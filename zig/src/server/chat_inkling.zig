@@ -14,9 +14,10 @@ pub fn is(text: anytype) bool {
 /// The reply so far (ids past the prompt, specials spelled out) split as vLLM's Inkling parser splits it.
 pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Error!@import("kimi_reply.zig").Result {
     const raw = try g.srv.text.decode(g.a, ids);
-    const r = split.split(g.a, raw, finished) catch |e| return e;
-    var calls: ?[]Value = null;
-    if (g.tools.len > 0 and r.calls.len > 0) {
+    if (!g.chat) return .{ .content = g.stops.visible(raw, !finished), .reasoning = "", .calls = null, .reasoning_tokens = 0 };
+    const r = try split.split(g.a, raw, finished);
+    var calls: ?[]Value = null; // a raw completion stays unsplit above; a reply a stop string ended keeps no calls
+    if (g.tools.len > 0 and r.calls.len > 0 and g.stops.matched(raw) == null) {
         const list = try g.a.alloc(Value, r.calls.len); // no ids: the model writes none (openai_calls.zig keys them)
         for (r.calls, list) |c, *v| {
             const f = try json.newObject(g.a);

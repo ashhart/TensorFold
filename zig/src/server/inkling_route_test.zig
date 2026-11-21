@@ -101,6 +101,7 @@ const Got = struct {
 
     fn keep(g: *Got, a: A, choice: json.Value, part: []const u8) !void {
         if (choice.strField("finish_reason")) |f| g.finish = f;
+        if (choice.strField("text")) |x| try g.content.appendSlice(a, x);
         const m = choice.get(part) orelse return;
         if (m.strField("reasoning_content")) |r| try g.reasoning.appendSlice(a, r);
         if (m.strField("content")) |c| try g.content.appendSlice(a, c);
@@ -121,6 +122,11 @@ fn request(a: A, word: []const u8, stream: bool) ![]const u8 {
 
 /// ``body`` to the chat route of a fresh server under the fixed test key, read as a whole reply or a stream.
 fn post(a: A, body: []const u8, stream: bool) !Got {
+    return postTo(a, body, stream, true);
+}
+
+/// ``post`` to the chat route or, with ``is_chat`` false, the raw completions route.
+fn postTo(a: A, body: []const u8, stream: bool, is_chat: bool) !Got {
     var backend: OneByOne = .{ .tokens = try script(a) };
     var text: Text = .{};
     var key: call_ids.Key = .of(call_ids.test_key_text);
@@ -129,7 +135,7 @@ fn post(a: A, body: []const u8, stream: bool) !Got {
     var wire: Wire = .{ .a = a };
     var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
     var c: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = "", .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
-    openai.post(srv, &c, a, true);
+    openai.post(srv, &c, a, is_chat);
     const bytes = wire.bytes.items;
     try t.expect(std.mem.startsWith(u8, bytes, "HTTP/1.1 200 "));
     var got: Got = .{};
@@ -192,4 +198,31 @@ test "an Inkling 2 call id is the request's own: call_ and 24 hex, whole as stre
     }
     try t.expectEqualStrings(ids[0], ids[1]);
     try t.expect(!std.mem.eql(u8, ids[0], ids[2]));
+}
+
+test "a raw Inkling 2 completion comes back unsplit, markers and all, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try std.mem.concat(a, u8, &reply_parts);
+    for ([_]bool{ false, true }) |stream| {
+        const body = try std.mem.concat(a, u8, &.{ "{\"model\":\"test-model\",\"max_tokens\":400,\"prompt\":\"x\",\"stream\":", if (stream) "true" else "false", "}" });
+        const got = try postTo(a, body, stream, false);
+        try t.expectEqualStrings(want, got.content.items);
+        try t.expectEqualStrings("", got.reasoning.items);
+        try t.expectEqual(@as(usize, 0), got.ids.items.len);
+    }
+}
+
+test "an Inkling 2 reply a stop string ended keeps no tool calls, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |stream| {
+        const plain = try request(a, "x", stream);
+        const body = try std.mem.concat(a, u8, &.{ plain[0 .. plain.len - 1], ",\"stop\":[\"", markers.end_sampling, "\"]}" });
+        const got = try post(a, body, stream);
+        try t.expectEqual(@as(usize, 0), got.ids.items.len);
+        try t.expectEqualStrings("Need the files.", got.reasoning.items);
+    }
 }
