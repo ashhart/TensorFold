@@ -168,7 +168,9 @@ fn writeBoth(a: std.mem.Allocator, f: *Fixture, o: rows.Options, prompt: []u32, 
     defer r.deinit();
     rows.write.queued(r, try entry(a, short, prompt), &.{ 0, 512 });
     rows.write.queued(r, try entry(a, long, prompt), &.{ 0, 512 });
-    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the write worker publishes the states
+    // The worker writes and publishes every queued state; a wall-clock bound here only lets a
+    // loaded host out-wait it, so the close waits for the writes, however long they take.
+    _ = rows.write.drain(r, std.math.maxInt(i128));
     try std.testing.expectEqual(@as(usize, 2), r.states.items.len);
     try std.testing.expectEqual(@as(usize, 4), r.blocks.count()); // 512 and 1024 tokens on a 512-row chunk grid: two blocks shared
 }
