@@ -165,7 +165,10 @@ const dsml_close = "</｜DSML｜function_calls>";
 /// One call to any of `tools`; arguments in their schema when `all` or the tool is strict, else any JSON object.
 fn anyCall(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Error!Value {
     const calls = try a.alloc(Value, tools.len);
-    for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), if (all or strict(t)) try parameters(a, t) else try anyObject(a));
+    for (tools, calls) |t, *c| {
+        const constrained = all or strict(t);
+        c.* = try call(a, s, try tool_specs.toolName(a, t), if (constrained) try parameters(a, t) else try anyObject(a), constrained);
+    }
     if (calls.len == 1) return calls[0];
     return node(a, "or", &.{.{ "elements", .{ .array = calls } }});
 }
@@ -194,7 +197,7 @@ fn callTag(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Er
 }
 
 /// One call to `name`: <tool_call>, the name and its arguments in the template's style, </tool_call>.
-fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error!Value {
+fn call(a: Allocator, s: Style, name: []const u8, schema: Value, constrained: bool) Allocator.Error!Value {
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     const elements = switch (s) {
         .deepseek => try list(a, &.{
@@ -224,7 +227,8 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
             break :blk try list(a, &.{ try constant(a, "<tool_call>"), ws, try arguments(a, .{ .object = whole }, "json"), ws, try constant(a, "</tool_call>") });
         },
         .minimax => try list(a, &.{
-            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})), try arguments(a, schema, "minimax_m3_xml"),
+            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})),
+            if (constrained) try arguments(a, schema, "minimax_m3_xml") else try node(a, "regex", &.{.{ "pattern", .{ .string = "[\\s\\S]*" } }}),
             try constant(a, mm ++ "</invoke>\n"),
         }),
         // GLM's template writes NAME<arg_key>K</arg_key><arg_value>V</arg_value>... with no blanks: xgrammar's glm_xml
