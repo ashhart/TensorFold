@@ -28,6 +28,17 @@ pub fn apply(f: *Flags, name: []const u8) bool {
     return true;
 }
 
+/// --voices DIR and --default-voice NAME on `out` (the server's Args); false: neither.
+pub fn value(out: *cli.Args, name: []const u8, v: []const u8) error{InvalidDefaultVoice}!bool {
+    if (std.mem.eql(u8, name, "--voices")) {
+        out.voices = v;
+    } else if (std.mem.eql(u8, name, "--default-voice")) {
+        if (!std.mem.eql(u8, v, "default") and !@import("drama_voice.zig").validName(v)) return error.InvalidDefaultVoice;
+        out.default_voice = v;
+    } else return false;
+    return true;
+}
+
 test "voice CLI: --request-voices and --manage-voices default off and are switches" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
