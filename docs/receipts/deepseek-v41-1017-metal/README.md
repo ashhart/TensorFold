@@ -13,6 +13,12 @@ DeepSeek Metal implementation under `zig/src/families/deepseek_v41/metal/`,
 including its own decoder suffix pass. The source below is a reproducible
 experiment. Its measurements apply to the pinned build.
 
+On the PR branch, the standard macOS build also accepts this pack directly.
+Use `TF_EXPERIMENTAL=deepseek` with `tensorfold-native serve MODEL_DIR`.
+It reads the stored affine projections and grouped experts, and uses the
+existing native lane host. `TF_DSV41_CACHE_PREFIX=20000` requests a shared
+prompt checkpoint within the configured cache budget.
+
 ## Results
 
 ### Prose and concurrency

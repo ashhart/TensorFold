@@ -50,6 +50,7 @@ pub const pair_rows = @import("core/pair_rows.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 /// DeepSeek-V4.1's Metal family in one export: tf.dsv41_metal.NAME (families/deepseek_v41/metal/contract_exports.zig).
 pub const dsv41_metal = @import("families/deepseek_v41/metal/contract_exports.zig");
+pub const deepseek_v41_affine = @import("families/deepseek_v41_affine/deepseek_v41.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");
 pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");

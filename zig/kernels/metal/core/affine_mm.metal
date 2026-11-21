@@ -498,16 +498,33 @@ inline bfloat am_swiglu(float g, float u, float limit) {
 }
 #endif
 
+#ifdef TF_GLU_WEIGHTED
+#define TF_AM_WEIGHT_ARG const device float* WS [[buffer(14)]],
+#define TF_AM_WEIGHT_AT(r) (WS + (r))
+inline bfloat am_swiglu_weighted(float g, float u, float limit, float w) {
+  const float gate = min(float(bfloat(g)), limit);
+  const float up = clamp(float(bfloat(u)), -limit, limit);
+  return bfloat(w * (gate / (1.0f + metal::precise::exp(-gate)) * up));
+}
+#else
+#define TF_AM_WEIGHT_ARG
+#define TF_AM_WEIGHT_AT(r) nullptr
+#endif
+
 // A simdgroup's gate (j 0) and up (j 1) fragments as SwiGLU outputs into y (ld N), rows below live only.
 template <int TM>
 inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* y, int N, int live, short2 home,
-                         float limit) {
+                         float limit, const device float* weights) {
   TF_UNROLL
   for (short i = 0; i < TM; i++) {
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
       const int r = 16 * i + home.y + (e >> 2) * 8;
+#ifdef TF_GLU_WEIGHTED
+      if (r < live) y[long(r) * N + home.x + TF_COL(e)] = am_swiglu_weighted(acc[i][0][e], acc[i][1][e], limit, weights[r]);
+#else
       if (r < live) y[long(r) * N + home.x + TF_COL(e)] = am_swiglu(acc[i][0][e], acc[i][1][e], limit);
+#endif
     }
   }
 }
@@ -520,7 +537,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
       const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]], device bfloat* Y [[buffer(6)]],          \
       const device int32_t* OFFS [[buffer(7)]], const device int32_t* ORDER [[buffer(8)]],                            \
       const device uint32_t* WU [[buffer(9)]], const device bfloat* SU [[buffer(10)]],                                 \
-      const device bfloat* BU [[buffer(11)]], constant float2& glu [[buffer(12)]], TF_AM_MAP_ARG                      \
+      const device bfloat* BU [[buffer(11)]], constant float2& glu [[buffer(12)]], TF_AM_MAP_ARG TF_AM_WEIGHT_ARG                      \
       uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                            \
       uint3 tg [[threadgroup_position_in_grid]]) {                                                                     \
     constexpr int SM = BM / 2;                                                                                         \
@@ -540,7 +557,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
                   (const device uchar*)(up ? WU : WG) + wrow * (a.k * TF_BITS / 8) + HALF_BYTES * (t % 2),            \
                   (up ? SU : SG) + wrow * (a.k / TF_GROUP), (up ? BU : BG) + wrow * (a.k / TF_GROUP), tile, sb, tn,     \
                   uint(t), home);                                                                                      \
-    am_store_glu<TM>(acc, Y + long(row + tm) * a.n + c0 + tn / 2, a.n, live, home, glu.y);                            \
+    am_store_glu<TM>(acc, Y + long(row + tm) * a.n + c0 + tn / 2, a.n, live, home, glu.y, TF_AM_WEIGHT_AT(row + tm));                            \
   }
 // Tile rows by 16: gate, up, gate, up for columns c0.., c0 + 16..
 TF_GATHER_GLU(32)

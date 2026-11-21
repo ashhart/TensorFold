@@ -209,6 +209,8 @@ pub const Info = struct {
     prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// An extra prompt cache checkpoint at this rendered token position, 0 to disable.
+    prompt_cache_prefix: u32 = 0,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
     prompt_cache_capacity: ?PromptCacheCapacity = null,
     /// The policy the engine runs under, one line (`/health` shows it); empty: none.

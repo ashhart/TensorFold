@@ -2,6 +2,11 @@
 
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
+pub const deepseek_v41 = @embedFile("deepseek_affine/v41.metal") ++ @embedFile("deepseek_affine/v41_index.metal") ++
+    @embedFile("deepseek_affine/v41_attend.metal") ++ @embedFile("deepseek_affine/v41_moe.metal") ++
+    @embedFile("deepseek_affine/v41_markov_rank.metal") ++ @embedFile("deepseek_affine/v41_markov_kernels.metal");
+pub const deepseek_v41_attend_nax = @embedFile("deepseek_affine/v41_attend_nax.metal");
+pub const deepseek_v41_index_nax = @embedFile("deepseek_affine/v41_index_nax.metal");
 
 pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");
 pub const hy4_flash_index_recall = @embedFile("hy4_flash/index_recall.metal");

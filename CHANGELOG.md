@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal keeps an optional exact prompt checkpoint for shared prefixes and reduces temporary work in decode attention while preserving the ordered reduction (#4368).
+- DeepSeek-V4.1 on Metal serves the affine Flash 1017 pack through the native lane host when opted in. Metal can keep an exact shared-prefix checkpoint, and the release-weight attention path uses fewer temporaries in its ordered decode reduction (#4368).
 
 
 
