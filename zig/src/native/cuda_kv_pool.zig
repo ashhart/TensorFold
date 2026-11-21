@@ -493,7 +493,6 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
 }
-
 test "CUDA cache default scales pool copies after full stream windows without cutting lanes" {
     const GiB: u64 = 1 << 30;
     const F = struct {};
