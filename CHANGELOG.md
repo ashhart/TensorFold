@@ -4,11 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- GLP control vectors: ports #1835's opt-in additive Qwen3.8-27B/Metal path and extends it to the experimental standalone DeepSeek-V4.1 EXL3 CUDA pair with GLPv3 paired-site addition. DeepSeek's ordinary release guard stays unchanged; project mode and the fork-only Metal backend are not included. Startup and saved-state identity bind the exact vector file and strength; no trained vectors ship. `tf-glp-check` also refuses malformed arguments with usage and status 2 (#4273). Original format: Matt Suiche's `weightless` project (@msuiche); native foundation: #1835. See [scope, attribution and qualification limits](docs/control-vectors.md). Thanks to @BlivionIaG and @AIFlowML.
-
-- DeepSeek-V4.1 CUDA: whole-prefill usage receipts report the prompt rows actually restored from saved state instead of zero; rejected prompts clear the previous count. Model arithmetic and the saved-state identity are unchanged.
-
-- GLP provenance: Hugging Face snapshot repository/revision checks recognize native Windows paths as well as forward slashes, rather than treating a Windows snapshot as an unnamed local conversion (#4273).
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream that opens a slot is promised the KV pages of its prompt and one widest pass instead of every slot being promised its whole window at load; a pass past that promises the rest before it takes a page and fails with `LaneMemory` before any page is taken when the pool cannot meet it, and a stream that leaves, a failed or requeued prompt pass, a reset and a move to slot 0 give back the slot's pages and promise. Without the flag nothing changes (#3377, refs #1293). Thanks to @CodingEmil.
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
+- Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states, so it drafts beside an oQ checkpoint of any width, and a head at a width the launches do not read is refused by name (#3251, part of #3061). Thanks to @gilby.
 
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
 
@@ -31,6 +29,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Mobile: a pairing link opened from outside the app asks first and names its host (#3036).
 
 - Qwen3.8-27B: the DSpine drafter `tencent/Qwen3.8-27B-DSpine-b16`, whose current revision names its architecture `DSpineDraftModel`, loads again on Metal and CUDA instead of stopping with `UnsupportedDraftConfig`; any other name is still refused (#3959, fixes #3819).
+
+- GLP control vectors: ports #1835's opt-in additive Qwen3.8-27B/Metal path and extends it to the experimental standalone DeepSeek-V4.1 EXL3 CUDA pair with GLPv3 paired-site addition. DeepSeek's ordinary release guard stays unchanged; project mode and the fork-only Metal backend are not included. Startup and saved-state identity bind the exact vector file and strength; no trained vectors ship. `tf-glp-check` also refuses malformed arguments with usage and status 2 (#4273). Original format: Matt Suiche's `weightless` project (@msuiche); native foundation: #1835. See [scope, attribution and qualification limits](docs/control-vectors.md). Thanks to @BlivionIaG and @AIFlowML.
+
+- DeepSeek-V4.1 CUDA: whole-prefill usage receipts report the prompt rows actually restored from saved state instead of zero; rejected prompts clear the previous count. Model arithmetic and the saved-state identity are unchanged.
+
+- GLP provenance: Hugging Face snapshot repository/revision checks recognize native Windows paths as well as forward slashes, rather than treating a Windows snapshot as an unnamed local conversion (#4273).
 
 - Server: `/v1/responses` accepts one level of `namespace` tools: each function is offered to the model as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket; requests without namespace tools are unchanged (#3610, fixes #3266). Thanks to @devopsfortunato.
 
