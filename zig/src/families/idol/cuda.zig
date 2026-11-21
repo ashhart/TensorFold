@@ -16,5 +16,6 @@ test {
     _ = @import("cuda_weights.zig");
     _ = config;
     _ = host;
+    _ = @import("octree.zig");
     _ = reference;
 }
