@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel GPUs: decode and verify attention (`attn_decode`) runs on a (rows, heads, slices) grid, so the tree rows of one key slice run back to back; each work group's arithmetic is unchanged, so replies keep their tokens, and the XPU kernel contract holds `attn_decode` with `attn_merge` to the previous kernels' bytes, with a planted control for the launch order (#2595, refs #2543). Thanks to @SergiioB.
+
 - Drama 3 on CUDA and Metal: the codec's weight map, decoder stage plan and decode and encode schedules live once in `codec_net.zig`, and each backend binds only its own kernels; a new `check-drama-codec-bindings` build step, run by `zig build test`, compiles both bindings on any host, and the waveform and codes are byte-identical to before on the author's CUDA and Metal runs (#2893, refs #2118). Thanks to @jschmied.
 
 - Nemotron and LFM2 MoE on CUDA: the prompt cache keeps a state at each message start by default, so an agent's next request resumes from where its last message began instead of reading the conversation again, within the existing prompt-cache budget and slots (#3696, part of #3617).
