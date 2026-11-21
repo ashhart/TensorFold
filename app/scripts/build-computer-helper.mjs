@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Compiles native/computer-use/*.swift into build/computer-use/tensorfold-computer, then runs its --self-test.
+// Compiles the Mac helper and shared ComputerUseChecks sources, excluding package tests and build artifacts.
 // A stamp beside the binary records the source digest and the binary's own sha256; swiftc is skipped only
 // when both still match. Sources go to swiftc by relative name so no local build path lands in the binary.
 import { createHash } from 'node:crypto'
@@ -29,7 +29,13 @@ export function swiftcArgs(sourceNames, output) {
 }
 
 export async function readSources(sourceDir) {
-  const names = (await readdir(sourceDir)).filter((name) => name.endsWith('.swift')).sort()
+  const names = []
+  for (const dir of ['.', 'ComputerUseChecks/Sources/ComputerUseChecks']) {
+    for (const name of await readdir(path.join(sourceDir, dir))) {
+      if (name.endsWith('.swift')) names.push(path.posix.join(dir, name))
+    }
+  }
+  names.sort()
   if (!names.length) throw new Error(`No Swift sources in ${sourceDir}.`)
   return Promise.all(names.map(async (name) => ({ name, bytes: await readFile(path.join(sourceDir, name)) })))
 }

@@ -170,12 +170,12 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
-            const h = o.h;
-            const view_ = h.view();
-            const n = view_.logical;
-            try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
-            try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0..4]), d.best.ptr);
-            return draw.pick(h, o.stream(), o.e.gpa, d, d.best_host[0..4].*, position, sm, false);
+            return @import("cuda_draft_draw.zig").single(o.h, o.stream(), o.e.gpa, d, position, sm, o.h.draw_batch.on and o.main == null);
+        }
+
+        /// One shared verify group completes its reductions before drawing in stream order.
+        pub fn drawsMany(o: Self, scores: u64, ds: []const *Draft, sms: []const ?Sampling, masks: []const []const u32, outs: []const []u32) !void {
+            return @import("cuda_draw_batch.zig").drawsMany(o.h, o.stream(), o.e.gpa, scores, ds, sms, masks, outs);
         }
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
@@ -447,13 +447,20 @@ pub fn draftMany(o: anytype, ds: []const *Draft, nexts: []const []const u32, row
     var step_nexts: [max_lanes][]const u32 = undefined;
     var step_rows: [max_lanes]u64 = undefined;
     while (n_act > 0 and j < max_chain) : (j += 1) {
-        // every active lane's best draft (fn_row_best on its own scores), then one download of all of them
-        for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
-        try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
+        var ready: ?@import("cuda_draft_draw.zig").Ready = null;
+        if (h.draw_batch.on and !(if (@hasField(@TypeOf(o), "main")) o.main != null else false)) {
+            ready = try @import("cuda_draft_draw.zig").gather(h, o.stream(), ds, act[0..n_act], sms);
+        } else {
+            for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
+            try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
+        }
         var next_act: usize = 0;
         var n_step: usize = 0;
         for (act[0..n_act], 0..) |i, r| {
-            const got = try draw.pick(h, o.stream(), o.e.gpa, ds[i], best_host[r * 4 ..][0..4].*, positions[i] + j, sms[i], true);
+            const got = if (ready) |*rd|
+                try rd.pick(h, o.stream(), o.e.gpa, ds[i], r, positions[i] + j, sms[i], true)
+            else
+                try draw.pick(h, o.stream(), o.e.gpa, ds[i], best_host[r * 4 ..][0..4].*, positions[i] + j, sms[i], true);
             const out = outs[i];
             const t = stops[i].take(j, got.prob);
             if (!t.propose) continue;

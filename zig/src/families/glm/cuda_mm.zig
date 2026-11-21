@@ -1,6 +1,7 @@
 //! GLM's bf16 linears on tensor cores (glm_mm): weights tiled once at load, any row count, row-stable K slices.
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 
 /// A linear's tiles: bf16 pairs (glm_mm_tile16), or `bits`-bit codes (glm_mm_tile4/6/8) with fp16 scales at `s`.
 pub const Tiled = struct { w: u64, n: usize, k: usize, s: u64 = 0, bits: u8 = 16 };
@@ -61,7 +62,7 @@ pub const Kernels = struct {
             k.tile_packed[wi] = try m.function(std.fmt.comptimePrint("glm_mm_tile{d}", .{b}));
         }
         try k.prompt.allowDynamicShared(smem(128));
-        k.pdl = try @import("sys").environment.value(bool, "TF_GLM_PDL", @import("profile").lookup("TF_GLM_PDL"), true);
+        k.pdl = cuda_pdl.on();
         return k;
     }
 };
@@ -137,7 +138,7 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
             r.add(@as(c_longlong, @intCast(total)));
             r.add(@as(c_int, @intCast(sk)));
             r.add(@as(c_int, @intFromBool(wide)));
-            try cuda.launch.launch(k.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &r);
+            try cuda.launch.launch(k.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 }, .pdl = k.pdl }, s, &r);
         }
         done += rows;
     }
@@ -155,7 +156,7 @@ pub fn tilePacked(k: *const Kernels, s: cuda.Stream, bits: u8, src: u64, ss: u64
     a.add(ds);
     a.add(@as(c_int, @intCast(n)));
     a.add(@as(c_int, @intCast(kk)));
-    try cuda.launch.launch(k.tile_packed[wi - 1], .{ .grid = .{ .x = @intCast((chunks + 255) / 256) }, .block = .{ .x = 256 } }, s, &a);
+    try cuda.launch.launch(k.tile_packed[wi - 1], .{ .grid = .{ .x = @intCast((chunks + 255) / 256) }, .block = .{ .x = 256 }, .pdl = k.pdl }, s, &a);
 }
 
 /// A row-major bf16 [n][k] linear at `src` tiled into `dst` (as many bytes).
@@ -166,7 +167,7 @@ pub fn tile(k: *const Kernels, s: cuda.Stream, src: u64, dst: u64, n: usize, kk:
     a.add(dst);
     a.add(@as(c_int, @intCast(n)));
     a.add(@as(c_int, @intCast(kk)));
-    try cuda.launch.launch(k.tile, .{ .grid = .{ .x = @intCast((chunks + 255) / 256) }, .block = .{ .x = 256 } }, s, &a);
+    try cuda.launch.launch(k.tile, .{ .grid = .{ .x = @intCast((chunks + 255) / 256) }, .block = .{ .x = 256 }, .pdl = k.pdl }, s, &a);
 }
 
 test "K slices as the shapes take them" {

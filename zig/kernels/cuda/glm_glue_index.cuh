@@ -1,6 +1,8 @@
 // sparse.py's DSA indexer glue by hand: the index key write, the 4-token pools and the per-row top-512 pools.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 using namespace glm_triton;
@@ -9,6 +11,7 @@ using namespace glm_triton;
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_index_write(const __nv_bfloat16* kr, int64_t k_stride, const float* gr, const __nv_bfloat16* lnw,
                        const __nv_bfloat16* lnb, __nv_bfloat16* ik, __nv_bfloat16* ig, const int* pos, float eps) {
+  glm_pdl::enter();
   constexpr int D = 128;
   const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
   const int d0 = threadIdx.x * 4;
@@ -38,6 +41,7 @@ extern "C" __global__ void __launch_bounds__(32)
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_pool_keys(const __nv_bfloat16* ik, const __nv_bfloat16* ig, const __nv_bfloat16* ape, __nv_bfloat16* pk,
                      const int* pos, int64_t rows, const int* pt, int64_t ps) {
+  glm_pdl::enter();
   constexpr int D = 128;
   const int64_t P = pos[0], p = P / 4 + blockIdx.x;
   if (4 * p + 3 > P + rows - 1) return;
@@ -194,11 +198,13 @@ __device__ __forceinline__ void select_row(const float* scores, int64_t* out, in
 // sparse._select_rows (VISIBLE), a row per 4-warp block: K best visible pools by 8-bit radix select, ties to lower.
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_select_rows(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+  glm_pdl::enter();
   glm_index::select_row<128>(scores, out, np, pos, k);
 }
 
 // tf_glm_select_rows a row per 1,024-thread block, for a few rows over many pools (a decode step's): its bytes.
 extern "C" __global__ void __launch_bounds__(1024)
     tf_glm_select_rows_wide(const float* scores, int64_t* out, int64_t np, const int* pos, int k) {
+  glm_pdl::enter();
   glm_index::select_row<1024>(scores, out, np, pos, k);
 }

@@ -18,13 +18,20 @@ pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, bac
         const cpu = modelName(a, sysctlString("machdep.cpu.brand_string") orelse "");
         const memory = sysctlU64("hw.memsize");
         const out = run(a, io, &.{ "/usr/sbin/system_profiler", "SPDisplaysDataType", "-json" });
-        return .{ .hardware = summarize(cpu, memory, macGpus(a, out orelse "", memory), true) };
+        return mac(a, cpu, memory, out orelse "", sysctlString("hw.product"));
     }
     const cpu = cpuinfo(a, readProc(a, io, "/proc/cpuinfo") orelse "");
     const memory = meminfo(readProc(a, io, "/proc/meminfo") orelse "") orelse (std.process.totalSystemMemory() catch null);
     const out = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
     if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, rocmVisible(env));
     return linux(a, cpu, memory, out, env.get("CUDA_VISIBLE_DEVICES"));
+}
+
+/// macOS probe results retain only an allowlisted family, never the raw product identifier.
+pub fn mac(a: Allocator, cpu: ?[]const u8, memory: ?u64, displays: []const u8, product: ?[]const u8) Probe {
+    var hardware = summarize(cpu, memory, macGpus(a, displays, memory), true);
+    hardware.form_factor = @import("benchmark_form_factor.zig").fromProduct(product orelse "");
+    return .{ .hardware = hardware };
 }
 
 /// The GPU query behind a backend's facts: nvidia-smi for cuda, rocminfo for rocm; none otherwise.

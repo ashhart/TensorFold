@@ -24,7 +24,11 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
     }
     const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
-    if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
+    if (parsed.rejected_envelopes > 0) {
+        log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
+        r.srv.metrics.keptToolCalls(r.srv.io, parsed.kept_unoffered, parsed.kept_malformed);
+        if (reply.runtime == .object) try reply.runtime.object.put(r.a, "kept_tool_calls", try keptBlock(r.a, parsed));
+    }
     // max_tokens cut a call the stream had begun: the whole reply returns it cut too, as the stream did (#1238)
     const cut = if (!r.plan.policy.single and std.mem.eql(u8, reply.finish_reason, "length")) try tool_stream.cutCalls(r.a, reply.content, tools) else null;
     if (cut != null) reply.content = try @import("reply_text.zig").cutProse(r.a, reply.content);
@@ -55,4 +59,17 @@ pub fn streamed(r: anytype, delta: Value) Allocator.Error!void {
         const at = std.math.cast(u64, (one.get("index") orelse continue).int64() orelse continue) orelse continue;
         try one.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, choice, at) });
     }
+}
+
+/// The reply's `tensorfold.kept_tool_calls`: both counts, and the unoffered names the model wrote.
+fn keptBlock(a: Allocator, parsed: tool_parse.Parsed) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    try o.put(a, "unoffered", try json.intValue(a, parsed.kept_unoffered));
+    try o.put(a, "malformed", try json.intValue(a, parsed.kept_malformed));
+    if (parsed.unoffered_names.len > 0) {
+        const list = try a.alloc(Value, parsed.unoffered_names.len);
+        for (parsed.unoffered_names, 0..) |name, i| list[i] = .{ .string = name };
+        try o.put(a, "unoffered_names", .{ .array = list });
+    }
+    return .{ .object = o };
 }

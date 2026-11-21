@@ -3,8 +3,9 @@
 For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
-`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
+the drafter, or by itself when the cache holds `z-lab/Qwen3.8-27B-DFlash2`; `--drafter none` serves without it.
+On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
@@ -21,6 +22,17 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+With thinking on, serve with `--thinking-budget 4096`; a client can set its own positive `thinking_budget` per request
+([API](../api.md#request-fields)). Measured on GPQA Diamond (198 questions) with TensorFold 1.2.7,
+`TensorFold/Qwen3.8-27B-MLX-4bit` and the DFlash2 drafter on one GB10, the model card's thinking sampling, a
+16,384-token reply limit and one attempt per question and setting: without a budget 78 of 198 replies were cut at the
+limit and with 4096 none were; the correct share went from 58.1% to 82.8%, and the 198 questions finished 3.2 times
+sooner (60 against 194 minutes at 8 parallel requests). Budgets from 4096 to 8192 measured the same within noise, and
+2048 was too tight. The table, the method and the per-question files are in
+[#3323](https://github.com/ashhart/TensorFold/issues/3323).
+
+`--thinking-reserve` ([API](../api.md#reasoning)) keeps a client's `max_tokens` for the answer; it was not tested.
+
 A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
 Both device classes retain the 16-row default. Startup prices every row count through
 the selected width, in a width-tagged cache.
@@ -33,8 +45,11 @@ A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, incl
 by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
 The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
 `TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
-The masked drafter block is unchanged. Both device classes use the lane loop by default, including at 16 rows.
-`TF_QWEN27_LANES=0` selects the legacy greedy shortcut; sampled requests retain the shared lane loop.
+The masked drafter block is unchanged. At the tensor-unit 16-row default, an eligible lone greedy request
+uses the long-copy driver; every copy is target-verified and arrivals yield back to the shared lane loop.
+Sampled requests, shared rounds, wider windows and earlier chips retain the lane loop.
+`TF_QWEN27_LANES=1` keeps every request on lanes; `0` requests the lone greedy driver on either device class.
+The lane copy switches do not size the lone driver's tail; its existing cap is `TF_Q27_COPY_ROWS` (default 48).
 Startup names the selected lone loop and width beside the lane window and copy policy.
 `tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
 The wall price excludes the diagnostic's host logit hash and scan.
@@ -63,8 +78,12 @@ For bounded top-k requests, the BF16 host draw validates and selects candidates 
 scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the same ordered candidates.
 Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
-On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
-default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
+On Metal, M5 prompt passes request 2,048 rows when no other request is decoding. The dense 27B and 9B default
+frame follows the attention geometry at model load and serving. The qualified shared-prefix path keeps the
+512-row default before M5; `TF_QWEN27_SHARED_PREFIX=0` on those chips uses a 128-row frame for its 128-row passes.
+Valid `TF_PROMPT_ROWS` values and a caller's explicit row count remain unchanged, as do M5 and routed defaults.
+Less unused scratch on the unshared path may let a tight startup fit or admit more streams.
+The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
@@ -198,7 +217,8 @@ The `qwen3_5` family combines Gated DeltaNet and full attention. The standard re
 4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
@@ -216,6 +236,12 @@ The target verifies every proposed token against its own serial sample.
 This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
 NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
 not the ones below.
+
+### Native engine on sm_110 (development build)
+
+On NVIDIA Thor (sm_110), build the native CUDA engine with `-Dsm=110`. This is a development target; `-Dgpu=sm_110` is not a product target yet. The measured path uses the MLX affine 4-bit/group-64 checkpoint, one GPU, BF16 KV and prompt activations, and the DFlash2 drafter. Text and PNG image requests were checked against `"draft": false` with greedy and seeded sampling, solo and concurrent streams, cancelled requests and resumed prompts. The device receipt belongs to the commit and checkpoint hashes recorded with the test run; it does not qualify other checkpoints or image decoders.
+
+The SM110 Qwen loader refuses `--slide`, DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES` when they would change the default serving path. Their other-GPU behavior is unchanged. Unset or explicit off values for the `TF_QWEN_*` switches keep the default path; `TF_NO_TREES` and `TF_DRAFT_NODES` must be unset.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
@@ -246,7 +272,8 @@ alone. One GPU: `--tp 2` stops at startup (two ranks read the MLX checkpoint), a
 input is qualified on this checkpoint.
 
 ```bash
-tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull nvidia/Qwen3.8-27B-NVFP4
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
 

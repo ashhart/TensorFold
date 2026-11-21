@@ -14,6 +14,7 @@ pub fn steps(b: *std.Build) void {
         .macos => {
             wire(b, "test-host-ci-macos-fast", "Nightly host checks without a GPU or shader compiler", &macos_fast);
             wire(b, "test-host-ci-macos-adapters", "Nightly host checks without a GPU or shader compiler", &macos_adapters);
+            wire(b, "test-host-ci-macos-native", "Nightly Metal engine host checks with the Metal toolchain", &macos_native);
             wire(b, "test-host-ci-macos-deepseek", "Nightly host checks without a GPU or shader compiler", &macos_deepseek);
             wire(b, "test-host-ci-macos-lanes", "Nightly host checks without a GPU or shader compiler", &macos_lanes);
             wire(b, "test-host-ci-macos-deferred", "Nightly host checks without a GPU or shader compiler", &macos_deferred);
@@ -57,6 +58,7 @@ const linux_compile = [_][]const u8{
     "compile-h3-library",
     "compile-modelopt-startup",
     "compile-moss-teacher-cuda",
+    "compile-native-cuda-windows",
     "compile-omni-video-host",
     "compile-proposal-metal-host",
     "compile-qwen35-learn",
@@ -68,6 +70,7 @@ const linux_compile = [_][]const u8{
 const linux_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -85,6 +88,9 @@ const linux_fast = [_][]const u8{
     "test-grammar-error-host",
     "test-info-config",
     "test-native-options-host",
+    "test-template-limits-host",
+    "test-originals-host",
+    "test-tokenizer-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -109,6 +115,7 @@ const linux_hip = [_][]const u8{
     "test-hip-blas-host",
     "test-hip-contract-select-host",
     "test-hip-family-offers-host",
+    "test-hip-followers-host",
     "test-hip-native-options-host",
     "test-hip-pair-contract-host",
     "test-lighton-hip-contract-host",
@@ -158,6 +165,7 @@ const linux_host = [_][]const u8{
     "test-flashnext-nonfinite-host",
     "test-flashnext-precise-host",
     "test-flashnext-prefill-pairs-host",
+    "test-flashnext-cancel-host",
     "test-flashnext-proposal-host",
     "test-flashnext-proposal-pack-host",
     "test-flashnext-rotary-bound-host",
@@ -183,9 +191,11 @@ const linux_host = [_][]const u8{
     "test-inc4-round-host",
     "test-inc4-rows-host",
     "test-kernel-seed-host",
+    "test-lane-explore-host",
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
+    "test-lane-strand-host",
     "test-lfm2-load-host",
     "test-living-shards-host",
     "test-merge",
@@ -248,6 +258,7 @@ const macos_adapters = [_][]const u8{
     "check-nemotron-prefill-widths-host",
     "check-qwen35-cache-host",
     "check-sessions-linux",
+    "check-video-exports-linux",
     "check-video-layout-linux",
     "compile-disk-identity-metal-host",
     "compile-dsv41-engram-alloc-aarch64",
@@ -273,13 +284,18 @@ const macos_adapters = [_][]const u8{
     "test-flashnext-pack-cache",
     "test-gguf-linux-compile",
     "test-h3-modulation-bf16",
+    "test-h3-read-ahead",
+    "test-lfm3-metal-steps-host",
+    "test-lfm2-moe-metal-steps-host",
     "test-masked-values-host",
     "test-metal-counters-host",
     "test-minimax-info-host",
+    "test-minimax-m3-metal-steps-host",
     "test-qwen-dense-geometry-host",
     "test-qwen-dense-route-host",
     "test-qwen27-draft-tree-host",
     "test-qwen27-facts-host",
+    "test-qwen35-metal-steps-host",
     "test-recurrent-forks",
     "test-shared-head-cost-metal-host",
     "test-slide-metal-host",
@@ -287,10 +303,13 @@ const macos_adapters = [_][]const u8{
     "test-verbs",
 };
 
+const macos_native = [_][]const u8{"test-native"};
+
 const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-draft",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -300,11 +319,14 @@ const macos_fast = [_][]const u8{
     "test-glm-disk-charge-host",
     "test-living-metal-host",
     "test-metal-formats-host",
+    "test-originals-host",
     "test-persistence-identity-host",
     "test-qwen27-bank-boundary-host",
     "test-qwen27-prompt-floor-host",
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
+    "test-template-limits-host",
+    "test-tokenizer-host",
 };
 
 const macos_lanes = [_][]const u8{

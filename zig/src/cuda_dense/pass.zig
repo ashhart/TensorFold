@@ -11,12 +11,15 @@ const Stream = cuda.Stream;
 const Weight = cuda.qmmf.Weight;
 const tail: cuda.norms.Tail = .{ .round = true }; // the norms' torch points: bf16(w * bf16(h * inv))
 
-/// A stream's rows in one forward: its slot, first position, tokens.
-pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32 };
+/// Image rows over a chain's embedding: chain rows [row, row + rows) take `src` [rows, hidden] bf16.
+pub const Inject = struct { row: usize, rows: usize, src: u64 };
+
+/// A stream's rows in one forward: its slot, first position, tokens, and the image rows spliced over them.
+pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32, images: []const Inject = &.{} };
 
 /// What a forward runs on: the model's state, the shared and the recipe's kernels, the weights, the CUDA stream.
 pub fn Engine(comptime R: type) type {
-    return struct { m: *const Model, k: *const Kernels, own: *const R.Kernels, w: *const R.Weights, s: Stream };
+    return struct { m: *const Model, k: *const Kernels, own: *const R.Kernels, w: *const R.Weights, s: Stream, taps: ?recipe.Tap = null };
 }
 
 /// A forward's rows (a prompt chunk, or a round of windows) and the operators a recipe's layers call on them.
@@ -32,6 +35,12 @@ pub fn Pass(comptime R: type) type {
         chains: []const Chain,
         rows: usize,
         prompt: bool,
+        taps: ?recipe.Tap = null, // a check's: the rows a recipe names (its projections'), none when served
+
+        /// Rows [rows, width] at `at` to the check's tap under `stage`; nothing without one.
+        pub fn tap(p: *const P, stage: []const u8, at: u64, width: usize) !void {
+            if (p.taps) |t| try t.at(t.ctx, stage, at, p.rows, width);
+        }
 
         fn part(p: *const P, w: Weight) !u64 {
             if (p.k.lane.partBytes(p.rows, w) > p.m.part_bytes) return error.LanePartTooSmall;
@@ -104,19 +113,37 @@ pub fn Pass(comptime R: type) type {
     };
 }
 
-/// Every chain's rows (a prompt chunk, or windows): the recipe's layers, then logits rows [head0, head0 + heads).
-pub fn forward(comptime R: type, e: Engine(R), chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
-    const m = e.m;
+/// A forward's rows, its chains, images and logits rows bounded; images only in a prompt chunk.
+pub fn rowsOf(m: *const Model, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !usize {
     var rows: usize = 0;
     for (chains) |ch| {
         if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.BadChain;
+        if (ch.images.len > 0 and !prompt) return error.BadWindow;
+        for (ch.images) |im| if (im.rows == 0 or im.row >= ch.tokens.len or im.rows > ch.tokens.len - im.row) return error.BadChain;
         rows += ch.tokens.len;
     }
     if (rows > @as(usize, if (prompt) mdl.prompt_rows else mdl.round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
     if (chains.len > mdl.round_rows or heads > mdl.round_rows or head0 + heads > rows) return error.BadWindow;
+    return rows;
+}
+
+/// Each chain's image rows over the embedding rows `h` [rows, hidden] bf16: one device copy an inject, on `s`.
+pub fn splice(d: *const cuda.Driver, s: Stream, h: u64, hidden: usize, chains: []const Chain) !void {
+    var row0: usize = 0;
+    for (chains) |ch| {
+        for (ch.images) |im| try d.check(d.api.cuMemcpyDtoDAsync_v2(h + (row0 + im.row) * hidden * 2, im.src, im.rows * hidden * 2, s.handle), "cuMemcpyDtoDAsync");
+        row0 += ch.tokens.len;
+    }
+}
+
+/// Every chain's rows (a prompt chunk, or windows): the recipe's layers, then logits rows [head0, head0 + heads).
+pub fn forward(comptime R: type, e: Engine(R), chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
+    const m = e.m;
+    const rows = try rowsOf(m, chains, prompt, head0, heads);
     try upload(m, e.s, chains, rows);
-    const p: Pass(R) = .{ .m = m, .k = e.k, .own = e.own, .w = e.w, .s = e.s, .g = m.g, .chains = chains, .rows = rows, .prompt = prompt };
+    const p: Pass(R) = .{ .m = m, .k = e.k, .own = e.own, .w = e.w, .s = e.s, .g = m.g, .chains = chains, .rows = rows, .prompt = prompt, .taps = e.taps };
     try R.embed(&p);
+    try splice(m.d, e.s, m.s.h, m.g.hidden, chains);
     for (0..m.g.layers) |i| try R.layer(&p, i);
     try R.final(&p);
     if (heads == 0) return;

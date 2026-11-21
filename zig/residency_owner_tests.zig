@@ -8,6 +8,7 @@ pub const checkpoint_host = @import("src/core/checkpoint.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 pub const tree_slots = @import("src/core/tree_slots.zig");
+pub const recurrent_workspace = @import("src/core/recurrent_workspace.zig");
 pub const draft_ops = @import("draft_ops");
 pub const row_projection = @import("src/core/row_projection.zig");
 pub const lane_projection = @import("src/core/lane_projection.zig");

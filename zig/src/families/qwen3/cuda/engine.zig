@@ -14,6 +14,43 @@ pub const max_inputs: usize = 128;
 /// The least window the budget may shrink a load to.
 pub const least_window: usize = 2048;
 
+/// A pass's arguments before any upload: the trunk's tokens, then inputs ending at strictly rising `ends` past it.
+pub fn checkBatch(tokens: []const u32, trunk: u32, ends: []const u32, out_len: usize, window: usize, vocab: usize, hidden: usize) error{InvalidBatch}!void {
+    if (tokens.len == 0 or tokens.len > window or ends.len == 0 or ends.len > max_inputs or
+        ends[ends.len - 1] != tokens.len or out_len != ends.len * hidden) return error.InvalidBatch;
+    var begin: u32 = trunk;
+    for (ends) |x| {
+        if (x <= begin) return error.InvalidBatch;
+        begin = x;
+    }
+    for (tokens) |t| if (t >= vocab) return error.InvalidBatch;
+}
+
+test "a pass's arguments are checked before any upload: the trunk, the ends, the window, the vocabulary and the rows" {
+    const tokens = [_]u32{ 1, 2, 3, 4 };
+    try checkBatch(&tokens, 0, &.{ 2, 4 }, 6, 8, 10, 3);
+    try checkBatch(&tokens, 1, &.{ 2, 4 }, 6, 4, 10, 3);
+    const bad = error.InvalidBatch;
+    try std.testing.expectError(bad, checkBatch(&tokens, 2, &.{ 2, 4 }, 6, 8, 10, 3)); // the first input is empty
+    try std.testing.expectError(bad, checkBatch(&tokens, 3, &.{ 2, 4 }, 6, 8, 10, 3)); // the trunk passes it
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 3, 2, 4 }, 9, 8, 10, 3)); // ends that fall
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 2, 2, 4 }, 9, 8, 10, 3)); // an empty input between
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{}, 0, 8, 10, 3));
+    try std.testing.expectError(bad, checkBatch(&.{}, 0, &.{0}, 3, 8, 10, 3));
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 2, 3 }, 6, 8, 10, 3)); // the last end is not the count
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 2, 4 }, 5, 8, 10, 3)); // the rows do not fit `out`
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 2, 4 }, 6, 3, 10, 3)); // past the window
+    try std.testing.expectError(bad, checkBatch(&tokens, 0, &.{ 2, 4 }, 6, 8, 4, 3)); // a token outside the vocabulary
+    var many: [max_inputs + 1]u32 = undefined;
+    var at: u32 = 0;
+    for (&many) |*x| {
+        at += 1;
+        x.* = at;
+    }
+    var ids: [max_inputs + 1]u32 = @splat(1);
+    try std.testing.expectError(bad, checkBatch(&ids, 0, &many, many.len * 3, many.len, 10, 3)); // more inputs than the rows hold
+}
+
 pub const Engine = struct {
     gpa: Allocator,
     d: cuda.Driver,
@@ -91,23 +128,15 @@ pub const Engine = struct {
         e.sized = true;
     }
 
-    /// Each input's final-normed last row as fp32 into `out` (ends.len rows of hidden); inputs end at `ends`.
+    /// Each input's final-normed last row as fp32 into `out`: after a shared `trunk` of tokens, inputs end at `ends`.
     pub fn run(e: *Engine, tokens: []const u32, trunk: u32, ends: []const u32, out: []f32) !void {
         const s = e.m.spec;
-        // a shared trunk comes with the reranker's packed decisions; embeddings run independent inputs
-        if (trunk != 0) return error.InvalidBatch;
-        if (!e.sized or tokens.len == 0 or tokens.len > e.window or ends.len == 0 or ends.len > max_inputs or
-            ends[ends.len - 1] != tokens.len or out.len != ends.len * s.hidden) return error.InvalidBatch;
-        var begin: u32 = 0;
-        for (ends) |x| {
-            if (x <= begin) return error.InvalidBatch;
-            begin = x;
-        }
-        for (tokens) |t| if (t >= s.vocab) return error.InvalidBatch;
+        if (!e.sized) return error.InvalidBatch;
+        try checkBatch(tokens, trunk, ends, out.len, e.window, s.vocab, s.hidden);
         const ids = e.ids_host.slice(u32)[0..tokens.len];
         @memcpy(ids, tokens);
         try store.view(&e.d, e.a.ids, 4 * tokens.len).uploadAsync(0, std.mem.sliceAsBytes(ids), e.s.handle);
-        try lm.Lm.forward(&e.l, &e.m, e.a, e.cap, ends);
+        try lm.Lm.forward(&e.l, &e.m, e.a, e.cap, trunk, ends);
         const rows = e.rows_host.slice(u16)[0 .. ends.len * s.hidden];
         try store.view(&e.d, e.a.rows, 2 * rows.len).downloadAsync(0, std.mem.sliceAsBytes(rows), e.s.handle);
         try e.s.synchronize();

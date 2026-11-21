@@ -1,0 +1,32 @@
+[
+  {
+    "depth": 1,
+    "url": "http://fixture.invalid:8001",
+    "model": "fixture-model",
+    "identity": {
+      "checkpoint": "Org/RecordedFixture@0000000000000000000000000000000000000000",
+      "tokenizer": "fixture-tokenizer",
+      "backend": "recorded-unit-fixture"
+    }
+  },
+  {
+    "depth": 4,
+    "url": "http://fixture.invalid:8004",
+    "model": "fixture-model",
+    "identity": {
+      "checkpoint": "Org/RecordedFixture@0000000000000000000000000000000000000000",
+      "tokenizer": "fixture-tokenizer",
+      "backend": "recorded-unit-fixture"
+    }
+  },
+  {
+    "depth": 8,
+    "url": "http://fixture.invalid:8008",
+    "model": "fixture-model",
+    "identity": {
+      "checkpoint": "Org/RecordedFixture@0000000000000000000000000000000000000000",
+      "tokenizer": "fixture-tokenizer",
+      "backend": "recorded-unit-fixture"
+    }
+  }
+]

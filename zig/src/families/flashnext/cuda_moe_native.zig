@@ -5,6 +5,7 @@ const mixed = @import("cuda_mixed_experts.zig");
 const nvfp4_tile = @import("cuda_nvfp4_tile.zig");
 const zs = @import("cuda_zero_slice.zig");
 const shared = @import("cuda_batch_side.zig");
+const exchange = @import("cuda_moe_exchange.zig");
 const Kernels = @import("cuda_batch_kernels.zig").Kernels;
 
 const dims = wt.dims;
@@ -19,7 +20,8 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     const e = owned.count + 1;
     const skip: i32 = @intCast(owned.count);
     const picks = if (native.world == 1) s.picks else try ownPicks(self, s.picks, s.picks_ep, pairs, owned.first, owned.count);
-    if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+    const y_bytes = exchange.clearedRows(native.world, n) * slots * dims * 4;
+    if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, y_bytes, self.stream.handle), "cuMemsetD8Async");
     const side = try shared.fork(self, native, n);
     switch (owned.format) {
         .nvfp4 => {
@@ -35,6 +37,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
     if (native.world != 1) {
         const collective = self.m.collective orelse return error.TensorParallelUnavailable;
+        if (exchange.rowSplit(native.world, n)) return exchange.run(self, collective, n);
         try collective.sum(self.stream, s.y, pairs * dims);
     }
 }

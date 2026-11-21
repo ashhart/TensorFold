@@ -133,6 +133,7 @@ pub fn validateEnvironment() !void {
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     validateEnvironment() catch return 1;
+    log.setJson(args.log_json);
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);
@@ -162,6 +163,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             return 1;
         },
     };
+    const take_out_check = takeOutCheck(args.slide, env(s, "TF_SLIDE_TAKE_OUT_CHECK")) catch return 1;
     const salt = if (env(s, "TENSORFOLD_SEED_SALT")) |t| std.fmt.parseInt(i64, std.mem.trim(u8, t, " "), 10) catch {
         std.debug.print("tensorfold: TENSORFOLD_SEED_SALT={s}: an integer\n", .{t});
         return 1;
@@ -178,14 +180,18 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TENSORFOLD_WIRE: expected spark or native\n", .{});
         return 1;
     };
+    const journal = if (env(s, "TENSORFOLD_REQUEST_JOURNAL")) |path| @import("request_journal.zig").Journal.open(gpa, io, path) catch |e| {
+        std.debug.print("tensorfold: TENSORFOLD_REQUEST_JOURNAL {s}: {s}\n", .{ path, @import("request_journal.zig").why(e) });
+        return 1;
+    } else null;
+    defer if (journal) |j| j.close(); // after the server's own deinit, which runs first
     const config: server_mod.Config = .{
-        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
+        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin, .cors_origins = args.cors_origin },
         .allowed_controls = args.allowed_controls,
         .redraw = args.redraw,
         .served_name = s.served,
         .model_dir = s.model_dir,
-        .voices_dir = args.voices,
-        .default_voice = args.default_voice,
+        .voice = .{ .dir = args.voices, .default = args.default_voice, .inline_voices = args.voice.inline_voices, .manage = args.voice.manage },
         .model_ids = ids.items,
         .background_ids = backgrounds,
         .default_max_tokens = args.max_tokens,
@@ -195,9 +201,12 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .thinking_reserve = args.thinking_reserve,
         .loop_guard = args.loop_guard or args.loop_guard_stop,
         .loop_stop = args.loop_guard_stop,
+        .tool_think_close = args.tool_think_close,
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
+        .max_connections = args.connections.max,
+        .peering = args.connections.peering,
         .default_sampling = s.sampling,
         .instruct_sampling = s.instruct,
         .use_drafts = !args.no_drafts,
@@ -210,6 +219,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .journal = journal,
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
@@ -218,6 +228,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
         .slide_drift_gate = args.slide_drift_gate,
+        .slide_take_out_check = take_out_check,
         .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
@@ -292,6 +303,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     @import("startup_receipt.zig").ready(port);
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
+    if (journal) |j| j.stopped(); // a stop, not a crash: requests still open are not quarantined
     accept_stop.store(true, .release);
     accept.join();
     lis.close();
@@ -424,6 +436,18 @@ test "the raise lifts a low soft limit, and a second raise does nothing" {
     try std.testing.expectEqual(@as(u64, 256), raised[0]);
     try std.testing.expectEqual(raised[1], @as(u64, @intCast((try posix.getrlimit(.NOFILE)).cur)));
     try std.testing.expect(raiseOpenFileLimit() == null);
+}
+
+/// TF_SLIDE_TAKE_OUT_CHECK, read once at start and only with --slide: a malformed value is refused here, by name.
+fn takeOutCheck(slide: bool, raw: ?[]const u8) !bool {
+    return slide and try @import("sys").environment.value(bool, "TF_SLIDE_TAKE_OUT_CHECK", raw, false);
+}
+
+test "Failure boundaries: TF_SLIDE_TAKE_OUT_CHECK is read once at start, only with --slide" {
+    try std.testing.expect(try takeOutCheck(true, "1"));
+    for ([_]?[]const u8{ null, "", "0" }) |raw| try std.testing.expect(!try takeOutCheck(true, raw));
+    try std.testing.expect(!try takeOutCheck(false, "1"));
+    for ([_][]const u8{ "yes", "2", "on" }) |raw| try std.testing.expectError(error.InvalidEnvironment, takeOutCheck(true, raw));
 }
 
 test "Failure boundaries: drain and SSE duration settings refuse non-finite or unrepresentable values" {

@@ -155,7 +155,7 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
                 due = tick(state, rule.k);
         }
         var item = offer orelse continue; // fresh zero: no hold, and a due trial remains unspent
-        if (rule.hold_order.len == 0) rule.hold_order = try rule.gpa.alloc(Offer, rule.batch_rows);
+        if (rule.offer_order.len == 0) rule.offer_order = try rule.gpa.alloc(Offer, rule.batch_rows);
         if (historical_zero or due) {
             if (who.prices.len > 0) {
                 // Probe the first missing profitable depth, not the whole unprofitable grant plus slack.
@@ -167,11 +167,11 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
                 item.gain = @min(raw, price.observedGain(observedOf(who), triedOf(who), @intCast(item.depth)));
             }
             out[index] = item.depth;
-            rule.hold_order[rule.hold_order.len - 1 - probes] = item;
+            rule.offer_order[rule.offer_order.len - 1 - probes] = item;
             probes += 1;
         } else {
             out[index] = item.depth;
-            rule.hold_order[normal] = item;
+            rule.offer_order[normal] = item;
             normal += 1;
         }
     }
@@ -180,9 +180,9 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
     var host_ms = base.host_ms;
     var deepest: i64 = 0;
     var context_rows: u32 = 0;
-    for (rule.hold_order[0..normal]) |item| out[item.index] = 0;
+    for (rule.offer_order[0..normal]) |item| out[item.index] = 0;
     if (probes > 0) {
-        const offers = rule.hold_order[rule.hold_order.len - probes ..];
+        const offers = rule.offer_order[rule.offer_order.len - probes ..];
         const funded = tryProbes(rule, whos, out, offers, base, fixed, plain);
         probes = funded;
         for (offers, 0..) |probe, index| {
@@ -203,7 +203,7 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
         }
     }
     if (normal == 0) return;
-    const order = rule.hold_order[0..normal];
+    const order = rule.offer_order[0..normal];
     std.mem.sort(Offer, order, {}, Offer.less);
     const starting_forward = base.forwardMs(rule.shared_costs, @intFromFloat(@ceil(rows))) orelse return;
     for (order) |item| out[item.index] = 0;

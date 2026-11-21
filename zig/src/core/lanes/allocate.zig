@@ -19,7 +19,11 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
 
 /// Grid prices replace steps; empty `charged` means all streams, and `hold_rows == 0` means unbounded passes.
 pub const HeadCost = struct {
+    block_ms: f64 = 0.0, // one fixed pass if any neural head runs; copies alone do not pay it
     step_ms: f64 = 0.0,
+    plain_ms: ?f64 = null, // fixed residual for the zero-draft option, independently measured
+    extra_step_ms: f64 = 0.0, // extra work past the first head step
+    heads: ?[]const bool = null, // copied rows do not run a neural head
     batched: bool = false,
     free_first: bool = false,
     hold_costs: []const hold_price.HoldCost = &.{},
@@ -111,7 +115,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     };
     const mixed = mixed_host or context_order;
     const least = @min(head.least_rows, max_rows);
-    var best = if (fixed_rows >= least) rate(costs, timed, fixed_rows, @floatFromInt(fixed_rows), overhead_ms + fixed_host_ms + rowTerm(costs, timed, head, fixed_rows, live)) else -std.math.inf(f64);
+    var best = if (fixed_rows >= least) rate(costs, timed, fixed_rows, @floatFromInt(fixed_rows), (head.plain_ms orelse overhead_ms) + fixed_host_ms + rowTerm(costs, timed, head, fixed_rows, live)) else -std.math.inf(f64);
     while (true) {
         const incumbent = best;
         // Unknown/nonfinite rates cannot price marginal utility (in particular, infinity * a free row).
@@ -151,7 +155,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
             rows += 1;
             expected += pick_p;
             if (head.host_row_ms.len > 0) host_ms += head.host_row_ms[s];
-            if (head.charged.len == 0 or head.charged[s]) {
+            const neural = if (head.heads) |mask| mask[s] else true;
+            if (neural and (head.charged.len == 0 or head.charged[s])) {
                 firsts += @intFromBool(counts[s] == 1);
                 drafts += 1;
                 deepest = @max(deepest, counts[s]);
@@ -159,7 +164,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
             }
             if (!grid) {
                 const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
-                head_ms = head.step_ms * steps;
+                const extra_steps: f64 = @floatFromInt(if (head.batched) deepest -| 1 else drafts - firsts);
+                head_ms = head.step_ms * steps + head.extra_step_ms * extra_steps + (if (drafts > 0) head.block_ms else 0);
             }
             if (rows < least) continue;
             const now = rate(costs, timed, rows, expected, overhead_ms + host_ms + head_ms + rowTerm(costs, timed, head, rows, live));
@@ -188,6 +194,7 @@ pub fn rowTerm(costs: *const Table, timed: bool, head: HeadCost, rows: u64, live
 fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
     var cost: f64 = 1.0;
     if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
+    if (cost + overhead_ms <= 0) return -1;
     return expected / (cost + overhead_ms);
 }
 

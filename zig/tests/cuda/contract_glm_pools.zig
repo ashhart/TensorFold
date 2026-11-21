@@ -157,10 +157,12 @@ pub const Pools = struct {
     }
 };
 
-/// The prompt indexer's two kernels, registered together so the runner keeps one entry for them.
+/// glm_index's kernels (the prompt indexer's two, the decode window's scores and its control), registered together.
 pub const Fast = struct {
     mod: cuda.Module,
     scores: @import("contract_glm_index.zig").Scores,
+    dscores: @import("contract_glm_index.zig").Scores, // the same kernel at a decode window's tiles
+    dscores_short: @import("contract_glm_index.zig").Scores, // and its control, told one tile fewer
     pools: Pools,
 
     /// On the heap, so the kernels' contexts keep their address; registered into `kernels`.
@@ -170,14 +172,19 @@ pub const Fast = struct {
         errdefer a.destroy(self);
         var m = try cuda.Module.load(gpu.d, cuda.kernels.glm_index);
         errdefer m.unload();
-        self.* = .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = try m.function("tf_glm_index_scores") }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
+        const fast = try m.function("tf_glm_index_scores");
+        self.* = .{ .mod = m, .scores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast }, .dscores = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast, .decode = true }, .dscores_short = idx.Scores{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores, .fast = fast, .decode = true, .short = true }, .pools = .{ .rig = .{ .gpu = gpu, .s = s }, .fast = try m.function("tf_glm_index_pools"), .narrow = fns.select_rows } };
         try kernels.append(a, self.scores.kernel());
+        try kernels.append(a, self.dscores.kernel());
+        try kernels.append(a, self.dscores_short.kernel());
         try kernels.append(a, self.pools.kernel());
         return self;
     }
 
     pub fn destroy(self: *Fast, a: std.mem.Allocator) void {
         self.pools.deinit();
+        self.dscores_short.deinit();
+        self.dscores.deinit();
         self.scores.deinit();
         self.mod.unload();
         a.destroy(self);

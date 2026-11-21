@@ -280,12 +280,15 @@ KERNEL_WG(16 * (D / RV)) void gdn_state(global const ushort *K, global const ush
                                                (private uint *)&s[tj]);
 }
 
+// rexp with the exponent read from the bits: equal to rexp for every float (subnormals clamp to 100, inf to -100).
+static inline int rexp_b(float m) { return m > 0.0f ? clamp(141 - (int)((as_uint(m) >> 23) & 255u), -100, 100) : 0; }
+
 // Output: P = M . Q.K^T and Q go to local memory in fp16 with row exponents, then Y = e^la.Q.S^T + P.U.
 KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, global const float *LA,
                             global const ushort *HS, global const ushort *VN, global ushort *Y, int HK, int HV,
                             int NC) {
   local ushort pa[2][(CK / 8) * (CK / 16) * 128], qa[(CK / 8) * (D / 16) * 128];
-  local float la[CK], qe[CK], pe[CK];
+  local float la[CK], qe[CK], pe[CK], el[CK];
   const int c = get_group_id(0), h = get_group_id(1), sg = get_sub_group_id(), lane = get_sub_group_local_id();
   const int kh = h / (HV / HK), T = NC * CK;
   const global ushort *Qh = Q + kh * D, *Kh = K + kh * D;
@@ -302,7 +305,7 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
     for (int r = 0; r < 8; r++) {
       float m;
       ROWMAX(qf, D / 16, r, m);
-      eq[r] = rexp(m);
+      eq[r] = rexp_b(m);
       if (lane == 0) qe[ti * 8 + r] = (float)eq[r];
     }
     for (int kk = 0; kk < D / 16; kk++) {            // a bf16 q scaled by 2^e is exact in fp16 down to 2^-24
@@ -329,8 +332,12 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
     for (int r = 0; r < 8; r++) {
       float m;
       ROWMAX(pf, CK / 16, r, m);
-      ep[r] = rexp(m);
+      ep[r] = rexp_b(m);
       if (lane == 0) pe[ti * 8 + r] = (float)ep[r];
+    }
+    for (int r = 0; r < 8; r++) {
+      const float e = exp(la[ti * 8 + r]);
+      if (lane == 0) el[ti * 8 + r] = e;
     }
     for (int tj = 0; tj < CK / 16; tj++) {
       ushort8 o[2];
@@ -354,8 +361,23 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
   const global float *HE = (const global float *)(HS + 2L * NC * HV * D * D);
   const global float *VE = (const global float *)(VN + 2L * NC * HV * D * CK);
   const int eh = (int)HE[vrow + lane], ev = (int)VE[vrow + lane];
-  for (int ti = 0; ti < CK / 8; ti++)
-    for (int r = 0; r < 8; r++) acc[ti][r] = ldexp(acc[ti][r], -((int)qe[ti * 8 + r] + eh)) * exp(la[ti * 8 + r]);
+  int qlo = 0, qhi = 0, plo = 0, phi = 0;            // the rows' exponent ranges, the same on every lane
+  for (int j = 0; j < CK / 16; j++) {
+    const int q = (int)qe[j * 16 + lane], p = (int)pe[j * 16 + lane];
+    qlo = min(qlo, sub_group_reduce_min(q)), qhi = max(qhi, sub_group_reduce_max(q));
+    plo = min(plo, sub_group_reduce_min(p)), phi = max(phi, sub_group_reduce_max(p));
+  }
+  // ldexp(x, n) is the one multiply x * 2^n for n in [-124, 127]; here n = -(row exponent + lane exponent)
+  const int one = sub_group_all(eh + qlo >= -127 && eh + qhi <= 124 && ev + plo >= -127 && ev + phi <= 124);
+  const int bh = 0x3F800000 - (eh << 23), bv = 0x3F800000 - (ev << 23);
+  if (one) {
+    for (int ti = 0; ti < CK / 8; ti++)
+      for (int r = 0; r < 8; r++)
+        acc[ti][r] = acc[ti][r] * as_float(bh - ((int)qe[ti * 8 + r] << 23)) * el[ti * 8 + r];
+  } else {
+    for (int ti = 0; ti < CK / 8; ti++)
+      for (int r = 0; r < 8; r++) acc[ti][r] = ldexp(acc[ti][r], -((int)qe[ti * 8 + r] + eh)) * el[ti * 8 + r];
+  }
   float8 pu[CK / 8];
   for (int ti = 0; ti < CK / 8; ti++) pu[ti] = 0.0f;
   for (int kk = 0; kk < CK / 16; kk++) {             // P·U: B = (U[2p][v], U[2p+1][v]), transposed read of VN
@@ -367,8 +389,13 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
       pu[ti] = DPH3(pv, b, pu[ti]);
     }
   }
-  for (int ti = 0; ti < CK / 8; ti++)
-    for (int r = 0; r < 8; r++) acc[ti][r] += ldexp(pu[ti][r], -((int)pe[ti * 8 + r] + ev));
+  if (one) {
+    for (int ti = 0; ti < CK / 8; ti++)
+      for (int r = 0; r < 8; r++) acc[ti][r] += pu[ti][r] * as_float(bv - ((int)pe[ti * 8 + r] << 23));
+  } else {
+    for (int ti = 0; ti < CK / 8; ti++)
+      for (int r = 0; r < 8; r++) acc[ti][r] += ldexp(pu[ti][r], -((int)pe[ti * 8 + r] + ev));
+  }
   for (int ti = 0; ti < CK / 8; ti++) {
     ushort8 o;
     for (int r = 0; r < 8; r++) o[r] = bf(acc[ti][r]);

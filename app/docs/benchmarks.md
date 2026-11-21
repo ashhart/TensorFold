@@ -6,7 +6,7 @@ The feature uses the bundled TensorFold 1.0.12 `benchmark` command and an instal
 Hugging Face checkpoint already present in the configured cache.
 Linked-folder models are currently unsupported; a run never downloads a model.
 
-The standard community-v1 run uses fixed Code and Chat fixtures, temperatures 1
+The standard community-v2 run uses fixed Code and Chat fixtures, temperatures 1
 and 0, five measured repetitions per cell, a 4,096-token context and a 256-token
 output limit.
 Four warm-ups plus 20 measured requests produce 24 requests in total.

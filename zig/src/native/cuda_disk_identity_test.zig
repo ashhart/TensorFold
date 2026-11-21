@@ -6,6 +6,10 @@ const disk = @import("cuda_disk.zig");
 const identity = @import("disk_identity.zig");
 const t = std.testing;
 
+test {
+    _ = @import("cuda_disk_golden_test.zig");
+}
+
 const Recording = struct {
     var calls: [16]enum { name, major, minor, version } = undefined;
     var count: usize = 0;

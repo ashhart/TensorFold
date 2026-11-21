@@ -60,6 +60,8 @@ pub const Request = struct {
     user_end: u32 = 0,
     /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
+    /// Where each message the chat template renders begins, sorted, past 0; empty for raw prompts (never a cut).
+    message_starts: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
     decode_spans: []const [2]u32 = &.{},
     /// Most reply tokens inside a think block before the engine writes ``think_close`` (0: no limit).
@@ -89,6 +91,8 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
+    unread: ?*const std.atomic.Value(u32) = null,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -116,14 +120,19 @@ pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
 pub const VisionOpen = vision_types.VisionOpen;
+pub const Size = vision_types.Size;
+pub const ocr = @import("engine_ocr.zig");
 
 pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
+pub const EncodeVoiceError = error{ BadWav, Closed, Failed, OutOfMemory };
 pub const ImageRequest = @import("image_api.zig").ImageRequest;
 pub const ImageResult = @import("image_api.zig").ImageResult;
 pub const ImageInfo = @import("image_api.zig").ImageInfo;
+pub const ImagePreview = @import("image_api.zig").ImagePreview;
+pub const ImageObserver = @import("image_api.zig").ImageObserver;
 pub const ImageSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed, silence };
@@ -215,6 +224,8 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// --decode-share: the reply's share of a fill step's wall time beside live decoders; null: the engine's default.
     decode_share: ?f64 = null,
+    /// engine-level default for --decode-share: long fills only; the flag wins; the env beats it; others pass null.
+    default_decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
     /// The engine is a reranker (it scores through `score`): the server answers POST /v1/rerank only when set.
@@ -223,6 +234,7 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
+    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr; null: no OCR route
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.
@@ -248,15 +260,8 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
-
-/// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
-pub const Ledger = struct {
-    ctx: *anyopaque,
-    total: u64,
-    cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
-    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
-};
+pub const Admit = @import("engine_admission.zig").Admit;
+pub const Ledger = @import("engine_admission.zig").Ledger;
 
 pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
 pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
@@ -272,6 +277,9 @@ pub const Family = struct {
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
+
+/// Which of --tp and --rank the command line named (a CUDA family's rank aliases fill the rest).
+pub const Given = struct { tp: bool = false, rank: bool = false };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
@@ -341,9 +349,10 @@ pub const Open = struct {
     decode_share: ?f64 = null,
     /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
     keep: ?i64 = null,
-    /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
+    /// Tensor parallelism: `rank` of `tp` (named on the command line when `given` says so); rank 0 listens on `master`.
     tp: u32 = 1,
     rank: u32 = 0,
+    given: Given = .{},
     master: []const u8 = "",
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
@@ -354,19 +363,7 @@ pub const Open = struct {
     loops: ?u32 = null,
 };
 
-/// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
-pub const Decision = struct {
-    trunk: []const u32,
-    at: usize = 0,
-    pictures: []const []const u8 = &.{}, // data URLs, in prompt order
-    branches: []const []const u32 = &.{},
-    counts: []const usize = &.{},
-    labels: []const u32 = &.{},
-    logits: []f64 = &.{},
-    read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
-    problem: []const u8 = "", // out: why the engine refused (error.Refused), in `arena`
-    arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
-};
+pub const Decision = @import("engine_decision.zig").Decision;
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct {
@@ -378,24 +375,18 @@ pub const Opened = struct {
     follow: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
-pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
-
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
-/// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
-pub const MemorySource = struct {
-    ctx: ?*anyopaque = null,
-    read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
-};
-
 pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const Memory = @import("engine_status.zig").Memory;
+pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
 /// What a request refused under critical memory pressure says (a 503).
-pub const pressure_message = "this Mac is under critical memory pressure: the server takes no new requests until it eases; retry shortly";
+pub const pressure_message = "the system is under critical memory pressure: the server takes no new requests until it eases; retry shortly";
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
@@ -442,7 +433,7 @@ pub const Engine = struct {
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
         /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
         recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
-        /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
+        /// A kept-state question for the engine thread (valid until `done`, for good once withdrawn); false: refused.
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
@@ -450,6 +441,8 @@ pub const Engine = struct {
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
         /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
+        /// A reference WAV file's codec rows in `gpa`, on the speech engine's own thread; null: it encodes no voices.
+        encode_voice: ?*const fn (ctx: *anyopaque, gpa: Allocator, wav: []const u8) EncodeVoiceError![][10]i32 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -567,7 +560,6 @@ pub const LaneHost = @import("lane_host.zig").LaneHost;
 pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
-
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
@@ -578,15 +570,14 @@ pub const cache_modes = @import("cache_modes.zig");
 /// Learned prompt-cache states on disk (prompt_imprint.zig), and when a shared cut goes there (prompt_learn.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
 pub const prompt_learn = @import("prompt_learn.zig");
-
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
+pub const ImprintClaim = @import("rows_ask.zig").Claim;
 pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
 pub const recall_store = lanes.recall_store;
-
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");
 

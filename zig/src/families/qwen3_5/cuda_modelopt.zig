@@ -317,6 +317,15 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
     return l.decode(e.stream, w, in, out, rows);
 }
 
+/// NVFP4 prompt gate and up in one lean pair launch into `act`, the bytes of main's path; false: not taken.
+pub fn swiglu(e: *Engine, gate: Proj, up: Proj, x: u64, act: u64, rows: usize, prompt: bool, rows_at: u64) !bool {
+    if (!prompt or rows <= 16 or gate != .ql or up != .ql or gate.ql != .nvfp4 or up.ql != .nvfp4) return false;
+    const k = if (e.mo) |*m| m else return false;
+    if (!cuda.nvfp4.Prompt.pairs(gate.ql.nvfp4, up.ql.nvfp4)) return false;
+    try k.prompt.swiglu(e.stream, x, gate.ql.nvfp4.k, rows, gate.ql.nvfp4, up.ql.nvfp4, act, rows_at);
+    return true;
+}
+
 /// An fp32 tensor of one element.
 pub fn scalar(ck: *core.Checkpoint, name: []const u8) !f32 {
     const t = try ck.get(name);

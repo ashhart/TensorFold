@@ -9,6 +9,7 @@ const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
 const interior = @import("prompt_interior.zig");
+const intermediate = @import("prompt_intermediate.zig");
 const index = @import("prompt_cache_index.zig");
 const forks = @import("prompt_cache_fork.zig");
 pub const others = @import("prompt_cache_others.zig");
@@ -71,13 +72,17 @@ pub const Pages = struct {
         holders: *const fn (ptr: *anyopaque, id: u32) u32,
         /// Pages free and not promised to a stream.
         available: *const fn (ptr: *anyopaque) usize,
+        /// `out.len` free pages the store holds itself, reclaiming first (a checkpoint's copies); null: none.
+        hold: ?*const fn (ptr: *anyopaque, out: []u32) bool = null,
     };
 };
 /// What a family's states depend on beyond their position.
 pub const Rules = @import("prompt_rules.zig").Rules;
+pub const Eviction = @import("prompt_cache_decay.zig").Policy;
 
 pub const Entry = struct {
     image_frame: u32 = 0, // the family frame can affect text rows before the first image
+    image_noted: bool = false, // this conversation prefix already named its image-only RAM retention
     images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
@@ -87,11 +92,14 @@ pub const Entry = struct {
     born: u32, // the prompt length of the request that kept it (a reply's end and its warm pass: that reply's): a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
     seen: Seen = .{}, // wall-clock created and last-use times and resumes, for the dashboard (never policy)
+    resume_credit: u2 = 0, // bounded policy metadata, separate from dashboard history
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     rewind: bool = false, // selected as a rewind: a reply born with this request does not supersede it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
+    intermediate: bool = false, // any kept state at a ladder position: once superseded, goes after other copies but before any newest state
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
+    removed_as: @import("prompt_cache_miss.zig").Reason = .evicted, // what the removal ring records when this entry goes
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
@@ -100,11 +108,13 @@ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evict
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
 pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
-pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
+pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{}, miss: ?@import("prompt_cache_miss.zig").Miss = null };
 /// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
-pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
+pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{}, miss: ?@import("prompt_cache_miss.zig").Miss = null };
 pub const Store = struct {
     image_frame: u32 = 0,
+    ring: @import("prompt_cache_miss.zig").Ring = .{}, // recently removed or refused states, a fixed 3 KiB
+    miss_counts: [@import("engine_status.zig").Status.PromptCache.miss_reason_names.len]u64 = @splat(0),
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
@@ -127,6 +137,8 @@ pub const Store = struct {
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
+    eviction: Eviction = .main,
+    resume_carry: @import("prompt_cache_decay.zig").Credit = .{},
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
@@ -135,7 +147,7 @@ pub const Store = struct {
     pub const keepBornFrame = images.keepBornFrame;
 
     pub fn init(gpa: Allocator, family: Snapshots, rules: Rules, budget: u64) Store {
-        return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget };
+        return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget, .eviction = @import("prompt_cache_decay.zig").fromEnv() };
     }
 
     pub fn deinit(s: *Store) void {
@@ -161,11 +173,13 @@ pub const Store = struct {
 
     pub fn remove(s: *Store, i: usize) void {
         std.debug.assert(s.entries.items[i].borrowers == 0);
+        s.ring.note(s.entries.items[i].tokens, s.entries.items[i].at, s.entries.items[i].removed_as);
         index.remove(s, s.entries.items[i]);
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        // Clear and failed restores must not publish invalid state; backend expiry is still spillable.
+        if (s.disk) |r| if (!e.expired or e.removed_as == .expired) rows.write.evicted(r, e);
         s.free(e);
     }
 
@@ -260,6 +274,7 @@ pub const Store = struct {
         var l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
         // the first lookup's marks, kept for the pass from the start if no shorter kept state resumes
         var fresh_marks: ?[]const u32 = null;
+        var refused_restore = false;
         while (l.entry) |e| {
             if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| {
                 const at = e.at; // read before the reserve may evict the entry
@@ -267,18 +282,20 @@ pub const Store = struct {
                 if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
                 // Restored: this state may go too; a peer restores before it drops.
                 s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, at, history_len, starts, spans));
-                return .{ .from = at, .marks = l.marks };
+                return .{ .from = at, .marks = l.marks, .miss = l.miss };
             } else |err| {
                 // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
                 if (fresh_marks == null) fresh_marks = l.marks else a.free(l.marks);
                 s.resumedWithReason(e, prompt, err);
+                refused_restore = true;
                 l = try s.lookupUserAt(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans, false);
             }
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
+        if (refused_restore and l.miss != null) l.miss.?.reason = .restore_failed; // a state was chosen and its restore refused
         s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
-        return .{ .marks = marks_ };
+        return .{ .marks = marks_, .miss = l.miss };
     }
 
     /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
@@ -298,6 +315,7 @@ pub const Store = struct {
 
     /// `lookupUser`; with `disk` false only RAM states (a retry after a refusal must not recall the refused one).
     fn lookupUserAt(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, disk: bool) !Lookup {
+        s.resume_carry = .{};
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -320,6 +338,8 @@ pub const Store = struct {
             s.find(prompt, starts, spans);
         @import("prompt_cache_divergence.zig").report(s, prompt, spans, e);
         if (e == null) s.counts.misses += 1;
+        const miss = @import("prompt_cache_miss.zig").derive(s, prompt, starts, spans, e);
+        if (miss.reason != .none) s.miss_counts[@backingInt(miss.reason)] += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)
             try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
@@ -330,18 +350,22 @@ pub const Store = struct {
             a.free(ordinary);
             return err;
         };
+        const marked = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
+            a.free(marks_);
+            return err;
+        };
         for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
+            for (marked) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
         var primary = @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans);
-        if (history_len == 0 and primary == 0) for (marks_) |at| {
+        if (history_len == 0 and primary == 0) for (marked) |at| {
             if (at != s.active_rewind_at) primary = @max(primary, at);
         };
-        s.reserve(prompt, born, e, marks_, spans, primary);
-        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
+        s.reserve(prompt, born, e, marked, spans, primary);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marked, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = fitted };
+        return .{ .entry = e, .marks = fitted, .miss = miss };
     }
 
     const reserve = @import("prompt_cache_reserve.zig").reserve;
@@ -349,12 +373,16 @@ pub const Store = struct {
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
         if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
-        for (s.entries.items) |e| e.expired = true;
+        for (s.entries.items) |e| {
+            e.expired = true;
+            e.removed_as = .cleared;
+        }
         s.collectExpired();
         s.shared_keys.clearRetainingCapacity();
         s.imprint = null;
         s.disk = null;
         s.active_rewind_at = 0;
+        s.resume_carry = .{};
     }
 
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
@@ -494,6 +522,7 @@ pub const Store = struct {
 
     /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
     pub const victimBut = policy.victimBut;
+    pub const victimMain = policy.victimMain;
     const extended = policy.extended;
 };
 
@@ -510,6 +539,7 @@ test {
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_interior_test.zig");
+    _ = @import("prompt_cache_intermediate_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_newest_test.zig");
     _ = @import("prompt_cache_fork_test.zig");
@@ -522,4 +552,5 @@ test {
     _ = @import("prompt_cache_repeat_test.zig");
     _ = @import("prompt_cache_tail_test.zig");
     _ = @import("prompt_cache_others_test.zig");
+    _ = @import("prompt_cache_miss_test.zig");
 }

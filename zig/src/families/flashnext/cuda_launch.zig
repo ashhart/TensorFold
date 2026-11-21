@@ -15,6 +15,8 @@ pub const rank_wire = @import("cuda_rank_wire.zig");
 pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
 /// The MoE pass's native routed experts (NVFP4, block FP8), whose FP8 call a device test takes.
 pub const moe_native = @import("cuda_moe_native.zig");
+/// A prompt pass's expert exchange at --tp 2, which the two-rank device test runs against the all-reduce.
+pub const moe_exchange = @import("cuda_moe_exchange.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
@@ -22,6 +24,9 @@ pub const qmm = @import("cuda_qmm.zig");
 pub const batch_state = @import("cuda_batch_state.zig");
 pub const batch_gdn_lanes = @import("cuda_batch_gdn_lanes.zig");
 pub const tile_kernels = @import("cuda_tile_kernels.zig");
+/// The prompt tiles' launches, the fused BF16 read-out's among them, which flashnext-readout-fused compares.
+pub const tiles = @import("cuda_tiles.zig");
+pub const readout_fused = @import("readout_fused.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
@@ -446,8 +451,11 @@ pub const Tri = struct {
 test {
     _ = @import("cuda_split_lane_test.zig");
     _ = @import("cuda_cap_test.zig");
+    _ = @import("cuda_mtp_graphs_test.zig");
     _ = embed;
     _ = hc;
+    _ = tiles;
+    _ = readout_fused;
     _ = qmm;
     _ = gdn;
     _ = mlp;
@@ -471,6 +479,7 @@ test {
     _ = @import("cuda_round_graph.zig");
     _ = @import("cuda_rank_memory.zig");
     _ = @import("cuda_rank_wire.zig");
+    _ = @import("cuda_moe_exchange.zig");
     _ = @import("cuda_modelopt_experts.zig");
     _ = @import("cuda_modelopt_threads.zig");
     _ = row_path;

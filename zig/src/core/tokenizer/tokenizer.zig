@@ -8,7 +8,7 @@ const models = @import("model.zig");
 const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
-pub const eos = @import("eos.zig");
+pub const eos = @import("checkpoint_eos"); // a shared module: std-only families read it too
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
 

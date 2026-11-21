@@ -22,6 +22,7 @@ pub const Settings = struct {
     max_rows: u64 = 64,
     code_accept: bool = false, // TF_DSV41_CODE_ACCEPT: expand high-acceptance short-context chains
     context_bucket: u64 = 2048, // TF_DSV41_GRAPH_BUCKET; short contexts only use its linear buckets
+    plain_streams: usize = 0, // TF_DSV41_DRAFT_PLAIN_STREAMS: a round with this many active streams or more decodes plain; 0 = off
 };
 
 /// [E(0) .. E(len)]: tokens a round verifying k drafts commits on average, into `out` (len + 1).

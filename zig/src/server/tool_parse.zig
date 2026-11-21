@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
+const reply_code = @import("reply_code.zig");
 const reply_text = @import("reply_text.zig");
 const tool_closers = @import("tool_closers.zig");
 const tool_dsml = @import("tool_dsml.zig");
@@ -18,9 +19,17 @@ pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = tool_dsml.Error;
 const Call = tool_dsml.Call;
-const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
+pub const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
 
-pub const Parsed = struct { content: []const u8, calls: ?[]Value, rejected_envelopes: usize = 0 };
+pub const Parsed = struct {
+    content: []const u8,
+    calls: ?[]Value,
+    rejected_envelopes: usize = 0,
+    kept_unoffered: usize = 0,
+    kept_malformed: usize = 0,
+    /// The names the model wrote for kept calls that named an unoffered tool: eight at most, 64 bytes each.
+    unoffered_names: []const []const u8 = &.{},
+};
 
 fn findCI(hay: []const u8, needle: []const u8, from: usize) ?usize {
     if (from > hay.len) return null;
@@ -44,56 +53,50 @@ fn allSpace(s: []const u8) bool {
 }
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
-fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
-    var found: std.ArrayList(Envelope) = .empty;
-    var pos: usize = 0;
-    var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
-    while (findCI(text, "<tool_call>", pos)) |s| {
-        if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
-        if (dsml) |outer| if (outer.at < s) {
-            pos = tool_dsml.blockEnd(text, outer) orelse break;
-            continue;
-        };
-        const e = findCI(text, "</tool_call>", s + 11) orelse break;
-        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) });
-        pos = e + 12;
-    }
-    pos = 0;
-    var closers: tool_closers.Closers = .{ .text = text };
-    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
-        pos = s + 1;
-        var j = s + 1;
-        if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) continue;
-        j += 1;
-        while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
-        if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) continue;
-        const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse continue;
-        const end = e + j - s + 12; // ``</NAME:tool_call>``
-        try found.append(a, .{ .start = s, .end = end, .payload = strip(text[j + 11 .. e]) });
-        pos = end;
-    }
-    pos = 0;
-    while (find(text, "<|tool_call>", pos)) |s| {
-        const e = find(text, "<tool_call|>", s + 12) orelse break;
-        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) });
-        pos = e + 12;
-    }
-    pos = 0;
-    while (tool_dsml.findOpen(text, pos)) |o| {
-        const e = tool_dsml.blockEnd(text, o);
-        const end = e orelse text.len;
-        try found.append(a, .{ .start = o.at, .end = end, .payload = text[o.at..end], .complete = e != null });
-        pos = end;
-    }
-    std.mem.sort(Envelope, found.items, {}, struct {
-        fn less(_: void, x: Envelope, y: Envelope) bool {
-            if (x.start != y.start) return x.start < y.start;
-            if (x.end != y.end) return x.end < y.end;
-            return std.mem.order(u8, x.payload, y.payload) == .lt;
-        }
-    }.less);
+pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     var kept: std.ArrayList(Envelope) = .empty;
-    for (found.items) |env| if (kept.items.len == 0 or env.start >= kept.items[kept.items.len - 1].end) try kept.append(a, env);
+    var pos: usize = 0;
+    var code: reply_code.Scanner = .{};
+    var closers: tool_closers.Closers = .{ .text = text };
+    var no_tc = false;
+    var no_gemma = false;
+    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
+        if (code.check(text, s, true) == .skip) {
+            pos = code.skip_end;
+            continue;
+        }
+        const env: ?Envelope = blk: {
+            if (tool_dsml.openedBy(text[s..])) |sp| {
+                const e = tool_dsml.blockEnd(text, .{ .at = s, .spelling = sp });
+                const end = e orelse text.len;
+                break :blk .{ .start = s, .end = end, .payload = text[s..end], .complete = e != null };
+            }
+            if (!no_tc and std.ascii.startsWithIgnoreCase(text[s..], "<tool_call>")) {
+                if (findCI(text, "</tool_call>", s + 11)) |e| {
+                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) };
+                }
+                no_tc = true;
+            }
+            if (!no_gemma and std.mem.startsWith(u8, text[s..], "<|tool_call>")) {
+                if (find(text, "<tool_call|>", s + 12)) |e| {
+                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) };
+                }
+                no_gemma = true;
+            }
+            var j = s + 1;
+            if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) break :blk null;
+            j += 1;
+            while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
+            if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) break :blk null;
+            const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse break :blk null;
+            break :blk .{ .start = s, .end = e + j - s + 12, .payload = strip(text[j + 11 .. e]) };
+        };
+        if (env) |item| {
+            try kept.append(a, item);
+            pos = item.end;
+            code.jumpTo(pos);
+        } else pos = s + 1;
+    }
     return kept.items;
 }
 
@@ -111,8 +114,11 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     if (envs.len == 0) return .{ .content = text, .calls = null };
     var calls: std.ArrayList(Value) = .empty;
     var residue: std.ArrayList(u8) = .empty;
+    var kept_names: std.ArrayList([]const u8) = .empty;
     var cursor: usize = 0;
     var rejected: usize = 0;
+    var kept_unoffered: usize = 0;
+    var kept_malformed: usize = 0;
     for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
@@ -139,12 +145,20 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             }
             break :blk null;
         };
-        const good = if (parsed) |list| list.len > 0 and for (list) |c| {
-            if ((try callName(a, c, &known)) == null) break false;
-        } else true else false;
-        if (!good) {
+        const reject: enum { none, unoffered, malformed } = blk: {
+            const list = parsed orelse break :blk .malformed;
+            if (list.len == 0) break :blk .malformed;
+            var unoffered = false;
+            for (list) |c| if ((try callName(a, c, &known)) == null) {
+                unoffered = true;
+                try keepName(a, &kept_names, strip(c.name));
+            };
+            break :blk if (unoffered) .unoffered else .none;
+        };
+        if (reject != .none) {
             try residue.appendSlice(a, text[env.start..env.end]);
             rejected += 1;
+            if (reject == .unoffered) kept_unoffered += 1 else kept_malformed += 1;
             continue;
         }
         for (parsed.?) |c| {
@@ -152,7 +166,24 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         }
     }
     try residue.appendSlice(a, text[cursor..]);
-    return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null, .rejected_envelopes = rejected };
+    return .{
+        .content = strip(residue.items),
+        .calls = if (calls.items.len > 0) calls.items else null,
+        .rejected_envelopes = rejected,
+        .kept_unoffered = kept_unoffered,
+        .kept_malformed = kept_malformed,
+        .unoffered_names = kept_names.items,
+    };
+}
+
+/// Keeps one unoffered name as the model wrote it: once, eight names at most, 64 UTF-8 bytes each.
+fn keepName(a: Allocator, names: *std.ArrayList([]const u8), raw: []const u8) Allocator.Error!void {
+    var end = @min(raw.len, 64);
+    while (end > 0 and end < raw.len and (raw[end] & 0xc0) == 0x80) end -= 1;
+    const name = raw[0..end];
+    if (name.len == 0 or names.items.len >= 8) return;
+    for (names.items) |kept| if (std.mem.eql(u8, kept, name)) return;
+    try names.append(a, name);
 }
 
 /// What closes the call ``text`` ends inside (the model's end token came before its ``
@@ -169,14 +200,25 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
 /// Where the reply's open call starts: the opener ``envelopes`` leaves without a closer, so one appended pairs with it.
 pub fn openCall(text: []const u8) ?usize {
     var pos: usize = 0;
+    var code: reply_code.Scanner = .{};
     var dsml = tool_dsml.findOpen(text, 0); // as in ``envelopes``
     return while (findCI(text, "<tool_call>", pos)) |s| {
         if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
         if (dsml) |outer| if (outer.at < s) {
+            if (code.check(text, outer.at, true) == .skip) {
+                pos = code.skip_end;
+                continue;
+            }
             pos = tool_dsml.blockEnd(text, outer) orelse return null;
+            code.jumpTo(pos);
             continue;
         };
+        if (code.check(text, s, true) == .skip) {
+            pos = code.skip_end;
+            continue;
+        }
         pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
+        code.jumpTo(pos);
     } else null;
 }
 

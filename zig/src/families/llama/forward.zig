@@ -128,6 +128,15 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32, 
 
 /// Several streams' rows in one forward, each segment's attention over its own cache: every row keeps its solo bits.
 pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids: []const u32, out: Out) !void {
+    return runImpl(m, s, segments, ids, out, false);
+}
+
+/// Qwen3 prompt-only pooling: the final normalized last row in s.x, without an output projection.
+pub fn runHidden(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) !void {
+    return runImpl(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, .{}, true);
+}
+
+fn runImpl(m: *const Model, s: *st.Scratch, segments: []const Segment, ids: []const u32, out: Out, comptime hidden_only: bool) !void {
     const n = ids.len;
     const c = &m.config;
     if (n == 0 or n > s.rows or (out.all and n > st.batch_rows) or (!out.all and segments.len != 1)) return error.LlamaRowsExceeded;
@@ -154,13 +163,13 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     x.glue(.embed, Args{ .rows = nr, .width = @intCast(h) }, &.{ out.ids orelse b(s.ids), bo(W.embed.buf, W.embed.off), A, b(s.resid) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     const normed = Args{ .rows = nr, .width = @intCast(h), .eps = c.eps };
     x.glue(.norm, normed, &.{ b(s.resid), t(W.layers[0].input_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
-    for (W.layers, 0..) |l, i| try layer(x, segments, l, i, n, if (i + 1 < W.layers.len) W.layers[i + 1].input_norm else null);
+    for (W.layers, 0..) |l, i| try layer(x, segments, l, i, n, hidden_only, if (i + 1 < W.layers.len) W.layers[i + 1].input_norm else null);
     if (out.all) {
         x.glue(.norm, normed, &.{ b(s.resid), t(W.norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
         x.dense(W.head, s.x, s.logits_all, 0, n, c.vocab);
     } else {
         x.glue(.norm, normed, &.{ bo(s.resid, (n - 1) * h * 2), t(W.norm), A, b(s.x) }, .{ 1, 1, 1 }, .{ 256, 1, 1 }, true);
-        x.dense(W.head, s.x, segments[0].cache.logits, 0, 1, c.vocab);
+        if (!hidden_only) x.dense(W.head, s.x, segments[0].cache.logits, 0, 1, c.vocab);
         if (out.draw) |d| pick(x, segments[0].cache.logits, d);
     }
     x.e.end();
@@ -221,7 +230,7 @@ fn pick(x: Enc, logits: mtl.Buffer, d: Draw) void {
 }
 
 /// Layer `i` on every segment's rows (s.x their input norm); its last add norms the residual by `next`.
-fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, next: ?wts.Tensor) !void {
+fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, comptime head_norm: bool, next: ?wts.Tensor) !void {
     const s = x.s;
     const c = &x.m.config;
     const h = c.hidden;
@@ -234,6 +243,15 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
         x.dense(l.attn.q, s.x, s.q, 0, n, qkvw);
         x.dense(l.attn.k, s.x, s.q, c.queryWidth() * 2, n, qkvw);
         x.dense(l.attn.v, s.x, s.q, (c.queryWidth() + c.kvWidth()) * 2, n, qkvw);
+    }
+    if (head_norm) {
+        const HArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, stride: u32, eps: f32 };
+        x.e.setPipeline(x.m.head_norm.?);
+        x.e.setBuffer(s.q, 0, 0);
+        x.e.setBuffer(l.attn.q_norm.?.buffer, l.attn.q_norm.?.offset, 1);
+        x.e.setBuffer(l.attn.k_norm.?.buffer, l.attn.k_norm.?.offset, 2);
+        x.e.setValue(HArgs{ .rows = nr, .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .stride = @intCast(qkvw), .eps = c.eps }, 3);
+        x.e.dispatchGroups(mtl.Size.of(c.heads + c.kv_heads, n, 1), mtl.Size.of(128, 1, 1));
     }
     var base: usize = 0;
     for (segments) |seg| {

@@ -475,8 +475,8 @@ pub const Graph = struct {
         if (fault == .write) return error.GraphWrite;
         // taught facts are private: owner-only, through a unique temporary that follows no link
         const staged = try platform.atomic_file.stagePrivate(a, path, &.{body});
-        if (fault == .rename) return error.GraphRename;
-        try platform.atomic_file.commit(a, staged, path);
+        // a test's rename fault fails the real rename (to no name), so commit removes the temporary as for any failure
+        platform.atomic_file.commit(a, staged, if (fault == .rename) "" else path) catch |e| return if (fault == .rename) error.GraphRename else e;
     }
 
     fn load(g: *Graph) !void {

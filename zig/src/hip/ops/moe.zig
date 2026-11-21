@@ -38,8 +38,9 @@ pub fn moeSelect(o: Ops, logits: u64, pick: u64, wts: u64, plan: ?struct { items
     try o.l.tf_moe_select(f(logits), i(pick), f(wts), if (plan) |pl| i(pl.items) else null, if (plan) |pl| i(pl.members) else null, int(capacity), int(r), int(experts), int(top_k), o.stream);
 }
 
-pub fn moeRoute(o: Ops, picks: u64, pairs: usize, experts: usize, tile: usize, members: u64, items: u64, capacity: usize) Error!void {
-    try o.l.tf_moe_route(@ptrFromInt(picks), int(pairs), int(experts), int(tile), i(members), i(items), int(capacity), o.stream);
+/// The plan: pairs by expert in items of at most `tile` pairs, the `shared` expert's of at most `shared_tile`.
+pub fn moeRoute(o: Ops, picks: u64, pairs: usize, experts: usize, tile: usize, shared: ?usize, shared_tile: usize, members: u64, items: u64, capacity: usize) Error!void {
+    try o.l.tf_moe_route(@ptrFromInt(picks), int(pairs), int(experts), int(tile), if (shared) |e| int(e) else -1, int(shared_tile), i(members), i(items), int(capacity), o.stream);
 }
 
 pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit: f32) Error!void {

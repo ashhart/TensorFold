@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const mm = @import("cuda_mm.zig");
 
@@ -73,9 +74,9 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u6
         const f = if (one) set.glue.bmm_tile1 else set.glue.bmm_tile;
         const bn: usize = if (one) 128 else 64;
         const shared: u32 = if (one) glue.bmm_tile1_smem[@intFromBool(wide)] else glue.bmm_tile_smem;
-        return cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(cdiv(m, 128)), .y = @intCast(cdiv(n, bn)) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
+        return cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(cdiv(m, 128)), .y = @intCast(cdiv(n, bn)) }, .block = .{ .x = 256 }, .shared = shared }, stream, &a);
     }
-    if (m >= rows_from) return cuda.launch.launch(set.glue.bmm_rows, .{ .grid = .{ .x = @intCast(cdiv(m, 128)), .y = @intCast(cdiv(n, 64)) }, .block = .{ .x = 128 } }, stream, &a);
+    if (m >= rows_from) return cuda_pdl.launch(set.glue.bmm_rows, .{ .grid = .{ .x = @intCast(cdiv(m, 128)), .y = @intCast(cdiv(n, 64)) }, .block = .{ .x = 128 } }, stream, &a);
     if (decodeTile(n, k)) |t| {
         if (x % 16 == 0 and x_stride % 8 == 0 and n % 8 == 0 and out % 16 == 0 and part % 16 == 0) {
             const f = switch (t.bn * 10 + t.st) {
@@ -86,12 +87,12 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u6
                 else => unreachable,
             };
             const shared: u32 = t.st * (16 + t.bn) * bk * 2; // Tile<16, bn, 64, st, 1, 4>'s stages (the output tile is smaller)
-            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(cdiv(m, 16)), .y = @intCast(cdiv(n, t.bn)), .z = @intCast(sk) }, .block = .{ .x = 128 }, .shared = shared }, stream, &a);
+            try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(cdiv(m, 16)), .y = @intCast(cdiv(n, t.bn)), .z = @intCast(sk) }, .block = .{ .x = 128 }, .shared = shared }, stream, &a);
             if (sk > 1) try glue.sliceSum(set, stream, part, out, m * n, sk, wide);
             return;
         }
     }
-    try cuda.launch.launch(set.glue.bmm_decode, .{ .grid = .{ .x = @intCast(cdiv(m, 16)), .y = @intCast(cdiv(n, 64)), .z = @intCast(sk) }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda_pdl.launch(set.glue.bmm_decode, .{ .grid = .{ .x = @intCast(cdiv(m, 16)), .y = @intCast(cdiv(n, 64)), .z = @intCast(sk) }, .block = .{ .x = 128 } }, stream, &a);
     if (sk > 1) try glue.sliceSum(set, stream, part, out, m * n, sk, wide);
 }
 
@@ -99,7 +100,7 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u6
 pub fn groupSums(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, xs: u64, m: usize, k: usize) !void {
     var a: cuda.Args = .{};
     inline for (.{ x, xs, @as(i64, @intCast(x_stride)), @as(i64, @intCast(k / 64)) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.group_sums, .{ .grid = .{ .x = @intCast(m), .y = @intCast(cdiv(k / 64, 16)) }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda_pdl.launch(set.glue.group_sums, .{ .grid = .{ .x = @intCast(m), .y = @intCast(cdiv(k / 64, 16)) }, .block = .{ .x = 128 } }, stream, &a);
 }
 
 test "K slices as qmm.py picks them" {

@@ -380,4 +380,5 @@ test "TF_DSV41_GM_GU2: 0 / 1, and a 4,096-row segment's gate / up at GU2 over it
 
 test {
     _ = @import("index_scratch_test.zig");
+    _ = @import("request_admission_test.zig");
 }

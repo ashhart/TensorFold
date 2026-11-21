@@ -99,7 +99,8 @@ class Model:
         y = out / torch.sqrt((out * out).mean(-1, keepdim=True) + self.eps) * w * torch.sigmoid(gate)
         return self.lin(r(y).reshape(T, H * dk), p + "o_proj")
 
-    def mla(self, x, p):
+    def mla(self, x, p, pos0=0):
+        """One MLA layer. x is the pre-normed residual [T, hidden]; attends only over the rows it is given."""
         c, r, ck = self.c, self.r, self.ck
         T, H = x.shape[0], c["num_attention_heads"]
         nope, rope, dv, lw = c["qk_nope_head_dim"], c["qk_rope_head_dim"], c["v_head_dim"], c["kv_lora_rank"]
@@ -108,7 +109,7 @@ class Model:
         lat = self.norm(kv[:, :lw], ck.t(p + "kv_a_layernorm.weight"))
         kvb = self.lin(lat, p + "kv_b_proj").view(T, H, nope + dv)
         inv = 1.0 / c["rope_theta"] ** (torch.arange(0, rope, 2, dtype=torch.float64) / rope)
-        ang = torch.arange(T, dtype=torch.float64)[:, None] * inv
+        ang = (pos0 + torch.arange(T, dtype=torch.float64))[:, None] * inv
         cos, sin = torch.cos(ang), torch.sin(ang)
 
         def rot(z):  # GPT-J pairs (rope_interleave), out in halves as HF's interleave helper writes them
@@ -154,7 +155,7 @@ class Model:
                 y[t] += self.mlp(x[t:t + 1], f"{p}experts.{int(idx[t, j])}.", le)[0] * w[t, j]
         return r(r(y) + self.mlp(x, p + "shared_experts.", ls))
 
-    def logits(self, ids):
+    def logits(self, ids, trace=None):
         c, ck = self.c, self.ck
         x = ck.t("model.word_embeddings.weight").double()[ids]
         for i in range(c["num_hidden_layers"]):
@@ -165,6 +166,8 @@ class Model:
             x = self.r(x + (self.mla(h, p + "attention.") if mla else self.kda(h, p + "attention.")))
             h = self.norm(x, ck.t(p + "post_attention_layernorm.weight"))
             x = self.r(x + (self.moe(h, p + "mlp.", i) if i >= c["first_k_dense_replace"] else self.mlp(h, p + "mlp.", 0)))
+            if trace is not None:
+                trace(i, x)
         self.hidden = self.norm(x, ck.t("model.norm.weight"))
         return self.hidden @ ck.lin("lm_head").T
 
@@ -181,19 +184,49 @@ class Model:
         return self.norm(x, ck.t(p + "final_layernorm.weight")) @ ck.lin("lm_head").T
 
 
+def one_mla(ck, c, x, layer, r, pos0=0):
+    """One MLA layer's output [T, hidden] from its pre-normed input x. Same Model.mla, not a second copy."""
+    return Model(ck, c, r).mla(x, f"model.layers.{layer}.attention.", pos0)
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__)
     a.add_argument("ckpt", help="a ling-synth directory (config.json, model.safetensors) or a sharded checkpoint's")
     a.add_argument("out", help="the reference file: ids, float64 and bf16-point logits, the picks it routed on")
     a.add_argument("--tokens", type=int, default=88)
+    a.add_argument("--layer-trace", help="write per-layer float64 and bf16-point hidden rows beside logits")
     a.add_argument("--picks", help="route on these picks (i32 [MoE layers][tokens][top_k], the graph's) instead")
     a.add_argument("--mtp", help="also the MTP layer's logits (float64, bf16 points) and its own picks, to this file")
     a.add_argument("--ids", help="these tokens (i32, ling-lanes' OUT.ids) instead of the fixed walk; --tokens follows")
+    a.add_argument("--mla-layer", type=int, metavar="I", help="write one MLA layer's output from --acts instead of full-decoder logits")
+    a.add_argument("--pos0", type=int, default=0, help="RoPE origin of row 0 of --acts; attention is still only over these rows")
+    a.add_argument("--acts", help="float64 [T, hidden] pre-normed input for --mla-layer")
     o = a.parse_args()
     c = json.load(open(os.path.join(o.ckpt, "config.json")))
     one = os.path.join(o.ckpt, "model.safetensors")
     ck = Ckpt(one if os.path.exists(one) else o.ckpt)
     V = c["vocab_size"]
+    if o.mla_layer is not None:
+        if not o.acts:
+            a.error("--mla-layer needs --acts")
+        i = o.mla_layer
+        stem = f"model.layers.{i}.attention.kv_a_proj_with_mqa"
+        if not any(k == stem or k.startswith(stem + ".") for k in ck.keys):
+            a.error(f"layer {i} has no {stem} in the checkpoint: not an MLA layer, or the index is not in this file")
+        hidden = c["hidden_size"]
+        raw = torch.frombuffer(bytearray(open(o.acts, "rb").read()), dtype=torch.float64)
+        if raw.numel() % hidden != 0:
+            a.error(f"--acts length {raw.numel()} is not a multiple of hidden {hidden}")
+        x = raw.view(-1, hidden)
+        T = x.shape[0]
+        with torch.no_grad():
+            y64 = one_mla(ck, c, x, i, lambda z: z, o.pos0)
+            ybf = one_mla(ck, c, x, i, bf16, o.pos0)
+        with open(o.out, "wb") as f:
+            f.write(b"TFLINGA1" + struct.pack("<4I", T, hidden, i, o.pos0))
+            f.write(y64.contiguous().numpy().tobytes() + ybf.contiguous().numpy().tobytes())
+        print("mla layer", i, "tokens", T, "pos0", o.pos0, "rms", y64.pow(2).mean().sqrt().item())
+        return
     if o.ids:
         ids = torch.frombuffer(bytearray(open(o.ids, "rb").read()), dtype=torch.int32).long()
     else:
@@ -205,8 +238,17 @@ def main():
         forced = torch.frombuffer(bytearray(open(o.picks, "rb").read()), dtype=torch.int32).view(nm, T, -1)
     with torch.no_grad():
         exact = Model(ck, c, lambda z: z, forced)
-        l64 = exact.logits(ids)
-        lbf = Model(ck, c, bf16, forced).logits(ids)
+        traces = [[], []]
+        def capture(which):
+            return lambda layer, x: traces[which].append(x.clone())
+        l64 = exact.logits(ids, capture(0) if o.layer_trace else None)
+        lbf = Model(ck, c, bf16, forced).logits(ids, capture(1) if o.layer_trace else None)
+        if o.layer_trace:
+            with open(o.layer_trace, "wb") as f:
+                f.write(b"TFLINGH1" + struct.pack("<3I", c["num_hidden_layers"], T, c["hidden_size"]))
+                for layers in traces:
+                    for x in layers:
+                        f.write(x.contiguous().numpy().tobytes())
         if o.mtp:  # the bf16-point model's own picks route its MTP layer; float64's are written for the flips
             rounded = Model(ck, c, bf16, forced)
             rounded.logits(ids)

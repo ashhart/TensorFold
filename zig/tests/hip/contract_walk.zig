@@ -4,18 +4,26 @@ const hip = @import("hip");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const kit = @import("contract_kit.zig");
+pub const w256 = @import("contract_walk256.zig");
+
+/// The d = 256 registrations: q fp32 and in the cache's kind for each case, then the two controls (q fp32, q in kind).
+pub const qwen_count = 2 * w256.cases.len + 2;
 
 const contract = core.contract;
 const c = contract.spec;
 const g = contract.gates;
 const rows = contract.rows;
 
-const d = 128; // Nemotron's head dim
 const page = 64;
 
 /// The score's lane products and wave tree, softmax's exp, sum and divide, the values' tile and the tiles' sum.
 fn depth(s: c.Shape) usize {
     return 22 + 4 + s.k / 256 + 8 + 1 + 2 * 128 + s.k / 128 + 4;
+}
+
+/// At d = 256 each lane sums eight products where d = 128 sums four, a multiply and an add each.
+fn depth256(s: c.Shape) usize {
+    return depth(s) + 8;
 }
 
 const names = [2][2][]const u8{
@@ -68,7 +76,7 @@ fn plain(_: kit.Kind) c.Spec {
     };
 }
 
-/// shape.rows rows of shape.n query heads (sixteen a KV head), each over the slot's first shape.k keys.
+/// shape.rows rows of shape.n query heads (`group` a KV head), each over the slot's first keys up to its position.
 pub const Walk = struct {
     rig: rig_.Rig,
     l: *const hip.Launcher,
@@ -83,6 +91,15 @@ pub const Walk = struct {
     act: bool = false,
     /// The one-block walk (tf_plan_attend_*) in place of the four launches.
     attend: bool = false,
+    /// Head size: Nemotron's 128, or 256 for a `qwen` case.
+    d: usize = 128,
+    /// Query heads a KV head.
+    group: usize = 16,
+    /// A d = 256 case (w256.cases): its served shapes, and rows cut at causal edges.
+    qwen: ?usize = null,
+    fault: w256.Fault = .none,
+    /// Each row's visible keys, its position plus one.
+    vis: []usize = &.{},
     q32: u64 = 0,
     wide: u64 = 0, // the baseline's fp32 rows
     base: u64 = 0,
@@ -94,24 +111,39 @@ pub const Walk = struct {
         return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .k = kit.act(), .arena = .init(a) };
     }
 
+    /// Registration i of `qwen_count`: each case with q fp32 and in the cache's kind, then the controls likewise.
+    pub fn qwenAt(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, i: usize) Walk {
+        var w = init(a, rt, s, l);
+        const control = i >= 2 * w256.cases.len;
+        const case = if (control) w256.control_case else i / 2;
+        w.d = 256;
+        w.group = w256.cases[case].heads / w256.cases[case].kv;
+        w.qwen = case;
+        w.act = i % 2 == 1;
+        w.fault = if (control) .steps else .none;
+        return w;
+    }
+
     pub fn deinit(self: *Walk) void {
         self.arena.deinit();
         self.rig.deinit();
     }
 
+    /// A control keeps its case's spec under its own name and must go red at gate 3.
     pub fn kernel(self: *Walk) g.Kernel {
-        return .{ .spec = spec(self.k, self.act, self.attend), .ctx = self, .vt = &vt };
+        const s = if (self.qwen) |i| w256.spec(i, self.k, self.act, self.fault, depth256) else spec(self.k, self.act, self.attend);
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.fault != .none) .shapes else null };
     }
 
     const vt = g.hooks(Walk);
 
     fn kv(self: *const Walk) usize {
-        return @max(self.shape.n / 16, 1);
+        return @max(self.shape.n / self.group, 1);
     }
 
     pub fn prepare(self: *Walk, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (self.attend and shape.k > 4096) return false;
-        if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.n % @max(shape.n / 16, 1) != 0) return false;
+        if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.n % @max(shape.n / self.group, 1) != 0) return false;
         self.rig.reset();
         _ = self.arena.reset(.retain_capacity);
         self.shape = shape;
@@ -119,6 +151,7 @@ pub const Walk = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         const k = self.k;
+        const d = self.d;
         const keys = shape.k;
         const pages = (keys + page - 1) / page;
         const n_kv = self.kv();
@@ -161,8 +194,13 @@ pub const Walk = struct {
         @memcpy(std.mem.sliceAsBytes(desc[words..])[0 .. pages * 4], std.mem.sliceAsBytes(table));
         const dev_desc = try self.rig.input(std.mem.sliceAsBytes(desc));
         const descs = try self.rig.input(std.mem.asBytes(&dev_desc));
+        // gate 4's weights are 1 / keys, so its rows see every key
+        self.vis = try a.alloc(usize, shape.rows);
         const pos = try a.alloc(i32, shape.rows);
-        @memset(pos, @intCast(keys - 1));
+        for (self.vis, pos, 0..) |*v, *p, r| {
+            v.* = if (self.qwen != null and fill != .stress) w256.visible(r, keys) else keys;
+            p.* = @intCast(v.* - 1);
+        }
         const zeros = try a.alloc(i32, shape.rows);
         @memset(zeros, 0);
         const many = [1]i32{@intCast(shape.rows)};
@@ -197,6 +235,7 @@ pub const Walk = struct {
     /// Gate 4: q = 0, so every weight is 1 / keys (a power of two); the second half's values undo the first but for 8.
     fn stress(self: *Walk, rng: std.Random) void {
         const keys = self.shape.k;
+        const d = self.d;
         const stride = self.kc.len / self.kv();
         for (0..self.kv()) |h| for (0..keys / 2) |key| for (0..d) |j| {
             const v: f64 = @floatFromInt(1 + rng.uintLessThan(u32, 64));
@@ -207,7 +246,12 @@ pub const Walk = struct {
 
     pub fn run(self: *Walk) !void {
         const s = self.shape;
-        const scale: f32 = 1 / @sqrt(@as(f32, d));
+        const d = self.d;
+        const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
+        if (self.fault == .steps) {
+            try w256.faulty(self.l, self.rig.s, self.qd, self.out, self.scratch, self.plan, s.n, self.kv(), s.k, scale, self.k, self.act);
+            return self.rig.s.synchronize();
+        }
         if (self.attend) {
             const kind = @backingInt(self.k);
             const qk: c_int = if (self.act) kind else 0;
@@ -272,7 +316,8 @@ pub const Walk = struct {
     /// The fp32 walk on q widened (the cast's exact values), then its rows cast to the kind; or the four launches.
     pub fn replaced(self: *Walk) ![]const u8 {
         const s = self.shape;
-        const scale: f32 = 1 / @sqrt(@as(f32, d));
+        const d = self.d;
+        const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
         const st = self.rig.s.handle;
         if (self.attend) {
             const out = if (self.act) self.base else self.wide;
@@ -317,23 +362,25 @@ pub const Walk = struct {
     }
 
     pub fn count(self: *Walk) usize {
-        return self.shape.rows * self.shape.n * d;
+        return self.shape.rows * self.shape.n * self.d;
     }
 
-    /// softmax(q k * scale) v in float64 a row and head, each output's magnitude through its scores' and sums' errors.
+    /// softmax(q k * scale) v in float64 a row and head over the keys it sees, each output's magnitude through its sum.
     pub fn reference(self: *Walk, want: []f64, mag: []f64) !void {
         const s = self.shape;
+        const d = self.d;
         const a = self.rig.a;
         const p = try a.alloc(f64, 2 * s.k);
         defer a.free(p);
         const sens = p[s.k..];
-        const scale: f64 = @as(f32, 1 / @sqrt(@as(f32, d)));
+        const scale: f64 = @as(f32, 1 / @sqrt(@as(f32, @floatFromInt(d))));
         const stride = self.kc.len / self.kv();
         for (0..s.rows) |r| for (0..s.n) |h| {
             const qv = self.q[(r * s.n + h) * d ..][0..d];
             const base = (h / (s.n / self.kv())) * stride;
+            const vis = self.vis[r];
             var top = -std.math.inf(f64);
-            for (0..s.k) |key| {
+            for (0..vis) |key| {
                 var dot: f64 = 0;
                 var abs: f64 = 0;
                 for (0..d) |j| {
@@ -345,18 +392,18 @@ pub const Walk = struct {
                 top = if (std.math.isNan(p[key]) or std.math.isNan(top)) std.math.nan(f64) else @max(top, p[key]);
             }
             var sum: f64 = 0;
-            for (p[0..s.k]) |*x| {
+            for (p[0..vis]) |*x| {
                 x.* = @exp(x.* - top);
                 sum += x.*;
             }
             const out = want[(r * s.n + h) * d ..][0..d];
             const m = mag[(r * s.n + h) * d ..][0..d];
             @memset(out, 0);
-            for (0..s.k) |key| for (0..d) |j| {
+            for (0..vis) |key| for (0..d) |j| {
                 out[j] += p[key] / sum * self.vc[base + key * d + j];
             };
             @memset(m, 0);
-            for (0..s.k) |key| for (0..d) |j| {
+            for (0..vis) |key| for (0..d) |j| {
                 m[j] += p[key] / sum * (@abs(self.vc[base + key * d + j]) + @abs(out[j])) * sens[key];
             };
         };
@@ -365,6 +412,7 @@ pub const Walk = struct {
     /// Gate 4's outputs: every weight 1 / keys, the values' products summed in the accumulator and order.
     pub fn simulate(self: *Walk, acc: c.Accum, order: g.Order, out: []f64) !void {
         const s = self.shape;
+        const d = self.d;
         const t = try self.rig.a.alloc(f64, s.k);
         defer self.rig.a.free(t);
         const w = 1 / @as(f64, @floatFromInt(s.k));

@@ -147,7 +147,8 @@ pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
     var who = win.who(s, e.cfg.k.hold_costs.len > 0);
     if (who.granted == null and @import("hold_price.zig").pricesPasses(e)) return 0;
     if (reach == .head and e.cfg.node_probabilities) return @intCast(try e.rule.headDepth(&who, null, win.probe(e)));
-    return @intCast(try e.rule.depth(who));
+    const d = try e.rule.depth(who);
+    return @intCast(if (e.cfg.shared_mtp_cap > 0 and e.live.items.len > 0) @min(d, e.cfg.shared_mtp_cap) else d); // joins a shared round
 }
 
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).

@@ -12,6 +12,7 @@ const schema = @import("slide_metrics_types.zig");
 const panel = @import("slide_panel.zig");
 const graph = @import("slide_graph.zig");
 const chat = @import("chat.zig");
+const reserved = @import("slide_reserved.zig");
 const Allocator = std.mem.Allocator;
 pub const Report = schema.Report;
 const Output = schema.Output;
@@ -72,10 +73,7 @@ fn baseline(srv: *Server, cx: *Cx, qs: []const Query, gone: anytype, r: *Report)
 /// All example roles are checked: an externally supplied wording is never credited if the plan reads it.
 pub fn contaminated(srv: *Server, cx: *Cx, plan: teach.Plan, question: []const u8) !bool {
     const head = (try asks.promptOnly(srv, cx, cx.a, null, question)).ids;
-    inline for (.{ "train", "think", "held", "near", "keep", "asked", "unasked", "kept" }) |role| {
-        for (@field(plan.full, role)) |ex| if (std.mem.indexOf(u32, ex.ids, head) != null) return true;
-    }
-    return false;
+    return reserved.contaminated(plan.full, head);
 }
 
 /// Three greedy passes, before committing a candidate; this function never trains or changes a lesson's rows.

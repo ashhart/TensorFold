@@ -161,6 +161,7 @@ pub const Engine = struct {
     /// A decision: the labels' logits after `prompt` (softcapped) and the row's log-sum-exp, on the second sequence.
     pub fn score(e: *Engine, prompt: []const u32, labels: []const u32, logits: []f64, _: bool) !f64 {
         if (prompt.len == 0 or prompt.len + 1 > e.max_len) return error.PromptTooLong;
+        for (labels) |t| if (t >= cfg.vocab) return error.InvalidGemmaToken; // a label's logit is read at row[t]
         const r = e.sc orelse blk: {
             e.sc = try e.r.fork();
             break :blk e.sc.?;

@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const api = @import("engine_api");
 const reuse = @import("cuda_reuse.zig");
 const engine = @import("cuda_engine.zig");
+const spares = @import("cuda_spares.zig");
 const rows = api.prompt_cache.rows;
 const Target = reuse.Target;
 const Copy = reuse.Copy;
@@ -64,16 +65,17 @@ fn gather(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.ima
 /// A host copy of `at` positions in the engine's cache format, filled by `scatter`, restored as any other.
 fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
     const t = target(ptr);
-    return @ptrCast(try blankCopy(t.e, at));
+    return @ptrCast(try blankCopy(t.e, at, &t.spares));
 }
 
-pub fn blankCopy(e: *engine.Engine, at: u32) !*Copy {
+/// A blank of `at` positions on pinned memory: a spare of its size from `kept` when given, else newly pinned.
+pub fn blankCopy(e: *engine.Engine, at: u32, kept: ?*spares.Spares) !*Copy {
     const n = reuse.layoutOf(e, at).total();
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
     const images = try e.gpa.alloc(reuse.Seen, 0);
     errdefer e.gpa.free(images);
-    copy.* = .{ .host = try cuda.HostBuffer.alloc(e.d, n), .len = n, .at = at, .delta = 0, .format = reuse.formatOf(e), .images = images };
+    copy.* = .{ .host = try spares.pin(kept, e.d, n), .len = n, .at = at, .delta = 0, .format = reuse.formatOf(e), .images = images, .spares = kept };
     return copy;
 }
 
@@ -114,7 +116,7 @@ pub fn bind(t: *Target, ctx: *const cuda.Context) void {
 
 /// A fixed prompt's state at the first chunk cut, hashed (a kernel or driver change moves it), and its prompt rate.
 pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !struct { hash: u64, rate: f64 } {
-    var toks: [engine.max_rows + 40 + 7]u32 = undefined;
+    var toks: [engine.grid_rows + 40 + 7]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
     const Hook = struct {
         t: *Target,
@@ -130,7 +132,7 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     };
     var hook: Hook = .{ .t = t };
     defer if (hook.saved) |saved| reuse.drop(t, saved);
-    const marks = [_]u32{engine.max_rows};
+    const marks = [_]u32{engine.grid_rows};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
     const ns = pass: {

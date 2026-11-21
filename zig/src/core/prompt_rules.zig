@@ -30,4 +30,10 @@ pub const Rules = struct {
     repeat_keyed: bool = false,
     /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
     fork: bool = false,
+    /// Spacing of a bounded ladder of checkpoints under the history (0: off; only chunk-invariant families opt in).
+    intermediate: u32 = 0,
+    /// Checkpoints kept from the ladder at most, the largest positions first.
+    intermediate_most: u8 = 0,
+    /// Prompts shorter than this, and ladder positions before it, keep none.
+    intermediate_min: u32 = 32768,
 };

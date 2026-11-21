@@ -58,7 +58,7 @@ pub const Io = struct {
     rig: rig_.Rig,
     reg: Reg,
     op: attn.Attention,
-    tensor: bool,
+    shared: bool,
     st: ?at_.State = null,
     rd: at_.Round = .{},
     host: [3][]u16 = .{ &.{}, &.{}, &.{} },
@@ -81,7 +81,7 @@ pub const Io = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const op = try attn.Attention.init(device, lib);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .tensor = tensor };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .shared = try tf.qwen27.simd_attention.sharedPrefix(tensor) };
     }
 
     pub fn deinit(t: *Io) void {
@@ -106,7 +106,7 @@ pub const Io = struct {
     const vt = g.hooks(Io);
 
     fn geo(t: *const Io) planning.Geometry {
-        return at_.geometry(t.reg.heads, t.tensor);
+        return at_.geometry(t.reg.heads, t.shared);
     }
 
     fn bits(rng: std.Random, xs: []u16) void {
@@ -362,5 +362,37 @@ pub const Io = struct {
             };
         };
         return null;
+    }
+};
+
+/// attention_io at the 27B's head counts on one Mac (24 over 4) and a rank of two (12 over 2), and two controls.
+pub const Suite = struct {
+    a: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    kernels: *std.ArrayList(g.Kernel),
+    ios: std.ArrayList(*Io) = .empty,
+
+    pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        var regs: std.ArrayList(Reg) = .empty;
+        defer regs.deinit(s.a);
+        for (std.enums.values(at_.Heads)) |h| for (std.enums.values(Which)) |w| try regs.append(s.a, .{ .heads = h, .which = w });
+        try regs.appendSlice(s.a, &.{ .{ .heads = .q27b, .which = .append, .control = true }, .{ .heads = .rank, .which = .device_keep, .control = true } });
+        for (regs.items) |r| {
+            if (only) |o| if (std.mem.indexOf(u8, spec(r).name, o) == null) continue;
+            const x = try s.a.create(Io);
+            errdefer s.a.destroy(x);
+            x.* = try Io.init(s.a, s.device, s.queue, r);
+            try s.ios.append(s.a, x);
+            try s.kernels.append(s.a, x.kernel());
+        }
+    }
+
+    pub fn deinit(s: *Suite) void {
+        for (s.ios.items) |x| {
+            x.deinit();
+            s.a.destroy(x);
+        }
+        s.ios.deinit(s.a);
     }
 };

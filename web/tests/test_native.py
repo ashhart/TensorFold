@@ -168,6 +168,13 @@ def test_extra_flags_are_checked_against_what_the_engine_offers():
                        (["--reasoning-effort", "max"], "one of low"), (["4"], "not a flag")):
         with pytest.raises(ValueError, match=said):
             check_extra(args, flags)
+    # a config file could carry --cortheon, --slide or a key past the checks above, so the flag itself is managed
+    flags["--config"] = {"value": None, "choices": None, "managed": None}
+    for args in (["--config", "research.toml"], ["--config=research.toml"]):
+        with pytest.raises(ValueError, match="--config is set by TensorFold Web"):
+            check_extra(args, flags)
+    assert native.safe_extra(["--config", "research.toml", "--no-drafts", "--config=x.toml"]) == \
+        (["--no-drafts"], ["--config", "--config"])
 
 
 

@@ -6,6 +6,8 @@ const cfg = @import("config.zig");
 const fwd = @import("cuda_forward.zig");
 const mdl = @import("cuda_model.zig");
 const kern = @import("cuda_kernels.zig");
+const kv = @import("core").kv_pool;
+const snap = @import("cuda_snap.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -30,7 +32,13 @@ const Lane = struct {
     rule: u64, // sample.cu's Rule, when the stream samples
     sampled: bool = false,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    lease: kv.Lease = .{}, // a paged slot's pages
 };
+
+/// Pages a request holds: its prompt, its reply and one last verify window.
+pub fn pagesFor(prompt: usize, max_new: usize) usize {
+    return (prompt + max_new + max_window + kern.page - 1) / kern.page;
+}
 
 pub const Lfm = struct {
     gpa: std.mem.Allocator,
@@ -46,6 +54,9 @@ pub const Lfm = struct {
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
+    pool: ?kv.Pool = null, // the pages every slot leases (attach)
+    tapped: ?struct { stream: *const Stream, cut: Cut } = null, // the chunk's tapped marks while its hooks run
+    snaps: ?snap.Pages = null, // the prompt cache's pages, allocated once inside its budget (snap_ready)
 
     /// The device bytes `init` allocates: the token and pick rings, metas, each slot's last row and rule.
     pub fn openBytes(slots: usize) usize {
@@ -53,7 +64,7 @@ pub const Lfm = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *mdl.Model, k: *const kern.Kernels, s: cuda.Stream) !Lfm {
-        const free = try gpa.alloc(bool, m.slots);
+        const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
         @memset(free, true);
         const greedy = try gpa.alloc(bool, ring + round_rows);
@@ -65,7 +76,7 @@ pub const Lfm = struct {
         errdefer picks.free();
         var meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
         errdefer meta.free();
-        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
+        const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slotCap());
         errdefer gpa.free(bufs);
         var made: usize = 0;
         errdefer for (bufs[0..made]) |*b| b.free();
@@ -76,9 +87,20 @@ pub const Lfm = struct {
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
+    /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
+    pub fn attach(x: *Lfm, extra: usize, pages: usize) !void {
+        try x.m.attach(x.s, extra, pages);
+        x.pool = try kv.Pool.init(x.gpa, pages, mdl.page_elems * 2);
+    }
+
     pub fn deinit(x: *Lfm) void {
         var it = x.lanes.valueIterator();
-        while (it.next()) |l| l.rows.deinit(x.gpa);
+        while (it.next()) |l| {
+            if (x.pool) |*p| p.finish(&l.lease);
+            l.rows.deinit(x.gpa);
+        }
+        if (x.pool) |*p| p.deinit();
+        if (x.snaps) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
@@ -97,7 +119,7 @@ pub const Lfm = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Lfm) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Lfm {
@@ -132,8 +154,72 @@ pub const Lfm = struct {
         };
     }
 
+    /// The stream's state at `at` for the prompt cache, copied behind the chunk that ends there.
+    pub fn saveState(x: *Lfm, owner: ?*anyopaque, at: u32) !*snap.Saved {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        const tap: ?usize = if (x.tapped) |t| if (t.stream == s) std.mem.indexOfScalar(usize, t.cut.taps(), at) else null else null;
+        if (tap == null and (l.fill orelse l.len) != at) return error.NotAtMark; // where the pass stands, or a tap
+        const conv = if (tap) |j| x.m.s.tap + j * mdl.slot_elems * 2 else x.m.states + l.slot * mdl.slot_elems * 2;
+        return snap.save(x.gpa, try x.snapPages(), x.m, x.s, l.slot, at, conv);
+    }
+
+    /// The stream's slot made to hold `k`'s state (a restore outside its prompt pass).
+    pub fn restoreState(x: *Lfm, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        try snap.restore(try x.snapPages(), x.m, x.s, l.slot, k);
+        l.len = k.at;
+    }
+
+    pub fn dropState(x: *Lfm, k: *snap.Saved) void {
+        snap.drop(x.gpa, &x.snaps.?, k);
+    }
+
+    /// The stream every write to a slot's caches takes, after the keeps so far (a draw needn't); tested below.
+    fn fenced(x: *Lfm) !cuda.Stream {
+        if (x.snaps) |*p| try p.fence(x.s);
+        return x.s;
+    }
+
+    fn snapPages(x: *Lfm) !*snap.Pages {
+        return if (x.snaps) |*p| p else error.NoSnapshotCache;
+    }
+
     fn freeSlot(x: *const Lfm) ?usize {
-        return std.mem.indexOfScalar(bool, x.free, true);
+        return std.mem.indexOfScalar(bool, x.free[0..x.m.slots], true);
+    }
+
+    fn fitsContext(x: *const Lfm, prompt: usize, max_new: usize) bool {
+        return prompt + max_new + max_window <= x.m.context;
+    }
+
+    /// Whether a request could start now: a free slot and (paged) its pages; one that never fits passes.
+    pub fn admits(x: *const Lfm, prompt: usize, max_new: usize) bool {
+        if (!x.fitsContext(prompt, max_new)) return true; // its prompt pass refuses it by name
+        const p = x.pool orelse return x.freeSlot() != null;
+        return x.freeSlot() != null and p.fits(pagesFor(prompt, max_new));
+    }
+
+    const Map = struct {
+        x: *Lfm,
+        slot: usize,
+        fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+            const m: *const Map = @ptrCast(@alignCast(ctx));
+            try m.x.m.mapPages(m.x.s, m.slot, ids[from..], from);
+        }
+    };
+
+    /// A free slot for the request, its pages leased now when paged; LaneMemory: not yet.
+    fn takeSlot(x: *Lfm, lease: *kv.Lease, prompt: usize, max_new: usize) !usize {
+        const slot = x.freeSlot() orelse return error.NoFreeSlot;
+        const p = if (x.pool) |*p| p else return slot;
+        const n = pagesFor(prompt, max_new);
+        try p.promise(lease, n);
+        errdefer p.finish(lease);
+        var map: Map = .{ .x = x, .slot = slot };
+        try p.cover(lease, n, .{ .ctx = &map, .write = Map.write });
+        return slot;
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
@@ -141,15 +227,16 @@ pub const Lfm = struct {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
         if (s.images.len > 0) return error.LfmTextOnly;
-        if (p.len + @as(usize, s.max_new) + max_window > x.m.context) return error.PastContext;
+        if (!x.fitsContext(p.len, s.max_new)) return error.PastContext;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (!got.found_existing) {
-            const slot = x.freeSlot() orelse {
+            var lease: kv.Lease = .{};
+            const slot = x.takeSlot(&lease, p.len, s.max_new) catch |e| {
                 x.lanes.removeByPtr(got.key_ptr);
-                return error.NoFreeSlot;
+                return e;
             };
             x.free[slot] = false;
-            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr };
+            got.value_ptr.* = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .lease = lease };
         }
         const l = got.value_ptr;
         l.sampled = false;
@@ -159,11 +246,30 @@ pub const Lfm = struct {
             l.sampled = true;
         };
         s.cached = 0;
-        if (s.reuse.saved != null) s.reuse_failed = true; // no prompt cache: every pass starts at 0
-        try x.m.clearSlot(x.s, l.slot);
-        l.fill = 0;
+        try x.m.clearSlot(try x.fenced(), l.slot);
+        l.fill = x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
+    }
+
+    /// The kept state's position, restored into the slot (0: none, or not this prompt's).
+    fn resumeAt(x: *Lfm, s: *Stream, l: *const Lane, len: usize) usize {
+        const saved = s.reuse.saved orelse return 0;
+        const k: *const snap.Saved = @ptrCast(@alignCast(saved));
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len) {
+            s.reuse_failed = true;
+            return 0;
+        }
+        const p = x.snapPages() catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        snap.restore(p, x.m, x.s, l.slot, k) catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        s.cached = k.at;
+        return k.at;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
@@ -171,18 +277,53 @@ pub const Lfm = struct {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
-        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
-            end = mk;
-        };
-        const done = end == p.len;
-        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        const c = cut(at, p.len, s.reuse.marks);
+        const done = c.end == p.len;
+        var rows: [mdl.max_taps]usize = undefined;
+        for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
+        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
-        s.fill_at.store(@intCast(end), .monotonic);
-        l.fill = if (done) null else end;
+        s.fill_at.store(@intCast(c.end), .monotonic);
+        l.fill = if (done) null else c.end;
         if (done) l.len = p.len;
-        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+        if (s.reuse.hook) |hk| {
+            x.tapped = .{ .stream = s, .cut = c };
+            defer x.tapped = null;
+            for (c.taps()) |t| hk.at(hk.ptr, s, @intCast(t));
+            if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(c.end)) != null) hk.at(hk.ptr, s, @intCast(c.end));
+        }
         return done;
+    }
+
+    /// A chunk's end (the grid line, the prompt's end or a mark) and the marks inside it, tapped in order.
+    const Cut = struct {
+        end: usize,
+        at: [mdl.max_taps]usize = undefined,
+        n: usize = 0,
+        fn taps(c: *const Cut) []const usize {
+            return c.at[0..c.n];
+        }
+    };
+
+    /// The chunk from `at`: up to max_taps marks inside it are tapped, the next one ends it.
+    fn cut(at: usize, len: usize, marks: []const u32) Cut {
+        var c: Cut = .{ .end = @min(len, (at / prompt_rows + 1) * prompt_rows) };
+        var from = at;
+        while (true) { // the marks inside in order, the first max_taps tapped
+            var next: ?usize = null;
+            for (marks) |mk| if (mk > from and mk < c.end and (next == null or mk < next.?)) {
+                next = mk;
+            };
+            const mk = next orelse break;
+            if (c.n == mdl.max_taps) {
+                c.end = mk;
+                break;
+            }
+            c.at[c.n] = mk;
+            c.n += 1;
+            from = mk;
+        }
+        return c;
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -227,7 +368,7 @@ pub const Lfm = struct {
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
-        try fwd.forward(x.m, x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
         l.len += 1;
         const h = x.next;
         try x.drawRows(l, x.m.s.logits, 0, 1, position, x.handle(), 0);
@@ -263,7 +404,7 @@ pub const Lfm = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
-        try fwd.forward(x.m, x.k, x.s, chains, false, 0, total);
+        try fwd.forward(x.m, x.k, try x.fenced(), chains, false, 0, total);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
@@ -296,7 +437,7 @@ pub const Lfm = struct {
             slots[i] = @intCast(l.slot);
             rows[i] = @intCast(l.row0 + path.len - 1); // the conv states after the last kept row
         }
-        try fwd.commit(x.m, x.k, x.s, slots[0..windows.len], rows[0..windows.len]);
+        try fwd.commit(x.m, x.k, try x.fenced(), slots[0..windows.len], rows[0..windows.len]);
     }
 
     /// No draft head: absorbing is a no-op, a request for drafts is refused by name (copy drafts come from the host).
@@ -305,14 +446,135 @@ pub const Lfm = struct {
     }
 
     fn dropLane(x: *Lfm, s: *const Stream) void {
-        if (x.lanes.fetchRemove(s)) |kv| {
-            var l = kv.value;
+        if (x.lanes.fetchRemove(s)) |entry| {
+            var l = entry.value;
+            if (x.pool) |*p| {
+                p.finish(&l.lease);
+                x.m.unmapPages(l.slot);
+            }
             x.free[l.slot] = true;
             l.rows.deinit(x.gpa);
+            if (x.lanes.count() == 0) x.report();
         }
+    }
+
+    /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+    fn report(x: *const Lfm) void {
+        if (@import("builtin").is_test) return;
+        const p = x.pool orelse return;
+        const c = p.census();
+        const ok = p.idle() and c.free == c.total;
+        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {
         self(ptr).dropLane(s);
     }
 };
+
+test "a request holds its prompt, its reply and one verify window in whole pages" {
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), pagesFor(400, 96));
+    try std.testing.expectEqual(@as(usize, 2), pagesFor(400, 97));
+    try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
+}
+
+test "a chunk taps the marks inside it, up to four, and ends at the next one, the grid line or the prompt's end" {
+    const cases = [_]struct { at: usize, len: usize, marks: []const u32, end: usize, taps: []const usize }{
+        .{ .at = 0, .len = 3000, .marks = &.{}, .end = prompt_rows, .taps = &.{} },
+        .{ .at = 0, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{700} },
+        .{ .at = 0, .len = 3000, .marks = &.{ 900, 300, 2900 }, .end = prompt_rows, .taps = &.{ 300, 900 } },
+        .{ .at = 0, .len = 3000, .marks = &.{ 5, 4, 3, 2, 1 }, .end = 5, .taps = &.{ 1, 2, 3, 4 } },
+        .{ .at = 9216, .len = 10144, .marks = &.{ 10050, 10140 }, .end = 10144, .taps = &.{ 10050, 10140 } },
+        .{ .at = 2048, .len = 2500, .marks = &.{ 2100, 2500 }, .end = 2500, .taps = &.{2100} },
+        .{ .at = 700, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{} },
+    };
+    for (cases) |k| {
+        const c = Lfm.cut(k.at, k.len, k.marks);
+        try std.testing.expectEqual(k.end, c.end);
+        try std.testing.expectEqualSlices(usize, k.taps, c.taps());
+    }
+}
+
+/// The writes a keep reads, by their call, and which argument is the stream each is queued on.
+const Write = struct { call: []const u8, arg: usize };
+const writes = [_]Write{ .{ .call = "fwd.forward(", .arg = 2 }, .{ .call = "fwd.commit(", .arg = 2 }, .{ .call = ".clearSlot(", .arg = 0 } };
+
+/// The writes in `code` whose stream isn't `try x.fenced()`; `found` counts every write.
+fn unfenced(code: []const u8, found: *usize) usize {
+    var bad: usize = 0;
+    for (writes) |w| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, code, from, w.call)) |at| {
+            from = at + w.call.len;
+            found.* += 1;
+            var depth: usize = 0;
+            var arg: usize = 0;
+            var start = from;
+            const stream = for (code[from..], from..) |ch, i| switch (ch) {
+                '(', '[', '{' => depth += 1,
+                ')', ']', '}' => if (depth == 0) break code[start..i] else {
+                    depth -= 1;
+                },
+                ',' => if (depth == 0) {
+                    if (arg == w.arg) break code[start..i];
+                    arg += 1;
+                    start = i + 1;
+                },
+                else => {},
+            } else "";
+            if (arg != w.arg or !std.mem.eql(u8, std.mem.trim(u8, stream, " \n"), "try x.fenced()")) bad += 1;
+        }
+    }
+    return bad;
+}
+
+test "a clear, a chunk, a one-row step, a verify round and a commit wait for the keeps; one on x.s is red" {
+    const all = @embedFile("cuda_backend.zig");
+    const code = all[0..std.mem.indexOf(u8, all, "\ntest \"").?];
+    var found: usize = 0;
+    try std.testing.expectEqual(@as(usize, 0), unfenced(code, &found));
+    try std.testing.expectEqual(@as(usize, 5), found); // a new write names itself here
+    // planted: each write in turn queued on the prompt stream without the wait
+    const fence = "try x.fenced()";
+    var planted: usize = 0;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, code, from, fence)) |at| : (from = at + fence.len) {
+        const bent = try std.mem.concat(std.testing.allocator, u8, &.{ code[0..at], "x.s", code[at + fence.len ..] });
+        defer std.testing.allocator.free(bent);
+        found = 0;
+        try std.testing.expectEqual(@as(usize, 1), unfenced(bent, &found));
+        planted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), planted);
+}
+
+const Waits = struct {
+    var n: usize = 0;
+    var on: usize = 0;
+    var of: usize = 0;
+    fn wait(st: cuda.abi.Stream, ev: cuda.abi.Event, _: c_uint) callconv(.c) cuda.abi.Result {
+        n += 1;
+        on = @intFromPtr(st);
+        of = @intFromPtr(ev);
+        return 0;
+    }
+};
+
+test "fenced: the prompt stream waits for the keeps' done once a keep is queued, and not again until the next" {
+    var d: cuda.Driver = undefined;
+    d.api.cuStreamWaitEvent = Waits.wait;
+    var x: Lfm = undefined;
+    x.s = .{ .d = &d, .handle = @ptrFromInt(1) };
+    x.snaps = null;
+    Waits.n = 0;
+    try std.testing.expectEqual(x.s.handle, (try x.fenced()).handle); // no prompt cache: nothing to wait for
+    const side: snap.Side = .{ .stream = .{ .d = &d, .handle = @ptrFromInt(2) }, .ready = .{ .d = &d, .handle = @ptrFromInt(3) }, .done = .{ .d = &d, .handle = @ptrFromInt(4) }, .pending = true };
+    x.snaps = .{ .pages = try kv.Pool.init(std.testing.allocator, 1, snap.page), .arena = null, .side = side };
+    defer x.snaps.?.pages.deinit();
+    try std.testing.expectEqual(@as(usize, 0), Waits.n);
+    try std.testing.expectEqual(x.s.handle, (try x.fenced()).handle);
+    try std.testing.expect(Waits.n == 1 and Waits.on == 1 and Waits.of == 4);
+    _ = try x.fenced(); // nothing queued since: no second wait
+    try std.testing.expectEqual(@as(usize, 1), Waits.n);
+}

@@ -10,10 +10,10 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
-/// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
+/// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
     return tensor_units and std.mem.endsWith(u8, name, " Ultra");
 }
@@ -56,15 +56,20 @@ pub const Kernels = struct {
     pair_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Set around prompt chunks: prompt rows take projection.promptSplit, decoded rows the decode split.
     prompt: bool = false,
-    /// Set on `longPrompt` chips: prompt chunks past 128 rows take one reg dispatch a projection, on their own key.
+    /// Set on `longPrompt` chips: chunks past a short entry's capacity take one dispatch on a separate long key.
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
     /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
     half_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
-    /// The last norm's output and its tf_sq_fits words, while no later norm has written over it.
+    /// Per [n, k]: whether chunk pairs on tf_sq_prep_s's sums give simd_qmm's tiles' bits (checked once on this chip).
+    sum_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
+    /// The last norm's output, its tf_sq_fits words and tf_sq_prep_h output, while no later norm writes over it.
     fits: ?Fits = null,
     fits_words: ?mtl.Buffer = null,
+    prep_words: ?mtl.Buffer = null,
+    /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
+    sum_words: ?mtl.Buffer = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -88,7 +93,10 @@ pub const Kernels = struct {
         k.bit_twins.deinit(k.allocator);
         k.pair_twins.deinit(k.allocator);
         k.half_twins.deinit(k.allocator);
+        k.sum_twins.deinit(k.allocator);
         if (k.fits_words) |b| b.deinit();
+        if (k.prep_words) |b| b.deinit();
+        if (k.sum_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
@@ -119,6 +127,7 @@ pub const Kernels = struct {
         return p;
     }
 
+    /// Encodes the product without ordering its output; the caller barriers before dependent reads or writes.
     pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void {
         return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0);
     }
@@ -174,11 +183,21 @@ pub const Kernels = struct {
                 .output = if (cut[1] > 0) .f32 else .bf16,
                 .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
-                .rows = if (long) lane.max_reg_rows else lane.reg_rows,
+                .row_blocks = long and !reg,
+                .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
             });
             k.joined(entry.value_ptr);
         }
         return entry;
+    }
+
+    /// Whether `p`'s rows from a 128-row boundary take the dispatches a whole pass makes there (the prompt tail).
+    pub fn blockRows(k: *const Kernels, p: projection.Linear) bool {
+        if (k.long_prompt) return false;
+        for (p.runs) |run| if (run.linear.raw) |raw| if (!k.tiled(raw)) return false;
+        if (p.runs.len > 0) return true;
+        if (p.raw) |raw| return raw.bits != 4 and k.tiled(raw);
+        return true;
     }
 
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
@@ -224,9 +243,16 @@ pub const Kernels = struct {
                 const scalar = try k.twin(m); // loads the tiles before they're read
                 const paired = try k.pairTwin(m);
                 if (try k.halfCall(m, x, rows, gn)) |half| {
-                    row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0);
-                } else row.simd.encode(e, try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn), m, x.buffer, x.offset, y.buffer, y.offset);
-                e.barrier();
+                    row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0, k.prep_words.?, 0);
+                } else {
+                    const c = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn);
+                    if (try k.sumsCall(m, c, rows)) |summed| {
+                        // prompt rows' chunk pairs read their group sums from a prepass, not each tile's shuffles
+                        row.simd.encodePrep(e, &k.simd.?, raw.k, rows, false, x.buffer, x.offset, k.sum_words.?, 0);
+                        e.barrier();
+                        row.simd.encodeSums(e, summed, m, x.buffer, x.offset, y.buffer, y.offset, k.sum_words.?, 0);
+                    } else row.simd.encode(e, c, m, x.buffer, x.offset, y.buffer, y.offset);
+                }
                 try span.end();
                 return;
             }
@@ -240,13 +266,12 @@ pub const Kernels = struct {
             e.setValue(call.dims, 4);
             e.setBuffer(y.buffer, y.offset, 5);
             e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
-            e.barrier();
             try span.end();
             return;
         }
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        const long = reg and longKey(k.long_prompt, k.prompt, rows);
+        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.long_prompt and k.prompt and rows > 16;
         const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
@@ -302,7 +327,6 @@ pub const Kernels = struct {
             const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw, whole); // loads the tiles before they're read
             const call = try row.simd_bits.call(&k.simd_bits.?, raw.bits, raw.n, raw.k, rows, stride, scalar, whole);
             row.simd_bits.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
-            e.barrier();
             try span.end();
             return;
         }
@@ -316,7 +340,6 @@ pub const Kernels = struct {
         e.setValue(call.dims, 4);
         e.setBuffer(y.buffer, y.offset, 5);
         e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
-        e.barrier();
         try span.end();
     }
 
@@ -354,6 +377,26 @@ pub const Kernels = struct {
         return ok;
     }
 
+    /// `c` on tf_sq_prep_s's sums for prompt rows (`half_rows` or more) where it keeps the bits; sizes `sum_words`.
+    fn sumsCall(k: *Kernels, m: row.simd.Matrix, c: row.simd.Call, rows: u32) !?row.simd.Call {
+        if (rows < half_rows) return null;
+        const summed = row.simd.callSums(&k.simd.?, c) orelse return null;
+        const ok = k.sum_twins.get(.{ m.n, m.k }) orelse blk: {
+            const exact = try row.simd.summedExact(&k.simd.?, k.device, m);
+            if (!exact) std.log.info("qwen27: {d}x{d} rows keep simd_qmm's chunk pairs' own sums (the prepass's bits differ on this chip)", .{ m.n, m.k });
+            try k.sum_twins.put(k.allocator, .{ m.n, m.k }, exact);
+            break :blk exact;
+        };
+        if (!ok) return null;
+        const bytes = row.simd.prepBytes(m.k, @import("gpu_frame.zig").max_rows, false);
+        if (k.sum_words == null or k.sum_words.?.length() < bytes) {
+            if (k.sum_words) |b| b.deinit();
+            k.sum_words = null;
+            k.sum_words = try k.device.buffer(bytes, mtl.ResourceOptions.private);
+        }
+        return summed;
+    }
+
     pub fn sum(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, xs: Ref, width: u32, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .xsum);
         errdefer span.cancel();
@@ -370,11 +413,12 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width }));
+        const xs_on = k.device.tensorUnits();
+        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on }));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
+        e.dispatchGroups(mtl.Size.of(1, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
         k.fits = null;
-        // tf_sq_fits's words for this output: prompt rows' projections of it may take half operands
+        // tf_sq_fits's words and tf_sq_prep_h's sums and halves for this output: its prompt rows may take half operands
         if (k.raw_tiles and rows >= half_rows) {
             if (k.simd == null) k.simd = try row.simd.Pipelines.load(k.device);
             const bytes = row.simd.fitsBytes(width, rows);
@@ -383,8 +427,14 @@ pub const Kernels = struct {
                 k.fits_words = null;
                 k.fits_words = try k.device.buffer(row.simd.fitsBytes(width, @import("gpu_frame.zig").max_rows), mtl.ResourceOptions.private);
             }
+            if (k.prep_words == null or k.prep_words.?.length() < row.simd.prepBytes(width, rows, true)) {
+                if (k.prep_words) |b| b.deinit();
+                k.prep_words = null;
+                k.prep_words = try k.device.buffer(row.simd.prepBytes(width, @import("gpu_frame.zig").max_rows, true), mtl.ResourceOptions.private);
+            }
             e.barrier();
             row.simd.encodeFits(e, &k.simd.?, width, rows, out.buffer, out.offset, k.fits_words.?, 0);
+            row.simd.encodePrep(e, &k.simd.?, width, rows, true, out.buffer, out.offset, k.prep_words.?, 0);
             e.barrier();
             k.fits = .{ .x = out, .rows = rows, .k = width };
         }
@@ -446,9 +496,10 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width }));
+        const xs_on = k.device.tensorUnits();
+        e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width, .xs = xs_on }));
         bind(e, .{ gate, up, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(width / 64, padded(rows), 1), mtl.Size.of(64, 1, 1));
+        e.dispatchGroups(mtl.Size.of(width / 64, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(64, 1, 1));
         try span.end();
     }
 };
@@ -486,6 +537,7 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
         .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
     };
     defer a.free(definitions);
-    const source = try std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+    const xs_define = if (key.xs) "#define Q27_XS 1\n" else "#define Q27_XS 0\n";
+    const source = try std.mem.concat(a, u8, &.{ xs_define, template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
     return source;
 }

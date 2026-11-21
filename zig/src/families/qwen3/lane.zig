@@ -13,6 +13,11 @@ pub const Refusal = error{PromptOnly};
 
 /// The backend over `Engine` (`run`, `window`, `m.spec`), packing at most `engine_max_inputs` inputs a run.
 pub fn Prompt(comptime Engine: type, comptime engine_max_inputs: usize) type {
+    return PromptWithApi(Engine, engine_max_inputs, api);
+}
+
+/// The same prompt lane in a family module whose API is supplied by the native host.
+pub fn PromptWithApi(comptime Engine: type, comptime engine_max_inputs: usize, comptime engine_api: type) type {
     return struct {
         const Self = @This();
 
@@ -116,7 +121,7 @@ pub fn Prompt(comptime Engine: type, comptime engine_max_inputs: usize) type {
             if (!p.normalize) return;
             const hidden = p.engine.m.spec.hidden;
             var at: usize = 0;
-            while (at < out.len) : (at += hidden) try api.embedding_vector.normalize(out[at..][0..hidden]);
+            while (at < out.len) : (at += hidden) try engine_api.embedding_vector.normalize(out[at..][0..hidden]);
         }
 
         fn release(ptr: *anyopaque, s: *Stream) void {

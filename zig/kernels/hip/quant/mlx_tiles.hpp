@@ -45,11 +45,18 @@ __global__ void __launch_bounds__(256) affine_wmma_skew(Affine a) {
     wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, true>(a);
 }
 
-// ---- the same on RM x 16 rows a block, for a routed item of few rows ----
+// ---- the same on RM x 16 rows a block, for a routed item of few rows; K-parallel passes for one of very few ----
+
+// The item tile's few-row passes as served: BF16 dot2 into the fp32 sums, every pass of a wave's columns.
+struct ItemFew {
+    using Dot = DotBF16;
+    using Epi = GemmOut<DotBF16>;
+    static constexpr bool every_pass = true;
+};
 
 template <int BITS, int RM>
 __global__ void __launch_bounds__(256) affine_wmma_item(Affine a) {
-    wmma_item_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, RM>(a);
+    wmma_item_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, RM, ItemFew>(a);
 }
 
 // ---- the decode stream tile ----

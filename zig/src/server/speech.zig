@@ -61,6 +61,7 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     };
     var cx: Cx = .{ .a = a };
     const id = try ids.make(a, "speech-", 32);
+    c.id = id;
     const received = clock.nowNs(srv.io);
     var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0, .register_on = srv.config.redraw.register.on() };
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
@@ -81,9 +82,10 @@ fn listed(names: []const []const u8, key: []const u8) bool {
 }
 
 /// Refuses what this route would drop: unknown fields, set modifiers, non-strings, a bad ``stream``/``stream_format``.
-fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
+fn checkFields(cx: *Cx, body: Value, inline_voices: bool) errors.Refused!void {
     for (body.object.keys(), body.object.values()) |key, value| {
         if (listed(&served_fields, key)) {
+            if (value == .object and inline_voices and std.mem.eql(u8, key, "voice")) continue; // an attested voice object
             if (value != .string) return cx.fail(.request, "{s} must be a string", .{key});
         } else if (std.mem.eql(u8, key, "stream")) {
             if (value != .bool and value != .null) return cx.refuse("stream must be a boolean");
@@ -110,7 +112,7 @@ fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("speech request body must be a JSON object");
-    try checkFields(cx, raw);
+    try checkFields(cx, raw, srv.config.voice.inline_voices);
     const sampling = try speech_sampling.parse(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
@@ -123,28 +125,41 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
-    const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
-    const refs = @import("drama_voice.zig").select(srv.voices, srv.config.default_voice, voice) catch {
-        const name = try pyrepr.repr(cx.a, .{ .string = voice });
-        if (srv.config.voices_dir != null)
-            return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
-        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
-    };
+    const refs = try voiceRefs(srv, cx, raw);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
     const prompt = try promptOf(srv, cx, sp, input);
     return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream };
 }
 
+/// The request's references: an attested inline voice under --request-voices, else the named catalog voice's, copied.
+fn voiceRefs(srv: *Server, cx: *Cx, raw: Value) errors.Refused![]const @import("drama_prompt").Reference {
+    if (raw.get("voice")) |value| if (value == .object) {
+        if (raw.get("speaker") != null) return cx.refuse("an inline voice object takes no speaker");
+        return @import("drama_voice.zig").parseDoc(cx.a, value) catch |e| switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.MissingAttestation => cx.refuse("an inline voice needs source.kind synthetic, self or consented and a source.note"),
+            else => cx.refuse("an inline voice is a drama3-http-voice/1 object with 1 to 4 references"),
+        };
+    };
+    const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
+    return srv.voices.select(cx.a, srv.config.voice.default, voice) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        const name = try pyrepr.repr(cx.a, .{ .string = voice });
+        if (srv.config.voice.dir != null or srv.config.voice.manage)
+            return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
+        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
+    };
+}
+
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
 fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors.Refused![]const u32 {
     if (try drama_prompt.problem(cx.a, input)) |message| return cx.refuse(message);
-    const prompt = drama_prompt.encode(cx.a, srv.text, input) catch |e| return switch (e) {
+    const counted = drama_prompt.encodeCounted(cx.a, srv.text, input) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Template => cx.other("the tokenizer cannot encode this prompt"),
     };
-    if (prompt.len > sp.max_prompt_tokens)
-        return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ prompt.len, sp.max_prompt_tokens });
-    return prompt;
+    try @import("drama_admission.zig").check(cx, counted.text_tokens, &.{}, counted.ids.len, sp.max_prompt_tokens);
+    return counted.ids;
 }
 
 /// Acquired errors, final replies and completed stream observations release the lane before client writes.
@@ -159,6 +174,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     var held = srv.speech_inflight.load(.acquire);
     while (true) {
         if (held >= @max(1, srv.info.lanes)) {
+            srv.load.refused(.engine_busy);
             cx.code = wait.engine_busy;
             return fail(c, cx, id, metadata.*, .capacity, "speech output capacity is full");
         }
@@ -213,11 +229,15 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         releaseLane(srv, &lane_released);
         return switch (e) {
             error.Busy => blk: {
+                srv.load.refused(.engine_busy);
                 cx.code = wait.engine_busy;
                 break :blk fail(c, cx, id, metadata.*, .capacity, "the engine is busy; retry shortly");
             },
             error.Closed => fail(c, cx, id, metadata.*, .other, "the scheduler is closed"),
-            error.InvalidRequest => fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling"),
+            error.InvalidRequest => blk: {
+                srv.load.refused(.invalid_request);
+                break :blk fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling");
+            },
             error.Unsupported => fail(c, cx, id, metadata.*, .request, "this model does not support speech synthesis"),
         };
     };
@@ -452,9 +472,9 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
         var cx: Cx = .{ .a = a };
         const body = (try json.parse(a, case[0])).ok;
         if (case[1].len == 0) {
-            try checkFields(&cx, body);
+            try checkFields(&cx, body, false);
         } else {
-            try std.testing.expectError(error.Refused, checkFields(&cx, body));
+            try std.testing.expectError(error.Refused, checkFields(&cx, body, false));
             try std.testing.expectEqualStrings(case[1], cx.message);
         }
     }
@@ -494,4 +514,6 @@ pub const Test = if (@import("builtin").is_test) struct {
 
 test {
     _ = @import("speech_audio_test.zig");
+    // The HTTP admission harness uses a Unix socket pair, unavailable on Windows.
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("drama_admission_test.zig");
 }

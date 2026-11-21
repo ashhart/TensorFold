@@ -109,7 +109,7 @@ pub const Drafter = struct {
         d.ops = try ops.Ops.init(target.device);
         errdefer d.ops.deinit();
         const keys_max = @max(options.capacity + block_rows, c.window - 1 + block_rows);
-        d.attention = try attention.Attention.init(gpa, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = keys_max, .output = .bf16 });
+        d.attention = try attention.Attention.init(gpa, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = keys_max, .output = .bf16 });
         errdefer d.attention.deinit();
         d.picks = try round.Ops.init(target.device);
         errdefer d.picks.deinit();

@@ -127,7 +127,7 @@ fn drafted(r: *q.Runner, dir: []const u8, prompt: []const u32, serial: []const u
         if (nodes > 0) { // tree rounds: drafting and verification timed together
             const a = q.now();
             var out: [16]u32 = undefined;
-            const round = try dr_mod.treeRound(dr, r.last, L - 1, nodes, null, &out);
+            const round = try dr_mod.treeRound(dr, r.last, L - 1, nodes, null, null, &out);
             t_verify += q.now() - a;
             for (round.tokens[1..]) |t| try got.append(alloc, t);
             try got.append(alloc, round.terminal);

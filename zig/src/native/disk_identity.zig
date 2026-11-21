@@ -4,7 +4,7 @@ const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
 /// Config/index bytes, stamps of every indexed shard (IndexedShardMissing if absent) and top-level safetensors.
-pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -46,7 +46,7 @@ pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8
 }
 
 /// This Mac's OS build and chip: a macOS update or another chip can compile a kernel to other bits.
-pub fn machine(h: *std.hash.Wyhash, chip: []const u8) void {
+pub fn machine(h: anytype, chip: []const u8) void {
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(chip);
@@ -65,7 +65,7 @@ pub const Profile = struct {
 };
 
 /// Only applicable non-identical entries partition kept state; defaults and `on_with` resolve before values are hashed.
-pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
+pub fn profile(h: anytype, p: Profile) void {
     var began = false;
     for (p.entries) |e| {
         if (e.class == .identical or !e.applies(p.family, p.backend)) continue;
@@ -95,7 +95,7 @@ pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
     }
 }
 
-fn valueField(h: *std.hash.Wyhash, syntax: api.profile.Syntax, value: ?[]const u8) void {
+fn valueField(h: anytype, syntax: api.profile.Syntax, value: ?[]const u8) void {
     switch (syntax) {
         .one => field(h, if (value != null and std.mem.eql(u8, value.?, "1")) "1" else "0"),
         .auto => field(h, value orelse "auto"),
@@ -117,7 +117,7 @@ fn valueField(h: *std.hash.Wyhash, syntax: api.profile.Syntax, value: ?[]const u
     }
 }
 
-fn field(h: *std.hash.Wyhash, bytes: []const u8) void {
+fn field(h: anytype, bytes: []const u8) void {
     var len: [8]u8 = undefined;
     std.mem.writeInt(u64, &len, @intCast(bytes.len), .little);
     h.update(&len);

@@ -51,8 +51,11 @@ pub const Pipelines = struct {
     /// tf_sq_mmh at 8 chunks: tf_sq_mma's bits through half operands where tf_sq_fits allows.
     half: [nt_values.len][2]mtl.Pipeline,
     fits: mtl.Pipeline,
+    /// tf_sq_prep_s and tf_sq_prep_h: X's group sums, and with them its halves, for the tiles that read them.
+    prep: [2]mtl.Pipeline,
     scalar: [s_values.len][2][max_scalar_rows]mtl.Pipeline,
     paired: mtl.Pipeline, // tf_sq_mmp_16_4_2_2: the shapes `pairs` takes
+    paired_sums: mtl.Pipeline, // tf_sq_mmx_16_4_2_2: the same with tf_sq_prep_s's sums
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -72,7 +75,9 @@ pub const Pipelines = struct {
             p.half[ti][ri] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_sq_mmh_{d}_{d}_{d}", .{ half_chunks, nt, rt }), false);
         };
         p.fits = try mtl.Pipeline.init(device, lib, "tf_sq_fits", false);
+        p.prep = .{ try mtl.Pipeline.init(device, lib, "tf_sq_prep_s", false), try mtl.Pipeline.init(device, lib, "tf_sq_prep_h", false) };
         p.paired = try mtl.Pipeline.init(device, lib, "tf_sq_mmp_16_4_2_2", false);
+        p.paired_sums = try mtl.Pipeline.init(device, lib, "tf_sq_mmx_16_4_2_2", false);
         return p;
     }
 
@@ -80,13 +85,15 @@ pub const Pipelines = struct {
         for (p.mma) |a| for (a) |b| for (b) |x| if (x) |y| y.deinit();
         for (p.half) |a| for (a) |x| x.deinit();
         p.fits.deinit();
+        for (p.prep) |x| x.deinit();
         for (p.scalar) |a| for (a) |b| for (b) |x| x.deinit();
         p.paired.deinit();
+        p.paired_sums.deinit();
     }
 };
 
-/// One dispatch: buffers x, W, S, B, args, out at 0-5; `groups` threadgroups of `threads`.
-pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize };
+/// One dispatch: buffers x, W, S, B, args, out at 0-5; `groups` threadgroups of `threads`; `paired`: tf_sq_mmp.
+pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize, paired: bool = false };
 
 /// y = x W^T, 4-bit groups of 64: the scalar twin at 1-2 rows if `scalar`, chunk pairs if `paired`, else MMA tiles.
 pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, paired: bool, whole: usize) !Call {
@@ -105,7 +112,7 @@ pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, 
     }
     const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
     if (paired and pairs(n, rt, s) and p.paired.maxThreads() >= 256)
-        return .{ .pipeline = p.paired, .args = args, .groups = .{ .width = n / 32, .height = (rows + 15) / 16 }, .threads = 256 };
+        return .{ .pipeline = p.paired, .args = args, .groups = .{ .width = n / 32, .height = (rows + 15) / 16 }, .threads = 256, .paired = true };
     const nt = tiles(n, rt, s);
     const pipeline = p.mma[si][std.mem.indexOfScalar(u32, &nt_values, nt).?][rt - 1] orelse return error.UnsupportedSimdShape;
     const sgs: usize = @min(s, 16, pipeline.maxThreads() / 32);
@@ -124,6 +131,37 @@ pub fn callHalf(p: *const Pipelines, n: usize, k: usize, rows: usize, whole: usi
     var h = c;
     h.pipeline = pipeline;
     return h;
+}
+
+/// `c` reading tf_sq_prep_s's sums (bound at 7, `encodeSums`), or null where `c` isn't the chunk-pair tiles.
+pub fn callSums(p: *const Pipelines, c: Call) ?Call {
+    if (!c.paired or p.paired_sums.maxThreads() < c.threads) return null;
+    var s = c;
+    s.pipeline = p.paired_sums;
+    return s;
+}
+
+/// tf_sq_mmx at any row count, its tiles as at 16 rows (the contract's small shapes); null where `n` takes no pairs.
+pub fn callSumsAt(p: *const Pipelines, n: usize, k: usize, rows: usize) !?Call {
+    var c = callSums(p, try call(p, n, k, @max(rows, 16), false, true, 0)) orelse return null;
+    c.args.r = @intCast(rows);
+    c.groups.height = (rows + 15) / 16;
+    return c;
+}
+
+/// Bytes of tf_sq_prep's output for `rows` rows of `k` inputs: sums (rows padded to pairs, 16 bytes), then halves.
+pub fn prepBytes(k: usize, rows: usize, halves: bool) usize {
+    const pairs_ = (rows + 1) / 2 * 2;
+    return (pairs_ * (k / 64) + 3) / 4 * 16 + if (halves) pairs_ * k * 2 else 0;
+}
+
+/// Writes x's group sums by the tiles' tree into `out` and, with `halves`, x as half, two rows interleaved.
+pub fn encodePrep(e: mtl.ComputeEncoder, p: *const Pipelines, k: usize, rows: usize, halves: bool, x: mtl.Buffer, x_off: usize, out: mtl.Buffer, out_off: usize) void {
+    e.setPipeline(p.prep[@intFromBool(halves)]);
+    e.setBuffer(x, x_off, 0);
+    e.setValue(Args{ .k = @intCast(k), .n = 0, .r = @intCast(rows) }, 4);
+    e.setBuffer(out, out_off, 7);
+    e.dispatchGroups(.{ .width = k / 64, .height = (rows + 31) / 32 }, .{ .width = 32 });
 }
 
 /// tf_sq_fits's words for `rows` rows of `k` inputs: one u32 a 16-row tile and 64-input group.
@@ -154,9 +192,16 @@ pub fn encode(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: u
     e.dispatchGroups(c.groups, .{ .width = c.threads });
 }
 
-/// `encode` with tf_sq_fits's words bound, for a `callHalf` call.
-pub fn encodeHalf(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: usize, y: mtl.Buffer, y_off: usize, flags: mtl.Buffer, flags_off: usize) void {
+/// `encode` with tf_sq_fits's words and tf_sq_prep_h's output (sums and halves) bound, for a `callHalf` call.
+pub fn encodeHalf(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: usize, y: mtl.Buffer, y_off: usize, flags: mtl.Buffer, flags_off: usize, prep: mtl.Buffer, prep_off: usize) void {
     e.setBuffer(flags, flags_off, 6);
+    e.setBuffer(prep, prep_off, 7);
+    encode(e, c, m, x, x_off, y, y_off);
+}
+
+/// `encode` with tf_sq_prep_s's sums bound, for a `callSums` call.
+pub fn encodeSums(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: usize, y: mtl.Buffer, y_off: usize, sums: mtl.Buffer, sums_off: usize) void {
+    e.setBuffer(sums, sums_off, 7);
     encode(e, c, m, x, x_off, y, y_off);
 }
 
@@ -175,6 +220,10 @@ pub fn halfExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     for ([_]u16{ 0x4980, 0x3580, 0x3800 }, 0..) |v, i| xs[(3 + 5 * i) * m.k + 64 * (i + 1) + 7] = v;
     const flags = try device.buffer(fitsBytes(m.k, rows), mtl.ResourceOptions.shared);
     defer flags.deinit();
+    const prep = try device.buffer(prepBytes(m.k, rows, true), mtl.ResourceOptions.shared);
+    defer prep.deinit();
+    const prep8 = try device.buffer(prepBytes(m.k, 8, true), mtl.ResourceOptions.shared);
+    defer prep8.deinit();
     var outs: [3]mtl.Buffer = undefined;
     for (&outs) |*o| o.* = try device.buffer(rows * m.n * 2, mtl.ResourceOptions.shared);
     defer for (outs) |o| o.deinit();
@@ -183,10 +232,12 @@ pub fn halfExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     encodeFits(e, p, m.k, rows, x, 0, flags, 0);
+    encodePrep(e, p, m.k, rows, true, x, 0, prep, 0);
+    encodePrep(e, p, m.k, 8, true, x, 0, prep8, 0);
     e.barrier();
     encode(e, try call(p, m.n, m.k, rows, false, false, 0), m, x, 0, outs[0], 0);
-    encodeHalf(e, (try callHalf(p, m.n, m.k, rows, 0)).?, m, x, 0, outs[1], 0, flags, 0);
-    encodeHalf(e, (try callHalf(p, m.n, m.k, 8, 0)).?, m, x, 0, outs[2], 0, flags, 0); // 8-row tiles read the 16-row words
+    encodeHalf(e, (try callHalf(p, m.n, m.k, rows, 0)).?, m, x, 0, outs[1], 0, flags, 0, prep, 0);
+    encodeHalf(e, (try callHalf(p, m.n, m.k, 8, 0)).?, m, x, 0, outs[2], 0, flags, 0, prep8, 0); // 8-row tiles read the 16-row words
     e.end();
     cb.commit();
     cb.wait();
@@ -200,8 +251,17 @@ pub fn halfExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
 
 /// Whether chunk pairs give tf_sq_mma's bits for `m` (16 rows each way); false where `pairs` never takes it.
 pub fn pairedExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
+    return pairCheck(p, device, m, false);
+}
+
+/// Whether chunk pairs on tf_sq_prep_s's sums give tf_sq_mma's bits for `m` (17 rows: a pad row in the prepass).
+pub fn summedExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
+    return pairCheck(p, device, m, true);
+}
+
+fn pairCheck(p: *const Pipelines, device: mtl.Device, m: Matrix, sums: bool) !bool {
     if (!pairs(m.n, 2, splits(m.n))) return false;
-    const rows = 16;
+    const rows: usize = if (sums) 17 else 16;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const x = try device.buffer(rows * m.k * 2, mtl.ResourceOptions.shared);
@@ -211,11 +271,21 @@ pub fn pairedExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     var outs: [2]mtl.Buffer = undefined;
     for (&outs) |*o| o.* = try device.buffer(rows * m.n * 2, mtl.ResourceOptions.shared);
     defer for (outs) |o| o.deinit();
+    const prep = try device.buffer(prepBytes(m.k, rows, false), mtl.ResourceOptions.shared);
+    defer prep.deinit();
+    const tiles_ = try call(p, m.n, m.k, rows, false, false, 0);
+    const c = try call(p, m.n, m.k, rows, false, true, 0);
+    const summed = if (sums) callSums(p, c) orelse return false else c;
     const queue = try device.queue();
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (outs, [_]bool{ false, true }) |o, pair| encode(e, try call(p, m.n, m.k, rows, false, pair, 0), m, x, 0, o, 0);
+    encode(e, tiles_, m, x, 0, outs[0], 0);
+    if (sums) {
+        encodePrep(e, p, m.k, rows, false, x, 0, prep, 0);
+        e.barrier();
+        encodeSums(e, summed, m, x, 0, outs[1], 0, prep, 0);
+    } else encode(e, c, m, x, 0, outs[1], 0);
     e.end();
     cb.commit();
     cb.wait();

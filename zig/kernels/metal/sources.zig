@@ -3,6 +3,20 @@
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
 
+pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");
+pub const hy4_flash_index_recall = @embedFile("hy4_flash/index_recall.metal");
+pub const hy4_flash_index_build = @embedFile("hy4_flash/index_build.metal");
+pub const hy4_flash_attention_sink = @embedFile("hy4_flash/attention_sink.metal");
+pub const hy4_flash_mla_project = @embedFile("hy4_flash/mla_project.metal");
+pub const hy4_flash_mla_attention = @embedFile("hy4_flash/mla_attention.metal");
+pub const hy4_flash_ihc = @embedFile("hy4_flash/ihc.metal");
+pub const hy4_flash_rows = @embedFile("hy4_flash/rows.metal");
+pub const hy4_flash_mla_nax = @embedFile("hy4_flash/mla_nax.metal");
+pub const hy4_flash_route_rows = @embedFile("hy4_flash/route_rows.metal");
+pub const hy4_flash_engram = @embedFile("hy4_flash/engram.metal");
+pub const hy4_flash_affine_experts = @embedFile("hy4_flash/affine_experts.metal");
+pub const hy4_flash_tensor_dispatch = @embedFile("hy4_flash/tensor_dispatch.metal");
+
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
@@ -24,8 +38,10 @@ pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
+/// gemm_nax and the image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax.
+const vision_glue = gemm_nax ++ @embedFile("prefill/vision_glue.metal");
 /// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
-pub const gemma4_vision = gemm_nax ++ @embedFile("gemma4/vision.metal");
+pub const gemma4_vision = vision_glue ++ @embedFile("gemma4/vision.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
 pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_sorted.metal") ++ @embedFile("lfm2/lfm2_dspark.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
@@ -44,6 +60,7 @@ pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_row_projection_legacy = @embedFile("core/row_projection_legacy.metal");
 pub const core_binned_projection = @embedFile("core/binned_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
@@ -79,8 +96,7 @@ pub const nemotron_head = @embedFile("nemotron_head.metal");
 /// Keyed draws over the whole vocabulary where tf_gpu_sample would keep only its 1,024 candidates.
 pub const nemotron_sample = @embedFile("nemotron_sample.metal");
 
-/// Sliding Weights: the learned change in the forward and the bounded step on captured rows.
-/// Learning in the weights: a low-rank change at every layer, and the gradients through each kind of layer to it.
+/// Sliding Weights: learned change and bounded step on captured rows; low-rank change per layer, with gradients to it.
 pub const train = @embedFile("train.metal");
 pub const train_mixers = @embedFile("train_mixers.metal");
 
@@ -108,6 +124,8 @@ pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
+pub const elementwise = @embedFile("ops/elementwise.metal");
+pub const embed_norm = @embedFile("ops/embed_norm.metal");
 
 /// Prompt-chunk kernels (tools/zig/prefill_*.py), bit-identical to MLX 0.32.3's prefill kernels.
 pub const prefill = [_]File{
@@ -119,10 +137,11 @@ pub const prefill = [_]File{
     .{ .name = "qmm_nax", .text = @embedFile("prefill/qmm_nax.metal") },
     .{ .name = "scan", .text = @embedFile("prefill/scan.metal") },
     .{ .name = "sort", .text = @embedFile("prefill/sort.metal") },
-    .{ .name = "embed_norm", .text = @embedFile("ops/embed_norm.metal") },
-    .{ .name = "elementwise", .text = @embedFile("ops/elementwise.metal") },
+    .{ .name = "embed_norm", .text = embed_norm },
+    .{ .name = "elementwise", .text = elementwise },
     .{ .name = "route", .text = @embedFile("ops/route.metal") },
     .{ .name = "qmv", .text = @embedFile("ops/qmv.metal") },
+    .{ .name = "gemv_ops", .text = @embedFile("ops/gemv.metal") },
 };
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
@@ -142,24 +161,45 @@ pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// A window's rows' dense-attention softmaxes in one launch, appended to ops/softmax.metal (tf_softmax_row).
+pub const glm_softmax_rows = @embedFile("glm_softmax_rows.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
-pub const glm_vision = gemm_nax ++ @embedFile("glm_vision.metal");
+pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
-pub const core_qwen_vision = gemm_nax ++ @embedFile("core/qwen_vision.metal");
+pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+/// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
+/// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
+pub const uocr = @embedFile("uocr/vision.metal");
+pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
+/// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
+pub const idol_decoder = @embedFile("idol_decoder.metal");
+/// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
+pub const idol_vae = @embedFile("idol_vae.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
+/// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
+pub const glm_kda_window = @embedFile("glm_kda_window.metal");
+/// And on two threadgroups a head (their value columns), then each head's norm: kda_rows' values (Ultra-class GPUs).
+pub const glm_kda_parts = @embedFile("glm_kda_parts.metal");
+/// Prompt chunks' expert gathers walked in column groups, appended to core/affine_mm.metal at 4 bits, groups of 64.
+pub const glm_mm_groups = @embedFile("glm_mm_groups.metal");
+/// The router's logits for a one-row window, appended to core/moe_route.metal at GLM's two shapes.
+pub const glm_route_one = @embedFile("glm_route_one.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
 pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
 pub const glm_sparse_nax = @embedFile("glm_sparse_nax.metal");
 /// A prompt chunk's index scores on the tensor units (nax.h inlined at load).
 pub const glm_index_nax = @embedFile("glm_index_nax.metal");
+/// Decode rows' key lists on many threadgroups: a sampled floor marks candidates, a merge selects among them.
+pub const glm_select = @embedFile("glm_select.metal");
 /// A prompt chunk's MLA absorb on the tensor units (nax.h inlined at load).
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
@@ -188,7 +228,7 @@ pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
 pub const step5_glue = @embedFile("step5/glue.metal");
 /// MiniMax-M3's glue at transformers' rounding points: norms, rotation, SwiGLU-OAI, router, indexer, decode attention.
-pub const minimax_m3_glue = @embedFile("minimax_m3/glue.metal");
+pub const minimax_m3_glue = @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
 /// MiniMax-M3's prompt attention on the tensor units over each row's kept index blocks.
 pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal");
 /// MiniMax-M3's DSpark drafter (norms, q/k into its context rings, block attention, the Markov chain) and the taps.
@@ -199,22 +239,28 @@ pub const minimax_m3_experts = @embedFile("minimax_m3/experts.metal");
 pub const minimax_m3_dflash2 = @embedFile("minimax_m3/dflash2.metal");
 /// MiniMax-M3's indexer block scores on the tensor units (a prompt chunk's).
 pub const minimax_m3_index_nax = @embedFile("minimax_m3/index_nax.metal");
+/// Flint's glue at the reference's rounding points: embed, norms, q/k rotation, SwiGLU, residual and MoE adds.
+pub const flint_glue = @embedFile("flint/glue.metal");
+/// Flint's attention on the tensor units: prompt tiles, decode partials and their merge, with sinks.
+pub const flint_attention_nax = @embedFile("flint/attention_nax.metal");
 /// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
 pub const step5_sparse = @embedFile("step5/sparse.metal");
 /// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
 pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
 /// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
-pub const step5_vision = gemm_nax ++ @embedFile("step5/vision.metal");
+pub const step5_vision = vision_glue ++ @embedFile("step5/vision.metal");
 /// Spark2.5's glue at its PyTorch rounding points: embed, fp32 residual adds and norms, rope, head gate, exact GELU.
-pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("spark25/glue.metal");
-/// Spark2.5's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
-pub const spark25_attention_nax = @embedFile("spark25/attention_nax.metal");
+pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
+/// Spark2.5's and Llama's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
+const prompt_attention_nax = @embedFile("core/prompt_attention_nax.metal");
+/// Spark2.5's prompt attention (core/prompt_attention_nax.metal as sp_prompt_attention).
+pub const spark25_attention_nax = "#define TF_PROMPT_ATTENTION sp_prompt_attention\n" ++ prompt_attention_nax;
 /// Spark2.5's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const spark25_gemm = gemm_nax ++ @embedFile("spark25/gemm.metal");
 /// Llama's glue at HF's rounding points: embed, a bf16 residual and its norm, rope with bf16 cos and sin, SiLU.
-pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("llama/glue.metal");
-/// Llama's prompt attention on the tensor units (gemma4's prompt kernel, every key; nax.h inlined at load).
-pub const llama_attention_nax = @embedFile("llama/attention_nax.metal");
+pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("llama/glue.metal");
+/// Llama's prompt attention: core/prompt_attention_nax.metal as ll_prompt_attention (its loader: WINDOW and RING 0).
+pub const llama_attention_nax = "#define TF_PROMPT_ATTENTION ll_prompt_attention\n" ++ prompt_attention_nax;
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const llama_gemm = gemm_nax ++ @embedFile("llama/gemm.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
@@ -244,3 +290,14 @@ pub const core_hc_activation = @embedFile("core/hc_activation.metal");
 pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
 
 pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
+
+/// Qwen3 embeddings' projected-head RMS norm (128-wide Q and K, V unchanged).
+pub const qwen3_heads = @embedFile("qwen3/heads.metal");
+/// GLM-5.3-Flash's DFlash2 drafter attention: Q/K rotary + normalized GQA partials and their merge.
+pub const glm_draft_attention = @embedFile("glm_draft_attention.metal");
+/// GLM-5.3-Flash's DFlash2 drafter top-k: row-wise top 16 over vocabulary logits into packed candidates.
+pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
+/// GLM-5.3-Flash's DFlash2 inline chain accept: compares verified picks against drafted tokens on the GPU.
+pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
+/// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
+pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");

@@ -21,6 +21,7 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const tap_k = @import("contract_tap.zig");
 const draft_k = @import("contract_draft.zig");
+const exl3_k = @import("contract_exl3.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
@@ -29,6 +30,7 @@ const dense12_k = @import("contract_dense_wmma12.zig");
 const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
+const route_k = @import("contract_route.zig");
 const kit = @import("contract_kit.zig");
 const item_k = @import("contract_wmma_item.zig");
 const embed_k = @import("contract_embed.zig");
@@ -40,6 +42,8 @@ const vl_k = @import("contract_vl.zig");
 const pos_k = @import("contract_vl_position.zig");
 const sparse_k = @import("contract_sparse_lanes.zig");
 const skew_k = @import("contract_wmma_skew.zig");
+const idx_k = @import("contract_idx_scores.zig");
+const items_k = @import("contract_stream_items.zig");
 
 const g = core.contract.gates;
 
@@ -191,6 +195,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     }
     defer for (&attends) |*w| w.deinit();
     for (&attends) |*w| try kernels.append(a, w.kernel());
+    // d = 256 (the Qwen checkpoints): each head group, short and long spans, q fp32 and in the kind; two controls
+    var qwen_walks: [walk_k.qwen_count]walk_k.Walk = undefined;
+    for (&qwen_walks, 0..) |*w, i| w.* = .qwenAt(a, &r, s, &l, i);
+    defer for (&qwen_walks) |*w| w.deinit();
+    for (&qwen_walks) |*w| try kernels.append(a, w.kernel());
     var prefills: [2]prefill_k.Prefill = undefined;
     for (&prefills, [_]bool{ true, false }) |*p, paged| p.* = .init(a, &r, s, &l, paged);
     defer for (&prefills) |*p| p.deinit();
@@ -233,9 +242,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();
     for (&streams) |*x| try kernels.append(a, x.kernel());
-    var relu2 = relu2_k.Relu2.init(a, &r, s, &l);
-    defer relu2.deinit();
-    try kernels.append(a, relu2.kernel());
+    // each width's relu^2 stream tile, then each wider width's planted control (its codes read as 4-bit)
+    var relu2s: [2 * relu2_k.widths.len - 1]relu2_k.Relu2 = undefined;
+    for (&relu2s, 0..) |*x, i| {
+        const plant = i >= relu2_k.widths.len;
+        x.* = .init(a, &r, s, &l, relu2_k.widths[if (plant) i + 1 - relu2_k.widths.len else i], plant);
+    }
+    defer for (&relu2s) |*x| x.deinit();
+    for (&relu2s) |*x| try kernels.append(a, x.kernel());
     var kv_write = kv_k.KvWrite.init(a, &r, s, &l);
     defer kv_write.deinit();
     try kernels.append(a, kv_write.kernel());
@@ -248,6 +262,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&drafts, draft_modes) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&drafts) |*m| m.deinit();
     for (&drafts) |*m| try kernels.append(a, m.kernel());
+    var exl3s: [exl3_k.registrations.len]exl3_k.Case = undefined;
+    for (&exl3s, exl3_k.registrations) |*m, reg| m.* = .init(a, &r, s, &l, reg);
+    defer for (&exl3s) |*m| m.deinit();
+    for (&exl3s) |*m| try kernels.append(a, m.kernel());
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
@@ -296,12 +314,21 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers, [_]kit.Kind{ .f16, .bf16 }) |*x, k| x.* = router_k.Router.init(a, &r, s, &l, k);
     defer for (&routers) |*x| x.deinit();
     for (&routers) |*x| try kernels.append(a, x.kernel());
+    // the route plan in each mode the engine asks it, then a control on each rule of its cut
+    var routes: [route_k.cases.len]route_k.Route = undefined;
+    for (&routes, route_k.cases) |*x, case| x.* = .init(a, &r, s, &l, case);
+    defer for (&routes) |*x| x.deinit();
+    for (&routes) |*x| try kernels.append(a, x.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
-    var items: [item_k.cases.len]item_k.Item = undefined;
-    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    // the last one is the few-row passes' control, on its case's geometry
+    var items: [item_k.cases.len + 1]item_k.Item = undefined;
+    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, @min(i, item_k.control.index));
     defer for (&items) |*x| x.deinit();
-    if (matrix) for (&items) |*x| try kernels.append(a, x.kernel());
+    if (matrix) {
+        items[item_k.cases.len].planted = try ctl.function(item_k.control.symbol);
+        for (&items) |*x| try kernels.append(a, x.kernel());
+    }
     var embeds: [4]embed_k.Embed = undefined;
     var nembeds: usize = 0;
     defer for (embeds[0..nembeds]) |*x| x.deinit();
@@ -341,10 +368,26 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
     defer sparse.deinit();
     try kernels.append(a, sparse.kernel());
+    var idx_scores: [2]idx_k.IdxScores = undefined;
+    for (&idx_scores, std.enums.values(idx_k.Fault)) |*x, fault| x.* = .init(a, &r, s, &l, fault);
+    defer for (&idx_scores) |*x| x.deinit();
+    for (&idx_scores) |*x| try kernels.append(a, x.kernel());
     var skews: [skew_k.cases.len]skew_k.Skew = undefined;
     for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&skews) |*x| x.deinit();
     if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
+    // the routed item-rows gate where picked (RDNA3.5), then each case's control: every item one row short
+    var items_rows: [2 * items_k.cases.len]items_k.StreamItems = undefined;
+    for (&items_rows, 0..) |*x, i| x.* = .init(a, &r, s, &l, i % items_k.cases.len);
+    defer for (&items_rows) |*x| x.deinit();
+    if (l.affine.variants.enabled) {
+        for (&items_rows, 0..) |*x, i| {
+            if (i >= items_k.cases.len) {
+                x.planted = .{ try ctl.function(items_k.control_symbols[0]), try ctl.function(items_k.control_symbols[1]) };
+            }
+            try kernels.append(a, x.kernel());
+        }
+    } else std.debug.print("N/A  hip affine_dot2_stream (item_rows): not picked off RDNA3.5\n", .{});
     const gdn_k = @import("contract_gdn.zig");
     // y and the state, then a control on each: one row short (the state), one key head (y)
     var gdn_prompts: [4]gdn_k.Prompt = undefined;

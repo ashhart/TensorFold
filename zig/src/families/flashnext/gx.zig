@@ -24,7 +24,9 @@ pub const Gx = struct {
     /// The routed and shared experts for `rows` rows (at most rmax; the kernels read the count from `rows_buf`).
     pub fn encode(g: *const Gx, r: *Run, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf, rows: usize) void {
         if (r.skip & (1 << 2) != 0) return;
-        g.launch(r.enc, !r.serial, x, lg, e, act, pick, wts, rows_buf, y, rows);
+        var bound = e;
+        if (r.sb_index) @import("scale_index.zig").bind(r, &bound, true, true) catch return; // init checked each set
+        g.launch(r.enc, !r.serial, x, lg, bound, act, pick, wts, rows_buf, y, rows);
     }
 
     /// The five launches on `enc`; `barriers` for a concurrent encoder, where each waits for the one it reads.
@@ -63,14 +65,15 @@ pub fn applies(w: variants.Experts) bool {
     return std.mem.eql(usize, &w.gu, &four) and std.mem.eql(usize, &w.down, &four);
 }
 
-/// fn_gx.metal compiled as the loader compiles it.
-pub fn library(device: mtl.Device) !mtl.Library {
-    return mtl.Library.fromSource(device, ks.flashnext_gx, mtl.CompileOptions.mlx());
+/// fn_gx.metal compiled as the loader compiles it; `indexed` reads scales and biases through scale_index's tables.
+pub fn library(a: std.mem.Allocator, device: mtl.Device, indexed: bool) !mtl.Library {
+    const text = if (indexed) try @import("experts4.zig").indexedGrouped(a, ks.flashnext_gx) else ks.flashnext_gx;
+    return mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
 }
 
 /// The grouped kernels for windows of `min_rows` rows or more (at most rmax).
 pub fn init(r: *Run, min_rows: usize) !*Gx {
-    const lib = try r.ownResource(try library(r.device));
+    const lib = try r.ownResource(try library(r.arena, r.device, r.sb_index));
     const g = try r.arena.create(Gx);
     var pipes: [functions.len]mtl.Pipeline = undefined;
     for (functions, &pipes) |name, *p| p.* = try r.ownResource(try mtl.Pipeline.init(r.device, lib, name, false));

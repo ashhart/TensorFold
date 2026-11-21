@@ -82,27 +82,11 @@ pub const Inventory = struct {
     }
 };
 
-/// macOS GPU limit when iogpu.wired_limit_mb is 0: fit to 107.5 of 128 GiB and 222.7 of 256 GiB, two thirds below that.
-pub fn defaultGpuLimit(memory: u64) u64 {
-    const fit = memory / 10 * 9 -| 768 * gib / 100;
-    return @max(memory / 3 * 2, fit);
-}
+const machine = @import("sys").machine;
 
-/// The GPU limit a wired-limit setting gives: the setting itself when non-zero, else macOS's default.
-pub fn gpuLimitFor(memory: u64, wired_limit_mb: u64) u64 {
-    return if (wired_limit_mb == 0) defaultGpuLimit(memory) else wired_limit_mb << 20;
-}
-
-/// Nominal memory bandwidth (bytes a second) for the chips we serve; 0 when unknown (the engine measures it).
-pub fn bandwidthOf(chip: []const u8) u64 {
-    const table = [_]struct { []const u8, u64 }{
-        .{ "M3 Ultra", 819 },  .{ "M2 Ultra", 800 },  .{ "M1 Ultra", 800 }, .{ "M4 Max", 546 }, .{ "M3 Max", 400 },
-        .{ "M2 Max", 400 },    .{ "M1 Max", 400 },    .{ "M4 Pro", 273 },   .{ "GB10", 273 },   .{ "RTX PRO 6000", 1792 },
-        .{ "RTX 5090", 1792 }, .{ "RTX 4090", 1008 }, .{ "RTX 3090", 936 },
-    };
-    for (table) |row| if (std.mem.indexOf(u8, chip, row[0]) != null) return row[1] * 1_000_000_000;
-    return 0;
-}
+pub const defaultGpuLimit = machine.defaultGpuLimit;
+pub const gpuLimitFor = machine.gpuLimitFor;
+pub const bandwidthOf = machine.bandwidthOf;
 
 /// A stable node id from a platform UUID (never zero).
 pub fn idFrom(uuid: []const u8) NodeId {

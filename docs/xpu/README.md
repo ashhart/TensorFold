@@ -57,6 +57,14 @@ context (~0.8 GB at 9.7 k tokens). A resume gives exactly the state of a full pa
 answer, bit for bit. Budget: `--prompt-cache-gib` (2 GiB by default, reserved before the streams: 6 streams instead
 of 7 in GPTQ at 16 k; `0` disables it). The core keeps nothing below 4,096 tokens. Measured on a 9.7 k-token
 document: the same request replayed 6.1 → 1.2 s, the next turn of a conversation 6.1 → 1.1 s.
+With the DFlash2 drafter, a kept state with bf16 K/V takes 64 KiB a prompt token plus 187 MiB (147 MiB without a
+drafter), so the default budget keeps nothing past about 29,700 tokens: the log says
+`kept nothing at N tokens: M MiB passes the 2048 MiB budget`, and a later turn resumes from the last state that
+fit, or from the start when none matches. The budget is shared by the streams: give a conversation you want resumed
+a budget above its state and a `--context` that leaves room for it. On one 32 GB card, measured on the MLX 4-bit
+checkpoint at `--parallel 1`, 3 GiB at `--context 40960` holds a 32 k-token conversation (first token 0.3–0.6 s,
+against 22 s with nothing kept), while 3 GiB beside `--context 139264` does not fit and the server refuses to
+start.
 Prefix shared between different requests: put the common base in the **system** message (or in the tools); the
 server places points at the end of the system prefix (and 512 / 2,048 tokens before it), and any request that shares
 that system message restarts from there, whatever follows (measured: two other questions on the same 9.7 k-token
@@ -89,6 +97,11 @@ Options through environment variables:
 | 2 / 4 / 8 simultaneous streams, code, greedy (aggregate) | 211 / 294 / 326 | 235 / 310 / 270 | 235 / 310 / 270 | 222 / 288 / 260 |
 | 2 / 4 / 8 simultaneous streams, chat, greedy (aggregate) | 151 / 239 / 300 | 148 / 215 / 208 | 162 / 230 / 224 | 162 / 249 / 227 |
 | `bench_openai` decode, 1 / 2 / 4 / 8 requests (aggregate) | 173 / 243 / 343 / 350 | 165 / 300 / 337 / 439 | 165 / 336 / 367 / 456 | 179 / 325 / 364 / 463 |
+
+The prefill row predates 1.1.0, which feeds the prompt DeltaNet's fp32 intermediates to the matrix units at close to fp32
+precision (`489baa2673`, `17facba3f8`). On a B70 with GPTQ g128 that costs about 5% of a 32,768-token prompt in the
+raw runner (`xpu-qwen27 --bench=32768`: 1,647 to 1,571 tok/s, tokens unchanged; #2859). The table's sizes have not been
+re-measured since.
 
 Before the per-stream DFlash2 drafts (copies only in the shared rounds), 2 / 4 / 8 code streams ran at
 64 / 120 / 182 tok/s in GPTQ. Validation: `zig build test`, oracle, drafted == serial, multi-stream == serial (chains

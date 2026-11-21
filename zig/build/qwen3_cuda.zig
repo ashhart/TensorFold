@@ -29,7 +29,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const run = b.addRunArtifact(gpu);
     run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
     b.step("qwen3-cuda-gpu-build", "Compile the Qwen3 dense CUDA checks without running them").dependOn(&gpu.step);
-    b.step("qwen3-cuda-gpu-test", "Qwen3 embedding vectors on CUDA against transformers (TF_QWEN3_EMBED_DIR, _REF, _BAR)").dependOn(&run.step);
+    b.step("qwen3-cuda-gpu-test", "Qwen3 embedding vectors and reranker logits on CUDA against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&run.step);
     all.dependOn(&gpu.step);
     const host = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3/checks.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true }) }));
     b.step("test-qwen3-checks-host", "Qwen3 checks' oracle pins, references and batching without a GPU").dependOn(&host.step);

@@ -1,7 +1,7 @@
 //! One safetensors file mapped read-only, its tensors found by name in core's index of the header.
 const std = @import("std");
 const report = @import("report.zig");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 
 const c = struct {
     extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;

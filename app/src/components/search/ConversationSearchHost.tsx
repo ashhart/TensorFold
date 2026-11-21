@@ -31,6 +31,7 @@ export function ConversationSearchHost({ navigationBlocked = false }: { navigati
   const [open, setOpen] = useState(false), [query, setQuery] = useState('')
   const [scope, setScope] = useState<'all' | 'thread'>('all'), [projectId, setProjectId] = useState('')
   const [archived, setArchived] = useState(false), [selected, setSelected] = useState(0), [retry, setRetry] = useState(0)
+  const scopedProjectId = scope === 'all' ? projectId : ''
   const panel = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null)
   const close = () => { client.clear(); setOpen(false); setQuery('') }
   useAccessibleDialog({ open, onClose: close, dialogRef: panel, initialFocusRef: input })
@@ -54,19 +55,19 @@ export function ConversationSearchHost({ navigationBlocked = false }: { navigati
   useEffect(() => {
     client.clear(); setSelected(0)
     if (!open || filterState.error || scope === 'thread' && !activeThreadId) return
-    const timer = setTimeout(() => void client.search({ scope, query, ...(scope === 'thread' ? { threadId: activeThreadId } : {}), ...(projectId ? { projectId } : {}), includeArchived: archived, filters: filterState.filters, limit: 50 }), 180)
+    const timer = setTimeout(() => void client.search({ scope, query, ...(scope === 'thread' ? { threadId: activeThreadId } : {}), ...(scopedProjectId ? { projectId: scopedProjectId } : {}), includeArchived: archived, filters: filterState.filters, limit: 50 }), 180)
     return () => { clearTimeout(timer); client.clear() }
-  }, [open, query, scope, activeThreadId, projectId, archived, filterKey, filterState.error, retry, client])
+  }, [open, query, scope, activeThreadId, scopedProjectId, archived, filterKey, filterState.error, retry, client])
   const ownsState = open && state.request?.query === query.trim().replace(/\s+/g, ' ')
     && state.request.scope === scope && (scope !== 'thread' || state.request.threadId === activeThreadId)
-    && (state.request.projectId ?? '') === projectId && !!state.request.includeArchived === archived && !filterState.error && conversationSearchFilterKey(state.request.filters) === filterKey
+    && (state.request.projectId ?? '') === scopedProjectId && !!state.request.includeArchived === archived && !filterState.error && conversationSearchFilterKey(state.request.filters) === filterKey
   const filterThreads = (threads ?? []).filter(thread => !thread.orchestratorHostId
     && (scope === 'thread' ? thread.id === activeThreadId : !thread.incognito && !thread.phoneLocalOnly && !thread.googleLocalOnly && !thread.bot && (archived || !thread.archivedAt))
-    && (!projectId || thread.projectId === projectId))
+    && (!scopedProjectId || thread.projectId === scopedProjectId))
   const current = ownsState ? state : { result: null, error: '', busy: false }
   const matches = current.result?.matches ?? []
   const navigationOwner = useRef('')
-  const ownership = JSON.stringify([open, scope, query.trim().replace(/\s+/g, ' '), activeThreadId, projectId, archived, filterKey, filterState.error, navigationBlocked])
+  const ownership = JSON.stringify([open, scope, query.trim().replace(/\s+/g, ' '), activeThreadId, scopedProjectId, archived, filterKey, filterState.error, navigationBlocked])
   navigationOwner.current = ownership
   useEffect(() => {
     document.getElementById(`conversation-search-result-${selected}`)?.scrollIntoView({ block: 'nearest' })

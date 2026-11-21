@@ -11,7 +11,9 @@ const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const http_conn = @import("http_conn.zig");
+const admission = @import("http_admission.zig");
 const listener_mod = @import("listener.zig");
 const routes = @import("routes.zig");
 const responses = @import("responses.zig");
@@ -28,12 +30,9 @@ const idle_unload = @import("idle_unload.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
-
 pub const Identity = @import("identity.zig").Identity;
-
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
 
@@ -44,8 +43,8 @@ pub const Config = struct {
     sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
-    voices_dir: ?[]const u8 = null,
-    default_voice: []const u8 = "default",
+    /// --voices, --default-voice, --request-voices and --manage-voices; the last two off keep the startup catalog.
+    voice: @import("voice_cli.zig").Config = .{},
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.
@@ -59,6 +58,7 @@ pub const Config = struct {
     loop_guard: bool = false,
     /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
     loop_stop: bool = false,
+    tool_think_close: bool = false, // --tool-think-close: a required or named call closes thinking in time
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
@@ -77,10 +77,10 @@ pub const Config = struct {
     silence_mid: bool = false,
     silence_guard: bool = false,
     cfg: ?@import("drama_cfg.zig").Options = null,
-    /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
-    prompt_seed: bool = false,
+    prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    journal: ?*@import("request_journal.zig").Journal = null, // serve owns TENSORFOLD_REQUEST_JOURNAL
     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
     phase_metrics: bool = false,
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
@@ -94,8 +94,8 @@ pub const Config = struct {
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
     slide_drift_gate: bool = false,
-    /// A fact whose check a delete fails, to test its put-back (0: none); only -Dslide-test-hooks builds set it.
-    slide_forget_fail: u32 = 0,
+    slide_take_out_check: bool = false, // TF_SLIDE_TAKE_OUT_CHECK=1 with --slide, read once at start
+    slide_forget_fail: u32 = 0, // a fact a delete fails to check, to test its put-back (0: none; test-hook builds)
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
     cortheon: bool = false,
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
@@ -104,6 +104,8 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-connections-per-address, --trusted-proxy: one address's share from three quarters full.
+    peering: @import("http_admission.zig").Peering = .{},
     /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
     admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
@@ -123,7 +125,6 @@ pub fn namedBackground(config: Config, f: Value) bool {
     for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
     return false;
 }
-
 /// Name the compiled structure with the client's own field when its route carried one (a borrowed static literal).
 pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
     const name = format orelse return;
@@ -137,15 +138,20 @@ pub const Server = struct {
     info: api.Info,
     text: model_text.Text,
     config: Config,
-    voices: []const @import("drama_voice.zig").Voice = &.{},
+    voices: @import("drama_voice_store.zig").Store = .{},
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
+    /// Replies are messages to recipients (`to=self` reasoning, `to=user` answer, a tool's name a call).
+    recipients: bool = false,
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
+    /// The effort a recipient template hears with thinking off: it has no switch, so its lowest level, not its default.
+    off_effort: ?[]const u8 = null,
     thinking_switch: bool = false,
+    video_decoder: bool = false, // libtfvideo loaded in `init`: with the video offer it decides video input (#3004)
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
@@ -153,12 +159,14 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
-    /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
-    ws_cache_bytes: std.atomic.Value(usize) = .init(0),
+    background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
+    ws_cache_bytes: std.atomic.Value(usize) = .init(0), // Responses socket cache bytes (ws_cache.zig)
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// Open connections by remote address, for the per-address share of the slots.
+    peers: admission.Peers = .{},
     draining: std.atomic.Value(bool) = .init(false),
     generating: std.atomic.Value(u32) = .init(0),
     /// Model requests holding a reservation, when config.admission is on.
@@ -186,9 +194,7 @@ pub const Server = struct {
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
-        var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
-        result.native_deepseek = srv.text.native_deepseek;
-        return result;
+        return @import("input_types.zig").media(srv);
     }
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
@@ -197,17 +203,18 @@ pub const Server = struct {
         srv.* = .{ .tool_ids = tool_ids, .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         srv.config.tool_id_key = null; // its key is zeroed: `tool_ids` is the one copy
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        @import("stale_temps.zig").discard(io, config); // a crash's temporaries beside the note and the graph
         if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
         if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
         if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
-        if (config.voices_dir) |dir| {
-            if (srv.info.speech == null) return error.VoicesRequireSpeech;
-            srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
-        }
-        _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
+        srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
+        srv.voices = .{ .gpa = gpa, .io = io, .dir = config.voice.dir };
+        if (srv.info.speech == null and (config.voice.dir != null or config.voice.inline_voices or config.voice.manage)) return error.VoicesRequireSpeech;
+        if (config.voice.dir) |dir| try srv.voices.load(dir);
+        _ = try srv.voices.select(srv.arena.allocator(), config.voice.default, "default");
         if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
@@ -225,8 +232,10 @@ pub const Server = struct {
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
         if (minimax) srv.markers = reply_text.mm_markers;
         srv.close_id = text.tokenId(srv.markers.close);
+        srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
+        if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
         // MiniMax-M3's template decides on its own; thinking off closes the block in the prompt (prompt.zig)
         srv.thinking_switch = minimax or std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
@@ -259,10 +268,12 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
+        srv.voices.deinit();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
@@ -352,6 +363,7 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.capability(.structures)) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
+            if (s.text.len > grammar.max_text) return cx.fail(.request, "{s}: the grammar is {d} bytes, more than the {d} KiB a grammar may be", .{ s.field, s.text.len, grammar.max_text / 1024 });
             const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
             if (request.structure) |tool| tool.free();
             request.structure = st;
@@ -382,8 +394,9 @@ pub const Server = struct {
         const st = if (request.structure) |*s| s else return;
         const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
         if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
-        const ready = g.budgetReady() catch false;
-        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        const ready = g.budgetReadiness() catch .uncovered;
+        if (ready == .over_work) return cx.refuse("grammar_budget cannot be kept for this grammar: exploring its parser states passes the fixed work limit, a step count that is the same on every machine; send it without grammar_budget");
+        if (ready != .ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
         st.budget = true;
     }
 
@@ -430,8 +443,9 @@ pub const Server = struct {
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
             if (!srv.admitConnection(c.fd)) continue;
-            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
-                _ = srv.open_connections.fetchSub(1, .acq_rel);
+            const slot = admission.peerSlot(&srv.peers, srv.io, &srv.open_connections, srv.config.max_connections, srv.config.peering, c.fd, c.peer) orelse continue;
+            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind, slot }) catch {
+                admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
                 _ = platform.posix.system.close(c.fd);
                 continue;
             };
@@ -440,20 +454,20 @@ pub const Server = struct {
     }
 
     pub fn admitConnection(srv: *Server, fd: platform.posix.socket_t) bool {
-        const admission = @import("http_admission.zig");
         if (admission.acquire(&srv.open_connections, srv.config.max_connections)) return true;
         admission.reject(fd);
         return false;
     }
 
-    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
-        defer _ = srv.open_connections.fetchSub(1, .acq_rel);
+    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool, slot: u16) void {
+        defer admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
         defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
         defer conn.deinit();
         conn.timeouts = srv.config.timeouts;
+        conn.shed = .{ .open = &srv.open_connections, .limit = srv.config.max_connections };
         var browser = srv.config.browser;
         browser.loopback_bind = loopback_bind;
         conn.auth_enabled = srv.keys != null and srv.keys.?.enabled();
@@ -549,14 +563,7 @@ fn seedBits(v: Value) u64 {
     if (std.fmt.parseInt(i128, v.int, 10)) |n| return @truncate(@as(u128, @bitCast(n))) else |_| return 0;
 }
 
-/// ``template_late_system``: "system" when the template keeps a later system message in place, else "user".
-fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
-    const probe_text = "tensorfold-late-system-probe";
-    const probe = (try json.parse(a, "[{\"role\": \"system\", \"content\": \"s\"}, {\"role\": \"user\", \"content\": \"u\"}, {\"role\": \"assistant\", \"content\": \"a\"}, {\"role\": \"system\", \"content\": \"tensorfold-late-system-probe\"}, {\"role\": \"user\", \"content\": \"v\"}]")).ok;
-    var problem: []const u8 = "";
-    const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
-    return if (std.mem.indexOf(u8, rendered.text, probe_text) != null) "system" else "user";
-}
+const lateSystem = @import("late_system.zig").lateSystem;
 
 /// With image input: whether a user turn holding an image part renders an image placeholder (else a startup warning).
 fn templateImages(srv: *Server) bool {

@@ -42,6 +42,12 @@ test "DSpine config: Tencent's 27B drafter, its taps, bridge widths and 8,192 wi
     try t.expect(dspine.declared(doc.value));
 }
 
+test "DSpine config: the DSpineDraftModel spelling parses to the same shape as DFlashDraftModel's" {
+    const spined = try std.mem.replaceOwned(u8, a, fixture, "\"DFlashDraftModel\"", "\"DSpineDraftModel\"");
+    defer a.free(spined);
+    try t.expectEqual(try parsed(fixture), try parsed(spined));
+}
+
 test "DSpine config: another second pass, decode mode, write mode or a non-causal block is refused" {
     const edits = [_][2][]const u8{
         .{ "\"mode\":\"serial_table\"", "\"mode\":\"parallel\"" },

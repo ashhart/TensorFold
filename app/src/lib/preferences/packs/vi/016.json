@@ -71,7 +71,7 @@
   "The community page could not open; try again in your browser.": "Không mở trang cộng đồng; thử bằng trình duyệt.",
   "The comparison could not finish.": "So sánh không hoàn tất.",
   "The comparison stopped before changing the engine.": "So sánh dừng trước khi đổi engine.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "Chưa đạt toàn bộ community-v1; ô thiếu không phải điểm hiệu năng.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "Chưa đạt toàn bộ community-v2; ô thiếu không phải điểm hiệu năng.",
   "The conversation could not be renamed.": "Không đổi tên hội thoại được.",
   "The document worker is not installed.": "Chưa cài trình xử lý tài liệu.",
   "The download action could not complete. Try again.": "Không hoàn tất tải. Thử lại.",

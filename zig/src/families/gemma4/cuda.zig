@@ -11,6 +11,7 @@ pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const forward = @import("cuda_forward.zig");
 pub const snap = @import("cuda_snap.zig");
+pub const disk = @import("cuda_disk.zig");
 pub const backend = @import("cuda_backend.zig");
 pub const shared = @import("cuda_shared.zig");
 pub const assistant = @import("cuda_assistant.zig");
@@ -47,6 +48,7 @@ test {
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_forward.zig");
     _ = @import("cuda_snap.zig");
+    _ = @import("cuda_disk.zig");
     _ = @import("cuda_backend.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_solo.zig");

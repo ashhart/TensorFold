@@ -51,14 +51,19 @@ Coverage includes:
   with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
-  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
+  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B, Muse Spark Open): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`,
+  exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
   every stream's caches are contiguous and made at open.
 - Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
+- LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
+- Qwen on Metal: `TF_QWEN27_METAL_KV_PAGES` (the 27B) and `TF_QWEN35_METAL_KV_PAGES`, where exactly `1` puts keys and
+  values in the core pool's pages; `arithmetic` until a main-against-branch token-hash run says otherwise.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
@@ -166,14 +171,19 @@ that each setting changed a reply. Each stable fallback is null. The release bac
 | `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
 | `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
 
+The DeepSeek-V4.1 Metal server also reads `TF_DSV41_PREFILL_PIECES`: there `1` runs a prompt in steps between the
+other streams' rounds ([environment](environment.md)); `stable` leaves it absent, so prompts run whole.
+
 The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
 in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
 The other pool classes conservatively retain the audit's `arithmetic` classification, without claiming exactness.
 Images and vision bias also have independent rows. `ENGRAM_DIR` is reported as `<set>`; its path is never printed
 by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide reader, although this row covers
 DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
+`FLOAT_LINEAR` is off by default and is not one of this table's rows: with it unset a projection a pack keeps as a
+float matrix alone is refused, as before.
 
-All 81 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
+All 82 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
 `zig/src/platform/environment.zig` (see [environment settings](environment.md)). Their readers read through that
 table; the served-knob readers of `PREFILL_ROWS` and `INDEX_BUDGET_MIB` keep their own stricter refusals after it.
 `Model.open` and the AOT planner check those rows before any allocation, device or checkpoint work, and a later
