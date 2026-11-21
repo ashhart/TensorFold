@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the first world-4 Flash Next receipt on HIP, oQ2-MTP at `--tp 4` on four Radeon AI PRO R9700s, with a same-binary world-2 control run that separates the world effect from engine changes (#4210, refs #2401). Thanks to @timmyit.
+
 - CUDA: GLM-5.3-Flash's latent cache and indexer accept full GLM-5.3's shapes (slice (a) of #3063) (#3949). Thanks to @bjornmonnens.
 
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
