@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a resumed prompt encodes only the images its kept state does not hold (Gemma 4, Qwen3.5 and Flash Next on one rank), so a follow-up turn skips the vision tower for images the restored prefix already holds; a resume never cuts an image, and at `--tp 2` Flash Next keeps encoding every image as before (#3164).
+
 - Tokenizer: a request gap with no normalized added spelling reuses the tokenizer's memo instead of re-encoding cold, so long multi-message requests on tokenizers with normalized added tokens (DeepSeek-style ones) cost less per call; gaps carrying a spelling keep the mask and every id is unchanged (#2844).
 
 - DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build): structured output runs on the lane core's token grammars with drafts on: `response_format`, the `guided_*` fields, `tool_choice: "required"` or a named function, and strict tools under `tool_choice: "auto"`; a grammar's stop token ends the reply with `finish_reason` `stop` even with `ignore_eos` (#3026, closes #1664, from #1665). Thanks to @nuk3s.
