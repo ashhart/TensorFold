@@ -431,8 +431,7 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    const bs: affine_mm.Strides = .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) };
-    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, bs, if (p.mm.m3_fast) 32 else 64);
+    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// The index scores' tile rows: 128 (a row's queries read once for 64 blocks), 64 where that leaves the GPU half idle.
