@@ -4,7 +4,8 @@ const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const serve = @import("hip_serve");
-const Engine = @import("engine.zig").Engine;
+const engine = @import("engine.zig");
+const Engine = engine.Engine;
 const state = @import("../forward/state.zig");
 const mtp = @import("mtp.zig");
 const costs = @import("hip_costs.zig");
@@ -69,6 +70,8 @@ pub const Lane = struct {
     held_n: usize = 0,
     /// Slots written and kept: the next window starts here.
     len: usize,
+    /// The first row a pass tapped: a stream resumed from a snapshot has no tap rows below its resume point.
+    tapped_from: usize = 0,
     /// The stream's id on every rank.
     id: u32 = 0,
     /// The prompt pass in progress, a chunk a call (null once it is in).
@@ -310,6 +313,7 @@ pub const Hip = struct {
         h.e.pool.ids.reserved += need;
         _ = try lane.caches.grow(h.gpa, prompt.len);
         s.cached = @intCast(at);
+        lane.tapped_from = at;
         const fill = glue.Fill.init(at, plan.marks);
         lane.fill = fill;
         // the other ranks get the stream's pages and where it resumed and cuts
@@ -479,19 +483,26 @@ pub const Hip = struct {
 
     /// A drafter's tapped layers, told before any stream exists: their rings then come with every stream's caches.
     pub fn prepareFeatures(h: *Hip, taps: []const u32) !void {
-        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
         if (h.e.o.world != 1) return error.TapsUnderTensorParallel;
+        // the taps the memory plan sized the rings for (native.zig sets them before sizing): kept as they are
+        const t = &h.e.model().taps;
+        if (taps.len > 0 and std.mem.eql(u32, taps, t.layers[0..t.n])) return;
+        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
         try h.e.setTaps(taps);
     }
 
-    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), the newest ring rows kept.
+    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), as far as the ring holds them.
     pub fn features(h: *Hip, lane: *const Lane, taps: []const u32, start: u64, count: u32) !be.Features {
         const t = &h.e.model().taps;
         if (taps.len != t.n or !std.mem.eql(u32, taps, t.layers[0..t.n])) return error.TapsMismatch;
         const ring = lane.caches.tap orelse return error.NoTaps;
         // a verify's rows are in the ring before its keep: they count as written until the keep drops them
         const written = lane.len + if (lane.pending) |p| p.rows else 0;
-        if (start + count > written or start + count <= written -| t.rows) return error.RowsNotHeld;
+        const end = start + count;
+        // a resumed lane's ring holds zeros below its resume point: the snapshot keeps no tap rows
+        if (count == 0 or start < lane.tapped_from or end > written) return error.RowsNotHeld;
+        // the drafter reads a span's newest tap_window rows at most: those must not be overwritten yet
+        if (@max(start, end -| engine.tap_window) < written -| t.rows) return error.RowsNotHeld;
         const row_bytes = t.n * h.e.model().spec.hidden * 2;
         return .{ .buffer = ring.base(), .offset = start, .rows = count, .row_bytes = @intCast(row_bytes), .space = .device, .device = h.e.o.device, .dtype = if (h.e.act == .bf16) .bf16 else .f16 };
     }
