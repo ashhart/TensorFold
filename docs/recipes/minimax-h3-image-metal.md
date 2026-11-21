@@ -451,6 +451,22 @@ the United States of America. Read it before use.
 
 ## Kernel contract
 
+Metal compiles each kernel at load with the options its tool uses. Its contract coverage is:
+
+- The edit encoder (`h3_image_encoder.metal`, fp32 with precise functions): its convolution at every layer geometry of
+  the released encoder (3x3, 3x3 adding its residual in place, 3x3 downsampling, 1x1), GroupNorm's partial sums (plain
+  and centred) and their finish, and the norm's SiLU, each within float64's range through its fp32 steps (nine
+  controls).
+- The prompt path (`h3_prompt.metal`): the bf16 product at every projection of Qwen3-VL to layer 50 and of the token
+  refiner, with and without a bias; both norms and both head layouts in the Qwen and H3 rounding orders; causal and full
+  attention within `attention_range`'s bound, with entries that plant an infinite value at a padded row's last key;
+  both gates, the residual add and the vision rows' scatter (fifteen controls).
+- The image decoder (`image_decoder.metal`, bf16): post_quant, the embedding with its registers, both norms, the
+  product plain and with LayerScale in place, the heads with their half-width rotary, attention over a 261-token tile
+  and a batch of 16 tiles, and SwiGLU, each at its bf16 points (ten controls).
+
+Every launch reserves its group size in its source.
+
 The edit encoder's, prompt path's and image decoder's kernels are registered with the kernel contract
 ([kernel-contract.md](../kernel-contract.md)): 31 registrations with 34 planted controls, and every launch's limits.
 They are checked against float64 at their rounding points, beside each tool's own `selftest`. `zig build
