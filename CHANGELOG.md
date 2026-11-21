@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states, so it drafts beside an oQ checkpoint of any width, and a head at a width the launches do not read is refused by name (#3251, part of #3061). Thanks to @gilby.
+
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
 
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
@@ -120,7 +122,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
 - Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
-- Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states (the stock head is 4-bit in groups of 64), so it drafts beside an oQ checkpoint of any width; a head at a width the launches do not read is refused by name (#3251, part of #3061).
 
 - Desktop: a new conversation on the built-in engine asks for its title after the first run settles, not beside it, so the title no longer competes with that run; cancelling or renaming during the run skips it (#4072, refs #3606). Thanks to @AIFlowML.
 
