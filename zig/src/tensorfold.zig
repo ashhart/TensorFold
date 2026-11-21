@@ -28,6 +28,7 @@ pub const idol = @import("families/idol/idol.zig");
 /// Unlimited-OCR-2 on Metal: document pages to text (its image encoder and decoder).
 pub const uocr = @import("families/uocr/uocr.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
+pub const checkpoint_file_cache = @import("core/checkpoint_file_cache.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
 pub const npy = @import("core/npy.zig");
