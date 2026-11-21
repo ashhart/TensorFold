@@ -242,6 +242,7 @@ pub const Kernels = struct {
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
+    glue: @import("cuda_modelopt_prompt.zig").Glue,
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
@@ -252,14 +253,18 @@ pub const Kernels = struct {
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
+        try prompt.enableBf16();
         var pack = try cuda.modelopt.Packer.load(d);
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
+        var glue = try @import("cuda_modelopt_prompt.zig").Glue.load(d, moe);
+        errdefer glue.unload();
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .glue = glue };
     }
 
     pub fn unload(k: *Kernels) void {
+        k.glue.unload();
         if (k.part) |*p| p.free();
         if (k.experts) |*x| x.unload();
         k.embed.unload();
@@ -269,7 +274,7 @@ pub const Kernels = struct {
     }
 
     pub fn linear(k: *const Kernels) cuda.qlinear.Linear {
-        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
+        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt, .bf16_prompt = true };
     }
 
     /// The slice partials every projection of `e` takes below fused_rows (none with clusters).
