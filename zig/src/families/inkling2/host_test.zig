@@ -1,5 +1,7 @@
 //! Host-only Inkling 2 family package: config, weight map, layer plan, chat template and tokenizer. No GPU.
 test {
+    _ = @import("attn.zig");
+    _ = @import("attn_test.zig");
     _ = @import("config.zig");
     _ = @import("config_test.zig");
     _ = @import("names.zig");
