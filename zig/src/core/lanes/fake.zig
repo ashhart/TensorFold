@@ -92,6 +92,7 @@ pub const Fake = struct {
     image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
     gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
     head_accepts: ?usize = null, // head drafts a round right before one wrong (null: one in five wrong)
+    keep_calls: usize = 0, // backend keep calls, including fully accepted lone windows when opted in
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -479,6 +480,7 @@ pub const Fake = struct {
 
     fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const x = self(ptr);
+        x.keep_calls += 1;
         for (windows, paths) |w, path| {
             const l = x.lane(w.stream);
             l.history.shrinkRetainingCapacity(l.base);
