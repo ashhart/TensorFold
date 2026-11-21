@@ -7,6 +7,7 @@ const core = @import("core");
 const exl3 = @import("core").exl3_layout;
 const st = core.safetensors;
 const Io = std.Io;
+const reads = @import("pack_read.zig");
 
 pub const DType = st.DType;
 
@@ -219,13 +220,14 @@ pub const Pack = struct {
         _ = std.math.add(u64, info.start, end) catch return error.BadSpan;
         if (bytes == 0) return;
         if (p.dir.len == 0) return error.HeaderOnlyPack;
-        var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ p.dir, p.files.items[info.file] });
-        const file = try Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        var path_buf: [Io.Dir.max_path_bytes + 1]u8 = undefined;
+        const path = try std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{s}/{s}", .{ p.dir, p.files.items[info.file] });
+        path_buf[path.len] = 0;
+        var file = try reads.Reader.open(std.heap.page_allocator, io, path_buf[0..path.len :0], core.direct_io.enabled());
+        defer file.close();
         if (span.count <= 1) {
-            if (try file.readPositionalAll(io, out, info.start + span.offset) != out.len) return error.ShortRead;
-            dropCache(file, info.start + span.offset, out.len);
+            try file.read(out, info.start + span.offset);
+            file.dropCache(info.start + span.offset, out.len);
             return;
         }
         // a strided part (a column split): one read covering every run, then the runs gathered
@@ -233,16 +235,11 @@ pub const Pack = struct {
         const cover: usize = @intCast(span.at(span.count - 1) + span.len - first);
         const tmp = try std.heap.page_allocator.alloc(u8, cover);
         defer std.heap.page_allocator.free(tmp);
-        if (try file.readPositionalAll(io, tmp, info.start + first) != cover) return error.ShortRead;
-        dropCache(file, info.start + first, cover);
+        try file.read(tmp, info.start + first);
+        file.dropCache(info.start + first, cover);
         const len: usize = @intCast(span.len);
         const stride: usize = @intCast(span.stride);
         for (0..@intCast(span.count)) |i| @memcpy(out[i * len ..][0..len], tmp[i * stride ..][0..len]);
-    }
-
-    /// Drops the page cache of bytes just read (POSIX_FADV_DONTNEED): on unified memory it competes with the device.
-    fn dropCache(file: Io.File, offset: u64, len: usize) void {
-        @import("core").checkpoint.cache.range(file, offset, len);
     }
 
     /// The codebook of the group at `prefix`: its marker's value, else the 3-instruction default.
@@ -267,6 +264,10 @@ fn lessStr(_: void, x: []const u8, y: []const u8) bool {
 }
 
 const testing = std.testing;
+
+test {
+    _ = @import("pack_read_test.zig");
+}
 
 /// One tensor of an in-memory image.
 pub const Spec = struct { name: []const u8, dtype: []const u8, shape: []const usize, fill: u8 = 0 };
