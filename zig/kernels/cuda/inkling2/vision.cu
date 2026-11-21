@@ -181,7 +181,7 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_embed(const __nv
     }
 }
 
-// Block a row: q and k of qkv [rows, 3 H 64] turned in place, pair j by cos, sin [rows][32]; fp32 as torch, then bf16.
+// Block a row: q, k pairs (2j, 2j + 1) turned in fp32; MiniMax M3 and dots pair (i, i + half), so it is not shared.
 extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_rope(__nv_bfloat16* __restrict__ qkv, const float* __restrict__ cs,
                                                                      const float* __restrict__ sn) {
     const int r = blockIdx.x;
@@ -194,7 +194,7 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_rope(__nv_bfloat
     }
 }
 
-// x [count] = bf16(x + bf16(gamma[i % width] y)): the layer-scaled residual add of an attention or MLP output.
+// x = bf16(x + bf16(gamma y)), the layer scale; a gamma mode on vit.cu's tf_vit_pointwise could replace it later.
 extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_scale_add(__nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ y,
                                                                           const __nv_bfloat16* __restrict__ gamma, int64_t count) {
     const int64_t i = (int64_t)blockIdx.x * kThreads + threadIdx.x;
