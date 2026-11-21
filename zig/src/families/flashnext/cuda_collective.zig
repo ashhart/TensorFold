@@ -27,7 +27,7 @@ pub const Collective = struct {
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
         if (rank > 1 or timeout_ms == 0) return error.BadRank;
-        const one_host = try link.oneHost();
+        const one_host = try agreeOneHost(link, rank, try link.oneHost(), wire.deadline(timeout_ms));
         // one host: connections are made in the bounded init and split, none by a collective; an operator's value wins
         if (one_host) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
         var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms, .rank = rank };
@@ -47,6 +47,21 @@ pub const Collective = struct {
         try c.connect(id, until, one_host);
         cuda.p2p_report.afterInit(&diag, .{ .lib = &c.lib, .comm = c.comm }); // no driver here: no probe
         return c;
+    }
+
+    /// Each rank sends its one-host answer over the link before NCCL starts; the split needs both to say one host.
+    fn agreeOneHost(link: wire.Link, rank: usize, mine: bool, until: u64) !bool {
+        const out = [1]u8{@as(u8, @intFromBool(mine))};
+        var peer: [1]u8 = undefined;
+        if (rank == 0) {
+            try link.send(&out, until);
+            try link.receive(&peer, until);
+        } else {
+            try link.receive(&peer, until);
+            try link.send(&out, until);
+        }
+        if (peer[0] > 1) return error.BadRankFrame;
+        return mine and peer[0] == 1;
     }
 
     /// One host: the parent shares its connections with a blocking split for the collectives; across hosts it runs them
@@ -288,6 +303,32 @@ test "across hosts the collectives stay on the nonblocking parent with NCCL's de
     try std.testing.expect(c.comm == Fake.parent and c.parent == null and Fake.color == -1 and !c.failed);
     c.abort();
     try Fake.expectAborts(&.{Fake.parent});
+}
+
+test "the split needs both ranks to say one host; a disagreeing or malformed answer keeps the nonblocking path" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const Case = struct { rank: usize, mine: bool, peer: u8, want: ?bool };
+    const cases = [_]Case{
+        .{ .rank = 0, .mine = true, .peer = 1, .want = true },
+        .{ .rank = 1, .mine = true, .peer = 1, .want = true },
+        .{ .rank = 0, .mine = true, .peer = 0, .want = false },
+        .{ .rank = 1, .mine = false, .peer = 1, .want = false },
+        .{ .rank = 0, .mine = true, .peer = 2, .want = null },
+    };
+    for (cases) |k| {
+        var pair: [2]c_int = undefined;
+        try std.testing.expect(std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) == 0);
+        defer closePair(pair);
+        const peer = wire.Link{ .fd = pair[1] };
+        try peer.send(&.{k.peer}, wire.deadline(1000));
+        const got = Collective.agreeOneHost(.{ .fd = pair[0] }, k.rank, k.mine, wire.deadline(1000));
+        if (k.want) |want| try std.testing.expectEqual(want, try got) else try std.testing.expectError(error.BadRankFrame, got);
+        var sent: [1]u8 = undefined;
+        if (k.want != null or k.rank == 0) {
+            try peer.receive(&sent, wire.deadline(1000));
+            try std.testing.expectEqual(@as(u8, @intFromBool(k.mine)), sent[0]);
+        }
+    }
 }
 
 test "a split that fails through its parent's asynchronous error aborts the parent, then the child NCCL returned" {
