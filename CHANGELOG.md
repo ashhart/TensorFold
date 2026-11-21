@@ -4,7 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the GLM record for `df_sumn` under nvcc 13.3 (40 registers) is the one checked; a stale generic 33-register entry no longer overrides it (#4291). Thanks to @Bizuayeu.
+
 - Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
+
+
 
 
 
@@ -17,10 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
 
 - Lane host: concurrent identical prompts join a leader that is filling a prompt state it will keep, so they reuse its whole fill and return the same tokens they would alone; a prompt whose state would not be kept, a zero budget, the leader's cancellation or a timeout still runs on its own (#3693, refs #3397, #3487). Thanks to @bikepresentbal.
-
-
-
-
 
 - Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
 
@@ -178,8 +178,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Release tooling: the runtime feed's preparation step names the error when it fails, instead of only saying that it failed.
 
 - HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
-
-- CUDA contract: `df_sumn` is recorded at nvcc 13.3 with 40 registers on sm_120 and sm_121 again, as `glm_cuda_records.zig` holds it; the line #3953 added for it, measured before the kernel gained its dependent-launch wait, read 33 and is removed (#4291, refs #3953).
 
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
