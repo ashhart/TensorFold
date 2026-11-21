@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
+
+
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
 
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
