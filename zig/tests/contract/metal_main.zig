@@ -436,6 +436,9 @@ pub fn main(init: std.process.Init) !u8 {
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);
+    var hy4: @import("metal_hy4.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer hy4.deinit();
+    try hy4.collect(o.only);
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_experts.deinit();
     try nemotron_experts.collect(o.only);

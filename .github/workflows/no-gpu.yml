@@ -288,6 +288,9 @@ jobs:
       # The pull client's framing and path checks: its fake hub runs on std.Io.net, so Windows builds and runs them.
       - name: zig build test-pull-security
         run: zig build -Dfixed-cpu test-pull-security
+      # The sm_120 Windows CUDA product type-checked (empty kernel images, nothing emitted): POSIX-only code fails here.
+      - name: zig build compile-native-cuda-windows
+        run: zig build -Dfixed-cpu compile-native-cuda-windows
       - name: Save the build cache
         if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

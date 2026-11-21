@@ -77,6 +77,7 @@ pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
 pub const hy4_flash = @import("families/hy4_flash/serve_metal.zig");
+pub const hy4_contract = @import("families/hy4_flash/contract_exports.zig");
 pub const qwen3_metal = @import("families/qwen3/metal/metal.zig");
 pub const llama = @import("families/llama/llama.zig");
 pub const flint = @import("families/flint/flint.zig");

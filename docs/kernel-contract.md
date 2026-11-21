@@ -170,6 +170,17 @@ for a row whose tile or block reads a non-finite value at a key masked for that 
 `gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
 float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
 that plants such a value and carries the finding, so its other entries keep a clean gate 1.
+Hy4-flash's `tf_hy4_attend_chunks` and `tf_hy4_attend_scored` give NaN for a row and head whose 512-key chunk starts
+with a -Inf score, where float64 leaves that key out: the running max is still -Inf there, so the first rescale is
+exp(-Inf - -Inf). Its `tf_hy4_attend_nax` gives NaN for a row whose 32-key tile reads a non-finite value at a key it
+masks (0 x Inf inside the P x V mma), and 0 for a row whose every score is NaN, where float64 gives NaN: Metal's `max`
+drops the NaN, so the running max stays -Inf and the kernel's guard weighs every key 0. Each has an entry of its own.
+Hy4-flash's `tf_hy4_route_select_rank` ranks a NaN key 0, since every comparison with it is false, so it races the
+row's best expert for the first pick; the core select it stands beside never picks a NaN key.
+Hy4-flash's `tf_hy4_group_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `max(dot, 0.0f)`.
+Hy4-flash's SwiGLU clip, in `tf_affine_experts_up_4` and `_8` and in affine_mm's `am_swiglu`, gives a finite output for
+a NaN gate or up sum where float64 keeps the NaN: `min(gate, 10)` and `clamp(up, -10, 10)` drop it. Its 4-bit tensor
+gathers carry affine_mm's +128 code offset finding above.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is

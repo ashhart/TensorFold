@@ -23,7 +23,7 @@ def concurrent(fault=None):
 
     512 tokens keep each stream ~0.1 s long at the fake's token gap, so the two streams overlap on a slow runner too
     (20 Nov: at 64 tokens a hosted Windows runner decoded them one after the other and main went red)."""
-    with tempfile.TemporaryDirectory() as folder, fake(False, fault) as url:
+    with tempfile.TemporaryDirectory() as folder, fake(False, fault, pair_streams=True) as url:
         out = Path(folder) / "out.json"
         subprocess.run([sys.executable, str(TOOLS / "bench_concurrent.py"), url, "fake", "--levels", "2", "--reps",
                         "1", "--temperatures", "0", "--tokens", "512", "--alone", "--serial", "--output", str(out)],

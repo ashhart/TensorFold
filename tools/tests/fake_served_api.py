@@ -60,6 +60,8 @@ import socket
 import threading
 import time
 
+from fake_stream_pair import StreamPairs
+
 FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_free", "cancel_reply",
           "cancel_health", "evict", "undrafted", "plain_drafts", "sampled_drafts", "unsampled", "serial", "empty")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
@@ -207,11 +209,14 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         key = json.dumps({k: v for k, v in body.items() if k not in ("stream", "stream_options")}, sort_keys=True)
         if server.prefill and not body.get("stream") and self.left(server.prefill):
             return
-        with server.one if server.fault == "serial" else contextlib.nullcontext():
+        pair = server.stream_pairs if body.get("stream") and server.fault != "serial" else None
+        with server.one if server.fault == "serial" else contextlib.nullcontext(), \
+                (pair.claim() if pair else contextlib.nullcontext()) as slot:
             payload = self.answer(body, key)
             # Out of flight before the reply is written: the client's next request must not find this one counted.
             if body.get("stream"):
-                self.play(streamed(payload, body.get("max_tokens", 16), TOKEN_GAP), key)
+                steps = streamed(payload, body.get("max_tokens", 16), TOKEN_GAP)
+                self.play(pair.steps(steps, slot) if pair else steps, key)
             else:
                 self.reply(200, payload)
         with server.lock:
@@ -363,12 +368,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True, prefill=0.0):
+def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True, prefill=0.0, *, pair_streams=False):
     """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
     server = FixtureHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
     server.streams = server.leaked = server.lost = server.disconnects = server.overlaps = 0
+    server.stream_pairs = StreamPairs(COUNTED) if pair_streams else None
     server.warm, server.warm_until, server.lanes_free, server.prefill = warm, 0.0, lanes_free, prefill
     server.census_at, server.census_gap = -1e9, 1e9  # no census read yet
     server.lock, server.one = threading.Lock(), threading.Lock()
@@ -389,7 +395,7 @@ def fake(cache, fault=None, linger=0.0, **shape):
     # linger: seconds each handler stays alive after its reply, widening any window between reply and exit.
     if fault not in (None, *FAULTS):
         raise ValueError(f"unknown fault {fault}")
-    # shape: warm, lanes_free and prefill, see ``running``.
+    # shape: warm, lanes_free, prefill; pair_streams opts the served-evidence fixture into visible-text rendezvous.
     with running(cache, fault, linger, **shape) as url:
         yield url
 
