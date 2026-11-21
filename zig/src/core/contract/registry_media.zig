@@ -67,6 +67,6 @@ pub const cuda = [_]CudaRecord{
 /// Drama 3's compact-checkpoint router, unmeasured: the GB10 check runs its contract and prints its RECORD.
 pub const cuda_pending = [_]CudaRecord{
     .{ .launch = .{ .name = "drama3 d3_router_compact", .symbol = "d3_router_compact", .image = "drama3", .threads = 256 }, .usage = @import("registry.zig").none },
-    // TOP's GB10 (sm_121, nvcc 13.0), job top-aaf334ae7ce0; no __launch_bounds__, so the driver allows 1024.
+    // GB10 (sm_121, nvcc 13.0) by docs/recipes/drama3-cuda/cfg-mix-gb10.sh; no __launch_bounds__, so 1024 fit.
     .{ .launch = .{ .name = "drama3 d3_cfg_mix", .symbol = "d3_cfg_mix", .image = "drama3", .threads = 256 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } }, .later_pending = true },
 };
