@@ -52,6 +52,12 @@ fn drafterDirectory(o: api.Open) ?[]const u8 {
     return if (o.drafts) o.drafter else null;
 }
 
+fn contextProblem(window: i64, fits: usize) ?[]const u8 {
+    if (window < 1) return "inkling2_loop: --context must be at least one token, and the selected context must fit the Metal state budget";
+    if (window > fits) return "inkling2_loop: --context exceeds the largest window this Mac can afford beside the checkpoint and DSpark state";
+    return null;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusal(o)) |why| {
         problem.* = why;
@@ -74,6 +80,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     } else null;
+    errdefer if (drafter) |d| d.deinit();
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
@@ -91,9 +98,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const draft_shared_token = if (drafter) |_| dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0) else 0;
     const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
     const window: i64 = o.context orelse @intCast(fits);
-    if (window < 1 or window > fits) {
+    if (contextProblem(window, fits)) |why| {
         if (drafter) |d| d.deinit();
         model.deinit();
+        problem.* = why;
         return null;
     }
     std.log.info("inkling2_loop: {d:.1} GiB for stream and prompt state, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
@@ -109,9 +117,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.drafted = null;
+    h.warm = .{ .queue = model.queue };
     if (drafter) |d| {
         try d.setContext(@intCast(window));
         h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+        h.drafted.?.first_rows = true;
     }
     errdefer if (h.drafted) |*d| d.deinit();
     const facts = if (h.drafted) |*d| d.facts(h.metal.facts()) else h.metal.facts();
@@ -120,7 +130,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.drafted) |*d| d.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = st.prompt_rows, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (drafter_dir) |dir| .{ .kind = "DSpark", .name = o.drafter_name orelse dir } else null } });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = st.prompt_rows, .decode_share = o.decode_share, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (drafter_dir) |dir| .{ .kind = "DSpark", .name = o.drafter_name orelse dir } else null } });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -190,6 +200,10 @@ test "Inkling native admission keeps DSpark opt-in and refuses learned modes" {
     o.speed_up = null;
     o.learn = "learned";
     try std.testing.expect(refusal(o) != null);
+    try std.testing.expect(contextProblem(0, 10) != null);
+    try std.testing.expect(contextProblem(-1, 10) != null);
+    try std.testing.expect(contextProblem(11, 10) != null);
+    try std.testing.expect(contextProblem(10, 10) == null);
 }
 
 test "Inkling native load limit clamps before integer conversion" {
