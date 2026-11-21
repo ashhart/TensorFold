@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: Enable dense MTP drafting for Qwen3.5-family targets with compatible checkpoint tensors (#3582). Thanks to @tacosta.
 
+
+
 - CUDA on unified-memory Linux (GB10): the start-up memory budget is at most the free memory CUDA reports, less the same reserve, instead of `/proc/meminfo` alone, and the server first drops the checkpoint's own shards from the page cache, so a checkpoint that was just read is not refused for its own cached pages; discrete cards, Windows, Metal and HIP are unchanged (#3192, part of #1857).
 - Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
 
