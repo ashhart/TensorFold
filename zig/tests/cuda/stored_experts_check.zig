@@ -170,7 +170,7 @@ pub fn outputs(gpu: Gpu, s: st.Stored, layer: usize) !void {
                 var sum: [2]f64 = .{ 0, 0 };
                 var abs: [2]f64 = .{ 0, 0 };
                 for (0..2) |m| for (0..st.hidden) |i| {
-                    const t = c.fromBf16(xr[i]) * s.w13.f64At(s.nv, e, m * st.width + j, i);
+                    const t = c.fromBf16(xr[i]) * s.w13.f64At(s.nv, e, 2 * j + m, i);
                     sum[m] += t;
                     abs[m] += @abs(t);
                 };
@@ -200,4 +200,57 @@ pub fn outputs(gpu: Gpu, s: st.Stored, layer: usize) !void {
         try check.expect(bad[0] == 0 and bad[1] == 0, "layer {d} {d} tokens: {d} gate-up and {d} down outputs outside the fp32 bound", .{ layer, tokens, bad[0], bad[1] });
         check.pass("layer {d} {s} {d} tokens ({s}): {d} gate-up and {d} down outputs within the fp32 bound; worst err/bound {d:.3} and {d:.3}", .{ layer, if (s.nv) "NVFP4" else "MXFP8", tokens, if (prompt) "prompt form" else "decode form", pairs * st.width, pairs * st.hidden, worst[0], worst[1] });
     }
+}
+
+/// MXFP8's E8M0 edges through tf_mxfp8_down_f32: scale byte 0 is 2^-127 (not 0, not 2^-126).
+pub fn e8m0Edges(gpu: Gpu) !void {
+    const a = gpu.gpa;
+    const n = 32;
+    const k = 32;
+    const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
+    var k8 = try mx.Mxfp8Experts.load(gpu.d, sms);
+    defer k8.unload();
+    var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
+    defer mod.unload();
+    const router = try grouped.Router.resolve(mod);
+    var stream = try cuda.Stream.init(gpu.d, false);
+    defer stream.deinit();
+    const edges = [_]u8{ 0, 1, 2, 126, 127, 128, 200, 240 }; // 448 x 2^113 still fits fp32
+    const values = [_]u8{ 0x38, 0x7E, 0x30, 0xB8 }; // 1, 448, 0.5, -1: each times 2^-127 stays a bf16 (>= 2^-133)
+    var codes: [n * k]u8 = undefined;
+    var scales: [n]u8 = undefined;
+    for (0..n) |r| {
+        scales[r] = edges[r % edges.len];
+        for (0..k) |i| codes[r * k + i] = values[(r / edges.len + i) % values.len];
+    }
+    var blocks: [mx.Mxfp8Experts.words]u32 = undefined;
+    mx.Mxfp8Experts.packOne(&blocks, &codes, &scales, n, k);
+    var w = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(&blocks));
+    defer w.free();
+    var eye: [k * k]u16 = @splat(0);
+    for (0..k) |i| eye[i * k + i] = 0x3F80;
+    var x = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(&eye));
+    defer x.free();
+    var ids: [k]i32 = @splat(0);
+    var dids = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(&ids));
+    defer dids.free();
+    var pb = try st.PlanBufs.init(gpu, k, 16);
+    defer pb.deinit();
+    try router.route(stream, dids.ptr, k, st.experts, 16, pb.plan);
+    var out = try cuda.DeviceBuffer.alloc(gpu.d, k * n * 4);
+    defer out.free();
+    try out.fill8(0xff, stream.handle);
+    const l: ex_.Layer = .{ .format = .mxfp8, .up = 0, .down = w.ptr, .width = k, .dims = n, .experts = st.experts, .caps = .{ 4, 25 } };
+    const gx: ex_.Grouped = .{ .mxfp8 = &k8 };
+    try gx.decode(stream, .down_f32, .{ .x = x.ptr, .stride = k }, l, pb.plan, out.ptr, pb.items, k, 16, -1);
+    try stream.synchronize();
+    const got = try a.alloc(f32, k * n);
+    defer a.free(got);
+    try out.download(0, std.mem.sliceAsBytes(got));
+    for (0..k) |i| for (0..n) |r| {
+        const want: f32 = @floatCast(core.expert_decode.mxfp8(&codes, &scales, k, r, i));
+        try check.expect(got[i * n + r] == want, "E8M0 byte {d}, code {x}: {e}, host {e}", .{ scales[r], codes[r * k + i], got[i * n + r], want });
+    };
+    try check.expect(core.expert_decode.e8m0(0) == 0x1p-127, "host E8M0 byte 0", .{});
+    check.pass("MXFP8 E8M0 bytes {any} decode exactly on the GPU (byte 0 = 2^-127)", .{edges});
 }

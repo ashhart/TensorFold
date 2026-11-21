@@ -86,13 +86,17 @@ pub const Stored = struct {
         defer a.free(up);
         const down = try a.alloc(u32, experts * down_words);
         defer a.free(down);
-        const half_c = s.w13.expertCodes(0).len / 2;
-        const half_s = s.w13.expertScales(0).len / 2;
+        const cb = s.w13.expertCodes(0).len; // w13 rows interleave gate and up (row 2j gate j, 2j + 1 up j)
+        const sb = s.w13.expertScales(0).len;
+        const split = try a.alloc(u8, cb + sb);
+        defer a.free(split);
         for (0..experts) |e| {
-            const c13 = s.w13.expertCodes(e);
-            const s13 = s.w13.expertScales(e);
-            const gate = [2][]const u8{ c13[0..half_c], s13[0..half_s] };
-            const upm = [2][]const u8{ c13[half_c..], s13[half_s..] };
+            const rc = cb / (2 * width);
+            const rs = sb / (2 * width);
+            mx.splitGateUp(s.w13.expertCodes(e), rc, split[0 .. cb / 2], split[cb / 2 .. cb]);
+            mx.splitGateUp(s.w13.expertScales(e), rs, split[cb..][0 .. sb / 2], split[cb + sb / 2 ..][0 .. sb / 2]);
+            const gate = [2][]const u8{ split[0 .. cb / 2], split[cb..][0 .. sb / 2] };
+            const upm = [2][]const u8{ split[cb / 2 .. cb], split[cb + sb / 2 ..][0 .. sb / 2] };
             const o = up[e * up_words ..][0..up_words];
             const d = down[e * down_words ..][0..down_words];
             if (s.nv) {
@@ -158,6 +162,7 @@ pub fn ckpt(gpu: Gpu, dir: []const u8) !void {
     defer gpu.gpa.free(path);
     var f = try core.safetensors.File.openPrefix(gpu.gpa, gpu.io, path, "model.llm.layers.");
     defer f.close(gpu.io);
+    try @import("stored_experts_check.zig").e8m0Edges(gpu);
     for ([_]usize{ 0, 20 }) |layer| {
         const s = try Stored.read(&f, layer);
         try invariants(s, layer);
