@@ -7,7 +7,6 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const family_memory = @import("cuda_family_memory.zig");
 const pool = family_memory.pool;
-const page_drop = @import("cuda_page_drop.zig");
 const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
@@ -267,7 +266,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
             return null;
         },
     };
-    if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir); // GB10: drop cached shards (#1857)
     const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.Witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
@@ -508,7 +506,6 @@ test {
     _ = windows;
     _ = @import("cuda_startup_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
-    _ = page_drop;
     _ = refusals;
     _ = lane_backend;
     _ = snaps;
