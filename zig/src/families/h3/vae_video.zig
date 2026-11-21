@@ -479,7 +479,7 @@ pub const Decoder = struct {
                 rope_s[rr * 48 + k2] = 0.0;
             }
         }
-        for (self.blocks) |b| {
+        if (getenv("SKIP_BLOCKS") == null) for (self.blocks) |b| {
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
 
