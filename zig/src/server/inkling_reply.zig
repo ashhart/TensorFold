@@ -78,7 +78,7 @@ pub const Stream = struct {
             if (reply[i] == '<') {
                 if (markerAt(reply[i..])) |hit| if (next(s.state, hit.m)) |to| {
                     i += hit.len;
-                    if (s.state == .tool and to == .content) try s.calls.append(a, try call(a, s.payload.items));
+                    if (s.state == .tool and to == .content) try s.close();
                     if (s.state == .header and (hit.m == .end or hit.m == .end_sampling)) try s.content.appendSlice(a, s.header.items);
                     if (to == .header or s.state == .header) s.header.clearRetainingCapacity();
                     if (to == .tool) s.payload.clearRetainingCapacity();
@@ -93,6 +93,12 @@ pub const Stream = struct {
             i = stop;
         }
         s.fed = i;
+    }
+
+    /// A finished tool block: its call, else its payload as written, kept as content.
+    fn close(s: *Stream) !void {
+        if (try call(s.a, s.payload.items)) |c| return s.calls.append(s.a, c);
+        try s.content.appendSlice(s.a, s.payload.items);
     }
 
     fn open(s: *Stream) *std.ArrayList(u8) {
@@ -161,13 +167,14 @@ pub fn thinkingTokens(text: anytype, ids: []const u32) usize {
     return n;
 }
 
-/// A finished tool block: `{"name": ..., "args": {...}}`; the arguments are the args member as written, or {}.
-fn call(a: std.mem.Allocator, payload: []const u8) !Call {
-    var doc = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return .{ .name = "", .arguments = "{}" };
+/// A tool block's `{"name": ..., "args": {...}}` with a string name; null for anything else.
+fn call(a: std.mem.Allocator, payload: []const u8) !?Call {
+    var doc = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return null;
     defer doc.deinit();
-    if (doc.value != .object) return .{ .name = "", .arguments = "{}" };
-    const n = doc.value.object.get("name") orelse std.json.Value{ .null = {} };
-    const own = if (n == .string) try a.dupe(u8, n.string) else "";
+    if (doc.value != .object) return null;
+    const n = doc.value.object.get("name") orelse return null;
+    if (n != .string) return null;
+    const own = try a.dupe(u8, n.string);
     const args = json_cut.find(try json_cut.members(a, std.mem.trimStart(u8, payload, " \t\r\n")), "args");
     return .{ .name = own, .arguments = try a.dupe(u8, if (args) |m| m.value else "{}") };
 }
@@ -276,7 +283,8 @@ test "inkling2 reply: a stream fed a byte at a time splits each prefix as the wh
     const a = arena.allocator();
     const reply = "<|message_model|><|content_thinking|>a <|content_text|>b<|end_message|><|message_model|><|content_text|>" ++
         "x <|content_te y<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"k\":1}}" ++
-        "<|end_message|><|message_model|>g<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{\"q\":\"<|\"";
+        "<|end_message|><|message_model|>f" ++
+        "<|content_invoke_tool_json|>{\"name\":<|end_message|><|message_model|>g<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{\"q\":\"<|\"";
     var s: Stream = .{ .a = a };
     for (1..reply.len + 1) |n| {
         try s.feed(reply[0..n], true);
@@ -286,5 +294,15 @@ test "inkling2 reply: a stream fed a byte at a time splits each prefix as the wh
         try t.expectEqualStrings(want.content, got.content);
         try t.expectEqual(want.calls.len, got.calls.len);
         try t.expectEqualStrings(want.cut orelse "-", got.cut orelse "-");
+    }
+}
+
+test "inkling2 reply: a tool block that is not a call stays content" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "{\"name\":\"f\",\"args\":{", "{\"args\":{}}", "{\"name\":7}", "[\"f\"]", "" }) |payload| {
+        const r = try splitT(&arena, try std.mem.concat(arena.allocator(), u8, &.{ "<|message_model|>f<|content_invoke_tool_json|>", payload, "<|end_message|>" }));
+        try t.expectEqual(@as(usize, 0), r.calls.len);
+        try t.expectEqualStrings(payload, r.content);
     }
 }

@@ -49,10 +49,10 @@ const Text = struct {
 const payload = "{\"name\":\"run_shell_command\",\"args\":{\"command\":\"ls /tmp\"}}";
 const reply_parts = [_][]const u8{ markers.thinking, "Need the files.", markers.end, markers.model, "run_shell_command", markers.tool_json, payload, markers.end, markers.end_sampling };
 
-/// The scripted reply as ids: each marker one token, every other byte its own.
-fn script(a: A) ![]const u32 {
+/// A scripted reply as ids: each marker one token, every other byte its own.
+fn script(a: A, parts: []const []const u8) ![]const u32 {
     var out: std.ArrayList(u32) = .empty;
-    for (reply_parts) |p| if (Text.tokenId(undefined, p)) |id| try out.append(a, id) else for (p) |b| try out.append(a, b);
+    for (parts) |p| if (Text.tokenId(undefined, p)) |id| try out.append(a, id) else for (p) |b| try out.append(a, b);
     return out.items;
 }
 
@@ -127,7 +127,12 @@ fn post(a: A, body: []const u8, stream: bool) !Got {
 
 /// ``post`` to the chat route or, with ``is_chat`` false, the raw completions route.
 fn postTo(a: A, body: []const u8, stream: bool, is_chat: bool) !Got {
-    var backend: OneByOne = .{ .tokens = try script(a) };
+    return postReply(a, &reply_parts, body, stream, is_chat);
+}
+
+/// ``postTo`` with the model writing `parts` instead of the scripted call.
+fn postReply(a: A, parts: []const []const u8, body: []const u8, stream: bool, is_chat: bool) !Got {
+    var backend: OneByOne = .{ .tokens = try script(a, parts) };
     var text: Text = .{};
     var key: call_ids.Key = .of(call_ids.test_key_text);
     const srv = try server.Server.init(t.allocator, t.io, backend.engine(), text.text(), .{ .served_name = "test-model", .model_ids = &.{"test-model"}, .enable_thinking = false, .use_drafts = false, .tool_id_key = &key }, null);
@@ -224,5 +229,19 @@ test "an Inkling 2 reply a stop string ended keeps no tool calls, whole and stre
         const got = try post(a, body, stream);
         try t.expectEqual(@as(usize, 0), got.ids.items.len);
         try t.expectEqualStrings("Need the files.", got.reasoning.items);
+    }
+}
+
+test "an Inkling 2 tool block that is not JSON is content, not a call, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const broken = payload[0 .. payload.len - 1];
+    const parts = [_][]const u8{ markers.model, "run_shell_command", markers.tool_json, broken, markers.end, markers.end_sampling };
+    for ([_]bool{ false, true }) |stream| {
+        const got = try postReply(a, &parts, try request(a, "x", stream), stream, true);
+        try t.expectEqual(@as(usize, 0), got.ids.items.len);
+        try t.expectEqualStrings(broken, got.content.items);
+        try t.expectEqualStrings("stop", got.finish);
     }
 }
