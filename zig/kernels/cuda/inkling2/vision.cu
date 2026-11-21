@@ -1,4 +1,4 @@
-// Inkling 2's vision tower glue: patch rows to the sequence, axial rotary, layer-scaled residuals.
+// Inkling 2's vision tower glue: patch rows to the sequence and axial rotary.
 #include <cuda_bf16.h>
 #include <stdint.h>
 
@@ -52,12 +52,4 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_rope(__nv_bfloat
         p[0] = tobf(__fadd_rn(__fmul_rn(a, c), __fmul_rn(-b, s)));
         p[1] = tobf(__fadd_rn(__fmul_rn(b, c), __fmul_rn(a, s)));
     }
-}
-
-// x = bf16(x + bf16(gamma y)), the layer scale; a gamma mode on vit.cu's tf_vit_pointwise could replace it later.
-extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_scale_add(__nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ y,
-                                                                          const __nv_bfloat16* __restrict__ gamma, int64_t count) {
-    const int64_t i = (int64_t)blockIdx.x * kThreads + threadIdx.x;
-    if (i >= count) return;
-    x[i] = tobf(__fadd_rn(bf(x[i]), bf(tobf(__fmul_rn(bf(gamma[i % kWidth]), bf(y[i]))))));
 }

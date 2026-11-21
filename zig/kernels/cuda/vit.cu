@@ -30,11 +30,13 @@ __device__ __forceinline__ float gelu_erf(float x) {
     return __fmul_rn(__fmul_rn(x, 0.5f), __fadd_rn(1.0f, erff(__fmul_rn(x, alpha))));
 }
 
-// bf16(act(v)), then bf16(R[at] + v) when R; v is already rounded to bf16.
-__device__ __forceinline__ __nv_bfloat16 pointwise_at(float v, const __nv_bfloat16* R, int64_t at, int act) {
+// bf16(act(v)), bf16(G[at % width] v) when G, then bf16(R[at] + v) when R; v is already rounded to bf16.
+__device__ __forceinline__ __nv_bfloat16 pointwise_at(float v, const __nv_bfloat16* R, int64_t at, int act,
+                                                      const __nv_bfloat16* G = nullptr, int width = 1) {
     if (act == 1) v = rbf(gelu_tanh(v));
     if (act == 2) v = rbf(gelu_erf(v));
     if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
+    if (G) v = rbf(__fmul_rn(bf(G[at % width]), v));
     return __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
 }
 
@@ -69,6 +71,15 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_pointwise(const __nv_bfl
     const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
     if (at >= count) return;
     O[at] = pointwise_at(bf(X[at]), R, at, act);
+}
+
+// tf_vit_pointwise with a layer scale G [width] between act and the add: torch's `r + gamma * h` (Inkling 2).
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_pointwise_gamma(const __nv_bfloat16* X, const __nv_bfloat16* R, __nv_bfloat16* O,
+                                                                            int64_t count, int act, const __nv_bfloat16* __restrict__ G,
+                                                                            int width) {
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
+    if (at >= count) return;
+    O[at] = pointwise_at(bf(X[at]), R, at, act, G, width);
 }
 
 // Block (row, column block): bias then pointwise, keeping the intermediate bf16 rounding in a register.
