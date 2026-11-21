@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
+
 - Cluster: bring-up reports the leader, epoch and view it agreed on and counts only acknowledgments for that view, so a rank that finishes after a peer says goodbye no longer reports a smaller view on slow runners (#4135, fixes #4123). Thanks to @AIFlowML.
 
 
