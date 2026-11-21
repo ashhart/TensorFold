@@ -347,7 +347,7 @@ test "Qwen retained: completed widths record actual chunks and one pass" {
         seed(&cache);
         var stream = try lanes.Stream.init(a, .{ .id = "widths", .prompt = &ids, .max_new = 4, .chunks = if (chunked) &.{ 5, 18 } else &.{} });
         defer stream.deinit(a);
-        try prefill.run(&cache, &stream, 128, Context{}, Context.advance);
+        try prefill.run(&cache, &stream, 128, Context{}, Context.advance, snap);
         try t.expectEqualSlices(u32, if (chunked) &.{ 5, 13, 5 } else &.{23}, stream.prefill_widths.items);
         try t.expectEqual(@as(usize, 23), cache.len);
     }

@@ -131,7 +131,7 @@ pub const Metal = struct {
         if (!self.fills.contains(stream)) {
             const cache = try self.opening(stream);
             errdefer self.drop(stream);
-            const at = prefill.open(cache, stream);
+            const at = prefill.open(cache, stream, snapshot);
             if (stream.reuse_failed) try lanes.memory_restore.refuseFallback(stream); // never a placeholder row as text
             try self.fills.put(self.gpa, stream, at);
         }
