@@ -1,6 +1,7 @@
 //! `tf-qwen35-cuda <model> stage <out> [fp8]`: one scenario's logits from one engine, or rank 0 of a stage ring.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const stage = @import("stage");
 const q = @import("qwen35");
 const E = q.engine;
@@ -79,7 +80,7 @@ fn finish(init: std.process.Init, a: std.mem.Allocator, e: *E.Engine, lead: *S.L
     for (toks) |t| std.debug.print(" {d}", .{t});
     std.debug.print("\n", .{});
     report(0, role);
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = out.items });
+    try core.chunked_write.writeFileChunked(init.io, std.Io.Dir.cwd(), out_path, out.items);
     return 0;
 }
 

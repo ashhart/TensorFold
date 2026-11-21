@@ -31,6 +31,6 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(out[at * q.config.vocab * 2 ..][0 .. n * q.config.vocab * 2], scratch.logits.contents()[0 .. n * q.config.vocab * 2]);
         at += n;
     }
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[3], .data = out });
+    try tf.chunked_write.writeFileChunked(init.io, std.Io.Dir.cwd(), args[3], out);
     std.debug.print("native Qwen forward: {d} rows, bf16 logits, fp32 recurrent state\n", .{ids.len});
 }
