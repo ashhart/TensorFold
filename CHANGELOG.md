@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: add opt-in hybrid Neural Engine+GPU prefill FFN sharing (`TF_ANE_COLUMNS`) and opt-in `TF_ANE_INT8=1` W8A8 MIL weight compilation for SenseNova-Loop AWQ and MLX-affine `g64` checkpoints, keeping both off by default (`default_columns = 0`, `TF_ANE_INT8 = 0`), with `q27_add_ane_bf16` kernel contract gates and controls (#3781).
+
 - Metal: serve and draft SenseNova-Loop-9B in MLX affine group-64 checkpoints (`mlx-q4g64`, `mlx-q5g64`, `mlx-q6g64`, `mlx-q8g64`), reusing shared physical weights across execution steps and supporting BF16 or quantized embeddings (#3781).
 
 - Metal: draft SenseNova-Loop-9B with its published mtp.safetensors head, keys-only intermediate prompt absorb and multi-stream batched draft rounds (#3868, fixes #3781).

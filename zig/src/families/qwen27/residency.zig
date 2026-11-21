@@ -118,6 +118,7 @@ pub fn finishShare(h: anytype, room: u64) !void {
         var buffers: ShareBuffers = undefined;
         const resident = if (h.resident) |*r| r else return error.AneShareResidencyRefused;
         if (!resident.tryAddNow(try shareBuffers(share, &buffers))) return error.AneShareResidencyRefused;
+        if (@hasField(@TypeOf(share.*), "awq")) if (share.awq) |t| if (t.owned.items.len > 0 and !resident.tryAddNow(t.owned.items)) return error.AneShareResidencyRefused;
     }
 }
 
@@ -130,6 +131,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     if (h.model.ane) |share| {
         var buffers: ShareBuffers = undefined;
         try list.appendSlice(h.gpa, try shareBuffers(share, &buffers));
+        if (@hasField(@TypeOf(share.*), "awq")) if (share.awq) |t| try list.appendSlice(h.gpa, t.owned.items);
     }
     var projections = h.model.kernels.lanes.valueIterator();
     while (projections.next()) |projection| try fields.append(h.gpa, &list, projection);

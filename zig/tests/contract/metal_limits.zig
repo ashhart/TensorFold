@@ -64,6 +64,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.qwen3_heads, .pre_m5 = sources.qwen3_heads };
     }
+    if (std.mem.startsWith(u8, d.name, "q27 ane awq ")) {
+        if (!assemble) return undefined;
+        const body = try a.dupe(u8, tf.qwen27.ane_awq.add_ane_bf16_source);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
         if (!assemble) return undefined;
         const units = std.mem.indexOf(u8, d.name, " m5 ") != null;

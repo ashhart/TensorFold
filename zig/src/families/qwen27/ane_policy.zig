@@ -14,7 +14,26 @@ pub fn requestedOnChip(n: u32, tensor_units: bool) bool {
     return n > 0 and tensor_units;
 }
 
+/// Explicit ANE column share allowed on Apple GPU generation 15+ (M3 and newer) when opted in via TF_ANE_COLUMNS.
+pub fn requestedOnGeneration(n: u32, generation: u32) bool {
+    return n > 0 and generation >= 15;
+}
+
+/// Strict opt-in: `TF_ANE_INT8` defaults to false everywhere and only `"1"` or `"true"` enables W8A8 INT8 slices.
+pub fn int8(value: ?[]const u8) !bool {
+    const raw = value orelse return false;
+    if (raw.len == 0 or std.mem.eql(u8, raw, "0") or std.mem.eql(u8, raw, "false")) return false;
+    if (std.mem.eql(u8, raw, "1") or std.mem.eql(u8, raw, "true")) return true;
+    return error.InvalidAneInt8;
+}
+
+/// Looped checkpoints keep `TF_ANE_INT8` opt-in too, identical to non-looped checkpoints.
+pub fn int8For(value: ?[]const u8, _: bool) !bool {
+    return int8(value);
+}
+
 test "ANE policy: the default is off and an explicit column count selects the opt-in" {
+    try std.testing.expectEqual(@as(u32, 0), default_columns);
     try std.testing.expectEqual(@as(u32, 0), try columns(null));
     try std.testing.expectEqual(@as(u32, 0), try columns("0"));
     try std.testing.expectEqual(@as(u32, 3072), try columns("3072"));
@@ -36,4 +55,25 @@ test "ANE policy: malformed and overflowing overrides keep refusing" {
 
 test "ANE policy: the measured private-overhead price is 32 MiB independent of columns" {
     try std.testing.expectEqual(@as(?u64, 32 << 20), build_runtime_overhead);
+}
+
+test "ANE policy: generation gating and strict opt-in TF_ANE_INT8 parsing" {
+    try std.testing.expect(!requestedOnGeneration(1024, 14));
+    try std.testing.expect(!requestedOnGeneration(0, 15));
+    try std.testing.expect(requestedOnGeneration(1024, 15));
+    try std.testing.expect(requestedOnGeneration(2048, 17));
+    try std.testing.expect(!try int8(null));
+    try std.testing.expect(!try int8(""));
+    try std.testing.expect(!try int8("0"));
+    try std.testing.expect(!try int8("false"));
+    try std.testing.expect(try int8("1"));
+    try std.testing.expect(try int8("true"));
+    try std.testing.expectError(error.InvalidAneInt8, int8("yes"));
+    try std.testing.expect(!try int8For(null, true));
+    try std.testing.expect(!try int8For("", true));
+    try std.testing.expect(!try int8For("0", true));
+    try std.testing.expect(!try int8For("false", true));
+    try std.testing.expect(try int8For("1", true));
+    try std.testing.expect(try int8For("1", false));
+    try std.testing.expect(try int8For("true", true));
 }

@@ -102,30 +102,54 @@ pub const Blob = struct {
     offsets: [4]usize = @splat(0),
 
     pub fn init(a: std.mem.Allocator, counts: []const usize) !Blob {
+        var specs: [4]Spec = undefined;
         if (counts.len == 0 or counts.len > 4) return error.Compile;
+        for (counts, 0..) |n, i| specs[i] = .{ .bytes = n * 2, .dtype = 1 };
+        return initSpecs(a, specs[0..counts.len]);
+    }
+
+    const Spec = struct { bytes: usize, dtype: u32 };
+
+    fn initSpecs(a: std.mem.Allocator, specs: []const Spec) !Blob {
+        if (specs.len == 0 or specs.len > 4) return error.Compile;
         var b = Blob{ .bytes = undefined };
         var at: usize = 64;
-        for (counts, 0..) |n, i| {
+        for (specs, 0..) |sp, i| {
             b.offsets[i] = at;
-            at = std.mem.alignForward(usize, at + 64 + n * 2, 64);
+            at = std.mem.alignForward(usize, at + 64 + sp.bytes, 64);
         }
         b.bytes = try a.alignedAlloc(u8, .@"16", at);
         @memset(b.bytes, 0);
-        std.mem.writeInt(u32, b.bytes[0..4], @intCast(counts.len), .little);
+        std.mem.writeInt(u32, b.bytes[0..4], @intCast(specs.len), .little);
         std.mem.writeInt(u32, b.bytes[4..8], 2, .little);
-        for (counts, 0..) |n, i| {
+        for (specs, 0..) |sp, i| {
             const h = b.bytes[b.offsets[i]..][0..64];
             std.mem.writeInt(u32, h[0..4], 0xDEADBEEF, .little);
-            std.mem.writeInt(u32, h[4..8], 1, .little);
-            std.mem.writeInt(u64, h[8..16], n * 2, .little);
+            std.mem.writeInt(u32, h[4..8], sp.dtype, .little);
+            std.mem.writeInt(u64, h[8..16], sp.bytes, .little);
             std.mem.writeInt(u64, h[16..24], b.offsets[i] + 64, .little);
         }
         return b;
     }
 
+    /// Four-tensor blob for INT8 MLP slice: `[qw1(i8), sw1(f16), qw2(i8), sw2(f16)]`.
+    pub fn initInt8(a: std.mem.Allocator, w1_elems: usize, w1_rows: usize, w2_elems: usize, w2_rows: usize) !Blob {
+        return initSpecs(a, &.{
+            .{ .bytes = w1_elems, .dtype = 4 },
+            .{ .bytes = w1_rows * 2, .dtype = 1 },
+            .{ .bytes = w2_elems, .dtype = 4 },
+            .{ .bytes = w2_rows * 2, .dtype = 1 },
+        });
+    }
+
     /// Tensor i's fp16 values, `n` of them.
     pub fn values(b: Blob, i: usize, n: usize) []f16 {
         return @alignCast(std.mem.bytesAsSlice(f16, b.bytes[b.offsets[i] + 64 ..][0 .. n * 2]));
+    }
+
+    /// Tensor i's int8 values, `n` of them.
+    pub fn int8Values(b: Blob, i: usize, n: usize) []i8 {
+        return @ptrCast(b.bytes[b.offsets[i] + 64 ..][0..n]);
     }
 
     pub fn deinit(b: Blob, a: std.mem.Allocator) void {
@@ -161,6 +185,40 @@ pub fn mlpSlice(a: std.mem.Allocator, h: usize, c: usize, s: usize, w1: usize, w
         \\}}
         \\
     , .{ .h = h, .s = s, .c = c, .c2 = 2 * c, .w1 = w1, .w2 = w2 });
+}
+
+/// MIL for one INT8 per-output-channel quantized MLP column slice using `constexpr_blockwise_shift_scale`.
+pub fn mlpSliceInt8(a: std.mem.Allocator, h: usize, c: usize, s: usize, qw1: usize, sw1: usize, qw2: usize, sw2: usize) ![]u8 {
+    return std.fmt.allocPrint(a,
+        \\program(1.3)
+        \\[buildInfo = dict<string, string>({{{{"coremlc-component-MIL", "3510.2.1"}}, {{"coremlc-version", "3505.4.1"}}}})]
+        \\{{
+        \\  func main<ios18>(tensor<fp16, [1, {[h]d}, 1, {[s]d}]> x) {{
+        \\    tensor<int8, [{[c2]d}, {[h]d}, 1, 1]> qw1 = const()[name=string("qw1"), val=tensor<int8, [{[c2]d}, {[h]d}, 1, 1]>(BLOBFILE(path=string("@model_path/weights/weight.bin"), offset=uint64({[qw1]d})))];
+        \\    tensor<fp16, [{[c2]d}, 1, 1, 1]> sw1 = const()[name=string("sw1"), val=tensor<fp16, [{[c2]d}, 1, 1, 1]>(BLOBFILE(path=string("@model_path/weights/weight.bin"), offset=uint64({[sw1]d})))];
+        \\    tensor<fp16, [{[c2]d}, {[h]d}, 1, 1]> w1 = constexpr_blockwise_shift_scale(data=qw1, scale=sw1)[name=string("w1")];
+        \\    tensor<int8, [{[h]d}, {[c]d}, 1, 1]> qw2 = const()[name=string("qw2"), val=tensor<int8, [{[h]d}, {[c]d}, 1, 1]>(BLOBFILE(path=string("@model_path/weights/weight.bin"), offset=uint64({[qw2]d})))];
+        \\    tensor<fp16, [{[h]d}, 1, 1, 1]> sw2 = const()[name=string("sw2"), val=tensor<fp16, [{[h]d}, 1, 1, 1]>(BLOBFILE(path=string("@model_path/weights/weight.bin"), offset=uint64({[sw2]d})))];
+        \\    tensor<fp16, [{[h]d}, {[c]d}, 1, 1]> w2 = constexpr_blockwise_shift_scale(data=qw2, scale=sw2)[name=string("w2")];
+        \\    string pt = const()[name=string("pt"), val=string("valid")];
+        \\    tensor<int32, [2]> st = const()[name=string("st"), val=tensor<int32, [2]>([1,1])];
+        \\    tensor<int32, [4]> pd = const()[name=string("pd"), val=tensor<int32, [4]>([0,0,0,0])];
+        \\    tensor<int32, [2]> dl = const()[name=string("dl"), val=tensor<int32, [2]>([1,1])];
+        \\    int32 gr = const()[name=string("gr"), val=int32(1)];
+        \\    tensor<fp16, [1, {[c2]d}, 1, {[s]d}]> gu = conv(dilations=dl, groups=gr, pad=pd, pad_type=pt, strides=st, weight=w1, x=x)[name=string("gu")];
+        \\    tensor<int32, [4]> b0 = const()[name=string("b0"), val=tensor<int32, [4]>([0,0,0,0])];
+        \\    tensor<int32, [4]> e0 = const()[name=string("e0"), val=tensor<int32, [4]>([1,{[c]d},1,{[s]d}])];
+        \\    tensor<int32, [4]> b1 = const()[name=string("b1"), val=tensor<int32, [4]>([0,{[c]d},0,0])];
+        \\    tensor<int32, [4]> e1 = const()[name=string("e1"), val=tensor<int32, [4]>([1,{[c2]d},1,{[s]d}])];
+        \\    tensor<fp16, [1, {[c]d}, 1, {[s]d}]> g = slice_by_index(x=gu, begin=b0, end=e0)[name=string("g")];
+        \\    tensor<fp16, [1, {[c]d}, 1, {[s]d}]> u = slice_by_index(x=gu, begin=b1, end=e1)[name=string("u")];
+        \\    tensor<fp16, [1, {[c]d}, 1, {[s]d}]> sg = silu(x=g)[name=string("sg")];
+        \\    tensor<fp16, [1, {[c]d}, 1, {[s]d}]> hh = mul(x=sg, y=u)[name=string("hh")];
+        \\    tensor<fp16, [1, {[h]d}, 1, {[s]d}]> y = conv(dilations=dl, groups=gr, pad=pd, pad_type=pt, strides=st, weight=w2, x=hh)[name=string("y")];
+        \\  }} -> (y);
+        \\}}
+        \\
+    , .{ .h = h, .s = s, .c = c, .c2 = 2 * c, .qw1 = qw1, .sw1 = sw1, .qw2 = qw2, .sw2 = sw2 });
 }
 
 /// A compiled, loaded program.
@@ -273,4 +331,75 @@ test "a 1x1 convolution on the Neural Engine matches an fp32 sum of its fp16 inp
         for (0..k) |i| want += @as(f32, w[row * k + i]) * @as(f32, xs[i * s + col]);
         try std.testing.expectApproxEqAbs(want, @as(f32, ys[row * s + col]), 0.05 + @abs(want) * 2e-3);
     };
+}
+
+test "INT8 constexpr_blockwise_shift_scale MLP slice compiles and evaluates within tolerance" {
+    if (!available()) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const device = try Device.init();
+    defer device.deinit();
+    const h = 64;
+    const c = 64;
+    const s = 128;
+    const blob = try Blob.initInt8(a, 2 * c * h, 2 * c, h * c, h);
+    defer blob.deinit(a);
+    const qw1 = blob.int8Values(0, 2 * c * h);
+    const sw1 = blob.values(1, 2 * c);
+    const qw2 = blob.int8Values(2, h * c);
+    const sw2 = blob.values(3, h);
+    for (sw1, 0..) |*sc, i| sc.* = @floatCast(0.01 + @as(f32, @floatFromInt(i % 7)) * 0.002);
+    for (sw2, 0..) |*sc, i| sc.* = @floatCast(0.01 + @as(f32, @floatFromInt(i % 5)) * 0.002);
+    for (qw1, 0..) |*v, i| v.* = @intCast(@as(i32, @intCast(i * 17 % 101)) - 50);
+    for (qw2, 0..) |*v, i| v.* = @intCast(@as(i32, @intCast(i * 29 % 101)) - 50);
+    const mil = try mlpSliceInt8(a, h, c, s, blob.offsets[0], blob.offsets[1], blob.offsets[2], blob.offsets[3]);
+    defer a.free(mil);
+    const program = try Program.init(mil, blob.bytes);
+    defer program.deinit();
+    const x = try Surface.init(device, h * s * 2);
+    defer x.deinit();
+    const y = try Surface.init(device, h * s * 2);
+    defer y.deinit();
+    const xs = x.buffer.slice(f16, h * s);
+    for (xs, 0..) |*v, i| v.* = @floatCast(@as(f32, @floatFromInt(@as(i32, @intCast(i * 31 % 33)) - 16)) / 16.0);
+    const req = try program.request(x, y);
+    defer req.deinit();
+    try req.run();
+    const ys = y.buffer.slice(f16, h * s);
+    for (0..h) |row| {
+        var want_acc: f32 = 0;
+        var g_buf: [c]f32 = undefined;
+        for (0..c) |col| {
+            var g: f32 = 0;
+            var u: f32 = 0;
+            for (0..h) |k| {
+                const xv: f32 = @floatCast(xs[k * s]);
+                g += (@as(f32, @floatFromInt(qw1[col * h + k])) * @as(f32, @floatCast(sw1[col]))) * xv;
+                u += (@as(f32, @floatFromInt(qw1[(c + col) * h + k])) * @as(f32, @floatCast(sw1[c + col]))) * xv;
+            }
+            const sg = g / (1.0 + @exp(-g));
+            g_buf[col] = sg * u;
+        }
+        for (0..c) |col| {
+            want_acc += (@as(f32, @floatFromInt(qw2[row * c + col])) * @as(f32, @floatCast(sw2[row]))) * g_buf[col];
+        }
+        try std.testing.expectApproxEqAbs(want_acc, @as(f32, @floatCast(ys[row * s])), 0.12 + @abs(want_acc) * 1e-2);
+    }
+    // Verify INT8 dequantize on ANE matches native FP16 ANE conv within FP16 weight rounding.
+    const fblob = try Blob.init(a, &.{ 2 * c * h, h * c });
+    defer fblob.deinit(a);
+    const fw1 = fblob.values(0, 2 * c * h);
+    const fw2 = fblob.values(1, h * c);
+    for (qw1, 0..) |v, i| fw1[i] = @floatCast(@as(f32, @floatFromInt(v)) * @as(f32, @floatCast(sw1[i / h])));
+    for (qw2, 0..) |v, i| fw2[i] = @floatCast(@as(f32, @floatFromInt(v)) * @as(f32, @floatCast(sw2[i / c])));
+    const fmil = try mlpSlice(a, h, c, s, fblob.offsets[0], fblob.offsets[1]);
+    defer a.free(fmil);
+    const fprog = try Program.init(fmil, fblob.bytes);
+    defer fprog.deinit();
+    const fy = try Surface.init(device, h * s * 2);
+    defer fy.deinit();
+    const freq = try fprog.request(x, fy);
+    defer freq.deinit();
+    try freq.run();
+    const fys = fy.buffer.slice(f16, h * s);
+    for (0..h) |row| try std.testing.expectApproxEqAbs(@as(f32, @floatCast(fys[row * s])), @as(f32, @floatCast(ys[row * s])), 0.01 + @abs(@as(f32, @floatCast(fys[row * s]))) * 2e-3);
 }

@@ -130,6 +130,8 @@ const valid = [_]Case{
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
     .{ .name = "TF_ANE_COLUMNS", .raw = "0", .n = 0 },
     .{ .name = "TF_ANE_COLUMNS", .raw = "3072", .n = 3072 },
+    .{ .name = "TF_ANE_INT8", .raw = "0", .n = 0 },
+    .{ .name = "TF_ANE_INT8", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
@@ -418,7 +420,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "TF_ANE_INT8", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
@@ -436,6 +438,7 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
+    try t.expect(try e.value(bool, "TF_ANE_INT8", "1", false) and !(try e.value(bool, "TF_ANE_INT8", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
 }
 

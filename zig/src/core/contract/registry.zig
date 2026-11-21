@@ -470,6 +470,7 @@ pub const sensenova_mhc = @import("sensenova_mhc_records.zig");
 test {
     _ = sensenova_mhc;
     _ = learning;
+    _ = @import("q27_ane_records.zig");
     _ = @import("qwen4_cuda_receipts_test.zig");
     _ = @import("moss_image_cuda_records.zig");
     _ = @import("glm_kv_pending.zig");
