@@ -114,6 +114,7 @@ test "draft sources: Metal GLM and GLM DSA follow actual MTP weights" {
     var weights: @typeInfo(@TypeOf(e.w)).pointer.child = undefined;
     e.w = &weights;
     e.ep = null;
+    e.dflash = null;
     e.device = .{ .id = no_arch };
     var slots: tf.glm.slots.Slots = undefined;
     var b: tf.glm.backend.Backend = .{ .gpa = std.testing.allocator, .sl = &slots };
