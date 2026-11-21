@@ -3,26 +3,13 @@ const std = @import("std");
 const mtl = @import("metal");
 const dc = @import("decoder_config.zig");
 const octree = @import("octree.zig");
+const trace_state = @import("decode_trace.zig");
 const gs = @import("gaussian.zig");
 const Decoder = @import("decoder.zig").Decoder;
 
 pub const Timing = struct { octree: f64 = 0, octree_gpu: f64 = 0, gaussian: f64 = 0, gaussian_gpu: f64 = 0, activation: f64 = 0 };
 
-/// Each level's parents and their counts, kept when a caller asks (for comparing a run's topology).
-pub const Trace = struct {
-    parents: [dc.max_level][]const [3]u32 = @splat(&.{}),
-    counts: [dc.max_level][]const u32 = @splat(&.{}),
-    probs: [dc.max_level][]const f32 = @splat(&.{}),
-
-    pub fn deinit(t: *Trace, gpa: std.mem.Allocator) void {
-        for (t.parents, t.counts, t.probs) |p, c, q| {
-            gpa.free(p);
-            gpa.free(c);
-            gpa.free(q);
-        }
-        t.* = .{};
-    }
-};
+pub const Trace = trace_state.Trace;
 
 pub const Result = struct {
     anchors: []f32,
@@ -39,7 +26,7 @@ pub const Result = struct {
 
 /// The anchors for `points` points: each level's probabilities on Metal, its split on the host.
 pub fn anchors(gpa: std.mem.Allocator, t: *Decoder, points: usize, draws: *octree.Draws, trace: ?*Trace, time: *Timing) ![]f32 {
-    var level: octree.Level = .{ .coords = try gpa.dupe([3]u32, &.{.{ 0, 0, 0 }}), .counts = try gpa.dupe(u32, &.{@intCast(points)}) };
+    var level = try octree.root(gpa, points);
     defer {
         gpa.free(level.coords);
         gpa.free(level.counts);
@@ -57,11 +44,13 @@ pub fn anchors(gpa: std.mem.Allocator, t: *Decoder, points: usize, draws: *octre
         const started = mtl.clock.seconds();
         octree.softmax(probs);
         const next = try octree.descend(gpa, level, probs, @intCast(l), draws, null);
+        errdefer {
+            gpa.free(next.coords);
+            gpa.free(next.counts);
+        }
         time.octree += mtl.clock.seconds() - started;
         if (trace) |tr| {
-            tr.parents[l - 1] = try gpa.dupe([3]u32, level.coords);
-            tr.counts[l - 1] = try gpa.dupe(u32, level.counts);
-            tr.probs[l - 1] = try gpa.dupe(f32, probs);
+            try trace_state.capture(tr, gpa, l - 1, level, probs);
         }
         gpa.free(level.coords);
         gpa.free(level.counts);
