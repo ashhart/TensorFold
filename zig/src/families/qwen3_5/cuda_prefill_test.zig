@@ -431,6 +431,8 @@ test "Qwen stepped prefill: an unread chunk's last layer launches K/V, both head
     e.gpa = t.allocator;
     e.g = g;
     e.layers = &ls;
+    var schedule = g.schedule();
+    e.steps = schedule.steps[0..schedule.len];
     e.fns = undefined;
     e.fns.head_norm = fnHandle(1);
     e.fns.head_norm_shift = fnHandle(2);
