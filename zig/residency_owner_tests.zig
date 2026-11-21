@@ -195,3 +195,7 @@ test {
 test {
     _ = @import("residency_qwen27_share_tests.zig");
 }
+
+test {
+    _ = @import("residency_qwen27_mtp_tests.zig");
+}
