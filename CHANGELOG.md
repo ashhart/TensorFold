@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5/3.6/3.8 on CUDA: a prompt chunk before the last that nothing reads (no last-layer tap, learning, MLP or pocket reader, prompt int8 path or image) stops its last layer after its keys, values and RoPE, skipping that layer's query projection, attention, output projection, MLP and head, with the same reply tokens; the final chunk is unchanged (#3060, fixes #2941). Thanks to @javierbits.
+
 - Tests: the Web loopback startup test sets its fixture ready before probing, so its health, model-list and relay checks no longer depend on warm-up timing (#3753, fixes #3752). Thanks to @AIFlowML.
 
 - Server: `TENSORFOLD_PARALLEL` sets the default lanes when `serve` has no `--parallel`: a whole number 1 to 4096 or `auto`; the flag wins when both are given, a blank value keeps the default, and any other value is refused by name at startup (#3685, for #3684). Thanks to @bikepresentball.
@@ -31,8 +33,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on Metal can draft with a published DFlash2 checkpoint behind `--drafter DIR` (and `--drafter-bits`); drafted replies equal plain ones, and the default stays MTP (#3920). Thanks to @gilby.
 
 - Qwen3.5-2B on Metal: a new stream's prompt runs one chunk a call at the same cuts as before, so other streams' decode rounds run between its chunks instead of waiting for the whole prompt; a cancel between chunks keeps the state at the last chunk's end (#3090, refs #3021).
-
-
 
 - Tools: add tf-h3-image to compare MiniMax-H3-Image Metal transformer steps with exported picture cases (#2766).
 
@@ -139,8 +139,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the dots.mocr CUDA recipe covers images with `--vision` (14,400 merged image tokens a request by default, set by `--vision-image-tokens`; each lane holds its request's image rows, so fewer lanes fit; JPEG needs libjpeg-turbo 3.1.4.1; video is refused), the oracle's SDPA image references and `stages`, and the `dots-image` and `dots-text` checks; the README and recipe index list CUDA for images and text (#2773, refs #1927). Thanks to @laudney.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_READOUT_FUSED=1` (off by default) runs a prompt pass's BF16 hyper-connection read-out from 768 rows in three launches instead of five, with every output byte the same (#3413, refs #3392). Thanks to @BadAd84.
-
-- CUDA: a non-final Qwen 3.5/3.6/3.8 prompt chunk that nothing reads stops its last layer after its keys and values, so cold 32K prompts finish 28-35 ms sooner and 8K about 3 ms sooner on a quiet GB10, with identical replies (#3060, fixes #2941).
 
 - Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
 
