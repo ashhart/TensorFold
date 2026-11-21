@@ -5,6 +5,7 @@ const tool_params = @import("tool_params.zig");
 const reply_text = @import("reply_text.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
+const tool_kinds = @import("tool_kinds.zig");
 
 pub const ns = "]<]minimax[>[";
 pub const open = ns ++ "<tool_call>";
@@ -39,57 +40,95 @@ pub fn closeAfterRewrite(a: Allocator, raw: []const u8, tools: []const Value, wh
     };
 }
 
-/// An element `ns<tag>inner ns</tag>` at `at` (same-named children nest): its tag, inner text and end.
-const Element = struct { tag: []const u8, inner: []const u8, end: usize };
+/// An element's opener: its name and the first byte of its contents.
+const Opener = struct { tag: []const u8, content: usize };
 
-fn element(text: []const u8, at: usize) ?Element {
-    if (!std.mem.startsWith(u8, text[at..], ns ++ "<")) return null;
-    const t0 = at + ns.len + 1;
-    const gt = std.mem.indexOfScalarPos(u8, text, t0, '>') orelse return null;
-    const tag = text[t0..gt];
+fn opener(text: []const u8, at: usize) ?Opener {
+    if (at > text.len or !std.mem.startsWith(u8, text[at..], ns ++ "<")) return null;
+    const start = at + ns.len + 1;
+    const gt = std.mem.indexOfScalarPos(u8, text, start, '>') orelse return null;
+    const tag = text[start..gt];
     if (tag.len == 0 or tag[0] == '/') return null;
-    var opener_buf: [256]u8 = undefined;
-    var closer_buf: [256]u8 = undefined;
-    const opener = std.fmt.bufPrint(&opener_buf, ns ++ "<{s}>", .{tag}) catch return null;
-    const closer = std.fmt.bufPrint(&closer_buf, ns ++ "</{s}>", .{tag}) catch return null;
-    var depth: usize = 1;
-    var p = gt + 1;
-    while (true) {
-        const c = std.mem.indexOfPos(u8, text, p, closer) orelse return null;
-        const o = std.mem.indexOfPos(u8, text, p, opener);
-        if (o != null and o.? < c) {
-            depth += 1;
-            p = o.? + opener.len;
-            continue;
-        }
-        depth -= 1;
-        if (depth == 0) return .{ .tag = tag, .inner = text[gt + 1 .. c], .end = c + closer.len };
-        p = c + closer.len;
-    }
+    return .{ .tag = tag, .content = gt + 1 };
 }
 
-/// An element's value: nested `item`s an array, other nested tags an object, else a scalar by its schema.
-fn value(a: Allocator, inner: []const u8, schema: tool_params.Schema) Allocator.Error!?Value {
-    const lead = inner.len - std.mem.trimStart(u8, inner, " \t\r\n").len;
-    if (!std.mem.startsWith(u8, inner[lead..], ns ++ "<")) return try tool_params.decode(a, inner, schema, false);
+const Parsed = struct { tag: []const u8, value: Value, end: usize };
+const max_depth = 64;
+
+/// One element and its matching closer, read without rescanning any descendant.
+fn element(a: Allocator, text: []const u8, at: *usize, schema: tool_params.Schema, depth: usize) Allocator.Error!?Parsed {
+    if (depth >= max_depth) return null;
+    const opened = opener(text, at.*) orelse return null;
+    const current = (try tool_kinds.resolved(a, schema.value, schema.root)) orelse return null;
+    const kind = if (current == .object) current.get("type") else null;
+    const structured = current == .object and (current.get("properties") != null or current.get("items") != null or
+        (kind != null and kind.? == .string and (std.mem.eql(u8, kind.?.string, "object") or std.mem.eql(u8, kind.?.string, "array"))));
+    var closer_buf: [256]u8 = undefined;
+    const closer = std.fmt.bufPrint(&closer_buf, ns ++ "</{s}>", .{opened.tag}) catch return null;
+    var p = opened.content;
+    const lead = p + (text[p..].len - std.mem.trimStart(u8, text[p..], " \t\r\n").len);
+    if (!structured or !std.mem.startsWith(u8, text[lead..], ns ++ "<")) {
+        const end = std.mem.indexOfPos(u8, text, p, closer) orelse return null;
+        if (!tool_params.finiteJson(text[p..end])) return null;
+        const decoded = try tool_params.decode(a, text[p..end], .{ .value = current, .root = schema.root }, false);
+        at.* = end + closer.len;
+        return .{ .tag = opened.tag, .value = decoded, .end = at.* };
+    }
     var items: std.ArrayList(Value) = .empty;
     const obj = try json.newObject(a);
     var all_items = true;
-    var p = lead;
-    while (p < inner.len) {
-        const rest = std.mem.trimStart(u8, inner[p..], " \t\r\n");
-        p = inner.len - rest.len;
-        if (p == inner.len) break;
-        const el = element(inner, p) orelse return null;
-        p = el.end;
-        const is_item = std.mem.eql(u8, el.tag, "item");
+    while (p < text.len) {
+        p += text[p..].len - std.mem.trimStart(u8, text[p..], " \t\r\n").len;
+        if (std.mem.startsWith(u8, text[p..], closer)) {
+            at.* = p + closer.len;
+            return .{ .tag = opened.tag, .value = if (all_items and items.items.len > 0) .{ .array = items.items } else .{ .object = obj }, .end = at.* };
+        }
+        const child_open = opener(text, p) orelse return null;
+        const is_item = std.mem.eql(u8, child_open.tag, "item");
+        const sub = try childSchema(a, current, schema.root, child_open.tag, is_item);
+        const child = (try element(a, text, &p, .{ .value = sub, .root = schema.root }, depth + 1)) orelse return null;
         all_items = all_items and is_item;
-        const sub: Value = if (schema.value == .object) (if (is_item) schema.value.get("items") else if (schema.value.get("properties")) |props| (if (props == .object) props.get(el.tag) else null) else null) orelse .{ .object = try json.newObject(a) } else .{ .object = try json.newObject(a) };
-        const v = (try value(a, el.inner, .{ .value = sub, .root = schema.root })) orelse return null;
-        if (is_item) try items.append(a, v);
-        try obj.put(a, el.tag, v);
+        if (is_item) try items.append(a, child.value);
+        try obj.put(a, child.tag, child.value);
     }
-    return if (all_items and items.items.len > 0) .{ .array = items.items } else .{ .object = obj };
+    return null;
+}
+
+/// The schema for one nested name, resolving references and selecting a supported combiner branch.
+fn childSchema(a: Allocator, schema: Value, root: Value, tag: []const u8, is_item: bool) Allocator.Error!Value {
+    if (schema == .object) {
+        if (is_item) if (schema.get("items")) |items| return items;
+        if (schema.get("properties")) |properties| if (properties == .object) if (properties.get(tag)) |child| return child;
+        for ([_][]const u8{ "anyOf", "oneOf", "allOf" }) |key| if (schema.get(key)) |branches| if (branches == .array) {
+            for (branches.array) |branch| {
+                const current = (try tool_kinds.resolved(a, branch, root)) orelse continue;
+                if (current != .object) continue;
+                if (is_item and current.get("items") != null) return childSchema(a, current, root, tag, is_item);
+                if (current.get("properties")) |properties| if (properties == .object and properties.get(tag) != null)
+                    return childSchema(a, current, root, tag, is_item);
+            }
+        };
+    }
+    return .{ .object = try json.newObject(a) };
+}
+
+/// Text safe to interpolate in a DSML tag or attribute.
+fn safeName(text: []const u8) bool {
+    return std.mem.indexOfScalar(u8, text, '"') == null and std.mem.indexOf(u8, text, "\u{ff5c}DSML\u{ff5c}") == null;
+}
+
+fn safeValue(v: Value) bool {
+    return switch (v) {
+        .float => |f| !std.math.isNan(f),
+        .string => true,
+        .array => |items| for (items) |item| {
+            if (!safeValue(item)) break false;
+        } else true,
+        .object => |obj| for (obj.keys(), obj.values()) |key, item| {
+            if (!safeName(key) or !safeValue(item)) break false;
+        } else true,
+        else => true,
+    };
 }
 
 /// One block's invokes as DSML, or null when anything in it is not a well-formed invoke.
@@ -107,26 +146,24 @@ fn block(a: Allocator, body: []const u8, schemas: *const tool_params.Schemas) Al
         if (!std.mem.startsWith(u8, rest, invoke)) return null;
         const n0 = p + invoke.len;
         const q = std.mem.indexOfPos(u8, body, n0, "\">") orelse return null;
-        const e = std.mem.indexOfPos(u8, body, q + 2, invoke_end) orelse return null;
         const name = body[n0..q];
+        if (!safeName(name)) return null;
         try out.print(a, "\n<\u{ff5c}DSML\u{ff5c}invoke name=\"{s}\">", .{name});
         var k = q + 2;
         while (true) {
-            const r = std.mem.trimStart(u8, body[k..e], " \t\r\n");
-            k = e - r.len;
-            if (k == e) break;
-            const el = element(body[0..e], k) orelse return null;
+            const r = std.mem.trimStart(u8, body[k..], " \t\r\n");
+            k = body.len - r.len;
+            if (std.mem.startsWith(u8, body[k..], invoke_end)) break;
+            const child_open = opener(body, k) orelse return null;
+            var cut = k;
+            const el = (try element(a, body, &cut, try tool_params.schemaOf(schemas, name, child_open.tag, a), 0)) orelse return null;
+            if (!safeName(el.tag) or !safeValue(el.value)) return null;
             k = el.end;
-            const v = (try value(a, el.inner, try tool_params.schemaOf(schemas, name, el.tag, a))) orelse return null;
-            if (v == .string) {
-                try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"true\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ el.tag, v.string });
-            } else {
-                const spelled = json.stringify(a, v, .{}) catch return error.OutOfMemory;
-                try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"false\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ el.tag, spelled });
-            }
+            const spelled = json.stringify(a, el.value, .{ .ascii = true }) catch return error.OutOfMemory;
+            try out.print(a, "<\u{ff5c}DSML\u{ff5c}parameter name=\"{s}\" string=\"false\">{s}</\u{ff5c}DSML\u{ff5c}parameter>", .{ el.tag, spelled });
         }
         try out.appendSlice(a, "</\u{ff5c}DSML\u{ff5c}invoke>");
-        p = e + invoke_end.len;
+        p = k + invoke_end.len;
         calls += 1;
     }
     if (calls == 0) return null;
