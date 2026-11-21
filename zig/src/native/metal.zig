@@ -11,7 +11,6 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
-const deepseek_v41 = @import("deepseek_v41_lane_host.zig");
 const metal_slide = @import("metal_slide.zig");
 const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
@@ -42,7 +41,6 @@ const affine_widths = blk: {
 };
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
-
 pub const families: []const api.Family = &.{
     .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
     .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
@@ -76,7 +74,6 @@ pub const families: []const api.Family = &.{
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
 }
-
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
@@ -165,7 +162,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "deepseek_v41")) return deepseek_v41.open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "deepseek_v41")) return @import("deepseek_v41_lane_host.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);

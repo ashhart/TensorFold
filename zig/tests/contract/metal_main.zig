@@ -320,23 +320,8 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var dsv41_routes = try @import("metal_dsv41_main.zig").Routes.create(a, device, queue, &kernels, o.only);
     defer dsv41_routes.destroy();
-    const Exl3Projection = @import("metal_exl3_projection.zig").Suite;
-    var exl3_projection: ?*Exl3Projection = null;
-    defer if (exl3_projection) |suite| suite.destroy();
-    if (Exl3Projection.matches(o.only))
-        exl3_projection = try Exl3Projection.create(a, device, queue, &kernels, o.only);
-    const Exl3Chain = @import("metal_exl3_chain.zig").For(tf.exl3_projection);
-    const exl3_chain = if (Exl3Chain.matches(o.only)) try Exl3Chain.create(a, device, queue, &kernels, o.only) else null;
-    defer if (exl3_chain) |suite| suite.destroy();
-    const NativeRows = @import("metal_dsv41_native_rows.zig").For(tf.deepseek_v41);
-    const native_rows = if (NativeRows.matches(o.only)) try NativeRows.create(a, device, queue, &kernels, o.only) else null;
-    defer if (native_rows) |suite| suite.destroy();
-    const NativeAttentionRows = @import("metal_dsv41_attention_rows.zig").For(tf.deepseek_v41, tf.frags);
-    var native_attention_rows: ?*NativeAttentionRows = null;
-    defer if (native_attention_rows) |suite| suite.destroy();
-    if (NativeAttentionRows.matches(o.only)) {
-        if (tensor) native_attention_rows = try NativeAttentionRows.create(a, device, queue, &kernels, o.only) else std.debug.print("SKIP dsv41-native-attention: native batched scan requires tensor units\n", .{});
-    }
+    var exl3 = try @import("metal_exl3_suites.zig").Suites.init(a, device, queue, &kernels, o.only, tensor);
+    defer exl3.deinit();
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
     defer for (d3combines[0..d3combine_count]) |*p| p.deinit();

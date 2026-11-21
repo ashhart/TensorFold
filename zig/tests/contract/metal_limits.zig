@@ -309,7 +309,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;
-    } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ")) {
+    } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ") or
+        std.mem.startsWith(u8, d.name, "glm moe rows "))
+    {
         if (!assemble) return undefined;
         text = tf.glm.wide.gather_source;
     } else if (std.mem.startsWith(u8, d.name, "nemotron experts ")) {
@@ -515,7 +517,14 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     }
     var n = try registry.checkMetal(a, list.items, false);
     std.debug.print("{s} limits: {d} selected Metal launches on their declared device generations, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
-    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    for (list.items) |d| {
+        const l = launchOf(a, device, d) catch |err| {
+            std.debug.print("FAIL limits here {s}: no source for it here ({t})\n", .{ d.name, err });
+            n += 1;
+            continue;
+        };
+        n += try onThisGpu(a, device, l, false);
+    }
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;

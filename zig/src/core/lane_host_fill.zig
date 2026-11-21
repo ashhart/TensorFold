@@ -293,8 +293,7 @@ fn short(j: *const LaneHost.Job) bool {
     return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
 }
 
-/// Fill chunks' cap: 512 under the flag (chunk-invariant family, live decoder) past an engine default's threshold,
-/// else the family's `decoding_rows`; 0: the engine's own cut.
+/// Fill chunks' cap: 512 with the flag past the default threshold, else the family's `decoding_rows`; 0: none.
 pub fn capRows(h: *const LaneHost, rows: u64) u32 {
     if (h.share.policy != .stock and h.share.call_rows > 0) return h.share.call_rows; // policyRun's hint for the call in flight
     if (runnable(h) == 0) return 0; // nothing decoding: the engine's own cut

@@ -382,8 +382,7 @@ pub const Store = struct {
         s.reserve(prompt, born, e, marked, spans, primary);
         const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marked, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
-        // The tail mark this lookup planned, where the backend may snapshot it inside the chunk that runs past it.
-        // Fitted marks only: a tail the reservation dropped is not snapshotted either.
+        // The tail mark this lookup planned, snapshot inside its chunk by the backend; only a fitted one.
         const snap_at: u32 = if (s.rules.tail_snap and tail_at > from and tail_at < prompt.len and
             prompt.len - tail_at >= 64 and std.mem.indexOfScalar(u32, fitted, tail_at) != null) tail_at else 0;
         return .{ .entry = e, .marks = fitted, .miss = miss, .snap_at = snap_at };
