@@ -10,7 +10,9 @@ const Tensor = hip.ops.Tensor;
 
 fn cancelled(ptr: *anyopaque) bool {
     const s: *lanes.Stream = @ptrCast(@alignCast(ptr));
-    return s.isCancelled();
+    if (!s.isCancelled()) return false;
+    s.keepInterruptedPrefill(s.fill_at.load(.monotonic));
+    return true;
 }
 
 fn compute(h: *backend.Backend, s: *lanes.Stream) Compute {
@@ -54,7 +56,7 @@ fn begin(h: *backend.Backend, s: *lanes.Stream) !*backend.Lane {
 }
 
 pub fn step(h: *backend.Backend, s: *lanes.Stream, max_rows: u32) !bool {
-    if (s.isCancelled()) return error.Cancelled;
+    if (cancelled(s)) return error.Cancelled;
     const l = h.streams.map.get(s) orelse try begin(h, s);
     const from = l.fill;
     if (from == s.prompt_len) {
@@ -94,6 +96,11 @@ pub fn step(h: *backend.Backend, s: *lanes.Stream, max_rows: u32) !bool {
     return to == s.prompt_len;
 }
 
+pub fn cancel(h: *backend.Backend, s: *lanes.Stream) !void {
+    const l = h.streams.map.get(s) orelse return;
+    s.keepInterruptedPrefill(@intCast(l.fill));
+}
+
 fn finish(h: *backend.Backend, s: *lanes.Stream, l: *backend.Lane, comp: Compute) !void {
     const logits = try decoder.logits(comp, try l.state.hiddenAt(s.prompt_len - 1), 1);
     var r = try h.request(h.a, s, l.image_rows, s.prompt_len, &.{}, s.prompt_len);
@@ -103,4 +110,35 @@ fn finish(h: *backend.Backend, s: *lanes.Stream, l: *backend.Lane, comp: Compute
     var choice: [1]u32 = undefined;
     try h.sampler.draw(comp.ops, h.e.stream, logits, &.{r}, &choice, false);
     l.first = h.streams.drawn.take(choice[0]);
+}
+
+test "Parse cancelled prefill retains the last completed prefix" {
+    const Record = struct {
+        calls: usize = 0,
+        at: u32 = 0,
+        fn interrupted(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const r: *@This() = @ptrCast(@alignCast(ptr));
+            r.calls += 1;
+            r.at = at;
+        }
+        fn cancelledNow(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    const ids: [513]u32 = @splat(1);
+    var saved: u8 = 0;
+    var record: Record = .{};
+    var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "cancelled", .prompt = &ids, .max_new = 1, .reuse = .{ .saved = &saved, .at = 512, .hook = .{ .ptr = &record, .at = Record.interrupted, .interrupted = Record.interrupted } }, .cancel_check = .{ .ptr = &record, .check = Record.cancelledNow } });
+    defer s.deinit(std.testing.allocator);
+    var h: backend.Backend = undefined;
+    try std.testing.expectError(error.Cancelled, step(&h, &s, 512));
+    try std.testing.expectEqual(@as(usize, 1), record.calls);
+    try std.testing.expectEqual(@as(u32, 512), record.at);
+    h.streams = .init(std.testing.allocator);
+    defer h.streams.deinit();
+    var lane: backend.Lane = .{ .state = undefined, .prefix = undefined, .image_rows = 0, .fill = 256 };
+    try h.streams.map.put(std.testing.allocator, &s, &lane);
+    try cancel(&h, &s);
+    try std.testing.expectEqual(@as(usize, 2), record.calls);
+    try std.testing.expectEqual(@as(u32, 256), record.at);
 }

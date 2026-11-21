@@ -130,7 +130,7 @@ pub const Dory = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Dory) lanes.Model {
@@ -262,7 +262,7 @@ pub const Dory = struct {
     }
 
     /// A prompt pass begins: a slot, the stream's rule, a kept state restored; where its first chunk starts.
-    fn opening(x: *Dory, s: *Stream) !*Lane {
+    pub fn opening(x: *Dory, s: *Stream) !*Lane {
         const p = s.prompt();
         if (p.len == 0) return error.EmptyPrompt;
         if (!fits(x.m.context, p.len, @as(usize, s.max_new))) return error.PastContext;
@@ -316,7 +316,10 @@ pub const Dory = struct {
     fn chunk(x: *Dory, s: *Stream, l: *Lane, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
-        if (s.isCancelled()) return error.Cancelled;
+        if (s.isCancelled()) {
+            s.keepInterruptedPrefill(@intCast(at));
+            return error.Cancelled;
+        }
         var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
         const marks = if (x.prompts != null) l.marks else s.reuse.marks;
         for (marks) |mk| if (mk > at and mk < end) {
@@ -352,6 +355,12 @@ pub const Dory = struct {
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
         return x.chunk(s, l, 0);
+    }
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const x = self(ptr);
+        const l = x.lanes.getPtr(s) orelse return;
+        if (l.fill) |at| s.keepInterruptedPrefill(@intCast(at));
+        l.fill = null;
     }
 
     fn handle(x: *Dory) usize {

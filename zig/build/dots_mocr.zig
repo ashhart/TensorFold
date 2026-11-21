@@ -23,10 +23,13 @@ pub fn hostTests(b: *std.Build, test_step: *std.Build.Step) void {
     }
 }
 
-pub fn hipTests(b: *std.Build, hip: *std.Build.Module, test_step: *std.Build.Step) void {
+pub fn hipTests(b: *std.Build, hip: *std.Build.Module, backend: *std.Build.Module, test_step: *std.Build.Step) void {
     const host = b.addRunArtifact(b.addTest(.{ .root_module = hip, .filters = &.{ "dots HIP columns:", "dots HIP vision:", "dots HIP text:" } }));
     test_step.dependOn(&host.step);
     b.step("test-dots-hip-host", "dots.mocr HIP column, vision and text operator admission without GPU execution").dependOn(&host.step);
+    const backend_host = b.addRunArtifact(b.addTest(.{ .root_module = backend, .filters = &.{"dots prefill"} }));
+    test_step.dependOn(&backend_host.step);
+    b.step("test-dots-hip-prefill-host", "dots.mocr interrupted prefill snapshots without GPU execution").dependOn(&backend_host.step);
     const family = hipModule(b, hip);
     const weights_host = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "dots HIP weights:", "dots HIP graph:", "dots HIP plan:" } }));
     b.step("test-dots-hip-weights-host", "HIP weight ownership, layout and budget refusal without GPU calls").dependOn(&weights_host.step);

@@ -160,6 +160,7 @@ pub const Server = struct {
     store: responses.Store,
     background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
     ws_cache_bytes: std.atomic.Value(usize) = .init(0), // Responses socket cache bytes (ws_cache.zig)
+    media_jobs: @import("media_job_service.zig").Service = .{},
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
@@ -191,12 +192,10 @@ pub const Server = struct {
     /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
     recall: ?*api.recall_store.Store = null,
     witness: ?*@import("witness.zig").State = null, // serve owns GET /v1/execution/witness state; null: off
-
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         return @import("input_types.zig").media(srv);
     }
-
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const tool_ids = if (config.tool_id_key) |key| key.take() else try @import("ids.zig").Key.random(io);
         const srv = try gpa.create(Server);
@@ -268,6 +267,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.media_jobs.deinit();
         srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();

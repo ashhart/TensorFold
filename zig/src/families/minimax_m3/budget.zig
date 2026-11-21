@@ -21,7 +21,14 @@ pub fn caches(ram: u64, working_set: u64, text: ?[]const u8, resident: u64) erro
     }
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
+/// Draft scratch and per-stream bytes; `base` already owns the checkpoint's draft weights.
+pub const Draft = struct { fixed: u64, stream: u64, tap_row: u64 };
 
+pub fn residentBytes(base: u64, streams: u64, draft: ?Draft) u64 {
+    const d = draft orelse return base;
+    const shared = @as(u64, st.batch_rows + st.prompt_rows) * d.tap_row;
+    return base + d.fixed + shared + streams * (d.stream + d.tap_row);
+}
 /// The longest context one stream's caches fit in `bytes`, at most `most`.
 pub fn longest(c: *const cfg.Config, bytes: u64, most: usize) usize {
     if (st.cacheBytes(c, 1) > bytes) return 0;

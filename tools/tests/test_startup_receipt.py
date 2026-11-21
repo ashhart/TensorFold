@@ -130,7 +130,8 @@ class Parsing(unittest.TestCase):
                     "tensorfold": {"token_sha256": "a" * 64}}
         self.assertEqual(fmt.completion_hash(json.dumps(response)), "a" * 64)
         for changed in (dict(response, error={}), dict(response, choices=[{"finish_reason": None}]),
-                        dict(response, usage={"completion_tokens": 0}), dict(response, tensorfold={"token_sha256": "short"})):
+                        dict(response, choices=[]), dict(response, usage={"completion_tokens": 0}),
+                        dict(response, tensorfold={"token_sha256": "short"})):
             with self.assertRaises(fmt.InvalidReceipt):
                 fmt.completion_hash(json.dumps(changed))
 
@@ -295,12 +296,26 @@ class MainFailures(unittest.TestCase):
             if not resources:
                 done["resources"] = None
             results.append(dict(fmt.paired(ready, done, digest * 64), status="ok", child_reaped=True))
-        warms = [{"sha256": identity} for identity in (identities or ["same"] * len(hashes))]
+        identities = identities or ["same"] * len(hashes)
+        warms = [{"sha256": identity} for identity in identities for _ in range(2)]
         with mock.patch.object(run.sys, "platform", "darwin"), mock.patch.object(run, "warm_checkpoint", side_effect=warms), mock.patch.object(
             run, "attempt", side_effect=results
         ), mock.patch.object(run.subprocess, "Popen", side_effect=AssertionError("main fixture must not launch")):
             status = run.main(["--binary", str(self.binary), "--model", str(self.model), "--output", str(output), "--runs", str(len(hashes))])
         return status, json.loads((output / "summary.json").read_text())
+
+    def test_checkpoint_change_during_attempt_invalidates_identity(self):
+        output = self.root / "changed-checkpoint"
+        ready, done = record(), record("first_completion")
+        result = dict(fmt.paired(ready, done, "a" * 64), status="ok", child_reaped=True)
+        with mock.patch.object(run.sys, "platform", "darwin"), mock.patch.object(
+            run, "warm_checkpoint", side_effect=[{"sha256": "before"}, {"sha256": "after"}]
+        ), mock.patch.object(run, "attempt", return_value=result):
+            status = run.main(["--binary", str(self.binary), "--model", str(self.model), "--output", str(output), "--runs", "1"])
+        summary = json.loads((output / "summary.json").read_text())
+        self.assertEqual((status, summary["status"]), (1, "failed"))
+        self.assertEqual(summary["runs"][0]["error"], "Checkpoint changed during attempt")
+        self.assertEqual(summary["runs"][0]["prewarm"]["sha256"], "before")
 
     def test_three_run_reply_hash_agreement(self):
         status, summary = self.main_case("matching", ["a", "a", "a"])

@@ -197,8 +197,12 @@ pub const Lanes = struct {
         var resume_from = from;
         while (true) : (at += engine.prompt_rows) {
             if (resume_from == null) mark(s, at);
-            if (try self.x.chunk(s.prompt(), at, resume_from, .{ .ptr = s, .check = cancelled })) |first| {
-                self.lanes.getPtr(s).?.first = self.take(first);
+            const first = self.x.chunk(s.prompt(), at, resume_from, .{ .ptr = s, .check = cancelled }) catch |err| {
+                if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(at));
+                return err;
+            };
+            if (first) |token| {
+                self.lanes.getPtr(s).?.first = self.take(token);
                 return;
             }
             resume_from = null;
@@ -215,8 +219,12 @@ pub const Lanes = struct {
         const at = going orelse if (from) |r| r.at else 0;
         errdefer l.fill = null;
         if (from == null) mark(s, at);
-        if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled })) |first| {
-            l.first = self.take(first);
+        const first = self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }) catch |err| {
+            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(at));
+            return err;
+        };
+        if (first) |token| {
+            l.first = self.take(token);
             l.fill = null;
             return true;
         }
@@ -227,6 +235,7 @@ pub const Lanes = struct {
     fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
         const self = of(ptr);
         const l = self.lanes.getPtr(s) orelse return;
+        if (l.fill) |at| s.keepInterruptedPrefill(@intCast(at));
         l.fill = null;
     }
 
@@ -382,3 +391,45 @@ pub const Lanes = struct {
         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
     }
 };
+
+test "MiniMax CUDA prefill: cancellation keeps the landed chunk for a resumed pass" {
+    const Record = struct {
+        kept: engine.Kept = .{ .id = 7, .at = 0 },
+        calls: usize = 0,
+        fn interrupted(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const r: *@This() = @ptrCast(@alignCast(ptr));
+            r.kept.at = at;
+            r.calls += 1;
+        }
+    };
+    const ids: [2 * engine.prompt_rows + 1]u32 = @splat(7);
+    var record: Record = .{};
+    var s = try lanes.Stream.init(std.testing.allocator, .{
+        .id = "cancelled",
+        .prompt = &ids,
+        .max_new = 1,
+        .reuse = .{ .hook = .{ .ptr = &record, .at = Record.interrupted, .interrupted = Record.interrupted } },
+    });
+    defer s.deinit(std.testing.allocator);
+    var e: engine.Engine = undefined;
+    e.snaps = .empty;
+    defer e.snaps.deinit(std.testing.allocator);
+    var back: Lanes = .{ .x = .{ .e = &e, .link = null } };
+    defer back.lanes.deinit(std.testing.allocator);
+    try back.lanes.put(std.testing.allocator, &s, .{ .slot = 0, .fill = engine.prompt_rows });
+    const b = back.backend();
+    try b.vtable.cancel_prefill.?(b.ptr, &s);
+    try std.testing.expectEqual(@as(usize, 1), record.calls);
+    try std.testing.expectEqual(@as(u32, engine.prompt_rows), record.kept.at);
+    try std.testing.expect(back.lanes.getPtr(&s).?.fill == null);
+    try e.snaps.put(std.testing.allocator, record.kept.id, .{ .buf = undefined, .at = record.kept.at, .drafted = .{ 0, 0 } });
+
+    var resumed = try lanes.Stream.init(std.testing.allocator, .{ .id = "resumed", .prompt = &ids, .max_new = 1, .reuse = .{ .saved = @ptrCast(&record.kept), .at = record.kept.at } });
+    defer resumed.deinit(std.testing.allocator);
+    const from = back.resumeFrom(&resumed, ids.len) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, engine.prompt_rows), from.at);
+    try std.testing.expectEqual(record.kept.id, from.id);
+    try std.testing.expectEqual(record.kept.at, resumed.cached);
+    try std.testing.expectEqual(record.kept.at, resumed.fill_at.load(.monotonic));
+    try std.testing.expect(!resumed.reuse_failed);
+}

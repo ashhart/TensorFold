@@ -104,6 +104,8 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
+    const media_jobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"media jobs:"} }));
+    b.step("test-media-jobs-host", "Durable media admission, ownership, cancellation, recovery and retention without devices").dependOn(&media_jobs.step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);

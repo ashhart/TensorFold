@@ -126,7 +126,7 @@ pub const Gemma = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
 
     /// The drafter's taps: those layers' outputs (before the next norm), kept by every forward from now on.
     fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
@@ -350,7 +350,10 @@ pub const Gemma = struct {
     fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
-        if (s.isCancelled()) return error.Cancelled;
+        if (s.isCancelled()) {
+            s.keepInterruptedPrefill(@intCast(at));
+            return error.Cancelled;
+        }
         // solo passes (TF_GEMMA4_CHUNK_SOLO) only without a drafter's taps, at most `injects` images a pass
         const solo = lanes.solo_chunk.passRows(&x.lanes, s, "fill", x.m.prompt_most, prompt_rows);
         const rows = if (x.tapped or s.images.len > max_injects) prompt_rows else solo;
@@ -413,6 +416,11 @@ pub const Gemma = struct {
             if (done) x.marked(s, s.prompt().len) else l.mark = l.fill;
         }
         return done;
+    }
+
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const l = self(ptr).lanes.getPtr(s) orelse return;
+        if (l.fill) |at| s.keepInterruptedPrefill(@intCast(at));
     }
 
     fn handle(x: *Gemma) usize {
@@ -550,7 +558,7 @@ pub const Gemma = struct {
 };
 
 /// tf_round_bf16_argmax's pick among `mask`'s allowed tokens: the first largest; a non-finite logit is an error.
-fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
+pub fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
     var best: f32 = 0;
     var id: ?u32 = null;
     for (row, 0..) |bits, t| {
@@ -565,25 +573,6 @@ fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
     return id orelse error.InvalidGrammarMasks;
 }
 
-test "a greedy pick under a grammar: the first largest allowed token, refusals by name" {
-    const bf = struct {
-        fn of(f: f32) u16 {
-            return @intCast(@as(u32, @bitCast(f)) >> 16);
-        }
-    }.of;
-    var row: [64]u16 = @splat(bf(0.5));
-    row[3] = bf(9);
-    row[40] = bf(2);
-    row[41] = bf(2);
-    var mask = [2]u32{ 0, (1 << 8) | (1 << 9) }; // tokens 40 and 41
-    try std.testing.expectEqual(@as(u32, 40), try pickAllowed(&row, &mask));
-    mask[0] = 1 << 3;
-    try std.testing.expectEqual(@as(u32, 3), try pickAllowed(&row, &mask));
-    try std.testing.expectError(error.InvalidGrammarMasks, pickAllowed(&row, &.{ 0, 0 }));
-    row[10] = 0xFF80; // -inf, even where the grammar refuses it
-    try std.testing.expectError(error.NonFiniteLogits, pickAllowed(&row, &mask));
-}
-
 test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tokens and costed copy grants" {
     var m: fwd.Model = undefined;
     m.slots = 16;
@@ -593,4 +582,8 @@ test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tok
     b.priority_copies = true;
     try lanes.shared_draft_check.check(b.facts(), true);
     try @import("cuda_head_cost_test.zig").check(b.facts());
+}
+
+test {
+    _ = @import("cuda_greedy_test.zig");
 }

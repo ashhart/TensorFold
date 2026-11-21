@@ -91,7 +91,7 @@ def completion_hash(body):
         if not isinstance(digest, str) or not re.fullmatch("[0-9a-f]{64}", digest):
             raise InvalidReceipt("First response has no full token hash")
         return digest
-    except (KeyError, TypeError, ValueError, UnicodeError) as error:
+    except (IndexError, KeyError, TypeError, ValueError, UnicodeError) as error:
         if isinstance(error, InvalidReceipt):
             raise
         raise InvalidReceipt("Malformed first completion") from None

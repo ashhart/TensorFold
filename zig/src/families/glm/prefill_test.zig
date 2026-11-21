@@ -187,6 +187,45 @@ test "glm prefill: a failed chunk, cancellation or state allocation releases jus
     try std.testing.expectEqual(@as(usize, 0), f.filling.count());
 }
 
+test "glm prefill: cancellation keeps a completed prefix for exact resume" {
+    const Kept = struct {
+        rows: std.ArrayList(u32) = .empty,
+        at: u32 = 0,
+
+        fn interrupted(ctx: *anyopaque, s: *Stream, at: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ctx));
+            k.rows.clearRetainingCapacity();
+            k.rows.appendSlice(a, s.prompt()[0..at]) catch unreachable;
+            k.at = at;
+        }
+    };
+    var f: Fake = .{};
+    defer f.deinit();
+    var kept: Kept = .{};
+    defer kept.rows.deinit(a);
+    const ids = [_]u32{ 3, 1, 4, 1, 5, 9 };
+    var stopped = try Stream.init(a, .{ .id = "stopped", .prompt = &ids, .max_new = 4, .chunks = &.{2}, .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.interrupted, .interrupted = Kept.interrupted } } });
+    defer stopped.deinit(a);
+    try std.testing.expect(!try fill.step(&f, &stopped, 0));
+    const Cancel = struct {
+        fn yes(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    var dummy: u8 = 0;
+    stopped.cancel_check = .{ .ptr = &dummy, .check = Cancel.yes };
+    try std.testing.expectError(error.Cancelled, fill.step(&f, &stopped, 0));
+    try std.testing.expectEqual(@as(u32, 2), kept.at);
+
+    var resumed = try Stream.init(a, .{ .id = "resumed", .prompt = &ids, .max_new = 4, .chunks = &.{2} });
+    defer resumed.deinit(a);
+    resumed.reuse.saved = &kept.rows;
+    resumed.reuse.at = kept.at;
+    while (!try fill.step(&f, &resumed, 0)) {}
+    try std.testing.expectEqual(@as(u32, 2), resumed.cached);
+    try std.testing.expectEqualSlices(u32, &ids, f.target.lanes.getPtr(&resumed).?.history.items);
+}
+
 test "glm prefill: shared prompt input restores each owner's IDs and lookahead after settling decoder scratch" {
     const Input = struct {
         shared: [16]u32 = @splat(99),
