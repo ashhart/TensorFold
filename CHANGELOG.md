@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - MiniMax-M3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a stepping drafter absorbs each chunk before the next; a pass can be cancelled keeping the state at the last chunk's end, and chunks are cut exactly as before, so replies are unchanged (#3089, part of #3021).
 
-- MiniMax-M3 on Metal: the DFlash2 and DSpark drafters hold up to eight streams' blocks in one pass and one wait instead of a pass per stream, and absorb no longer waits for the GPU; drafted replies are unchanged (#3121).
-
-- MiniMax-M3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a stepping drafter absorbs each chunk before the next; a pass can be cancelled keeping the state at the last chunk's end, and chunks are cut exactly as before, so replies are unchanged (#3089, part of #3021).
-
-
-
 - Qwen3.8 Flash Next on Metal: a request cancelled while its prompt is still filling keeps the prompt state it had already landed at a resumable cut, so a follow-up with the same prefix resumes from there instead of starting over (#3657, refs #3618).
 
 - GLM-5.3-Flash on Metal can draft with a published DFlash2 checkpoint behind `--drafter DIR` (and `--drafter-bits`); drafted replies equal plain ones, and the default stays MTP (#3920). Thanks to @gilby.
