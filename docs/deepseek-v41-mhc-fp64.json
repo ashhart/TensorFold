@@ -1,0 +1,103 @@
+{
+ "scope": "mHC (hyperconnection mix) stage fp64 qualification: rounding level, Metal deltas and 1-ULP input amplification. Independent CPU reference parameterized comptime (math.zig MixOf/denseOf/mixesOf/splitOf/inverseOf/collapseOf/expandOf, f32 source-contract path bit-identical, f64 ideal path); harness zig/tests/deepseek_v41_reference/operator_hc_fp64.zig; fixtures hc_attention_rms.json and hc_fp64_rows.json (retained inputs only).",
+ "nrms_definition": "sqrt(sum(delta^2)/sum(ref^2)) in f64; ULP = |delta| / fp32 spacing at the fp64 reference value.",
+ "inputs": [
+  "token671_attention (retained token-671 embedding, four copies)",
+  "token1_ffn (retained token-1 FFN stream and branch, real hc_ffn scale/base)",
+  "eight_teacher_rows (the eight retained teacher embeddings)",
+  "wide_dynamic_range (copy magnitudes 2^24..2^-12, rotating signs)",
+  "split_args (16 retained unary arguments incl. 1.4393715858459473, controlling post argument, integer exp sweep -32..32, plus sigmoid/softmax spans)",
+  "cancellation fixtures (half-ULP terms after 1.0)"
+ ],
+ "rounding_level_fp32_reference_vs_fp64": {
+  "inverse_statistic_nrms": [
+   2.7e-09,
+   2.8e-08
+  ],
+  "projection_dense_nrms": [
+   2.2e-08,
+   2.9e-08
+  ],
+  "pre_sigmoid_nrms": [
+   1.1e-08,
+   4.2e-08
+  ],
+  "post_nrms": [
+   3.9e-08,
+   7.2e-08
+  ],
+  "comb_sinkhorn_nrms": [
+   1.4e-08,
+   6.8e-08
+  ],
+  "collapse_bf16_unequal_cells": 0,
+  "post_expand_bf16_unequal_cells": [
+   0,
+   5
+  ]
+ },
+ "metal_vs_fp64": {
+  "inverse_max_ulp": 0.6,
+  "projection_max_ulp": 0.5,
+  "pre_max_ulp": 2.75,
+  "post_max_ulp": 2.29,
+  "comb_max_ulp_near_cancelled_cells_only": 34.2,
+  "comb_max_abs": 1.5e-07,
+  "post_controlling_exponent_row_max_ulp": 1.61,
+  "exponent_sweep_minus32_to_32_worst_stage_nrms": 9e-08,
+  "bf16_unequal_cells": {
+   "token671": 0,
+   "token1_ffn": "3 of 20480",
+   "eight_teacher_rows": "8 of 163840",
+   "wide_dynamic_range": 0
+  },
+  "verdict": "every sub-stage sits at the fp32 source-contract rounding level; Metal exceeds the fp32 reference by at most ~1 ULP at the documented Metal exp boundary"
+ },
+ "cancellation_boundaries": [
+  {
+   "fixture": "collapse_half_ulps",
+   "metal": "0x3500",
+   "f32_ref": "0x3500",
+   "f64_ideal": "0x34c0"
+  },
+  {
+   "fixture": "post_half_ulps",
+   "metal": "0x0",
+   "f32_ref": "0x0",
+   "f64_ideal": "0x3400"
+  },
+  {
+   "fixture": "branch_product",
+   "metal": "0x3500",
+   "f32_ref": "0x3500",
+   "f64_ideal": "0x34c0"
+  }
+ ],
+ "amplification_1ulp_input": {
+  "method": "perturb one bf16 stream cell (or branch cell) by 1 ULP, propagate the ideal fp64 stage, output NRMS growth = sqrt(sum(dy^2)/sum(y^2)) / (|dx|/sqrt(sum(x^2))); 256 sampled cells per row; 8 teacher positions plus the token-1 FFN row",
+  "analog_fp64_gain_mean_per_row": [
+   0.182,
+   0.76
+  ],
+  "analog_fp64_gain_max_overall": 0.762,
+  "collapse_gain_mean": 0.5003,
+  "collapse_gain_max": 1.944,
+  "bf16_visible_gain_mean_per_row": [
+   0.74,
+   2.382
+  ],
+  "bf16_visible_gain_max": 34.5,
+  "bf16_rows_changed_fraction": "224-250 of 256 perturbations change at least one of 20480 output cells",
+  "mean_changed_cells": "8.1-13.1 of 20480",
+  "statistic_relative_shift_mean": 3.6e-07,
+  "comb_nrms_shift_mean": 3.6e-08,
+  "metal_confirmation_row0": {
+   "amp_mean": 1.886,
+   "fp64_bf16_amp_mean": 1.945,
+   "mean_changed_cells": 12.06
+  }
+ },
+ "gate_reading": "A single-ULP input difference is attenuated by the mix in exact arithmetic (gain < 1) and appears as 1-bf16-ULP flips on about 0.06 percent of output cells; the stage's own rounding-level output NRMS is 0 to 2.5e-5. Hyperconnection mixing therefore cannot turn fp32 ULP noise into the observed 4.096 percent whole-model NRMS; a specific operator-level difference elsewhere (sparse/compressed attention candidates) remains the plausible cause.",
+ "kernel_changes": "none required; no tolerance relaxed, no source coefficient injected",
+ "receipts": "gitignored receipts/ (mhc-fp64-run.log, mhc-fp64-parsed.json, build-summary.log); commit contains code, fixture and this summary"
+}

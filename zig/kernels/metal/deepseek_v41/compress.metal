@@ -47,6 +47,7 @@ inline float tf_c_e2m1v(uint c) {
 struct TfCPoolArgs {
   uint rows, dim;
 };
+static_assert(sizeof(TfCPoolArgs) == 8, "TfCPoolArgs must mirror metal/compress.zig's PoolArgs");
 
 // Compressor ratio 2 (model.py:429-487): a column a thread, rows in order; odd positions pool the two slots.
 inline void tf_c_pool2_col(const device float* KV, const device float* SC, device float* ST, const device int* P,
@@ -83,6 +84,7 @@ inline void tf_c_pool2_col(const device float* KV, const device float* SC, devic
 struct TfCRtArgs {
   uint blocks, in_stride, out_row;
 };
+static_assert(sizeof(TfCRtArgs) == 12, "TfCRtArgs must mirror metal/compress.zig's RtArgs");
 
 // The compressed KV's fp4_act_quant round trip (kernel.py:184), 16-value blocks, E4M3 scales, to row D[r] (< 0 skips).
 inline void tf_c_fp4rt_block(const device bfloat* X, device bfloat* Y, const device int* D, constant TfCRtArgs& a,
@@ -118,6 +120,7 @@ inline void tf_c_fp4rt_block(const device bfloat* X, device bfloat* Y, const dev
 struct TfCPackArgs {
   uint blocks, in_stride, code_row, scale_row, scale_off, use_dest;
 };
+static_assert(sizeof(TfCPackArgs) == 24, "TfCPackArgs must mirror metal/compress.zig's PackArgs");
 
 // Index keys and queries, fp4_act_quant: 32-value blocks, E8M0 scales, E2M1 nibbles, to row D[r] (< 0 skips).
 inline void tf_c_fp4pack_block(const device bfloat* X, device uchar* C, device uchar* S, const device int* D,
@@ -158,6 +161,7 @@ inline uint tf_c_slot(const device int* RS, uint r) { return TF_CTL == 6 ? 0u : 
 struct TfCPoolSegArgs {
   uint keep, dim; // rows a slot's kept inputs hold (its score half starts keep rows on), columns
 };
+static_assert(sizeof(TfCPoolSegArgs) == 8, "TfCPoolSegArgs must mirror metal/compress.zig's PoolSegArgs");
 
 // tf_dsv41_c_pool2 over several slots, slot g.y over its rows and carry; its kv and score rows kept in its inputs.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_pool2_segs(

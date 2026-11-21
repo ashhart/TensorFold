@@ -186,7 +186,7 @@ pub const Kit = struct {
     pub fn load(device: mtl.Device) !Kit {
         var v = try Pipelines.load(device);
         errdefer v.deinit();
-        return .{ .v = v, .g = try glue.Pipelines.load(device, sources.dsv41.glue_tmp) };
+        return .{ .v = v, .g = try glue.Pipelines.load(device, sources.dsv41.glue_rows) };
     }
 
     pub fn deinit(k: *Kit) void {

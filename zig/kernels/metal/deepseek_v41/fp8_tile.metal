@@ -10,6 +10,7 @@ struct TfDsv41Fp8TileArgs {
   uint K, N, R, groups, per, sgs;
   long xs, ws, ss, ys; // byte strides between the launches of a batch (grid y)
 };
+static_assert(sizeof(TfDsv41Fp8TileArgs) == 56, "TfDsv41Fp8TileArgs must mirror kernel_sources' tile arguments");
 
 #define TF_TLD 36  // staged row stride of one column's 32 decoded K values (floats)
 #define TF_TLV 10  // pair-tree levels a simdgroup's slice holds (up to 512 groups)

@@ -61,7 +61,11 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 glue_tmp ")) {
         if (!assemble) return @as(Launch, undefined);
-        return .{ .decl = d, .function = fun, .here = sources.dsv41.glue_tmp, .pre_m5 = sources.dsv41.glue_tmp };
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.glue_rows, .pre_m5 = sources.dsv41.glue_rows };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 glue_rows ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.glue_rows, .pre_m5 = sources.dsv41.glue_rows };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fused ")) {
         if (!assemble) return @as(Launch, undefined);

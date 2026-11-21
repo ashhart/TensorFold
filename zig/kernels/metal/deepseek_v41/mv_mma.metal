@@ -12,6 +12,7 @@ using namespace metal;
 struct TfDsv41MvMmaArgs {
   uint k, n, rows;
 };
+static_assert(sizeof(TfDsv41MvMmaArgs) == 12, "TfDsv41MvMmaArgs must mirror its Zig launch arguments");
 
 inline float tf_dsv41_mv_mma_x(uint bits) {
   const float f = as_type<float>(bits);
