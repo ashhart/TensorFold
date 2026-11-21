@@ -111,9 +111,18 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     var chunk: [32 << 10]u8 = undefined;
     var offset = resume_from;
     while (true) {
+        const prefix = r.buffered(); // persist progress before any underlying read can fail and advance
+        for ([_][]const u8{prefix}) |bytes| {
+            if (bytes.len > e.size - offset) return error.SizeMismatch;
+            hash.update(bytes);
+            if (check_git) git.update(bytes);
+            try file.writePositionalAll(io, bytes, offset);
+            offset += bytes.len;
+        }
+        r.toss(prefix.len);
         var vecs = [_][]u8{&chunk};
         const got = r.readVec(&vecs);
-        const left = r.buffered(); // what a read took into the reader's own buffer, kept on disk if it then stalls
+        const left = r.buffered();
         for ([_][]const u8{ chunk[0 .. got catch 0], left }) |bytes| {
             if (bytes.len > e.size - offset) return error.SizeMismatch;
             hash.update(bytes);
