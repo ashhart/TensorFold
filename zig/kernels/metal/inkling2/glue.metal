@@ -138,35 +138,75 @@ kernel void tf_inkling2_conv_dynamic(
 }
 
 struct InkRouteArgs { uint rows; };
-kernel void tf_inkling2_router(
+// The router's first launch: dots[row][e] = weight[e] . x[row] in fp32, a simdgroup an expert, eight columns a lane a step.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_route_scores(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
-    const device float* bias [[buffer(2)]], device uint* ids [[buffer(3)]],
-    device float* weights [[buffer(4)]], constant InkRouteArgs& a [[buffer(5)]],
+    device float* dots [[buffer(2)]], constant InkRouteArgs& a [[buffer(3)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint e = tg.x * 8 + sg, row = tg.y;
+  if (e >= 128 || row >= a.rows) return;
+  const device bfloat* w = weight + size_t(e) * 2304;
+  const device bfloat* v = x + size_t(row) * 2304;
+  float acc = 0.0f;
+  for (uint i = 8 * lane; i < 2304; i += 256) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
+    const float4 v0 = float4(*(const device bfloat4*)(v + i)), v1 = float4(*(const device bfloat4*)(v + i + 4));
+    acc += dot(w0, v0) + dot(w1, v1);
+  }
+  const float sum = simd_sum(acc);
+  if (lane == 0) dots[row * 128 + e] = sum;
+}
+
+// The second: the eight greatest score + bias, the lowest expert on a tie, written in ascending expert order.
+kernel void tf_inkling2_router(
+    const device float* dots [[buffer(0)]], const device float* bias [[buffer(1)]],
+    device uint* ids [[buffer(2)]], device float* weights [[buffer(3)]],
+    constant InkRouteArgs& a [[buffer(4)]],
     uint t [[thread_position_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
   if (row >= a.rows) return;
-  threadgroup float scores[128], chosen[8];
-  threadgroup uint picked[8];
+  threadgroup float scores[128], keys[128], chosen[8];
+  threadgroup uint ranks[128], picked[8];
   if (t < 128) {
-    float dot = 0.0f;
-    for (uint d = 0; d < 2304; ++d)
-      dot += float(weight[size_t(t) * 2304 + d]) * float(x[size_t(row) * 2304 + d]);
-    scores[t] = ink_sigmoid(dot);
+    scores[t] = ink_sigmoid(dots[row * 128 + t]);
+    keys[t] = scores[t] + bias[t];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // Among ordered keys the scan in the last branch takes the greatest first: an expert's rank says the same.
+  bool unordered = false;
+  if (t < 128) {
+    uint rank = 0;
+    for (uint e = 0; e < 128; ++e) {
+      unordered = unordered || isnan(keys[e]);
+      rank += (keys[e] > keys[t] || (keys[e] == keys[t] && e < t)) ? 1u : 0u;
+    }
+    ranks[t] = rank;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t < 128 && !unordered && ranks[t] < 8) {
+    // Combining, including the denominator, is in ascending expert index.
+    uint slot = 0;
+    for (uint e = 0; e < t; ++e) slot += ranks[e] < 8 ? 1u : 0u;
+    picked[slot] = t; chosen[slot] = scores[t];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
-    bool used[128] = {};
-    for (uint j = 0; j < 8; ++j) {
-      uint best = 128;
-      for (uint e = 0; e < 128; ++e) if (!used[e]) {
-        if (best == 128 || scores[e] + bias[e] > scores[best] + bias[best]) best = e;
+    if (unordered) {
+      // A NaN key neither wins nor loses a comparison, so the picks follow this scan's order.
+      bool used[128] = {};
+      for (uint j = 0; j < 8; ++j) {
+        uint best = 128;
+        for (uint e = 0; e < 128; ++e) if (!used[e]) {
+          if (best == 128 || keys[e] > keys[best]) best = e;
+        }
+        used[best] = true; picked[j] = best; chosen[j] = scores[best];
       }
-      used[best] = true; picked[j] = best; chosen[j] = scores[best];
-    }
-    // Combining, including the denominator, is in ascending expert index.
-    for (uint j = 1; j < 8; ++j) {
-      uint id = picked[j]; float score = chosen[j]; uint k = j;
-      while (k > 0 && picked[k - 1] > id) { picked[k] = picked[k - 1]; chosen[k] = chosen[k - 1]; --k; }
-      picked[k] = id; chosen[k] = score;
+      for (uint j = 1; j < 8; ++j) {
+        uint id = picked[j]; float score = chosen[j]; uint k = j;
+        while (k > 0 && picked[k - 1] > id) { picked[k] = picked[k - 1]; chosen[k] = chosen[k - 1]; --k; }
+        picked[k] = id; chosen[k] = score;
+      }
     }
     float den = 1e-20f;
     for (uint j = 0; j < 8; ++j) den += chosen[j];
