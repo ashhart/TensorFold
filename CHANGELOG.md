@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the GLM Metal contract runs to the end on M1 to M4 Macs again (its KDA and index texts carry the pre-M5 define the loader adds), and gate 5 resolves GLM's routed-expert row launches on every Mac instead of stopping with `UnknownLaunch` (#4397).
+
 - Qwen3.8-27B on Metal (M1 to M4): `--mtp-drafts N` loads the checkpoint's MTP head from `mtp-4bit.safetensors` and drafts chains of up to N tokens for every stream, alone or in shared rounds, and `--mtp-confidence` stops a chain below its floor; before, the Metal build refused both flags (#2464, refs #2368). Thanks to @jschmied.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GATHER_EARLY=1` (default `0`) gathers a shared decode pass's n-gram rows for every lane in one pooled call instead of one call a stream, for passes of at most 64 lanes (wider passes keep the per-stream call); which rows are read and how a row is dequantized do not change, so replies stay main's, and the measured mean decode gain on one GB10 rises to +2.10% at eight streams (#4009). Thanks to @BadAd84.
