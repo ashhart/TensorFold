@@ -1,6 +1,7 @@
 //! `tf-qwen35-cuda <model> pipe <out> [fp8]`: greedy streams decoded in `k` groups, one engine or a stage ring.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const stage = @import("stage");
 const q = @import("qwen35");
 const E = q.engine;
@@ -123,7 +124,7 @@ fn finish(init: std.process.Init, a: std.mem.Allocator, e: *E.Engine, lead: *S.L
     try lead.step(closes[0..set.streams], &.{}, .window);
     var out: std.ArrayList(u8) = .empty;
     for (streams) |x| try out.appendSlice(a, std.mem.sliceAsBytes(x.hist.items[set.prompt..][0..set.tokens]));
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = out.items });
+    try core.chunked_write.writeFileChunked(init.io, std.Io.Dir.cwd(), out_path, out.items);
     const ms = @as(f64, @floatFromInt(t2 - t1)) / 1e6;
     const made = @as(f64, @floatFromInt(set.streams * set.tokens));
     std.debug.print("pipe {s}: {{\"streams\":{d},\"k\":{d},\"draft\":{d},\"prompt\":{d},\"tokens\":{d},\"prompt_ms\":{d:.1},\"decode_ms\":{d:.1},\"tok_s\":{d:.2},\"rounds\":{d},\"drafted\":{d},\"kept_drafts\":{d}}}\n", .{ role, set.streams, set.k, set.draft, set.prompt, set.tokens, @as(f64, @floatFromInt(t1 - t0)) / 1e6, ms, made * 1e3 / ms, rounds, drafted, taken });

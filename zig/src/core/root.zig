@@ -2,6 +2,7 @@
 
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("benchmark_group.zig");
+pub const chunked_write = @import("chunked_write.zig");
 pub const weight_only = @import("weight_only.zig");
 pub const profile = @import("profile");
 pub const safetensors = @import("safetensors.zig");

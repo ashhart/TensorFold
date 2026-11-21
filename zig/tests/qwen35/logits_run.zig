@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const hip = @import("hip");
+const core = @import("core");
 const qwen35 = @import("qwen3_5");
 const ids_file = @import("ids_file.zig");
 const Kind = @import("logit_kind.zig").Kind;
@@ -115,6 +116,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     out[head - 1] = '\n';
     var file: File = .{ .body = out[head..], .width = width };
     try stream(gpa, e, ids, mode, .{ .ctx = &file, .put = File.put });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = out });
+    try core.chunked_write.writeFileChunked(io, std.Io.Dir.cwd(), args[2], out);
     std.debug.print("wrote {d}{s} rows x {d} logits to {s}\n", .{ ids.len, if (mode.decode) " decoded" else "", vocab(e), args[2] });
 }
