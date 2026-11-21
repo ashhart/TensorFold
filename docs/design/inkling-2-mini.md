@@ -18,11 +18,11 @@ Answered by the maintainer in #4274's discussion on 2026-11-21; answer 2 carries
 
 ## What main has
 
-On main `523d58cbe`:
+On main `72ebe5f6e`:
 
 - `zig/src/families/inkling2` is Inkling 2 Small's host package (#3578): config, weight names, layer plan, chat template and tokenizer tests. It accepts `inkling2` only, so Mini's `inkling2_loop` is refused.
-- CUDA has Inkling 2's attention kernels under the kernel contract (#4125).
-- Open for Small on CUDA: glue kernels (#4126), expert and vision kernels (#4127), drafter kernels (#4128), the reply split (#4124) and the EXL3 loader (#3612).
+- CUDA has Inkling 2's attention kernels (#4125) and glue kernels (#4126) under the kernel contract.
+- Open for Small on CUDA: expert and vision kernels (#4127), drafter kernels (#4128), the reply split (#4124) and the EXL3 loader (#3612).
 - Metal has no Inkling 2 kernel. It has NVFP4 code for Drama 3 and an attention residual for Kimi K3; whether either fits Inkling 2 is not established here.
 - No backend serves Inkling 2 end to end.
 
@@ -88,7 +88,7 @@ Each slice is one pull request with its own tests. "Needs" names what must land 
 | M3 | The routed experts as stored: NVFP4 and MXFP8 decoded in registers, bf16 activations, FP32 sums. | none |
 | M4 | The loop kernels under the kernel contract. | H3 |
 | M5 | The engine, text only: 48 slots, the lane adapter, admission by memory class and the family registration. Starts from the original checkpoint. | H2, M1 to M4 |
-| M6 | DSpark: the drafter's kernels under the kernel contract, then the drafter through the shared lane rounds. MiniMax M3 and Kimi K3 have DSpark drafters on Metal to adapt. Same checks as C5. | M5, H4 |
+| M6 | DSpark: the drafter's kernels under the kernel contract, then the drafter through the shared lane rounds. MiniMax M3 has the one DSpark drafter on Metal to adapt (`families/minimax_m3/dspark.zig`); Kimi K3's Metal adapter refuses external draft heads. Same checks as C5. | M5, H4 |
 | M7 | Images: the vision tower and projector. | M5 |
 | M8 | The served receipt, the recipe page and the ledger cells. | M5 |
 
@@ -108,7 +108,7 @@ The gate is agreed; the speed bar below is its threshold.
 - **Same-engine exactness,** on the tiny checkpoint and on the released one, greedy and sampled: drafted equals `"draft": false`, a resumed prompt equals a fresh one, and concurrent equals solo. Seams are checked at every pass boundary, for KV, conv state and final logits.
 - **Fidelity:** teacher-forced histories against the reference huggingface/transformers#51050, with every top-token difference and its margin recorded.
 - **Speed:** a served receipt as CONTRIBUTING describes (decode with and without the drafter, cold first token at one and four streams, cold 2k, 8k, 32k and 64k prompts, peak memory), against a standard server on the same machine. The bar: decode no slower than that server, with and without the drafter.
-- **Refusals:** `is_varloop`, audio parts, and images before the vision slice, each with a test.
+- **Refusals:** `is_varloop`, `--loops` (Dory's pass-count override), audio parts, and images before the vision slice, each with a test.
 
 The tiny checkpoint `hf-internal-testing/tiny-inkling2-mini` at revision `ee242a48af34ff0729518f4ac28cfcb847e470ab` has 18 decoder layers, a loop core of layers 6 to 11, and no drafter: its config declares no `mtp_config` and its files ship no `mtp.safetensors`. It covers plain, resumed and concurrent decode. It cannot cover drafted-versus-plain, and with one core block it cannot cover the two-source message case. Draft parity therefore runs on the original checkpoint with its bundled `mtp.safetensors`, recording proposal and acceptance counts.
 
