@@ -1,14 +1,9 @@
-//! Regression tests for the bounded chunked writer.
-//! The kernel rejects single writes over INT_MAX (XNU vn_write); the helper
-//! must never issue a request larger than its own cap, and must preserve
-//! order and content.
+//! Regression tests for bounded output writes.
 const std = @import("std");
 const cw = @import("chunked_write.zig");
 
 const testing = std.testing;
 
-/// Sink that refuses any request larger than `cap`, like the kernel's
-/// per-write byte limit. Records accepted bytes.
 const LimitedSink = struct {
     buf: std.ArrayList(u8),
     cap: usize,
@@ -26,7 +21,6 @@ test "chunked writes respect the cap and preserve order" {
     var sink = LimitedSink{ .buf = .empty, .cap = cap };
     defer sink.buf.deinit(testing.allocator);
 
-    // One byte more than a single request forces at least two chunks.
     const total = cap + 1;
     const data = try testing.allocator.alloc(u8, total);
     defer testing.allocator.free(data);
@@ -38,8 +32,6 @@ test "chunked writes respect the cap and preserve order" {
 }
 
 test "old single-write path fails the same sink when over the limit" {
-    // The one-shot path is what qwen35_forward used before; modeled here as
-    // one unbounded request. It must fail the enforcing sink.
     const cap = 64;
     var sink = LimitedSink{ .buf = .empty, .cap = cap };
     defer sink.buf.deinit(testing.allocator);
