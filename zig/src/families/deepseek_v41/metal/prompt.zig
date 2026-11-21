@@ -134,18 +134,12 @@ pub const Prompt = struct {
         const td = now();
         try p.finish(env, slot, tail);
         p.prof.dec_ns = now() - td;
-        if (std.c.getenv("TF_DSV41_PROMPT_PROF") != null) p.prof.report(env.c, hist.len, now() - t0);
+        p.report(env.c, hist.len, now() - t0);
     }
 
-    /// The prompt's encoder profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
-    pub fn report(p: *const Prompt, rows: usize, wall_ns: u64) void {
-        if (std.c.getenv("TF_DSV41_PROMPT_PROF") == null) return;
-        const ms = struct {
-            fn of(ns: u64) f64 {
-                return @as(f64, @floatFromInt(ns)) / 1e6;
-            }
-        }.of;
-        std.log.scoped(.dsv41).info("prompt {d} rows: {d:.0} ms, encoder {d} chunks: gpu {d:.0} ms, host fill {d:.0} ms, host encode {d:.0} ms, host wait {d:.0} ms", .{ rows, ms(wall_ns), p.prof.chunks, p.prof.gpu_s * 1e3, ms(p.prof.prep_ns), ms(p.prof.enc_ns), ms(p.prof.stall_ns) });
+    /// The prompt's profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
+    pub fn report(p: *const Prompt, c: *const Config, rows: usize, wall_ns: u64) void {
+        if (std.c.getenv("TF_DSV41_PROMPT_PROF") != null) p.prof.report(c, rows, wall_ns);
     }
 
     /// The prepared next chunk is dropped if it was `tail`'s (that slot's prompt ended or restarts).
