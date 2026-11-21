@@ -124,7 +124,7 @@ pub const Drafter = struct {
             }
             if (x.committed_end != item.start) return error.DraftContextGap;
             const bytes: [*]const u8 = @ptrFromInt(f.buffer + f.offset);
-            try x.ring(c).absorbBytes(bytes[0 .. @as(usize, f.rows) * f.row_bytes], f.rows);
+            try x.ring().absorbBytes(bytes[0 .. @as(usize, f.rows) * f.row_bytes], f.rows);
             l.count = 0;
         }
     }
