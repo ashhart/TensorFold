@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
+
 - Qwen3.8 Flash Next on Metal: a request cancelled while its prompt is still filling keeps the prompt state it had already landed at a resumable cut, so a follow-up with the same prefix resumes from there instead of starting over (#3657, refs #3618).
 
 - GLM-5.3-Flash on Metal can draft with a published DFlash2 checkpoint behind `--drafter DIR` (and `--drafter-bits`); drafted replies equal plain ones, and the default stays MTP (#3920). Thanks to @gilby.
