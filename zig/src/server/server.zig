@@ -35,7 +35,6 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 pub const Identity = @import("identity.zig").Identity;
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
-
 pub const Config = struct {
     browser: request_guard.Policy = .{},
     allowed_controls: ?@import("drama_allow.zig").Policy = null,
