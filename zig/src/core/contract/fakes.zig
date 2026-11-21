@@ -156,6 +156,25 @@ test "correct CPU kernels pass gates 1-4 and every planted fault goes red at its
     try std.testing.expectEqual(@as(usize, 0), t.problems());
 }
 
+test "initialization failures are tallied and later kernels and controls still run" {
+    const a = std.testing.allocator;
+    var f = Fake{ .a = a, .op = .sum };
+    defer f.deinit();
+    const missing: g.Kernel = .{ .spec = spec("missing library", .sum), .ctx = undefined, .vt = undefined, .init_error = error.NoFunction };
+    const missed_control: g.Kernel = .{ .spec = spec("missing control library", .sum), .ctx = undefined, .vt = undefined, .control = .shapes, .init_error = error.NoFunction };
+    g.quiet = true;
+    defer g.quiet = false;
+    var t: g.Tally = .{};
+    try g.runAll(a, &.{ missing, missed_control, f.kernel("after missing library", null) }, 0x5eed, &t);
+    try std.testing.expectEqual(@as(usize, 2), t.kernels);
+    try std.testing.expectEqual(@as(usize, 1), t.failed);
+    try std.testing.expectEqual(@as(usize, 1), t.passed);
+    try std.testing.expectEqual(@as(usize, 1), t.controls);
+    try std.testing.expectEqual(@as(usize, 1), t.missed);
+    try std.testing.expectEqual(@as(usize, 2), t.problems());
+    try std.testing.expect(f.runs > 0);
+}
+
 test "a tail fault passes at whole tiles: the edges are what catch it" {
     const a = std.testing.allocator;
     var f = Fake{ .a = a, .op = .sum, .fault = .tail };

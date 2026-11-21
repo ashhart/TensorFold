@@ -34,7 +34,7 @@ fn boltSource(name: []const u8) ![]const u8 {
 }
 
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
-fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
+pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     return resolve(a, device, d, true);
 }
 
@@ -208,6 +208,25 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
+        if (!assemble) return undefined;
+        const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
+            @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
+            @import("inkling2_metal").runtime
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
+            @import("inkling2_metal").loop
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
+            @import("inkling2_metal").experts
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
+            @import("inkling2_metal").glue
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
+            @import("inkling2_metal").prompt_attention
+        else
+            @import("inkling2_metal").attention;
+        const pre_m5 = if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt ")) @import("inkling2_metal").prompt_attention_pre_m5 else body;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = pre_m5 };
     }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;

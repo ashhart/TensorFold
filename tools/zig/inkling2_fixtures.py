@@ -1,4 +1,4 @@
-"""Rebuild zig/src/families/inkling2/fixtures from the Inkling 2 Small release and tiny-random/inkling-2."""
+"""Rebuild zig/src/families/inkling2/fixtures from the Small, tiny-random and Mini checkpoint inputs."""
 import argparse
 import hashlib
 import json
@@ -10,6 +10,19 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "zig/src/families/inkling2/fixtures"
 RELEASE = "thinkingmachines/Inkling-2-Small@2ad1157016e1aac77b6ff1b770e7c05229403134"
 TINY = "tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7"
+MINI_RELEASE = "thinkingmachines/Inkling-2-Mini"
+MINI_REVISION = "ed40e7da625f594fc9c4990f5f66be24873c22d7"
+MINI_PROVENANCE = {
+    "release": MINI_RELEASE,
+    "revision": MINI_REVISION,
+    "revision_status": "full revision supplied separately; every checkpoint config field matches",
+    "published": "2026-11-20",
+    "license": "apache-2.0",
+}
+MINI_HEADER_PROVENANCE = (
+    f"release={MINI_RELEASE} revision={MINI_REVISION} "
+    "published=2026-11-20 license=apache-2.0"
+)
 PINS = {"transformers": "5.20.0", "tokenizers": "0.23.3", "jinja2": "3.1.6"}
 MERGES = 1500
 
@@ -46,11 +59,33 @@ def dump(value, depth=0):
 
 
 def read_header(path):
-    """The tensors of a safetensors file as {name: (dtype tag, shape)}, read from its first bytes only."""
-    with open(path, "rb") as f:
-        (length,) = struct.unpack("<Q", f.read(8))
-        meta = json.loads(f.read(length))
+    """The tensors of a safetensors file or extracted JSON header as {name: (dtype tag, shape)}."""
+    if path.suffix == ".json":
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        with open(path, "rb") as f:
+            (length,) = struct.unpack("<Q", f.read(8))
+            meta = json.loads(f.read(length))
     return {name: (v["dtype"], tuple(v["shape"])) for name, v in meta.items() if name != "__metadata__"}
+
+
+def release_header(directory, stem):
+    """Read the supplied extracted header when present, otherwise the release's safetensors file."""
+    extracted = directory / f"{stem}.header.json"
+    return read_header(extracted if extracted.is_file() else directory / f"{stem}.safetensors")
+
+
+def annotated_mini_config(path):
+    """The published config with explicit fixture provenance; no revision is inferred from its bytes."""
+    raw = path.read_bytes()
+    value = json.loads(raw)
+    if not isinstance(value, dict) or "_fixture_provenance" in value:
+        raise SystemExit(f"{path}: expected an unannotated config object")
+    provenance = json.dumps(MINI_PROVENANCE, ensure_ascii=False, indent=2).replace("\n", "\n  ")
+    annotation = f'  "_fixture_provenance": {provenance},\n'.encode("utf-8")
+    if not raw.startswith(b"{\n"):
+        raise SystemExit(f"{path}: expected the published indented config layout")
+    return raw.replace(b"{\n", b"{\n" + annotation, 1)
 
 
 def spans(layers):
@@ -66,7 +101,7 @@ def spans(layers):
     return ",".join(runs)
 
 
-def fold(tag, tensors):
+def fold(tag, tensors, provenance=""):
     """The table the host tests unfold: tag, count and sha256 of the sorted lines, then one line per name pattern."""
     names = sorted(tensors)
 
@@ -85,7 +120,7 @@ def fold(tag, tensors):
             parts[at[0]] = "{L}"
         dtype, dims = tensors[name]
         groups.setdefault((".".join(parts), dtype, shape(dims)), []).append(layer)
-    lines = [f"{tag} {len(names)} {digest}"]
+    lines = [f"{tag} {len(names)} {digest}" + (f" {provenance}" if provenance else "")]
     for (pattern, dtype, dims), layers in sorted(groups.items()):
         lines.append(f"{pattern} {dtype} {dims}" + ("" if layers == [None] else " " + spans(layers)))
     return "\n".join(lines) + "\n"
@@ -152,7 +187,7 @@ def prompt_cases(release):
     return {"reference": reference, "chat": chat, "raw": raw}
 
 
-def build(release, tiny):
+def build(release, tiny, mini):
     """Every fixture file as bytes."""
     full = json.loads((release / "tokenizer.json").read_text(encoding="utf-8"))
     cut = json.dumps(cut_tokenizer(full), separators=(",", ":"), ensure_ascii=False) + "\n"
@@ -165,6 +200,13 @@ def build(release, tiny):
         "prompt_cases.json": (dump(prompt_cases(release)) + "\n").encode("utf-8"),
         "tiny_model_header.txt": fold("inkling2-tiny-model", read_header(tiny / "model.safetensors")).encode("utf-8"),
         "tiny_mtp_header.txt": fold("inkling2-tiny-mtp", read_header(tiny / "mtp.safetensors")).encode("utf-8"),
+        "mini_config.json": annotated_mini_config(mini / "config.json"),
+        "mini_model_header.txt": fold(
+            "inkling2-mini-model", release_header(mini, "model-00001-of-00001"), MINI_HEADER_PROVENANCE
+        ).encode("utf-8"),
+        "mini_mtp_header.txt": fold(
+            "inkling2-mini-mtp", release_header(mini, "mtp"), MINI_HEADER_PROVENANCE
+        ).encode("utf-8"),
     }
 
 
@@ -173,13 +215,17 @@ def main():
     parser.add_argument("--release", type=Path, required=True,
                         help=f"{RELEASE}: config.json, chat_template.jinja, tokenizer.json, tokenizer_config.json")
     parser.add_argument("--tiny", type=Path, required=True, help=f"{TINY}: config.json, model.safetensors, mtp.safetensors")
+    parser.add_argument(
+        "--mini", type=Path, required=True,
+        help=f"{MINI_RELEASE}: config.json and model/MTP safetensors or extracted .header.json files; full revision supplied separately after config-field match",
+    )
     parser.add_argument("--out", type=Path, default=FIXTURES, help="the fixtures directory to write or compare")
     parser.add_argument("--check", action="store_true", help="write nothing; exit 1 if a file differs from the one in --out")
     args = parser.parse_args()
     for name, want in PINS.items():
         if version(name) != want:
             raise SystemExit(f"{name} {version(name)} is installed, {want} is pinned")
-    files = build(args.release, args.tiny)
+    files = build(args.release, args.tiny, args.mini)
     differ = 0
     if not args.check:
         args.out.mkdir(parents=True, exist_ok=True)
