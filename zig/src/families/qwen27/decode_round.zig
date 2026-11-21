@@ -571,14 +571,12 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
-
 fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
     const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
     const key = try allocation(a, m.device, owned, bytes);
     const value = try allocation(a, m.device, owned, bytes);
     return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
 }
-
 fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
     const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(a, b) catch |err| {
