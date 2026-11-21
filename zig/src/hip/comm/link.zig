@@ -75,6 +75,21 @@ pub const Link = struct {
         fault: *Fault,
         secret: *const auth.Secret,
     ) Error!struct { Link, rccl.UniqueId, [Policy.word_count]u32 } {
+        return openWithBudget(io, host, port, id, hello, policy, fault, secret, proof_ms);
+    }
+
+    /// `open` with a shorter formation budget for host tests; production keeps `proof_ms`.
+    pub fn openWithBudget(
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        id: rccl.UniqueId,
+        hello: Hello,
+        policy: [Policy.word_count]u32,
+        fault: *Fault,
+        secret: *const auth.Secret,
+        formation_ms: u64,
+    ) Error!struct { Link, rccl.UniqueId, [Policy.word_count]u32 } {
         const rank = hello.rank;
         const world = hello.world;
         if (world < 2 or world > max_world or rank >= world) return error.BadRank;
@@ -83,7 +98,7 @@ pub const Link = struct {
         var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.readInt(u32, &ip.ip4.bytes, .little) };
         var link: Link = .{ .rank = rank, .world = world };
         if (rank == 0) {
-            try link.lead(&addr, hello, fault, secret);
+            try link.lead(&addr, hello, fault, secret, formation_ms);
             for (link.fds[0 .. world - 1]) |fd| {
                 try writeAll(fd, std.mem.asBytes(&Answer{}));
                 try writeAll(fd, std.mem.asBytes(&id));
@@ -127,7 +142,7 @@ pub const Link = struct {
     }
 
     /// Rank 0 takes every hello; at the first that differs, every rank in (and any arriving soon after) is told.
-    fn lead(l: *Link, addr: *posix.sockaddr.in, hello: Hello, fault: *Fault, secret: *const auth.Secret) Error!void {
+    fn lead(l: *Link, addr: *posix.sockaddr.in, hello: Hello, fault: *Fault, secret: *const auth.Secret, formation_ms: u64) Error!void {
         const server = try socket();
         defer _ = posix.system.close(server);
         const one: c_int = 1;
@@ -143,16 +158,33 @@ pub const Link = struct {
             @sizeOf(posix.sockaddr.in),
         )) != .SUCCESS) return error.BindFailed;
         if (posix.errno(posix.system.listen(server, 16)) != .SUCCESS) return error.BindFailed;
+        const formation_until = auth.nowMs() +| formation_ms;
         var taken: [max_world]bool = @splat(false);
         taken[0] = true;
         var refused: ?Fault = null;
         var arrived: usize = 0;
         var linger_until: u64 = 0;
         while (arrived < l.world - 1) {
-            const wait: i32 = if (refused == null) -1 else @intCast(@min(linger_until -| auth.nowMs(), linger_ms));
-            const fd = (try accept(server, wait)) orelse break;
+            const left = formation_until -| auth.nowMs();
+            if (left == 0) {
+                if (refused != null) break;
+                for (1..l.world) |r| {
+                    if (taken[r]) _ = posix.system.close(l.fds[r - 1]);
+                }
+                return error.LinkClosed;
+            }
+            const wait: i32 = @intCast(@min(left, if (refused == null) @as(u64, std.math.maxInt(i32)) else @min(linger_until -| auth.nowMs(), linger_ms)));
+            const maybe_fd = try accept(server, wait);
+            if (maybe_fd == null) {
+                if (refused != null) break;
+                for (1..l.world) |r| {
+                    if (taken[r]) _ = posix.system.close(l.fds[r - 1]);
+                }
+                return error.LinkClosed;
+            }
+            const fd = maybe_fd.?;
             // a connection that proves no key takes no place and hears no answer: it is closed and the wait goes on
-            const who = auth.accept(fd, secret, &.{.rocm}, auth.budget_ms) catch |e| {
+            const who = auth.accept(fd, secret, &.{.rocm}, formation_until -| auth.nowMs()) catch |e| {
                 var at: [64]u8 = undefined;
                 std.log.warn("hip: a connection from {s} to the ranks' link proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
                 _ = posix.system.close(fd);
@@ -160,7 +192,7 @@ pub const Link = struct {
             };
             arrived += 1;
             var h = std.mem.zeroes(Hello);
-            const field = if (readHello(fd, &h)) |_| (if (h.rank != who.rank or h.world != who.world) Field.rank else differs(hello, h, &taken)) else |_| Field.layout;
+            const field = if (readHello(fd, &h, formation_until)) |_| (if (h.rank != who.rank or h.world != who.world) Field.rank else differs(hello, h, &taken)) else |_| Field.layout;
             if (refused == null) {
                 if (field) |f| {
                     refused = .{ .field = f, .rank = h.rank };
@@ -223,8 +255,8 @@ pub const Link = struct {
 };
 
 /// A proven rank's hello, its layout checked before the rest is read; a rank that stalls is not waited on.
-fn readHello(fd: posix.socket_t, h: *Hello) Error!void {
-    const until = auth.nowMs() + auth.budget_ms;
+fn readHello(fd: posix.socket_t, h: *Hello, formation_until: u64) Error!void {
+    const until = @min(auth.nowMs() +| auth.budget_ms, formation_until);
     const bytes = std.mem.asBytes(h);
     try readBefore(fd, bytes[0..8], until);
     if (h.magic != magic or h.layout != layout) return;
