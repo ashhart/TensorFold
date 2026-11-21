@@ -63,6 +63,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
+- Tests: the CUDA Idol decoders' contract reference rounds tiled attention's P to fp16 at each 64-key tile's running maximum, as the kernel and torch's CUDA flash and memory-efficient attention do, instead of at the final maximum, which went red at 16x1000x65 on an RTX 5090; a host test checks it against an fp32 online-softmax simulation, and the decoder self attention's gate 4 computes its alike keys' outputs once instead of for all 8,192 tokens (#4508, after #1858). Thanks to @AIFlowML.
+
 ## 1.3.4
 
 - Lanes: #3728's lone-stream copy pricing applies only to a family that opts in and serves without a model drafter (Qwen3.5/3.8 on HIP with copies only), so copies-only decode on AMD Strix Halo keeps 1.3.3's speed, while streams with a model drafter price their drafts as before; tokens are unchanged.
