@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ALLOW = Path(__file__).with_name("cuda_common_allowlist.json")
 TOKEN = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_]\w*|\d+(?:\.\d*)?|[^\s]')
 OPS = re.compile(r'\b(?:ldmatrix[.\w]*|mma\.sync[.\w]*|cp\.async[.\w]*|ld\.global\.nc[.\w]*|griddepcontrol[.\w]*)')
-NAMES = re.compile(r'(?:warp_sum|block_sum\w*|fp4pair|fp8pair|e4m3f|unpack8|pack8)\Z')
+NAMES = re.compile(r'(?:[wW]arp_?[sS]um|[bB]lock_?[sS]um\w*|fp4pair|fp8pair|e4m3f|unpack8|pack8)\Z')
 
 
 @dataclass(frozen=True)
