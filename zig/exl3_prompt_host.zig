@@ -54,6 +54,7 @@ fn run(rows: usize, prompt: bool, shared: bool) !void {
     Capture.reset();
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
+    d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
     d.api.cuMemcpy2DAsync_v2 = Capture.copy;
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
@@ -266,6 +267,7 @@ test "exl3 prompt: GLM admission facts through shared lanes keep drafted plain a
 test "exl3 prompt: each projection group launches the kernel of its own verified width, with the same arguments" {
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
+    d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
     k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };

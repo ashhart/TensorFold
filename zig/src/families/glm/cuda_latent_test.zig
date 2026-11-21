@@ -92,6 +92,7 @@ const Fakes = struct {
     fn init(f: *Fakes) void {
         f.d = undefined;
         f.d.api.cuLaunchKernel = Launch.run;
+        f.d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Launch.run);
         f.d.api.cuModuleGetFunction = Ops.function;
         inline for (@typeInfo(glue.Kernels).@"struct".field_names, 1..) |name, i| @field(f.ks, name) = .{ .d = &f.d, .handle = @ptrFromInt(i) };
         f.m = undefined;
