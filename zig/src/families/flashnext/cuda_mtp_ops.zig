@@ -38,7 +38,6 @@ const ple_tail_n = wt.ple_tail_n;
 const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const max_chain = mtp.max_chain;
-const max_rows = mtp.max_rows;
 const proj_bytes = mtp.proj_bytes;
 const fc_sk = mtp.fc_sk;
 const piece_rows = mtp.piece_rows;
@@ -279,7 +278,7 @@ pub fn Ops(comptime Tri: type) type {
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
             o.e.round_graph.clear();
             const n = ids.len;
-            if (n == 0 or n > max_rows) return error.WindowTooWide;
+            if (!mtp.rowsOk(n)) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
             if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads; // its spares swap with the sequence's states
             d.settle(seq);
@@ -299,7 +298,7 @@ pub fn Ops(comptime Tri: type) type {
             if (o.main != null) return error.UnsupportedRankOperation;
             // every window refused before any stream's state moves
             for (seqs, idss, ds) |seq, ids, d| {
-                if (ids.len == 0 or ids.len > max_rows) return error.WindowTooWide;
+                if (!mtp.rowsOk(ids.len)) return error.WindowTooWide;
                 if (seq.fed + ids.len > seq.cap) return error.PromptTooLong;
                 if (!d.layout.heads.eql(seq.heads)) return error.DraftHeads;
             }
