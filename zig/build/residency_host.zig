@@ -6,6 +6,9 @@ pub fn steps(b: *std.Build) void {
     if (b.graph.host.result.os.tag == .macos) metal.linkSystemLibrary("objc", .{});
     const run = b.addRunArtifact(b.addTest(.{ .root_module = metal, .filters = &.{ "residency", "a set is built", "buffers made later", "a join whose", "an operator load ceiling" } }));
     b.step("test-metal-residency-host", "Unique residency allocations, limits, flags and lifetimes without devices").dependOn(&run.step);
+    const timeline_module = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal4_timeline.zig"), .target = b.graph.host, .link_libc = true });
+    const timeline = b.addRunArtifact(b.addTest(.{ .root_module = timeline_module, .filters = &.{ "timeline stage records:", "timeline rounds:", "timeline init:", "timeline kernels:", "timeline labels:" } }));
+    b.step("test-metal-timeline-host", "Metal 4 timeline allocation failure boundaries without a device").dependOn(&timeline.step);
     const recording = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = b.graph.host });
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     // the prompt cache's budget over the same residency limits, so its no-footprint branch runs off macOS too

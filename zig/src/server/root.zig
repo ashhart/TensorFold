@@ -17,6 +17,7 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("cache_flush.zig");
     _ = @import("drafter_test.zig");
     _ = @import("startup_receipt.zig");
     _ = @import("kimi_prompt_test.zig");
@@ -362,4 +363,11 @@ test {
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");
+}
+
+test {
+    _ = @import("witness_test.zig");
+    _ = @import("witness_http_test.zig");
+    _ = @import("witness_race_test.zig");
+    _ = @import("witness_reply_test.zig");
 }

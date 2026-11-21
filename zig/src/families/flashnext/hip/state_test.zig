@@ -120,7 +120,7 @@ const Saved = struct {
         main.history = .{ 5, 6 };
         head.len = at;
         const s: hip.Stream = .{ .r = r, .handle = null };
-        const copy = try snapshot.save(std.testing.allocator, r, s, &main, &head, at, ratio);
+        const copy = try snapshot.save(std.testing.allocator, .{ .d = r }, s, &main, &head, at, ratio);
         return .{ .main = main, .head = head, .copy = copy };
     }
 
@@ -163,7 +163,7 @@ test "a lone rank's restore that fails at any copy or allocation leaves fresh ca
         defer head.deinit(std.testing.allocator);
         Host.copies = k;
         defer Host.copies = null;
-        snapshot.restoreAgreed(std.testing.allocator, &r, s, src.copy, &main, &head, ratio, eos, null) catch |err| {
+        snapshot.restoreAgreed(std.testing.allocator, .{ .d = &r }, s, src.copy, &main, &head, ratio, eos, null) catch |err| {
             try std.testing.expectEqual(error.RestoreRefused, err);
             try expectFresh(&main);
             try expectFresh(&head);
@@ -185,7 +185,7 @@ test "a lone rank's restore that fails at any copy or allocation leaves fresh ca
         var head = try caches(&r);
         defer head.deinit(std.testing.allocator);
         const a = failing.allocator();
-        snapshot.restoreAgreed(a, &r, s, src.copy, &main, &head, ratio, eos, null) catch {
+        snapshot.restoreAgreed(a, .{ .d = &r }, s, src.copy, &main, &head, ratio, eos, null) catch {
             try expectFresh(&main);
             try expectFresh(&head);
             continue;
@@ -207,7 +207,7 @@ test "a lone rank whose caches cannot be made fresh after a failed restore stops
     Host.fail_fill = true;
     defer Host.fail_fill = false;
     defer Host.copies = null;
-    const got = snapshot.restoreAgreed(std.testing.allocator, &r, s, src.copy, &main, null, ratio, eos, null);
+    const got = snapshot.restoreAgreed(std.testing.allocator, .{ .d = &r }, s, src.copy, &main, null, ratio, eos, null);
     try std.testing.expectError(error.GroupStopped, got);
 }
 
@@ -243,7 +243,7 @@ const Pair = struct {
         defer Host.fail_fill = false;
         const copy: ?*const snapshot.Saved = if (mine and p.fails == .missing) null else src.copy;
         const h: ?*cache.Caches = if (i == 0) &head else null;
-        snapshot.restoreAgreed(std.testing.allocator, &r, s, copy, &main, h, ratio, eos, l) catch |err| {
+        snapshot.restoreAgreed(std.testing.allocator, .{ .d = &r }, s, copy, &main, h, ratio, eos, l) catch |err| {
             p.got[i] = err;
             if (err == error.GroupStopped) return;
             expectFresh(&main) catch return;
@@ -339,4 +339,24 @@ test "a round's graph is chosen for the pool's caches only: caches made elsewher
     c = try e.pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
     try std.testing.expectEqual(engine.Pick.capture, try e.choose(&.{.{ .c = &c, .tokens = &step, .pos = 0 }}));
     e.pool.unlease(c);
+}
+
+test "a state copied through a bounce buffer smaller than its spans is the direct copy's bytes, and restores alike" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var src = try Saved.init(&r, 9);
+    defer src.deinit();
+    var bounce: [1000]u8 = undefined; // no span a whole number of it
+    const through: snapshot.Copy = .{ .d = &r, .bounce = &bounce };
+    const copy = try snapshot.save(std.testing.allocator, through, s, &src.main, &src.head, at, ratio);
+    defer snapshot.drop(std.testing.allocator, copy);
+    try std.testing.expectEqualSlices(u8, src.copy.main, copy.main);
+    try std.testing.expectEqualSlices(u8, src.copy.head, copy.head);
+    var main = try caches(&r);
+    defer main.deinit(std.testing.allocator);
+    var head = try caches(&r);
+    defer head.deinit(std.testing.allocator);
+    try snapshot.restoreAgreed(std.testing.allocator, through, s, copy, &main, &head, ratio, eos, null);
+    try expectRestored(&main, &src.main);
+    try expectRestored(&head, &src.head);
 }

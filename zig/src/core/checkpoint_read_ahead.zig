@@ -175,7 +175,14 @@ fn packInner(gpa: std.mem.Allocator, io: std.Io, p: anytype, prefix: []const u8,
         var path: ?[:0]u8 = null;
         for (p.names.keys(), p.names.values()) |name, info| {
             if (info.file != i or !std.mem.startsWith(u8, name, prefix) or info.nbytes == 0) continue;
-            if (path == null) path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ p.dir, file }, 0);
+            if (path == null) {
+                // one exact-size alloc: allocPrintSentinel's growing writer ties the alloc count to remap
+                const buf = try a.allocSentinel(u8, p.dir.len + 1 + file.len, 0);
+                @memcpy(buf[0..p.dir.len], p.dir);
+                buf[p.dir.len] = '/';
+                @memcpy(buf[p.dir.len + 1 ..][0..file.len], file);
+                path = buf;
+            }
             const end = try std.math.add(u64, info.start, info.nbytes);
             var lo = info.start;
             while (lo < end) {

@@ -133,6 +133,15 @@ pub const Model = struct {
     h_erow: []u16 = &.{}, // host staging of the window's embedding rows
     dr: ?*dflash2.Drafter = null, // fed inside run: taps after its layers, the context update after the last layer
 
+    const CacheLists = struct { kc: []u64, vc: []u64 };
+
+    fn cacheLists(gpa: std.mem.Allocator, layers: usize) !CacheLists {
+        const kc = try gpa.alloc(u64, layers);
+        errdefer gpa.free(kc);
+        const vc = try gpa.alloc(u64, layers);
+        return .{ .kc = kc, .vc = vc };
+    }
+
     /// fp16 K/V caches: full layers [slots, context, HK, 64], sliding layers rings of ringSize rows.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const Weights, k3: *const exl3.Kernels, comm: ?tp.Collective, context: usize, rows: usize, slots: usize, s: Stream) !Model {
         const cfg = w.cfg;
@@ -184,8 +193,11 @@ pub const Model = struct {
         const L = w.layers.len;
         const HK = cfg.kv_heads;
         const hd = cfg.head_dim;
-        m.kc = try gpa.alloc(u64, L);
-        m.vc = try gpa.alloc(u64, L);
+        const lists = try cacheLists(gpa, L);
+        m.kc = lists.kc;
+        errdefer gpa.free(m.kc);
+        m.vc = lists.vc;
+        errdefer gpa.free(m.vc);
         for (0..L) |i| {
             const n = if (cfg.full[i]) context else m.ring;
             m.kc[i] = try ar.zeros(slots * n * HK * hd * 2);
@@ -261,6 +273,7 @@ pub const Model = struct {
             b.iota = try ar.upload(std.mem.sliceAsBytes(io_));
         }
         m.h_erow = try gpa.alloc(u16, R * D);
+        errdefer gpa.free(m.h_erow);
         const first = w.layers[0].experts;
         const sz = try exl3.sizes(first, R, cfg.top_k);
         b.sc = .{ .xg = try ar.zeros(sz.xg), .xu = try ar.zeros(sz.xg), .xd = try ar.zeros(sz.xd), .z = try ar.zeros(sz.z), .y = try ar.zeros(sz.y), .ids = try ar.zeros(sz.ids), .count = try ar.zeros(4), .members = try ar.alloc(sz.members), .rows = R, .slots = cfg.top_k };
@@ -482,4 +495,13 @@ test "chunks stay at 64 or fewer, and at CK keys up to 16K" {
 test "ring" {
     try std.testing.expectEqual(@as(usize, 2176), ringSize(2047, 128));
     try std.testing.expectEqual(@as(usize, 2112), ringSize(2047, 1));
+}
+
+test "Muse Spark host cache lists: a refused second list frees the first" {
+    for (0..2) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        const gpa = failing.allocator();
+        try std.testing.expectError(error.OutOfMemory, Model.cacheLists(gpa, 4));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }

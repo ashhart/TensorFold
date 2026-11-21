@@ -13,7 +13,7 @@ pub const usage =
     \\  flashnext-mtp-parity MODEL IDS_FILE  several streams' MTP heads in one shared pass against each alone
     \\  flashnext-score MODEL IDS_FILE  decisions' label scores against a plain pass's last row
     \\  flashnext-model-rank MODEL RANK PORT IDS_FILE  explicit full-model replay experiment (no drafts)
-    \\  flashnext-rank RANK PORT [sum|eof|timeout|missing|eof-scatter|timeout-scatter|exchange]  two-process collectives, failures, the expert exchange
+    \\  flashnext-rank RANK PORT [sum|eof|timeout|missing|late|gone|eof-scatter|timeout-scatter|exchange]  two-process collectives, failures, start-up waits, the expert exchange
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
     \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
     \\  flashnext-nvfp4-tp        rank-local expert cuts and FP32 partials against FP64 (one GPU)
@@ -153,6 +153,7 @@ pub const usage =
     \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
+    \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
     \\  glm-exl3 | glm-exl3-items  GLM's EXL3 routed experts, decode and prompt, against float64, and the item plan's decode against the plain decode, byte for byte (synthetic)
     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)

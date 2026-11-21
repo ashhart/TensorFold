@@ -114,6 +114,8 @@ pub const rules = [_]Rule{
     .{ .name = "XPU_MTP", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 disables MTP drafting; default 1)" },
     .{ .name = "XPU_MTP_DEPTH", .scope = .xpu, .kind = .u32, .min = 1, .max = 15, .forms = "a whole draft depth from 1 to 15 (default 6)" },
     .{ .name = "XPU_MTP_CONF", .scope = .xpu, .kind = .signed_real, .forms = "a finite cumulative log-probability cut (default -0.4)" },
+    .{ .name = "XPU_CHUNK", .scope = .xpu, .kind = .u32, .min = 1, .max = 2048, .forms = "a whole busy prompt row count from 1 to 2048 (default 64)" },
+    .{ .name = "XPU_CHUNK_SOLO", .scope = .xpu, .kind = .u32, .min = 1, .max = 2048, .forms = "a whole solo prompt row count from busy to 2048 (default 2048)" },
     .{ .name = "XPU_VERIFY_TEST", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (1 runs stand-in verify checks)" },
     .{ .name = "XPU_FLASHNEXT_WARM", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 skips host PLE warmup; 1 forces it)" },
     .{ .name = "XPU_DEVICE_ID", .scope = .xpu, .kind = .positive, .base = 0, .forms = "a nonzero PCI device id in decimal or 0x hex" },
@@ -266,6 +268,7 @@ pub const rules = [_]Rule{
     .{ .name = "HF_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
     .{ .name = "HUGGING_FACE_HUB_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
     .{ .name = "HF_TOKEN_PATH", .scope = .hub, .kind = .path, .forms = "a path without control characters to the Hugging Face token file (pull only)" },
+    .{ .name = "TF_FLASHNEXT_DRAFT_HEAD", .scope = .flashnext, .kind = .word, .words = &.{ "bf16", "affine4" }, .forms = "bf16 or affine4 (unset or blank keeps affine4, a bf16 language head's draft rows as 4-bit groups of 32; bf16 keeps the rows as stored)" },
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
