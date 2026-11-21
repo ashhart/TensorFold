@@ -137,12 +137,10 @@ const Moe = struct {
         m.combine.deinit(a);
     }
 };
-
 fn wanted(o: Opts, name: []const u8) bool {
     const only = o.only orelse return true;
     return std.mem.indexOf(u8, name, only) != null;
 }
-
 pub fn main(init: std.process.Init) !u8 {
     const a = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -210,6 +208,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, mixed.kernel().spec.name)) {
         if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     }
+    var picks: @import("metal_tree_round_picks.zig").Suite = .{};
+    defer picks.deinit(a);
+    try picks.collect(a, device, queue, o.only, &kernels);
+    var q27_stack: @import("metal_q27_stack.zig").Suite = .{};
+    defer q27_stack.deinit(a);
+    try q27_stack.collect(a, device, queue, o.only, &kernels);
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);

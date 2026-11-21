@@ -21,6 +21,25 @@ pub fn build(gpa: std.mem.Allocator, parents: []const i32, steps: []Step, first:
     return planner.peak;
 }
 
+/// A schedule as flow words: row, then slots to restore and save into plus one, 0 for none; false for a forest.
+pub fn flows(steps: []const Step, words: []u32) bool {
+    for (steps, words, 0..) |step, *word, at| {
+        if ((at > 0 and step.read_slot < 0) or step.row > 0xffff) return false;
+        const continues = at == 0 or step.read_slot == steps[at - 1].write_slot;
+        const restore: u32 = if (continues) 0 else @intCast(step.read_slot + 1);
+        var save: u32 = 0;
+        for (steps[at + 1 ..], at + 1..) |later, j| {
+            if (j > at + 1 and later.read_slot == step.write_slot) {
+                save = @intCast(step.write_slot + 1);
+                break;
+            }
+            if (later.write_slot == step.write_slot) break;
+        }
+        word.* = step.row | (restore << 16) | (save << 24);
+    }
+    return true;
+}
+
 const Builder = struct {
     parents: []const i32,
     sizes: []const usize,
@@ -90,6 +109,41 @@ fn rowsOf(steps: anytype) [steps.len]u32 {
     var rows: [steps.len]u32 = undefined;
     for (steps, &rows) |step, *row| row.* = step.row;
     return rows;
+}
+
+test "flow words compute every row from the same parent as the slot schedule" {
+    var random: u64 = 4099;
+    for ([_]usize{ 2, 5, 16, 33, 64 }) |width| {
+        var parents: [64]i32 = undefined;
+        var steps: [64]Step = undefined;
+        var words: [64]u32 = undefined;
+        var expected: [64]u64 = undefined;
+        for (0..32) |_| {
+            for (parents[0..width], 0..) |*parent, row| {
+                random = random *% 6364136223846793005 +% 1442695040888963407;
+                parent.* = if (row == 0) -1 else @intCast(random % row);
+                const value = if (parent.* < 0) @as(u64, 23) else expected[@intCast(parent.*)];
+                expected[row] = value *% 65537 +% row +% 1;
+            }
+            _ = try build(std.testing.allocator, parents[0..width], steps[0..width], 7, 16);
+            try std.testing.expect(flows(steps[0..width], words[0..width]));
+            var kept: [max_slots]u64 = @splat(0);
+            var state: u64 = 23;
+            for (words[0..width]) |word| {
+                const restore = (word >> 16) & 0xff;
+                if (restore != 0) state = kept[restore - 1];
+                const row = (word & 0xffff) - 7;
+                state = state *% 65537 +% row +% 1;
+                try std.testing.expectEqual(expected[row], state);
+                if (word >> 24 != 0) kept[(word >> 24) - 1] = state;
+            }
+        }
+    }
+    const forest = [_]i32{ -1, 0, -1 };
+    var steps: [3]Step = undefined;
+    var words: [3]u32 = undefined;
+    _ = try build(std.testing.allocator, &forest, &steps, 0, 16);
+    try std.testing.expect(!flows(&steps, &words));
 }
 
 test "long chains need one slot and stars need two independent of depth or width" {
