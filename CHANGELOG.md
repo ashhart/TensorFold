@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
+
 - GLM on Metal: vectorized prompt, KDA and indexer kernels on Macs without tensor units cut cold prompt time 5.17% to 5.68% (2K to 64K tokens) with 0/64 token differences (#3921, refs #3152). Thanks to @gilby.
 
 - MiniMax-H3-Image on Metal: `tf-h3-image` runs its transformer (MiniMax H3's, without the audio layers, on M5 tensor units) from a picture case through its six distilled steps, each with its own output head, beside the engine; the VAE's rules (config, tiles and blend, latent statistics, pixels) run on the host, and core/picture gains Pillow's Lanczos-3 resampling. Clip cases run as before (#2775).
