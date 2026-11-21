@@ -273,6 +273,7 @@ test "GLM index geometry: indexUpdate passes GLM-5.3-Flash's rope 0 and pools of
     };
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = R.launch;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(R.launch);
     var ks: glue.Kernels = undefined;
     ks.index_write = .{ .d = &d, .handle = @ptrFromInt(1) };
     ks.pool_keys = .{ .d = &d, .handle = @ptrFromInt(2) };
