@@ -68,7 +68,7 @@ status=0
     echo "PASS compact replay exact through PCM chunk 1 vs 1, then: $(tail -n 1 "$out/compact-replay.log")"
     echo "PASS compact batched prefill (64 rows) replay exact through PCM chunk 1 vs 1, then: $(tail -n 1 "$out/compact-batched-replay.log")"
     echo "PASS compact decode at codec chunk 1, frames byte-identical at chunks 4 and 16: $(tail -n 1 "$out/compact-1.log")"
-    for chunk in 4 16; do echo "INFO compact PCM at codec chunk $chunk against 1, 16-bit steps: $(pcm_diff "$chunk")"; done
+    for chunk in 4 16; do echo "INFO compact PCM at codec chunk $chunk against 1, 16-bit steps: $(cat "$out/pcm-$chunk.txt")"; done
     echo "INFO compact codes at 1 and 64 prompt rows $capacity"
     grep '^(filtered) SUMMARY' "$out/contract.log"
     grep '^RECORD drama3 d3_router_compact:' "$out/limits.log"
