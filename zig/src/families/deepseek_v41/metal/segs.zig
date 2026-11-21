@@ -36,8 +36,8 @@ pub fn many(x: *const Ctx) bool {
     return x.segs.len > 1;
 }
 
-fn addr(b: ?mtl.Buffer) u64 {
-    return if (b) |x| x.gpuAddress() else 0;
+fn addr(b: ?mtl.Buffer, off: usize) u64 {
+    return if (b) |x| x.gpuAddress() + off else 0;
 }
 
 /// Every buffer of the launch's slots declared on `e` in one call: run once an encoder before its first `table`.
@@ -74,12 +74,12 @@ pub fn table(x: *const Ctx, l: u32) !Ref {
         const src = sg.slot.source(c, l);
         out[j] = .{
             .window = region.window.gpuAddress(),
-            .pool = addr(region.pool),
-            .keys = addr(region.keys),
-            .carry = addr(region.carry),
-            .inputs = addr(region.inputs),
-            .comp = if (src) |r| r.pool.?.gpuAddress() else region.window.gpuAddress(),
-            .ikeys = if (src) |r| addr(r.keys) else 0,
+            .pool = addr(region.pool, region.pool_off),
+            .keys = addr(region.keys, region.keys_off),
+            .carry = addr(region.carry, 0),
+            .inputs = addr(region.inputs, 0),
+            .comp = if (src) |r| r.pool.?.gpuAddress() + r.pool_off else region.window.gpuAddress(),
+            .ikeys = if (src) |r| addr(r.keys, r.keys_off) else 0,
             .base = sg.r0,
             .rows = sg.n,
             .nkeys = if (ratio > 0) (sg.p0 + sg.n) / ratio else 0,

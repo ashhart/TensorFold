@@ -15,15 +15,42 @@ pub const index_key_bytes = 68;
 /// One layer's regions. The window is mirrored (slot s and s + slots hold one key) so any 128 positions are one run.
 pub const Region = struct {
     window: mtl.Buffer,
-    /// compressed latents [positions / ratio][head_dim] bf16, at KV sources only
+    /// compressed latents [positions / ratio][head_dim] bf16, at KV sources only, from byte `pool_off`
     pool: ?mtl.Buffer = null,
-    /// index keys [positions / ratio][68], at KV sources only
+    /// index keys [positions / ratio][68], at KV sources only, from byte `keys_off`
     keys: ?mtl.Buffer = null,
+    /// where this slot's rows start in `pool` and `keys` (nonzero only in a shared pool's run)
+    pool_off: usize = 0,
+    keys_off: usize = 0,
+    /// false: `pool` and `keys` are the shared pool's buffers, released by their owner
+    owned: bool = true,
     /// the ratio-2 compressor's carry: kv [2][head_dim] then score [2][head_dim], fp32
     carry: ?mtl.Buffer = null,
     /// the ratio-2 compressor's inputs of the last launch: kv [rows][head_dim] then score [rows][head_dim], fp32
     inputs: ?mtl.Buffer = null,
 };
+
+const Ref = pipelines.glue.Ref;
+
+/// The slot's compressed latents as a kernel binds them: row 0 at its first row.
+pub fn poolRef(r: *const Region) Ref {
+    return .{ .buf = r.pool.?, .off = r.pool_off };
+}
+
+/// The slot's index keys as a kernel binds them: row 0 at its first row.
+pub fn keysRef(r: *const Region) Ref {
+    return .{ .buf = r.keys.?, .off = r.keys_off };
+}
+
+/// The slot's first `n` bytes of compressed latents on the host.
+pub fn poolBytes(r: *const Region, n: usize) []u8 {
+    return r.pool.?.contents()[r.pool_off..][0..n];
+}
+
+/// The slot's first `n` bytes of index keys on the host.
+pub fn keysBytes(r: *const Region, n: usize) []u8 {
+    return r.keys.?.contents()[r.keys_off..][0..n];
+}
 
 /// The compressed rows a KV source holds for `limit` positions.
 pub fn poolRows(c: *const Config, layer: u32, limit: u32) u32 {
@@ -35,6 +62,9 @@ pub fn tapBytes(c: *const Config) usize {
     return @as(usize, pipelines.max_rows) * c.dspark_targets.len * c.hidden * 2;
 }
 
+/// A shared pool's buffers by layer (null at layers that are not KV sources).
+pub const Shared = struct { pools: []const ?mtl.Buffer, keys: []const ?mtl.Buffer };
+
 pub const Slot = struct {
     regions: []Region,
     limit: u32,
@@ -44,6 +74,15 @@ pub const Slot = struct {
 
     /// Every backbone layer's regions for positions [0, limit) and the taps, zeroed; the carry's scores start at -inf.
     pub fn init(a: std.mem.Allocator, device: mtl.Device, c: *const Config, limit: u32) !Slot {
+        return make(a, device, c, limit, null);
+    }
+
+    /// As `init`, but each KV source's latents and keys are the shared pool's buffers; no positions until `bind`.
+    pub fn initShared(a: std.mem.Allocator, device: mtl.Device, c: *const Config, shared: Shared) !Slot {
+        return make(a, device, c, 0, shared);
+    }
+
+    fn make(a: std.mem.Allocator, device: mtl.Device, c: *const Config, limit: u32, shared: ?Shared) !Slot {
         const regions = try a.alloc(Region, c.layers);
         errdefer a.free(regions);
         var made: usize = 0;
@@ -52,15 +91,20 @@ pub const Slot = struct {
         for (regions, 0..) |*r, l| {
             const layer: u32 = @intCast(l);
             const wbytes = 2 * @as(usize, windowSlots(c)) * c.head_dim * 2;
-            r.* = .{ .window = try device.buffer(wbytes, opts) };
+            r.* = .{ .window = try device.buffer(wbytes, opts), .owned = shared == null };
             made = l + 1;
             @memset(r.window.contents()[0..wbytes], 0);
             if (!c.isKvSource(layer)) continue;
-            const rows = poolRows(c, layer, limit);
-            r.pool = try device.buffer(@as(usize, rows) * c.head_dim * 2, opts);
-            @memset(r.pool.?.contents()[0 .. @as(usize, rows) * c.head_dim * 2], 0);
-            r.keys = try device.buffer(@as(usize, rows) * index_key_bytes, opts);
-            @memset(r.keys.?.contents()[0 .. @as(usize, rows) * index_key_bytes], 0);
+            if (shared) |sh| {
+                r.pool = sh.pools[l] orelse return error.NoPoolBuffer;
+                r.keys = sh.keys[l] orelse return error.NoPoolBuffer;
+            } else {
+                const rows = poolRows(c, layer, limit);
+                r.pool = try device.buffer(@as(usize, rows) * c.head_dim * 2, opts);
+                @memset(r.pool.?.contents()[0 .. @as(usize, rows) * c.head_dim * 2], 0);
+                r.keys = try device.buffer(@as(usize, rows) * index_key_bytes, opts);
+                @memset(r.keys.?.contents()[0 .. @as(usize, rows) * index_key_bytes], 0);
+            }
             if (c.compressRatio(layer) > 1) {
                 r.carry = try device.buffer(4 * @as(usize, c.head_dim) * 4, opts);
                 resetCarry(r, c);
@@ -76,11 +120,21 @@ pub const Slot = struct {
         return .{ .regions = regions, .limit = limit, .a = a, .taps = taps };
     }
 
+    /// The slot's rows become `rows` x the run's first block at each KV source; it holds `limit` positions.
+    pub fn bind(s: *Slot, c: *const Config, first: u64, limit: u32) void {
+        for (s.regions, 0..) |*r, l| if (r.pool != null and !r.owned) {
+            const row0: usize = @intCast(first / c.compressRatio(@intCast(l)));
+            r.pool_off = row0 * c.head_dim * 2;
+            r.keys_off = row0 * index_key_bytes;
+        };
+        s.limit = limit;
+    }
+
     fn free(r: *Region) void {
         if (r.inputs) |b| b.deinit();
         r.window.deinit();
-        if (r.pool) |b| b.deinit();
-        if (r.keys) |b| b.deinit();
+        if (r.owned) if (r.pool) |b| b.deinit();
+        if (r.owned) if (r.keys) |b| b.deinit();
         if (r.carry) |b| b.deinit();
     }
 
@@ -96,10 +150,11 @@ pub const Slot = struct {
         return &s.regions[src];
     }
 
-    /// Every region of `from` copied over this slot's, in a blit on `cb` (snapshots, test resets).
+    /// Every region of `from` copied over this slot's, in a blit on `cb` (test resets; slots that own their buffers).
     pub fn copyFrom(s: *const Slot, cb: mtl.CommandBuffer, from: *const Slot) void {
         const b = cb.blit();
         for (s.regions, from.regions) |to, fr| {
+            std.debug.assert(to.owned and fr.owned);
             b.copy(fr.window, 0, to.window, 0, to.window.length());
             inline for (.{ "pool", "keys", "carry" }) |f| {
                 if (@field(to, f)) |t| b.copy(@field(fr, f).?, 0, t, 0, t.length());
