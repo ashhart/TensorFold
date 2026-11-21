@@ -17,6 +17,11 @@ constexpr int GROUPED_LOAD = tf_exl3::AHEAD;
 constexpr int GROUPED_LOAD = tf_exl3::PLAIN;
 #endif
 
+// Defined before the others: nvcc 13.3 then leaves tf_exl3_grouped_2's sm_12x SASS as it was.
+extern "C" __global__ void tf_exl3_grouped_wide_2(tf_exl3::GroupedArgs a) {  // mul1, 64 columns by 32 members
+    tf_exl3::grouped_body<2, 4, 4, GROUPED_LOAD, 2>(a, blockIdx.x, blockIdx.y, blockIdx.z);
+}
+
 extern "C" __global__ void tf_exl3_grouped_0(tf_exl3::GroupedArgs a) {  // 3inst, any width
     tf_exl3::grouped_body<0, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
 }
@@ -27,10 +32,6 @@ extern "C" __global__ void tf_exl3_grouped_1(tf_exl3::GroupedArgs a) {  // mcg, 
 
 extern "C" __global__ void tf_exl3_grouped_2(tf_exl3::GroupedArgs a) {  // mul1, any width (RED-SNOW's experts)
     tf_exl3::grouped_body<2, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
-}
-
-extern "C" __global__ void tf_exl3_grouped_wide_2(tf_exl3::GroupedArgs a) {  // mul1, 64 columns by 32 members
-    tf_exl3::grouped_body<2, 4, 4, GROUPED_LOAD, 2>(a, blockIdx.x, blockIdx.y, blockIdx.z);
 }
 
 namespace tf_exl3 {
