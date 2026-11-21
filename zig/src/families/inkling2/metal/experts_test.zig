@@ -124,11 +124,14 @@ test "eight-term combine stress separates FP32 and BF16 in every contract order"
     try std.testing.expect(9.0 / exact_allowance >= 100);
 }
 
-test "launch geometry is 32 scalar threads and validates block/layout edges" {
+test "launch geometry is a simdgroup an output by route pair and validates block/layout edges" {
     const nv = p.Call{ .rows = 3, .k = 2304, .n = 1152, .format = .nvfp4 };
     try p.check(nv);
-    try std.testing.expectEqual(@as(u32, 24), p.geometry(nv).groups);
-    try std.testing.expectEqual(@as(u32, 32), p.geometry(nv).threads);
+    try std.testing.expectEqual(@as(u32, 144), p.geometry(nv).outputs);
+    try std.testing.expectEqual(@as(u32, 24), p.geometry(nv).pairs);
+    try std.testing.expectEqual(@as(u32, 256), p.geometry(nv).threads);
+    try std.testing.expectEqual(@as(u32, 5), p.combineGeometry(nv).outputs);
+    try std.testing.expectEqual(@as(u32, 3), p.combineGeometry(nv).pairs);
     const mx = p.Call{ .rows = 1, .k = 1152, .n = 2304, .format = .mxfp8 };
     try p.check(mx);
     var bad = nv;
