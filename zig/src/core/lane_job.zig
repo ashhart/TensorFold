@@ -47,6 +47,7 @@ pub const Job = struct {
     wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
     fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
     backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
+    why: pc.why.Why = .{}, // its lookup's reason; bypass until one runs
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {

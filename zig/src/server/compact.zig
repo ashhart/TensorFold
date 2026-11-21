@@ -7,7 +7,8 @@ const server_mod = @import("server.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const Server = server_mod.Server;
-const CompactAt = server_mod.CompactAt;
+/// auto compacts near the window. fraction compacts past that share of it.
+pub const CompactAt = union(enum) { auto, fraction: f64 };
 const Cx = @import("errors.zig").Cx;
 
 pub const marker_line = "Memory of the earlier conversation:";

@@ -27,6 +27,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     };
     if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught) if (@import("lane_cache_queue.zig").lookup(h, job)) |l| {
         job.entry = l.entry;
+        job.why = l.why;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
         reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };

@@ -30,8 +30,7 @@ const idle_unload = @import("idle_unload.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-/// auto compacts near the window. fraction compacts past that share of it.
-pub const CompactAt = union(enum) { auto, fraction: f64 };
+pub const CompactAt = @import("compact.zig").CompactAt;
 pub const Identity = @import("identity.zig").Identity;
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
@@ -82,6 +81,7 @@ pub const Config = struct {
     journal: ?*@import("request_journal.zig").Journal = null, // serve owns TENSORFOLD_REQUEST_JOURNAL
     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
     phase_metrics: bool = false,
+    cache_why: bool = false, // TF_CACHE_WHY=1: each reply's tensorfold block says why its prompt resumed no further
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
     spark_stats: bool = false,
     /// Null keeps every reply identical to a server that has no compaction.

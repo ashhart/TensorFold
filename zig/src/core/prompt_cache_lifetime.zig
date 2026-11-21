@@ -7,6 +7,7 @@ pub fn expired(s: *pc.Store, saved: pc.Saved) void {
     for (s.entries.items) |e| if (e.saved == saved and !e.expired) {
         e.expired = true;
         e.removed_as = .expired;
+        e.gone = .expired;
         s.counts.evicted += 1;
         return;
     };
@@ -36,6 +37,7 @@ pub fn resumedWithReason(s: *pc.Store, e: *pc.Entry, prompt: []const u32, failur
         s.counts.failed += 1;
         e.expired = true;
         e.removed_as = .restore_failed;
+        e.gone = .restore_failed;
         return;
     }
     s.clock += 1;
