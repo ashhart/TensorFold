@@ -416,6 +416,30 @@ fn weightsOf(t: projection.Triple, n: usize, k: usize) row_gpu.Weights {
     return .{ .w = t.weight.buffer, .w_off = t.weight.offset, .scales = t.scales.buffer, .s_off = t.scales.offset, .biases = t.biases.buffer, .b_off = t.biases.offset, .n = n, .k = k, .group = t.group, .bits = t.bits };
 }
 
+/// The whole lm_head from the checkpoint files: a pair rank's drafter compresses its vocabulary spans from it.
+pub const FullHead = struct { linear: Linear, owned: std.ArrayList(mtl.Buffer) };
+
+pub fn fullHead(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, w: widths.Width) !FullHead {
+    const g = s.global;
+    const prefix: []const u8 = if (checkpoint.has("language_model.lm_head.weight")) "language_model." else "";
+    var owned: std.ArrayList(mtl.Buffer) = .empty;
+    errdefer {
+        for (owned.items) |*b| b.deinit();
+        owned.deinit(allocator);
+    }
+    var stage = cp.Stage{ .device = device };
+    defer stage.deinit();
+    var runs: std.ArrayList([]projection.Run) = .empty;
+    defer {
+        for (runs.items) |r| allocator.free(r);
+        runs.deinit(allocator);
+    }
+    var none = widths.Widths{ .allocator = allocator, .layers = &.{}, .embed = w, .head = w };
+    const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = &none };
+    const linear = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = w, .span = .{ .from = 0, .len = g.vocab } }}, g.hidden);
+    return .{ .linear = linear, .owned = owned };
+}
+
 pub fn ref(t: Tensor) Ref {
     return .{ .buffer = t.buffer, .offset = t.offset };
 }

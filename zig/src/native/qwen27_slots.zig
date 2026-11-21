@@ -35,6 +35,8 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (slot == 0 and s.yield_check != null and s.max_new == 0 and
         b.standing.warmYields(keepsEnd(s), resumable(b, s, 0), resumable(b, s, kept_at))) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
+    // Announced before the first chunk: rank 1 opens where rank 0 does (glm_dsa order).
+    if (b.link) |l| try l.begin(slot);
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
@@ -132,6 +134,8 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     const part = ids[at..end];
     const last = end == ids.len;
     const before = b.runner.gpu_seconds;
+    // Rank 0 sends the chunk before running it here (glm_dsa order): the send carries this pass's boundary.
+    if (b.link) |l| try l.chunk(slot, part, last, decoded);
     if (d) |x| {
         if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
     } else {
@@ -182,6 +186,7 @@ fn promiseRows(b: *const Metal, s: *const lanes.Stream) u32 {
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
 pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
+    try @import("qwen27_pair.zig").refuseRequest(b.link, s); // the chunked prefill bypasses prefillFn: the same guards
     b.settle() catch {};
     b.dropRound();
     promoteDue(b);
@@ -502,6 +507,7 @@ fn copyRows() !u32 {
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
 pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+    try @import("qwen27_pair.zig").refuseFollower(b.link); // the serial draft loop bypasses prefillFn's refusals
     const d = b.draft orelse return error.DraftNotAttached;
     if (s.sampling != null) return error.GreedyDraftsOnly;
     if (b.owners[0] != null) return error.StreamBusy;

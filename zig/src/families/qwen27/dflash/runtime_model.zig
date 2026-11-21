@@ -35,7 +35,8 @@ pub const Model = struct {
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
         defer a.free(text);
         const c = try cfg.parse(a, text);
-        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
+        // A pair's rank holds a shard: its `config` is rank-local (a split vocab), so bind the global geometry.
+        if (target.shard) |sh| try c.bind(sh.global.hidden, sh.global.vocab, sh.global.layers) else try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
         return openBound(a, target, c, shards, mode);
@@ -325,5 +326,7 @@ fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8,
     const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
+    // A pair rank's `config` is rank-local; the drafter's weights are global shapes.
+    if (target.shard) |sh| return ck.validate(w, s, b, format, sh.global.vocab, sh.global.hidden);
     return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);
 }

@@ -9,9 +9,49 @@ const Fence = @import("fence.zig").Fence;
 const Owner = @import("../families/flashnext/owned.zig").Owner;
 const pair_layout = @import("pair_rows_layout.zig");
 const pair_loopback = @import("pair_rows_loopback.zig");
+const pair_start = @import("pair_rows_start.zig");
 
 pub const Settings = settings.Settings;
 pub const Ref = @import("exlr8_projection.zig").Ref;
+
+/// The five facts that change a pair's bits or its commands, exchanged at `ready`; the wire never carries a 0.
+pub const Fingerprint = struct {
+    /// A hash of build_options.version, as `capabilities --json` prints it; 0 for a build with no version string.
+    version: u64 = 0,
+    /// The Apple GPU generation the Metal device names ("Apple M4 Max" is 4): the kernels' bits differ across them.
+    chip: u64 = 0,
+    /// The checkpoint identity's first eight bytes (config.json, the index, each shard's name, size and header).
+    checkpoint: u64 = 0,
+    /// The weight format tag the affine readers resolved (the widths tag), so a 4-bit stack refuses a 6-bit stack.
+    format: u64 = 0,
+    /// The commands rank 1 replays and their words: two builds with one version string may still differ here.
+    protocol: u64 = 0,
+};
+
+/// The wire's encoding: ready cannot signal a 0, so a fact travels as @max(w,1); the comparison normalizes both sides.
+fn wireWord(w: u64) u64 {
+    return @max(w, 1);
+}
+
+/// A fingerprint fact's mismatch: names the fact and both sides' values, so the restart message says what differed.
+pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) !?[]const u8 {
+    const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" }, .{ "command protocol", "protocol" } };
+    inline for (facts) |f| {
+        const name = f[0];
+        const field = f[1];
+        const my = wireWord(@field(mine, field));
+        const their = wireWord(@field(peer, field));
+        if (my != their)
+            return try std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, my, their, name });
+    }
+    return null;
+}
+
+/// The fingerprint's words, in field order, at `FINGERPRINT` in the flag page: they must end before the beat word.
+const fingerprint_fields = @typeInfo(Fingerprint).@"struct".field_names;
+comptime {
+    std.debug.assert(pair_layout.FINGERPRINT + 8 * fingerprint_fields.len <= pair_layout.BEAT);
+}
 
 pub const command_words = pair_layout.command_words;
 pub const Slot = pair_layout.Slot;
@@ -34,9 +74,11 @@ const slotOf = pair_layout.slotOf;
 const Layout = pair_layout.Layout;
 const FLAG = pair_layout.FLAG;
 const HELLO = pair_layout.HELLO;
-const CMD_FLAG = pair_layout.CMD_FLAG;
+/// The flag word rank 1 waits on for the next command (the host tests post commands through it).
+pub const CMD_FLAG = pair_layout.CMD_FLAG;
 const CMD_ACK = pair_layout.CMD_ACK;
 const READY = pair_layout.READY;
+const FINGERPRINT = pair_layout.FINGERPRINT;
 const BEAT = pair_layout.BEAT;
 const POSTED = pair_layout.POSTED;
 const FAILED = pair_layout.FAILED;
@@ -127,9 +169,14 @@ pub const Pair = struct {
     gpa: std.mem.Allocator,
     /// The parsed settings file: the endpoint's config points into it, so it outlives `ep`.
     arena: *std.heap.ArenaAllocator,
+    /// TF_Q27_PAIR_TRACE_EVERY's exchanges between trace lines, or 0 when TF_Q27_PAIR_TRACE is off.
+    trace_every: u64 = 0,
 
     /// Connect to the peer named in `settings_path` (speed-up mode's file), exchanges up to `bytes`, and start sending.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, settings_path: []const u8, bytes: usize) !*Pair {
+        // the trace settings are read before anything opens: a malformed one is refused by name, never read as off
+        const trace = try platform.environment.read(bool, "TF_Q27_PAIR_TRACE", false);
+        const trace_every = if (trace) try platform.environment.read(u64, "TF_Q27_PAIR_TRACE_EVERY", 2048) else 0;
         const l: Layout = .{ .slot = pages(bytes) };
         const text = try std.Io.Dir.cwd().readFileAlloc(io, settings_path, gpa, .limited(1 << 20));
         defer gpa.free(text);
@@ -142,50 +189,8 @@ pub const Pair = struct {
         if (s.rank > 1 or s.links.len != 1) return error.PairTwoRanksOneLink;
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
         defer gpa.free(lib);
-        const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = l.window(), .staging_bytes = 4 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
-        errdefer ep.deinit();
-        var owned: Owner(mtl) = .{};
-        errdefer owned.deinit();
-        const rd = ep.rdma();
-        const win = rd.window();
-        const lib_m = try mtl.Library.fromSource(device, sources.core_pair_rows, mtl.CompileOptions.mlx());
-        defer lib_m.deinit();
-        const fence = try Fence.init(device);
-        errdefer fence.deinit();
-        const posted = try device.sharedEvent();
-        errdefer posted.deinit();
-        const landed = try device.sharedEvent();
-        errdefer landed.deinit();
-        const p = try gpa.create(Pair);
-        errdefer gpa.destroy(p);
-        const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        p.* = .{
-            .rank = s.rank,
-            .peer = 1 - s.rank,
-            .l = l,
-            .ep = ep,
-            .rd = rd,
-            .win = win,
-            .wbuf = try owned.keep(gpa, try device.bufferNoCopy(win.ptr, win.len, opts)),
-            .stage_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_stage", false)),
-            .gather_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_gather", false)),
-            .argmax_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_argmax", false)),
-            .pick_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "pair_pick", false)),
-            .fence = fence,
-            .posted = posted,
-            .landed = landed,
-            .bytes = try gpa.alloc(u32, JOBS),
-            .gpa = gpa,
-            .arena = arena,
-            .owned = owned,
-        };
-        owned = .{}; // the pair owns them now: the error path must not release them twice
-        errdefer gpa.free(p.bytes);
-        // both Macs up before the first exchange: a word each way
-        try rd.signal(p.peer, l.flags() + HELLO, 1);
-        while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
-        p.thread = try std.Thread.spawn(.{}, service, .{p});
-        return p;
+        var kit: Kit = .{ .gpa = gpa, .device = device, .library_path = lib, .s = s, .l = l, .arena = arena, .trace_every = trace_every };
+        return pair_start.start(Kit, &kit, gpa, JOBS);
     }
 
     /// Rank 0 tells rank 1 it is done (its `next` returns null); then the sending thread and the link close.
@@ -346,11 +351,17 @@ pub const Pair = struct {
         raise();
         try p.reach(p.l.flags() + CMD_ACK, p.cmd, cmd_ack_timeout_ms);
         p.cmd += 1;
+        const n = p.frame(kind, words);
+        try p.ep.writeSignalFrom(p.peer, p.l.cmdOut(), p.l.cmdIn(), n, p.l.flags() + CMD_FLAG, p.cmd);
+    }
+
+    /// Rank 0's frame at its cmdOut, as `next` reads it at cmdIn: kind, word count, the words; its byte count.
+    pub fn frame(p: *Pair, kind: u32, words: []const u32) usize {
         const head: [2]u32 = .{ kind, @intCast(words.len) };
         const out = p.l.cmdOut();
         @memcpy(p.win[out..][0..8], std.mem.asBytes(&head));
         @memcpy(p.win[out + 8 ..][0 .. 4 * words.len], std.mem.sliceAsBytes(words));
-        try p.ep.writeSignalFrom(p.peer, out, p.l.cmdIn(), 8 + 4 * words.len, p.l.flags() + CMD_FLAG, p.cmd);
+        return 8 + 4 * words.len;
     }
 
     /// Rank 1: rank 0's next command's words into `out` and its kind; null once rank 0 is done or this Mac stops.
@@ -368,10 +379,20 @@ pub const Pair = struct {
         return if (kind == 0) null else kind;
     }
 
-    /// Both Macs loaded before the first command: a word each way, each waited for with the load's bound.
-    pub fn ready(p: *Pair) !void {
+    /// Both Macs loaded and alike where it changes the bits, before the first command: `why` names a mismatched fact.
+    pub fn ready(p: *Pair, fp: Fingerprint, a: std.mem.Allocator, why: *[]const u8) !void {
         try p.rd.signal(p.peer, p.l.flags() + READY, 1);
+        inline for (fingerprint_fields, 0..) |name, i| try p.rd.signal(p.peer, p.l.flags() + FINGERPRINT + 8 * i, wireWord(@field(fp, name)));
         try p.reach(p.l.flags() + READY, 1, ready_timeout_ms);
+        var peer: Fingerprint = .{};
+        inline for (fingerprint_fields, 0..) |name, i| {
+            try p.reach(p.l.flags() + FINGERPRINT + 8 * i, 1, ready_timeout_ms);
+            @field(peer, name) = @atomicLoad(u64, p.word64(p.l.flags() + FINGERPRINT + 8 * i), .acquire);
+        }
+        if (try fingerprintProblem(a, fp, peer)) |text| {
+            why.* = text;
+            return error.PairFingerprintMismatch;
+        }
     }
 
     /// This Mac's command wait ends (rank 1 at close).
@@ -408,10 +429,14 @@ pub const Pair = struct {
         var x: u32 = 1;
         // Ticks after which this link is no longer cold: set at the first relay, when both ranks have just loaded.
         var cold_until: u64 = 0;
+        const trace = p.trace_every != 0;
+        var tr: Trace = .{};
         while (!p.stop.load(.acquire)) {
             p.seam_x.store(x, .release);
             // 1. The GPU must reach the seam: sleep while idle, spin once published, fail if it never arrives.
             var armed: u64 = 0;
+            var t0: u64 = 0;
+            if (trace) t0 = ticksNow();
             while (p.posted.value() < @as(u64, x)) {
                 if (p.stop.load(.acquire)) return;
                 if (!reached(p.queued.load(.acquire), x)) {
@@ -422,12 +447,15 @@ pub const Pair = struct {
                 if (ticksNow() -% armed > post_timeout_ms * ticks_per_ms) return p.fail(x, "this Mac's GPU never reached the seam", peer_timeout_ms);
                 std.atomic.spinLoopHint();
             }
+            if (trace) tr.post_wait += ticksNow() -% t0;
             // 2. Relay: part to the peer's recv slot, arrival flag in the same MCDMA write, data and count together.
             const at = x % JOBS;
+            if (trace) t0 = ticksNow();
             p.ep.writeSignalFrom(p.peer, p.l.send(x), p.l.recv(x), p.bytes[at], p.l.flags() + FLAG, x) catch |err| {
                 std.log.err("pair rank {d}: seam {d} relay write failed: {s}", .{ p.rank, x, @errorName(err) });
                 return p.fail(x, "the relay write failed", peer_timeout_ms);
             };
+            if (trace) tr.submit += ticksNow() -% t0;
             // 3. The peer's relay puts its part in our slot; its flag is proof; the cold bound, then the steady one.
             if (x == 1) cold_until = ticksNow() +% cold_window_ms * ticks_per_ms;
             const cold = cold_until != 0 and ticksNow() < cold_until;
@@ -438,11 +466,107 @@ pub const Pair = struct {
                 if (ticksNow() -% t1 > budget_ms * ticks_per_ms) return p.fail(x, "the peer's part never landed", budget_ms);
                 std.atomic.spinLoopHint();
             }
+            if (trace) {
+                tr.peer_wait += ticksNow() -% t1;
+                tr.n += 1;
+                if (tr.n % p.trace_every == 0) tr.log(p.rank, p.trace_every);
+            }
             // 4. Release the GPU: both parts are in; the event's wait is the acquire that makes them visible.
             @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), x, .release);
             p.landed.set(x);
             x +%= 1;
         }
+    }
+};
+
+/// Pair.init's makers for `pair_rows_start.start`: the link, the Metal objects, the hello and the service thread.
+const Kit = struct {
+    pub const Made = Pair;
+    pub const Owned = Owner(mtl);
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    library_path: [:0]const u8,
+    s: Settings,
+    l: Layout,
+    arena: *std.heap.ArenaAllocator,
+    trace_every: u64,
+
+    pub fn endpoint(k: *Kit) !*fabric.mcdma.Endpoint {
+        return fabric.mcdma.Endpoint.create(k.gpa, k.library_path, .{ .rank = k.s.rank, .ranks = 2, .window_bytes = k.l.window(), .staging_bytes = 4 << 20, .links = k.s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
+    }
+    pub fn library(k: *Kit) !mtl.Library {
+        return mtl.Library.fromSource(k.device, sources.core_pair_rows, mtl.CompileOptions.mlx());
+    }
+    pub fn fence(k: *Kit) !Fence {
+        return Fence.init(k.device);
+    }
+    pub fn event(k: *Kit) !mtl.SharedEvent {
+        return k.device.sharedEvent();
+    }
+    pub fn window(k: *Kit, win: []u8) !mtl.Buffer {
+        return k.device.bufferNoCopy(win.ptr, win.len, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    }
+    pub fn pipeline(k: *Kit, lib: mtl.Library, name: []const u8) !mtl.Pipeline {
+        return mtl.Pipeline.init(k.device, lib, name, false);
+    }
+
+    /// The pair around what `start` made; `owned` and `thread` stay empty until start's last step.
+    pub fn assemble(k: *Kit, p: *Pair, o: anytype) void {
+        p.* = .{
+            .rank = k.s.rank,
+            .peer = 1 - k.s.rank,
+            .l = k.l,
+            .ep = o.ep,
+            .rd = o.rd,
+            .win = o.win,
+            .wbuf = o.wbuf,
+            .stage_pipe = o.stage_pipe,
+            .gather_pipe = o.gather_pipe,
+            .argmax_pipe = o.argmax_pipe,
+            .pick_pipe = o.pick_pipe,
+            .fence = o.fence,
+            .posted = o.posted,
+            .landed = o.landed,
+            .bytes = o.bytes,
+            .gpa = k.gpa,
+            .arena = k.arena,
+            .trace_every = k.trace_every,
+        };
+    }
+
+    /// Both Macs up before the first exchange: a word each way.
+    pub fn hello(_: *Kit, p: *Pair) !void {
+        try p.rd.signal(p.peer, p.l.flags() + HELLO, 1);
+        while (@atomicLoad(u64, p.word64(p.l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
+    }
+    pub fn spawn(_: *Kit, p: *Pair) !std.Thread {
+        return std.Thread.spawn(.{}, Pair.service, .{p});
+    }
+};
+
+/// Host-side atomic-step timings for TF_Q27_PAIR_TRACE: where a relayed seam's wall time goes.
+const Trace = struct {
+    n: u64 = 0,
+    /// Step 1: from the loop top to posted(x) — encode/commit lag while the seam is queued.
+    post_wait: u64 = 0,
+    /// Step 2: the writeSignalFrom call itself (kext submit, no flush).
+    submit: u64 = 0,
+    /// Step 3: from submit to the peer's flag word reaching x (the peer land RTT).
+    peer_wait: u64 = 0,
+
+    /// The mean over the last `n` exchanges, the TF_Q27_PAIR_TRACE_EVERY that ended them.
+    fn log(t: *Trace, rank: u32, n: u64) void {
+        const us = struct {
+            fn f(ticks: u64, count: u64) u64 {
+                return if (count == 0) 0 else ticks * 1000 / (count * ticks_per_ms);
+            }
+        }.f;
+        std.log.info("pair rank {d}: trace n={d} post_wait={d}us submit={d}us peer_wait={d}us sum={d}us/exchange", .{
+            rank, t.n, us(t.post_wait, n), us(t.submit, n), us(t.peer_wait, n), us(t.post_wait + t.submit + t.peer_wait, n),
+        });
+        t.post_wait = 0;
+        t.submit = 0;
+        t.peer_wait = 0;
     }
 };
 
