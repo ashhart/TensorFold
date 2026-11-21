@@ -13,7 +13,13 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     m.addImport("core", core);
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("inkling2_metal", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig"), .target = target, .optimize = optimize }));
-    m.addImport("metal", b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .optimize = optimize }));
+    const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .optimize = optimize });
+    if (target.result.os.tag == .macos) {
+        metal.linkFramework("Metal", .{});
+        metal.linkFramework("Foundation", .{});
+        metal.linkSystemLibrary("objc", .{});
+    }
+    m.addImport("metal", metal);
     m.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = target, .optimize = optimize }));
     const inkling2_metal_ref = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/ref.zig"), .target = target, .optimize = optimize });
     inkling2_metal_ref.addImport("metal", m.import_table.get("metal").?);
