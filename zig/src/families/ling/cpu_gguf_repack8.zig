@@ -3,6 +3,7 @@ const std = @import("std");
 const g = @import("core").gguf;
 const rows = @import("cpu_rows.zig");
 const sdot = @import("cpu_gguf_q4_sdot.zig");
+const block_batch = @import("cpu_gguf_block_batch.zig");
 pub const layout_version: u32 = 5;
 
 pub const BlockQ4Kx8 = extern struct { rows: [8][144]u8 align(16) };
@@ -84,7 +85,14 @@ fn projectTiles(comptime T: type, comptime M: usize, blocks: [*]const T, acts: [
                 const tile = &blocks[group * bpr + block];
                 inline for (0..8) |row| {
                     const bytes: [*]const u8 = &tile.rows[row];
-                    inline for (0..M) |input_row| {
+                    if (M > 1 and batch == M) {
+                        const act = acts + first * bpr + block;
+                        const values = if (T == BlockQ4Kx8)
+                            block_batch.q4k(M, bytes, act, bpr)
+                        else
+                            block_batch.q6k(M, bytes, act, bpr);
+                        inline for (0..M) |input_row| totals[input_row][row] += values[input_row];
+                    } else inline for (0..M) |input_row| {
                         if (input_row < batch) {
                             const act = &acts[(first + input_row) * bpr + block];
                             totals[input_row][row] += if (T == BlockQ4Kx8)
