@@ -87,6 +87,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     golden_build.step(b, target, server_tests, api, tokenizer, template, engines);
     engines.addImport("lanes", api.import_table.get("lanes").?);
     b.step("test-draft-metal-host", "Metal draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"draft sources:"} })).step);
+    b.step("test-qwen35-chunk-startup-metal-host", "Qwen3.5 Metal startup refuses bad TF_QWEN35_CHUNK before checkpoint load").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"qwen35 startup: TF_QWEN35_CHUNK refuses before the checkpoint loader runs"} })).step);
     b.step("test-drafter-skip-metal-host", "Counted shared draft skips without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"zero grant:"} })).step);
     b.step("test-uocr", "Unlimited-OCR-2's tests (its kernels compile on this GPU)").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"uocr:"} })).step);
     const embed_host = b.step("test-qwen3-metal-host", "Qwen3 Metal embedding geometry, batch bounds and native refusals without GPU work");
