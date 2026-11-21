@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: with `--execution-witness`, native Qwen3.5-2B on CUDA (one rank, MLX affine 4-bit, text only) attests its path: once the server is ready it reads every checkpoint shard, after stamping the files before the load, and binds them with the kernel images, GPU, driver, family facts and resolved profile values; other engines still read `unsupported` (#2956, refs #2741). Thanks to @kotevcode.
+
 - MiniMax-H3-Image on Metal: `tf-h3-image-encoder` turns an edit's reference pictures into their clean rows with the VAE's encoder in fp32 on any Apple GPU, with a selftest of each kernel against a float64 host reference; the reference rules (sizes, crops, grids, encoder layers, clean and anchor rows) run on the host (#2778, on #2775).
 
 - GLM on Metal: vectorized prompt, KDA and indexer kernels on Macs without tensor units cut cold prompt time 5.17% to 5.68% (2K to 64K tokens) with 0/64 token differences (#3921, refs #3152). Thanks to @gilby.
@@ -14,15 +16,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
 
-
-
-
-
 - Qwen dense and MoE hybrids on CUDA: opt-in `TF_QWEN_KV_HOST=1` keeps the KV pages in mapped pinned host memory, with the state and verify runs on the device, so a long window can fit on a card with little room left beside the weights; it needs `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1` and a discrete GPU, takes an optional `TF_QWEN_KV_HOST_GIB` cap, refuses spill, disk snapshots and `TF_QWEN_KV_SHARE` by name, and trades speed for room, since attention reads the pages over the device interconnect; unset, the plan and every path stay as they were (#2637). Thanks to @MaverickKB.
 
 - GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
-
-
 
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
 
@@ -31,7 +27,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
 
 - Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
-- Server: with `--execution-witness`, native Qwen3.5-2B on CUDA at one rank, MLX affine 4-bit and text only attests its path, `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: once the server is ready it reads every shard byte on one thread, after stamping the checkpoint's files before the load, and binds them with the kernel images, GPU, driver, family facts and resolved profile values a kept state's key binds; a file that moved reads `files_changed`, every other engine still reads `unsupported_path`, and an idle reload hashes its new engine again (#2956, refs #2741). Thanks to @kotevcode.
 
 - Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
 
