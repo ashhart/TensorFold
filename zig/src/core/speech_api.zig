@@ -19,6 +19,10 @@ pub const SpeechRequest = struct {
     /// Plain text frame rows for reference-conditioned semantic CFG; empty means no guidance.
     unconditioned: []const [11]i32 = &.{},
     cfg_gamma: f32 = 1,
+    /// A speaker embedding for the family's speaker row; empty: the prompt rows carry the voice, or there is none.
+    speaker: []const f32 = &.{},
+    /// A reference clip to clone the voice from: mono samples at the family's rate; empty: none.
+    reference_audio: []const f32 = &.{},
 };
 
 pub const SpeechInfo = struct {
