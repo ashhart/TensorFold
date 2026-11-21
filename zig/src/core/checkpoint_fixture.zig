@@ -33,6 +33,19 @@ pub fn image(a: std.mem.Allocator, entries: []const Entry) ![]u8 {
     return out;
 }
 
+/// A safetensors image whose data starts on 16 bytes: the header padded with spaces, every tensor aligned.
+pub fn aligned(a: std.mem.Allocator, entries: []const Entry) ![]u8 {
+    const plain = try image(a, entries);
+    const header: usize = @intCast(std.mem.readInt(u64, plain[0..8], .little));
+    const pad = (16 - (8 + header) % 16) % 16;
+    const out = try a.alloc(u8, plain.len + pad);
+    std.mem.writeInt(u64, out[0..8], header + pad, .little);
+    @memcpy(out[8..][0..header], plain[8..][0..header]);
+    @memset(out[8 + header ..][0..pad], ' ');
+    @memcpy(out[8 + header + pad ..], plain[8 + header ..]);
+    return out;
+}
+
 pub fn write(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, entries: []const Entry) !void {
     const bytes = try image(a, entries);
     defer a.free(bytes);

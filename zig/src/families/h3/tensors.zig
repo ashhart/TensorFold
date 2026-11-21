@@ -27,6 +27,11 @@ pub const Tensors = struct {
         return .{ .map = map, .buffer = buffer, .data = 8 + header_len, .names = names, .arena = arena, .path = owned };
     }
 
+    /// The bytes of tensor `e` in the file, for `read_ahead`.
+    pub fn span(self: *const Tensors, e: st.Entry) read_ahead.Span {
+        return .{ .path = self.path, .lo = self.data + e.begin, .hi = self.data + e.end };
+    }
+
     pub fn deinit(self: *Tensors) void {
         self.buffer.deinit();
         self.arena.deinit();
@@ -97,10 +102,10 @@ pub const Checkpoint = struct {
 
     /// Every shard's whole file into the page cache, ahead of the first forward's faults.
     pub fn readAhead(self: *const Checkpoint, gpa: std.mem.Allocator, io: std.Io) !void {
-        const shards = try gpa.alloc(read_ahead.Shard, self.shards.len);
-        defer gpa.free(shards);
-        for (shards, self.shards) |*s, *shard| s.* = .{ .path = shard.path, .size = shard.map.size };
-        _ = try read_ahead.read(gpa, io, shards);
+        const whole = try gpa.alloc(read_ahead.Span, self.shards.len);
+        defer gpa.free(whole);
+        for (whole, self.shards) |*s, *shard| s.* = .{ .path = shard.path, .lo = 0, .hi = shard.map.size };
+        _ = try read_ahead.read(gpa, io, whole);
     }
 
     pub fn entry(self: *const Checkpoint, name: []const u8) ?st.Entry {

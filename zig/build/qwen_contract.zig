@@ -32,8 +32,8 @@ pub fn host(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     imageTests(b, core, all);
 }
 
-pub fn images(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, kernels: anytype, files: []const ?std.Build.LazyPath) *std.Build.Step {
-    const install = @import("kernel_contract.zig").cuda(b, runner, controls, h3);
+pub fn images(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, h3_image: [2]?std.Build.LazyPath, kernels: anytype, files: []const ?std.Build.LazyPath) *std.Build.Step {
+    const install = @import("kernel_contract.zig").cuda(b, runner, controls, h3, h3_image);
     for (kernels, files) |k, file| {
         if (std.mem.eql(u8, k.name, "moe") or std.mem.eql(u8, k.name, "experts") or std.mem.eql(u8, k.name, "qwen36_mtp") or std.mem.eql(u8, k.name, "sample") or std.mem.eql(u8, k.name, "glm_glue")) {
             if (file) |image| install.dependOn(&b.addInstallFile(image, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
@@ -62,6 +62,7 @@ fn imageTests(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void
     tests.addOptions("contract_options", opts);
     tests.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = files.add("contract_controls.fatbin", "contract_controls") });
     tests.addAnonymousImport("fatbin_h3", .{ .root_source_file = files.add("h3.fatbin", "h3") });
+    for ([_][]const u8{ "h3_image_decoder", "h3_image_prompt" }) |n| tests.addAnonymousImport(b.fmt("fatbin_{s}", .{n}), .{ .root_source_file = files.add(b.fmt("{s}.fatbin", .{n}), n) });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests, .filters = &.{"contract image:"} }));
     b.step("test-contract-images-host", "Live contract image routing and unknown-name refusal with inert bytes").dependOn(&run.step);
     all.dependOn(&run.step);
