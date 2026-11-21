@@ -378,11 +378,10 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     }));
 }
 
-test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5, dots.mocr and Parse offer through their Loaded" {
-    inline for (.{ flashnext.native, nemotron.native }) |F| {
-        const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
-        try std.testing.expect(!@hasField(Loaded, "offer"));
-    }
+test "text-only Nemotron has no offer; Flash Next, GLM-OCR, Qwen3, Qwen3.5, dots.mocr and Parse offer through Loaded" {
+    const NemotronLoaded = @typeInfo(@typeInfo(@TypeOf(nemotron.native.open)).@"fn".return_type.?).error_union.payload;
+    try std.testing.expect(!@hasField(NemotronLoaded, "offer"));
+    try std.testing.expect(@FieldType(flashnext.native.Loaded, "offer") == serve.Offer);
     try std.testing.expect(@FieldType(glm_ocr.native.Loaded, "offer") == serve.Offer);
     inline for (.{ "vision", "cache", "cache_capacity" }) |old| try std.testing.expect(!@hasField(glm_ocr.native.Loaded, old));
     try std.testing.expect(@FieldType(qwen3.native.Loaded, "offer") == serve.Offer);

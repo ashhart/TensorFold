@@ -1,4 +1,4 @@
-//! Gemma 4 (affine-4/64 text) behind the native CUDA registry; images, widths, drafters (steps 9-12) refused.
+//! Gemma 4 (affine-4/64 text), images and native assistant/DFlash paths behind the CUDA registry.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");

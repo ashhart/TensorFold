@@ -282,7 +282,7 @@ pub const Lfm = struct {
     fn chunk(x: *Lfm, s: *Stream, l: *Lane) !bool {
         const p = s.prompt();
         const at = l.fill.?;
-        if (s.isCancelled()) return error.Cancelled;
+        try cancelledPrefix(s, at);
         const points = lanes.cutPoints(s); // cold and resumed passes cut at the same named starts
         const c = cut(at, p.len, s.reuse.marks, points);
         const done = c.end == p.len;
@@ -340,6 +340,12 @@ pub const Lfm = struct {
             from = point;
         }
         return c;
+    }
+
+    pub fn cancelledPrefix(s: *Stream, at: usize) !void {
+        if (!s.isCancelled()) return;
+        s.keepInterruptedPrefill(@intCast(at));
+        return error.Cancelled;
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -487,13 +493,6 @@ pub const Lfm = struct {
         self(ptr).dropLane(s);
     }
 };
-
-test "a request holds its prompt, its reply and one verify window in whole pages" {
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(400, 96));
-    try std.testing.expectEqual(@as(usize, 2), pagesFor(400, 97));
-    try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
-}
 
 test "a chunk taps marks and message starts, up to four, then ends at the next, the grid line or the prompt's end" {
     const cases = [_]struct { at: usize, len: usize, marks: []const u32, chunks: []const u32, end: usize, taps: []const usize }{

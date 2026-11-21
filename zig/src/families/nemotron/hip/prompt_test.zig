@@ -101,12 +101,18 @@ const Fake = struct {
     e: *RecordedEngine,
     streams: serve.backend.Streams(source.Lane),
     tp: serve.protocol.Sender,
+    prefix: void = {},
     lane: *source.Lane,
     head: ?*NoHead = null,
     sampler: Sampler,
     drawer_state: Drawer = .{},
     chunk_rows: usize,
     start: usize,
+    cut: usize = 0,
+    state: u64 = 0,
+    saved_at: usize = 0,
+    saved_state: u64 = 0,
+    saved_valid: bool = false,
     kept: usize = 0,
 
     pub const cancelOf = source.Hip.cancelOf;
@@ -125,6 +131,7 @@ const Fake = struct {
             r.layers += 1;
             try forward.traceLayer(ctx.trace, layer, .{ .ptr = 1, .kind = .bf16 }, rows);
         }
+        for (pos..pos + rows) |i| h.state = (h.state *% 16777619) ^ @as(u64, @intCast(i + 1));
         return .{ .ptr = 1, .kind = .bf16 };
     }
 
@@ -133,8 +140,16 @@ const Fake = struct {
     }
 
     pub fn begin(h: *Fake, s: *lanes.Stream) !*source.Lane {
-        h.lane.fill = serve.backend.Fill.init(h.start, &.{@intCast(h.start + h.chunk_rows)});
-        h.lane.s.len = h.start;
+        const from: usize = if (s.reuse.saved != null) s.reuse.at else h.start;
+        const cut = if (h.cut != 0) h.cut else from + h.chunk_rows;
+        h.lane.fill = serve.backend.Fill.init(from, &.{@intCast(cut)});
+        h.lane.s.len = from;
+        if (s.reuse.saved != null) {
+            try T.expect(h.saved_valid);
+            try T.expectEqual(h.saved_at, from);
+            h.state = h.saved_state;
+        } else h.state = 0;
+        s.cached = @intCast(from);
         h.lane.id = try h.streams.idOf(s);
         try h.streams.map.put(h.gpa, s, h.lane);
         return h.lane;
@@ -144,8 +159,11 @@ const Fake = struct {
         return @min(at + h.chunk_rows, limit);
     }
 
-    pub fn keepCut(h: *Fake, _: *source.Lane, _: []const u32, _: usize) !void {
+    pub fn keepCut(h: *Fake, _: *source.Lane, _: []const u32, at: usize) !void {
         h.kept += 1;
+        h.saved_at = at;
+        h.saved_state = h.state;
+        h.saved_valid = true;
     }
 
     pub fn keepRows(_: *Fake, _: *source.Lane, _: usize) !void {}
@@ -236,6 +254,78 @@ test "Nemotron final prompt chunks cancel before progress logits or a first draw
         try run(true, rows, world, true, false, start);
         try run(true, rows, world, false, true, start);
     };
+}
+
+test "Nemotron cancellation between prompt cuts resumes with the exact fresh recurrent state" {
+    const rows = 64;
+    var tokens: [3 * rows]u32 = @splat(1);
+    var flag: Flag = .{};
+    var r: Record = .{ .flag = &flag, .cancel_inside = false };
+    Inert.runtime.api.hipCtxSetCurrent = current;
+    Inert.runtime.api.hipStreamSynchronize = synchronize;
+    var e: RecordedEngine = .{
+        .rec = &r,
+        .ctx = .{ .r = &Inert.runtime, .device = 0, .handle = null },
+        .stream = .{ .r = &Inert.runtime, .handle = @ptrCast(&r) },
+        .o = .{ .world = 1 },
+    };
+    e.m.dims.hidden = 1;
+    var lane: source.Lane = undefined;
+    lane.fill = null;
+    lane.first_row = null;
+    lane.pending = null;
+    lane.held_n = 0;
+    lane.resumed = false;
+    lane.hidden = .{ .r = &Inert.runtime, .ptr = @ptrFromInt(1), .len = 2 };
+    var h: Fake = .{
+        .gpa = T.allocator,
+        .e = &e,
+        .streams = serve.backend.Streams(source.Lane).init(T.allocator),
+        .tp = .{ .gpa = T.allocator },
+        .lane = &lane,
+        .sampler = .{ .rec = &r },
+        .chunk_rows = rows,
+        .start = 0,
+        .cut = 2 * rows,
+    };
+    defer h.streams.deinit();
+    const b = serve.backend.Backend(Fake).backend(&h);
+    const step = b.vtable.prefill_step.?;
+
+    var cancelled = try lanes.Stream.init(T.allocator, .{ .id = "cancelled", .prompt = &tokens, .max_new = 8 });
+    defer cancelled.deinit(T.allocator);
+    try T.expect(!try step(b.ptr, &cancelled, 0));
+    try T.expectEqual(rows, lane.fill.?.at);
+    try T.expect(!h.saved_valid);
+    if (b.vtable.cancel_prefill) |keep| try keep(b.ptr, &cancelled);
+    try T.expect(h.saved_valid);
+    try T.expectEqual(rows, h.saved_at);
+    try T.expectEqual(h.state, h.saved_state);
+    b.vtable.release(b.ptr, &cancelled);
+    h.state = 0;
+
+    var resumed = try lanes.Stream.init(T.allocator, .{
+        .id = "resumed",
+        .prompt = &tokens,
+        .max_new = 8,
+        .reuse = .{ .saved = @ptrCast(&h.saved_state), .at = rows },
+    });
+    defer resumed.deinit(T.allocator);
+    try T.expect(!try step(b.ptr, &resumed, 0));
+    try T.expectEqual(rows, resumed.cached);
+    try T.expect(try step(b.ptr, &resumed, 0));
+    const resumed_state = h.state;
+    b.vtable.release(b.ptr, &resumed);
+
+    h.saved_valid = false;
+    var fresh = try lanes.Stream.init(T.allocator, .{ .id = "fresh", .prompt = &tokens, .max_new = 8 });
+    defer fresh.deinit(T.allocator);
+    try T.expect(!try step(b.ptr, &fresh, 0));
+    try T.expect(!try step(b.ptr, &fresh, 0));
+    try T.expect(try step(b.ptr, &fresh, 0));
+    try T.expectEqual(tokens.len, lane.s.len);
+    try T.expectEqual(resumed_state, h.state);
+    b.vtable.release(b.ptr, &fresh);
 }
 
 test "Nemotron layer traces keep non-cancel failures as BadShape" {

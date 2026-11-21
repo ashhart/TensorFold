@@ -79,7 +79,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(m: *Metal) be.Backend {
-        return .{ .ptr = m, .chunk_invariant = true, .vtable = &.{ .prefill = prefill, .prefill_step = step, .reports_fill = true, .first = first, .first_masked = firstMasked, .queue = queueOne, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .release = release } };
+        return .{ .ptr = m, .chunk_invariant = true, .vtable = &.{ .prefill = prefill, .prefill_step = step, .cancel_prefill = cancelPrefill, .reports_fill = true, .first = first, .first_masked = firstMasked, .queue = queueOne, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *Metal {
@@ -172,6 +172,11 @@ pub const Metal = struct {
         if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null)
             if (s.reuse.hook) |hook| hook.at(hook.ptr, s, @intCast(end));
         return end == s.prompt_len;
+    }
+    fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) !void {
+        const m = self(ptr);
+        const slot = try m.find(s);
+        s.keepInterruptedPrefill(m.state.streams[slot].pos);
     }
 
     fn draw(m: *Metal, s: *lanes.Stream, logits_: []const u16, pos: u64, mask: []const u32) !u32 {
@@ -322,4 +327,36 @@ test "Kimi full verification publishes its position before an optional partial k
     record = .{ .start = positions[0].pos, .verified = 1 };
     windowPosition(&state, 0, record, 1);
     try std.testing.expectEqual(@as(u32, 20), positions[0].pos);
+}
+
+test "Kimi cancel between prefill steps keeps the landed prompt state" {
+    const Observer = struct {
+        marked: usize = 0,
+        interrupted: usize = 0,
+        at: u32 = 0,
+        fn mark(ptr: *anyopaque, _: *lanes.Stream, _: u32) void {
+            @as(*@This(), @ptrCast(@alignCast(ptr))).marked += 1;
+        }
+        fn interrupt(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const o: *@This() = @ptrCast(@alignCast(ptr));
+            o.interrupted += 1;
+            o.at = at;
+        }
+    };
+    var observer: Observer = .{};
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "cancel", .prompt = &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, .max_new = 4, .drafts = false, .reuse = .{ .hook = .{ .ptr = &observer, .at = Observer.mark, .interrupted = Observer.interrupt } } });
+    defer stream.deinit(std.testing.allocator);
+    var positions = [_]@import("state.zig").Stream{.{ .pos = 4, .kept = 3 }};
+    var slots = [_]Slot{.{ .stream = &stream }};
+    var model: Metal = undefined;
+    model.slots = &slots;
+    model.state.streams = &positions;
+    const backend = model.backend();
+    const cancel = backend.vtable.cancel_prefill orelse return error.MissingKimiCancelHook;
+    try cancel(backend.ptr, &stream);
+    try std.testing.expectEqual(@as(usize, 0), observer.marked);
+    try std.testing.expectEqual(@as(usize, 1), observer.interrupted);
+    try std.testing.expectEqual(@as(u32, 4), observer.at);
+    try std.testing.expectEqual(@as(u32, 4), positions[0].pos);
+    try std.testing.expectEqual(@as(u32, 3), positions[0].kept);
 }
