@@ -20,8 +20,11 @@ USAGE = """\
                                            the SDK's decode of CASE's final sample: each octree level's parents,
                                            probabilities, draws and counts, the anchors, the Gaussian decoder's raw
                                            rows, the activated Gaussians, the PLY and the camera (OUT/decode.*)
+  vae VAE SDK IMAGE OUT [--stages]         the FLUX.2 VAE rows of a preprocessed image: the SDK's, then float64's
 WEIGHTS is a speridlabs/idol snapshot; SDK an idol-sdk checkout at the pinned commit. F holds feature1 (DINOv3 rows
 [1, 4101, 1280]) and feature2 (FLUX.2 VAE rows [1, 4101, 128]), in one file or two, as the SDK's ImageEncoder returns.
+VAE is the vae/ folder of black-forest-labs/FLUX.2-klein-4B at the pinned revision (FLUX.2-dev's gives the same bf16
+weights); IMAGE the 1024 x 1024 RGB picture IdolPipeline.preprocess returns.
 """
 
 SDK_COMMIT = "4702a7f00850e34b6e83a2170cc123c3e9570744"
@@ -495,7 +498,7 @@ def decode(args) -> int:
              "ruler_device": args.ruler_device if args.ruler else None}
     (out / "decode.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps(meta))
-    return 0
+
 
 
 def main(argv: list[str]) -> int:
@@ -510,6 +513,13 @@ def main(argv: list[str]) -> int:
     d.add_argument("--ruler", action="store_true", help="both decoders again in float32 on the SDK's own inputs")
     d.add_argument("--ruler-device", default="cpu", choices=("mps", "cpu", "cuda"))
     d.add_argument("--time-only", action="store_true", help="the timed decode alone, nothing recorded")
+    p = sub.add_parser("vae")
+    for name in ("vae", "sdk", "image", "out_dir"):
+        p.add_argument(name)
+    p.add_argument("--device", default="mps", choices=("mps", "cpu", "cuda"))
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--repeats", type=int, default=5, help="timed encodes after the first")
+    p.add_argument("--stages", action="store_true", help="float64's down blocks, mid block and moments too")
     for name in ("case", "blocks", "exact"):
         p = sub.add_parser(name)
         p.add_argument("weights")
@@ -530,6 +540,10 @@ def main(argv: list[str]) -> int:
         else:
             p.add_argument("--steps", type=int, default=50)
     args = ap.parse_args(argv)
+    if args.cmd == "vae":
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from idol_vae_case import vae_case
+        return vae_case(args)
     return {"case": case, "blocks": blocks, "exact": exact, "decode": decode}[args.cmd](args)
 
 
