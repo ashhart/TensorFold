@@ -103,8 +103,8 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        // Hy4-flash's mapped experts and rounded SiLU, both behind defines that are off for every other caller
-        try std.testing.expectEqualStrings("9a01998f26f80c9faa511dce14d1f545264c9ab343d189d8f0f005d83cc632b7", &std.fmt.bytesToHex(hash, .lower));
+        // GLM's opt-in nonfinite raw MMA; Hy4's mapped experts and rounded SiLU stay behind caller defines
+        try std.testing.expectEqualStrings("1fe364272044dbc36c32a4c3ace833ccf8b7eb28d8e01fa6c65b6bcc2bf33231", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;

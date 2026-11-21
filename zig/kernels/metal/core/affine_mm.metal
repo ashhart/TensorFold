@@ -206,6 +206,24 @@ struct AmRows {
   const device bfloat* x[TM][2];
   const device float* s[TM][2];
 };
+#ifdef TF_AM_EXACT_NONFINITE
+// Row sums identify candidate groups; scanning candidates keeps finite overflow on the original path.
+template <int TM, int TL>
+inline void am_nonfinite(thread const AmRows<TM>& rows, int k, thread bool (&raw)[TL][2]) {
+  TF_UNROLL
+  for (short m = 0; m < TL; m++) {
+    const int g = k / TF_GROUP;
+    TF_UNROLL
+    for (short h = 0; h < 2; h++) {
+      raw[m][h] = !isfinite(rows.s[m][h][g]);
+      if (raw[m][h]) {
+        raw[m][h] = false;
+        for (short j = 0; j < TF_GROUP; j++) raw[m][h] |= !isfinite(float(rows.x[m][h][k + j]));
+      }
+    }
+  }
+}
+#endif
 
 // The fragment of x at column c from a lane's two row starts (8-byte loads on M5).
 inline frag<bfloat> am_frag(const device bfloat* r0, const device bfloat* r1, int c, short2 home) {
@@ -226,6 +244,10 @@ template <int TM, int TL>
 inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int k,
                     const threadgroup bfloat* tile, const threadgroup float* sb, int tn, short2 home) {
   frag<float> part[TL][2];
+#ifdef TF_AM_EXACT_NONFINITE
+  bool raw[TL][2];
+  frag<float> exact[TL][2];
+#endif
   TF_UNROLL
   for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
     frag<bfloat> b0, b1, a[TL];
@@ -240,6 +262,9 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
     for (short m = 0; m < TL; m++) {
       a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
     }
+#ifdef TF_AM_EXACT_NONFINITE
+    if (q % (TF_GROUP / 16) == 0) am_nonfinite<TM, TL>(rows, k + 16 * q, raw);
+#endif
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
       if (q % (TF_GROUP / 16) == 0) {
@@ -247,6 +272,18 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
       } else {
         mma_16x32<false, true>(part[m][0], part[m][1], a[m], b0, b1);
       }
+#ifdef TF_AM_EXACT_NONFINITE
+      if (simd_any(raw[m][0] || raw[m][1])) {
+        frag<bfloat> r0, r1;
+        TF_UNROLL
+        for (short e = 0; e < 8; e++) r0[e] = b0[e] - OFF, r1[e] = b1[e] - OFF;
+        if (q % (TF_GROUP / 16) == 0) {
+          am_first(exact[m][0], exact[m][1], a[m], r0, r1);
+        } else {
+          mma_16x32<false, true>(exact[m][0], exact[m][1], a[m], r0, r1);
+        }
+      }
+#endif
     }
     if ((q + 1) % (TF_GROUP / 16) == 0) { // a group's sums done: its scale, its bias times the row sums
       const int g = q / (TF_GROUP / 16);
@@ -259,9 +296,20 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
           TF_UNROLL
           for (short c = 0; c < 4; c++) {
             const int col = tn + 16 * j + home.x + TF_COL(c);
-            const float s = sg[col], b = sg[64 + col];
+            const float s = sg[col];
+#ifdef TF_AM_EXACT_NONFINITE
+            float b0 = sg[64 + col], b1 = b0;
+            if (raw[m][0]) b0 += OFF * s;
+            if (raw[m][1]) b1 += OFF * s;
+            const float p0 = raw[m][0] ? exact[m][j][c] : part[m][j][c];
+            const float p1 = raw[m][1] ? exact[m][j][4 + c] : part[m][j][4 + c];
+            acc[m][j][c] += s * p0 + b0 * xr0;
+            acc[m][j][4 + c] += s * p1 + b1 * xr1;
+#else
+            const float b = sg[64 + col];
             acc[m][j][c] += s * part[m][j][c] + b * xr0;
             acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr1;
+#endif
           }
         }
       }
