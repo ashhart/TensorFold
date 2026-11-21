@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - Server: chat and legacy completions requests take `deadline_s` (seconds, more than 0 and at most 1,000,000; any other value is refused before the engine): at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave and its usage; a reply the engine ended first, or a cancel that came first, keeps its own ending, and without the field nothing changes (#3438). Thanks to @jayleaton.
 
 - Tests: the CUDA kernel contract's NVFP4_NZ5 stress fill holds +5s among its 4s and 6s, its float64 reference reads code 0b1000 as 5, and a second planted control goes red at the sums gate, so that gate covers the +5 code; no kernel changes (#3543, refs #2894). Thanks to @Bizuayeu.
@@ -35,9 +37,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA: drafted decode after a 1,040,384-token prompt takes its DSA index scores from `tf_glm_index_scores`, 13.8% faster at TP=4 (172.39 against 151.51 tok/s median) with byte-identical scores and the same tokens; shorter windows keep `tf_glm_scores` (#3689). Thanks to @Bizuayeu.
 - Flash Next on HIP: on one GPU with the prompt cache on, a prompt chunk runs on through the prompt-cache marks its side buffers can hold, writing each marked row's state aside, instead of ending at the first mark (#3646).
 
+- Cluster: bring-up reports the leader, epoch and view it agreed on and counts only acknowledgments for that view, so a rank that finishes after a peer says goodbye no longer reports a smaller view on slow runners (#4135, fixes #4123). Thanks to @AIFlowML.
+
+- GLM-5.3-Flash on CUDA: drafted decode after a 1,040,384-token prompt takes its DSA index scores from `tf_glm_index_scores`, 13.8% faster at TP=4 (172.39 against 151.51 tok/s median) with byte-identical scores and the same tokens; shorter windows keep `tf_glm_scores` (#3689). Thanks to @Bizuayeu.
+
 - GLM-5.3-Flash on CUDA: `TF_GLM_DRAFT_SPLIT=1` splits the DFlash2 drafter's MLP across three ranks or more where each share is 256-aligned, without `TF_ROCE=1`; the ranks must set it alike, two ranks split as before, and unset changes nothing. On three GB10s whose gathers stay on NCCL, decode with `--drafter` is about 5% faster at one stream (four streams within their start-to-start spread), with the same replies and the same tokens a round on the measured prompts. As with `TF_ROCE=1`, the split drafter adds its down projection's rank shares in another order, so its proposals can differ at near-ties (#3616, for #3581).
-
-
 
 - Flash Next on HIP: on an integrated GPU that shares the host's pages (no firmware carve-out), the default kept-prompt cache takes no more than the memory the streams leave, at most 16 GiB and none when nothing is left; an explicit `--prompt-cache-gib` still sets it (#3645).
 
