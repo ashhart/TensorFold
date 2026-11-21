@@ -260,6 +260,23 @@ test "an Inkling 2 call takes the offered tool's spelling, and one to a tool not
     }
 }
 
+test "an Inkling 2 reply a stop string ended at a block's end keeps no tool calls, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const call_first = [_][]const u8{ markers.model, "run_shell_command", markers.tool_json, payload, markers.end, markers.end_sampling };
+    for ([_]bool{ false, true }) |stream| {
+        for ([_][]const []const u8{ &reply_parts, &call_first }) |parts| {
+            const plain = try request(a, "x", stream);
+            const body = try std.mem.concat(a, u8, &.{ plain[0 .. plain.len - 1], ",\"stop\":[\"", markers.end, "\"]}" });
+            const got = try postReply(a, parts, body, stream, true);
+            try t.expectEqual(@as(usize, 0), got.ids.items.len);
+            try t.expectEqualStrings("", got.content.items);
+            try t.expectEqualStrings("stop", got.finish);
+        }
+    }
+}
+
 test "an Inkling 2 tool block that is not JSON is content, not a call, whole and streamed" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
