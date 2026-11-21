@@ -12,6 +12,13 @@ pub const Asked = struct { drafter: bool = false, slide: bool = false, vision: b
 /// True: BF16 decisions; false: other formats or image chat; refused: no head or tower, flags, a quantized/tied head.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) !bool {
     const g = geometry.Geometry.read(gpa, io, dir) catch return false;
+    if (g.loop != null) {
+        if (asked.vision) return error.SenseNovaVision;
+        if (asked.drafter) return error.SenseNovaDrafter;
+        if (asked.slide) return error.SenseNovaLearning;
+        if (asked.kv8 or asked.prompt_int8) return error.SenseNovaPrecision;
+        return false;
+    }
     const head = present(gpa, io, dir);
     if (!g.bf16) return if (head) error.QwenHeadNeedsBf16 else false;
     if (!head) {
@@ -52,6 +59,18 @@ pub fn present(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
 /// The words of each refusal above.
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.SenseNovaVision => "SenseNova Loop supports text only; image input and --vision are not supported",
+        error.SenseNovaDrafter => "--drafter: SenseNova Loop supports plain decoding only",
+        error.SenseNovaLearning => "SenseNova Loop does not support learning or training",
+        error.SenseNovaRanks => "SenseNova Loop does not support pipeline stages or tensor-parallel ranks",
+        error.UnsupportedSenseNovaMhc => "SenseNova mHC requires 2 streams, fixed_identity false, at most 1000 iterations and a pre_scale that fits FP32",
+        error.SenseNovaPocket => "SenseNova Loop CUDA does not support learned pocket shards",
+        error.SenseNovaMoe => "SenseNova Loop CUDA does not support MoE checkpoints",
+        error.SenseNovaMtp => "SenseNova Loop CUDA does not support MTP layers",
+        error.SenseNovaPrecision => "SenseNova Loop requires BF16 prompts and KV caches",
+        error.BadLoops => "--loops: SenseNova Loop accepts a count from 1 to 4",
+        error.BadLoopConfig => "invalid SenseNova Loop or mHC configuration",
+        error.ScheduleTooLarge => "SenseNova Loop execution schedule is too large",
         error.QwenBf16DecisionOnly => "BF16 Qwen3.5 serves as a decision backbone only: this checkpoint has no joint_head_config.json",
         error.QwenHeadNeedsBf16 => "the joint schema head needs the BF16 checkpoint: this one is quantized",
         error.QwenJointTied => "the joint schema head is qualified on untied BF16 checkpoints: this one ties its head to the embedding (tie_word_embeddings)",

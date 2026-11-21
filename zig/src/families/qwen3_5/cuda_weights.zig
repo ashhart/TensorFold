@@ -86,6 +86,7 @@ pub fn total(g: Geometry) usize {
     if (g.heads) t += if (mo) modelopt.packedBytes(g.vocab, g.hidden, g.kinds.head) else packedBytes(g.vocab, g.hidden, g.bits.head);
     if (g.heads) t += aligned(g.hidden * 2); // the final norm
     for (g.first..g.first + g.layers) |i| {
+        t += @import("loop_weights.zig").bytes(g, i);
         t += 2 * aligned(g.hidden * 2);
         if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
@@ -143,6 +144,17 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
     defer e.gpa.free(words);
     for (words, std.mem.bytesAsSlice(u16, t.bytes)) |*w, h| w.* = @as(u32, h) << 16;
     return upload(e, std.mem.sliceAsBytes(words));
+}
+
+fn dtBias(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, n: usize) !u64 {
+    var buf: [160]u8 = undefined;
+    const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}linear_attn.dt_bias", .{prefix}));
+    if (t.is(.bf16, &.{n})) return put(e, t);
+    if (!t.is(.f32, &.{n})) return error.UnexpectedTensor;
+    const converted = try e.gpa.alloc(u16, n);
+    defer e.gpa.free(converted);
+    try @import("loop_weights.zig").convertDtBias(t, converted);
+    return upload(e, std.mem.sliceAsBytes(converted));
 }
 
 pub fn tensor(into: anytype, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
@@ -401,6 +413,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
             .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
+        if (@import("loop_weights.zig").active(g, i)) l.mhc = try @import("loop_weights.zig").load(e, ck, p);
         if (g.pocket > 0) try loadPocket(e, ck, p, i);
         if (g.linear[i]) {
             l.mixer = .{ .delta = .{
@@ -412,7 +425,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, taps_shape),
                 .norm = try tensor(e, ck, "{s}linear_attn.norm.weight", .{p}, .bf16, &.{geometry.dk}),
                 .a_log = try f32vec(e, ck, "{s}linear_attn.A_log", .{p}, g.v_heads),
-                .dt_bias = try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
+                .dt_bias = if (g.loop != null) try dtBias(e, ck, p, g.v_heads) else try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
             } };
         } else {
             l.mixer = .{ .attention = .{
@@ -429,6 +442,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
 
 test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own width" {
     var g: Geometry = undefined;
+    g.loop = null;
     g = .{ .hidden = 2048, .intermediate = 6144, .layers = 2, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(false) };
     g.linear[0] = true;
     const uniform = total(g);

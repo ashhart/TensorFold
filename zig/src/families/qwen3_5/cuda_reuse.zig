@@ -343,6 +343,7 @@ pub fn dropCopy(e: *Engine, copy: *Copy) void {
 
 fn testGeometry(layers: usize, attention_every: usize, kv_heads: usize) Geometry {
     var g: Geometry = undefined;
+    g.loop = null;
     g.hidden = 5120;
     g.k_heads = 16;
     g.v_heads = 48;

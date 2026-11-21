@@ -1,0 +1,56 @@
+//! SenseNova router ownership and text tensor selection.
+const std = @import("std");
+const geometry = @import("cuda_geometry.zig");
+const weights = @import("cuda_weights.zig");
+
+pub const Routers = struct { attn_weight: u64, attn_bias: u64, ffn_weight: u64, ffn_bias: u64 };
+
+pub fn active(g: geometry.Geometry, i: usize) bool {
+    const c = g.loop orelse return false;
+    const m = c.mhc orelse return false;
+    return i >= m.start and i < m.end;
+}
+
+pub fn bytes(g: geometry.Geometry, i: usize) usize {
+    if (!active(g, i)) return 0;
+    const aligned = @import("cuda_engine.zig").aligned;
+    return 2 * (aligned(8 * 2 * g.hidden * 4) + aligned(8 * 4));
+}
+
+pub fn load(e: anytype, ck: anytype, prefix: []const u8) !Routers {
+    const shape = .{ 8, 2 * e.g.hidden };
+    return .{
+        .attn_weight = try weights.tensor(e, ck, "{s}mhc_attn.weight", .{prefix}, .f32, &shape),
+        .attn_bias = try weights.tensor(e, ck, "{s}mhc_attn.bias", .{prefix}, .f32, &.{8}),
+        .ffn_weight = try weights.tensor(e, ck, "{s}mhc_ffn.weight", .{prefix}, .f32, &shape),
+        .ffn_bias = try weights.tensor(e, ck, "{s}mhc_ffn.bias", .{prefix}, .f32, &.{8}),
+    };
+}
+
+pub fn loaded(g: geometry.Geometry, name: []const u8) bool {
+    if (std.mem.eql(u8, name, "lm_head.weight") or std.mem.eql(u8, name, "model.language_model.embed_tokens.weight") or std.mem.eql(u8, name, "model.language_model.norm.weight")) return true;
+    const prefix = "model.language_model.layers.";
+    if (!std.mem.startsWith(u8, name, prefix)) return false;
+    const rest = name[prefix.len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return false;
+    const i = std.fmt.parseInt(usize, rest[0..dot], 10) catch return false;
+    if (i >= g.layers) return false;
+    const suffix = rest[dot + 1 ..];
+    const common = [_][]const u8{ "input_layernorm.weight", "post_attention_layernorm.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight" };
+    const delta = [_][]const u8{ "linear_attn.A_log", "linear_attn.dt_bias", "linear_attn.conv1d.weight", "linear_attn.norm.weight", "linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight", "linear_attn.in_proj_a.weight", "linear_attn.in_proj_b.weight", "linear_attn.out_proj.weight" };
+    const attn = [_][]const u8{ "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight" };
+    const mhc = [_][]const u8{ "mhc_attn.weight", "mhc_attn.bias", "mhc_ffn.weight", "mhc_ffn.bias" };
+    for (common) |n| if (std.mem.eql(u8, suffix, n)) return true;
+    const mixer: []const []const u8 = if (g.linear[i]) &delta else &attn;
+    for (mixer) |n| if (std.mem.eql(u8, suffix, n)) return true;
+    if (active(g, i)) for (mhc) |n| if (std.mem.eql(u8, suffix, n)) return true;
+    return false;
+}
+
+pub fn convertDtBias(t: @import("core").checkpoint.Tensor, out: []u16) !void {
+    if (!t.is(.f32, &.{out.len})) return error.UnexpectedTensor;
+    for (out, 0..) |*v, i| {
+        const word = std.mem.readInt(u32, t.bytes[i * 4 ..][0..4], .little);
+        v.* = @import("core").bf16_round.bits(@bitCast(word));
+    }
+}
