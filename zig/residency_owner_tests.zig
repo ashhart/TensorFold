@@ -25,6 +25,7 @@ pub const bf16_topk = @import("bf16_topk");
 /// The core pool and its Metal pages, which qwen27/kv_pages.zig reads through core.
 pub const kv_pool = @import("src/core/kv_pool.zig");
 pub const metal_kv_pages = @import("src/core/metal_kv_pages.zig");
+pub const sensenova_loop = @import("src/families/sensenova_loop/sensenova_loop.zig");
 const a = std.testing.allocator;
 
 test "residency owner GLM: actual arena slots tower and snapshots match live unique allocations" {
