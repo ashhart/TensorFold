@@ -23,7 +23,6 @@ const round_prof = @import("round_prof.zig");
 const pool_ = @import("pool.zig");
 const pool_bufs = @import("pool_bufs.zig");
 const pooled = @import("target_pool.zig");
-
 const iface = host.iface;
 const lanes = host.lanes;
 const Config = host.config.Config;
@@ -54,8 +53,7 @@ pub const Options = struct {
     cache_bytes: u64 = 0,
     /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
     resident: ?*mtl.resident.Resident = null,
-    /// TF_DSV41_POOL_TOKENS: the slots share one pool of positions (null: each slot holds `limit` positions)
-    pool: ?pool_.Setting = null,
+    pool: ?pool_.Setting = null, // TF_DSV41_POOL_TOKENS: null keeps `limit` positions per slot
 };
 /// The drafter's work behind a window: `queue` right after its command buffers, `drain` before the target writes.
 pub const Behind = struct {
@@ -91,12 +89,9 @@ pub const Target = struct {
     pick_ids: []u64 = &.{},
     /// the drafter's work behind a window (null: none)
     behind: ?Behind = null,
-    /// the shared pool's runs and buffers (null: each slot owns its rows)
-    pool: ?pool_.Pool = null,
+    pool: ?pool_.Pool = null, // shared runs and buffers (null: each slot owns its rows)
     pbufs: ?pool_bufs.Bufs = null,
-    /// each slot's next request's max new tokens (`admit`), sizing its run
-    max_new: []?u64 = &.{},
-
+    max_new: []?u64 = &.{}, // each slot's next reply limit (admit), sizing its run
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
@@ -173,7 +168,6 @@ pub const Target = struct {
         a.free(s.images);
         if (s.image_rows) |*r| r.deinit();
     }
-
     pub fn deinit(t: *Target) void {
         t.tree.deinit(t);
         if (t.joined) {
