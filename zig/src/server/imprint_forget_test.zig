@@ -292,7 +292,7 @@ test "imprint forget: warm passes in flight are cancelled, and a reply begun bef
     try message.put(a, "role", .{ .string = "assistant" });
     try message.put(a, "content", .{ .string = "ok" });
     const began = warm.forgets.load(.seq_cst);
-    warm.reply(srv, input, .{ .object = message }, false, null, 14, began);
+    warm.reply(srv, input, .{ .object = message }, null, false, null, 14, began);
     try t.expectEqual(@as(u32, 1), e.submits); // no forget since it began: its next turn is warmed
     try warm.live.track(t.io, 901); // two passes the engine still holds
     try warm.live.track(t.io, 902);
@@ -301,8 +301,8 @@ test "imprint forget: warm passes in flight are cancelled, and a reply begun bef
     try t.expectEqual(@as(u16, 200), (try call(srv, a, .{})).status);
     try t.expect(std.mem.indexOfScalar(api.Id, e.cancels.items, 901) != null);
     try t.expect(std.mem.indexOfScalar(api.Id, e.cancels.items, 902) != null);
-    warm.reply(srv, input, .{ .object = message }, false, null, 14, began);
+    warm.reply(srv, input, .{ .object = message }, null, false, null, 14, began);
     try t.expectEqual(@as(u32, 1), e.submits); // begun before the forget: no pass keeps its states again
-    warm.reply(srv, input, .{ .object = message }, false, null, 14, warm.forgets.load(.seq_cst));
+    warm.reply(srv, input, .{ .object = message }, null, false, null, 14, warm.forgets.load(.seq_cst));
     try t.expectEqual(@as(u32, 2), e.submits); // a turn after it warms as before
 }
