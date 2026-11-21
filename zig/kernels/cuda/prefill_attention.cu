@@ -332,6 +332,9 @@ template __global__ void tf_prefill_attention::tree_kernel<64, 8, 4, 8>(const __
 // Head dim 72, eight warps of one head, eight staging slots (SigLIP2's tower, 72 dims padded to 80 inside).
 template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
+// Head dim 64, eight warps (GLM-5.3-Flash's image tower, 16 heads of 64 over a frame group's patches).
+template __global__ void tf_prefill_attention::vision_kernel<64, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
+    float);
 // Head dim 80, eight warps, two blocks an SM (RADIO's tower, 16 heads of 80): full_kernel<80>'s bits, 1.35x faster.
 template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);

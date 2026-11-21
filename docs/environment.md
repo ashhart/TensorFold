@@ -57,6 +57,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
+| `TF_GLM_VISION_FUSED` | Exactly `0` or `1`; default off (the GLM vision tower's attention as cuBLASLt products around a softmax kernel) |
 | `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, a prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
 | `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels and its qmmf linears use dependent launches) |

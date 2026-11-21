@@ -274,6 +274,7 @@ const Full = struct {
 
 /// Full attention by head dim: SigLIP2's 72, RADIO's 80 (full_kernel's bits in one barrier a tile), MOSS-Image's 128.
 const fulls = [_]Full{
+    .{ .dim = 64, .warps = 8 }, // GLM-5.3-Flash's image tower, 16 heads of 64
     .{ .dim = 72, .warps = 8, .slots = 8 },
     .{ .dim = 80, .warps = 8 },
     .{ .dim = 128, .warps = 8 },
