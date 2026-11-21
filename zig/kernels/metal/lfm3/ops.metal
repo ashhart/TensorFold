@@ -259,3 +259,60 @@ inline void lfm3_head(const device bfloat* x, const device bfloat* gain, constan
   const float total = lfm3_head_square_total(v);
   if (lane == 0) out[row] = total;
 }
+
+// lfm2_argmax for LFM3: row r's lowest id of its largest bf16 logit, then 1 if any logit is not finite.
+[[kernel, max_total_threads_per_threadgroup(1024)]] void lfm3_argmax(
+    const device ushort* logits [[buffer(0)]], constant uint& vocab [[buffer(1)]], device uint* best [[buffer(2)]],
+    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tv[32];
+  threadgroup uint ti[32], tn[32];
+  const device ushort* x = logits + size_t(row) * vocab;
+  float bv = -INFINITY;
+  uint bi = 0xffffffffu, bad = 0;
+  // Eight logits a load, ids rising along a thread: a strictly larger value moves the pick (vocab % 8 == 0).
+  for (uint v = 8 * t; v < vocab; v += 8 * 1024) {
+    const uint4 w = *(const device uint4*)(x + v);
+    const uint words[4] = {w.x, w.y, w.z, w.w};
+    for (uint j = 0; j < 8; ++j) {
+      const float f = as_type<float>((j % 2) ? (words[j / 2] & 0xFFFF0000u) : (words[j / 2] << 16));
+      if (!isfinite(f)) bad = 1;
+      else if (f > bv) {
+        bv = f;
+        bi = v + j;
+      }
+    }
+  }
+  for (uint off = 16; off > 0; off >>= 1) {
+    const float ov = simd_shuffle_xor(bv, off);
+    const uint oi = simd_shuffle_xor(bi, off);
+    if (ov > bv || (ov == bv && oi < bi)) {
+      bv = ov;
+      bi = oi;
+    }
+  }
+  bad = simd_max(bad);
+  if (lane == 0) {
+    tv[sg] = bv;
+    ti[sg] = bi;
+    tn[sg] = bad;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0) return;
+  bv = tv[lane];
+  bi = ti[lane];
+  bad = tn[lane];
+  for (uint off = 16; off > 0; off >>= 1) {
+    const float ov = simd_shuffle_xor(bv, off);
+    const uint oi = simd_shuffle_xor(bi, off);
+    if (ov > bv || (ov == bv && oi < bi)) {
+      bv = ov;
+      bi = oi;
+    }
+  }
+  bad = simd_max(bad);
+  if (lane == 0) {
+    best[2 * row] = bi;
+    best[2 * row + 1] = bad;
+  }
+}
