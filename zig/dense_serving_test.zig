@@ -51,6 +51,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // The launch sequence includes the extracted delta scan and MTP's retained-row tap argument.
-    try std.testing.expectEqualStrings("f53f3637d0667e5dc2d837ef60e00886d4481a28f31f173037403fea79c2770d", &hash(out.items));
+    // The launch sequence includes main's moved delta scan and MTP's retained-row tap argument.
+    try std.testing.expectEqualStrings("2099ef3b0a28d63d079b65d191a9c3be7e7c0ff93fb9b53ec9d6a6e61565220d", &hash(out.items));
 }
