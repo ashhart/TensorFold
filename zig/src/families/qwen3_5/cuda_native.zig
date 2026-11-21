@@ -548,7 +548,6 @@ pub const Lanes = struct {
             try cache.keep(self.e, path);
         }
     }
-
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.QwenCheckpointHasNoDraftHead;
     }
