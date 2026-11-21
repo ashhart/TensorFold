@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3 on Metal: in a shared round, every stream's qk now runs in one dispatch instead of once per stream per attention layer, with the same arithmetic per row, so replies are unchanged (#3079).
+
 - MiniMax-H3-Image on Metal: `tf-h3-image-prompt` writes a whole text-to-image case from a size and a seed (the canvas, the size and the seed's starting rows), so text to image runs end to end with TensorFold's own tools, and `tf-h3-image ... free` exits 0 when there is no reference to gate against (#2781).
 
 - Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream that opens a slot is promised the KV pages of its prompt and one widest pass instead of every slot being promised its whole window at load; a pass past that promises the rest before it takes a page and fails with `LaneMemory` before any page is taken when the pool cannot meet it, and a stream that leaves, a failed or requeued prompt pass, a reset and a move to slot 0 give back the slot's pages and promise. Without the flag nothing changes (#3377, refs #1293). Thanks to @CodingEmil.
