@@ -488,7 +488,7 @@ fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
 }
 
 /// Admission bytes of a rank: the checkpoint over the two TP ranks (the embedding stays in host memory).
-pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64, _: bool) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
+pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64, _: bool, _: u32, _: u32) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
     return share(total, tpRead());
 }
 

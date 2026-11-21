@@ -114,7 +114,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 /// Every row's logits of this rank's vocabulary share in verify windows: logits.r{rank}.bf16 and its .json.
 fn everyRow(gpa: std.mem.Allocator, io: std.Io, driver: *const cuda.Driver, stream: cuda.Stream, m: *const mm3.forward.Modules, dir: []const u8, ids: []const i32, out_dir: []const u8) !void {
-    const p = try mm3.native.place();
+    const p = try mm3.native.toolPlace();
     var lib: ?cuda.nccl.Library = null;
     var comm: cuda.nccl.Comm = null;
     if (p.world > 1) {

@@ -47,7 +47,8 @@ test "the host counts the tower's bytes with --vision on rank 0, none without it
     const a = t.allocator;
     const io = t.io;
     const with: api.Open = .{ .dir = "", .model_type = "tiny_dense", .vision = .{} };
-    try t.expectEqual(try V.visionBytes(a, io, ""), try offer.weightBytes(V, a, io, with));
+    try t.expectEqual(try V.visionBytes(a, io, "", 0, 1), try offer.weightBytes(V, a, io, with));
+    try t.expectEqual(@as(u64, 0), try V.visionBytes(a, io, "", 1, 2)); // another rank holds no tower
     try t.expectEqual(@as(u64, 0), try offer.weightBytes(V, a, io, .{ .dir = "", .model_type = "tiny_dense" }));
     try t.expectEqual(@as(u64, 0), try offer.weightBytes(N, a, io, with));
 }
