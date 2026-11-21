@@ -64,6 +64,7 @@ pub const Metal = struct {
         out.draft_prefix = true;
         if (model.weights.stages != null) {
             out.drafts = try st.Scratch.initDraft(gpa, model.device, 8);
+            errdefer out.drafts.?.deinit();
             try @import("calibrate.zig").measure(out);
             if (model.confidence != null)
                 out.conf_schedule = .{ .prune = true, .costs = confidence.pinned_costs, .margin = true };
