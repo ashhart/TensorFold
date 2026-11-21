@@ -139,6 +139,7 @@ pub fn attend(k: *const Kernels, s: cuda.Stream, at: AttnArgs, out: u64) !void {
     const lo: usize = @intCast(at.lo);
     const hi: usize = @intCast(at.hi);
     if (lo > hi or at.T * @divExact(at.hq, at.hk) > max_q) return error.Inkling2DraftShape;
+    if (at.ring <= 0 or hi - lo >= @as(usize, @intCast(at.ring))) return error.Inkling2DraftShape; // keys would alias
     var x = at;
     x.c0 = int(lo / chunk);
     const n = chunks(lo, hi);
@@ -210,7 +211,7 @@ test "dspark ops: argument structs keep dspark.cu's layouts; chunks by absolute 
     try std.testing.expectEqual(@as(usize, 2), chunks(1000, 1030));
 }
 
-test "dspark ops: a head or a block the kernels would run wrong is refused before a launch" {
+test "dspark ops: a head, a block or a ring the kernels would run wrong is refused before a launch" {
     const no = error.Inkling2DraftShape;
     try checkHead(256, 128, 8);
     try std.testing.expectError(no, checkHead(8, 128, 8)); // tiny-random's rank
@@ -224,4 +225,6 @@ test "dspark ops: a head or a block the kernels would run wrong is refused befor
     try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 9, 4608, 256));
     const q: QkArgs = .{ .x = 0, .qw = 0, .kw = 0, .q = 0, .kc = 0, .vc = 0, .ld = 32 * 64, .hq = 24, .hk = 4, .ring = 4096, .pos0 = 0, .eps = 1e-6, .theta = 1e6 };
     try std.testing.expectError(no, qk(&k, s, q, 8)); // 64-wide heads
+    const at: AttnArgs = .{ .q = 0, .kc = 0, .vc = 0, .po = 0, .pml = 0, .T = 8, .hq = 24, .hk = 4, .ring = 4096, .lo = 0, .hi = 4096, .c0 = 0, .scale = 1 };
+    try std.testing.expectError(no, attend(&k, s, at, 0)); // 4,097 keys in a 4,096-row ring
 }
