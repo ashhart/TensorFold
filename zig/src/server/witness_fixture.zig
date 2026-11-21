@@ -131,6 +131,9 @@ pub const Harness = struct {
     pub fn start(h: *Harness, engine: *Engine, keys: ?*auth.Store, checkpoint: ?*Checkpoint, args: cli.Args) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), h.model, .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .keep_warm_s = 0 }, keys);
         errdefer h.srv.deinit();
+        errdefer if (h.binary) |b| b.close(t.io);
+        errdefer if (h.text) |x| x.deinit();
+        errdefer if (h.state) |s| s.deinit();
         if (checkpoint) |c| {
             h.text = try parts.Text.stamp(t.allocator, t.io, c.path, null);
             h.binary = try c.binary();
