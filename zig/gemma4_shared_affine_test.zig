@@ -104,7 +104,13 @@ test "landed Metal source bytes are pinned without shader compilation" {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
         // GLM's opt-in nonfinite raw MMA; Hy4's mapped experts and rounded SiLU stay behind caller defines
-        try std.testing.expectEqualStrings("1fe364272044dbc36c32a4c3ace833ccf8b7eb28d8e01fa6c65b6bcc2bf33231", &std.fmt.bytesToHex(hash, .lower));
+        try std.testing.expectEqualStrings("7a3cd96f8415a55b441c1c3b77474f86e8284013c8154574d5b8b7afb7752ba8", &std.fmt.bytesToHex(hash, .lower));
+    }
+    {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(ks.core_affine_nonfinite, &hash, .{});
+        // GLM's raw g128 accumulator and 128-element nonfinite scan
+        try std.testing.expectEqualStrings("bb82cb52a977c1b3fb9d52eef2185904b8c97bb675884dd38b79172c4c0efe4a", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
