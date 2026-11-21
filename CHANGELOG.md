@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: GLM-5.3-Flash's latent cache and indexer accept full GLM-5.3's shapes (slice (a) of #3063) (#3949). Thanks to @bjornmonnens.
+
 - Qwen3.8-27B on Metal (M1 to M4): `--mtp-drafts N` loads the checkpoint's MTP head from `mtp-4bit.safetensors` and drafts chains of up to N tokens for every stream, alone or in shared rounds, and `--mtp-confidence` stops a chain below its floor; before, the Metal build refused both flags (#2464, refs #2368). Thanks to @jschmied.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GATHER_EARLY=1` (default `0`) gathers a shared decode pass's n-gram rows for every lane in one pooled call instead of one call a stream, for passes of at most 64 lanes (wider passes keep the per-stream call); which rows are read and how a row is dequantized do not change, so replies stay main's, and the measured mean decode gain on one GB10 rises to +2.10% at eight streams (#4009). Thanks to @BadAd84.
@@ -20,13 +22,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: Enable dense MTP drafting for Qwen3.5-family targets with compatible checkpoint tensors (#3582). Thanks to @tacosta.
 
-
-
 - CUDA on unified-memory Linux (GB10): the start-up memory budget is at most the free memory CUDA reports, less the same reserve, instead of `/proc/meminfo` alone, and the server first drops the checkpoint's own shards from the page cache, so a checkpoint that was just read is not refused for its own cached pages; discrete cards, Windows, Metal and HIP are unchanged (#3192, part of #1857).
 - Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
-
-- GLM-5.3 on CUDA: the latent row width and cache count, the DSA indexer's pool size, key store and index rope, and 576-wide roped latent rows are read from the model instead of fixed at GLM-5.3-Flash's values (one new kernel, `tf_mla_absorb_q_192`), so full GLM-5.3's shapes (79 caches of 576-value rows, pools of 1, top 2,048, 64 roped index dims) can run on the Flash pieces; GLM-5.3-Flash's launches and replies are unchanged (#3949, part of #3063).
-
 
 
 ## 1.3.3
