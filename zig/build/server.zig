@@ -105,9 +105,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const strict = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses strict", "Responses custom", "Responses deferred", "Responses foreground streamed failures", "Responses continuation flushes" } }));
     strict.has_side_effects = true;
     b.step("test-responses-strict-host", "Responses default compatibility, explicit strict policy and per-request custom tools").dependOn(&strict.step);
-    const complete_server = b.addRunArtifact(b.addTest(.{ .root_module = server }));
+    const complete_server = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses", "responses", "workspace", "tool_", "Kimi", "kimi_" } }));
     complete_server.has_side_effects = true;
-    b.step("test-responses-server-host", "Complete server CPU suite with the actual server modules").dependOn(&complete_server.step);
+    b.step("test-responses-server-host", "Responses, tool stream and workspace CPU contracts with the actual server modules").dependOn(&complete_server.step);
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
     const media_jobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"media jobs:"} }));
