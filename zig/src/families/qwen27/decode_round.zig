@@ -24,17 +24,14 @@ pub const pagesOn = kv_pages.on;
 pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
 const kvp = kv_pages.kvp;
-
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     const msg = cb.failure() orelse return false;
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
 }
-
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
-
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,

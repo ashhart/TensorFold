@@ -98,7 +98,6 @@ pub fn keysForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights
     try r.attention.keysOnly(e, &r.scratch, &r.bindings[layer], plan, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry }, f.get(.value), caches);
 }
 
-
 test "qwen27 prompt tail: each planted reader of the last layer's rows refuses it" {
     const open: Facts = .{ .keeps_none = true };
     try std.testing.expect(keysOnly(open));
