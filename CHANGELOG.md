@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App on Linux: with `TENSORFOLD_LINUX_SANDBOX=1` and bubblewrap installed, agent commands run in a bubblewrap sandbox that keeps every repository's `config`, `config.worktree`, `hooks` and `info` read-only, nested repositories included, and freezes worktree `.git` pointers; a workspace with no repository, a worktree whose gitdir or shared directory lies outside the workspace, a path the sandbox cannot inspect, or a walk past 32 levels or 50,000 directories is refused with code 126 before anything runs. Without the setting, Linux commands stay refused as before (#3364, fixes #1693). Thanks to @eXsoR65.
+
 - Gemma 4 on Metal: each linear's bytes are held once instead of three times (the shard, the lane or row pack and a prompt-chunk copy): the linears are staged from their files during load and the files close after it, with the same bytes and the default prompt-cache budget unchanged (#3350). Thanks to @jschmied.
 
 - App on Linux: with `TENSORFOLD_LINUX_SANDBOX=1` and bubblewrap installed, agent commands run in a bubblewrap sandbox that keeps every repository's `config`, `config.worktree`, `hooks` and `info` read-only, nested repositories included, and freezes worktree `.git` pointers; a workspace with no repository, a worktree whose gitdir or shared directory lies outside the workspace, a path the sandbox cannot inspect, or a walk past 32 levels or 50,000 directories is refused with code 126 before anything runs. Without the setting, Linux commands stay refused as before (#3364, fixes #1693). Thanks to @eXsoR65.
