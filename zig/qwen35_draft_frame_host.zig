@@ -83,6 +83,7 @@ test "Draft frames: a common frame stages each stream's own ring positions and p
 }
 
 const Record = struct {
+    const HeadProjection = struct { columns: c_int, rows: c_int };
     var counts: [16]usize = @splat(0);
     var max_rows: u32 = 0;
     var uploads: usize = 0;
@@ -91,11 +92,24 @@ const Record = struct {
     var fail: bool = false;
     var last_norm_input: u64 = 0;
     var block: usize = 8;
+    var head_projections: [8]HeadProjection = undefined;
+    var head_projection_count: usize = 0;
     fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id < counts.len) counts[id] += 1;
         if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
+        if (id == 14) {
+            const parts = @as(*const cuda.qlinear.Parts, @ptrCast(@alignCast(args.?[2].?))).*;
+            const columns = parts.p[0].n;
+            if (columns > 256) {
+                head_projections[head_projection_count] = .{
+                    .columns = columns,
+                    .rows = @as(*const c_int, @ptrCast(@alignCast(args.?[3].?))).*,
+                };
+                head_projection_count += 1;
+            }
+        }
         if (id == 5) {
             std.debug.assert(z == 9 and threads == 128);
             if (fail) return cuda.abi.error_not_ready;
@@ -104,6 +118,12 @@ const Record = struct {
     }
     fn upload(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         uploads += 1;
+        return cuda.abi.success;
+    }
+    fn copyDevice(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
+    fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         return cuda.abi.success;
     }
     fn download(dst: ?*anyopaque, _: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
@@ -133,7 +153,7 @@ fn weight() cuda.qlinear.Affine4 {
     return .{ .w = 1, .s = 2, .b = 3, .n = 256, .k = 256, .npad = 256 };
 }
 
-test "Draft frames: the real hold adapter emits one frame for every stream and invalidates drafts on failure" {
+test "Draft frames: actual holds group mixed head widths and invalidate drafts on failure" {
     for ([_]usize{ 8, 16 }) |block| try actualFrame(block);
 }
 fn actualFrame(block: usize) !void {
@@ -143,6 +163,8 @@ fn actualFrame(block: usize) !void {
     driver.api.cuLaunchKernel = Record.launch;
     driver.api.cuMemcpyHtoDAsync_v2 = Record.upload;
     driver.api.cuMemcpyDtoHAsync_v2 = Record.download;
+    driver.api.cuMemcpyDtoDAsync_v2 = Record.copyDevice;
+    driver.api.cuMemcpy2DAsync_v2 = Record.copy2d;
     driver.api.cuStreamSynchronize = Record.wait;
     var e: q.engine.Engine = undefined;
     e.kit = null;
@@ -272,10 +294,40 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 0), ctx.held_n);
         try std.testing.expectEqual(@as(usize, 0), ctx.grown);
     }
+
+    // The pre-fix hold path sends both contexts through the full head.
+    e.head = .{ .a4 = .{ .w = 1, .s = 2, .b = 3, .n = 248320, .k = 256, .npad = 248320 } };
+    d.c.vocab = 248320;
+    d.scratch.len = try d.layout(false);
+    _ = try d.layout(true);
+    contexts[0].wide = false;
+    contexts[1].wide = true;
+    e.affine.group_fn = function(&driver, 14);
+    Record.downloads = 0;
+    Record.head_projection_count = 0;
+    Record.fail = false;
+    try d.drafter().hold(holds[0..2]);
+
+    const per = block - 1;
+    var narrow_rows: usize = 0;
+    var tail_rows: usize = 0;
+    var full_rows: usize = 0;
+    for (Record.head_projections[0..Record.head_projection_count]) |projection| {
+        switch (projection.columns) {
+            98304 => narrow_rows += @intCast(projection.rows),
+            320 => tail_rows += @intCast(projection.rows),
+            248320 => full_rows += @intCast(projection.rows),
+            else => unreachable,
+        }
+    }
+    try std.testing.expectEqual(per, full_rows);
+    try std.testing.expectEqual(per, narrow_rows);
+    try std.testing.expectEqual(per, tail_rows);
 }
 
 test {
     _ = @import("qwen35_draft_equality.zig");
+    _ = @import("qwen35_draft_frame_mixed_host.zig");
     _ = @import("qwen35_draft_graphs_host.zig");
 }
 
