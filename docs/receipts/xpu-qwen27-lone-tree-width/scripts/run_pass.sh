@@ -8,7 +8,7 @@ export LC_ALL=C
 unset XPU_KV_INT8
 mkdir -p "$OUT"
 ss -ltn | grep -q ":$PORT " && { echo "port $PORT busy"; exit 3; }
-"$BIN" serve "$MODEL" --drafter "$DRAFTER" --context 132096 --parallel 1 --host 127.0.0.1 --port "$PORT" --name m \
+timeout -k 120 -s INT 45m "$BIN" serve "$MODEL" --drafter "$DRAFTER" --context 132096 --parallel 1 --host 127.0.0.1 --port "$PORT" --name m \
   --no-update-check --prompt-cache-gib 0 > "$OUT/$L.server.log" 2>&1 &
 SP=$!
 sleep 2; kill -0 $SP 2>/dev/null || { echo "server died at launch"; exit 1; }
@@ -18,10 +18,10 @@ RC=0
 CORP=${CORP:-$HERE/../inputs/corp_code.txt}
 export CORP
 MODES=draft; [ "$PLAIN" = 1 ] && MODES=draft,plain
-CELLS="${CELLS_GREEDY:-0:code;32768:code;65536:code;131072:code}" MODES=$MODES python3 -I "$HERE/bench_tree.py" http://127.0.0.1:$PORT "$L" "$OUT" 3 \
+CELLS="${CELLS_GREEDY:-0:code;32768:code;65536:code;131072:code}" MODES=$MODES timeout 40m python3 -I "$HERE/bench_tree.py" http://127.0.0.1:$PORT "$L" "$OUT" 3 \
   > "$OUT/$L.bench.log" 2>&1 || RC=1
 if [ "$SAMPLED" = 1 ]; then
-  CELLS="${CELLS_SAMPLED:-0:code;131072:code}" MODES=sampled python3 -I "$HERE/bench_tree.py" http://127.0.0.1:$PORT "$L-sampled" "$OUT" 3 \
+  CELLS="${CELLS_SAMPLED:-0:code;131072:code}" MODES=sampled timeout 40m python3 -I "$HERE/bench_tree.py" http://127.0.0.1:$PORT "$L-sampled" "$OUT" 3 \
     > "$OUT/$L-sampled.bench.log" 2>&1 || RC=1
 fi
 kill -INT $SP; for i in $(seq 90); do kill -0 $SP 2>/dev/null || break; sleep 1; done; kill -9 $SP 2>/dev/null
