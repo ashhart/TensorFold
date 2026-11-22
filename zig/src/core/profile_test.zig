@@ -131,6 +131,16 @@ test "stable profile: the keep-others rule registers as an identical exact-one C
     try t.expectEqual(p.Switch.TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, p.registered("TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS").?);
 }
 
+test "stable profile: LFM3 parallel repair is an identical exact-one Metal opt-in" {
+    const e = p.entry(.TF_LFM3_PARALLEL_REPAIR);
+    try t.expectEqual(p.Class.identical, e.class);
+    try t.expectEqual(p.Syntax.one, e.syntax);
+    try t.expect(e.applies("lfm3", "metal") and !e.applies("lfm3", "cuda"));
+    try t.expect(p.resolve(.stable, .TF_LFM3_PARALLEL_REPAIR, null) == null);
+    try t.expect(e.differs("1"));
+    for ([_][]const u8{ "0", "", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+}
+
 test "stable profile: a runtime name lookup covers the registry and leaves every other name to libc" {
     try t.expectEqual(p.Switch.TF_GLM_KV_HOST, p.registered("TF_GLM_KV_HOST").?);
     try t.expectEqual(p.Switch.TF_QWEN_KV_PAGES, p.registered("TF_QWEN_KV_PAGES").?);

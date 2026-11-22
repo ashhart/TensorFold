@@ -16,6 +16,7 @@ const binned_projection = @import("metal_binned_projection.zig");
 const lfm3_projection = @import("metal_lfm3_projection.zig");
 const lfm3_vision = @import("metal_lfm3_vision.zig");
 const lfm3_vision_controls = @import("metal_lfm3_vision_controls.zig");
+const lfm3_repair = @import("metal_lfm3_range_repair.zig");
 const g = contract.gates;
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
@@ -55,6 +56,8 @@ pub const Suite = struct {
     lfm3_sum_count: usize = 0,
     lfm3_attention_probes: [std.enums.values(lfm3_attention_sums.Kind).len * 2]lfm3_attention_sums.Probe = undefined,
     lfm3_attention_count: usize = 0,
+    lfm3_repair_probes: [5]lfm3_repair.Probe = undefined,
+    lfm3_repair_count: usize = 0,
     binned_probes: [9]binned_projection.Probe = undefined,
     binned_count: usize = 0,
     lfm3_projection_probes: [14]lfm3_projection.Probe = undefined,
@@ -122,6 +125,19 @@ pub const Suite = struct {
             s.lfm3_alpha_probe = try lfm3_alpha.Probe.init(a, device, queue);
             try kernels.append(a, s.lfm3_alpha_probe.?.kernel());
         }
+        const repair_cases = [_]struct { shared: bool, forced: bool, bad: bool }{
+            .{ .shared = false, .forced = false, .bad = false },
+            .{ .shared = false, .forced = true, .bad = false },
+            .{ .shared = false, .forced = true, .bad = true },
+            .{ .shared = true, .forced = false, .bad = false },
+            .{ .shared = true, .forced = true, .bad = false },
+        };
+        for (repair_cases) |case| {
+            if (!wanted(only, lfm3_repair.label(case.shared, case.forced, case.bad))) continue;
+            s.lfm3_repair_probes[s.lfm3_repair_count] = try lfm3_repair.Probe.init(a, device, queue, case.shared, case.forced, case.bad);
+            s.lfm3_repair_count += 1;
+        }
+        for (s.lfm3_repair_probes[0..s.lfm3_repair_count]) |*probe| try kernels.append(a, probe.kernel());
         for ([_]bool{ false, true }) |sliding| for ([_]bool{ false, true }) |bad| {
             if (sliding and bad or !wanted(only, lfm3_segments.name(sliding, bad))) continue;
             s.lfm3_shared_probes[s.lfm3_shared_count] = try lfm3_segments.Probe.init(a, device, queue, sliding, bad);
@@ -210,6 +226,7 @@ pub const Suite = struct {
         if (s.lfm3_weight_probe) |*probe| probe.deinit();
         if (s.lfm3_product_probe) |*probe| probe.deinit();
         if (s.lfm3_alpha_probe) |*probe| probe.deinit();
+        for (s.lfm3_repair_probes[0..s.lfm3_repair_count]) |*probe| probe.deinit();
         for (s.lfm3_shared_probes[0..s.lfm3_shared_count]) |*probe| probe.deinit();
         for (s.lfm3_conv_probes[0..s.lfm3_conv_count]) |*probe| probe.deinit();
         for (s.lfm3_qk_probes[0..s.lfm3_qk_count]) |*probe| probe.deinit();

@@ -8,6 +8,7 @@ pub const row_projection = @import("row_projection.zig");
 pub const Model = @import("model.zig").Model;
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
+pub const range_repair = @import("range_repair.zig");
 pub const backend = @import("backend.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const image = @import("image.zig");

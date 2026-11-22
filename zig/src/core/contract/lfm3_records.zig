@@ -86,6 +86,13 @@ pub const metal = [_]M{
     .{ .name = "lfm3 range-clear lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "lfm3 lfm3_attn_partial", .threads = 128, .tg_memory = 2096, .reserved = 128 },
     .{ .name = "lfm3 lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 repair lfm3_attn_merge_flagged", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 repair lfm3_attn_segments_merge_flagged", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 repair lfm3_attn_repair_partial", .threads = 128, .tg_memory = 4128, .reserved = 128 },
+    .{ .name = "lfm3 repair lfm3_attn_segments_repair_partial", .threads = 128, .tg_memory = 4128, .reserved = 128 },
+    .{ .name = "lfm3 repair lfm3_attn_repair_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 repair lfm3_attn_segments_repair_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 repair-bad-order lfm3_attn_repair_partial", .threads = 128, .tg_memory = 4128, .reserved = 128 },
     .{ .name = "lfm3 postnorm-bad lfm3_post_norm", .threads = 256, .tg_memory = 144, .reserved = 256 },
     .{ .name = "lfm3 lfm3_post_norm", .threads = 256, .tg_memory = 144, .reserved = 256 },
 };
