@@ -385,8 +385,8 @@ pub const Runner = struct {
     /// The model's Metal 4 queue, unless the pass is a prompt chunk or needs Metal 3: a trace, the Neural Engine, seams
     fn passQueue(r: *const Runner, rows: usize) mtl.Queue {
         const c = r.model.metal4 orelse return r.model.queue;
-        if (!r.metal4 or rows > metal4_rows or c.broken or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
-        return c.asQueue();
+        if (!r.metal4 or rows > metal4_rows or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
+        return c;
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {

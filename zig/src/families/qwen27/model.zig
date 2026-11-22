@@ -21,7 +21,7 @@ pub const Model = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     /// Verify passes' own Metal 4 queue, where this Mac has one and TF_Q27_METAL4 allows it (see metal4Wanted).
-    metal4: ?*mtl.metal4.Context = null,
+    metal4: ?mtl.Queue = null,
     /// This rank's share of the family's weights; `local` shapes are what this graph builds, `global` the file's.
     shard: cfg.Shard,
     /// The local config, so downstream shapes are the rank's own.
@@ -144,11 +144,11 @@ pub const Model = struct {
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.metal4 = null;
-        if (try metal4Wanted(m.device)) m.metal4 = mtl.metal4.Context.create(a, m.device) catch |err| blk: {
+        if (try metal4Wanted(m.device)) m.metal4 = m.device.queue4() catch |err| blk: {
             std.log.info("qwen27: verify passes stay on Metal 3: {s}", .{@errorName(err)});
             break :blk null;
         };
-        errdefer if (m.metal4) |ctx| ctx.destroy();
+        errdefer if (m.metal4) |q| q.deinit();
         m.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer m.checkpoint.deinit();
         const headers = timing.span(.checkpoint_headers);
@@ -257,7 +257,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        if (m.metal4) |c| c.destroy();
+        if (m.metal4) |q| q.deinit();
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
         if (m.mhc) |*p| p.deinit();

@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
+pub const tf_metal4 = true; // this executable exercises Model's Metal 4 verify queue
 const q = tf.qwen27;
 const contract = tf.tree_round;
 const Round = q.round_plan.Round;
