@@ -14,4 +14,5 @@ test {
     _ = state;
     _ = budget;
     _ = snapshot;
+    _ = weights;
 }
