@@ -1,5 +1,4 @@
-//! NVFP4 routed experts for the Hy4 latent branch: ModelOpt's per-expert tensors packed for core's grouped NVFP4
-//! kernels (BF16 activations, W4A16; input_scale stays metadata). One rank holds every expert.
+//! NVFP4 routed experts for the Hy4 latent branch: ModelOpt's per-expert tensors on core's grouped kernels, one rank.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -37,7 +36,7 @@ pub const Routed = struct {
     rows: usize,
     slots: usize,
 
-    /// Every expert of `prefix` ("model.layers.N.mlp"): gate and up [intermediate, latent], down [latent, intermediate].
+    /// Every expert of `prefix` ("model.layers.N.mlp"): gate and up [intermediate, latent], down the other way.
     pub fn init(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, latent: usize, intermediate: usize, experts: usize, rows: usize, slots: usize, limit: f32) !Routed {
         if (experts == 0 or experts > cuda.grouped.max_experts or latent == 0 or latent % 32 != 0 or
             intermediate == 0 or intermediate % 32 != 0 or rows == 0 or slots == 0 or slots > experts or
