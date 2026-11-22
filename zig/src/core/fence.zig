@@ -10,12 +10,12 @@ pub const Fence = struct {
 
     /// The encoder's dispatches start after the work that last updated the fence.
     pub fn wait(self: Fence, enc: mtl.ComputeEncoder) void {
-        mtl.objc.msg(void, enc.id, "waitForFence:", .{self.id});
+        enc.waitForFence(self.id);
     }
 
     /// Later waits see this encoder's work complete.
     pub fn update(self: Fence, enc: mtl.ComputeEncoder) void {
-        mtl.objc.msg(void, enc.id, "updateFence:", .{self.id});
+        enc.updateFence(self.id);
     }
 
     pub fn deinit(self: Fence) void {

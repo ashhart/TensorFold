@@ -1,6 +1,8 @@
 //! Compile the real Qwen27 startup, vision offer, lane callbacks and GPU encoding without running this object.
 const std = @import("std");
 const host = @import("qwen27_served");
+pub const tf_metal4 = true;
+
 export fn qwen27SpeedCompile(a: *std.mem.Allocator, io: *std.Io, options: *host.Options) usize {
     var why: []const u8 = "";
     const h = host.open(a.*, io.*, ".", options.*, a.*, &why) catch return 0;

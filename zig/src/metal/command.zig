@@ -258,6 +258,18 @@ pub const ComputeEncoder = struct {
         if (self.slot()) |s| s.dispatched(self.id);
     }
 
+    pub fn updateFence(self: ComputeEncoder, fence: Id) void {
+        if (self.slot() != null)
+            return objc.msg(void, self.id, "updateFence:afterEncoderStages:", .{ fence, metal4.stage_dispatch });
+        objc.msg(void, self.id, "updateFence:", .{fence});
+    }
+
+    pub fn waitForFence(self: ComputeEncoder, fence: Id) void {
+        if (self.slot() != null)
+            return objc.msg(void, self.id, "waitForFence:beforeEncoderStages:", .{ fence, metal4.stage_dispatch });
+        objc.msg(void, self.id, "waitForFence:", .{fence});
+    }
+
     /// Later dispatches see every buffer write before this point (concurrent encoders).
     pub fn barrier(self: ComputeEncoder) void {
         if (self.slot()) |s| return s.barrier(self.id);
@@ -305,3 +317,7 @@ pub const ComputeEncoder = struct {
         return @fromBackingInt(@intCast(objc.msg(usize, self.id, "dispatchType", .{})));
     }
 };
+
+test "Metal submission: target and draft dispatches keep their order across fences" {
+    try @import("command_recording_test.zig").check(ComputeEncoder);
+}
