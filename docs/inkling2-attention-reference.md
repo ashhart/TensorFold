@@ -8,9 +8,10 @@ Beside it are a float64 host model (`zig/src/families/inkling2/attn.zig`), the f
 `attn_order_hand_test.zig`). The kernels are the reference: the host model follows their source, it does not run them.
 Every statement about a kernel's source carries `file:line` at commit `6dbb32f048a6` (#4125 as merged), in the files
 `zig/kernels/cuda/inkling2/attention.cu` (`attention.cu`), `prompt_attention.cu`,
-`zig/src/families/inkling2/kernels.zig` (`kernels.zig`), `zig/build/cuda_kernels.zig`, `zig/build/cuda_fatbin.zig` and `zig/tests/cuda/contract_inkling2_attn_ref.zig` (`contract_inkling2_attn_ref.zig`). Statements about
-`transformers` 5.23.0 cite `models/inkling2/modeling_inkling2.py` as TF523:line. Nothing here claims that fp32 scores
-or P give the same tokens as higher precision; token-level gates stay with the engine.
+`zig/src/families/inkling2/kernels.zig` (`kernels.zig`), `zig/build/cuda_kernels.zig`, `zig/build/cuda_fatbin.zig` and
+`zig/tests/cuda/contract_inkling2_attn_ref.zig` (`contract_inkling2_attn_ref.zig`). Statements about `transformers`
+5.23.0 cite `models/inkling2/modeling_inkling2.py` as TF523:line. Nothing here claims that fp32 scores or P give the
+same tokens as higher precision; token-level gates stay with the engine.
 
 ## Scope
 
@@ -27,14 +28,17 @@ The kernels keep a ring cache (a key at position `p` sits in slot `p % ring`, `a
 `kernels.zig:41`, `:54-56` round the ring to a multiple of 64); the host model takes a dense cache, one place per
 position, which gives the same values as a ring holding every position. Its shapes are the kernels' at `hd = 128`,
 `d_rel = 16` and 1024 bias columns (`kernels.zig:5-7`) and, for tests, any smaller `hd` (a head is zero-padded to a
-multiple of 16: zero products add nothing), `d_rel <= 32` and any number of columns. The fp32 model in the kernels' order has no limit on the number of keys; the float64 model in `attn.zig` takes at most `most_keys = 8192` (`attn.zig:8`).
+multiple of 16: zero products add nothing), `d_rel <= 32` and any number of columns. The fp32 model in the kernels'
+order has no limit on the number of keys; the float64 model in `attn.zig` takes at most `most_keys = 8192`
+(`attn.zig:8`).
 
 ## Values and where they round
 
 Notation: `bf(x)` is round-to-nearest-even to bf16; every input (`q`, `k`, `v`, `rel`, `proj`, `sink`, `gate`) is a
 bf16 value held exactly in fp32 (`attention.cu:25`). The product of two bf16 values is exact in fp32 (a 16-bit
-significand) unless it overflows or lies below `2^-134` (below that, its last bit falls under the fp32 grid `2^-149`),
-so only additions and the operations listed round. For row at position `t`, key `s` and `dist = t - s`:
+significand) unless it overflows or lies below `2^-134` (a sufficient condition: a 16-bit product from `2^-134` up
+ends on the fp32 grid `2^-149`; below it the product may be inexact), so only additions and the operations listed
+round. For row at position `t`, key `s` and `dist = t - s`:
 
 | Step | Value | Where | Rounded to bf16 |
 |---|---|---|---|
@@ -92,15 +96,22 @@ What the order does not fix:
   adds them in ascending order, each rounded to nearest and unfused: that is the model's choice.
 - Where the source writes a plain `*` and `+`, nvcc may contract them into one fused operation: `attention.cu:119`
   (`acc += r[j] * bf(...)`), `:240` (`sc * scale + bias`), `:252` with `:259` (`l *= alpha`, then `l += P`),
-  `:373-374` (`ll * a + l * b`, `o * a + po * b`), `:380` (`ll * a + exp2f(...)`), and the same lines of
-  `prompt_attention.cu` (`:160`, `:172`, `:185` with `:193`). The kernels build with `-O3` and no other floating-point
-  flag (`zig/build/cuda_kernels.zig:161-162`, passed to nvcc at `zig/build/cuda_fatbin.zig:24`), and NVIDIA's nvcc
-  documentation (v13.5, options `--fmad`, `--prec-div`, `--ftz`) gives the default of `--fmad` as "This option is set
-  to true and nvcc enables the contraction of floating-point multiplies and adds/subtracts into floating-point
-  multiply-add operations". We state what the source and the build line say and nothing about the code nvcc generated.
-  The folds at `attention.cu:134`, `:139` use `__fmul_rn` and `__fadd_rn` and do not contract. The host model rounds
-  the product and the sum separately at every open site; the bound below counts roundings and holds for either choice,
-  a fused operation having fewer.
+  `:373-374` (`ll * a + l * b`, `o * a + po * b`), `:380` (`ll * a + exp2f(...)`), `:258` (the `* kLog2e` of `:240`
+  with the `- mu` in `exp2f(sc - mu)`), and the same lines of `prompt_attention.cu` (`:160`, `:172`, `:185` with
+  `:193`, `:192`); the list names the sites found and excludes no other. The kernels build with `-O3` and no other
+  floating-point flag (`zig/build/cuda_kernels.zig:161-162` at that commit, passed to nvcc at
+  `zig/build/cuda_fatbin.zig:24`), and NVIDIA's nvcc documentation (v13.5, options `--fmad`, `--prec-div`, `--ftz`)
+  gives the default of `--fmad` as "This option is set to true and nvcc enables the contraction of floating-point
+  multiplies and adds/subtracts into floating-point multiply-add operations". We state what the source and the build
+  line say and nothing about the code nvcc generated. The folds at `attention.cu:134`, `:139` use `__fmul_rn` and
+  `__fadd_rn` and do not contract. The host model rounds the product and the sum separately at every open site; the
+  bound below counts roundings and holds for either choice, a fused operation having fewer.
+- Two assumptions the bound rests on and no host test can check: that the tensor-core adders do not flush subnormal
+  numbers to zero (a flush would be an absolute error of up to `2^-126` an operand, above the bound's subnormal term),
+  and that `exp2f` and `expf` on the device keep to the 2 ULP of the hypotheses below; the host model uses Zig's `@exp2`
+  and `@exp`, so no host test can push that 2 ULP.
+- Several streams: the host model takes a call as one stream, its blocks starting at the call's first row; the kernel
+  forms blocks per segment (`kernels.zig:59-70`, `attention.cu:150-151`). For one stream they are the same.
 - Division and subnormal numbers: the nvcc documentation says of `--prec-div` "This option is set to true and nvcc
   enables the IEEE round-to-nearest mode." and of `--ftz` "This option is set to false and nvcc preserves denormal
   values."; the build line sets neither.
@@ -123,8 +134,10 @@ consequence of the source and the host model, not a measurement on a device.
   hold, and the NaN stays through the rescales, folds and the merge. The other columns of the row stay finite. Which
   rows are affected depends on the call: rows of one block at different positions see each other's later keys, and in
   a sliding layer a row sees the keys between the block's first window start and its own. A call of a single row has
-  no such key (its range is its live keys). The host model reproduces this rule for the decode kernel (`block_pairs = 64` in the model, `tile_pairs` at `kernels.zig:10`). The prompt kernel loads `b_lo .. min(b_hi, tile_hi)` and skips a tile past a warp's last row
-  (`prompt_attention.cu:84`, `:60-61`, `:143`), so its set differs; the host model does not reproduce it.
+  no such key (its range is its live keys). The host model reproduces this rule for the decode kernel (`block_pairs =
+  64` in the model, `tile_pairs` at `kernels.zig:10`). The prompt kernel loads `b_lo .. min(b_hi, tile_hi)` and skips
+  a tile past a warp's last row (`prompt_attention.cu:84`, `:60-61`, `:143`), so its set differs; the host model does
+  not reproduce it.
 - A NaN sink gives a NaN denominator. A `+inf` sink makes `mf` infinite, `a = exp2f(mm - inf) = 0` and
   `exp2f(inf - inf)` NaN: every output of that row and head is NaN. A `-inf` sink contributes 0.
 - An infinite gate saturates the sigmoid: `+inf` gives 1, `-inf` gives 0 (so `y * 0` is 0, or NaN if `y` is
@@ -132,20 +145,25 @@ consequence of the source and the host model, not a measurement on a device.
 
 ## FP64 check and its bound
 
-The float64 model (`attend` with `f64` in `attn.zig`, at most `most_keys = 8192` keys) evaluates the formula of the table above without any rounding:
-with `x = (q . k) hd^-1/2 + bias` in natural-log units, `y = sum_s e^(x_s - M) v_s / (sum_s e^(x_s - M) + e^(sink - M))`
-and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] * proj[j][dist]` where `dist < rext`. The bound's own float64 value is `head` in `attn_bound.zig`: the same formula in log2 units, run a second time beside `attend` and without its key limit. The oracle evaluates the same formula with Python's standard library (and `transformers`, see the fidelity check). The fp32 model
-in the kernels' order (`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the
-output to bf16 and nothing else, and is held to float64 by the bound below.
+The float64 model (`attend` with `f64` in `attn.zig`, at most `most_keys = 8192` keys) evaluates the formula of the
+table above without any rounding: with `x = (q . k) hd^-1/2 + bias` in natural-log units, `y = sum_s e^(x_s - M) v_s /
+(sum_s e^(x_s - M) + e^(sink - M))` and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] *
+proj[j][dist]` where `dist < rext`. The bound's own float64 value is `head` in `attn_bound.zig`: the same formula in
+log2 units, run a second time beside `attend` and without its key limit. The oracle evaluates the same formula with
+Python's standard library (and `transformers`, see the fidelity check). The fp32 model in the kernels' order
+(`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the output to bf16 and
+nothing else, and is held to float64 by the bound below.
 
 Domain. The bound is claimed for a row and head whose inputs satisfy these conditions, checked in float64 from the
 inputs (`head` in `attn_bound.zig` returns `error.AttnDomain` outside them): every `q`, `rel`, `sink` and `gate` of
 the pair, every `proj` entry it reads and every `k` and `v` of the keys its block loads is finite; `gate >= -87` for
-every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk <= 2^20` and `nk * vmax < 2^120`. They are sufficient and not sharp, and outside them the page claims nothing. The need is real: at `gate = -89`
-the kernel's `expf(89)` is `inf` (`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 +
-inf)` is 0 and the output 0, where float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already
-subnormal and its quotient has more than `u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is
-`2^127.68`).
+every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk <= 2^20` and
+`nk * vmax < 2^120`. They are sufficient and not sharp, and outside them the page claims nothing. Inside them `exp(L)`
+can still overflow (`L` above about 709.8, from scores near `2^120`); there the bound is infinite and claims nothing,
+and `limit` returns `+inf` rather than `0 * inf`. The need is real: at `gate = -89` the kernel's `expf(89)` is `inf`
+(`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 + inf)` is 0 and the output 0, where
+float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already subnormal and its quotient has more than
+`u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is `2^127.68`).
 
 For one row and head with `nk` live keys, let `u = 2^-24`, `u_mma = 2^-23`, `u_bf = 2^-8`, `gamma(n) = n u / (1 - n u)`
 and `lambda(a) = -ln(1 - a)`. The fp32 result `y` before the output's rounding satisfies, against the float64 result
@@ -174,17 +192,18 @@ where the key gets no bias); for the sink `gamma(2) |log2(e) sink| + 2^-133`. Th
 what `attn_bound.zig` evaluates. Each term is a count of roundings in the order above:
 
 - The hypotheses. `exp2f` and `expf` are within 2 ULP of the correctly rounded result: NVIDIA's CUDA Programming Guide
-  (v13.5, section 5.6.7.2, Exponential Functions, Table 54) lists `expf(x)` and `exp2f(x)` with "2 ULP" for `float`. Section 5.6.7 says "The maximum ULP error is stated as the maximum observed absolute value of the difference in ULPs
+  (v13.5, section 5.6.7.2, Exponential Functions, Table 54) lists `expf(x)` and `exp2f(x)` with "2 ULP" for `float`.
+  Section 5.6.7 says "The maximum ULP error is stated as the maximum observed absolute value of the difference in ULPs
   between the value returned by the function and a correctly rounded result of the corresponding precision obtained
-  according to the round-to-nearest ties-to-even rounding mode. The error bounds are derived from extensive, though not
-  exhaustive, testing. Therefore, they are not guaranteed." Within 2 ULP of the correctly rounded value, which itself is
-  within `u`, the result is within `gamma(5)` of the exact one. The second hypothesis: an mma's result differs from the
-  exact sum of its 17 operands (16 products and the accumulator) by at most `17 u_mma` times the sum of their absolute
-  values. It is the assumption of `zig/tests/cuda/contract_inkling2_attn_ref.zig`: `u_mma = 2^-23` "a tensor-core add:
-  its adders may truncate" (`:24`), the dot's error `abs * scale * 136 * u_mma` (`:158`, 136 is 8 chained mma times 17)
-  and `tiles * (4 * 17 + 1)` in `depth` (`:85`). It is not a guarantee of the hardware, and it covers every order inside
-  an mma. The other fp32 operations round to nearest (above), and a fused operation has fewer roundings than the unfused
-  pair, so every count holds for the open sites.
+  according to the round-to-nearest ties-to-even rounding mode. The error bounds are derived from extensive, though
+  not exhaustive, testing. Therefore, they are not guaranteed." Within 2 ULP of the correctly rounded value, which
+  itself is within `u`, the result is within `gamma(5)` of the exact one. The second hypothesis: an mma's result
+  differs from the exact sum of its 17 operands (16 products and the accumulator) by at most `17 u_mma` times the sum
+  of their absolute values. It is the assumption of `zig/tests/cuda/contract_inkling2_attn_ref.zig`: `u_mma = 2^-23`
+  "a tensor-core add: its adders may truncate" (`:24`), the dot's error `abs * scale * 136 * u_mma` (`:158`, 136 is 8
+  chained mma times 17) and `tiles * (4 * 17 + 1)` in `depth` (`:85`). It is not a guarantee of the hardware, and it
+  covers every order inside an mma. The other fp32 operations round to nearest (above), and a fused operation has
+  fewer roundings than the unfused pair, so every count holds for the open sites.
 - `G_dot`: `M` chained mma (the dot's error against `A_s` is `(1 + 17 u_mma)^M - 1` by induction over the chain), and
   six roundings of the score: the scale constant (`1 / sqrtf(128)` is two roundings of `hd^-1/2`), the product with it,
   the add of the bias, the constant `kLog2e` (one rounding of `log2(e)`) and its product.
@@ -199,7 +218,8 @@ what `attn_bound.zig` evaluates. Each term is a count of roundings in the order 
   a chunk and the sink's `a`, each an `exp2f` (`gamma(5)`) and a product (`u`).
 - `4 T lambda(17 u_mma)`: the values' mma chain, four mma a tile over `T` tiles. `(S + C) lambda(u)`: the add of each
   fold and merge.
-- `16 T + 2 + S + C + 1`: the denominator's adds: 16 a tile in a lane, two combining the lanes, one for each fold or merge (`S + C`) and the add of the sink's term.
+- `16 T + 2 + S + C + 1`: the denominator's adds: 16 a tile in a lane, two combining the lanes, one for each fold or
+  merge (`S + C`) and the add of the sink's term.
 - `lambda(gamma(5)) + 4 lambda(u)`: the sigmoid's `expf`, its add and its quotient, the quotient `o a / den` and the
   final product.
 - Domain: under its conditions no fp32 operation of the order overflows. A dot, its scaled and biased value and the
@@ -233,7 +253,10 @@ of a block; the checkpoint's `hd = 128`, 16 taps, 1024 columns); and on a case f
 values, a large gap between scores, P nearest a bf16 half step, a dominant sink, P below the normal range, an output
 below the normal range (where the last product's absolute error exceeds the sigmoid-scaled floor term), and the ends
 of the domain. Every element is inside its bound, and the worst error over bound is 0.16 before and 0.26 after the
-output's rounding; the tests print each case.
+output's rounding; the tests print each case. That is no margin of the bound: a targeted case, one key's table sum
+rounding up and the dominant key's rounding down (`bound: a table rounded up at the weak key and down at the dominant
+one`), reaches 0.96 before and 0.95 after the output's rounding, so the bound is close to tight for the table's
+rounding.
 
 Each rounding point and each seam also has a test whose expected value is written by hand in float64 and does not come
 from the model (`attn_order_hand_test.zig`): the table's tie to even, P rounded once in the products and in the
@@ -262,25 +285,32 @@ from the source, and the fixture keeps both its float64 result and its bf16 bits
   and 993 further; the largest difference, as `|got - transformers| / (|transformers| + top)` with `top` the head's
   largest `|transformers|`, is 6.1e-2. This is the arithmetic difference between the kernels' three roundings and the
   eager path's seven, on the six fixture cases (tiny-random `inkling-2`, the checkpoint's shapes among them).
-- The float64 model equals the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's largest `|y|`.
-- The fixture `zig/src/families/inkling2/fixtures/attn_tiny.bin` (SHA-256 `96aadd48918923fe5a4d165740bc337340476aeeacc5c3ee63600d8dcd7d0cde`) comes from `python3 zig/src/families/inkling2/oracle/attn.py write <model_dir>`, run on a local copy of `tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7` (`model.safetensors` SHA-256 `ac7f0eaa84e50b53c4afce3ea7eecdc49ccca21bd467edb16f3d052d9099a3de`) with `transformers` 5.23.0 and `torch` 2.15.0+cpu (`attn.py:13-16`).
+- The float64 model equals the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's
+  largest `|y|`.
+- The fixture `zig/src/families/inkling2/fixtures/attn_tiny.bin` (SHA-256
+  `96aadd48918923fe5a4d165740bc337340476aeeacc5c3ee63600d8dcd7d0cde`) comes from `python3
+  zig/src/families/inkling2/oracle/attn.py write <model_dir>`, run on a local copy of
+  `tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7` (`model.safetensors` SHA-256
+  `ac7f0eaa84e50b53c4afce3ea7eecdc49ccca21bd467edb16f3d052d9099a3de`) with `transformers` 5.23.0 and `torch`
+  2.15.0+cpu (`attn.py:13-16`).
 
 ## Falsification
 
 Each single change below was made alone to the host code (the fp32 model in `attn_order.zig`, the window to `first` in
-`attn.zig`, and the bound's terms and domain checks in `attn_bound.zig`), `zig build test-inkling2-host` was run on it,
-and the change was reverted. The test that turns red is named (test names as in `attn_order_hand_test.zig` and `attn_bound_test.zig`; where more than one goes red, the count is given). The unchanged
-tree is green: 78 tests passed and 4 skipped.
+`attn.zig`, and the bound's terms and domain checks in `attn_bound.zig`), `zig build test-inkling2-host` was run on
+it, and the change was reverted. The test that turns red is named (test names as in `attn_order_hand_test.zig` and
+`attn_bound_test.zig`; where more than one goes red, the count is given). The unchanged tree is green: 81 tests passed
+and 4 skipped.
 
 | Single change to the host model | A test that turns red (N red in all) |
 |---|---|
-| table: no bf16 rounding | `table: bf16 once, a tie to even` |
+| table: no bf16 rounding | `table: bf16 once, a tie to even` (2 red) |
 | dot rounded to bf16 (as eager) | `score: the dot and the scale stay fp32` (2 red) |
 | scaled dot rounded to bf16 | `score: the dot and the scale stay fp32` (2 red) |
 | logit rounded to bf16 | `sub-chunk seam: starts from its own maximum` (5 red) |
 | scale missing | `score: the dot and the scale stay fp32` (6 red) |
 | scale 1/hd | `score: the dot and the scale stay fp32` (5 red) |
-| bias not added | `bias: distances under rext only` (7 red) |
+| bias not added | `bias: distances under rext only` (8 red) |
 | P not rounded (numerator and denominator) | `P: bf16 once, in the products and the denominator` (7 red) |
 | P rounded for P.V, denominator sums unrounded P | `P: bf16 once, in the products and the denominator` (8 red) |
 | P.V sums unrounded P, denominator rounded | `P: bf16 once, in the products and the denominator` (7 red) |
@@ -302,37 +332,42 @@ tree is green: 78 tests passed and 4 skipped.
 | no rescale between tiles (alpha 1) | `tile seam: P rounds against its tile's maximum, then rescales` (9 red) |
 | denominator not rescaled between tiles | `tile seam: P rounds against its tile's maximum, then rescales` (9 red) |
 | values not rescaled between tiles | `tile seam: P rounds against its tile's maximum, then rescales` (5 red) |
-| fold scales swapped (old by the new part's factor) | `tile seam: P rounds against its tile's maximum, then rescales` (34 red) |
+| fold scales swapped (old by the new part's factor) | `tile seam: P rounds against its tile's maximum, then rescales` (36 red) |
 | chunks merged in reverse order | `global chunks: merge in order`; `sliding chunks: merge in order` (2 red) |
-| masked key scored 0 instead of -inf | `window: exactly `window` keys` (29 red) |
+| masked key scored 0 instead of -inf | `` window: exactly `window` keys `` (29 red) |
 | block loads only the row's own keys (NaN rule) | `NaN: a non-finite V at a masked key a block loads` |
 | block starts at the row's own window (NaN rule) | `NaN: below the window, a key another row's block loads` |
 | mu without the all-masked guard | `bound: sliding seams` |
-| gate sigmoid with the wrong sign | `NaN: a masked key no block loads is harmless`; `NaN: a non-finite V at a masked key a block loads` (33 red) |
+| gate sigmoid with the wrong sign | `NaN: a masked key no block loads is harmless`; `NaN: a non-finite V at a masked key a block loads` (34 red) |
 | gate missing | `gate: its sigmoid` (11 red) |
-| key limit of 8192 kept in the order model | `shapes: over 8192 keys is accepted, a refusal stays a refusal` (4 red) |
+| key limit of 8192 kept in the fp32 model in the kernels' order | `shapes: over 8192 keys is accepted, a refusal stays a refusal` (4 red) |
 | block of one pair (NaN rule) | `NaN: a non-finite V at a masked key a block loads`; `NaN: below the window, a key another row's block loads` (2 red) |
-| window one key too wide | `window: exactly `window` keys` (6 red) |
+| window one key too wide | `` window: exactly `window` keys `` (6 red) |
 | bias one distance too far | (the table read runs past the last column and `index out of bounds` aborts the test binary: 32 tests terminate, none names a rounding) |
-| bias one distance too short | `bias: distances under rext only` (2 red) |
+| bias one distance too short | `bias: distances under rext only` (3 red) |
 | wrong key-head group (h mod kv_heads) | `group: the group's key head` (3 red) |
 | table taps summed in reverse | `table: taps in order` |
 | dot summed in reverse (all dims, one chain) | `score: one chain across k16 blocks` |
 | bound: no absolute term 2^-149 for the last product | `bound: an output below the normal range` |
 | domain: gate bound not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
 | domain: dot magnitude not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
+| domain: live keys not limited to 2^20 | `bound: the domain ends at 2^20 live keys` |
+| bound: not infinite where exp(L) overflows | `bound: where exp(L) overflows the bound is infinite, never NaN` |
 | domain: infinite value at a loaded key not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
 
 These changes leave the host tests green. They are the model's choices or equivalent forms, and their effect is one
 rounding, below what a float64 hand value or the bound can separate:
 - fusing the score `dot * scale + bias` into one `fma` (an open site above), or the fold's product and add (the source
   pins the fold with `__fmul_rn` and `__fadd_rn`, so the model's separate roundings follow the source, not a test);
-- the order of the 16 products inside one mma, here the products of a tile's `P.V` in descending key order, and the
-  dot's k16 blocks summed apart and then added in order (the page names the order inside an mma as the hardware's);
+- the order of the products a tile's `P.V` adds: the model adds them in one fp32 chain, so descending key order over
+  the 64 keys reverses the four chained mma and the products inside each; no test pins it (the order inside an mma is
+  the hardware's, the order of the four is stated above); and the dot's k16 blocks summed apart and then added in
+  order;
 - which of the four lanes holds a key of `l` and how the four lane sums add (one lane, or a chain instead of
   `(l0 + l1) + (l2 + l3)`): one rounding in `l`;
 - the sink folded in before the chunks instead of at the merge: the same operations in another association;
-- the exponent in natural-log units with `exp` instead of log2 units with `exp2f`: the same values up to the rounding of
-  the product with `log2(e)`, which can flip a P only when it lies within about `1e-7` of a bf16 half step;
+- the exponent in natural-log units with `exp` instead of log2 units with `exp2f`: the same values up to the rounding
+  of the product with `log2(e)`, which can flip a P only when it lies within about `u |X - mu|` (relative) of a bf16
+  half step;
 - the bound's score floor at `2^-140` instead of `2^-133`: the error it covers is below `2^-133`, while `L` is at least
   `lambda(u_bf)`, about `2^-8`, so no input can tell the two apart; the value rests on the derivation above.
