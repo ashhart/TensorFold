@@ -1,7 +1,4 @@
 //! ModelOpt NVFP4 builds of Hy4-flash: the quantization block they carry, and the tensor each name must be.
-//! The routed experts, the shared experts and the dense MLP are NVFP4 (e2m1 codes two to a byte, an e4m3 scale
-//! every 16 inputs, a per-tensor scale and an input scale). The Engram tables are e4m3 rows with one BF16 scale
-//! a row. Everything else stays as Tencent released it: BF16, with the f32 tensors of the release.
 const std = @import("std");
 const config = @import("config.zig");
 
@@ -30,7 +27,7 @@ fn expect(weights: anytype, prefix: []const u8, name: []const u8, suffix: []cons
     try weights.expect(full, dtype, shape);
 }
 
-/// One NVFP4 linear of `out` rows by `in` inputs.
+/// One NVFP4 linear of `out` rows by `in` inputs: e2m1 codes two to a byte, an e4m3 scale a 16 inputs, two f32 scalars.
 fn linear(weights: anytype, prefix: []const u8, name: []const u8, out: usize, in: usize) !void {
     if (out == 0 or in == 0 or in % group != 0) return error.UnsupportedHy4Quant;
     try expect(weights, prefix, name, ".weight", .u8, &.{ out, in / 2 });
@@ -114,6 +111,7 @@ fn checkFeed(weights: anytype, layer: []const u8, t: config.Text, index: u32) !v
     }
 }
 
+/// An Engram layer: its table is e4m3 rows with one BF16 scale a row, everything else BF16 as released.
 fn checkEngram(weights: anytype, layer: []const u8, t: config.Text, number: u32) !void {
     const orders = t.engram_max_ngram_size - 1;
     const rows = try t.engramRows(number);
@@ -179,8 +177,7 @@ fn checkDraft(weights: anytype, model: config.Model) !void {
     }
 }
 
-/// Every text and drafter tensor of an NVFP4 build, by name, stored type and shape. The vision tower is the
-/// patch embedding only: the family refuses images until the tower runs in its own kernels.
+/// Every text and drafter tensor of an NVFP4 build by name, stored type and shape; the vision tower's patch embedding.
 pub fn check(weights: anytype, model: config.Model) !void {
     try model.validate();
     const t = model.text_config;
