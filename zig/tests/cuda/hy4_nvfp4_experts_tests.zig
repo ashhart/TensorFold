@@ -155,3 +155,102 @@ pub fn run(gpu: check.Gpu) !void {
     try check.expect(clamped > 0, "the clamp is crossed by some gate ({d} of {d} at {d} rows)", .{ clamped, most * slots * inner, most });
     r.report("Hy4 NVFP4 routed experts: 8 experts, 4 picks a row, rows 1/5/64/255/256/300 (narrow and wide plans), gate-up and fp32 down FP64-bounded with the SwiGLU clamp crossed; a wider stored gate refused");
 }
+
+/// The published build's own experts (atakans/Hy4-flash-NVFP4): every expert of one layer loaded and packed, 64 rows of
+/// 16 picks run, the first 8 rows' 128 pairs FP64-bounded and equal to the same rows in an 8-row run.
+pub fn runCheckpoint(gpu: check.Gpu, dir: []const u8, layer: usize) !void {
+    var arena = std.heap.ArenaAllocator.init(gpu.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n_latent = 1536; // routed_expert_hidden_size
+    const n_inner = 1536; // moe_intermediate_size
+    const n_experts = 512;
+    const picks_n = 16; // num_experts_per_tok
+    const limit: f32 = 10.0; // swiglu_limit
+    const rows = 64;
+    const checked = 8;
+    var ck = try core.Checkpoint.openModel(a, gpu.io, dir);
+    defer ck.close();
+    var name: [64]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&name, "model.layers.{d}.mlp", .{layer});
+    var rng = std.Random.DefaultPrng.init(0x4f5);
+    var r = try rig.Rig.init(gpu, a, rng.random());
+    defer r.deinit();
+    var routed = try hy4.Routed.init(a, gpu.d, &ck, prefix, n_latent, n_inner, n_experts, rows, picks_n, limit);
+    defer routed.free();
+    var kernels = try hy4.Kernels.load(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)));
+    defer kernels.unload();
+    const x = r.bfs(rows * n_latent, 1.0);
+    const dx = try r.dev(std.mem.sliceAsBytes(x));
+    const picks = try a.alloc(i32, rows * picks_n);
+    for (0..rows) |row| {
+        var used: [n_experts]bool = @splat(false);
+        for (0..picks_n) |slot| {
+            var e = rng.random().uintLessThan(usize, n_experts);
+            while (used[e]) e = (e + 1) % n_experts;
+            used[e] = true;
+            picks[row * picks_n + slot] = @intCast(e);
+        }
+    }
+    const dp = try r.dev(std.mem.sliceAsBytes(picks));
+    const pairs = checked * picks_n;
+    _ = try routed.run(&kernels, r.s, dx, dp, checked);
+    const act8 = try r.back(u16, routed.act.ptr, pairs * n_inner);
+    const y8 = try r.back(f32, routed.y.ptr, pairs * n_latent);
+    _ = try routed.run(&kernels, r.s, dx, dp, rows);
+    try check.sameBytes("the first 8 rows equal in a 64-row run (gate-up)", std.mem.sliceAsBytes(try r.back(u16, routed.act.ptr, pairs * n_inner)), std.mem.sliceAsBytes(act8));
+    try check.sameBytes("the first 8 rows equal in a 64-row run (down)", std.mem.sliceAsBytes(try r.back(f32, routed.y.ptr, pairs * n_latent)), std.mem.sliceAsBytes(y8));
+    var clamped: usize = 0;
+    for (0..pairs) |pair| {
+        const row = pair / picks_n;
+        const e: usize = @intCast(picks[pair]);
+        var weights: [3][]f64 = undefined;
+        for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, p| {
+            var full: [128]u8 = undefined;
+            const n: usize = if (p == 2) n_latent else n_inner;
+            const k: usize = if (p == 2) n_inner else n_latent;
+            var lin = try core.nvfp4_slice.read(&ck, a, try std.fmt.bufPrint(&full, "{s}.experts.{d}.{s}", .{ prefix, e, proj }), .{ .from = 0, .to = n }, .{ .from = 0, .to = k });
+            ck.release();
+            weights[p] = try a.alloc(f64, n * k);
+            for (0..n) |i| for (0..k) |j| {
+                const byte = lin.codes[i * (k / 2) + j / 2];
+                const code: u4 = if (j % 2 == 0) @truncate(byte) else @truncate(byte >> 4);
+                weights[p][i * k + j] = core.quant.nvfp4.e2m1(code) * core.quant.fp8.e4m3(lin.scales[i * (k / 16) + j / 16]) * lin.global;
+            };
+            lin.deinit(a);
+        }
+        for (0..n_inner) |j| {
+            var gate: f64 = 0;
+            var up: f64 = 0;
+            var mg: f64 = 0;
+            var mu: f64 = 0;
+            for (0..n_latent) |k| {
+                const xv = rig.bf(x[row * n_latent + k]);
+                gate += xv * weights[0][j * n_latent + k];
+                up += xv * weights[1][j * n_latent + k];
+                mg += @abs(xv * weights[0][j * n_latent + k]);
+                mu += @abs(xv * weights[1][j * n_latent + k]);
+            }
+            const lim: f64 = limit;
+            if (rig.rbf(gate) > lim or @abs(rig.rbf(up)) > lim) clamped += 1;
+            const g = @min(rig.rbf(gate), lim);
+            const u = @min(@max(rig.rbf(up), -lim), lim);
+            const want = rig.rbf(g / (1 + @exp(-g))) * u;
+            const tol = @abs(want) * (1.0 / 128.0) + rig.sumTol(mg, n_latent) * 2 + rig.sumTol(mu, n_latent) * 2 + 1e-6;
+            try r.within("Hy4 build's experts: gate-up vs FP64", rig.bf(act8[pair * n_inner + j]), want, tol);
+        }
+        for (0..n_latent) |j| {
+            var want: f64 = 0;
+            var mag: f64 = 0;
+            for (0..n_inner) |k| {
+                const term = rig.bf(act8[pair * n_inner + k]) * weights[2][j * n_inner + k];
+                want += term;
+                mag += @abs(term);
+            }
+            try r.within("Hy4 build's experts: fp32 down vs FP64", y8[pair * n_latent + j], want, rig.sumTol(mag, n_inner) + 1e-6);
+        }
+        for (weights) |w| a.free(w);
+    }
+    std.debug.print("clamp crossed in {d} of {d} gate-up columns\n", .{ clamped, pairs * n_inner });
+    r.report("Hy4 build's NVFP4 experts: one layer's 512 experts packed, 64 rows of 16 picks; the first 8 rows equal to an 8-row run and their 128 pairs FP64-bounded");
+}
