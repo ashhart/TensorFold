@@ -1,4 +1,4 @@
-//! A TP rank's share of GLM-5.3-Flash on CUDA (the Python family's ShardPlan): heads one by one, widths in 64s.
+//! A TP rank's share of GLM-5.3 on CUDA (the Python family's ShardPlan): heads one by one, widths in 64s.
 
 const std = @import("std");
 const canon = @import("canon");
@@ -35,7 +35,8 @@ pub const Share = struct {
         return .{
             .rank = rank,
             .world = world,
-            .kda = try span(d.kda, c.kda_heads, rank, world),
+            // full GLM-5.3 has no KDA heads
+            .kda = if (c.kda_heads == 0) .{ .lo = 0, .hi = 0 } else try span(d.kda, c.kda_heads, rank, world),
             .mla = try span(d.mla, c.mla_heads, rank, world),
             .dense = try span(d.dense, c.dense_inter, rank, world),
             .moe = try span(d.moe, c.moe_inter, rank, world),

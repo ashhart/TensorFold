@@ -22,6 +22,9 @@ pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     m.addImport("heat", heat);
     m.addImport("tp", @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)); // over the engine's own cuda module
     m.addImport("engine_api", api); // TF_GLM_KV_SHARE's prompt_radix store: family()'s, the server's
+    // full GLM-5.3's shape, parsed as the Metal family parses it
+    const dsa_config = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_dsa/config.zig"), .target = target, .optimize = optimize });
+    m.addImport("glm_dsa_config", dsa_config);
     return m;
 }
 
