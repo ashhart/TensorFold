@@ -25,11 +25,10 @@ const Kernel = enum {
     down_mxfp8,
     combine,
     group_plan,
-    group_pack,
-    group_gate_up_nvfp4,
-    group_gate_up_mxfp8,
-    group_down_nvfp4,
-    group_down_mxfp8,
+    mma_gate_up_nvfp4,
+    mma_gate_up_mxfp8,
+    mma_down_nvfp4,
+    mma_down_mxfp8,
 };
 pub const symbols = blk: {
     const names = @typeInfo(Kernel).@"enum".field_names;
@@ -50,27 +49,13 @@ const DotArgs = extern struct {
 };
 const CombineArgs = extern struct { rows: u32, topk: u32, hidden: u32, experts: u32 };
 const PlanArgs = extern struct { pairs: u32, experts: u32, tile: u32, gate_up_groups: u32, down_groups: u32, pad: [3]u32 = @splat(0) };
-const PackArgs = extern struct { k: u32, rows: u32, gpb: u32, pad: u32 = 0 };
 
-/// A precision's grouped tiling: row groups (four rows each) per threadgroup, pairs per tile, granules per K block.
-const Geometry = struct {
-    row_groups: u32,
-    tile: u32,
-    gpb: u32,
-
-    fn of(p: Precision) Geometry {
-        return if (p == .nvfp4) .{ .row_groups = 2, .tile = 16, .gpb = 2 } else .{ .row_groups = 1, .tile = 32, .gpb = 4 };
-    }
-};
-
-/// Grouped rows pad each K slice of 32 blocks: BF16 elements one row occupies for `k` with `gpb` granules per block.
-fn rowElems(k: u32, gpb: u32) u32 {
-    return (std.math.divCeil(u32, k / (gpb * 8), 32) catch unreachable) * gpb * 256;
-}
-const min_tile = 16;
+/// Pairs per grouped tile, and the outputs one tile's threadgroup covers: 32 weight rows (16 gate/up columns).
+const group_tile = 16;
+const group_rows = 32;
 
 comptime {
-    std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16 and @sizeOf(PlanArgs) == 32 and @sizeOf(PackArgs) == 16);
+    std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16 and @sizeOf(PlanArgs) == 32);
 }
 
 pub const LoadOptions = struct {
@@ -114,7 +99,6 @@ const Scratch = struct {
     order: usize,
     tiles: usize,
     launch: usize,
-    packed_x: usize,
 
     fn reserve(cursor: *usize, bytes: usize) usize {
         const off = cursor.*;
@@ -122,15 +106,13 @@ const Scratch = struct {
         return off;
     }
 
-    fn init(device: mtl.Device, rows: u32, pairs: u32, experts: u32, hidden: u32, inter: u32, shared: bool) !Scratch {
+    fn init(device: mtl.Device, pairs: u32, experts: u32, hidden: u32, inter: u32, shared: bool) !Scratch {
         var bytes: usize = 0;
-        // The widest grouping (four granules per block) bounds the padded stage and packed activation rows.
-        const stage = reserve(&bytes, @as(usize, pairs) * @max(inter, rowElems(inter, 4)) * @sizeOf(u16));
+        const stage = reserve(&bytes, @as(usize, pairs) * inter * @sizeOf(u16));
         const down = reserve(&bytes, pairs * hidden * @sizeOf(u16));
         const order = reserve(&bytes, pairs * @sizeOf(u32));
-        const tiles = reserve(&bytes, (pairs / min_tile + experts + 2) * 16);
+        const tiles = reserve(&bytes, (pairs / group_tile + experts + 2) * 16);
         const launch = reserve(&bytes, 32);
-        const packed_x = reserve(&bytes, @as(usize, rows) * rowElems(hidden, 4) * @sizeOf(u16));
         if (bytes > device.maxBufferLength()) return error.ExpertScratchTooLarge;
         return .{
             .buffer = try device.buffer(bytes, if (shared) mtl.ResourceOptions.shared else mtl.ResourceOptions.private),
@@ -139,7 +121,6 @@ const Scratch = struct {
             .order = order,
             .tiles = tiles,
             .launch = launch,
-            .packed_x = packed_x,
         };
     }
 
@@ -208,7 +189,7 @@ pub const Store = struct {
             loaded += 1;
             if (p.maxThreads() < threads or p.simdWidth() != simd_width) return error.ExpertLaunchLimit;
         }
-        const scratch = try Scratch.init(d, max_rows, pairs, t.experts, t.hidden, t.expert_inter, options.shared_scratch);
+        const scratch = try Scratch.init(d, pairs, t.experts, t.hidden, t.expert_inter, options.shared_scratch);
         return .{
             .allocator = gpa,
             .layers = layers,
@@ -260,7 +241,7 @@ pub const Store = struct {
         const b = s.scratch;
         const kernel: Kernel = switch (grouped) {
             false => if (gate_up) (if (nv) .gate_up_nvfp4 else .gate_up_mxfp8) else (if (nv) .down_nvfp4 else .down_mxfp8),
-            true => if (gate_up) (if (nv) .group_gate_up_nvfp4 else .group_gate_up_mxfp8) else (if (nv) .group_down_nvfp4 else .group_down_mxfp8),
+            true => if (gate_up) (if (nv) .mma_gate_up_nvfp4 else .mma_gate_up_mxfp8) else (if (nv) .mma_down_nvfp4 else .mma_down_mxfp8),
         };
         e.setPipeline(s.pipe(kernel));
         bind(e, &.{ m.weight, m.scales, m.factors, x, if (grouped) b.at(b.order) else ids, b.at(if (gate_up) b.stage else b.down) });
@@ -286,26 +267,20 @@ pub const Store = struct {
     /// Prompt chunks: sort the pairs by expert once, then each tile decodes its expert's weights for all of its pairs.
     fn encodeGrouped(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, x: View, ids: View, rows: u32) void {
         const b = s.scratch;
-        const geo = Geometry.of(layer.precision);
         e.setPipeline(s.pipe(.group_plan));
         bind(e, &.{ ids, b.at(b.order), b.at(b.tiles), b.at(b.launch) });
         e.setValue(PlanArgs{
             .pairs = rows * s.topk,
             .experts = s.experts,
-            .tile = geo.tile,
-            .gate_up_groups = groups(s.inter, geo.row_groups * 2),
-            .down_groups = groups(s.hidden, geo.row_groups * 4),
+            .tile = group_tile,
+            .gate_up_groups = groups(s.inter, group_rows / 2),
+            .down_groups = groups(s.hidden, group_rows),
         }, 4);
         e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(plan_threads, 1, 1));
         e.barrier();
-        e.setPipeline(s.pipe(.group_pack));
-        bind(e, &.{ x, b.at(b.packed_x) });
-        e.setValue(PackArgs{ .k = s.hidden, .rows = rows, .gpb = geo.gpb }, 2);
-        e.dispatchThreads(mtl.Size.of(s.hidden / 8, rows, 1), mtl.Size.of(threads, 1, 1));
+        s.dot(e, layer, true, x, ids, rows * s.topk, true);
         e.barrier();
-        s.dot(e, layer, true, b.at(b.packed_x), ids, rows * s.topk, true);
-        e.barrier();
-        s.dot(e, layer, false, b.at(b.stage), ids, rows * s.topk, true);
+        s.dot(e, layer, false, s.scratch.at(b.stage), ids, rows * s.topk, true);
     }
 
     /// Encode BF16 projections for active IDs, weighted by FP32 route scores, without submitting.
