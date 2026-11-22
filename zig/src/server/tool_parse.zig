@@ -575,4 +575,5 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
 
 test {
     _ = @import("tool_protocol_security_test.zig");
+    _ = @import("tool_json_close.zig");
 }
