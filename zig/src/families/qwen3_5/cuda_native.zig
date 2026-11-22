@@ -80,7 +80,6 @@ pub const Room = @import("cuda_mtp.zig").Room;
 pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
 /// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes.
 pub const contextCeiling = plan.contextCeiling;
-
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
     learns: ?*E.Engine = null,
@@ -113,7 +112,6 @@ pub const Loaded = struct {
     /// A Clef checkpoint's readouts (the engine then answers only those); null for every other checkpoint.
     readouts: ?lanes.readout.Info = null,
 };
-
 pub const cacheBytes = plan.cacheBytes;
 pub const cacheBytesWithTaps = plan.cacheBytesWithTaps;
 /// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
@@ -125,7 +123,6 @@ pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     l.extra = @intCast(extra -| in_run);
     return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
-
 /// The pool beside the first stream's window (engine_paged: for it too): `streams` more lanes and `pages` pages.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const l: *Lanes = @ptrCast(@alignCast(p));
@@ -141,20 +138,17 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     if (l.share_snaps > 0 and streams > 0) l.prefix = try prefix_mod.Prefix.init(l.gpa, l.e, l.pages.?, l.share_snaps);
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
-
 pub const kvHostRefusal = kv_host_mod.refusal;
 /// Host bytes are absent before any geometry or cap read when the switch is unset.
 pub fn kvHostRoom(p: *anyopaque) !u64 {
     return kv_host_mod.room(@as(*Lanes, @ptrCast(@alignCast(p))));
 }
-
 /// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.pool.items.len > 0 and !l.paged_only) return true;
     return if (l.pages) |pg| pg.fits(prompt, max_tokens) else true;
 }
-
 /// The pool the lane host's ledger admits this family's promises by (#1943).
 pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
     return if (@as(*Lanes, @ptrCast(@alignCast(p))).pages) |pg| &pg.pool else null;
