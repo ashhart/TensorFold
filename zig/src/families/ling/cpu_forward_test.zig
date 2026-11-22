@@ -11,16 +11,15 @@ const Synthetic = struct {
     arena: std.heap.ArenaAllocator,
     made: std.StringHashMapUnmanaged([]f32) = .empty,
     hidden: usize,
-    fast_mode: bool = false,
     pool: ?*Pool = null,
 
-    pub fn deinit(s: *Synthetic) void {
+    fn deinit(s: *Synthetic) void {
         if (s.pool) |p| p.destroy();
         s.arena.deinit();
     }
 
     /// Workers that dispatch even these small matrices, so every projection and expert row crosses threads.
-    pub fn workers(s: *Synthetic, threads: usize) !*Pool {
+    fn workers(s: *Synthetic, threads: usize) !*Pool {
         if (s.pool) |p| {
             if (p.threads == threads) return p;
             p.destroy();
@@ -170,27 +169,6 @@ test "a session refuses tokens past the vocabulary and past its capacity without
     var r = try s.run(a, &.{ 1, 2 });
     r.deinit();
     try std.testing.expectEqual(@as(u32, 2), s.state.position);
-}
-
-test "fast mode forward with head-parallel KDA and MLA gives identical bytes at 1, 2, and 4 threads" {
-    const a = std.testing.allocator;
-    var source = Synthetic{ .arena = std.heap.ArenaAllocator.init(a), .hidden = 64, .fast_mode = true };
-    defer source.deinit();
-    var c = tiny();
-    c.kda_heads = 4;
-    c.mla_heads = 4;
-    const ids = [_]u32{ 3, 17, 5, 40, 9, 22 };
-    var s1 = try Forward.Session.init(a, &source, c, 16, 1);
-    defer s1.deinit();
-    var want = try s1.run(a, &ids);
-    defer want.deinit();
-    for ([_]usize{ 2, 4 }) |threads| {
-        var s = try Forward.Session.init(a, &source, c, 16, threads);
-        defer s.deinit();
-        var got = try s.run(a, &ids);
-        defer got.deinit();
-        try std.testing.expectEqualSlices(u8, last(want, c.vocab), last(got, c.vocab));
-    }
 }
 
 test "session step reuses its output buffers and matches run byte for byte" {

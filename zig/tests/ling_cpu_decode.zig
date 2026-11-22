@@ -2,7 +2,7 @@
 const std = @import("std");
 const cpu = @import("ling_cpu");
 
-const usage = "usage: ling-cpu-decode [--fast] MODEL.gguf ID,ID,... COUNT [THREADS]\n";
+const usage = "usage: ling-cpu-decode MODEL.gguf ID,ID,... COUNT [THREADS]\n";
 
 fn top(values: []const f32) u32 {
     var best: usize = 0;
@@ -22,48 +22,26 @@ pub fn main(init: std.process.Init) !void {
     var buf: [4096]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(init.io, &buf);
     const w = &out.interface;
-    var fast_mode = false;
-    var pos: [4][]const u8 = undefined;
-    var npos: usize = 0;
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--fast")) {
-            fast_mode = true;
-        } else if (npos < pos.len) {
-            pos[npos] = arg;
-            npos += 1;
-        } else {
-            try w.writeAll(usage);
-            try w.flush();
-            return error.Usage;
-        }
-    }
-    if (npos != 3 and npos != 4) {
+    if (args.len != 4 and args.len != 5) {
         try w.writeAll(usage);
         try w.flush();
         return error.Usage;
     }
     var prompt: std.ArrayList(u32) = .empty;
-    var it = std.mem.tokenizeScalar(u8, pos[1], ',');
+    var it = std.mem.tokenizeScalar(u8, args[2], ',');
     while (it.next()) |id| try prompt.append(a, try std.fmt.parseInt(u32, id, 10));
-    const count = try std.fmt.parseInt(u32, pos[2], 10);
-    const threads = if (npos == 4) try std.fmt.parseInt(usize, pos[3], 10) else 1;
+    const count = try std.fmt.parseInt(u32, args[3], 10);
+    const threads = if (args.len == 5) try std.fmt.parseInt(usize, args[4], 10) else 1;
     if (prompt.items.len == 0 or count == 0 or prompt.items.len + count > 4096) return error.PromptCapacity;
 
     const opening = std.Io.Clock.awake.now(init.io);
-    var file = try cpu.gguf.File.open(init.gpa, init.io, pos[0]);
+    var file = try cpu.gguf.File.open(init.gpa, init.io, args[1]);
     defer file.close(init.io);
-    if (fast_mode) file.enableFastMode() catch |err| {
-        if (err == error.DotprodTargetRequired) {
-            try w.writeAll("error: --fast requires an ARM dot-product build (rebuild with -Dcpu=baseline+dotprod; check for asimddp in /proc/cpuinfo)\n");
-            try w.flush();
-        }
-        return err;
-    };
     const c = try file.config();
     var session = try cpu.Gguf.Session.init(init.gpa, &file, c, @intCast(prompt.items.len + count), threads);
     defer session.deinit();
     const opened = std.Io.Clock.awake.now(init.io);
-    try w.print("model opened in {d:.2} s, {d} threads, {s}\n", .{ @as(f64, @floatFromInt(opening.durationTo(opened).toNanoseconds())) / 1e9, threads, if (fast_mode) "fast" else "exact" });
+    try w.print("model opened in {d:.2} s, {d} threads, exact\n", .{ @as(f64, @floatFromInt(opening.durationTo(opened).toNanoseconds())) / 1e9, threads });
     try w.flush();
 
     var next: u32 = undefined;

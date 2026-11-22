@@ -96,3 +96,13 @@ test "persistent workers run whole experts with the serial SwiGLU bytes" {
         }
     }
 }
+
+test "extractAllowedCpus reads sparse affinity masks in ascending order without hardcoded cores" {
+    const mask = [_]usize{ (@as(usize, 1) << 0) | (@as(usize, 1) << 3) | (@as(usize, 1) << 5) | (@as(usize, 1) << 7), (@as(usize, 1) << 2) };
+    var out: [4]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 4), pool_.extractAllowedCpus(&mask, &out));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3, 5, 7 }, &out);
+    var all: [8]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 5), pool_.extractAllowedCpus(&mask, &all));
+    try std.testing.expectEqual(@as(usize, @bitSizeOf(usize) + 2), all[4]);
+}
