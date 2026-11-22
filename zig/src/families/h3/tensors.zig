@@ -27,11 +27,6 @@ pub const Tensors = struct {
         return .{ .map = map, .buffer = buffer, .data = 8 + header_len, .names = names, .arena = arena, .path = owned };
     }
 
-    /// The bytes of tensor `e` in the file, for `read_ahead`.
-    pub fn span(self: *const Tensors, e: st.Entry) read_ahead.Span {
-        return .{ .path = self.path, .lo = self.data + e.begin, .hi = self.data + e.end };
-    }
-
     pub fn deinit(self: *Tensors) void {
         self.buffer.deinit();
         self.arena.deinit();
