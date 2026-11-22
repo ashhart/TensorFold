@@ -13,7 +13,17 @@ const unsupported = [_][]const u8{
     "else",              "not",           "unevaluatedProperties", "unevaluatedItems", "prefixItems",
 };
 
-/// Whether every constraint in this schema has a post-validation implementation.
+/// Keys whose value maps names (a property's, a definition's) to subschemas: the names are never keywords.
+const named = [_][]const u8{ "properties", "$defs", "definitions", "patternProperties" };
+/// Keys whose value is data, not a schema: nothing inside them is a keyword.
+const data = [_][]const u8{ "enum", "const", "default", "examples" };
+
+fn listed(key: []const u8, names: []const []const u8) bool {
+    for (names) |name| if (std.mem.eql(u8, key, name)) return true;
+    return false;
+}
+
+/// Whether every constraint in this schema has a post-validation implementation, judged at keyword positions only.
 pub fn supported(schema: Value) bool {
     if (schema == .array) {
         for (schema.array) |item| if (!supported(item)) return false;
@@ -21,7 +31,12 @@ pub fn supported(schema: Value) bool {
     }
     if (schema != .object) return true;
     for (schema.object.keys(), schema.object.values()) |key, value| {
-        for (unsupported) |name| if (std.mem.eql(u8, key, name)) return false;
+        if (listed(key, &unsupported)) return false;
+        if (listed(key, &data)) continue;
+        if (listed(key, &named)) {
+            if (value == .object) for (value.object.values()) |sub| if (!supported(sub)) return false;
+            continue;
+        }
         if (!supported(value)) return false;
     }
     return true;
