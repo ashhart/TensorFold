@@ -166,3 +166,18 @@ test "nemotron cuda steps: a kept state refused at open leaves the fill at 0, no
     try std.testing.expect(s.reuse_failed);
     try std.testing.expectEqual(@as(u32, 0), s.fill_at.load(.monotonic));
 }
+
+test "nemotron cuda steps: a stream cancelled while it waited opens nothing and never reaches the tower (REV59 4)" {
+    var r: Rig = .{};
+    r.init();
+    defer r.deinit();
+    var flag: Flag = .{ .on = true };
+    var images: [1]lanes.stream.Image = .{.{ .pixels = &.{}, .gh = 4, .gw = 4, .tokens = 4, .at = 1 }};
+    const prompt: [8]u32 = @splat(1);
+    var s = try lanes.Stream.init(a, .{ .id = "late", .prompt = &prompt, .max_new = 4, .images = &images, .cancel_check = .{ .ptr = &flag, .check = Flag.check } });
+    defer s.deinit(a);
+    try std.testing.expectError(error.Cancelled, r.step(&s));
+    try std.testing.expectError(error.Cancelled, r.b.backend().prefill(&s));
+    try std.testing.expectEqual(@as(usize, 0), r.count.passes);
+    try std.testing.expectEqual(@as(usize, 0), r.b.lanes.count());
+}

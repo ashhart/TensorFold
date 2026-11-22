@@ -19,6 +19,7 @@ pub const Fills = std.AutoHashMapUnmanaged(*const lanes.Stream, pass.Pass);
 
 /// prefill: the stream's sequence, sampling and kept prefix, then its whole pass.
 pub fn whole(self: *Cuda, s: *lanes.Stream) !void {
+    if (s.isCancelled()) return error.Cancelled; // cancelled while it waited: no sequence, restore or tower
     const from = try open(self, s);
     try run(self, s, from);
 }
@@ -125,6 +126,7 @@ pub fn step(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     var sink: Cuda.PromptSink = .{ .gpa = self.gpa, .s = s };
     var tap: Cuda.TapSink = undefined;
     if (self.fills.getPtr(s) == null) {
+        if (s.isCancelled()) return error.Cancelled; // cancelled while it waited: no sequence, restore or tower
         const from = try open(self, s);
         const cancel: engine.Cancel = .{ .ptr = s, .check = Cuda.cancelled, .yields = s.yield_check != null };
         tap = .{ .self = self, .taps = &self.lanes.getPtr(s).?.taps };
