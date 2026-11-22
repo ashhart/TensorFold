@@ -62,6 +62,8 @@ pub const Kernels = struct {
         k.silu_mul = try m[4].function("tf_lfm2_silu_mul");
         k.lane = try cuda.qmmf.Lane.load(d, (try ctx.capability()) / 10);
         errdefer k.lane.unload();
+        const bf16_prompt = try @import("sys").environment.read(bool, "TF_DENSE_PROMPT_BF16", true);
+        if (bf16_prompt) try k.lane.loadPrompt(d);
         k.norms = try cuda.norms.Norms.load(d);
         errdefer k.norms.unload();
         k.embed = try cuda.embed_rows.EmbedRows.load(d);
