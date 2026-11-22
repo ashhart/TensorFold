@@ -367,6 +367,28 @@ test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only it
     try t.expectEqual(@as(usize, 8), r.libraries);
 }
 
+test "qwen27 quant: inline sums select the fitting decode pipeline only with the switch on" {
+    for ([_]bool{ false, true }) |enabled| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .inline_sums = enabled };
+        defer k.deinit();
+        var p = matrix(&r, 5120);
+        p.slices = 8;
+        for ([_]u32{ 17408, 25600 }) |width| {
+            p.k = width;
+            try k.prepareDecode(p);
+            const key = quant.Key{
+                .kind = .projection,
+                .n = p.n,
+                .k = p.k,
+                .slices = p.slices,
+                .inline_sums = enabled and width == 17408,
+            };
+            try t.expectEqual(key.inline_sums, k.lanes.get(key).?.inline_sums);
+        }
+    }
+}
+
 test "qwen27 quant: 5-bit and 6-bit g64 use reg lane keys with 128/2048 row capacity and producer sums" {
     for ([_]u8{ 5, 6 }) |bits| {
         var r: mtl.Record = .{};

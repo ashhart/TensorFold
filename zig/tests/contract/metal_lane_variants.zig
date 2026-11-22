@@ -12,7 +12,18 @@ pub const m5 = [_]Reg{
     .{ .v = .{ .kind = .lane_reg, .bits = 6, .group = 64 }, .name = "metal lane projection q6 g64 reg" },
     .{ .v = .{ .kind = .lane_reg, .bits = 6, .group = 64, .control = true }, .name = "control: metal lane projection q6 g64 reg, unreordered tiles" },
     .{ .v = .{ .kind = .lane, .bits = 8, .group = 128, .sk = 4 }, .name = "metal lane projection q8 g128 sk4" },
-} ++ q8 ++ hy4;
+} ++ q8 ++ hy4 ++ q27;
+
+const q27 = [_]Reg{
+    q27Inline(1, &.{ .{ .rows = 16, .n = 98592, .k = 5120 }, .{ .rows = 16, .n = 17408, .k = 5120 } }),
+    q27Inline(2, &.{ .{ .rows = 16, .n = 17408, .k = 5120 }, .{ .rows = 5, .n = 10240, .k = 5120 } }),
+    q27Inline(4, &.{ .{ .rows = 5, .n = 5120, .k = 6144 }, .{ .rows = 16, .n = 5120, .k = 17408 } }),
+    q27Inline(8, &.{ .{ .rows = 16, .n = 4096, .k = 5120 }, .{ .rows = 16, .n = 5120, .k = 4096 }, .{ .rows = 16, .n = 5120, .k = 17408 }, .{ .rows = 16, .n = 1280, .k = 5120 }, .{ .rows = 16, .n = 256, .k = 5120 }, .{ .rows = 16, .n = 1024, .k = 5120 } }),
+};
+
+fn q27Inline(comptime sk: usize, served: []const Shape) Reg {
+    return .{ .v = .{ .kind = .lane_reg, .sk = sk, .inline_sums = true, .served = served }, .name = std.fmt.comptimePrint("qwen27 inline sums sk{d}", .{sk}) };
+}
 
 const head = [_]Shape{ .{ .rows = 1, .n = 248320, .k = 5120 }, .{ .rows = 16, .n = 64, .k = 5120 } };
 const mlp = [_]Shape{.{ .rows = 16, .n = 34816, .k = 5120 }};

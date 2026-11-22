@@ -169,7 +169,8 @@ pub const Model = struct {
         errdefer if (m.idle_release) |owner| owner.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
+        const inline_sums = m.device.tensorUnits() and try platform.environment.read(bool, "TF_Q27_INLINE_SUMS", false);
+        m.kernels = .{ .inline_sums = inline_sums, .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
         errdefer m.kernels.deinit();
         if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
         m.glue = try glue.Kernels.init(m.device);

@@ -9,7 +9,12 @@ pub const Adapter = struct {
     metadata: mtl.Buffer,
     /// With `order`, the words are rewritten into reg_layout and encode on the reg kernel (same output words).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, prepared: cpu.Prepared, sk: usize, order: ?lane.RegOrder) !Adapter {
-        const layout = lane.Layout{ .n = prepared.n, .k = prepared.k, .format = .{ .bits = 4, .group = 64 }, .sk = sk, .precompute_sums = true, .cooperative = order == null, .reg = order != null };
+        return initWithInlineSums(a, device, prepared, sk, order, false);
+    }
+
+    pub fn initWithInlineSums(a: std.mem.Allocator, device: mtl.Device, prepared: cpu.Prepared, sk: usize, order: ?lane.RegOrder, enabled: bool) !Adapter {
+        var layout = lane.Layout{ .n = prepared.n, .k = prepared.k, .format = .{ .bits = 4, .group = 64 }, .sk = sk, .precompute_sums = true, .cooperative = order == null, .reg = order != null };
+        layout.inline_sums = enabled and layout.inlineSumsFit();
         try layout.validate();
         const words = try device.buffer(layout.weightWords() * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer words.deinit();

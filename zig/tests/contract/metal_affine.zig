@@ -15,7 +15,7 @@ const mm = tf.affine_mm;
 const lane = tf.lane_projection;
 const identity = @import("affine_identity.zig");
 
-pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, lane, lane_reg, qk };
+pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_draft_twins, simd_bits, lane, lane_reg, qk };
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's or simd_sums' planted fault.
 pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, identity: bool = false, control: bool = false, served: ?[]const c.Shape = null, inline_sums: bool = false };
@@ -47,6 +47,10 @@ pub const half = [_]Reg{
     .{ .v = .{ .kind = .simd_half, .control = true }, .name = "control: metal simd_qmm half, every tile marked as fitting half" },
     .{ .v = .{ .kind = .simd_sums }, .name = "metal simd_qmm pairs prepass sums q4 g64" },
     .{ .v = .{ .kind = .simd_sums, .control = true }, .name = "control: metal simd_qmm pairs, the prepass's sums left at zero" },
+};
+
+pub const draft_twins = [_]Reg{
+    .{ .v = .{ .kind = .simd_draft_twins }, .name = "qwen27 draft matmul twins" },
 };
 
 /// Each 16-input piece's products, two roundings a piece, a lane's pieces in turn, then a simd_sum tree.
@@ -90,6 +94,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4 and !v.glm_m3_fast) offset_inf else null, .replaces = if (v.identity) "the frozen affine_mm before exact-nonfinite groups" else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = @max(64, v.group), .min = @max(64, v.group) } }, .served = if (v.bits == 8 and v.group == 64) &router_rows else &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
         .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         // the 27B's norm-fed widths past 6,144 (8 chunks), as the prompt chunk's tiles and its 9-row tail take them
+        .simd_draft_twins => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 2 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &draftShapes },
         .simd_half => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 32, .n = 6240, .k = 512 }, .{ .rows = 9, .n = 12288, .k = 256 } } },
         // the 27B's down and o (16 chunks, four column tiles), as a prompt chunk and an odd tail take them
         .simd_sums => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 16, .min = 9 }, .{ .size = 128, .step = 32, .min = 96 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 64, .n = 5120, .k = 1024 }, .{ .rows = 9, .n = 512, .k = 512 } } },
@@ -97,6 +102,18 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = laneBase(v), .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = v.served orelse &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
     };
 }
+
+const draftShapes = [_]c.Shape{
+    .{ .rows = 1, .n = 5120, .k = 25600 },
+    .{ .rows = 2, .n = 5120, .k = 17408 },
+    .{ .rows = 16, .n = 5120, .k = 17408 },
+    .{ .rows = 16, .n = 4096, .k = 5120 },
+    .{ .rows = 16, .n = 5120, .k = 4096 },
+    .{ .rows = 16, .n = 1280, .k = 5120 },
+    .{ .rows = 16, .n = 256, .k = 5120 },
+    .{ .rows = 16, .n = 1024, .k = 5120 },
+    .{ .rows = 2, .n = 17408, .k = 5120 },
+};
 
 /// Inputs half doesn't hold on every third row: 2^20 (past its range) and 2^-15 (a subnormal), in turn across groups.
 fn plant(f: Affine) void {
@@ -135,7 +152,7 @@ pub const Proj = struct {
         var p = Proj{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name };
         switch (v.kind) {
             .row => p.row_p = try row.Pipelines.load(device),
-            .simd, .simd_half, .simd_sums => p.sq_p = try sq.Pipelines.load(device),
+            .simd, .simd_half, .simd_sums, .simd_draft_twins => p.sq_p = try sq.Pipelines.load(device),
             .simd_bits => p.sqb_p = try sqb.Pipelines.load(device),
             .affine_mm => {
                 const format: mm.Format = .{ .bits = v.bits, .group = @intCast(v.group), .out_f32 = v.f32_out, .glm_m3_fast = v.glm_m3_fast, .exact_nonfinite = v.bits == 4 and v.glm_m3_fast };
@@ -204,7 +221,7 @@ pub const Proj = struct {
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.k % p.v.group != 0) return false;
         return switch (p.v.kind) {
             .row => if ((row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = shape.n, .k = shape.k, .group = p.v.group, .bits = p.v.bits }).validate()) |_| true else |_| false,
-            .simd, .simd_bits => shape.n % 8 == 0 and shape.k % 64 == 0,
+            .simd, .simd_bits, .simd_draft_twins => shape.n % 8 == 0 and shape.k % 64 == 0,
             .simd_half => shape.n % 8 == 0 and shape.k % 64 == 0 and sq.chunks(shape.n, 0) == sq.half_chunks,
             .simd_sums => shape.n % 8 == 0 and shape.k % 64 == 0 and (try sq.callSumsAt(&p.sq_p.?, shape.n, shape.k, shape.rows)) != null,
             .affine_mm => shape.n % 64 == 0 and shape.k % 64 == 0,
@@ -228,7 +245,7 @@ pub const Proj = struct {
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
         const out_bytes = f.outputs() * c.size(spec(p.v, p.name).out);
         switch (p.v.kind) {
-            .row, .simd, .simd_half, .simd_sums, .simd_bits, .affine_mm => {
+            .row, .simd, .simd_half, .simd_sums, .simd_draft_twins, .simd_bits, .affine_mm => {
                 p.w = try p.rig.input(std.mem.sliceAsBytes(words));
                 p.s = try p.rig.input(std.mem.sliceAsBytes(f.scales));
                 p.b = try p.rig.input(std.mem.sliceAsBytes(f.biases));
@@ -240,10 +257,8 @@ pub const Proj = struct {
                     }
                 }
                 if (p.v.kind == .simd_half) p.flags = try p.rig.scratch(sq.fitsBytes(shape.k, shape.rows));
-                if (p.v.kind == .simd_half or p.v.kind == .simd_sums) {
-                    p.sums = try p.rig.scratch(sq.prepBytes(shape.k, shape.rows, p.v.kind == .simd_half));
-                    p.base = try p.rig.scratch(out_bytes);
-                }
+                if (p.v.kind == .simd_half or p.v.kind == .simd_sums) p.sums = try p.rig.scratch(sq.prepBytes(shape.k, shape.rows, p.v.kind == .simd_half));
+                if (p.v.kind == .simd_half or p.v.kind == .simd_sums or p.v.kind == .simd_draft_twins) p.base = try p.rig.scratch(out_bytes);
             },
             .lane, .lane_reg, .qk => {
                 const l = p.layout(shape, false);
@@ -301,6 +316,10 @@ pub const Proj = struct {
                 e.setBuffer(p.out.buf, p.out.off, 5);
                 e.dispatchGroups(mtl.Size.of(cl.groups, cl.slots, 1), mtl.Size.of(cl.threads, 1, 1));
             },
+            .simd_draft_twins => {
+                const cl = try sq.call(&p.sq_p.?, shape.n, shape.k, shape.rows, true, shape.rows == 16, 0);
+                sq.encode(e, cl, p.matrix(shape), p.x.buf, p.x.off, p.out.buf, p.out.off);
+            },
             .simd => {
                 const cl = try sq.call(&p.sq_p.?, shape.n, shape.k, shape.rows, false, true, 0);
                 sq.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k }, p.x.buf, p.x.off, p.out.buf, p.out.off);
@@ -351,7 +370,7 @@ pub const Proj = struct {
     /// The replaced kernel's bytes on the same inputs: a frozen affine_mm, cooperative lane, or fp32 simd_qmm.
     pub fn replaced(p: *Proj) ![]const u8 {
         const affine_identity = p.v.kind == .affine_mm and p.v.identity;
-        if ((p.v.kind != .lane_reg or laneBase(p.v) == null) and p.v.kind != .simd_half and p.v.kind != .simd_sums and p.v.kind != .qk and !affine_identity) return error.NotAReplacement;
+        if ((p.v.kind != .lane_reg or laneBase(p.v) == null) and p.v.kind != .simd_half and p.v.kind != .simd_sums and p.v.kind != .simd_draft_twins and p.v.kind != .qk and !affine_identity) return error.NotAReplacement;
         const f = p.f.?;
         const len = f.outputs() * c.size(spec(p.v, p.name).out);
         @memset(p.rig.bytes(p.base, len), 0xff);
@@ -360,7 +379,7 @@ pub const Proj = struct {
             p.encodeAffine(pass.e, p.mm_base_p.?, p.base_sums, p.base, false);
         } else if (p.v.kind == .qk) {
             try p.lane_p.?.encode(pass.e, ref(p.x), ref(p.tiled), ref(p.s), ref(p.base), @intCast(f.shape.rows));
-        } else if (p.v.kind == .simd_half or p.v.kind == .simd_sums) {
+        } else if (p.v.kind == .simd_half or p.v.kind == .simd_sums or p.v.kind == .simd_draft_twins) {
             sq.encode(pass.e, try sq.call(&p.sq_p.?, f.shape.n, f.shape.k, f.shape.rows, false, false, 0), p.matrix(f.shape), p.x.buf, p.x.off, p.base.buf, p.base.off);
         } else try p.coop_p.?.encode(pass.e, ref(p.x), ref(if (p.v.inline_sums) p.w else p.tiled), ref(p.s), ref(p.base), @intCast(f.shape.rows));
         try p.rig.finish(pass);
