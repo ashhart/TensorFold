@@ -13,6 +13,7 @@ const libs_tests = @import("libs_tests.zig");
 const rank_scatter_tests = @import("rank_scatter_tests.zig");
 const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
+const sample_nucleus_tests = @import("sample_nucleus_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const request_starts = @import("request_start_checks.zig");
 const resume_tests = @import("resume_tests.zig");
@@ -193,6 +194,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);
     }
+    if (std.mem.eql(u8, cmd, "sample-adversarial")) return sample_nucleus_tests.adversarial(gpu);
+    if (std.mem.eql(u8, cmd, "sample-bench")) return sample_nucleus_tests.bench(gpu);
     if (std.mem.eql(u8, cmd, "compile-contract-glue")) return compileContractGlue();
     if (std.mem.eql(u8, cmd, "qwen-draft-frames")) {
         if (rest.len != 4) return error.FrameGateArguments;
