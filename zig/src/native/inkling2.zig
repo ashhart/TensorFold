@@ -207,6 +207,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const budget = try cacheBudget(a, o, cache_left, drafted, problem) orelse return null;
     h.target = try target.Target.init(gpa, model, .{ .capacity = window, .streams = count, .rows = target.max_rows, .drafts = drafted, .images = if (h.vision != null) .{ .ctx = h, .encode = Host.encode } else null });
     errdefer h.target.deinit();
+    if (drafted) try h.target.measureCosts(io);
     var backend = h.target.backend();
     var facts = h.target.facts();
     if (h.draft) |d| {
