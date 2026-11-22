@@ -369,8 +369,8 @@ pub const Model = struct {
             const kv_width: usize = @as(usize, layer.heads.kv) * layer.heads.dim;
             try loop_math.projectQkv(&k.loop, s, u_q, u_k, u_v, lw.attn.wq, lw.attn.wk, lw.attn.wv, m.s.q_raw, m.s.k_raw, m.s.v_raw, rows, h, q_width, kv_width);
             try ops.rowdot(&k.glue, s, u_q, lw.attn.wr, m.s.rel_raw, rows, layer.heads.q * c.d_rel, h, true, false);
-            try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, true);
-            try ops.rowdot(&k.glue, s, u_q, lw.attn.sink, m.s.sink, rows, layer.heads.q, h, true, true);
+            try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, false);
+            try ops.rowdot(&k.glue, s, u_q, lw.attn.sink, m.s.sink, rows, layer.heads.q, h, true, false);
 
             const geometry = m.layerGeometry(visit.layer);
             const cache = m.cacheOf(visit.cache_slot);
