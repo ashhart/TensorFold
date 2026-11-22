@@ -59,6 +59,21 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
     try put(sink, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{e});
     // gate and up are one tensor, w13: 2 * intermediate rows
     const rows = [2][2]u64{ .{ 2 * m, h }, .{ h, m } };
+    if (prec == .exl3) {
+        // One trellis group per expert and projection, with fp16 scales and the codebook's marker.
+        inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, p| {
+            const k: u64 = if (p == 2) m else h;
+            const n: u64 = if (p == 2) h else m;
+            for (0..e) |x| {
+                const E = .{ i, x };
+                try put(sink, "model.llm.layers.{d}.mlp.experts.{d}." ++ proj ++ ".trellis", E, .i16, &.{ k / 16, n / 16, any });
+                try put(sink, "model.llm.layers.{d}.mlp.experts.{d}." ++ proj ++ ".suh", E, .f16, &.{k});
+                try put(sink, "model.llm.layers.{d}.mlp.experts.{d}." ++ proj ++ ".svh", E, .f16, &.{n});
+                try put(sink, "model.llm.layers.{d}.mlp.experts.{d}." ++ proj ++ ".mcg", E, .i32, &[_]u64{});
+            }
+        }
+        return;
+    }
     inline for (.{ "w13", "w2" }, 0..) |w, n| {
         const r = rows[n][0];
         const k = rows[n][1];
@@ -73,6 +88,7 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight", L, .f8_e4m3, &.{ e, r, k });
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight_scale", L, .u8, &.{ e, r, k / 32 });
             },
+            .exl3 => unreachable,
         }
     }
 }
@@ -182,11 +198,16 @@ pub fn all(c: *const config.Config, prec: []const plan.Precision, file: File, si
     }
 }
 
-/// Each layer's expert precision from its w13 tensor: packed U8 is NVFP4, FP8 is MXFP8, anything else is refused.
+/// Each layer's expert precision from its tensors: a trellis group is EXL3, packed U8 is NVFP4, FP8 is MXFP8.
 pub fn precisions(entries: st.Header, layers: u32, out: []plan.Precision) !void {
     if (out.len < layers) return error.PrecisionCount;
     for (0..layers) |i| {
         var buf: [96]u8 = undefined;
+        const trellis = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.0.gate_proj.trellis", .{i});
+        if (entries.get(trellis) != null) {
+            out[i] = .exl3;
+            continue;
+        }
         const name = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
         const hit = entries.get(name) orelse return error.NoExperts;
         out[i] = switch (hit.dtype) {

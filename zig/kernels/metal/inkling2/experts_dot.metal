@@ -142,3 +142,15 @@ void inkling2_exp_combine(const device bfloat* down [[buffer(0)]], const device 
   }
   out[ulong(at.y) * a.hidden + at.x] = bfloat(sum);
 }
+
+// The EXL3 store's activation: capped SwiGLU of one gate/up BF16 pair, the packed kernels' i2x_swiglu.
+[[kernel, max_total_threads_per_threadgroup(I2X_COMBINE_THREADS)]]
+void inkling2_exp_swiglu(const device bfloat* gate [[buffer(0)]], const device bfloat* up [[buffer(1)]],
+                         device bfloat* out [[buffer(2)]], constant Inkling2ExpSwigluArgs& a [[buffer(3)]],
+                         uint idx [[thread_position_in_grid]]) {
+  const ulong total = ulong(a.pairs) * a.inter;
+  if (idx >= total) return;
+  const float g = float(gate[idx]);
+  const float u = float(up[idx]);
+  out[idx] = bfloat(i2x_swiglu(g, u, a.gate_cap, a.up_cap));
+}

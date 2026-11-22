@@ -14,6 +14,12 @@ struct Inkling2ExpCombineArgs {
   uint rows, topk, hidden, experts;
 };
 
+// The EXL3 store's SwiGLU over pairs*inter BF16 gate/up pairs; src_div is always one.
+struct Inkling2ExpSwigluArgs {
+  uint pairs, inter;
+  float gate_cap, up_cap;
+};
+
 constant float kI2xE2m1[16] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
 
 // E4M3FN (bias 7, no infinities, 0x7f / 0xff are NaN): (8 + m) 2^(e - 10), or m 2^-9 below the least normal.

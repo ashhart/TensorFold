@@ -91,7 +91,8 @@ fn refusal(a: Allocator, o: api.Open) !?[]const u8 {
     return null;
 }
 
-/// Every released shard counts, as core/checkpoint.zig lists them (model*.safetensors), plus mtp when drafted.
+/// Every released shard counts, as core/checkpoint.zig lists them (model*.safetensors), plus the EXL3
+/// pack's dense-*/exl3-layer-* shards and mtp when drafted.
 fn checkpointFileBytes(io: std.Io, dir: []const u8, drafted: bool) u64 {
     var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
     defer d.close(io);
@@ -100,7 +101,7 @@ fn checkpointFileBytes(io: std.Io, dir: []const u8, drafted: bool) u64 {
     while (true) {
         const e = (it.next(io) catch break) orelse break;
         if (e.kind != .file and e.kind != .sym_link) continue;
-        const shard = std.mem.startsWith(u8, e.name, "model") and std.mem.endsWith(u8, e.name, ".safetensors");
+        const shard = (std.mem.startsWith(u8, e.name, "model") or std.mem.startsWith(u8, e.name, "dense-") or std.mem.startsWith(u8, e.name, "exl3-layer-")) and std.mem.endsWith(u8, e.name, ".safetensors");
         const head = drafted and std.mem.eql(u8, e.name, "mtp.safetensors");
         if (!shard and !head) continue;
         const st = d.statFile(io, e.name, .{}) catch continue;

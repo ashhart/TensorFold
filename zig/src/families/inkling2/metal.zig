@@ -5,6 +5,7 @@ pub const state = @import("metal_state.zig");
 pub const Item = @import("metal_forward.zig").Item;
 pub const ImageRows = @import("metal_forward.zig").ImageRows;
 pub const experts = @import("metal_experts.zig");
+pub const experts_exl3 = @import("metal_experts_exl3.zig");
 pub const vision = @import("metal_vision.zig");
 pub const draft = @import("metal_draft.zig");
 pub const ops = @import("metal_ops.zig");

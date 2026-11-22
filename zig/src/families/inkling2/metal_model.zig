@@ -8,10 +8,45 @@ const state = @import("metal_state.zig");
 const wts = @import("metal_weights.zig");
 const ops_mod = @import("metal_ops.zig");
 const ex = @import("metal_experts.zig");
+const exl3s = @import("metal_experts_exl3.zig");
 const fwd = @import("metal_forward.zig");
 const plan_mod = @import("plan.zig");
 const loop_mod = @import("metal_loop.zig");
-const Mapped = @import("metal_mapped.zig").Mapped;
+const MappedSet = @import("metal_mapped.zig").Set;
+
+/// The routed-expert store: the official packed NVFP4/MXFP8 kernels, or the EXL3 trellis projections.
+const ExpertStore = union(enum) {
+    official: ex.Store,
+    exl3: exl3s.Store,
+
+    pub fn encode(s: *ExpertStore, e: mtl.ComputeEncoder, layer: u32, x: exl3s.View, ids: exl3s.View, weights: exl3s.View, out: exl3s.View, rows: u32) !void {
+        switch (s.*) {
+            .official => |*p| try p.encode(e, layer, x, ids, weights, out, rows),
+            .exl3 => |*x2| try x2.encode(e, layer, x, ids, weights, out, rows),
+        }
+    }
+
+    pub fn scratchBytes(s: *const ExpertStore) u64 {
+        return switch (s.*) {
+            .official => |*p| p.scratchBytes(),
+            .exl3 => |*x| x.scratchBytes(),
+        };
+    }
+
+    pub fn setResident(s: *ExpertStore, hook: ?mtl.ResidencySet.Follow) void {
+        switch (s.*) {
+            .official => |*p| p.setResident(hook),
+            .exl3 => |*x| x.setResident(hook),
+        }
+    }
+
+    pub fn deinit(s: *ExpertStore) void {
+        switch (s.*) {
+            .official => |*p| p.deinit(),
+            .exl3 => |*x| x.deinit(),
+        }
+    }
+};
 
 pub const Options = struct {
     /// Positions a stream created by `newState` holds.
@@ -128,13 +163,13 @@ pub const Model = struct {
     queue: mtl.Queue,
     config: config.Config,
     options: Options,
-    mapped: Mapped,
+    mapped: MappedSet,
     checkpoint: ck.Checkpoint,
     weights: wts.Weights,
     ops: ops_mod.Ops,
     plan: plan_mod.Plan,
     loop_ops: loop_mod.Ops,
-    store: ex.Store,
+    store: ExpertStore,
     scratch: Scratch,
     /// f32 [rows, unpadded_vocab]: the softcapped logits of each item's last `logit_rows` rows, in item order.
     logits: mtl.Buffer,
@@ -163,16 +198,22 @@ pub const Model = struct {
         errdefer m.device.deinit();
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
-        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/model-00001-of-00001.safetensors", .{dir}, 0);
-        defer gpa.free(path);
-        m.mapped = try Mapped.open(path);
+        m.mapped = try MappedSet.open(gpa, io, dir);
         errdefer m.mapped.deinit();
         m.checkpoint = ck.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
-        try m.mapped.adopt(&m.checkpoint, try m.mapped.buffer(m.device));
+        try m.mapped.adopt(&m.checkpoint, m.device);
+        // The expert format is the checkpoint's, not the config's: EXL3 packs name trellis tensors, the release w13/w2.
         var precision: [config.max_layers]plan_mod.Precision = undefined;
+        var exl3_layers: usize = 0;
         for (precision[0..t.layers], 0..) |*p, i| {
             var buf: [96]u8 = undefined;
+            const trellis = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.0.gate_proj.trellis", .{i});
+            if (m.checkpoint.has(trellis)) {
+                p.* = .exl3;
+                exl3_layers += 1;
+                continue;
+            }
             const name = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
             p.* = switch ((try m.checkpoint.get(name)).dtype) {
                 .u8 => .nvfp4,
@@ -180,6 +221,8 @@ pub const Model = struct {
                 else => return error.UnexpectedExpertFormat,
             };
         }
+        if (exl3_layers != 0 and exl3_layers != @as(usize, t.layers)) return error.MixedExpertFormat;
+        const exl3_model = exl3_layers == @as(usize, t.layers);
         m.plan = try plan_mod.build(t, precision[0..t.layers]);
         m.weights = try wts.load(gpa, &m.checkpoint, &m.config);
         errdefer m.weights.deinit(gpa);
@@ -187,7 +230,10 @@ pub const Model = struct {
         errdefer m.ops.deinit();
         m.loop_ops = try loop_mod.Ops.load(m.device);
         errdefer m.loop_ops.deinit();
-        m.store = try ex.Store.load(gpa, m.device, &m.checkpoint, &m.config, options.rows);
+        m.store = if (exl3_model)
+            .{ .exl3 = try exl3s.Store.load(gpa, m.device, &m.checkpoint, &m.config, options.rows) }
+        else
+            .{ .official = try ex.Store.load(gpa, m.device, &m.checkpoint, &m.config, options.rows) };
         errdefer m.store.deinit();
         m.scratch = try Scratch.init(m.device, t, options.rows);
         errdefer m.scratch.deinit();

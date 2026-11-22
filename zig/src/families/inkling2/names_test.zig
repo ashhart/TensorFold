@@ -304,3 +304,96 @@ test "Mini refuses a malformed cross-pass query table and missing controller" {
     try t.expectEqualStrings(queries, report.wrong.items[0]);
     try t.expectEqualStrings(gain, report.missing.items[0]);
 }
+
+test "expert precision follows a trellis group: EXL3 layers sit beside packed ones" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var entries: st.Header = .empty;
+    for (0..12) |i| {
+        var b: [96]u8 = undefined;
+        if (i == 1 or i == 7) {
+            const trellis = try std.fmt.bufPrint(&b, "model.llm.layers.{d}.mlp.experts.0.gate_proj.trellis", .{i});
+            try entries.put(a, try a.dupe(u8, trellis), .{ .dtype = .i16, .rank = 3, .shape = .{ 8, 8, 64, 1, 1 }, .begin = 0, .end = 0 });
+        } else {
+            const w13 = try std.fmt.bufPrint(&b, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
+            try entries.put(a, try a.dupe(u8, w13), .{ .dtype = .u8, .rank = 3, .shape = .{ 96, 256, 128, 1, 1 }, .begin = 0, .end = 0 });
+        }
+    }
+    var prec: [12]plan.Precision = undefined;
+    try names.precisions(entries, 12, &prec);
+    for (prec, 0..) |p, i| try t.expectEqual(if (i == 1 or i == 7) plan.Precision.exl3 else plan.Precision.nvfp4, p);
+}
+
+/// The map's puts collected as a header, so a test can ask what an all-EXL3 plan names.
+const Collect = struct {
+    arena: std.mem.Allocator,
+    names: st.Header = .empty,
+
+    pub fn put(s: *Collect, name: []const u8, dtype: st.DType, dims: []const u64) !void {
+        var e: st.Entry = .{ .dtype = dtype, .rank = @intCast(dims.len), .shape = @splat(1), .begin = 0, .end = 0 };
+        for (dims, 0..) |d, i| e.shape[i] = @intCast(d);
+        try s.names.put(s.arena, try s.arena.dupe(u8, name), e);
+    }
+};
+
+test "an all-EXL3 plan names each expert's trellis group with fp16 scales and the codebook marker" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try load(a);
+    var prec: [12]plan.Precision = @splat(.exl3);
+    var sink: Collect = .{ .arena = a };
+    try names.all(&c, &prec, .model, &sink);
+    const report = try names.check(a, &c, sink.names, .model);
+    try t.expect(report.clean());
+    // gate/up read hidden x inter, down reads inter x hidden; the trellis keeps its 8*halves tail free.
+    const trellis = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.trellis").?;
+    try t.expectEqual(st.DType.i16, trellis.dtype);
+    try t.expectEqual(@as(u8, 3), trellis.rank);
+    try t.expectEqual(@as(usize, 128 / 16), trellis.shape[0]);
+    try t.expectEqual(@as(usize, 128 / 16), trellis.shape[1]);
+    try t.expectEqual(@as(usize, names.any), trellis.shape[2]);
+    const suh = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.suh").?;
+    try t.expectEqual(st.DType.f16, suh.dtype);
+    try t.expectEqual(@as(usize, 128), suh.dim(0));
+    const svh = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.svh").?;
+    try t.expectEqual(@as(usize, 128), svh.dim(0));
+    const down = sink.names.get("model.llm.layers.0.mlp.experts.95.down_proj.trellis").?;
+    try t.expectEqual(@as(usize, 128 / 16), down.shape[0]);
+    try t.expectEqual(@as(usize, 128 / 16), down.shape[1]);
+    const mcg = sink.names.get("model.llm.layers.11.mlp.experts.95.up_proj.mcg").?;
+    try t.expectEqual(st.DType.i32, mcg.dtype);
+    try t.expectEqual(@as(u8, 0), mcg.rank);
+    // packed names must not leak into an EXL3 plan
+    try t.expect(sink.names.get("model.llm.layers.0.mlp.experts.w13_weight") == null);
+}
+
+test "the EXL3 pack's shard headers match the map (TF_INKLING2_EXL3=<dir>)" {
+    const dir = std.mem.span(std.c.getenv("TF_INKLING2_EXL3") orelse return error.SkipZigTest);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg_path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
+    const cfg_json = try std.Io.Dir.cwd().readFileAlloc(t.io, cfg_path, a, .limited(1 << 20));
+    var why: config.Why = .{};
+    const c = try config.parse(a, cfg_json, &why);
+    var all: st.Header = .empty;
+    var d = try std.Io.Dir.cwd().openDir(t.io, dir, .{ .iterate = true });
+    defer d.close(t.io);
+    var it = d.iterate();
+    while (try it.next(t.io)) |f| {
+        if (f.kind != .file) continue;
+        const shard = (std.mem.startsWith(u8, f.name, "dense-") or std.mem.startsWith(u8, f.name, "exl3-layer-")) and
+            std.mem.endsWith(u8, f.name, ".safetensors");
+        if (!shard) continue;
+        try names.merge(a, &all, try headerOf(a, dir, f.name));
+    }
+    const model = try names.check(a, &c, all, .model);
+    try t.expect(model.clean());
+    var prec: [config.max_layers]plan.Precision = undefined;
+    try names.precisions(all, c.text.layers, &prec);
+    for (prec[0..c.text.layers]) |p| try t.expectEqual(plan.Precision.exl3, p);
+    const mtp = try names.check(a, &c, try headerOf(a, dir, "mtp.safetensors"), .mtp);
+    try t.expect(mtp.clean());
+}

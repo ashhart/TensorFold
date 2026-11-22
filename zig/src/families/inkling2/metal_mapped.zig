@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
+const ck_host = @import("../../core/checkpoint.zig");
 const st = @import("../../core/safetensors.zig");
 
 pub const Mapped = struct {
@@ -50,15 +51,25 @@ pub const Mapped = struct {
 
     /// Consume `buf`, registering the file's tensors at their offsets; `c` must be empty and on error keeps the buffer.
     pub fn adopt(m: *const Mapped, c: *ck.Checkpoint, buf: mtl.Buffer) !void {
+        if (c.tensors.count() != 0) {
+            buf.deinit();
+            return error.CheckpointNotEmpty;
+        }
+        try m.adoptShard(c, buf);
+    }
+
+    /// As adopt for one shard of a multi-file checkpoint: `c` may already hold other shards' tensors.
+    /// On error `buf` is either freed here or owned by `c` for its deinit, never both.
+    pub fn adoptShard(m: *const Mapped, c: *ck.Checkpoint, buf: mtl.Buffer) !void {
         {
             errdefer buf.deinit();
-            if (c.tensors.count() != 0) return error.CheckpointNotEmpty;
             try c.own(buf, m.span.len);
         }
         var arena = std.heap.ArenaAllocator.init(c.allocator);
         defer arena.deinit();
         const entries = try st.parseHeader(arena.allocator(), m.header(), m.dataLen());
         for (entries.keys(), entries.values()) |name, entry| {
+            if (c.tensors.contains(name)) return error.DuplicateTensor;
             try c.set(name, .{
                 .buffer = buf,
                 .offset = m.data_start + entry.begin,
@@ -89,8 +100,104 @@ pub const Mapped = struct {
     }
 };
 
+/// addFileSplit's `later`: nothing stays in its file, so every tensor packs at the checkpoint's alignment.
+fn packAll(name: []const u8, rank: usize) bool {
+    _ = name;
+    _ = rank;
+    return false;
+}
+
 fn touch(span: []const u8, page: usize, lo: usize, hi: usize, sink: *u8) void {
     var acc: u8 = 0;
     for (lo..hi) |p| acc +%= @as(*const volatile u8, &span[p * page]).*;
     sink.* = acc;
 }
+
+/// The checkpoint's shards as one set: each file stays a private mapping when its tensors' absolute
+/// offsets meet their consumers' alignment, else it is repacked into an aligned buffer at adopt.
+pub const Set = struct {
+    gpa: std.mem.Allocator,
+    files: std.ArrayList(File) = .empty,
+
+    const File = union(enum) {
+        /// A private mapping adopted no-copy into the checkpoint.
+        mapped: Mapped,
+        /// A shard repacked by Checkpoint.addFileSplit at adopt (its file offsets are not aligned).
+        repacked: [:0]u8, // the path, owned
+    };
+
+    /// The shard paths of `dir`: model.safetensors.index.json's weight_map, else model*.safetensors.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Set {
+        const paths = try ck_host.shardFiles(gpa, io, dir);
+        defer ck_host.freeShardFiles(gpa, paths);
+        var s: Set = .{ .gpa = gpa };
+        errdefer s.deinit();
+        for (paths) |path| {
+            var m = try Mapped.open(path);
+            if (try mappable(gpa, &m)) {
+                s.files.append(gpa, .{ .mapped = m }) catch |err| {
+                    m.deinit();
+                    return err;
+                };
+            } else {
+                m.deinit();
+                const owned = try gpa.dupeSentinel(u8, path, 0);
+                s.files.append(gpa, .{ .repacked = owned }) catch |err| {
+                    gpa.free(owned);
+                    return err;
+                };
+            }
+        }
+        return s;
+    }
+
+    /// Every tensor's absolute offset meets the strictest alignment its dtype's consumers ask for.
+    fn mappable(gpa: std.mem.Allocator, m: *const Mapped) !bool {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const entries = try st.parseHeader(arena.allocator(), m.header(), m.dataLen());
+        for (entries.values()) |e| {
+            if ((m.data_start + e.begin) % alignFor(e.dtype) != 0) return false;
+        }
+        return true;
+    }
+
+    fn alignFor(dt: st.DType) usize {
+        return switch (dt) {
+            .bf16 => 16, // the dense kernels' vector loads
+            .f32, .i32, .u32 => 4,
+            .f16, .i16, .u16 => 2,
+            .f64, .i64, .u64 => 8,
+            else => 1,
+        };
+    }
+
+    /// Adopt every shard into `c`: mapped files no-copy, packed files repacked and aligned.
+    pub fn adopt(s: *Set, c: *ck.Checkpoint, device: mtl.Device) !void {
+        for (s.files.items) |*f| {
+            switch (f.*) {
+                .mapped => |*m| {
+                    const buf = try m.buffer(device);
+                    try m.adoptShard(c, buf);
+                },
+                .repacked => |path| try c.addFileSplit(device, path, "", null, packAll),
+            }
+        }
+    }
+
+    /// Fault every mapped page in on `threads` threads; repacked shards were read at adopt.
+    pub fn warm(s: *Set, threads: usize) void {
+        for (s.files.items) |*f| switch (f.*) {
+            .mapped => |*m| m.warm(threads),
+            .repacked => {},
+        };
+    }
+
+    pub fn deinit(s: *Set) void {
+        for (s.files.items) |*f| switch (f.*) {
+            .mapped => |*m| m.deinit(),
+            .repacked => |path| s.gpa.free(path),
+        };
+        s.files.deinit(s.gpa);
+    }
+};
