@@ -88,6 +88,12 @@ pub const round_rows: usize = 64;
 pub const fc_sk: usize = 4;
 /// Head rows one launch takes at most (a prompt's rows go through in pieces).
 pub const piece_rows: usize = 256;
+
+/// Whether prefill retains only the head's caches and skips unread proposals (default off).
+pub fn prefillLean() bool {
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_PREFILL_MTP_LEAN", false) catch false;
+}
 /// Normed-stream partial sums a row (cuda_batch.zig's pss_n).
 pub const pss_n = (dims / 256) * streams;
 pub const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
@@ -470,4 +476,5 @@ test "draft chains fit one verify window while the default stays six" {
 test {
     _ = @import("cuda_mtp_nonfinite_test.zig");
     _ = @import("cuda_mtp_load.zig");
+    _ = @import("cuda_mtp_prefill_test.zig");
 }

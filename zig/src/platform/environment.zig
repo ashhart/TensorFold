@@ -299,6 +299,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_GATHER_EARLY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1: one pooled n-gram gather a shared pass; default 0)" },
     .{ .name = "TF_FLASHNEXT_PROFILE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_VERIFY_HOST_LOGITS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_PREFILL_MTP_LEAN", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps only MTP KV/indexer caches during prefill)" },
     .{ .name = "TF_FLASHNEXT_DRAFTS", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 6; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_DRAFTS_GREEDY", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 8; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_GREEDY_WIDE", .scope = .flashnext, .kind = .size, .forms = "a whole round width from 0 to the native size maximum (default 4)" },

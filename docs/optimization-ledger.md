@@ -462,6 +462,11 @@ below; these are estimates for planning a port, not results.
 
     Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
 
+    Flash Next CUDA has an opt-in `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` prompt-head path. It retains the KV and indexer
+    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and uses pieces of at most
+    3,072 rows instead of 256. The default is off. Host checks cover cache bytes and poisoned outputs; device
+    byte-equality, memory and timing qualification remain required.
+
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
     Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
