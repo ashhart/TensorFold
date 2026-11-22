@@ -492,7 +492,6 @@ pub const Drafter = struct {
             for (pass, blocks[0..count]) |it, *k| {
                 const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
                 if (it.depth == 0 or it.depth > c.block or it.position == 0) return error.DraftDepth;
-                if (it.pending >= d.target.config.vocab) return error.InvalidMiniMaxToken; // embed reads row id unchecked
                 const anchor = it.position - 1;
                 if (l.end != anchor) return error.DraftContextGap;
                 k.* = .{ .lane = l, .pending = it.pending, .anchor = anchor };

@@ -110,6 +110,7 @@ const Run = struct {
 fn opening(self: *Metal, stream: *lanes.Stream) !*Pass {
     const ids = stream.prompt();
     if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidMiniMaxPrompt;
+    for (ids) |id| if (id >= self.model.config.vocab) return error.InvalidMiniMaxToken; // external ids checked once, before any step
     const capacity = ids.len + stream.max_new + 1;
     const need = st.cacheBytes(&self.model.config, capacity);
     if (self.held + need > self.options.budget) {
