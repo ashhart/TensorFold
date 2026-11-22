@@ -54,6 +54,9 @@ pub const Model = struct {
     /// Where the head's logits go, a row of vocab bf16 values at a time.
     pub const Keep = struct { gpa: std.mem.Allocator, rows: *std.ArrayList(u16) };
 
+    /// The check mode's count: 1-row calls and batch rows compared with the language model's other algorithm.
+    pub const Tally = cuda.one_row.Tally;
+
     /// The checkpoint at `dir` on the device (every tensor used), with scratch for `o`'s clips and passes.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, c: cfg.Config, o: Options) !*Model {
         const sp = spec(c.text);
