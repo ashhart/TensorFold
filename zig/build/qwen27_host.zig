@@ -24,6 +24,8 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     for ([_]*std.Build.Module{ window, taps, allocated }) |m| window_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const rows = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_rows_test.zig"), .target = b.graph.host });
     b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
+    const causal = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/attention_causal.zig"), .target = b.graph.host, .imports = &.{.{ .name = "kernel_sources", .module = quant_sources }} });
+    b.step("test-qwen27-causal-skip-host", "Prompt chunks past a threadgroup's causal limit merge to the same bits, without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = causal })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
     b.step("test-qwen27-ane-policy-host", "Neural Engine opt-in and tensor-unit chip policy without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ane_policy })).step);
     const draws_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });

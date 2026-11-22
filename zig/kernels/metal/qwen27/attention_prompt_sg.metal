@@ -149,28 +149,31 @@ kernel void q27_attn_prompt_sg(device const bfloat* QA [[buffer(0)]], device con
   const device bfloat* q = QA + ((int64_t)hk * args.rp + (live ? tile * 16 : 0)) * PD + h * PH;
   const device bfloat* k = caches[0].keys + (int64_t)hk * args.key_stride + h * PH;
   const device bfloat* v = caches[0].values + (int64_t)hk * args.value_stride + h * PH;
+  const bool skip = args.causal_skip != 0 && kbeg >= q27_prompt_group_keys(args, int(tg.z), SG / 2);  // PM -inf, PL 0: merge skips PO
   Q27SgRun r;
   _Pragma("clang loop unroll(full)")
   for (int e = 0; e < 16; e++) { r.O[0][e] = q27_sgf(0.0f); r.O[1][e] = q27_sgf(0.0f); }
   r.m0 = -INFINITY; r.m1 = -INFINITY; r.l0 = 0.0f; r.l1 = 0.0f;
-  int kt = kbeg;
+  int kt = skip ? kend : kbeg;
   if (!MASKED) {  // main's loop; q27_attn_prompt_pick sends MASKED when a value some row must not see isn't finite
     for (; kt + PTK <= kend; kt += PTK) q27_sg_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
     if (kt < kend) q27_sg_step<true, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
   } else {
     // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask, then unmask
     const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
-    const uint mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x80008000u : 0u;
+    const uint mask = !skip && q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x80008000u : 0u;
     const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
     for (; kt < seen_by_all; kt += PTK) q27_sg_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
     for (; kt < kend; kt += PTK) q27_sg_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
   }
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
-  _Pragma("clang loop unroll(full)")
-  for (int e = 0; e < 16; e++) {
-    simdgroup_store(r.O[0][e], PO + base * PD + h * PH + 8 * e, PD);
-    simdgroup_store(r.O[1][e], PO + (base + 8) * PD + h * PH + 8 * e, PD);
+  if (!skip) {
+    _Pragma("clang loop unroll(full)")
+    for (int e = 0; e < 16; e++) {
+      simdgroup_store(r.O[0][e], PO + base * PD + h * PH + 8 * e, PD);
+      simdgroup_store(r.O[1][e], PO + (base + 8) * PD + h * PH + 8 * e, PD);
+    }
   }
   if (h == 0 && (lane & 9) == 0) {
     PM[base + fm] = r.m0; PL[base + fm] = r.l0;

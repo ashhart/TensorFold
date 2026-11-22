@@ -25,7 +25,7 @@ pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b };
 pub const Which = enum { decode, prompt };
 
 /// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
-pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false, paged: bool = false, stale: bool = false };
+pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false, paged: bool = false, stale: bool = false, causal: bool = false };
 
 /// The control's edit: prompts never pick the masked kernel; decode rows off a shared prefix take the tail, no control.
 fn controlEdit(w: Which, shared: bool) ?at_.Edit {
@@ -62,14 +62,24 @@ pub fn served(comptime h: at_.Heads, comptime w: Which) []const c.Shape {
 }
 
 fn nameOf(comptime r: Reg) []const u8 {
+    if (r.causal) return std.fmt.comptimePrint("metal qwen27 attention {s} prompt rows with the causal skip", .{comptime at_.label(r.heads)});
     if (r.paged) return std.fmt.comptimePrint("{s}qwen27 paged prompt {s}{s}", .{ if (r.control or r.stale) "control: " else "metal ", comptime at_.label(r.heads), if (r.control) " unmasked nonfinite" else if (r.stale) " stale second page" else "" });
     const what = if (r.which == .decode) "decode rows" else "prompt rows";
     if (r.control) return std.fmt.comptimePrint("control: qwen27 attention {s} {s} with non-finite values unmasked", .{ comptime at_.label(r.heads), what });
     return std.fmt.comptimePrint("metal qwen27 attention {s} {s}", .{ comptime at_.label(r.heads), what });
 }
 
+/// Prompts crossing a 512-key chunk, so a threadgroup of early rows has a whole chunk past its limit.
+fn causalServed(comptime h: at_.Heads) []const c.Shape {
+    const n: usize = comptime at_.geometry(h, false).heads;
+    return comptime &.{ .{ .rows = 16, .n = n, .k = 500 }, .{ .rows = 128, .n = n, .k = 500 }, .{ .rows = 128, .n = n, .k = 1000 } };
+}
+
 /// fp32 scores and sums, half probabilities into P V, the gate's bf16 sigmoid; `mids`: bf16(o) and bf16(sigmoid).
 pub fn spec(r: Reg) c.Spec {
+    if (r.causal) return switch (r.heads) {
+        inline else => |h| .{ .name = nameOf(.{ .heads = h, .which = .prompt, .causal = true }), .accum = .f32, .depth = oneRounding, .ops = 8, .mids = 2, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 512 } }, .served = causalServed(h), .replaces = "the q27 prompt kernel running every chunk" },
+    };
     if (r.paged) return switch (r.heads) {
         inline else => |h| switch (r.control) {
             inline else => |ctl| switch (r.stale) {
@@ -138,12 +148,14 @@ pub const Attn = struct {
         var op = try attn.Attention.init(device, lib);
         errdefer op.deinit();
         var base_op: ?attn.Attention = null;
-        if (r.paged) {
+        if (r.causal) op.causal_skip = true; // else the environment's, so =1 runs every prompt cell through the skip
+        if (r.paged or r.causal) {
             const base = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
             defer a.free(base);
             const base_lib = try mtl.Library.fromSource(device, base, mtl.CompileOptions.mlx());
             defer base_lib.deinit();
             base_op = try attn.Attention.init(device, base_lib);
+            base_op.?.causal_skip = false;
         }
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .shared = shared, .base_op = base_op };
     }
@@ -233,7 +245,7 @@ pub const Attn = struct {
         }
         t.refs[4] = try t.rig.output(r.rows * nh * D * 2);
         t.st = try at_.State.init(t.a, t.rig.device, r, gm, t.caches[0..r.streams]);
-        if (t.reg.paged) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
+        if (t.reg.paged or t.reg.causal) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
         if (t.shared and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
         return true;
     }
@@ -429,6 +441,7 @@ pub const Suite = struct {
         for (std.enums.values(at_.Heads)) |h| try regs.append(s.a, .{ .heads = h, .which = .prompt, .paged = true });
         try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .control = true });
         try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .stale = true });
+        for (heads) |h| try regs.append(s.a, .{ .heads = h, .which = .prompt, .causal = true });
         for (regs.items) |r| {
             if (only) |o| if (std.mem.indexOf(u8, spec(r).name, o) == null) continue;
             const x = try s.a.create(Attn);

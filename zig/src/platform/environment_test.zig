@@ -141,6 +141,8 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_CAUSAL_SKIP", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_CAUSAL_SKIP", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },

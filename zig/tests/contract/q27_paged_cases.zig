@@ -15,7 +15,7 @@ pub fn fault(a: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 pub fn served(comptime n: usize) []const c.Shape {
-    return &.{ .{ .rows = 16, .n = n, .k = 255 }, .{ .rows = 16, .n = n, .k = 256 }, .{ .rows = 16, .n = n, .k = 511 }, .{ .rows = 16, .n = n, .k = 512 }, .{ .rows = 1, .n = n, .k = 255 }, .{ .rows = 1, .n = n, .k = 256 }, .{ .rows = 1, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 512 }, .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 } };
+    return &.{ .{ .rows = 16, .n = n, .k = 255 }, .{ .rows = 16, .n = n, .k = 256 }, .{ .rows = 16, .n = n, .k = 511 }, .{ .rows = 16, .n = n, .k = 512 }, .{ .rows = 1, .n = n, .k = 255 }, .{ .rows = 1, .n = n, .k = 256 }, .{ .rows = 1, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 512 }, .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 }, .{ .rows = 16, .n = n, .k = 500 }, .{ .rows = 128, .n = n, .k = 1000 } };
 }
 
 /// Reverse page order with page zero unused: no logical page has its contiguous address.
