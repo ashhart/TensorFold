@@ -34,7 +34,7 @@ pub const Lanes = struct {
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
-    costs: ?lane_costs.Table = null, // MTP's window and draft prices, timed at load (cuda_lane_costs)
+    costs: ?lane_costs.Table = null, // Target window and drafter prices, timed at load (cuda_lane_costs)
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -95,11 +95,16 @@ pub const Lanes = struct {
 
     /// Round loop facts: copies up to max_rows, head chains to max_drafts, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
-        const drafting = self.x.e.mtp;
         const block = self.x.e.drafter != null;
-        const costs = if (block) null else if (self.costs) |*c| c else null;
+        const priced = block and self.x.e.m.priced_windows;
+        const drafting = self.x.e.mtp;
+        const costs = if (block and !priced) null else if (self.costs) |*c| c else null;
         const sharing = drafting and !self.alone;
         return .{
+            .priced_windows = priced,
+            .fixed_draft_block = priced,
+            .plain_guard = priced,
+            .lone_cost_tile = if (priced) 16 else 0,
             .allocate_shared_drafts = drafting and !block, // cut chances would price a block's stream at none
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
@@ -126,7 +131,7 @@ pub const Lanes = struct {
     /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
     pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
         self.copy_confidence = enabled and self.x.e.mtp;
-        return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
+        return copy_policy.apply(self.facts(), enabled, (self.x.e.drafter == null or self.x.e.m.priced_windows) and self.costs != null);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
@@ -555,16 +560,7 @@ pub const Lanes = struct {
             held[i] = l;
         }
         try self.x.block(reqs[0..requests.len]);
-        const cut = try dflash.confidence();
-        for (requests, held[0..requests.len]) |r, l| {
-            l.held_n = @min(r.depth, max_held);
-            var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
-            for (l.chances[0..l.held_n], 0..) |*c, j| {
-                chain *= c.*;
-                if (j > 0 and chain < cut) c.* = 0; // held with chance 0: the window sizing leaves it out
-                if (c.* == 0) chain = 0;
-            }
-        }
+        try copy_policy.blockChances(requests, held[0..requests.len], self.x.e.m.priced_windows);
     }
 
     /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).

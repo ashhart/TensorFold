@@ -289,6 +289,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         mark.* = p.stream.draft_chances_cut;
         p.stream.draft_chances_cut = prior;
     }
+    if (e.cfg.priced_windows and plans.len == 1 and plans[0].kind == .head and plans[0].parents == null)
+        probs[0] = try @import("window_price.zig").probabilities(e, plans[0].stream, probs[0]);
     if (e.cfg.allocate_shared_drafts) for (plans, probs, cuts) |p, chances, mark| {
         if (p.kind == .copy or p.context_copy) {
             p.stream.draft_chances.clearRetainingCapacity();
@@ -313,16 +315,18 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
     const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
     const paired = if (explicit or live) null else e.rule.verifyPrice(plans.len, anySampled(plans));
+    const token_rate = if (e.cfg.priced_windows and plans.len == 1 and plans[0].kind == .head and plans[0].parents == null) @import("window_price.zig").tokenRate(e, plans[0].stream, costs) else null;
     const counts = if (paired) |p|
-        try alloc.allocateDrafts(a, fixed, probs, costs, p.fixed, e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(plans.len, anySampled(plans)) })
+        try alloc.allocateDrafts(a, fixed, probs, costs, p.fixed, e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .token_rate = token_rate, .least_rows = e.rule.row_cost.leastRows(plans.len, anySampled(plans)) })
     else
-        try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
+        try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .token_rate = token_rate, .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
     const trial = if (live) lone_costs.probe(e, plans[0]) else null;
     if (trial) |count| {
         counts[0] = count;
         plans[0].cost_probe_rows = count + 1;
         plans[0].stream.cost_probe_trial = lone_costs.trial(plans[0].stream, probs[0], count + 1);
     }
+    if (token_rate != null) @import("window_price.zig").selected(e, plans[0].stream, counts[0], costs);
     if (live) {
         // a depth probe asks one draft past the priced width: keep it, or the acceptance it explores never moves
         keepProbe(&plans[0], counts);

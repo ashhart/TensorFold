@@ -42,6 +42,7 @@ pub const open_owner = @import("cuda_open_owner.zig");
 pub const images = @import("cuda_images.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
+pub const copy_policy = @import("cuda_copy_policy.zig");
 pub const lane_costs = @import("cuda_lane_costs.zig");
 pub const native = @import("cuda_native.zig");
 pub const native_dsa = @import("cuda_native_dsa.zig"); // full GLM-5.3 (glm_moe_dsa)

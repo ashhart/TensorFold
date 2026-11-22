@@ -10,6 +10,7 @@ fn facts(family: Family, enabled: bool) lanes.Model {
             const f = @import("glm_cuda");
             var e: f.engine.Engine = undefined;
             e.mtp = true;
+            e.m.priced_windows = false;
             e.drafter = if (family == .glm_block) @ptrFromInt(16) else null;
             var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };
             return b.factsWithCopies(enabled);
@@ -453,6 +454,7 @@ test "GLM window prices: MTP takes timed prices and DFlash2 keeps every consumed
     for (&k.ms, f.lane_costs.widths) |*m, w| m.* = 9 + 0.5 * @as(f64, @floatFromInt(w));
     var e: f.engine.Engine = undefined;
     e.mtp = true;
+    e.m.priced_windows = false;
     for ([_]?*@TypeOf(e.drafter.?.*){ null, @ptrFromInt(16) }) |drafter| {
         e.drafter = drafter;
         var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };

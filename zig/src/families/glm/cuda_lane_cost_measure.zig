@@ -1,4 +1,4 @@
-//! The load-time expert race is shared; only MTP consumes measured window and step prices.
+//! Load-time expert-form races and optional target-window prices for chained or block drafters.
 const std = @import("std");
 const rule = @import("lanes").cost_rule;
 pub const widths = [_]u32{ 1, 2, 3, 4, 6, 8, 12, 16, 24, 32 };
@@ -18,6 +18,11 @@ pub fn every(factored: bool) u64 {
 
 /// Warm the target, race its expert forms by width unless `pin` names one, then time the prices this drafter consumes.
 pub fn measure(timer: anytype, block: bool, pin: ?bool) !Kept {
+    return measureMode(timer, block, pin, false);
+}
+
+/// A priced parallel block retains its verify timings and measures its fixed pass, rather than MTP steps.
+pub fn measureMode(timer: anytype, block: bool, pin: ?bool, priced: bool) !Kept {
     const Window = struct {
         timer: @TypeOf(timer),
         pub fn time(w: @This(), i: usize) !f64 {
@@ -35,7 +40,7 @@ pub fn measure(timer: anytype, block: bool, pin: ?bool) !Kept {
     var k: Kept = .{ .ms = @splat(0), .step_ms = 0, .fact = every(pin orelse false) };
     if (pin) |f| {
         try timer.form(every(f));
-        if (block) return k;
+        if (block and !priced) return k;
         for (0..2 * sweeps) |_| for (0..widths.len) |i| {
             _ = try w.time(i);
         };
@@ -47,10 +52,14 @@ pub fn measure(timer: anytype, block: bool, pin: ?bool) !Kept {
             if (factored < classic * (1 - margin)) k.fact |= @as(u64, 1) << @intCast(i);
         }
         try timer.form(k.fact);
-        if (block) return k;
+        if (block and !priced) return k;
         for (&k.ms, forms[0], forms[1], 0..) |*m, classic, factored, i| m.* = if (on(k.fact, i)) factored else classic;
     }
     try rule.smoothSerial(w, &k.ms);
+    if (block) {
+        k.step_ms = (try rule.fastest(d, 7)) / 7;
+        return k;
+    }
     const chain = [2]f64{ try rule.fastest(d, levels[0]), try rule.fastest(d, levels[1]) };
     k.step_ms = @max(0, (chain[1] - chain[0]) / @as(f64, @floatFromInt(levels[1] - levels[0])));
     return k;

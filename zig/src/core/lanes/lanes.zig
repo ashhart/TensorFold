@@ -5,6 +5,7 @@ pub const proposal_score = @import("proposal_score.zig");
 pub const proposal_head = @import("proposal_head.zig");
 pub const table = @import("table.zig");
 pub const allocate = @import("allocate.zig");
+pub const window_price = @import("window_price.zig");
 pub const accept = @import("accept.zig");
 pub const proposer = @import("proposer.zig");
 pub const recall = @import("recall.zig");
@@ -93,6 +94,7 @@ test {
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
     _ = @import("windows_chances_test.zig");
+    _ = @import("priced_windows_test.zig");
     _ = @import("grammar_time_test.zig");
     _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
