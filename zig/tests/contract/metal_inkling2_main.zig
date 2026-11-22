@@ -5,12 +5,14 @@ const g = @import("contract").gates;
 const Ops = @import("metal_inkling2_suite.zig").Suite;
 const Loop = @import("metal_inkling2_loop.zig").Suite;
 const Experts = @import("metal_inkling2_experts.zig").Suite;
+const Exl3Swiglu = @import("metal_inkling2_exl3_swiglu.zig").Suite;
 const Media = @import("metal_inkling2_media_suite.zig").Suite;
 
 pub const Suites = struct {
     ops: Ops,
     loop: Loop,
     experts: Experts,
+    exl3_swiglu: Exl3Swiglu,
     media: Media,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel)) Suites {
@@ -18,6 +20,7 @@ pub const Suites = struct {
             .ops = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .exl3_swiglu = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .media = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
     }
@@ -27,6 +30,7 @@ pub const Suites = struct {
         try s.ops.collect(only);
         try s.loop.collect(only);
         try s.experts.collect(only);
+        try s.exl3_swiglu.collect(only);
         try s.media.collect(only);
     }
 
@@ -34,6 +38,7 @@ pub const Suites = struct {
         s.ops.deinit();
         s.loop.deinit();
         s.experts.deinit();
+        s.exl3_swiglu.deinit();
         s.media.deinit();
     }
 
