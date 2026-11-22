@@ -26,6 +26,7 @@ pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
 const kv_grow = @import("kv_grow.zig");
 const kv_slots = @import("kv_slots.zig");
+const decode_verify = @import("decode_verify.zig");
 
 /// The host's hook for buffers a slot's K/V growth made.
 pub const Grown = struct { ctx: *anyopaque, added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void };
@@ -281,90 +282,7 @@ pub const Runner = struct {
     }
 
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
-        const metric = mtl.pass_metrics.phase(.verify);
-        defer metric.end();
-        try r.settleKeep();
-        if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
-        mtl.pass_metrics.rows(round.ids.len);
-        if (r.tail != null and (if (r.model.config.looped) head == .none else (accepted or head != .all))) return error.BadVerifyTail;
-        // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
-        if (r.tail != null and r.reduce != null) return error.TailOnRank;
-        for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
-        if (stage_planes.on) if (stage_planes.active != null) try stage_planes.admit(round.windows); // refused before the round touches any state
-        for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
-        for (round.slots, round.windows) |slot, window| try r.reserve(slot, window.start + @as(u32, @intCast(window.parents.len)));
-        const paths = try r.allocator.alloc([]const u32, round.windows.len);
-        defer r.allocator.free(paths);
-        @memset(paths, &.{});
-        var accepted_rows: [@import("gpu_frame.zig").max_rows]u32 = undefined;
-        if (accepted) for (round.windows, round.firsts, paths) |window, first, *path| {
-            for (window.parents, 0..) |parent, row| {
-                if (parent != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
-                accepted_rows[first + row] = @intCast(row);
-            }
-            path.* = accepted_rows[first..][0..window.parents.len];
-        };
-        r.accepted_chain = accepted;
-        defer r.accepted_chain = false;
-        var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
-        defer recurrent.deinit();
-        if (r.gdn.marks) |m| {
-            if (!accepted or !r.model.kernels.prompt or r.capture_taps) return error.BadPromptMarks;
-            try m.check(recurrent);
-        }
-        var attention_plan = try r.attentionPlan(round);
-        defer attention_plan.deinit();
-        try r.gdn.prepare(r.model.device, recurrent, accepted);
-        try r.model.frame.setRows(round.ids, round.feed_positions);
-        const placed = image_rows.place(&r.model.frame, &r.rope, r.images, r.model.config.mrope_section, round);
-        try r.scratch.upload(attention_plan);
-        r.current_round = round;
-        r.current_gdn = &recurrent;
-        r.current_attention = &attention_plan;
-        r.current_placed = placed;
-        defer {
-            r.current_round = null;
-            r.current_gdn = null;
-            r.current_attention = null;
-            r.current_placed = .{};
-        }
-        if (r.capture_taps) {
-            r.taps.begin();
-            r.tapped = @splat(.{});
-        }
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
-        const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        const tail_facts = stage_planes.begin(@import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null));
-        r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
-        defer r.tail_from = null;
-        if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
-        const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
-            r.failed = true;
-            return err;
-        };
-        // A seam cannot fail while encoding: the transport reports it out of band, and a broken pair fails the round.
-        if (r.reduce) |red| if (red.broken()) return r.fail(error.PairFailed);
-        if (r.model.ane) |share| share.drain() catch |err| return r.fail(err);
-        if (r.trace) |t| {
-            r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
-            t.round();
-        }
-        if (r.capture_taps) {
-            try r.taps.complete();
-            for (round.slots, round.windows, round.firsts) |slot, w, first| r.tapped[slot] = .{ .start = w.start, .first = first, .rows = @intCast(w.parents.len) };
-        }
-        if (accepted) {
-            for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
-        } else r.active = fingerprint(round);
-        if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
-    }
-
-    pub fn advancePartialTap(r: *Runner, round: *const Round, layer_lex: usize, layer_sem: usize, tap_lex: mtl.Buffer, tap_sem: mtl.Buffer) !void {
-        return @import("partial_tap.zig").advancePartialTap(r, round, layer_lex, layer_sem, tap_lex, tap_sem);
+        return decode_verify.run(r, round, head, accepted);
     }
 
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
@@ -373,8 +291,8 @@ pub const Runner = struct {
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
-        try r.settleKeep();
-        if (r.failed or r.active == null or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
+        const active = r.active orelse return error.RoundNotReady;
+        if (r.failed or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
         var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
@@ -425,7 +343,8 @@ pub const Runner = struct {
     }
 
     pub fn checkDeviceKeep(r: *const Runner, round: *const Round) !void {
-        if (r.failed or r.active == null or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
+        const active = r.active orelse return error.RoundNotReady;
+        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
     }
 
     /// Encode only: the caller commits after the lane core publishes its authoritative path.
@@ -458,7 +377,8 @@ pub const Runner = struct {
     }
 
     pub fn completeDeviceKeep(r: *Runner, round: *const Round, path: []const u32) !void {
-        if (r.failed or r.active == null or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
+        const active = r.active orelse return error.RoundNotReady;
+        if (r.failed or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
         r.offsets[round.slots[0]] = (try round.windows[0].keep(path)).length;
         r.active = null;
     }
@@ -590,8 +510,25 @@ pub const Runner = struct {
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
-    fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
+    pub fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
+
+fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
+    const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
+    const key = try allocation(a, m.device, owned, bytes);
+    const value = try allocation(a, m.device, owned, bytes);
+    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
+}
+
+fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
+    const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    owned.append(a, b) catch |err| {
+        b.deinit();
+        return err;
+    };
+    return b;
+}
+
