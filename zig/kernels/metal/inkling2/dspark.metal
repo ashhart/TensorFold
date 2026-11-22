@@ -121,6 +121,7 @@ static inline float dspark_attention_score(const device bfloat* q, const device 
   return dot * DSP_SCALE;
 }
 
+// A threadgroup a (row, head). Thread t scores keys t, t + 128, ...; the denominator and each value sum stay in key order.
 kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const device bfloat* block_k [[buffer(1)]], const device bfloat* block_v [[buffer(2)]], const device bfloat* context_k [[buffer(3)]], const device bfloat* context_v [[buffer(4)]], device float* scores [[buffer(5)]], device bfloat* out [[buffer(6)]], constant DsparkAttentionArgs& a [[buffer(7)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 24, h = group % 24, kv = h / 3;
   const uint q_at = row * DSP_Q + h * DSP_HEAD;
@@ -129,35 +130,42 @@ kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const
   const uint retained = a.committed - first;
   const uint count = retained + 8;
   const uint score_at = group * count;
-  threadgroup float peak, denominator;
+  threadgroup float peaks[128], peak, denominator;
+  float m = -INFINITY;
+  for (uint j = d; j < count; j += 128) {
+    const float s = j < retained
+        ? dspark_attention_score(q, context_k, q_at, ((first + j) % a.ring) * DSP_KV + kv * DSP_HEAD)
+        : dspark_attention_score(q, block_k, q_at, (j - retained) * DSP_KV + kv * DSP_HEAD);
+    scores[score_at + j] = s;
+    m = max(m, s);
+  }
+  peaks[d] = m;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (d == 0) {
-    float m = -INFINITY;
-    for (uint j = 0; j < retained; ++j) {
-      const uint position = first + j;
-      const float s = dspark_attention_score(q, context_k, q_at, (position % a.ring) * DSP_KV + kv * DSP_HEAD);
-      scores[score_at + j] = s;
-      m = max(m, s);
-    }
-    for (uint j = 0; j < 8; ++j) {
-      const float s = dspark_attention_score(q, block_k, q_at, j * DSP_KV + kv * DSP_HEAD);
-      scores[score_at + retained + j] = s;
-      m = max(m, s);
-    }
+    float top = -INFINITY;
+    for (uint t = 0; t < 128; ++t) top = max(top, peaks[t]);
+    peak = top;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint j = d; j < count; j += 128) scores[score_at + j] = exp(scores[score_at + j] - peak);
+  threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+  if (d == 0) {
     float sum = 0.0f;
-    for (uint j = 0; j < count; ++j) sum += exp(scores[score_at + j] - m);
-    peak = m;
+    for (uint j = 0; j < count; ++j) sum += scores[score_at + j];
     denominator = sum;
   }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint j = d; j < count; j += 128) scores[score_at + j] = scores[score_at + j] / denominator;
   threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
   float value = 0.0f;
   for (uint j = 0; j < retained; ++j) {
     const uint position = first + j;
     const uint v_at = (position % a.ring) * DSP_KV + kv * DSP_HEAD + d;
-    value += (exp(scores[score_at + j] - peak) / denominator) * float(context_v[v_at]);
+    value += scores[score_at + j] * float(context_v[v_at]);
   }
   for (uint j = 0; j < 8; ++j) {
     const uint v_at = (j * DSP_KV + kv * DSP_HEAD) + d;
-    value += (exp(scores[score_at + retained + j] - peak) / denominator) * float(block_v[v_at]);
+    value += scores[score_at + retained + j] * float(block_v[v_at]);
   }
   out[out_at] = bfloat(value);
 }
