@@ -191,8 +191,8 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     if (kv_host_mod.onHost()) try kv_host_mod.checkDevice(try ctx.attribute(.integrated) != 0, page_tokens, engine_paged);
     const share_snaps = try prefix_mod.sharing();
     if (kv_host_mod.onHost()) try kv_host_mod.checkShared(share_snaps);
-    // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
-    if (share_snaps > 0 and (page_tokens == 0 or E.grid_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
+    // shared save marks are page edges and become cold-pass cuts independent of the compute chunk grid
+    if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;
     if (kv_host_mod.onHost() and share_snaps == 0) std.log.warn("TF_QWEN_KV_HOST pins the KV pages in host memory; the prompt cache would pin more beside them: set --prompt-cache-gib to bound it", .{});
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
     errdefer e.deinit();
