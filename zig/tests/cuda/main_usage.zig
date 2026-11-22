@@ -111,6 +111,7 @@ pub const usage =
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
+    \\  mlp-act-fused             TF_Q35_MLP_ACT_FUSED: the NVFP4 up write-out against up then tf_q35_mlp_act, bit for bit
     \\  checkpoint                checkpoint prompt tiles, NVFP4 up rows and share sums byte-equal to the decode path (synthetic FP8 and NVFP4)
     \\  exlr8                     EXLR8 projections: every codebook state, FP64, row windows, the Metal frozen digests
     \\  exlr8-bench DIR [MANIFEST] [LAYER] [SETS]   a real EXLR8 layer: FP64, row windows, then GB/s by stage

@@ -35,6 +35,7 @@ const glm_index_check = @import("glm_index_check.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
+const mlp_act_fused_tests = @import("mlp_act_fused_tests.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
 const ck_tests = @import("ck_tests.zig");
@@ -249,6 +250,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "mlp-act-fused")) return mlp_act_fused_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moe-router-bench")) return @import("moe_router_bench.zig").run(gpu);
