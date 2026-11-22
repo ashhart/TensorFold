@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
+
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#N).
 
 - Flash Next on CUDA: after a chat reply a quiet background pass keeps its state so the next turn resumes past the reply instead of prefilling it; the pass runs on one rank and yields when a request arrives (#3219).
