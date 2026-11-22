@@ -4,6 +4,7 @@ const Record = @import("hip_records.zig").Record;
 
 pub const records = .{
     @import("hip_records_glm_ocr.zig").records,
+    @import("hip_records_inkling2.zig").records,
     @import("hip_records_joint.zig").records,
     @import("hip_records_lighton_ocr.zig").records,
     @import("hip_records_qwen_vision.zig").records,
@@ -28,6 +29,7 @@ test "HIP record counts stay pinned in their owning files" {
         @import("hip_records_exl3.zig").records.len,
         @import("hip_records_gdn.zig").records.len,
         @import("hip_records_glm_ocr.zig").records.len,
+        @import("hip_records_inkling2.zig").records.len,
         @import("hip_records_item.zig").records.len,
         @import("hip_records_joint.zig").records.len,
         @import("hip_records_lighton_ocr.zig").records.len,
