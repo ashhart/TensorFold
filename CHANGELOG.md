@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
 
+
+
 - Flash Next on Metal: `TF_FN_GX_GATEUP_MB2=1` (opt-in) decodes each expert's gate/up weights once for two rows; about 2% faster at 4 code streams on an M5 Ultra, tokens unchanged (refs #1486).
 
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
