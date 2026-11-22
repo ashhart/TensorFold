@@ -2,10 +2,6 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details. For Desktop installers and changes awaiting a Desktop build, see the [Desktop changelog](app/CHANGELOG.md).
 
-## Unreleased
-
-- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
-
 ## 1.3.4
 
 - `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
