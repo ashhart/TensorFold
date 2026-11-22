@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_MOE_DIRECT=1` (off by default) runs a decode window's EXL3 experts without their two row copies and the shared expert's slot write, summing the slot rows bit-equal to the default path, so replies are unchanged (#3659, for #3570). Thanks to @ultradaoto.
+
 - HIP: `serve` with `--drafter` runs Qwen3.8-27B's DFlash2 drafter on the HIP engine through the lane core, where it was refused, and the drafter's weights and per-stream contexts count in the memory plan (#3665, refs #1563). Thanks to @AbrahamCete.
 
 - Hardening: tool-call parsing, streaming parsers and grammar compiles bound their work and validate arguments before emitting them (#4378).
