@@ -92,25 +92,51 @@ pub fn main(init: std.process.Init) !void {
             defer xb2.deinit();
             _ = fread(xb2.slice(f32, n).ptr, 4, n, tf);
             _ = fclose(tf);
-            const yb3 = try device.buffer(n * 4, mtl.ResourceOptions.shared);
-            defer yb3.deinit();
-            const wb3 = try device.buffer(2048 * 4, mtl.ResourceOptions.shared);
-            defer wb3.deinit();
+            const yb3u = try device.buffer(n * 4, mtl.ResourceOptions.shared);
+            defer yb3u.deinit();
+            const wb3u = try device.buffer(2048 * 4, mtl.ResourceOptions.shared);
+            defer wb3u.deinit();
             @memcpy(wb.slice(f32, 2048), decoder.blocks[0].norm1_w);
             const q3 = try device.queue();
             const cb3 = q3.commandBuffer();
             const e3 = cb3.compute(.concurrent);
             e3.setPipeline(decoder.p[1]);
             e3.setBuffer(xb2, 0, 0);
-            e3.setBuffer(wb3, 0, 1);
-            e3.setBuffer(yb3, 0, 2);
+            e3.setBuffer(wb3u, 0, 1);
+            e3.setBuffer(yb3u, 0, 2);
             e3.setValue([1]u32{ 2048 }, 3);
             e3.dispatchGroups(mtl.Size.of(rows_n, 1, 1), mtl.Size.of(256, 1, 1));
             e3.end();
             cb3.commit(); cb3.wait();
-            const yh3 = yb3.slice(f32, n);
+            const yh3 = yb3u.slice(f32, n);
                         const xh3 = xb2.slice(f32, n);
-            std.debug.print("RMSNORM-TEST x0={d:.4} x1={d:.4} w0={d:.4} y0={d:.4} y1={d:.4}", .{ xh3[0], xh3[1], wb3.slice(f32, 2048)[0], yh3[0], yh3[1] });
+            std.debug.print("RMSNORM-TEST x0={d:.4} x1={d:.4} w0={d:.4} y0={d:.4} y1={d:.4}", .{ xh3[0], xh3[1], wb3u.slice(f32, 2048)[0], yh3[0], yh3[1] });
+        {
+            const xb3u = try device.buffer(2 * 2048 * 4, mtl.ResourceOptions.shared);
+            defer xb3u.deinit();
+            const xbu2 = try device.buffer(2 * 2048 * 4, mtl.ResourceOptions.shared);
+            defer xbu2.deinit();
+            const xh4 = xbu2.slice(f32, 2 * 2048);
+            @memset(xh4, 2.0);
+            const wbu2 = try device.buffer(2048 * 4, mtl.ResourceOptions.shared);
+            defer wbu2.deinit();
+            @memset(wbu2.slice(f32, 2048), 1.0);
+            const ybu2 = try device.buffer(2 * 2048 * 4, mtl.ResourceOptions.shared);
+            defer ybu2.deinit();
+            const q4u = try device.queue();
+            const cb4u = q4u.commandBuffer();
+            const e4u = cb4u.compute(.concurrent);
+            e4u.setPipeline(decoder.p[1]);
+            e4u.setBuffer(xbu2, 0, 0);
+            e4u.setBuffer(wbu2, 0, 1);
+            e4u.setBuffer(ybu2, 0, 2);
+            e4u.setValue([1]u32{ 2048 }, 3);
+            e4u.dispatchGroups(mtl.Size.of(2, 1, 1), mtl.Size.of(256, 1, 1));
+            e4u.end();
+            cb4u.commit(); cb4u.wait();
+            const yvu = ybu2.slice(f32, 2 * 2048);
+            std.debug.print("RMSNORM-UNIT y[0]={d:.4} y[1]={d:.4} y[2048]={d:.4} (expect 1.0)", .{ yvu[0], yvu[1], yvu[2048] });
+        }
         }
     }
     }

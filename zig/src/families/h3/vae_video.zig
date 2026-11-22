@@ -550,7 +550,7 @@ pub const Decoder = struct {
                     for (0..3) |axis| {
                         for (0..8) |f| {
                             const inv = std.math.pow(f32, 100.0, -@as(f32, @floatFromInt(f)) * 0.125);
-                            const a = pos_val[axis] * inv;
+                            const a = 2.0 * std.math.pi * pos_val[axis] * inv;
                             rope_h[pos * 48 + k2] = @cos(a);
                             rope_s[pos * 48 + k2] = @sin(a);
                             rope_h[pos * 48 + 24 + k2] = @cos(a);
@@ -605,6 +605,13 @@ pub const Decoder = struct {
         @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
         const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
+        if (getenv("DUMP_NORMEDOUT") != null and bi == 0) {
+            const nop = try std.fmt.allocPrintSentinel(gpa, "zig-normedout.f32", .{}, 0);
+            defer gpa.free(nop);
+            const fno = fopen(nop, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed_out.slice(f32, rows * dim).ptr, 4, rows * dim, fno);
+            _ = fclose(fno);
+        }
         e.setPipeline(self.p[0]);
         e.setBuffer(normed_out, 0, 0);
         e.setBuffer(qkv_w, 0, 1);
@@ -631,8 +638,8 @@ pub const Decoder = struct {
             _ = fclose(fnn);
         }
         e.barrier();
-        if (getenv("DUMP_QKV_BLK") != null and bi == 1) {
-            const qzp2 = try std.fmt.allocPrintSentinel(gpa, "zig-qkv-blk1.f32", .{}, 0);
+        if (getenv("DUMP_QKV_BLK") != null and (bi == 0 or bi == 1)) {
+            const qzp2 = try std.fmt.allocPrintSentinel(gpa, "zig-qkv-blk{d}.f32", .{bi}, 0);
             defer gpa.free(qzp2);
             const fq2 = fopen(qzp2, "wb") orelse return error.CannotWrite;
             _ = fwrite(qkv.slice(f32, rows * 3 * dim).ptr, 4, rows * 3 * dim, fq2);
@@ -658,7 +665,7 @@ pub const Decoder = struct {
                     for (0..3) |axis| {
                         for (0..8) |f| {
                             const inv = std.math.pow(f32, 100.0, -@as(f32, @floatFromInt(f)) * 0.125);
-                            const a = pvals[axis] * inv;
+                            const a = 2.0 * std.math.pi * pvals[axis] * inv;
                             rope_cos[rpos * 48 + k2] = @cos(a);
                             rope_sin[rpos * 48 + k2] = @sin(a);
                             rope_cos[rpos * 48 + 24 + k2] = @cos(a);
