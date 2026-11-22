@@ -67,7 +67,8 @@ pub fn relTable(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, rel:
     e.dispatchGroups(mtl.Size.of(r.rows * r.heads, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+/// The partial sums of every row and head: `merge` reads them after a barrier.
+pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref) !void {
     const launch = try planning.attend(r, l, stride, slots);
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     if (launch.path == .decode) {
@@ -80,11 +81,21 @@ pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: pla
         e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
-    e.barrier();
+}
+
+/// The partials of `partials` merged, with the sink and gate, into each row's attention output.
+pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+    const launch = try planning.attend(r, l, stride, slots);
     e.setPipeline(k.merge);
     bind(e, &.{ part_o, part_ml, sink, gate, meta.pos, out }, 0);
     e.setValue(planning.MergeArgs{ .heads = r.heads, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .subs = launch.subs }, 6);
     e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
+}
+
+pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+    try partials(k, e, r, l, stride, slots, meta, q, kv, tab, part_o, part_ml);
+    e.barrier();
+    try merge(k, e, r, l, stride, slots, meta, part_o, part_ml, sink, gate, out);
 }
 
 test {
