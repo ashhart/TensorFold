@@ -94,8 +94,9 @@ test "a long prompt beside a live stream splits at the cap, with the tokens of t
     try twoStreams(0.5, &split);
     try t.expectEqual(@as(u64, long_rows), whole.widest); // no flag: today's one pass
     try t.expectEqual(@as(usize, 1), whole.steps);
-    try t.expectEqual(@as(u64, fill.decode_cap_rows), split.widest);
-    try t.expectEqual(@as(usize, long_rows / fill.decode_cap_rows), split.steps);
+    try t.expectEqual(@as(u32, 512), fill.decode_cap_rows); // the cap these cases pin, written out so a change shows here
+    try t.expectEqual(@as(u64, 512), split.widest);
+    try t.expectEqual(@as(usize, long_rows / 512), split.steps);
     try t.expectEqualSlices(u32, &whole.sink.live, &split.sink.live);
     try t.expectEqualSlices(u32, &whole.sink.long, &split.sink.long);
 }
@@ -104,5 +105,5 @@ test "the live stream gets a round after every chunk but the last: its gap is on
     var split: Run = .{};
     try twoStreams(0.5, &split);
     try t.expectEqual(split.steps - 1, split.rounds_during);
-    try t.expect(split.widest <= fill.decode_cap_rows);
+    try t.expect(split.widest <= 512);
 }
