@@ -23,6 +23,7 @@ pub const usage =
     \\  moetile-contract          shared down replacement gates and the planted control
     \\  moetile-bench             alternate shared-down plus scatter and direct-slot GPU timings
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
+    \\  hy4-nvfp4-experts         Hy4-flash's ModelOpt NVFP4 routed experts: each pair FP64-bounded under the SwiGLU clamp
     \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
     \\  nvfp4-nz5                 NVFP4_NZ5's block 32 experts: E2M1's bytes with each +5 a 4 under a scale 1.25x as large
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
