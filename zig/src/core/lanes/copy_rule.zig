@@ -1,9 +1,11 @@
 //! A copy prefix's expected tokens per millisecond; no shared or model-drafter depth selection.
+const std = @import("std");
 const depth = @import("depth.zig");
 const price = @import("copy_price.zig");
 
 pub fn rows(r: *depth.Rule, who: depth.Who, chances: []const f64, most: i64, take: bool) !i64 {
     if (most <= 0 or !r.copy_guard or r.family_costs.empty()) return most;
+    if (chances.len == 0) return error.EmptyCopyChances;
     const plain = (try price.plain(r, who)) orelse return most;
     var best: i64 = 1;
     var best_rate: f64 = -1;
@@ -18,6 +20,7 @@ pub fn rows(r: *depth.Rule, who: depth.Who, chances: []const f64, most: i64, tak
     var d: i64 = 1;
     while (d <= most) : (d += 1) {
         const cost = (try price.cost(r, d, who)) orelse break;
+        if (cost == 0 or !std.math.isFinite(cost)) return most;
         const at: usize = @intCast(d - 1);
         run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
         expected += run;

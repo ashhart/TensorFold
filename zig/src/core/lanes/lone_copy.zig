@@ -11,7 +11,7 @@ const f = ev.f;
 /// Only opted-in copies-only streams; every model head/drafter and shared round keeps its existing path.
 pub fn enabled(e: *const Engine, s: *const Stream) bool {
     const c = e.cfg;
-    return e.alone and s.drafts and c.timed and c.copy_guard and !c.family_mtp and e.trim == null and !c.root_copies and
+    return e.alone and s.drafts and c.timed and c.copy_guard and c.max_copy > 0 and !c.family_mtp and e.trim == null and !c.root_copies and
         !c.context_copies and !c.node_probabilities and c.lone_cost_tile == 0 and !c.family_costs.empty() and (!c.pipelined or s.logprobs != null or s.grammar != null);
 }
 
