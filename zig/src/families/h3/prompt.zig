@@ -81,47 +81,31 @@ pub const Runner = struct {
         r.queue.deinit();
     }
 
-    /// Command buffers committed in order, each a few layers' work; `finish` waits for the last and checks them all.
+    /// Command buffers committed in order, each a few layers' work; `finish` waits for them all and checks them.
     const Passes = struct {
-        list: [80]mtl.CommandBuffer = undefined,
-        n: usize = 0,
+        done: gpu_turn.Queue(mtl.CommandBuffer, 80) = .{},
+        cb: mtl.CommandBuffer = undefined,
         give_way: ?gpu_turn.Turn,
         paused: f64 = 0,
 
-        /// Passes ahead of the host before the next waits for speech: enough to hide its wake-up.
-        const queued = 3;
+        /// Passes ahead of the host while it waits for speech: enough to hide its wake-up.
+        const queued = 2;
 
-        fn next(p: *Passes, q: mtl.Queue) !mtl.ComputeEncoder {
-            if (p.n == p.list.len) return error.H3TooManyPasses;
-            if (p.give_way) |t| {
-                if (p.n >= queued) try check(p.list[p.n - queued]);
-                p.paused += gpu_turn.yield(t.io, t.at);
-            }
-            p.list[p.n] = q.commandBuffer();
-            p.n += 1;
-            return p.list[p.n - 1].compute(.serial);
+        fn next(p: *Passes, q: mtl.Queue) mtl.ComputeEncoder {
+            if (p.give_way) |t| p.paused += gpu_turn.yield(t.io, t.at);
+            p.cb = q.commandBuffer();
+            return p.cb.compute(.serial);
         }
 
-        fn commit(p: *Passes, e: mtl.ComputeEncoder) void {
+        fn commit(p: *Passes, e: mtl.ComputeEncoder) !void {
             e.end();
-            p.list[p.n - 1].commit();
+            p.cb.commit();
+            try p.done.add(p.cb, if (p.give_way == null) 80 else queued);
         }
 
         fn finish(p: *Passes) !f64 {
-            var gpu: f64 = 0;
-            for (p.list[0..p.n]) |cb| {
-                try check(cb);
-                gpu += cb.gpuSeconds();
-            }
-            return gpu;
-        }
-
-        fn check(cb: mtl.CommandBuffer) !void {
-            cb.wait();
-            if (cb.failure()) |msg| {
-                std.log.err("h3 prompt: a pass failed on the GPU: {s}", .{msg});
-                return error.GpuFailed;
-            }
+            try p.done.drain();
+            return p.done.gpu;
         }
     };
 
@@ -156,7 +140,7 @@ pub const Runner = struct {
         defer pool.pop();
         var passes: Passes = .{ .give_way = r.give_way };
         for (w.layers, 0..) |l, li| {
-            const e = try passes.next(r.queue);
+            const e = passes.next(r.queue);
             const k = &r.k;
             k.norm(e, s.at(.x), l.norm1, s.at(.xn), T, H, g.eps, .qwen);
             k.gemm(e, s.at(.xn), l.q, null, s.at(.q), T, qh.row, H);
@@ -173,7 +157,7 @@ pub const Runner = struct {
             k.gemm(e, s.at(.act), l.down, null, s.at(.y), T, H, g.ffn);
             k.add(e, s.at(.x), s.at(.y), T * H);
             if (n > 0 and li < 3) k.scatterAdd(e, s.at(.x), .{ .buffer = s.buf, .offset = s.at(.deep).offset + li * n * H * 2 }, s.at(.pads), n, H);
-            passes.commit(e);
+            try passes.commit(e);
         }
         r.gpu = try passes.finish();
         r.paused = passes.paused;
@@ -198,7 +182,7 @@ pub const Runner = struct {
         defer pool.pop();
         var passes: Passes = .{ .give_way = r.give_way };
         const k = &r.k;
-        var e = try passes.next(r.queue);
+        var e = passes.next(r.queue);
         k.gemm(e, s.at(.in), w.cond_w, w.cond_b, s.at(.x), T, H, g.text);
         // the fused rows hold each head's q, k and v together: 384 values a head, q at 0, k at 128, v at 256
         const fused: Heads = .{ .count = g.heads, .row = 3 * inner, .head = 3 * D };
@@ -218,11 +202,11 @@ pub const Runner = struct {
             k.glu(e, s.at(.wide), value, s.at(.act), T, g.mlp, 2 * g.mlp, 2 * g.mlp, .h3);
             k.gemm(e, s.at(.act), b.fc2, null, s.at(.y), T, H, g.mlp);
             k.add(e, s.at(.x), s.at(.y), T * H);
-            passes.commit(e);
-            e = try passes.next(r.queue);
+            try passes.commit(e);
+            e = passes.next(r.queue);
         }
         k.norm(e, s.at(.x), w.final_norm, s.at(.out), T, H, g.final_eps, .h3);
-        passes.commit(e);
+        try passes.commit(e);
         r.gpu = try passes.finish();
         r.paused = passes.paused;
         @memcpy(out, s.slice(u16, .out, T * H));
