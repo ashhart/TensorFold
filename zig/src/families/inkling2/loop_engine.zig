@@ -527,12 +527,13 @@ pub const Model = struct {
             const visit = m.w.p.visits[v];
             const layer = m.w.p.at(visit.layer);
             const geometry = m.layerGeometry(visit.layer);
-            const rb = @as(usize, layer.heads.kv) * layer.heads.dim * 2;
+            const rb = @as(usize, layer.heads.dim) * 2; // the caches are head-major: [kv head][ring][dim]
             const global = layer.kind == .global;
             const count = if (global) at else @min(at, m.w.c.text.window - 1);
             const first = at - count;
             const cache = m.cacheOf(visit.cache_slot);
-            for ([2]u64{ cache.k, cache.v }) |base| {
+            for ([2]u64{ cache.k, cache.v }) |k_or_v| for (0..layer.heads.kv) |head| {
+                const base = k_or_v + head * geometry.ring * rb;
                 var pos = first;
                 while (pos < at) {
                     const row = pos % geometry.ring;
@@ -544,7 +545,7 @@ pub const Model = struct {
                     off += n * rb;
                     pos += n;
                 }
-            }
+            };
         }
         const conv = m.slotBase() + m.layout.at(0).conv_offset;
         const bytes = m.layout.bytes - m.layout.at(0).conv_offset;
