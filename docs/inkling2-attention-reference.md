@@ -107,7 +107,7 @@ What the order does not fix:
   `__fadd_rn` and do not contract. The host model rounds the product and the sum separately at every open site; the
   bound below counts roundings and holds for either choice, a fused operation having fewer.
 - Two assumptions the bound rests on and no host test can check: that the tensor-core adders do not flush subnormal
-  numbers to zero (a flush would be an absolute error of up to `2^-126` an operand, above the bound's subnormal term),
+  numbers to zero (a flush would be an absolute error of up to `2^-126` an operand, which the bound does not count),
   and that `exp2f` and `expf` on the device keep to the 2 ULP of the hypotheses below; the host model uses Zig's `@exp2`
   and `@exp`, so no host test can push that 2 ULP.
 - Several streams: the host model takes a call as one stream, its blocks starting at the call's first row; the kernel
@@ -149,9 +149,9 @@ The float64 model (`attend` with `f64` in `attn.zig`, at most `most_keys = 8192`
 table above without any rounding: with `x = (q . k) hd^-1/2 + bias` in natural-log units, `y = sum_s e^(x_s - M) v_s /
 (sum_s e^(x_s - M) + e^(sink - M))` and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] *
 proj[j][dist]` where `dist < rext`. The bound's own float64 value is `head` in `attn_bound.zig`: the same formula in
-log2 units, run a second time beside `attend` and without its key limit. The oracle evaluates the same formula with
-Python's standard library (and `transformers`, see the fidelity check). The fp32 model in the kernels' order
-(`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the output to bf16 and
+log2 units, run a second time beside `attend`, without `attend`'s limit of 8192 keys. The oracle evaluates the same
+formula with Python's standard library (and `transformers`, see the fidelity check). The fp32 model in the kernels'
+order (`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the output to bf16 and
 nothing else, and is held to float64 by the bound below.
 
 Domain. The bound is claimed for a row and head whose inputs satisfy these conditions, checked in float64 from the
@@ -159,11 +159,13 @@ inputs (`head` in `attn_bound.zig` returns `error.AttnDomain` outside them): eve
 the pair, every `proj` entry it reads and every `k` and `v` of the keys its block loads is finite; `gate >= -87` for
 every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk <= 2^20` and
 `nk * vmax < 2^120`. They are sufficient and not sharp, and outside them the page claims nothing. Inside them `exp(L)`
-can still overflow (`L` above about 709.8, from scores near `2^120`); there the bound is infinite and claims nothing,
-and `limit` returns `+inf` rather than `0 * inf`. The need is real: at `gate = -89` the kernel's `expf(89)` is `inf`
-(`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 + inf)` is 0 and the output 0, where
-float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already subnormal and its quotient has more than
-`u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is `2^127.68`).
+can still overflow in float64: it does once `L` is above about 709.78, and `L` grows with the size of the scores, so
+well inside the domain; there the bound is infinite and claims nothing, and `limit` returns `+inf` rather than `0 *
+inf`. The test `bound: where exp(L) overflows the bound is infinite, never NaN` has `q = k = 2^50` and `v = 0`: it
+prints `L 6.20e24`, the model gives 0 and the bound is infinite. The need is real: at `gate = -89` the kernel's
+`expf(89)` is `inf` (`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 + inf)` is 0 and
+the output 0, where float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already subnormal and its
+quotient has more than `u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is `2^127.68`).
 
 For one row and head with `nk` live keys, let `u = 2^-24`, `u_mma = 2^-23`, `u_bf = 2^-8`, `gamma(n) = n u / (1 - n u)`
 and `lambda(a) = -ln(1 - a)`. The fp32 result `y` before the output's rounding satisfies, against the float64 result
@@ -252,11 +254,11 @@ against the float64 formula, before and after the output's rounding, on the orac
 of a block; the checkpoint's `hd = 128`, 16 taps, 1024 columns); and on a case for each term: cancellation in the
 values, a large gap between scores, P nearest a bf16 half step, a dominant sink, P below the normal range, an output
 below the normal range (where the last product's absolute error exceeds the sigmoid-scaled floor term), and the ends
-of the domain. Every element is inside its bound, and the worst error over bound is 0.16 before and 0.26 after the
-output's rounding; the tests print each case. That is no margin of the bound: a targeted case, one key's table sum
-rounding up and the dominant key's rounding down (`bound: a table rounded up at the weak key and down at the dominant
-one`), reaches 0.96 before and 0.95 after the output's rounding, so the bound is close to tight for the table's
-rounding.
+of the domain. Every element is inside its bound, and over these cases the worst error over bound is 0.16 before and
+0.26 after the output's rounding; the tests print each case. A further case aims at the table's rounding: one key's
+table sum rounds up (the weak key) and the dominant key's rounds down (`bound: a table rounded up at the weak key and
+down at the dominant one`). It prints 9.640e-1 before and 9.547e-1 after the output's rounding, so the bound is close
+to tight for that rounding and the 0.16 and 0.26 are no margin.
 
 Each rounding point and each seam also has a test whose expected value is written by hand in float64 and does not come
 from the model (`attn_order_hand_test.zig`): the table's tie to even, P rounded once in the products and in the
@@ -366,8 +368,8 @@ rounding, below what a float64 hand value or the bound can separate:
 - which of the four lanes holds a key of `l` and how the four lane sums add (one lane, or a chain instead of
   `(l0 + l1) + (l2 + l3)`): one rounding in `l`;
 - the sink folded in before the chunks instead of at the merge: the same operations in another association;
-- the exponent in natural-log units with `exp` instead of log2 units with `exp2f`: the same values up to the rounding
-  of the product with `log2(e)`, which can flip a P only when it lies within about `u |X - mu|` (relative) of a bf16
-  half step;
+- the exponent in natural-log units with `exp` instead of log2 units with `exp2f`: the same values except where the
+  other fp32 rounding of the score `X` moves a P across a bf16 rounding boundary; the tests stay green with it, so
+  none of them pins it;
 - the bound's score floor at `2^-140` instead of `2^-133`: the error it covers is below `2^-133`, while `L` is at least
   `lambda(u_bf)`, about `2^-8`, so no input can tell the two apart; the value rests on the derivation above.
