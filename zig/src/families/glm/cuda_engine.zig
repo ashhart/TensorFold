@@ -221,9 +221,20 @@ pub const Engine = struct {
         if (profiled) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
         };
-        if (profiled) for (&e.prompt_profs) |*p| {
+        if (profiled) for (&e.prompt_profs, 0..) |*p, bucket| {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
+            const started = std.Io.Clock.awake.now(io).toNanoseconds();
+            try p.*.?.initPrompt(layers.len, e.pieces.count);
+            const create_ms = prof_mod.Prof.elapsedMs(io, started);
+            const pairs = prof_mod.Prof.promptCapacity(layers.len, e.pieces.count);
+            const bucket_rows = ([_]usize{ 64, 256, 1024, 2048 })[bucket];
+            std.log.info("glm prof startup rank={d} bucket_rows={d} layers={d} pieces={d} pairs={d} events={d} create_ms={d:.4}", .{ e.share.rank, bucket_rows, layers.len, e.pieces.count, pairs, 2 * pairs, create_ms });
+        };
+        if (profiled) if (e.heat_gate.bands) |bands| {
+            std.log.info("glm prof startup rank={d} heat=on high_c={d:.1} low_c={d:.1} root={s}", .{ e.share.rank, bands.high_c, bands.low_c, e.heat_gate.root });
+        } else {
+            std.log.info("glm prof startup rank={d} heat=off", .{e.share.rank});
         };
         e.prompt_out = try prompt_lp.Output.init(d);
         errdefer e.prompt_out.free();
@@ -401,6 +412,8 @@ pub const Engine = struct {
         errdefer if (f.prof) |p| {
             p.prompt.?.invalid = true;
         };
+        const gate_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
+        const heat_before = if (f.prof != null) e.heat_gate.waited_s else 0;
         var stamp = prof_mod.span(f.prof, e.stream, .gate);
         e.gate(cancel) catch |err| {
             if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
@@ -408,6 +421,7 @@ pub const Engine = struct {
         };
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
+        if (f.prof != null) std.log.info("glm prof gate rank={d} slot={d} start={d} rows={d} wall_ms={d:.4} heat_wait_s={d:.3}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, gate_started), e.heat_gate.waited_s - heat_before });
         try f.run(as_i32[0..rows]);
         e.index_splits += @intFromBool(split);
         stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
@@ -418,6 +432,7 @@ pub const Engine = struct {
         stamp.end();
         stamp = prof_mod.span(f.prof, e.stream, .draw);
         const last = start + rows == len;
+        const draw_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
@@ -426,6 +441,7 @@ pub const Engine = struct {
         }
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last and f.prof != null) std.log.info("glm prof draw rank={d} slot={d} start={d} rows={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, draw_started) });
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
         if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
