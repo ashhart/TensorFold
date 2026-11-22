@@ -105,6 +105,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
