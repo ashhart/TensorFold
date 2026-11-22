@@ -293,6 +293,7 @@ pub const Engine = struct {
     /// The whole prompt in chunks, then the first token from the last row.
     pub fn prefill(e: *Engine, ids: []const u32, cancel: ?Cancel) !u32 {
         if (ids.len == 0 or ids.len + window_rows >= e.capacity) return error.PromptTooLong;
+        for (ids) |id| if (id >= e.c.vocab) return error.InvalidMiniMaxToken; // external ids checked once, before any step
         var start: usize = 0;
         while (true) : (start += prompt_rows) {
             if (try e.prefillChunk(ids, start, cancel)) |first| return first;

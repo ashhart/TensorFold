@@ -321,6 +321,7 @@ pub const Model = struct {
             if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.context) return error.BadChain;
             if (m.paging) |p| if (ch.p0 + ch.tokens.len > p.caps[ch.slot]) return error.PastPages;
             if (!prompt and ch.tokens.len > window_rows) return error.WindowTooWide;
+            for (ch.tokens) |t| if (t >= m.c.vocab) return error.TokenOutsideVocabulary; // embed reads w[id] unchecked
             rows += ch.tokens.len;
         }
         if (rows == 0 or rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.TooManyRows;

@@ -293,6 +293,7 @@ pub const Drafter = struct {
         const hid = geo.hidden;
         var host: [3 * max_items]i32 = undefined;
         for (items, 0..) |it, r| {
+            if (it.pending >= cfg.vocab) return error.InvalidGemmaToken; // embed reads the table at id unchecked
             host[r] = @intCast(it.pending);
             host[max_items + r] = @intCast(it.position);
             host[2 * max_items + r] = @intCast(it.slot);

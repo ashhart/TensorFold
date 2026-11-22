@@ -152,6 +152,7 @@ pub fn forward(m: *const Model, k: *const Kernels, s: Stream, chains: []const Ch
     var rows: usize = 0;
     for (chains) |ch| {
         if (ch.tokens.len == 0 or ch.slot >= m.slots or ch.p0 + ch.tokens.len > m.context) return error.BadChain;
+        for (ch.tokens) |t| if (t >= c.vocab) return error.InvalidLfmToken; // embed reads the table at id unchecked
         if (ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.PastPages;
         if (ch.taps.len > 0 and (!prompt or ch.taps.len > mdl.max_taps)) return error.BadChain;
         for (ch.taps) |r| if (r >= ch.tokens.len) return error.BadChain;
