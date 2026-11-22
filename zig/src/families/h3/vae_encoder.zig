@@ -47,11 +47,9 @@ pub fn conv3d(
     // copy input into padded (temporal offset t_pad_pre, spatial offset pad)
     for (0..c_in) |c| {
         for (0..t) |tt| {
-            for (0..h) |hh| {
-                const src = ((c * t) + tt) * h * w + hh * w;
-                const dst = ((c * tp) + (tt + t_pad_pre)) * hp * wp + (hh + spatial_pad) * wp + spatial_pad;
-                @memcpy(padded[dst .. dst + w], input[src .. src + w]);
-            }
+            const src = ((c * t) + tt) * h * w;
+            const dst = ((c * tp) + (tt + t_pad_pre)) * hp * wp + spatial_pad * wp + spatial_pad;
+            @memcpy(padded[dst .. dst + w], input[src .. src + w]);
         }
     }
 
@@ -245,10 +243,12 @@ pub const Encoder = struct {
         var w = w_in;
 
         // conv_in
+        std.debug.print("ENC: conv_in {d}x{d}x{d}", .{ t, h, w });
         var act = try conv3d(gpa, x, weights.conv_in_w, weights.conv_in_b, cfg.in_channels, channels, t, h, w, 3, 3, 3, 1, 1, 1, true, 1);
 
         // levels
         for (0..6) |level| {
+            std.debug.print("ENC: level {d} ch={d} {d}x{d}x{d}", .{ level, channels, t, h, w });
             const c_out_level = cfg.ch * cfg.ch_mult[level];
             for (0..cfg.num_res_blocks) |bi| {
                 const c_in_block = if (bi == 0) channels else c_out_level;
@@ -262,8 +262,6 @@ pub const Encoder = struct {
                 const downed = try downsample(gpa, act, dw, weights.levels[level].down_b.?, channels, t, h, w);
                 gpa.free(act);
                 act = downed;
-                h = (h + 1) / 2 + 1; // padded: (h+2-3)/2+1 = (h-1)/2+1... computed below
-                // correct: out_h = (hp - kh)/sh + 1 with hp = h+2, kh=3, sh=2 → (h-1)/2 + 1
                 h = (h - 1) / 2 + 1;
                 w = (w - 1) / 2 + 1;
             }
