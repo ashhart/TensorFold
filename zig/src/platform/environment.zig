@@ -116,6 +116,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 fuses the 27B MTP absorb and picks drafts on the GPU; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_JOIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 runs a window's rows in pairs in the 27B's decode tail before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_TIED_HEAD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a dense Qwen with a tied head load, its head read from the embedding; unset or blank is 0)" },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the streams' keys and values in core-pool pages; unset or blank is 0)" },

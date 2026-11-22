@@ -168,6 +168,7 @@ test "profile line: new rows and every grouped member report real names and scop
         .{ .name = "TF_SLIDE_ROUTED", .raw = "1", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
         .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
         .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
+        .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
     }) |c| {
         const env: ExtraEnv = .{ .name = c.name, .value = c.raw };
         const line = try format(a, .stable, c.family, c.backend, env);
