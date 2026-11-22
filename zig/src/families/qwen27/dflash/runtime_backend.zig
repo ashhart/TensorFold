@@ -71,6 +71,7 @@ pub const Backend = struct {
     appended: u32 = 0,
     appended_rows: u32 = 0,
     failed: bool = false,
+    overlap: bool = false, // the op being encoded leaves its closing barrier to the next independent op
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
@@ -202,8 +203,12 @@ pub const Backend = struct {
         if (b.failed) return error.DraftBackendFailed;
         try b.frame.require(epoch);
         b.frame.ops += 1;
-        if (b.frame.ops == first_part_ops or b.frame.ops % part_ops == 0) try b.frame.part();
+        if (b.frame.ops == first_part_ops or (!b.frame.concurrent and b.frame.ops % part_ops == 0)) try b.frame.part();
         return b.frame.encoder;
+    }
+    /// An op's closing barrier, unless the next op was declared independent of it.
+    pub fn closeOp(b: *Backend, e: mtl.ComputeEncoder) void {
+        if (b.overlap) b.overlap = false else e.barrier();
     }
     /// TF_Q27_PROFILE: the frame's passes join `trace`'s `drafter` class, and its spans keep an open frame's encoder.
     pub fn profile(b: *Backend, trace: ?*core.gpu_profile.Trace) void {

@@ -35,6 +35,7 @@ pub const Frame = struct {
     profiler: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE: each pass's buffers time its `drafter` class
     hold: @import("core").gpu_profile.Hold = .{}, // while open, the trace's spans keep this frame's encoder
     borrowed: bool = false, // open on another's buffer: its owner commits and waits for it
+    concurrent: bool = false, // TF_Q27_DRAFT_CONCURRENT: every op orders its own reads and writes with barriers
     pub fn setResident(f: *Frame, hook: ?mtl.ResidencySet.Follow) void {
         for (f.pool.items) |buffer| {
             if (f.residency) |h| h.leave(h.ctx, buffer);
@@ -57,7 +58,7 @@ pub const Frame = struct {
         f.cursor = 0;
         f.entries.clearRetainingCapacity();
         f.cb = f.queue.commandBuffer();
-        f.encoder = f.cb.compute(.serial);
+        f.encoder = if (f.concurrent) f.cb.compute(.concurrent) else f.cb.compute(.serial);
         f.active = true;
         f.completed = false;
         f.part_count = 0;
@@ -96,7 +97,7 @@ pub const Frame = struct {
         f.parts[f.part_count] = f.cb;
         f.part_count += 1;
         f.cb = f.queue.commandBuffer();
-        f.encoder = f.cb.compute(.serial);
+        f.encoder = if (f.concurrent) f.cb.compute(.concurrent) else f.cb.compute(.serial);
         mtl.objc.msg(void, f.encoder.id, "waitForFence:", .{f.fence.?});
     }
     pub fn finish(f: *Frame) !void {

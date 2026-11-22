@@ -143,6 +143,7 @@ pub const valid = [_]Case{
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_CONV_INPLACE", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_DRAFT_CONCURRENT", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },

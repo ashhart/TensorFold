@@ -83,6 +83,9 @@ pub const Ops = struct {
         stream_append: *const fn (*anyopaque, u64, u32, u32, View, View, []const u64) anyerror!void,
         // x + y, row for row: a DFlash v1 layer's residuals (DFlash2 adds them inside its conv).
         add: ?*const fn (*anyopaque, u64, View, View) anyerror!View = null,
+        // TF_Q27_DRAFT_CONCURRENT: whether independent linears overlap, and leave the next op's closing barrier out.
+        overlaps: ?*const fn (*anyopaque) bool = null,
+        overlap_next: ?*const fn (*anyopaque, u64) anyerror!void = null,
     };
 };
 
