@@ -137,8 +137,7 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
 
 struct Ink2LogitArgs { uint rows, vocab; };
 
-// Threadgroup (x, y): vocabulary rows 32x .. 32x + 31 against rows 16y .. 16y + 15 of h, summed as the expert
-// products are (eighths of the 2,304 columns, 16 an op, the partials added in order); then bf16 and the cap of 30.
+// Threadgroup (x, y): vocabulary rows 32x .. + 31 by rows 16y .. + 15 of h, summed as the expert products are.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_logits_units(
     device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]],
     device float* Y [[buffer(2)]], constant Ink2LogitArgs& a [[buffer(3)]],
