@@ -238,11 +238,14 @@ test "GLM index: a decode select's scan covers the last row's pools in spans, an
     try std.testing.expectEqual(@as(usize, 16 * 2 * 6753 * 4), bitsBytes(16, 216080));
 }
 
-test "rank 0 splits a prompt chunk's indexer rows from TF_GLM_INDEX_SPLIT's position on, over two ranks or more" {
+test "GLM index: rank 0 splits a prompt chunk's indexer rows from TF_GLM_INDEX_SPLIT's position on, over two ranks or more" {
     try std.testing.expect(!splitAt(65536, 0, 3)); // 0: never
     try std.testing.expect(splitAt(65536, 65536, 3));
     try std.testing.expect(!splitAt(63488, 65536, 3));
     try std.testing.expect(!splitAt(65536, 65536, 1)); // one rank holds every row
+    try std.testing.expect(!splitAt(0, 32768, 2)); // every paired step of an 8K or 32K prompt stays local
+    try std.testing.expect(!splitAt(28672, 32768, 2));
+    try std.testing.expect(splitAt(32768, 32768, 2));
 }
 
 test "GLM index geometry: full GLM-5.3's pools of 1 score every key, keep 2,048 and list them with no tail" {

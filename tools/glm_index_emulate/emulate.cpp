@@ -71,6 +71,20 @@ static void run_grid(unsigned gx, unsigned gy, int threads, const std::function<
 static int fails = 0;
 static uint32_t bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 static float bf(__nv_bfloat16 v) { return __bfloat162float(v); }
+// sparse.select_tokens' row model: expanded pool tokens, the causal tail and the populated count.
+static void token_rows(const int64_t* pools, int pos, int K, int* tokens, int* counts, int rows, const int* pt,
+                       int64_t page_rows, int pool) {
+  for (int r = 0; r < rows; r++) {
+    const int64_t q = (int64_t)pos + r, npool = (q + 1) / pool;
+    const int width = pool * K + pool - 1;
+    auto at = [&](int64_t t) { return (int)(pt ? pt[t / 512] * page_rows + t % 512 : t); };
+    for (int i = 0; i < pool * K; i++) tokens[r * width + i] = at(pools[(int64_t)r * K + i / pool] * pool + i % pool);
+    for (int i = 0; i < pool - 1; i++) tokens[r * width + pool * K + i] = npool * pool + i <= q ? at(npool * pool + i) : -1;
+    int tail = 0;
+    for (int i = 0; i < pool - 1; i++) tail += npool * pool + i <= q;
+    counts[r] = npool > K ? pool * K + tail : 0;
+  }
+}
 
 struct Case { int64_t pos, rows, np; int loop, heads; bool paged; int pool = 4, rope = 0; };
 
@@ -162,6 +176,45 @@ static void scores_case(std::mt19937_64& g, const Case& c) {
          (long long)c.pos, (long long)c.rows, (long long)c.np, c.loop, c.heads, c.pool, c.rope, c.paged ? "paged" : "plain",
          (long long)bad, (long long)unread);
   fails += bad != 0 || unread != 0;
+  // TP=2 whole rows versus rank blocks: score, pick and token bytes must survive rank-order concatenation.
+  std::vector<float> part_scores(out.size());
+  std::memcpy(part_scores.data(), raw.data(), raw.size() * 4);
+  const int K = std::min<int64_t>(c.np, c.pool == 1 ? 2048 : 512);
+  const int cap = c.np <= 12288 ? 1024 : c.np <= 32768 ? 2048 : 4096;
+  const int target = c.np <= 12288 ? 724 : c.np <= 32768 ? 1024 : 2048;
+  const int width = c.pool * K + c.pool - 1;
+  std::vector<int64_t> pools((size_t)c.rows * K), part_pools(pools.size());
+  std::vector<int> tokens((size_t)c.rows * width), part_tokens(tokens.size()), counts(c.rows), part_counts(c.rows);
+  run_grid(c.rows, 1, glm_index::T, [&] { tf_glm_index_pools(out.data(), pools.data(), c.np, &pos, K, cap, target, nullptr, c.pool); });
+  token_rows(pools.data(), pos, K, tokens.data(), counts.data(), c.rows, c.paged ? pt.data() : nullptr, page_elems, c.pool);
+  const int64_t per = (c.rows + 1) / 2;
+  for (int rank = 0; rank < 2; rank++) {
+    const int64_t lo = std::min<int64_t>(c.rows, rank * per), hi = std::min<int64_t>(c.rows, lo + per), rows = hi - lo;
+    if (rows == 0) continue;
+    const int at = (int)(c.pos + lo);
+    const int64_t part_nb = (std::min(c.np, std::max<int64_t>(512, (c.pos + hi) / c.pool)) + 63) / 64;
+    run_grid((rows + 7) / 8, (part_nb + c.loop - 1) / c.loop, 256, [&] {
+      tf_glm_index_scores(q.data() + lo * c.heads * D, w.data() + lo * W, W, pk, part_scores.data() + lo * c.np, &at, rows,
+                          c.np, part_nb, scale, wscale, c.heads, c.loop, c.paged ? pt.data() : nullptr,
+                          c.paged ? page_elems * 2 : 0, c.pool, c.rope, inv.data());
+    });
+    run_grid(rows, 1, glm_index::T, [&] {
+      tf_glm_index_pools(part_scores.data() + lo * c.np, part_pools.data() + lo * K, c.np, &at, K, cap, target, nullptr, c.pool);
+    });
+    token_rows(part_pools.data() + lo * K, at, K, part_tokens.data() + lo * width, part_counts.data() + lo, rows,
+               c.paged ? pt.data() : nullptr, page_elems, c.pool);
+  }
+  int score_diff = 0; // unused score tails are intentionally not written by a smaller rank block
+  for (int64_t r = 0; r < c.rows; r++) {
+    const int64_t used = std::min<int64_t>(c.np, std::max<int64_t>((c.pos + r + 1) / c.pool, K));
+    score_diff += std::memcmp(out.data() + r * c.np, part_scores.data() + r * c.np, used * 4) != 0;
+  }
+  const int pool_diff = std::memcmp(pools.data(), part_pools.data(), pools.size() * 8) != 0;
+  const int token_diff = std::memcmp(tokens.data(), part_tokens.data(), tokens.size() * 4) != 0 ||
+                         std::memcmp(counts.data(), part_counts.data(), counts.size() * 4) != 0;
+  printf("TP2 local/split pos %lld rows %lld: scores %d pools %d tokens %d\n", (long long)c.pos, (long long)c.rows,
+         score_diff, pool_diff, token_diff);
+  fails += score_diff + pool_diff + token_diff;
 }
 
 static int tile_cap(int np) { return np <= 12288 ? 1024 : np <= 32768 ? 2048 : 4096; }
