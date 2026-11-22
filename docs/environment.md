@@ -50,7 +50,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
-| `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+| `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96, or two blocks per SM with `TF_QMMF_HALF_BN=1` |
+| `TF_QMMF_HALF_BN` | Exactly `0` or `1`, read when a CUDA lane loads; default off. `1` also gives FP4, FP8 and FP8G decode calls of 16 rows or fewer the 32-column half tile, below `TF_QMMF_HALF_BELOW` blocks (default two per SM, so 340 on 170 SMs and 96 on 48). Columns split, never K, so every output keeps its bits |
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
