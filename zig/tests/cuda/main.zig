@@ -10,6 +10,7 @@ const oracle_tests = @import("oracle_tests.zig");
 const libs_tests = @import("libs_tests.zig");
 const rank_scatter_tests = @import("rank_scatter_tests.zig");
 const roce_gather_tests = @import("roce_gather_tests.zig");
+const glm_roce_fuse_tests = @import("glm_roce_fuse_tests.zig");
 const sample_tests = @import("sample_tests.zig");
 const sample_nucleus_tests = @import("sample_nucleus_tests.zig");
 const glue_tests = @import("glue_tests.zig");
@@ -263,6 +264,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         return rank_scatter_tests.run(gpu, rank, world, if (rest.len > 2) rest[2] else null);
     }
     if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 2);
+    if (std.mem.eql(u8, cmd, "glm-roce-fuse")) return glm_roce_fuse_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10));
     if (std.mem.eql(u8, cmd, "rank-sum")) return rank_scatter_tests.sum(gpu);
     if (std.mem.eql(u8, cmd, "nccl-pair")) return libs_tests.ncclPair(gpu, try std.fmt.parseInt(c_int, try arg(rest, 0), 10), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));

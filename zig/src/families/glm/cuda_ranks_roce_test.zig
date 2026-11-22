@@ -127,3 +127,30 @@ test "TF_GLM_DRAFT_SPLIT=1 is in the ranks' agreement at three ranks or more, an
     };
     try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&two));
 }
+
+test "TF_GLM_ROCE_FUSE: off by default, 1 or 0, refused otherwise" {
+    const Env = struct {
+        var value: ?[]const u8 = null;
+        fn get(name: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, name, "TF_GLM_ROCE_FUSE")) value else null;
+        }
+    };
+    var problem: []const u8 = "";
+    for ([_]?[]const u8{ null, "", "0" }) |v| {
+        Env.value = v;
+        try std.testing.expect(!(try Settings.read(&Env.get, &problem)).roce_fuse);
+    }
+    Env.value = "1";
+    try std.testing.expect((try Settings.read(&Env.get, &problem)).roce_fuse);
+    Env.value = "yes";
+    try std.testing.expectError(error.BadSetting, Settings.read(&Env.get, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_ROCE_FUSE: 0 or 1", problem);
+}
+
+test "TF_GLM_ROCE_FUSE=1 on only one TP2 rank is refused by name" {
+    var all = [_]Fingerprint{
+        Fingerprint.of(2, 0, .{ .roce_fuse = true }, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+    };
+    try std.testing.expectEqual(Mismatch{ .field = .roce_fuse, .rank = 1 }, mismatch(&all).?);
+}

@@ -27,6 +27,7 @@ pub const Settings = struct {
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    roce_fuse: bool = false, // TF_GLM_ROCE_FUSE=1: TP2 whole-window gather + HC post or MTP residual in one kernel
     roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
@@ -95,6 +96,12 @@ pub const Settings = struct {
         if (get("TF_GLM_ROCE_MULTI")) |v| {
             if (std.mem.eql(u8, v, "1")) s.roce_multi = true else if (std.mem.eql(u8, v, "0")) s.roce_multi = false else {
                 problem.* = "TF_GLM_ROCE_MULTI: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_ROCE_FUSE")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.roce_fuse = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_ROCE_FUSE: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -237,7 +244,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // main layout 24 plus roce_fuse
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -259,6 +266,7 @@ pub const Fingerprint = extern struct {
     max_videos: u32 = 0,
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
+    roce_fuse: u32 = 0, // TF_GLM_ROCE_FUSE: the whole-window posts fuse only where every rank enabled TP2 RoCE fusion
     roce_wide: u32 = 0, // TF_ROCE=1: three ranks or more split the drafter MLP and gather by RoCE, or none does
     draft_split: u32 = 0, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP, or none does
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
@@ -298,6 +306,7 @@ pub const Fingerprint = extern struct {
         max_videos,
         max_frames,
         roce_multi,
+        roce_fuse,
         roce_wide,
         draft_split,
         kv_host,
@@ -340,6 +349,7 @@ pub const Fingerprint = extern struct {
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
+            .roce_fuse = @intFromBool(s.roce_fuse),
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .draft_split = @intFromBool(s.draft_split and world >= 3), // two ranks split whatever it says
             .kv_host = s.kv_host,
@@ -515,6 +525,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
         .roce_multi => "TF_GLM_ROCE_MULTI",
+        .roce_fuse => "TF_GLM_ROCE_FUSE",
         .roce_wide => "TF_ROCE=1 at three ranks or more (the RoCE gather and the drafter split)",
         .draft_split => "TF_GLM_DRAFT_SPLIT=1 at three ranks or more (the drafter split)",
         .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",

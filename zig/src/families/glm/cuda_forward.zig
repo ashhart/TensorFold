@@ -153,9 +153,10 @@ pub const Pieces = pieces_mod.Pieces;
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    // collective: the boundary's gathers through it (the group's RoCE route once installed); side streams stay raw
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null },
+    // group/fuse: only whole-window GLM posts on the group's own TP2 RoCE, never the generic Collective vtable
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null, group: ?*const cuda.tp_group.Group = null, fuse: bool = false },
 };
+pub const ResolvePost = cuda.roce.Post;
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
 pub const Rank = struct {
@@ -202,9 +203,9 @@ pub const Forward = struct {
         return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null, .tfq3 = if (f.m.tfq3) |*x| x else null };
     }
 
-    /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
-    pub fn resolve(f: *const Forward, rows: usize) !void {
-        return @import("cuda_boundary.zig").resolve(f, rows);
+    /// The layer sums' boundary; true means its optional post already ran in the gather kernel.
+    pub fn resolve(f: *const Forward, rows: usize, epilogue: ?ResolvePost) !bool {
+        return @import("cuda_boundary.zig").resolve(f, rows, epilogue);
     }
 
     fn slot(r: Rank, rows: usize) u64 {
@@ -449,19 +450,19 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
             if (pf) |p| try p.fork(f.stream, j, .f);
-            try f.resolve(R);
+            const fused_a = try f.resolve(R, .{ .hc_post = .{ .x = f.ranks[0].b.x, .xout = f.ranks[0].b.x, .post = f.ranks[0].b.post, .comb = f.ranks[0].b.comb } });
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
             for (f.ranks) |r| {
                 const l = r.w.layers[j];
-                try f.post(r, R);
+                if (!fused_a) try f.post(r, R);
                 try f.pre(r, l.ffn_hc, l.post_norm, R);
                 try f.ffn(r, l, R, slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             if (pf) |p| try p.fork(f.stream, j, .n);
-            try f.resolve(R);
-            for (f.ranks) |r| try f.post(r, R);
+            const fused_b = try f.resolve(R, .{ .hc_post = .{ .x = f.ranks[0].b.x, .xout = f.ranks[0].b.x, .post = f.ranks[0].b.post, .comb = f.ranks[0].b.comb } });
+            for (f.ranks) |r| if (!fused_b) try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
             switch (f.ranks[0].w.layers[j].mixer) {
@@ -535,19 +536,20 @@ pub const Forward = struct {
             }
         }
         if (!propose) return;
-        try f.resolve(rows);
+        const first = f.ranks[0].b;
+        const fused_a = try f.resolve(rows, .{ .residual_add = .{ .x = first.mx + tail, .xout = first.mx + tail } });
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
-            try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
+            if (!fused_a) try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
             try glue.rmsnormBy(f.set(), f.stream, b.mx + tail, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, rows, D);
             try f.ffn(r, m.layer, rows, slot(r, rows));
         }
-        try f.resolve(rows);
+        const fused_b = try f.resolve(rows, .{ .residual_add = .{ .x = first.mx + tail, .xout = first.mx + tail } });
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
-            try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
+            if (!fused_b) try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
             try glue.rmsnorm(f.set(), f.stream, b.mx + (n - 1) * D * 2, D, m.norm, b.fnormed, D, b.fxs, c.eps, 1, D);
             if (!b.prefill) try m.draft.project(f.set(), &f.m.q4, if (f.m.tfq3) |*x| x else null, f.stream, b.fnormed, b.fxs, b.logits, 1);
         }
