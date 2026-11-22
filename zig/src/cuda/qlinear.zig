@@ -121,6 +121,7 @@ pub const Linear = struct {
             .affine4 => |q| {
                 const a = l.affine4 orelse return error.FormatNotLoaded;
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                if (rows > Affine4Kernels.max_rows) return a.verify(s, in.x, in.sums, q, out, rows); // decode's chains a row
                 return a.decode(s, in.x, in.sums, q, out, rows);
             },
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),

@@ -431,8 +431,8 @@ pub const Forward = struct {
         try sd.s.wait(sd.fork);
         const sp = b.sharedPlan(rows);
         const pairs = rows * c.slots();
-        try g.decode(sd.s, .up, in[0], ex, sp, b.act, 2, pairs, 16, -1);
-        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, pairs, 16, -1);
+        try g.decode(sd.s, .up, in[0], ex, sp, b.act, if (rows > 16) 4 else 2, pairs, 16, -1);
+        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, if (rows > 16) 4 else 2, pairs, 16, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);

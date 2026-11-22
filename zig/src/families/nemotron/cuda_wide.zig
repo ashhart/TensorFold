@@ -1,0 +1,74 @@
+//! TF_NEMOTRON_WIDE_ROUNDS: shared rounds of up to 16 streams and 32 rows where each row keeps its 16-row bits.
+const std = @import("std");
+const Config = @import("config.zig").Config;
+
+/// Streams a shared round holds: today's 8, or 16 with the switch.
+pub const narrow_streams = 8;
+pub const wide_streams = 16;
+
+/// The switch; default off. The startup check refused every malformed value already, so a plain default stands here.
+pub fn on() bool {
+    return @import("sys").environment.read(bool, "TF_NEMOTRON_WIDE_ROUNDS", false) catch false;
+}
+
+/// Where a 17-32-row round keeps each row's bits: GB10, one rank, non-latent, not Bolt, no e4m3 rows or bf16 experts.
+pub fn allowed(c: Config, gb10: bool) bool {
+    return gb10 and c.latent == 0 and !c.bolt and !c.ck and !c.salm and c.world == 1;
+}
+
+/// A shared round's streams at most.
+pub fn streams(c: Config) usize {
+    return if (c.wide_rounds) wide_streams else narrow_streams;
+}
+
+/// The shared expert's 16-row items at `rows` (1-32), halves at members 0 and `half`; then (items, experts).
+pub fn sharedItems(experts: u32, half: u32, rows: usize) [14]u32 {
+    var w: [14]u32 = @splat(0);
+    const lo: u32 = @intCast(@min(rows, 16));
+    const hi: u32 = @intCast(rows - lo);
+    if (hi == 0) {
+        w[0..6].* = .{ experts, 0, lo, experts + 1, half, lo };
+        w[12..14].* = .{ 2, 2 };
+    } else {
+        w[0..12].* = .{ experts, 0, 16, experts, 16, hi, experts + 1, half, 16, experts + 1, half + 16, hi };
+        w[12..14].* = .{ 4, 2 };
+    }
+    return w;
+}
+
+test "wide rounds: shared plan items keep 16-row tiles, today's two items at 16 rows or fewer" {
+    for (1..17) |rows| {
+        const w = sharedItems(40, 32, rows);
+        const n: u32 = @intCast(rows);
+        try std.testing.expectEqualSlices(u32, &.{ 40, 0, n, 41, 32, n }, w[0..6]);
+        try std.testing.expectEqualSlices(u32, &.{ 2, 2 }, w[12..14]);
+    }
+    for (17..33) |rows| {
+        const w = sharedItems(40, 32, rows);
+        const hi: u32 = @intCast(rows - 16);
+        try std.testing.expectEqualSlices(u32, &.{ 40, 0, 16, 40, 16, hi, 41, 32, 16, 41, 48, hi, 4, 2 }, &w);
+    }
+}
+
+const small: Config = .{ .hidden = 8, .vocab = 16, .layers = 2, .mamba_heads = 2, .mamba_head_dim = 4, .groups = 1, .state = 4, .conv_kernel = 4, .heads = 2, .kv_heads = 1, .head_dim = 4, .experts = 4, .top_k = 2, .expert_width = 4, .shared_width = 8, .routed_scaling = 1, .eps = 1e-5 };
+
+test "wide rounds: 16 streams only with the switch, and only where each row's kernels are proved" {
+    var c: Config = small;
+    try std.testing.expectEqual(@as(usize, 8), streams(c));
+    c.wide_rounds = true;
+    try std.testing.expectEqual(@as(usize, 16), streams(c));
+    c = small;
+    try std.testing.expect(allowed(c, true));
+    try std.testing.expect(!allowed(c, false)); // off GB10 affine-4 has no 32-row verify
+    inline for (.{ "bolt", "ck", "salm" }) |f| {
+        var x: Config = small;
+        @field(x, f) = true;
+        try std.testing.expect(!allowed(x, true));
+    }
+    var lat: Config = small;
+    lat.latent = 1024;
+    try std.testing.expect(!allowed(lat, true)); // Super keeps its own 32-row window
+    var tp: Config = small;
+    tp.world = 2;
+    try std.testing.expect(!allowed(tp, true));
+}

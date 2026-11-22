@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
 const train_ops = @import("cuda_train_ops.zig");
 const glue = @import("cuda_glue.zig");
+const parts = @import("cuda_wide.zig").wide_streams; // a shared round's or batched draft's parts: nemotron_ops.cu PARTS
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -43,11 +44,11 @@ pub const Snaps = extern struct {
 };
 
 /// A batched draft's rows: each part's `a` (wa bytes a row) and `b` (wb bytes a row), its start and row count.
-pub const GatherRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), wa: c_int = 0, wb: c_int = 0 };
+pub const GatherRows = extern struct { a: [parts]u64 = @splat(0), b: [parts]u64 = @splat(0), rows: [parts]c_int = @splat(0), row0: [parts]c_int = @splat(0), wa: c_int = 0, wb: c_int = 0 };
 /// A span's last row: each part's source rows, moved to the destination rows in part order.
-pub const LastRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0) };
+pub const LastRows = extern struct { a: [parts]u64 = @splat(0), b: [parts]u64 = @splat(0) };
 /// A level's rows: each part's token and probability destinations, its start and row count, the level's words.
-pub const ScatterRows = extern struct { tok: [8]u64 = @splat(0), prob: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), tok_at: c_int = 0, prob_at: c_int = 0 };
+pub const ScatterRows = extern struct { tok: [parts]u64 = @splat(0), prob: [parts]u64 = @splat(0), rows: [parts]c_int = @splat(0), row0: [parts]c_int = @splat(0), tok_at: c_int = 0, prob_at: c_int = 0 };
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
@@ -449,7 +450,7 @@ pub const Ops = struct {
 
     /// experts.route's plan over the routed slots alone (rows <= 16, experts <= 128): the shared halves run apart.
     pub fn planRouted(o: Ops, picks: u64, rows: usize, slots: usize, routed: usize, count: usize, tile: usize, p: Plan) !void {
-        if (rows > 16 or slots > 8 or count > 128) return error.PlanTooWide;
+        if (rows > 32 or slots > 8 or count > 128) return error.PlanTooWide; // nemotron_ops.cu pk: 32 rows of 8 slots
         var a: cuda.Args = .{};
         a.add(picks);
         for ([_]usize{ rows, slots, routed, count, tile }) |v| a.add(int(v));

@@ -172,8 +172,8 @@ pub const Cuda = struct {
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = true, // copy-only models retain the landed shared target forward
-            .batch_rows = @intCast(width),
-            .max_streams = engine.max_streams,
+            .batch_rows = @intCast(state.sharedRows(self.e.c)), // 32 with TF_NEMOTRON_WIDE_ROUNDS; 17-32 priced linearly
+            .max_streams = @intCast(@import("cuda_wide.zig").streams(self.e.c)),
         };
     }
 
@@ -474,7 +474,7 @@ pub const Cuda = struct {
                 break :blk first[0..];
             };
             const v = h.vocab(r.stream.context.items);
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
+            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.sharedRows(self.e.c)) {
                 try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;

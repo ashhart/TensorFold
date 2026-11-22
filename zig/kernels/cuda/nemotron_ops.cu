@@ -41,7 +41,7 @@ __device__ __forceinline__ int scan128(int v, int* total) {
 extern "C" __global__ void __launch_bounds__(128) tf_plan_routed(const int* __restrict__ picks, int rows, int slots, int routed,
                                                                 int E, int T, int* __restrict__ members,
                                                                 int* __restrict__ items, int* __restrict__ counts) {
-    __shared__ int pk[16 * 8];
+    __shared__ int pk[32 * 8];  // rows <= 32 (a wide shared round), slots <= 8
     const int tid = threadIdx.x, P = rows * slots;
     for (int p = tid; p < P; p += blockDim.x) pk[p] = p % slots < routed ? picks[p] : -1;
     __syncthreads();
@@ -309,12 +309,15 @@ extern "C" __global__ void tf_splice_rows(__nv_bfloat16* __restrict__ H, const _
     for (int i = threadIdx.x; i < D; i += blockDim.x) H[r * D + i] = F[static_cast<int64_t>(s) * D + i];
 }
 
+// Parts of a batched draft or shared round at most: cuda_kernels.zig's parts.
+constexpr int PARTS = 16;
+
 // A batched draft's rows: each part's rows of `a` (wa bytes a row) and `b` (wb bytes a row) to dst_a and dst_b.
 struct GatherRows {
-    const void* a[8];
-    const void* b[8];
-    int rows[8];
-    int row0[8];
+    const void* a[PARTS];
+    const void* b[PARTS];
+    int rows[PARTS];
+    int row0[PARTS];
     int wa;
     int wb;
 };
@@ -323,8 +326,8 @@ struct GatherRows {
 extern "C" __global__ void tf_nemo_gather_rows(const GatherRows g, void* __restrict__ dst_a, void* __restrict__ dst_b) {
     const int r = blockIdx.x;
     int k = 0;
-    while (k < 8 && !(r >= g.row0[k] && r < g.row0[k] + g.rows[k])) ++k;
-    if (k == 8) return;
+    while (k < PARTS && !(r >= g.row0[k] && r < g.row0[k] + g.rows[k])) ++k;
+    if (k == PARTS) return;
     const int at = r - g.row0[k];
     const char* sa = static_cast<const char*>(g.a[k]) + (size_t)at * g.wa;
     char* da = static_cast<char*>(dst_a) + (size_t)r * g.wa;
@@ -337,8 +340,8 @@ extern "C" __global__ void tf_nemo_gather_rows(const GatherRows g, void* __restr
 
 // A span's last row: each part's source a/b row moved to dst row k, ascending k with a barrier between rows.
 struct LastRows {
-    const void* a[8];
-    const void* b[8];
+    const void* a[PARTS];
+    const void* b[PARTS];
 };
 
 // One block: row k's sources to dst row k in order, so a row that is another part's destination is read before written.
@@ -356,10 +359,10 @@ extern "C" __global__ void tf_nemo_gather_last(const LastRows g, void* __restric
 
 // A level's rows: each part's token and probability to its own buffers at tok_at/prob_at, one row a part.
 struct ScatterRows {
-    unsigned* tok[8];
-    float* prob[8];
-    int rows[8];
-    int row0[8];
+    unsigned* tok[PARTS];
+    float* prob[PARTS];
+    int rows[PARTS];
+    int row0[PARTS];
     int tok_at;
     int prob_at;
 };
@@ -368,8 +371,8 @@ struct ScatterRows {
 extern "C" __global__ void tf_nemo_scatter_rows(const unsigned* __restrict__ TOK, const float* __restrict__ PROB, const ScatterRows g) {
     const int r = blockIdx.x;
     int k = 0;
-    while (k < 8 && !(r >= g.row0[k] && r < g.row0[k] + g.rows[k])) ++k;
-    if (k == 8 || threadIdx.x != 0) return;
+    while (k < PARTS && !(r >= g.row0[k] && r < g.row0[k] + g.rows[k])) ++k;
+    if (k == PARTS || threadIdx.x != 0) return;
     const int at = r - g.row0[k];
     g.tok[k][g.tok_at + at] = TOK[r];
     if (g.prob[k] != nullptr) g.prob[k][g.prob_at + at] = PROB[r];
