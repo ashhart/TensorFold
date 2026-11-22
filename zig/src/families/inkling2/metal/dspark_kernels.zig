@@ -126,6 +126,25 @@ pub const Pipelines = struct {
     }
 };
 
+/// The greedy chain's two kernels, outside `Pipelines`: its entries are the block's `Kind`s one for one.
+pub const Chain = struct {
+    step: mtl.Pipeline,
+    pick: mtl.Pipeline,
+
+    pub fn load(device: mtl.Device, text: []const u8) !Chain {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        const step = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_step", false);
+        errdefer step.deinit();
+        return .{ .step = step, .pick = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_pick", false) };
+    }
+    pub fn deinit(c: *Chain) void {
+        c.pick.deinit();
+        c.step.deinit();
+        c.* = undefined;
+    }
+};
+
 fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
     for (refs, 0..) |r, slot| e.setBuffer(r.buf, r.off, slot);
 }
@@ -211,6 +230,23 @@ pub fn recurrentStep(p: *const Pipelines, e: mtl.ComputeEncoder, state: Ref, kap
     bind(e, &.{ state, kappa_row, rnn_weight, markov_w1, z, next_state, lambda });
     e.setValue(TokenArgs{ .token = previous_token }, 7);
     threads(e, rank, 256);
+}
+
+/// recurrentStep on the token `held[step]` holds: the chain's previous draft, read on the GPU.
+pub fn chainStep(c: *const Chain, e: mtl.ComputeEncoder, state: Ref, kappa_row: Ref, rnn_weight: Ref, markov_w1: Ref, z: Ref, next_state: Ref, lambda: Ref, held: Ref, step: u32) void {
+    e.setPipeline(c.step);
+    bind(e, &.{ state, kappa_row, rnn_weight, markov_w1, z, next_state, lambda });
+    e.setValue(TokenArgs{ .token = step }, 7);
+    e.setBuffer(held.buf, held.off, 8);
+    threads(e, rank, 256);
+}
+
+/// held[step + 1] = the first greatest of a row of final logits: one threadgroup of 1,024.
+pub fn chainPick(c: *const Chain, e: mtl.ComputeEncoder, logits: Ref, held: Ref, step: u32) void {
+    e.setPipeline(c.pick);
+    bind(e, &.{ logits, held });
+    e.setValue(TokenArgs{ .token = step }, 2);
+    groups(e, 1, 1024);
 }
 
 /// Raw U*y rows round once to BF16, with no target unembedding softcap.

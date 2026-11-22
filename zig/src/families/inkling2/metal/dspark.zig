@@ -48,8 +48,7 @@ pub const Drafter = struct {
     /// Scratch for the second and later streams of one hold; the first uses `scratch`, as absorb does.
     more: std.ArrayList(state.Scratch) = .empty,
     /// The greedy chain's kernels, and each held stream's eight tokens: the anchor, then its drafts.
-    chain_step: mtl.Pipeline = undefined,
-    chain_pick: mtl.Pipeline = undefined,
+    chain: k.Chain = undefined,
     chain_tokens: mtl.Buffer = undefined,
     scores: ?mtl.Buffer = null,
     capacity: usize = 1,
@@ -75,13 +74,9 @@ pub const Drafter = struct {
         errdefer d.pipelines.deinit();
         d.scratch = try state.Scratch.init(device);
         errdefer d.scratch.deinit();
-        {
-            const lib = try mtl.Library.fromSource(device, @import("inkling2_metal").inkling2_dspark, mtl.CompileOptions.mlx());
-            defer lib.deinit();
-            d.chain_step = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_step", false);
-            d.chain_pick = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_pick", false);
-            d.chain_tokens = try device.buffer(chain_streams * 8 * @sizeOf(u32), mtl.ResourceOptions.shared);
-        }
+        d.chain = try k.Chain.load(device, @import("inkling2_metal").inkling2_dspark);
+        errdefer d.chain.deinit();
+        d.chain_tokens = try device.buffer(chain_streams * 8 * @sizeOf(u32), mtl.ResourceOptions.shared);
         return d;
     }
 
@@ -91,8 +86,7 @@ pub const Drafter = struct {
         d.contexts.deinit(d.gpa);
         if (d.scores) |scores| scores.deinit();
         d.chain_tokens.deinit();
-        d.chain_pick.deinit();
-        d.chain_step.deinit();
+        d.chain.deinit();
         for (d.more.items) |*extra| extra.deinit();
         d.more.deinit(d.gpa);
         d.scratch.deinit();
@@ -301,17 +295,9 @@ pub const Drafter = struct {
         for (0..depth) |step| {
             const current = if (second_bank) s.next_state else s.state;
             const next = if (second_bank) s.state else s.next_state;
-            e.setPipeline(d.chain_step);
-            for ([_]Ref{ at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0) }, 0..) |b, slot_| e.setBuffer(b.buf, b.off, slot_);
-            e.setValue(k.TokenArgs{ .token = @intCast(step) }, 7);
-            e.setBuffer(held.buf, held.off, 8);
-            e.dispatchThreads(mtl.Size.of(state.rank, 1, 1), mtl.Size.of(256, 1, 1));
+            k.chainStep(&d.chain, e, at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0), held, @intCast(step));
             k.finalLogits(&d.pipelines, e, at(s.base, step * state.vocabulary * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(s.logits, 0));
-            e.setPipeline(d.chain_pick);
-            e.setBuffer(s.logits, 0, 0);
-            e.setBuffer(held.buf, held.off, 1);
-            e.setValue(k.TokenArgs{ .token = @intCast(step) }, 2);
-            e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+            k.chainPick(&d.chain, e, at(s.logits, 0), held, @intCast(step));
             second_bank = !second_bank;
         }
     }
