@@ -431,8 +431,8 @@ const mutations = [_]Mutation{
         .format = .mxfp8,
         .gate = .shapes,
         .label = "control: inkling2 experts grouped MXFP8 down writes its first two columns swapped",
-        .from = "dst[0] = bfloat(total[g][r].x);\n        dst[1] = bfloat(total[g][r].y);",
-        .to = "dst[0] = bfloat(total[g][r].y);\n        dst[1] = bfloat(total[g][r].x);",
+        .from = "dst[0] = bfloat(mine.x);\n    dst[1] = bfloat(mine.y);",
+        .to = "dst[0] = bfloat(mine.y);\n    dst[1] = bfloat(mine.x);",
     },
     .{
         .format = .nvfp4,

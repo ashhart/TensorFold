@@ -198,21 +198,31 @@ inline void i2x_group_dot(const device uchar* weight, const device uchar* w_scal
   if (!busy) return;
   for (uint shift = 16u; shift != 0u; shift >>= 1u)
     for (uint g = 0u; g < RG; ++g) for (uint r = 0u; r < RT; ++r) total[g][r] += simd_shuffle_xor(total[g][r], shift);
-  if (lane != 0u) return;
-  for (uint r = 0u; r < RT && first + r < live; ++r) {
+  // Lane 0's sums, as the one-row dot stores them, go one (group, pair) per lane so SwiGLU runs once, not per pair.
+  float4 mine = 0.0f;
+  uint who = 0u, owner = 0u;
+  bool stores = false;
+  for (uint r = 0u; r < RT; ++r) {
     for (uint g = 0u; g < RG; ++g) {
-      device bfloat* dst = out + i2x_group_dst<NV, GATE_UP>(a, pair[r], col0 + g * (GATE_UP ? 2u : 4u));
-      if (GATE_UP) {
-        const float4 sums = i2x_bf4(total[g][r]);
-        dst[0] = bfloat(i2x_swiglu(sums.x, sums.y, a.gate_cap, a.up_cap));
-        dst[1] = bfloat(i2x_swiglu(sums.z, sums.w, a.gate_cap, a.up_cap));
-      } else {
-        dst[0] = bfloat(total[g][r].x);
-        dst[1] = bfloat(total[g][r].y);
-        dst[2] = bfloat(total[g][r].z);
-        dst[3] = bfloat(total[g][r].w);
-      }
+      const float4 sums = simd_broadcast_first(total[g][r]);
+      const bool me = lane == g * RT + r;
+      mine = me ? sums : mine;
+      who = me ? pair[r] : who;
+      owner = me ? g : owner;
+      stores = me ? first + r < live : stores;
     }
+  }
+  if (!stores) return;
+  device bfloat* dst = out + i2x_group_dst<NV, GATE_UP>(a, who, col0 + owner * (GATE_UP ? 2u : 4u));
+  if (GATE_UP) {
+    const float4 sums = i2x_bf4(mine);
+    dst[0] = bfloat(i2x_swiglu(sums.x, sums.y, a.gate_cap, a.up_cap));
+    dst[1] = bfloat(i2x_swiglu(sums.z, sums.w, a.gate_cap, a.up_cap));
+  } else {
+    dst[0] = bfloat(mine.x);
+    dst[1] = bfloat(mine.y);
+    dst[2] = bfloat(mine.z);
+    dst[3] = bfloat(mine.w);
   }
 }
 
