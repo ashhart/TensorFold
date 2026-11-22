@@ -21,6 +21,8 @@
 // takes routed plans of more rows an item, up to 6.3 pairs; past that rows64 decodes an item's weights once for
 // its rows (Flash Next served at 2,048-row chunks, 6.8 pairs an item: 8K prompt 1,826 -> 1,868 tok/s; at 1,024-row
 // chunks, 5.9 pairs, the two were even).
+// Pairs per item count a bucketed plan's capacity, which doubles past each power of two of rows, so rows16 and
+// rows32 also stop at 16 and 27 rows an expert (mlx_entries.zig), Flash Next's cuts by pairs.
 // The dot2 rows below serve what the matrix tiles do not fit (unaligned words or tables) and runs with the matrix
 // cores off. Their bounds are gfx1100's, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
 // the routed K-parallel tile's: its items are the tuner's, its pairs per item lowered from the tuner's 4.14 to 3.5 by

@@ -210,11 +210,15 @@ fn fitsPrefillSkew(s: Shape) bool {
     return fitsPrefillMatrix(s) and s.k <= skew_k;
 }
 
-/// A plain prompt product of at most `rows` rows, the most a few-row block of gfx12's matrix tile was measured on.
-fn rowsFit(comptime rows: u32) *const fn (Shape) bool {
+/// The routed cuts are Flash Next's by pairs (rows16 to 820 rows, rows32 to 1,380): 16 and 27 rows an expert.
+const rows16_expert_rows = 16;
+const rows32_expert_rows = 27;
+
+/// gfx12's few-row blocks up to `rows` rows, or rows an expert: a bucketed plan's pairs per item fall as it grows.
+fn rowsFit(comptime routed: bool, comptime rows: u32) *const fn (Shape) bool {
     return struct {
         fn f(s: Shape) bool {
-            return fitsPrefillMatrix(s) and s.m <= rows;
+            return if (routed) fitsPrefillItem(s) and s.expert_rows <= rows else fitsPrefillMatrix(s) and s.m <= rows;
         }
     }.f;
 }
@@ -376,11 +380,11 @@ const routed_item = [_]Entry{
 
 /// gfx12's few-row matrix blocks: routed items on 32 rows, plain on 64, either on 16 (longer plain: fillTier).
 const rows_entries = [_]Entry{
-    entry(.routed, .prefill, "rows32", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(1), .caps = &matrix12, .policy = &matrixOn }),
+    entry(.routed, .prefill, "rows32", .{ .family = .matrix12, .fits = rowsFit(true, rows32_expert_rows), .launch = launchRows(1), .caps = &matrix12, .policy = &matrixOn }),
     entry(.routed, .prefill, "rows64", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn }),
-    entry(.project, .prefill, "rows64", .{ .family = .matrix12, .fits = rowsFit(64), .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
-    entry(.routed, .prefill, "rows16", .{ .family = .matrix12, .fits = &fitsPrefillItem, .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn }),
-    entry(.project, .prefill, "rows16", .{ .family = .matrix12, .fits = rowsFit(32), .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
+    entry(.project, .prefill, "rows64", .{ .family = .matrix12, .fits = rowsFit(false, 64), .launch = launchRows(0), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
+    entry(.routed, .prefill, "rows16", .{ .family = .matrix12, .fits = rowsFit(true, rows16_expert_rows), .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn }),
+    entry(.project, .prefill, "rows16", .{ .family = .matrix12, .fits = rowsFit(false, 32), .launch = launchRows(rows12.kp_tier), .caps = &matrix12, .policy = &matrixOn, .rounds = .always }),
 };
 
 pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item ++ rows_entries;
