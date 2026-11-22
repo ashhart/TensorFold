@@ -465,6 +465,19 @@ and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (a
 terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
 and the linear reading its input rows one row late.
 
+HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads (`inkling2/attention.hip`,
+`contract_inkling2*.zig`, records in `hip_records_inkling2.zig`; `tf-hip-kernel-contract image inkling2`). It does not
+match #4125's CUDA bits; it keeps CUDA's rounding points and is held to the same float64 reference
+(`core.contract.inkling2_attn_ref`, with HIP's scalar fp32 chains): `tf_ink2_prep` (sliding and global, tau at n_floor
+8,192), `tf_ink2_rel_table`, and the chunked attention and its merge on sliding layers (`tf_ink2_attn`) and global ones
+(`tf_ink2_attn_fold`) to 1M keys on a ring that wraps. Every P is rounded to bf16 before its sum and P V, the sink enters
+last as a raw logit and the merge takes the raw gate's sigmoid, rounding once. The split launch (a block a 1,024-key
+sub-chunk) and the prompt launch (`tf_ink2_attn_prompt`: 8 pairs a block share one LDS stage while the next tile loads
+into registers, 37 KiB) are bit-equal to the fold, and three streams in one launch are bit-equal to each stream alone,
+at its row and cache offsets (prep, sliding, fold and split). Eight controls go red at `shapes`: a bias one distance
+late, no sink, one q a bf16 step up (prompt), a window one key long, the sink and gate given after their sigmoid (as
+#4387's glue did), tau off, a table read one column late, and a prep writing one stream's keys into another's slots.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
