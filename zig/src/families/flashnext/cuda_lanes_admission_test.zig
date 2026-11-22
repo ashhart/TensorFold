@@ -93,7 +93,7 @@ const Waiting = struct {
     }
 };
 
-pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype) type {
+pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, comptime load: anytype) type {
     return struct {
         test "four concurrent streams all retain MTP draft state" {
             try run(Cuda, open, drop, 4);
@@ -116,6 +116,18 @@ pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype
             try std.testing.expectError(error.Yielded, be.vtable.prefill(be.ptr, &s));
             try std.testing.expect(waiting.asked == 1 and waiting.kept == 0); // it stands where it opened: nothing new
             try std.testing.expectEqual(@as(?usize, 0), rig.self.lanes.getPtr(&s).?.filled); // and no chunk ran
+        }
+
+        test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
+            const env = @import("sys").env;
+            // every driver entry point undefined: the refusal must come before the first call
+            var driver: cuda.Driver = undefined;
+            const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
+                _ = env.setenv(bad[0], bad[1], 1);
+                defer _ = env.unsetenv(bad[0]);
+                try std.testing.expectError(bad[2], load(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
+            }
         }
     };
 }

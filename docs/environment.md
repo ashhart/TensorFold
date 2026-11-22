@@ -43,6 +43,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
+| `TF_FLASHNEXT_EXL3_PREFILL`, `TF_FLASHNEXT_EXL3_PREFILL_RING`, `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH`, `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | Whole nonnegative rows; unset uses 8192 general / 4096 server; an explicit count sets both |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | Whole nonnegative lookahead count; default 1 |
+| `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
@@ -52,6 +57,19 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
 | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
+| `TF_FLASHNEXT_CHUNK` | Whole prompt rows from 1 through 16384 per pass; default 1536 |
+| `TF_FLASHNEXT_CHUNK_SOLO` | Whole rows from the busy chunk through 16384; unset keeps the family's default; EXL3 packs refuse an override |
+| `TF_FLASHNEXT_CACHE_TELEMETRY`, `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY`, `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_SNAP_HOST` | Exactly `0` or `1`; default on for EXL3 above 32768 context tokens, otherwise off |
+| `TF_FLASHNEXT_EXL3_ARCH` | Exactly `unqualified`; unset requires the qualified architecture |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | Finite nonnegative GiB; memory admission separately enforces its 0.5 GiB floor (2 on unified memory) and total memory size |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | `POOL:+N,POOL:-N` without control characters; pool validation requires balanced line transfers |
+| `TF_FLASHNEXT_EXL3_STREAMS` | Positive whole stream count; default 1; `--parallel` wins |
+| `TF_FLASHNEXT_EXPERT_LINES` | Whole expert-line count per layer; pool construction requires at least 10; unset derives the count from memory |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | Whole MiB from 0 through 17592186044415; unset uses the server reserve |
+| `TF_FLASHNEXT_PLE_READ` | Exactly `map` or `pread`; default `map` |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | Directory path without control characters; unset disables persisted expert-use profiles |
+| `TF_FLASHNEXT_EXL3_ROUTED` | Exactly `host` or `device`; default `host` |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
@@ -165,7 +183,8 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_KEEP_LATE` | Exactly `0` or `1`; unset or blank leaves the choice to the loader |
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; default on: two ranks split the BF16 dense projections |
-| `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; default off: each rank keeps its half of the output head |
+| `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; default off: each rank keeps its half of the output head. EXL3 defaults on at TP=2 and stays whole at TP=1 |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | Exactly `0` or `1`; default off; on keeps the EXL3 MTP experts on the device |
 | `TF_FLASHNEXT_FUSED_SPLIT` | Exactly `0` or `1`; default off. `1` runs CUDA split-K lane calls of 2,048 columns or more on the fused form, with the same bits; Metal and HIP refuse `1` |
 | `TF_FLASHNEXT_ATTN_LANES` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_WARM_AHEAD` | Exactly `0` or `1`; default off |

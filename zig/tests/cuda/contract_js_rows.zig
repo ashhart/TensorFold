@@ -228,7 +228,7 @@ fn rnd(acc: c.Accum, v: f64) f64 {
         .f32 => @as(f32, @floatCast(v)),
         .f16 => @as(f16, @floatCast(v)),
         .bf16 => c.fromBf16(c.toBf16(@floatCast(v))),
-        .none => v,
+        .f64, .none => v,
     };
 }
 

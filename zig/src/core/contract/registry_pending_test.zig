@@ -9,6 +9,29 @@ const cuda = registry.cuda;
 const checkCuda = registry.checkCuda;
 const targetDecision = registry.targetDecision;
 const TargetDecision = registry.TargetDecision;
+
+test {
+    _ = @import("flashnext_exl3_pending.zig");
+}
+test "EXL3 prompt resource records select measured CUDA 13.4 usage without changing older compiler records" {
+    const record = for (cuda) |candidate| {
+        if (std.mem.eql(u8, candidate.launch.name, "exl3_candidate tf_exl3_prompt_2")) break candidate;
+    } else return error.MissingExl3PromptRecord;
+    const older = registry.usageFor(record, .{ .major = 13, .minor = 3 });
+    const current = registry.usageFor(record, .{ .major = 13, .minor = 4 });
+    for (current, 0..) |usage, index| {
+        try std.testing.expectEqual(@as(u32, if (index < 3) 80 else 77), usage.regs);
+        try std.testing.expectEqual(@as(u32, if (index < 3) 80 else 79), older[index].regs);
+        try std.testing.expectEqual(@as(u32, 32768), usage.static);
+        try std.testing.expectEqual(@as(u32, 256), usage.bound);
+    }
+}
+test "unmeasured CUDA records cannot pass a compiled resource check" {
+    for (cuda_pending) |r| {
+        if (!std.meta.eql(none, r.usage)) continue;
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+    }
+}
 test "CUDA lane resources distinguish recorded launches from missing receipts" {
     for (cuda_pending) |r| {
         try std.testing.expect(r.launch.threads > 0);

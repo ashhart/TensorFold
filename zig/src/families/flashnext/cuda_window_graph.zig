@@ -22,6 +22,11 @@ pub fn enabled() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
+/// `enabled`, and no pooled EXL3 experts block in `layers`: it waits on the host for its picks, which no capture holds.
+pub fn admits(layers: []const @import("cuda_prompt_load.zig").Layer) bool {
+    return enabled() and !@import("exl3/model/cuda_exl3_pass.zig").waitsHost(layers);
+}
+
 /// attnRows' host values for rows ending at `ends` in a `cap`-token cache: dense chunks, the score grid (0: none).
 pub const Geometry = struct {
     chunks: u32,
