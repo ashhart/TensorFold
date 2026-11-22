@@ -234,6 +234,7 @@ kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], c
 }
 
 // The recurrent step after held[a.token]: the chain's previous token read on the GPU.
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_chain_step(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], const device uint* held [[buffer(8)]], uint i [[thread_position_in_grid]]) {
   dspark_recurrent_step(state, kappa, rnn_weight, markov, z, next_state, lambda, held[a.token], i);
 }
