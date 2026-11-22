@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.3.4
 
+- Lanes: #3728's lone-stream copy pricing applies only to a family that opts in and serves without a model drafter (Qwen3.5/3.8 on HIP with copies only), so copies-only decode on AMD Strix Halo keeps 1.3.3's speed, while streams with a model drafter price their drafts as before; tokens are unchanged.
+
 - `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
 
 - Server: `response_format: json_object` with `grammar_budget: true` works again on large vocabularies: the server's fixed `json_object` rule gets budget limits sized to it (computed once per tokenizer), while every client-supplied grammar keeps the limits from #4378; a budget refusal now names what it hit (work, edges, bytes, timeout or busy slots) (#4615, follows #4378).
