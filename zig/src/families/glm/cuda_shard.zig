@@ -24,7 +24,7 @@ pub const Share = struct {
     kda: Span, // KDA heads
     mla: Span, // DSA heads
     dense: Span, // the dense MLP's intermediate rows
-    moe: Span, // each routed expert's intermediate rows
+    moe: Span, // each routed expert's intermediate rows (layer 0's; moeAt has every layer's)
     shared: Span, // the shared expert's intermediate rows
     vocab: Span, // the head's rows
 
@@ -45,13 +45,36 @@ pub const Share = struct {
         };
     }
 
+    /// Layer `i`'s routed expert rows: full GLM-5.3's ranks take the cut's larger parts in turn, a layer each.
+    pub fn moeAt(s: Share, c: *const Config, i: usize) !Span {
+        if (!c.dsa) return s.moe; // GLM-5.3-Flash: one cut for every layer
+        return span(decls(c).moe, c.moe_inter, (s.rank + i) % s.world, s.world);
+    }
+
+    /// The most routed expert rows a layer gives this rank (its buffers' width).
+    pub fn moeMost(s: Share, c: *const Config) usize {
+        var most = s.moe.len();
+        if (c.dsa) for (0..s.world) |p| {
+            most = @max(most, (span(decls(c).moe, c.moe_inter, p, s.world) catch s.moe).len());
+        };
+        return most;
+    }
+
+    /// This rank's routed expert rows over the MoE layers as (part, whole).
+    fn moeRows(s: Share, c: *const Config) [2]u64 {
+        if (!c.dsa or c.layers + c.mtp <= c.dense_layers) return .{ s.moe.len(), c.moe_inter };
+        var sum: u64 = 0;
+        for (c.dense_layers..c.layers + c.mtp) |i| sum += (s.moeAt(c, i) catch s.moe).len();
+        return .{ sum, @as(u64, c.layers + c.mtp - c.dense_layers) * c.moe_inter };
+    }
+
     /// This rank's largest fraction of an axis as (part, whole): its weights are at most that much of the checkpoint.
     pub fn part(s: Share, c: *const Config) [2]u64 {
         const axes = [_][2]u64{
             .{ s.kda.len(), c.kda_heads },
             .{ s.mla.len(), c.mla_heads },
             .{ s.dense.len(), c.dense_inter },
-            .{ s.moe.len(), c.moe_inter },
+            s.moeRows(c),
             .{ s.shared.len(), c.shared_inter },
             .{ s.vocab.len(), c.vocab },
         };
