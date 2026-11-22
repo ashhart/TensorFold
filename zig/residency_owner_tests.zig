@@ -19,6 +19,7 @@ pub const shared_attention = @import("src/core/shared_attention.zig");
 pub const segments = @import("src/core/segments.zig");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
+pub const image_rows = @import("src/core/image_rows.zig");
 pub const tree_round = @import("tree_round");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const bf16_topk = @import("bf16_topk");
