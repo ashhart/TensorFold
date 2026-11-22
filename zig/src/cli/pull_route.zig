@@ -209,18 +209,24 @@ pub fn tunnelOf(io: std.Io, address: *const std.Io.net.IpAddress) ?Tunnel {
 const AddressDeadline = struct { address: std.Io.net.IpAddress = undefined, deadline: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake } };
 var addresses: [64]AddressDeadline = @splat(.{});
 var address_count: usize = 0;
+var address_next: usize = 0; // once full, the oldest entry is replaced (a pull over rotating CDN addresses never runs out)
 
-/// Carries a name's original deadline to each address the resolver returned.
-pub fn rememberAddress(io: std.Io, address: std.Io.net.IpAddress, deadline: std.Io.Clock.Timestamp) !void {
+/// Carries a name's original deadline to each address the resolver returned. A full table drops its oldest address,
+/// whose connect then takes a fresh deadline (addressDeadline returns null), instead of failing the pull.
+pub fn rememberAddress(io: std.Io, address: std.Io.net.IpAddress, deadline: std.Io.Clock.Timestamp) error{TooManyHosts}!void {
     lock.lockUncancelable(io);
     defer lock.unlock(io);
     for (addresses[0..address_count]) |*a| if (a.address.eql(&address)) {
         a.deadline = deadline;
         return;
     };
-    if (address_count == addresses.len) return error.TooManyHosts;
-    addresses[address_count] = .{ .address = address, .deadline = deadline };
-    address_count += 1;
+    if (address_count < addresses.len) {
+        addresses[address_count] = .{ .address = address, .deadline = deadline };
+        address_count += 1;
+        return;
+    }
+    addresses[address_next] = .{ .address = address, .deadline = deadline };
+    address_next = (address_next + 1) % addresses.len;
 }
 
 pub fn addressDeadline(io: std.Io, address: *const std.Io.net.IpAddress) ?std.Io.Clock.Timestamp {

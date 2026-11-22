@@ -113,3 +113,15 @@ test "pull proxy: the timeouts read their own variables" {
     try std.testing.expectEqual(@as(u32, 5), s.connect_s);
     try std.testing.expectEqual(@as(u32, 7), s.stall_s);
 }
+
+test "pull route: more distinct addresses than the table holds never fails a pull; the newest keeps its deadline" {
+    const io = std.testing.io;
+    const deadline: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 99, @intCast(i / 256), @intCast(i % 256) }, .port = 443 } };
+        try route.rememberAddress(io, address, deadline);
+    }
+    const newest: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 99, 0, 199 }, .port = 443 } };
+    try std.testing.expect(route.addressDeadline(io, &newest) != null);
+}
