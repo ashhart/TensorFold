@@ -406,6 +406,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-glm-grants-host", "GLM CUDA head-cost policy without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"shared head costs:"} })).step);
     skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"zero grant:"} })).step);
     @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
+    const prefill_exact = b.step("test-glm-prefill-exact-host", "GLM exact prefill dead-work and launch regressions without a GPU");
+    prefill_exact.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"prefill exact:"} })).step);
+    step.dependOn(prefill_exact);
     const q4_pdl = b.createModule(.{ .root_source_file = b.path("zig/glm_q4_pdl_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const q4_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = q4_pdl }));
     b.step("test-glm-q4-pdl-host", "GLM Q4 draft-head launch honors TF_GLM_PDL without a GPU").dependOn(&q4_pdl_run.step);
