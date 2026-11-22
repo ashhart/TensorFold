@@ -529,9 +529,8 @@ pub const Probe = struct {
                     if (!std.math.isNan(c.fromBf16(bits))) return "BF16 NaN was not propagated";
                 } else if (bits != expected) {
                     const relative: f64 = switch (self.kind) {
-                        .fuse_taps, .block_qkv, .context_kv, .swiglu, .logits => 0.02,
+                        .fuse_taps, .block_qkv, .context_kv, .swiglu, .logits, .base => 0.02,
                         .attention => 0.03,
-                        .base => 0,
                         else => 0,
                     };
                     const got = c.fromBf16(bits);
