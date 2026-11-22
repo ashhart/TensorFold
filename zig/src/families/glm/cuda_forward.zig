@@ -378,6 +378,11 @@ pub const Forward = struct {
 
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
+        return f.runMode(ids, true);
+    }
+
+    /// The same pass with `lm_head` only when its logits are read; final norms always cover every row.
+    pub fn runMode(f: *const Forward, ids: []const i32, head: bool) !void {
         const R = ids.len;
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
@@ -398,7 +403,7 @@ pub const Forward = struct {
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
         if (pieces > 1 or (pieces == 1 and f.splits(R))) try f.pieced(f.pieces.?, R, cut[0..pieces]) else try f.whole(R);
-        try f.finish(R);
+        try f.finish(R, head);
         if (f.prof) |p| p.mark(f.stream, .head);
     }
 
@@ -442,7 +447,7 @@ pub const Forward = struct {
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
-    pub fn finish(f: *const Forward, R: usize) !void {
+    pub fn finish(f: *const Forward, R: usize, head: bool) !void {
         prof_mod.context(f.prof, null, null, .chunk);
         const stamp = prof_mod.span(f.prof, f.stream, .head);
         defer stamp.end();
@@ -454,6 +459,7 @@ pub const Forward = struct {
                 try shared.heads(f, r);
                 continue;
             }
+            if (!head) continue;
             const head_rows: usize = if (b.prefill) 1 else R;
             const first = if (b.prefill) R - 1 else 0;
             try projection.matmul(f.set(), f.stream, r.w.head, b.fnormed + first * c.hidden * 2, c.hidden, b.logits, b.kda.mm_part, head_rows, r.w.share.vocab.len(), c.hidden, false);
