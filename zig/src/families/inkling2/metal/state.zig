@@ -5,7 +5,7 @@ const plan = @import("../plan.zig");
 const ap = @import("attention_plan.zig");
 
 pub const window_rows = 16;
-pub const batch_rows = 32;
+pub const batch_rows = 64;
 pub const prompt_rows = 512;
 pub const max_rows = 512;
 pub const max_segments = batch_rows;

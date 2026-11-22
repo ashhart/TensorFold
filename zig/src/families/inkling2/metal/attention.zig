@@ -7,13 +7,16 @@ pub const planning = @import("attention_plan.zig");
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Cache = struct { k: Ref, v: Ref };
 pub const RowMeta = struct { pos: Ref, seg_of: Ref, segs: Ref };
+pub const Slot = struct { kv: Cache, ring: u32, chunk: u32 = 0, last_pos: u32 = 0 };
 
 pub const Kernels = struct {
     scalar_lib: mtl.Library,
     prompt_lib: mtl.Library,
     prep: mtl.Pipeline,
+    prep_slots: mtl.Pipeline,
     rel_table: mtl.Pipeline,
     decode: mtl.Pipeline,
+    decode_slots: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
     prompt_sliding: mtl.Pipeline,
@@ -27,25 +30,46 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [6]mtl.Pipeline = undefined;
+        var pipes: [8]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for (
-            [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib },
-            [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt", "tf_ink2_attn_prompt_sliding" },
-            &pipes,
-        ) |lib, name, *pipe| {
+        const libs = [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib };
+        const names = [_][]const u8{
+            "tf_ink2_prep",
+            "tf_ink2_prep_slots",
+            "tf_ink2_rel_table",
+            "tf_ink2_attn_scalar",
+            "tf_ink2_attn_slots",
+            "tf_ink2_merge",
+            "tf_ink2_attn_prompt",
+            "tf_ink2_attn_prompt_sliding",
+        };
+        for (libs, names, &pipes) |lib, name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
         }
-        return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .rel_table = pipes[1], .decode = pipes[2], .merge = pipes[3], .prompt = pipes[4], .prompt_sliding = pipes[5], .units = units };
+        return .{
+            .scalar_lib = scalar_lib,
+            .prompt_lib = prompt_lib,
+            .prep = pipes[0],
+            .prep_slots = pipes[1],
+            .rel_table = pipes[2],
+            .decode = pipes[3],
+            .decode_slots = pipes[4],
+            .merge = pipes[5],
+            .prompt = pipes[6],
+            .prompt_sliding = pipes[7],
+            .units = units,
+        };
     }
     pub fn deinit(k: *Kernels) void {
         k.prompt_sliding.deinit();
         k.prompt.deinit();
         k.merge.deinit();
+        k.decode_slots.deinit();
         k.decode.deinit();
         k.rel_table.deinit();
+        k.prep_slots.deinit();
         k.prep.deinit();
         k.prompt_lib.deinit();
         k.scalar_lib.deinit();
@@ -64,6 +88,35 @@ pub fn prep(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: plann
     bind(e, &scales, 4);
     bind(e, &.{ meta.pos, meta.seg_of, meta.segs, q, rel, kv.k, kv.v }, 6);
     e.setValue(planning.PrepArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .global = @intFromBool(l.tau), .qk_clip = c.qk_clip, .rel_clip = c.rel_clip, .floor_pos = c.floor, .alpha = c.alpha, .eps = c.eps }, 13);
+    e.dispatchGroups(mtl.Size.of(r.rows, r.heads + 2 * r.kv_heads, 1), mtl.Size.of(32, 1, 1));
+}
+
+/// Batched prep for up to 8 stream slots; unused slots bind safely to slots[0].
+pub fn prepSlots(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, global: bool, c: planning.Prep, meta: RowMeta, raw: [4]Ref, scales: [2]Ref, q: Ref, rel: Ref, slots: []const Slot) void {
+    std.debug.assert(slots.len > 0 and slots.len <= planning.max_slots);
+    e.setPipeline(k.prep_slots);
+    bind(e, &raw, 0);
+    bind(e, &scales, 4);
+    bind(e, &.{ meta.pos, meta.seg_of, q, rel }, 6);
+    var rings: [planning.max_slots]u32 = undefined;
+    for (0..planning.max_slots) |i| {
+        const s = if (i < slots.len) slots[i] else slots[0];
+        e.setBuffer(s.kv.k.buf, s.kv.k.off, 10 + i);
+        e.setBuffer(s.kv.v.buf, s.kv.v.off, 18 + i);
+        rings[i] = s.ring;
+    }
+    e.setValue(planning.PrepSlotsArgs{
+        .heads = r.heads,
+        .kv_heads = r.kv_heads,
+        .global = @intFromBool(global),
+        .n_slots = @intCast(slots.len),
+        .rings = rings,
+        .qk_clip = c.qk_clip,
+        .rel_clip = c.rel_clip,
+        .floor_pos = c.floor,
+        .alpha = c.alpha,
+        .eps = c.eps,
+    }, 26);
     e.dispatchGroups(mtl.Size.of(r.rows, r.heads + 2 * r.kv_heads, 1), mtl.Size.of(32, 1, 1));
 }
 
@@ -93,6 +146,37 @@ fn partialsLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l:
         e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
+}
+
+/// Batched scalar attention partials for up to 8 stream slots; unused slots bind safely to slots[0].
+pub fn partialsSlots(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, window: u32, stride: u32, meta: RowMeta, q: Ref, tab: Ref, part_o: Ref, part_ml: Ref, slots: []const Slot) !void {
+    std.debug.assert(slots.len > 0 and slots.len <= planning.max_slots);
+    var slot_meta: [planning.max_slots]planning.SlotMeta = undefined;
+    for (0..planning.max_slots) |i| {
+        const s = if (i < slots.len) slots[i] else slots[0];
+        const layer = planning.Layer{ .window = window, .ring = s.ring, .chunk = s.chunk, .tau = window == 0 };
+        if (i < slots.len and planning.slotsFor(layer, @as(usize, s.last_pos) + 1) > stride) return error.Inkling2Partials;
+        slot_meta[i] = .{ .ring = s.ring, .chunk = s.chunk };
+    }
+    const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
+    e.setPipeline(k.decode_slots);
+    bind(e, &.{ q, tab, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+    for (0..planning.max_slots) |i| {
+        const s = if (i < slots.len) slots[i] else slots[0];
+        e.setBuffer(s.kv.k.buf, s.kv.k.off, 6 + i);
+        e.setBuffer(s.kv.v.buf, s.kv.v.off, 14 + i);
+    }
+    e.setValue(planning.AttnSlotsArgs{
+        .heads = r.heads,
+        .kv_heads = r.kv_heads,
+        .window = window,
+        .c0 = 0,
+        .chunks = stride,
+        .n_slots = @intCast(slots.len),
+        .scale = scale,
+        .slots = slot_meta,
+    }, 22);
+    e.dispatchGroups(mtl.Size.of(r.rows * r.heads, stride, 1), mtl.Size.of(planning.decode_threads, 1, 1));
 }
 
 fn mergeLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, launch: planning.Launch, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) void {
