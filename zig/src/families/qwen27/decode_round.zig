@@ -457,25 +457,21 @@ pub const Runner = struct {
             },
         };
     }
-
     pub fn completeDeviceKeep(r: *Runner, round: *const Round, path: []const u32) !void {
         const active = r.active orelse return error.RoundNotReady;
         if (r.failed or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
         r.offsets[round.slots[0]] = (try round.windows[0].keep(path)).length;
         r.active = null;
     }
-
     /// After a GPU failure, once no stream holds a slot: rounds run again, each slot reset by its next prompt.
     pub fn recover(r: *Runner) void {
         r.failed = false;
         r.active = null;
     }
-
     /// An idle or newly lone host may drop scratch only after the previous verify has been kept.
     pub fn trimBefore(r: *Runner) void {
         if (r.active == null) r.gdn.releaseBefore();
     }
-
     /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
     pub fn settleSlot(r: *Runner, slot: u32) void {
         const cb = r.reading[slot] orelse return;
@@ -483,7 +479,6 @@ pub const Runner = struct {
         cb.wait();
         cb.release();
     }
-
     /// `cb` reads `slot` (committed, not waited): the slot's next write settles it first.
     pub fn readingSlot(r: *Runner, slot: u32, cb: mtl.CommandBuffer) void {
         r.settleSlot(slot);
