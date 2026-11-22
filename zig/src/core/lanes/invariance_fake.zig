@@ -230,7 +230,14 @@ const FakeRunner = struct {
             complete = true;
             for (0..n) |i| complete = complete and joins[i] != inv.no_round and leaves[i] != inv.no_round;
             if (complete) break;
+            const emitted_before = streams[0].emitted().len;
+            const trace_before = recorder.trace.items.len;
             try engine.step();
+            const committed = streams[0].emitted().len - emitted_before;
+            const kept = trace_before + committed;
+            if (recorder.trace.items.len < kept) return error.MissingCommittedPositions;
+            // One verify window records accepted target positions before tentative rejects; keep committed rows only.
+            recorder.trace.items.len = kept;
             try addDue(round + 1, &engine, plan, streams[0..n], joins[0..n]);
             markLeaves(streams[0..n], leaves[0..n], round + 1);
         }
