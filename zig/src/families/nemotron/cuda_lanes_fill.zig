@@ -160,6 +160,14 @@ pub fn step(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     return true;
 }
 
+/// cancel_prefill: a pass cancelled between chunks keeps its prefix where its last chunk ended, on its own sequence.
+pub fn keepCancelled(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+    const self: *Cuda = @ptrCast(@alignCast(ptr));
+    const p = self.fills.getPtr(s) orelse return; // no pass between chunks: nothing filled past what was kept
+    self.e.bind(self.lanes.getPtr(s).?.seq); // the prompt cache's save reads the bound sequence (cuda_reuse.save)
+    s.keepInterruptedPrefill(@intCast(p.s));
+}
+
 /// A stream released between its chunks: its pass is dropped (the lane host keeps any kept prefix).
 pub fn forget(self: *Cuda, s: *const lanes.Stream) void {
     _ = self.fills.remove(s);
