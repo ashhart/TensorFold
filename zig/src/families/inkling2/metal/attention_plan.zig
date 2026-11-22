@@ -14,8 +14,10 @@ pub const prompt_pairs = 128;
 pub const prompt_threads = 256;
 pub const decode_threads = 32;
 pub const merge_threads = head_dim;
+pub const max_slots = 8;
 
 pub const Seg = extern struct { row0: i32, n: i32, p0: i32, pad: i32 = 0, off: i64 };
+pub const SlotMeta = extern struct { ring: u32, chunk: u32, pad0: u32 = 0, pad1: u32 = 0 };
 pub const PrepArgs = extern struct {
     heads: u32,
     kv_heads: u32,
@@ -27,12 +29,36 @@ pub const PrepArgs = extern struct {
     alpha: f32,
     eps: f32,
 };
+pub const PrepSlotsArgs = extern struct {
+    heads: u32,
+    kv_heads: u32,
+    global: u32,
+    n_slots: u32,
+    rings: [max_slots]u32,
+    qk_clip: f32,
+    rel_clip: f32,
+    floor_pos: f32,
+    alpha: f32,
+    eps: f32,
+};
 pub const AttnArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, window: u32, chunk: u32, c0: u32, chunks: u32, scale: f32 };
+pub const AttnSlotsArgs = extern struct {
+    heads: u32,
+    kv_heads: u32,
+    window: u32,
+    c0: u32,
+    chunks: u32,
+    n_slots: u32,
+    scale: f32,
+    pad: u32 = 0,
+    slots: [max_slots]SlotMeta,
+};
 pub const MergeArgs = extern struct { heads: u32, window: u32, chunk: u32, c0: u32, chunks: u32, subs: u32 = 1 };
 pub const PromptArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, window: u32 = 0, chunk: u32, c0: u32, chunks: u32, scale: f32 };
 comptime {
     if (@sizeOf(Seg) != 24 or @sizeOf(PrepArgs) != 36 or @sizeOf(AttnArgs) != 32) @compileError("Inkling attention ABI drift");
     if (@sizeOf(MergeArgs) != 24 or @sizeOf(PromptArgs) != 32) @compileError("Inkling prompt ABI drift");
+    if (@sizeOf(SlotMeta) != 16 or @sizeOf(PrepSlotsArgs) != 68 or @sizeOf(AttnSlotsArgs) != 160 or @offsetOf(AttnSlotsArgs, "slots") != 32) @compileError("Inkling slots ABI drift");
 }
 
 pub const Layer = struct {

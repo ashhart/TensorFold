@@ -234,55 +234,104 @@ const Attend = struct {
     kv: attention.Cache,
 };
 
-/// Every stream's attention a step at a time: a step's launches run side by side, and a barrier ends each step.
+const SlotBatch = struct { base: usize, rr: ap.Rows, meta: attention.RowMeta, len: usize };
+
+fn slotBatch(batch: []const Attend, s: *state.Scratch, out_slots: *[ap.max_slots]attention.Slot) SlotBatch {
+    var batch_rows: usize = 0;
+    var last_pos: u32 = 0;
+    for (batch, 0..) |it, k| {
+        batch_rows += it.rows;
+        last_pos = @max(last_pos, it.rr.last_pos);
+        out_slots[k] = .{ .kv = it.kv, .ring = it.layer.ring, .chunk = it.layer.chunk, .last_pos = it.rr.last_pos };
+    }
+    const b = batch[0].base;
+    return .{
+        .base = b,
+        .rr = .{ .rows = @intCast(batch_rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = @intCast(batch.len) },
+        .meta = .{ .pos = a(at(s.pos, b * 4)), .seg_of = a(at(s.seg_of, b * 4)), .segs = a(at(s.segs, 0)) },
+        .len = batch.len,
+    };
+}
+
+/// Every stream's attention a step at a time: multi-stream decode batches up to 8 slots per launch.
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment) !void {
     const w = &m.weights.layers[v.layer];
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     var items: [state.max_segments]Attend = undefined;
     var base: usize = 0;
+    var max_last_pos: u32 = 0;
     for (segments, items[0..segments.len], 0..) |seg, *it, si| {
         const cache = seg.cache;
         const layer0 = cache.attentionLayer(&m.weight_plan, v.cache_slot, seg.rows);
+        const last_pos: u32 = @intCast(cache.len + seg.rows - 1);
+        max_last_pos = @max(max_last_pos, last_pos);
         it.* = .{
             .cache = cache,
             .base = base,
             .rows = seg.rows,
-            .rr = .{ .rows = @intCast(seg.rows), .heads = 24, .kv_heads = 8, .last_pos = @intCast(cache.len + seg.rows - 1), .streams = 1 },
+            .rr = .{ .rows = @intCast(seg.rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = 1 },
             .layer = .{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau },
             .meta = .{ .pos = a(at(s.pos, base * 4)), .seg_of = a(at(s.seg_of, base * 4)), .segs = a(at(s.segs, si * @sizeOf(ap.Seg))) },
             .kv = .{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) },
         };
         base += seg.rows;
     }
+    const total = base;
     const all = items[0..segments.len];
     const scratch_stage = segments.len == 1 and segments[0].cache.pending == null;
     for (all) |it| stageConvKv(m, e, s, it.cache, v, it.base, it.rows, scratch_stage);
     e.barrier();
     for (all) |it| for ([_]bool{ true, false }) |key| convInputForAttention(m, e, s, it.cache, v, it.base, it.rows, scratch_stage, key);
     e.barrier();
-    for (all) |it| {
+    if (all.len == 1) {
+        const it = all[0];
         const b = it.base;
         attention.prep(&m.attention, e, it.rr, it.layer, prep, it.meta, .{ a(at(s.q_raw, b * state.query_width * 2)), a(at(s.k_conv, b * state.kv_width * 2)), a(at(s.v_conv, b * state.kv_width * 2)), a(at(s.rel_raw, b * state.rel_width * 2)) }, .{ a(r(w.attn.q_scale)), a(r(w.attn.rel_scale)) }, a(at(s.q_prep, b * state.query_width * 2)), a(at(s.rel_prep, b * state.rel_width * 2)), it.kv);
+    } else {
+        var bi: usize = 0;
+        while (bi < all.len) : (bi += ap.max_slots) {
+            var slot_items: [ap.max_slots]attention.Slot = undefined;
+            const sb = slotBatch(all[bi..@min(bi + ap.max_slots, all.len)], s, &slot_items);
+            const b = sb.base;
+            attention.prepSlots(&m.attention, e, sb.rr, all[0].layer.tau, prep, sb.meta, .{ a(at(s.q_raw, b * state.query_width * 2)), a(at(s.k_conv, b * state.kv_width * 2)), a(at(s.v_conv, b * state.kv_width * 2)), a(at(s.rel_raw, b * state.rel_width * 2)) }, .{ a(r(w.attn.q_scale)), a(r(w.attn.rel_scale)) }, a(at(s.q_prep, b * state.query_width * 2)), a(at(s.rel_prep, b * state.rel_width * 2)), slot_items[0..sb.len]);
+        }
     }
     e.barrier();
-    for (all) |it| attention.relTable(&m.attention, e, it.rr, a(at(s.rel_prep, it.base * state.rel_width * 2)), a(r(w.attn.rel_projection)), a(at(s.rel_tab, it.base * 24 * ap.extent * 2)));
+    const all_rr = ap.Rows{ .rows = @intCast(total), .heads = 24, .kv_heads = 8, .last_pos = max_last_pos, .streams = @intCast(all.len) };
+    attention.relTable(&m.attention, e, all_rr, a(at(s.rel_prep, 0)), a(r(w.attn.rel_projection)), a(at(s.rel_tab, 0)));
     e.barrier();
     const stride = s.attn_stride;
     if (all.len == 1) {
         const it = all[0];
         const b = it.base;
-        try attention.attend(&m.attention, e, it.rr, it.layer, stride, 0, it.meta, a(at(s.q_prep, b * state.query_width * 2)), it.kv, a(at(s.rel_tab, b * 24 * ap.extent * 2)), a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)), a(at(s.sink, b * 24 * 2)), a(at(s.gate, b * state.query_width * 2)), a(at(s.att, b * state.query_width * 2)));
+        const slots = @as(usize, s.rows) * 24 * stride * ap.subs;
+        try attention.attend(&m.attention, e, it.rr, it.layer, stride, slots, it.meta, a(at(s.q_prep, b * state.query_width * 2)), it.kv, a(at(s.rel_tab, b * 24 * ap.extent * 2)), a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)), a(at(s.sink, b * 24 * 2)), a(at(s.gate, b * state.query_width * 2)), a(at(s.att, b * state.query_width * 2)));
         e.barrier();
         return;
     }
-    for (all) |it| {
-        const b = it.base;
-        try attention.partials(&m.attention, e, it.rr, it.layer, stride, 0, it.meta, a(at(s.q_prep, b * state.query_width * 2)), it.kv, a(at(s.rel_tab, b * 24 * ap.extent * 2)), a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)));
+    var bi: usize = 0;
+    while (bi < all.len) : (bi += ap.max_slots) {
+        var slot_items: [ap.max_slots]attention.Slot = undefined;
+        const sb = slotBatch(all[bi..@min(bi + ap.max_slots, all.len)], s, &slot_items);
+        const b = sb.base;
+        try attention.partialsSlots(&m.attention, e, sb.rr, all[0].layer.window, stride, sb.meta, a(at(s.q_prep, b * state.query_width * 2)), a(at(s.rel_tab, b * 24 * ap.extent * 2)), a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)), slot_items[0..sb.len]);
     }
     e.barrier();
-    for (all) |it| {
-        const b = it.base;
-        try attention.merge(&m.attention, e, it.rr, it.layer, stride, 0, it.meta, a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)), a(at(s.sink, b * 24 * 2)), a(at(s.gate, b * state.query_width * 2)), a(at(s.att, b * state.query_width * 2)));
+    var same_chunk = true;
+    for (all[1..]) |it| if (it.layer.chunk != all[0].layer.chunk) {
+        same_chunk = false;
+        break;
+    };
+    if (same_chunk) {
+        const m_merge = attention.RowMeta{ .pos = a(at(s.pos, 0)), .seg_of = a(at(s.seg_of, 0)), .segs = a(at(s.segs, 0)) };
+        try attention.merge(&m.attention, e, all_rr, all[0].layer, stride, 0, m_merge, a(at(s.part_o, 0)), a(at(s.part_ml, 0)), a(at(s.sink, 0)), a(at(s.gate, 0)), a(at(s.att, 0)));
+    } else {
+        for (all) |it| {
+            const b = it.base;
+            var rr_dec = it.rr;
+            rr_dec.streams = @intCast(all.len);
+            try attention.merge(&m.attention, e, rr_dec, it.layer, stride, 0, it.meta, a(at(s.part_o, b * 24 * @as(usize, stride) * ap.head_dim * 4)), a(at(s.part_ml, b * 24 * @as(usize, stride) * 8)), a(at(s.sink, b * 24 * 2)), a(at(s.gate, b * state.query_width * 2)), a(at(s.att, b * state.query_width * 2)));
+        }
     }
     e.barrier();
 }
@@ -397,48 +446,9 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
     if (m.dense_units) |*du| {
-        dense_units.encode6(du, e, .{
-            .xq = at(s.q_norm, 0),
-            .xk = knorm,
-            .xv = vnorm,
-            .wq = r(w.attn.wq),
-            .wk = r(w.attn.wk),
-            .wv = r(w.attn.wv),
-            .wr = r(w.attn.wr),
-            .ws = r(w.attn.sink),
-            .wg = r(w.attn.gate),
-            .yq = at(s.q_raw, 0),
-            .yk = at(s.k_raw, 0),
-            .yv = at(s.v_raw, 0),
-            .yr = at(s.rel_raw, 0),
-            .ys = at(s.sink, 0),
-            .yg = at(s.gate, 0),
-        }, .{
-            .rows = @intCast(rows),
-            .k = state.hidden,
-            .nq = @intCast(w.attn.wq.shape[0]),
-            .nk = @intCast(w.attn.wk.shape[0]),
-            .nv = @intCast(w.attn.wv.shape[0]),
-            .nr = @intCast(w.attn.wr.shape[0]),
-            .ns = @intCast(w.attn.sink.shape[0]),
-            .ng = @intCast(w.attn.gate.shape[0]),
-        }) catch unreachable;
+        dense_units.encode6(du, e, .{ .xq = at(s.q_norm, 0), .xk = knorm, .xv = vnorm, .wq = r(w.attn.wq), .wk = r(w.attn.wk), .wv = r(w.attn.wv), .wr = r(w.attn.wr), .ws = r(w.attn.sink), .wg = r(w.attn.gate), .yq = at(s.q_raw, 0), .yk = at(s.k_raw, 0), .yv = at(s.v_raw, 0), .yr = at(s.rel_raw, 0), .ys = at(s.sink, 0), .yg = at(s.gate, 0) }, .{ .rows = @intCast(rows), .k = state.hidden, .nq = @intCast(w.attn.wq.shape[0]), .nk = @intCast(w.attn.wk.shape[0]), .nv = @intCast(w.attn.wv.shape[0]), .nr = @intCast(w.attn.wr.shape[0]), .ns = @intCast(w.attn.sink.shape[0]), .ng = @intCast(w.attn.gate.shape[0]) }) catch unreachable;
     } else if (rows <= 32) {
-        try dense_fuse.encode6(
-            &m.dense_fuse,
-            e,
-            df(at(s.q_norm, 0)),
-            df(knorm),
-            df(vnorm),
-            .{ .w = df(r(w.attn.wq)), .y = df(at(s.q_raw, 0)), .n = state.query_width },
-            .{ .w = df(r(w.attn.wk)), .y = df(at(s.k_raw, 0)), .n = state.kv_width },
-            .{ .w = df(r(w.attn.wv)), .y = df(at(s.v_raw, 0)), .n = state.kv_width },
-            .{ .w = df(r(w.attn.wr)), .y = df(at(s.rel_raw, 0)), .n = state.rel_width },
-            .{ .w = df(r(w.attn.sink)), .y = df(at(s.sink, 0)), .n = 24 },
-            .{ .w = df(r(w.attn.gate)), .y = df(at(s.gate, 0)), .n = state.query_width },
-            @intCast(rows),
-            state.hidden,
-        );
+        try dense_fuse.encode6(&m.dense_fuse, e, df(at(s.q_norm, 0)), df(knorm), df(vnorm), .{ .w = df(r(w.attn.wq)), .y = df(at(s.q_raw, 0)), .n = state.query_width }, .{ .w = df(r(w.attn.wk)), .y = df(at(s.k_raw, 0)), .n = state.kv_width }, .{ .w = df(r(w.attn.wv)), .y = df(at(s.v_raw, 0)), .n = state.kv_width }, .{ .w = df(r(w.attn.wr)), .y = df(at(s.rel_raw, 0)), .n = state.rel_width }, .{ .w = df(r(w.attn.sink)), .y = df(at(s.sink, 0)), .n = 24 }, .{ .w = df(r(w.attn.gate)), .y = df(at(s.gate, 0)), .n = state.query_width }, @intCast(rows), state.hidden);
     } else {
         dense(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
         dense(m, e, w.attn.wk, knorm, at(s.k_raw, 0), rows);
@@ -498,7 +508,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         total += seg.rows;
         for (0..seg.rows) |i| {
             s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-            s.seg_of.slice(i32, rows)[base + i] = 0;
+            s.seg_of.slice(i32, rows)[base + i] = @intCast(si % ap.max_slots);
         }
         s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         base += seg.rows;
