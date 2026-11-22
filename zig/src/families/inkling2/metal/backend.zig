@@ -302,7 +302,7 @@ pub const Metal = struct {
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
-        const words = (self.vocab() + 31) / 32;
+        const words = maskWords(self.model.config.text.vocab);
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
@@ -312,6 +312,7 @@ pub const Metal = struct {
         for (windows, out, 0..) |w, o, i| {
             const rows = w.rows();
             if (rows == 0 or rows > st.window_rows or total + rows > st.batch_rows or w.parents != null or w.held != 0 or o.sampled.len != rows or o.drafts.len != rows - 1 or w.positions.len != rows) return error.UnsupportedInklingWindow;
+            if (w.masks.len != 0 and w.masks.len != rows * words) return error.InvalidInklingMasks;
             const cache = try self.cacheOf(w.stream);
             if (cache.pending != null) return error.InklingWindowAlreadyOpen;
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
@@ -334,7 +335,7 @@ pub const Metal = struct {
             @memcpy(o.drafts, w.tokens);
             for (0..seg.rows) |r| {
                 const l = all[(base + r) * self.vocab() ..][0..self.vocab()];
-                const mask = if (w.masks.len >= (r + 1) * words) w.masks[r * words ..][0..words] else &.{};
+                const mask = maskRow(w.masks, words, r);
                 o.sampled[r] = try self.draw(l, w.stream.sampling, w.positions[r], mask);
                 if (o.rows.len == seg.rows) o.rows[r] = logprobRow(l, o.sampled[r], w.stream.logprobs orelse 0);
             }
@@ -400,6 +401,27 @@ pub const Metal = struct {
         cast(ptr).gpa.destroy(snap);
     }
 };
+
+/// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, padding included.
+fn maskWords(vocab: u32) usize {
+    return (@as(usize, vocab) + 31) / 32;
+}
+
+/// Row `r` of a window's masks, or none where the window has none.
+fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
+    return if (masks.len == 0) &.{} else masks[r * words ..][0..words];
+}
+
+test "a window's masks step by the padded vocabulary's words" {
+    const words = maskWords(201024);
+    try std.testing.expectEqual(@as(usize, 6282), words);
+    var masks: [3 * 6282]u32 = @splat(0);
+    masks[2 * 6282] = 1;
+    try std.testing.expectEqual(@as(usize, 0), maskRow(&.{}, words, 2).len);
+    try std.testing.expectEqual(@as(u32, 0), maskRow(&masks, words, 1)[0]);
+    try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
+    try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
+}
 
 fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
