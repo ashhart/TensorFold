@@ -42,11 +42,14 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     if (!keyed(r)) return false;
     const spans = h.spans(r);
+    const previous_salt = store.salt;
+    store.salt = r.cacheSalt();
+    defer store.salt = previous_salt;
     const have: u32 = if (store.find(r.cacheKey(), r.chunks, spans)) |e| e.at else 0;
     const least = have +| @max(store.rules.min_gap, 1); // a cut this far past what is kept already
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
-        if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
+        if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request) or l.request.cacheSalt() != r.cacheSalt()) continue;
         // a single-flight join: the leader's prompt is the waiter's own; armed only when its fill keeps anything
         if (joinable(h, r, spans, l) and room(h, job, l) and l.marks.len > 0 and store.most != 0) {
             best = .{ .leader = l, .id = l.id, .whole = true };
@@ -69,6 +72,7 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
 
 /// Whether filling `l` is the waiter's own prompt: key tokens, raw tokens and spans, no mark consulted (lock held).
 fn joinable(h: *LaneHost, r: *const api.Request, spans: []const [2]u32, l: *const Job) bool {
+    if (r.cacheSalt() != l.request.cacheSalt()) return false;
     if (!std.mem.eql(u32, r.cacheKey(), l.request.cacheKey())) return false;
     if (!std.mem.eql(u32, r.prompt, l.request.prompt)) return false;
     return modes.equal(spans, h.spans(l.request), @intCast(l.request.prompt.len));
