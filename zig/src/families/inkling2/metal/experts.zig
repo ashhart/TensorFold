@@ -27,7 +27,9 @@ pub const function_names = [_][:0]const u8{
 /// The columns the units kernels read a row: experts_units.metal's INK2_GU_K and INK2_DOWN_K.
 const units_gu_k = 2304;
 const units_down_k = 1152;
-const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units", "tf_ink2_dense_units" };
+const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units", "tf_ink2_dense_units", "tf_ink2_nvfp4_gu_units_t", "tf_ink2_nvfp4_down_units_t", "tf_ink2_mxfp8_gu_units_t", "tf_ink2_mxfp8_down_units_t" };
+/// A chunk of more rows than this gives an expert enough pairs for the turned tiles, 32 pairs a band.
+const turned_rows: u32 = 512;
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
@@ -208,8 +210,19 @@ pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, sca
     }
 }
 
+const Globals = struct { amax: Ref, denominator: Ref };
+
 /// gu, or the down products (`down`), after group on the tensor units: an op is 16 of an expert's pairs by 32 rows.
-pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, out: Ref, c: Call) !void {
+pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    return launchUnits(p, e, down, c.rows > turned_rows, x, w, scales, nv_globals, out, c);
+}
+
+/// The same products on the turned tiles, 16 rows by 32 of an expert's pairs an op: the same sums, for wide chunks.
+pub fn unitsTurned(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    return launchUnits(p, e, down, true, x, w, scales, nv_globals, out, c);
+}
+
+fn launchUnits(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, turned: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
     try plan.check(c);
     const pipes = p.units orelse return error.NoTensorUnits;
     // Gate and up rows interleave, so gu has two weight rows an output; the kernels fix the columns of each product.
@@ -220,15 +233,15 @@ pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: 
             const g = nv_globals orelse return error.MissingNvfp4Globals;
             for ([_]Ref{ x, w, scales, g.amax, g.denominator, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 8);
-            e.setPipeline(pipes[@intFromBool(down)]);
+            e.setPipeline(pipes[(if (turned) @as(usize, 6) else 0) + @intFromBool(down)]);
         },
         .mxfp8 => {
             for ([_]Ref{ x, w, scales, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 6);
-            e.setPipeline(pipes[2 + @as(usize, @intFromBool(down))]);
+            e.setPipeline(pipes[(if (turned) @as(usize, 6) else 0) + 2 + @as(usize, @intFromBool(down))]);
         },
     }
-    e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(if (turned) weight_rows / 16 else (weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
 const LogitArgs = extern struct { rows: u32, vocab: u32 };

@@ -11,7 +11,7 @@ const host = @import("tensorfold").inkling2_metal_host.experts;
 const controls = @import("metal_inkling2_units_controls.zig");
 const src = @import("inkling2_metal");
 
-pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down };
+pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down, nv_gu_t, nv_down_t, mx_gu_t, mx_down_t };
 
 /// The columns the kernels fix for each product, and the experts `group` lists.
 const gu_k = 2304;
@@ -25,6 +25,10 @@ fn symbol(k: Kind) []const u8 {
         .nv_down => "tf_ink2_nvfp4_down_units",
         .mx_gu => "tf_ink2_mxfp8_gu_units",
         .mx_down => "tf_ink2_mxfp8_down_units",
+        .nv_gu_t => "tf_ink2_nvfp4_gu_units_t",
+        .nv_down_t => "tf_ink2_nvfp4_down_units_t",
+        .mx_gu_t => "tf_ink2_mxfp8_gu_units_t",
+        .mx_down_t => "tf_ink2_mxfp8_down_units_t",
     };
 }
 
@@ -34,19 +38,32 @@ fn mutation(k: Kind) controls.Mutation {
         .nv_down => .nv_down_phi,
         .mx_gu => .mx_gu_scale,
         .mx_down => .mx_down_scale,
+        .nv_gu_t => .nv_gu_t_phi,
+        .nv_down_t => .nv_down_t_phi,
+        .mx_gu_t => .mx_gu_t_scale,
+        .mx_down_t => .mx_down_t_scale,
     };
 }
 
 fn isNv(k: Kind) bool {
-    return k == .nv_gu or k == .nv_down;
+    return k == .nv_gu or k == .nv_down or k == .nv_gu_t or k == .nv_down_t;
 }
 fn isGu(k: Kind) bool {
-    return k == .nv_gu or k == .mx_gu;
+    return k == .nv_gu or k == .mx_gu or k == .nv_gu_t or k == .mx_gu_t;
+}
+/// The turned tiles: 16 weight rows by 32 of an expert's pairs an op.
+fn isTurned(k: Kind) bool {
+    return k == .nv_gu_t or k == .nv_down_t or k == .mx_gu_t or k == .mx_down_t;
 }
 /// An op is 16 columns: the shared bound on its roundings a step, then the eight partial sums and the epilogue.
 fn depth(s: c.Shape) usize {
     return s.k / 16 * contract.attention_range.mma_step + 8 + 3;
 }
+
+const gu_shapes = [_]c.Shape{ .{ .rows = 2, .n = 16, .k = gu_k }, .{ .rows = 5, .n = 32, .k = gu_k }, .{ .rows = 20, .n = 16, .k = gu_k } };
+const gu_turned_shapes = [_]c.Shape{ .{ .rows = 2, .n = 16, .k = gu_k }, .{ .rows = 5, .n = 32, .k = gu_k }, .{ .rows = 40, .n = 16, .k = gu_k } };
+const down_shapes = [_]c.Shape{ .{ .rows = 2, .n = 32, .k = down_k }, .{ .rows = 5, .n = 64, .k = down_k }, .{ .rows = 20, .n = 32, .k = down_k } };
+const down_turned_shapes = [_]c.Shape{ .{ .rows = 2, .n = 32, .k = down_k }, .{ .rows = 5, .n = 64, .k = down_k }, .{ .rows = 40, .n = 32, .k = down_k } };
 
 pub fn spec(k: Kind, control: bool) c.Spec {
     const base = if (control) mutation(k).name() else switch (k) {
@@ -54,6 +71,10 @@ pub fn spec(k: Kind, control: bool) c.Spec {
         .nv_down => "metal inkling2 units tf_ink2_nvfp4_down_units",
         .mx_gu => "metal inkling2 units tf_ink2_mxfp8_gu_units",
         .mx_down => "metal inkling2 units tf_ink2_mxfp8_down_units",
+        .nv_gu_t => "metal inkling2 units tf_ink2_nvfp4_gu_units_t",
+        .nv_down_t => "metal inkling2 units tf_ink2_nvfp4_down_units_t",
+        .mx_gu_t => "metal inkling2 units tf_ink2_mxfp8_gu_units_t",
+        .mx_down_t => "metal inkling2 units tf_ink2_mxfp8_down_units_t",
     };
     return .{
         .name = base,
@@ -62,12 +83,9 @@ pub fn spec(k: Kind, control: bool) c.Spec {
         .ops = if (isGu(k)) 12 else 3,
         .mids = if (isGu(k)) 3 else 0,
         .out = .bf16,
-        // An expert's pairs go 16 a band: one expert takes every row here, so 20 rows cross a band.
-        .tiles = .{ .{ .size = 16 }, .{}, .{} },
-        .served = if (isGu(k))
-            &.{ .{ .rows = 2, .n = 16, .k = gu_k }, .{ .rows = 5, .n = 32, .k = gu_k }, .{ .rows = 20, .n = 16, .k = gu_k } }
-        else
-            &.{ .{ .rows = 2, .n = 32, .k = down_k }, .{ .rows = 5, .n = 64, .k = down_k }, .{ .rows = 20, .n = 32, .k = down_k } },
+        // One expert takes every row here, so 20 rows cross a 16-pair band and 40 a turned tile's 32.
+        .tiles = .{ .{ .size = if (isTurned(k)) 32 else 16 }, .{}, .{} },
+        .served = if (isGu(k)) (if (isTurned(k)) &gu_turned_shapes else &gu_shapes) else if (isTurned(k)) &down_turned_shapes else &down_shapes,
         .sums = .{ .f16 = 0, .bf16 = 0, .why = "independent FP64 terms and explicit BF16 nodes" },
     };
 }
@@ -203,7 +221,8 @@ pub const Probe = struct {
         const out = hr(p.refs[if (nv) 6 else 4]);
         try host.group(&p.pipes, e, ids, p.call());
         e.barrier();
-        try host.units(&p.pipes, e, !isGu(p.kind), hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), if (nv) .{ .amax = hr(p.refs[3]), .denominator = hr(p.refs[4]) } else null, out, p.call());
+        const launch = if (isTurned(p.kind)) &host.unitsTurned else &host.units;
+        try launch(&p.pipes, e, !isGu(p.kind), hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), if (nv) .{ .amax = hr(p.refs[3]), .denominator = hr(p.refs[4]) } else null, out, p.call());
         try p.rig.finish(pass);
     }
 
@@ -289,7 +308,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [8]Probe = undefined,
+    probes: [16]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {
@@ -309,7 +328,7 @@ pub const Suite = struct {
     }
 };
 
-test "contract labels resolve to the four units entries" {
+test "contract labels resolve to the units entries" {
     for (std.enums.values(Kind)) |kind| {
         const name = spec(kind, false).name;
         try std.testing.expect(std.mem.startsWith(u8, name, "metal inkling2 units "));
