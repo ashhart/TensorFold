@@ -90,10 +90,10 @@ const cases = [_]Case{
     .{ .piece = .shared, .err = error.OutOfMemory, .mine = true, .other = true },
 };
 
-/// State `i`'s read started and finished.
-fn started(p: *prefetch.Prefetch, r: *rows.Rows, i: usize) !void {
+/// State `i`'s read registered; `wait` starts its producer, so `take` joins `.reading` or `.ready`, never `.queued`.
+fn started(p: *prefetch.Prefetch, r: *rows.Rows, i: usize, wait: bool) !void {
     const name = p.start(r, i) orelse return error.NotReadAhead;
-    try t.expectEqual(@as(?prefetch.Phase, .ready), ahead.settled(p, name));
+    if (wait) ahead.available(p, name);
 }
 
 /// Conversation 1's next turn recalled with its copy failing as `c` says, both disk states read ahead first or not.
@@ -116,8 +116,8 @@ fn recalled(a: Allocator, tag: []const u8, c: Case, read_ahead: bool) !void {
     const other = x.r.states.items[theirs].name;
     const f = if (read_ahead) try prefetch.make(x.r, t.io, .{}) else null;
     if (f) |p| {
-        try started(p, x.r, mine);
-        try started(p, x.r, theirs);
+        try started(p, x.r, mine, true);
+        try started(p, x.r, theirs, false);
     }
     x.f.scatters = .{ .after = if (c.piece == .own) plan.pieces.len - 1 else 0, .err = c.err };
     // the failed read leaves the turn to prefill what it would have restored
@@ -132,14 +132,15 @@ fn recalled(a: Allocator, tag: []const u8, c: Case, read_ahead: bool) !void {
     try t.expectEqual(c.other, exists(x.r, other, ".st"));
     try t.expectEqual(c.mine or c.other, exists(x.r, shared.name, ".blk"));
     if (f) |p| {
+        // the used read left with its request; a forgotten read is freed now (`drop` waits on a mid-stream fill)
+        ahead.until(p, "freed", @as(u64, 1) + @intFromBool(!c.other));
         const k = ahead.counts(p);
         try t.expectEqual(@as(u64, 2), k.made);
         try t.expectEqual(@as(u64, 1), k.used);
-        // a forgotten state's read is freed there and then, and counted cancelled if nobody used it
-        try t.expectEqual(@as(u64, @intFromBool(!c.mine)) + @intFromBool(!c.other), k.freed);
+        try t.expectEqual(@as(u64, 1) + @as(u64, @intFromBool(!c.other)), k.freed);
         try t.expectEqual(@as(u64, @intFromBool(!c.other)), k.cancelled);
-        try t.expectEqual(c.mine, ahead.settled(p, own.name) != null);
-        try t.expectEqual(c.other, ahead.settled(p, other) != null);
+        try t.expectEqual(@as(?prefetch.Phase, null), ahead.phased(p, own.name));
+        try t.expectEqual(c.other, ahead.phased(p, other) != null);
     }
 }
 

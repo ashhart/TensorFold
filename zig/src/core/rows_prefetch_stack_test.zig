@@ -9,23 +9,34 @@ const prefetch = @import("rows_prefetch.zig");
 const fixture = @import("rows_async_fixture.zig");
 const t = std.testing;
 
+const Stager = struct {
+    /// A save streams its chunks to the worker, so it stages on its own thread, never one holding the writer.
+    fn run(s: *@import("prompt_cache.zig").Store) void {
+        s.remove(0);
+    }
+};
+
 test "prefetch: a queued write publishes before the next request reads its exact image ahead" {
-    const x = try fixture.Fixture.open("fetch-queued", .evicted, false, 9 << 20);
+    const x = try fixture.Fixture.open("fetch-queued", .evicted, false, 18 << 20);
     defer x.close();
     var gate: fixture.Gate = .{};
     defer gate.release.store(true, .release);
     x.r.file_io = gate.io();
     const first = fixture.prompt(1);
     try x.keep(&first, 900);
-    x.s.remove(0);
+    const stager1 = try std.Thread.spawn(.{}, Stager.run, .{&x.s});
     try fixture.Gate.wait(&gate.entered);
     const next = fixture.prompt(2);
     try x.keep(&next, 900);
     const kept: *@import("rows_fake.zig").Kept = @ptrCast(@alignCast(x.s.entries.items[0].saved));
     const expected = try t.allocator.dupe(u8, kept.img);
     defer t.allocator.free(expected);
-    x.s.remove(0);
-    try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
+    const stager2 = try std.Thread.spawn(.{}, Stager.run, .{&x.s});
+    const staged = waits.deadline();
+    while (x.r.worker.?.pending() != 2) {
+        if (rows.write.nowNs() >= staged) return error.StagerStalled;
+        rows.write.io.nap();
+    }
     var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
     defer cfg.deinit(std.testing.allocator);
     var core: lanes.Engine = undefined;
@@ -59,6 +70,8 @@ test "prefetch: a queued write publishes before the next request reads its exact
     try t.expect(x.f.restored_ok);
     try t.expectEqual(@as(u64, 1), f.counts.used);
     try t.expectEqual(@as(u64, 2), x.r.counts.writes);
+    stager1.join();
+    stager2.join();
 }
 
 test "prefetch: closing the store does not join a blocked read past its deadline" {
@@ -111,7 +124,8 @@ test "prefetch: a failed or late staged write releases its request without readi
         x.r.file_io = gate.io();
         const tokens = fixture.prompt(4);
         try x.keep(&tokens, 900);
-        x.s.remove(0);
+        const stager = try std.Thread.spawn(.{}, Stager.run, .{&x.s});
+        defer stager.join();
         try fixture.Gate.wait(&gate.entered);
         var cfg = try lanes.Config.init(std.testing.allocator, .{}, 1, 0);
         defer cfg.deinit(std.testing.allocator);
@@ -142,4 +156,34 @@ test "prefetch: a failed or late staged write releases its request without readi
         gate.release.store(true, .release);
         try x.settle();
     }
+}
+
+test "prefetch: a held writer keeps its stager inside the fixed chunks until released" {
+    const x = try fixture.Fixture.open("fetch-chunk-hold", .evicted, false, 9 << 20);
+    defer x.close();
+    var gate: fixture.Gate = .{};
+    defer gate.release.store(true, .release);
+    x.r.file_io = gate.io();
+    const tokens = fixture.prompt(5);
+    try x.keep(&tokens, 900);
+    var removed: std.atomic.Value(bool) = .init(false);
+    const Watch = struct {
+        fn run(s: *@import("prompt_cache.zig").Store, flag: *std.atomic.Value(bool)) void {
+            s.remove(0);
+            flag.store(true, .release);
+        }
+    };
+    // The save outgrows the two handoff chunks: only the stager waits on the held writer, never the caller.
+    const stager = try std.Thread.spawn(.{}, Watch.run, .{ &x.s, &removed });
+    defer stager.join();
+    try fixture.Gate.wait(&gate.entered);
+    try t.expectEqual(@as(usize, 1), x.r.worker.?.pending());
+    gate.release.store(true, .release);
+    const end = waits.deadline();
+    while (!removed.load(.acquire)) {
+        if (rows.write.nowNs() >= end) return error.StagerStalled;
+        rows.write.io.nap();
+    }
+    try x.settle();
+    try t.expectEqual(@as(usize, 1), x.r.states.items.len);
 }
