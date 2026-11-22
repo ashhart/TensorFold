@@ -166,7 +166,7 @@ __device__ __forceinline__ void add_rms_row(void* __restrict__ x, float* __restr
 }  // namespace tf_norms
 
 // y = x * rsqrt(mean(x^2) + eps) * w (w null: no weight), in fp32, rounded once to y's kind.
-extern "C" __global__ void __launch_bounds__(NT) tf_rms_rows(const void* x, int x_kind, const float* w, void* y,
+extern "C" __global__ void __launch_bounds__(NT) tf_rms_rows(void* x, int x_kind, const float* w, void* y,
                                                              int y_kind, int width, float eps) {
     gemma4_pdl::enter();
 #define TF_RMS(XK, YK)                                                                                            \
@@ -202,7 +202,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_rms_rows_sums(__nv_bfloat16*
 }
 
 // res (fp32, in place) += rms(x) * w1 (a sandwich norm; null: res += x), then y = rms(res) * w2 in y's kind.
-extern "C" __global__ void __launch_bounds__(NT) tf_add_rms_rows(const void* x, int x_kind, float* res, const float* w1,
+extern "C" __global__ void __launch_bounds__(NT) tf_add_rms_rows(void* x, int x_kind, float* res, const float* w1,
                                                                  const float* w2, void* y, int y_kind, int width,
                                                                  float eps) {
     gemma4_pdl::enter();
@@ -403,15 +403,15 @@ __device__ __forceinline__ void add_rms_h(__nv_bfloat16* __restrict__ x, __nv_bf
 
 }  // namespace tf_norms
 
-extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h(const __nv_bfloat16* x, const __nv_bfloat16* r,
+extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h(__nv_bfloat16* x, __nv_bfloat16* r,
                                                                          const __nv_bfloat16* w, __nv_bfloat16* h,
                                                                          __nv_bfloat16* y, float* xs, int width, float eps) {
     gemma4_pdl::enter();
     add_rms_h(x, r, w, h, y, xs, width, eps);
 }
 
-extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h_f32w(const __nv_bfloat16* x,
-                                                                              const __nv_bfloat16* r, const float* w,
+extern "C" __global__ void __launch_bounds__(VNT) tf_add_rms_rows_bf16h_f32w(__nv_bfloat16* x,
+                                                                              __nv_bfloat16* r, const float* w,
                                                                               __nv_bfloat16* h, __nv_bfloat16* y,
                                                                               float* xs, int width, float eps) {
     gemma4_pdl::enter();
@@ -459,24 +459,24 @@ __device__ __forceinline__ void gated_rms(__nv_bfloat16* __restrict__ y, long lo
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_64(const __nv_bfloat16* y, long long y_ld,
-                                                                        const __nv_bfloat16* z, long long z_ld,
+extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_64(__nv_bfloat16* y, long long y_ld,
+                                                                        __nv_bfloat16* z, long long z_ld,
                                                                         const __nv_bfloat16* w, __nv_bfloat16* out,
                                                                         float* xs, int heads, float eps) {
     gemma4_pdl::enter();
     gated_rms<8>(y, y_ld, z, z_ld, w, out, xs, heads, eps);
 }
 
-extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_128(const __nv_bfloat16* y, long long y_ld,
-                                                                         const __nv_bfloat16* z, long long z_ld,
+extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_128(__nv_bfloat16* y, long long y_ld,
+                                                                         __nv_bfloat16* z, long long z_ld,
                                                                          const __nv_bfloat16* w, __nv_bfloat16* out,
                                                                          float* xs, int heads, float eps) {
     gemma4_pdl::enter();
     gated_rms<16>(y, y_ld, z, z_ld, w, out, xs, heads, eps);
 }
 
-extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(const __nv_bfloat16* y, long long y_ld,
-                                                                         const __nv_bfloat16* z, long long z_ld,
+extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(__nv_bfloat16* y, long long y_ld,
+                                                                         __nv_bfloat16* z, long long z_ld,
                                                                          const __nv_bfloat16* w, __nv_bfloat16* out,
                                                                          float* xs, int heads, float eps) {
     gemma4_pdl::enter();

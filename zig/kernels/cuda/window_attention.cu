@@ -280,7 +280,7 @@ __device__ __forceinline__ bool wattn_rows(__nv_bfloat16* __restrict__ q, __nv_b
 
 // A block with a NaN or infinite output, run again with ODD on (out of the common path).
 template <int D, int WARPS, int HPC, int NS>
-__device__ __noinline__ void wattn_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
+__device__ __noinline__ void wattn_odd(__nv_bfloat16* q, __nv_bfloat16* kc, __nv_bfloat16* vc,
                                        __nv_bfloat16* out, int p0, int W, int H, int HK, int G, float scale, int win,
                                        int ring) {
     wattn_rows<D, WARPS, HPC, NS, true>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring);
@@ -298,7 +298,7 @@ wattn_kernel(__nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc,
 
 // The paged prompt rows' run again with ODD on: wattn_odd's arithmetic, its own symbol so wattn_odd keeps its name.
 template <int D, int WARPS, int HPC, int NS>
-__device__ __noinline__ void wattn_odd_pg(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
+__device__ __noinline__ void wattn_odd_pg(__nv_bfloat16* q, __nv_bfloat16* kc, __nv_bfloat16* vc,
                                           __nv_bfloat16* out, int p0, int W, int H, int HK, int G, float scale,
                                           int win, int ring, Pg pg) {
     wattn_rows<D, WARPS, HPC, NS, true>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg);
@@ -553,8 +553,8 @@ __device__ __forceinline__ bool decode_tc_rows(
 }
 
 // A NaN output, the block (or its one warp with keys) again: NaN and inf out of the mma, added at float64's weights.
-__device__ __noinline__ void decode_tc_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
-                                           __nv_bfloat16* out, const int* pos, const int* slot, int h, int hk, int win,
+__device__ __noinline__ void decode_tc_odd(__nv_bfloat16* q, __nv_bfloat16* kc, __nv_bfloat16* vc,
+                                           __nv_bfloat16* out, int* pos, int* slot, int h, int hk, int win,
                                            long long ring, float scale) {
     decode_tc_rows<true>(q, kc, vc, out, pos, slot, h, hk, win, ring, scale);
 }
@@ -571,11 +571,11 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
 } // namespace tf_window_prompt
 
 // Head dim 128, eight warps, four or eight query heads a block, eight staging slots.
-template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(const __nv_bfloat16* __restrict__,
-    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
+template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(__nv_bfloat16* __restrict__,
+    __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
     int, int, float, int, int);
-template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv_bfloat16* __restrict__,
-    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
+template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(__nv_bfloat16* __restrict__,
+    __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
     int, int, float, int, int);
 
 // Kolibri-1's full layers' prompt rows over pages: head dim 128, eight warps, four or eight query heads a block.
