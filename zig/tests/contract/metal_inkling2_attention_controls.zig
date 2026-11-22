@@ -2,17 +2,25 @@
 const std = @import("std");
 const contract = @import("contract");
 
-pub const Which = enum { prep_sliding, prep_global, rel_table, decode_sliding, decode_global, prompt_m5, prompt_pre_m5 };
+pub const Which = enum { prep_sliding, prep_global, rel_table, decode_sliding, decode_global, prompt_m5, prompt_pre_m5, prompt_sliding_m5, prompt_sliding_pre_m5 };
 pub fn function(w: Which) []const u8 {
     return switch (w) {
         .prep_sliding, .prep_global => "tf_ink2_prep",
         .rel_table => "tf_ink2_rel_table",
         .decode_sliding, .decode_global => "tf_ink2_attn_scalar",
-        .prompt_m5, .prompt_pre_m5 => "tf_ink2_attn_prompt",
+        .prompt_m5, .prompt_pre_m5, .prompt_sliding_m5, .prompt_sliding_pre_m5 => "tf_ink2_attn_prompt",
     };
 }
 pub fn isPrompt(w: Which) bool {
-    return w == .prompt_m5 or w == .prompt_pre_m5;
+    return w == .prompt_m5 or w == .prompt_pre_m5 or isPromptSliding(w);
+}
+/// The prompt kernel on a sliding layer: a window of keys a row, a tile of keys a chunk.
+pub fn isPromptSliding(w: Which) bool {
+    return w == .prompt_sliding_m5 or w == .prompt_sliding_pre_m5;
+}
+/// The prompt kernel built for chips before the M5.
+pub fn isPre(w: Which) bool {
+    return w == .prompt_pre_m5 or w == .prompt_sliding_pre_m5;
 }
 pub fn isAttention(w: Which) bool {
     return w == .decode_sliding or w == .decode_global or isPrompt(w);
@@ -27,6 +35,8 @@ pub const Mutation = enum {
     merge_no_sink,
     prompt_late_bias,
     prompt_pre_late_bias,
+    prompt_wide_window,
+    prompt_pre_wide_window,
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
             .none => "",
@@ -37,6 +47,8 @@ pub const Mutation = enum {
             .merge_no_sink => "control: metal inkling2 attention global merge without sink tf_ink2_merge",
             .prompt_late_bias => "control: metal inkling2 prompt m5 first key bias boosted tf_ink2_attn_prompt",
             .prompt_pre_late_bias => "control: metal inkling2 prompt pre-m5 first key bias boosted tf_ink2_attn_prompt",
+            .prompt_wide_window => "control: metal inkling2 prompt m5 sliding window half as long tf_ink2_attn_prompt",
+            .prompt_pre_wide_window => "control: metal inkling2 prompt pre-m5 sliding window half as long tf_ink2_attn_prompt",
         };
     }
     pub fn gate(m: Mutation) ?contract.gates.Gate {
@@ -52,6 +64,8 @@ pub const Mutation = enum {
             .merge_no_sink => .decode_global,
             .prompt_late_bias => .prompt_m5,
             .prompt_pre_late_bias => .prompt_pre_m5,
+            .prompt_wide_window => .prompt_sliding_m5,
+            .prompt_pre_wide_window => .prompt_sliding_pre_m5,
         };
     }
     const Edit = struct { from: []const u8, to: []const u8 };
@@ -82,6 +96,10 @@ pub const Mutation = enum {
                 .from = "const float bias = live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;",
                 .to = "const float bias = (live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f) + (live && kp == b_lo ? 128.0f : 0.0f);",
             },
+            .prompt_wide_window, .prompt_pre_wide_window => .{
+                .from = "(a.window == 0u || kp + a.window > pos);",
+                .to = "(a.window == 0u || kp + a.window / 2u > pos);",
+            },
         };
     }
 };
@@ -99,7 +117,7 @@ test "Inkling 2 attention controls each hit one live statement and cannot apply 
     for (std.enums.values(Mutation)) |m| {
         if (m == .none) continue;
         const w = m.which();
-        const plain = if (isPrompt(w)) (if (w == .prompt_pre_m5) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
+        const plain = if (isPrompt(w)) (if (isPre(w)) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
         const edited = try apply(a, plain, m);
         defer a.free(edited);
         try std.testing.expect(std.mem.indexOf(u8, edited, m.edit().to) != null);

@@ -23,6 +23,8 @@ const rel_shapes = [_]c.Shape{ .{ .rows = 4, .n = H * EXTENT, .k = R }, .{ .rows
 const sliding_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 2049 } };
 const global_shapes = [_]c.Shape{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 2, .n = H * D, .k = 1030 } };
 const prompt_shapes = [_]c.Shape{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 } };
+/// A window that starts inside a tile, one that wraps the ring, and one not yet full.
+const prompt_sliding_shapes = [_]c.Shape{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 2049 }, .{ .rows = 64, .n = H * D, .k = 80 } };
 fn depth(s: c.Shape) usize {
     return D + 4 * s.k + 64;
 }
@@ -61,6 +63,14 @@ fn spec(w: Which) c.Spec {
         .prompt_pre_m5 => {
             s.name = "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt";
             s.served = &prompt_shapes;
+        },
+        .prompt_sliding_m5 => {
+            s.name = "metal inkling2 prompt m5 sliding tf_ink2_attn_prompt";
+            s.served = &prompt_sliding_shapes;
+        },
+        .prompt_sliding_pre_m5 => {
+            s.name = "metal inkling2 prompt pre-m5 sliding tf_ink2_attn_prompt";
+            s.served = &prompt_sliding_shapes;
         },
     }
     return s;
@@ -163,7 +173,7 @@ pub const Probe = struct {
     pml: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, m: Mutation) !Probe {
-        const plain = if (controls.isPrompt(w)) (if (w == .prompt_pre_m5) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
+        const plain = if (controls.isPrompt(w)) (if (controls.isPre(w)) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
         const text = try controls.apply(a, plain, m);
         defer a.free(text);
         var lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
@@ -226,9 +236,10 @@ pub const Probe = struct {
         p.rig.reset();
         p.shape = s;
         p.fill = fill;
-        const global = p.which == .prep_global or p.which == .decode_global or controls.isPrompt(p.which);
-        const sliding = p.which == .prep_sliding or p.which == .decode_sliding;
-        p.layer = .{ .window = if (sliding) 1024 else 0, .ring = 2048, .chunk = if (sliding) 256 else plan.global_chunk, .tau = global };
+        const tiled = controls.isPromptSliding(p.which);
+        const global = p.which == .prep_global or p.which == .decode_global or (controls.isPrompt(p.which) and !tiled);
+        const sliding = p.which == .prep_sliding or p.which == .decode_sliding or tiled;
+        p.layer = .{ .window = if (sliding) 1024 else 0, .ring = 2048, .chunk = if (tiled) plan.tile_keys else if (sliding) 256 else plan.global_chunk, .tau = global };
         const rows = s.rows;
         const rh = rows * H;
         const cache = KV * p.layer.ring * D;
@@ -369,9 +380,9 @@ pub const Probe = struct {
             e.setBuffer(p.pml.buf, p.pml.off, 6);
             const sc: f32 = 1.0 / @sqrt(@as(f32, D));
             if (controls.isPrompt(p.which)) {
-                e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 7);
-                const blocks = (rows * (H / KV) + plan.prompt_pairs - 1) / plan.prompt_pairs;
-                e.dispatchGroups(mtl.Size.of(blocks, KV, stride), mtl.Size.of(256, 1, 1));
+                const launch = try plan.attend(.{ .rows = @intCast(rows), .last_pos = @intCast(p.shape.k - 1), .prompt = p.layer.window > 0 }, p.layer, stride, 0);
+                e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .chunk = p.layer.chunk, .c0 = launch.c0, .chunks = stride, .scale = sc, .window = p.layer.window }, 7);
+                e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(256, 1, 1));
             } else {
                 e.setBuffer(p.meta[0].buf, p.meta[0].off, 7);
                 e.setBuffer(p.meta[1].buf, p.meta[1].off, 8);
@@ -519,8 +530,8 @@ pub const Probe = struct {
 
 fn supported(device: mtl.Device, w: Which) bool {
     return switch (w) {
-        .prompt_m5 => device.tensorUnits(),
-        .prompt_pre_m5 => !device.tensorUnits(),
+        .prompt_m5, .prompt_sliding_m5 => device.tensorUnits(),
+        .prompt_pre_m5, .prompt_sliding_pre_m5 => !device.tensorUnits(),
         else => true,
     };
 }

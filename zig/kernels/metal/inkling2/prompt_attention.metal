@@ -6,10 +6,15 @@ using namespace metal;
 constant constexpr uint D = 128, EXTENT = 1024, KEYS = 64, PAIRS = 128;
 constant constexpr float LOG2E = 1.4426950408889634f;
 struct InkPromptSeg { int row0, n, p0, pad; long off; };
-struct InkPromptArgs { uint heads, kv_heads, ring, chunk, c0, chunks; float scale; };
+struct InkPromptArgs { uint heads, kv_heads, ring, chunk, c0, chunks; float scale; uint window; };
 
 inline size_t ink_prompt_rh(const InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
   return (size_t(s.row0) + pair / group) * heads + kvh * group + pair % group;
+}
+
+// The first chunk a row at `pos` reads, which holds its partial slot 0: its window's on a sliding layer, else c0.
+inline uint ink_prompt_first(constant InkPromptArgs& a, uint pos) {
+  return a.window ? (pos + 1 > a.window ? pos + 1 - a.window : 0u) / a.chunk : a.c0;
 }
 
 inline void ink_fold(float& mm, float& ll, float m, float l, float& a, float& b) {
@@ -46,6 +51,9 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
   const uint kvh = tg.y, c = a.c0 + tg.z, b_lo = c * a.chunk;
   const uint tile_hi = uint(s.p0) + min(m0 + PAIRS - 1, total - 1) / group;
   if (b_lo > tile_hi) return;
+  // A sliding layer's block starts at its first pair's window: a chunk wholly before it has no key for the block.
+  const uint first_pos = uint(s.p0) + m0 / group;
+  if (a.window && first_pos + 1 > a.window && b_lo + a.chunk <= first_pos + 1 - a.window) return;
   const uint k_hi = min(b_lo + a.chunk - 1, tile_hi), m = m0 + 16 * sg;
   const short2 home = tfp::frag_home(ushort(lane));
   const uint row_a = m + uint(home.y), row_b = row_a + 8;
@@ -89,7 +97,7 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
         const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e), kp = kt + 16 * f + col;
         const uint lr = row < total ? row / group : 0, pos = uint(s.p0) + lr;
         const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-        const bool live = row < total && kp <= pos && kp >= sub_lo && kp <= sub_hi;
+        const bool live = row < total && kp <= pos && kp >= sub_lo && kp <= sub_hi && (a.window == 0u || kp + a.window > pos);
         const uint distance = live ? pos - kp : 0;
         const float bias = live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;
         score[f][e] = live ? (score[f][e] * a.scale + bias) * LOG2E : -INFINITY;
@@ -131,15 +139,17 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
   for (uint d = 0; d < 8; ++d) for (uint e = 0; e < 8; ++e) {
     const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e);
     if (row >= total) continue;
-    const uint pos = uint(s.p0) + row / group;
-    if (b_lo > pos) continue;
+    const uint pos = uint(s.p0) + row / group, first = ink_prompt_first(a, pos);
+    if (b_lo > pos || c < first) continue;
     const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-    part_o[(prow * a.chunks + c - a.c0) * D + 16 * d + col] = out[d][e];
+    part_o[(prow * a.chunks + c - first) * D + 16 * d + col] = out[d][e];
   }
   if (home.x == 0) for (uint h = 0; h < 2; ++h) {
     const uint row = m + uint(home.y) + 8 * h;
     if (row >= total || b_lo > uint(s.p0) + row / group) continue;
+    const uint first = ink_prompt_first(a, uint(s.p0) + row / group);
+    if (c < first) continue;
     const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-    part_ml[prow * a.chunks + c - a.c0] = float2(upper[h], whole[h]);
+    part_ml[prow * a.chunks + c - first] = float2(upper[h], whole[h]);
   }
 }

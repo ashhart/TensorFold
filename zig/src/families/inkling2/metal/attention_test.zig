@@ -11,7 +11,7 @@ test "inkling2 metal ABI matches the shaders" {
     try t.expectEqual(@as(usize, 24), @sizeOf(p.Seg));
     try t.expectEqual(@as(usize, 36), @sizeOf(p.PrepArgs));
     try t.expectEqual(@as(usize, 24), @sizeOf(p.MergeArgs));
-    try t.expectEqual(@as(usize, 28), @sizeOf(p.PromptArgs));
+    try t.expectEqual(@as(usize, 32), @sizeOf(p.PromptArgs));
     try t.expectEqual(@as(u32, 24), (p.Rows{ .rows = 1, .last_pos = 0 }).heads);
     try t.expectEqual(@as(u32, 8), (p.Rows{ .rows = 1, .last_pos = 0 }).kv_heads);
     try t.expectEqual(@as(f32, 8192), (p.Prep{}).floor);

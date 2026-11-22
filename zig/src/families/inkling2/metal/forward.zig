@@ -208,7 +208,7 @@ const Attend = struct {
 };
 
 /// Every stream's attention a step at a time: a step's launches run side by side, and a barrier ends each step.
-fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment) !void {
+fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, prompt: bool) !void {
     const w = &m.weights.layers[v.layer];
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     var items: [state.max_segments]Attend = undefined;
@@ -220,8 +220,9 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             .cache = cache,
             .base = base,
             .rows = seg.rows,
-            .rr = .{ .rows = @intCast(seg.rows), .heads = 24, .kv_heads = 8, .last_pos = @intCast(cache.len + seg.rows - 1), .streams = 1 },
-            .layer = .{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau },
+            // A prompt's rows on a sliding layer: the prompt kernel, a tile of keys a chunk.
+            .rr = .{ .rows = @intCast(seg.rows), .heads = 24, .kv_heads = 8, .last_pos = @intCast(cache.len + seg.rows - 1), .streams = 1, .prompt = prompt and m.attention.units and layer0.window > 0 },
+            .layer = .{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = if (prompt and m.attention.units and layer0.window > 0) ap.tile_keys else layer0.chunk, .tau = layer0.tau },
             .meta = .{ .pos = a(at(s.pos, base * 4)), .seg_of = a(at(s.seg_of, base * 4)), .segs = a(at(s.segs, si * @sizeOf(ap.Seg))) },
             .kv = .{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) },
         };
@@ -365,7 +366,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     try project(m, e, prompt, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
     try project(m, e, prompt, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
     e.barrier();
-    try attendSegments(m, e, s, v, segments);
+    try attendSegments(m, e, s, v, segments, prompt);
     try project(m, e, prompt, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     e.barrier();
     postConv(m, e, segments, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
