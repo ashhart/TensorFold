@@ -70,7 +70,6 @@ pub const Kinds = struct {
 };
 
 pub const Geometry = struct {
-    bf16: bool = false,
     pocket: usize = 0,
     hidden: usize,
     intermediate: usize,
