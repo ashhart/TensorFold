@@ -560,14 +560,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer native_ple.destroy();
     const native_gdn = try @import("metal_qwen4_gdn.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer native_gdn.destroy();
-    const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer moss_image.destroy();
-    const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer moss_image_decoder.destroy();
+    const image_dspine = try @import("metal_image_dspine_suites.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer image_dspine.destroy();
     var h3_image_suites = try @import("metal_h3_image_suites.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer h3_image_suites.destroy();
-    const dspine = try @import("metal_qwen27_dspine.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer dspine.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
