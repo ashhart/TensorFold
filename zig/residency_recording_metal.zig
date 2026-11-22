@@ -77,8 +77,15 @@ pub const objc = struct {
     pub fn retain(id: Id) Id {
         return id;
     }
-    pub fn msg(comptime R: type, _: Id, comptime _: [:0]const u8, _: anytype) R {
-        if (R != void) @compileError("ownership fixture permits only inert fence messages");
+    pub fn msg(comptime R: type, id: Id, comptime selector: [:0]const u8, _: anytype) R {
+        if (R == ?Id) {
+            std.debug.assert(std.mem.eql(u8, selector, "newFence"));
+            return id;
+        }
+        std.debug.assert(R == void);
+        const record: *Record = @ptrCast(@alignCast(id));
+        if (std.mem.eql(u8, selector, "updateFence:")) record.fence_updates += 1;
+        if (std.mem.eql(u8, selector, "waitForFence:")) record.fence_waits += 1;
     }
     pub const Pool = struct {
         pub fn push() @This() {
@@ -104,9 +111,15 @@ pub const Record = struct {
     initial_missing: usize = 0,
     fail_at: ?usize = null,
     refuse_set: bool = false,
+    record_passes: bool = false,
+    pass_count: usize = 0,
+    passes: [512]Pass = undefined,
+    current: Pass = .{},
+    fence_updates: usize = 0,
+    fence_waits: usize = 0,
 
     pub fn device(r: *Record) Device {
-        return .{ .record = r };
+        return .{ .record = r, .id = @ptrCast(r) };
     }
     pub fn queue(r: *Record) Queue {
         return .{ .record = r };
@@ -133,6 +146,14 @@ pub const Record = struct {
     }
 };
 
+pub const Binding = struct { buffer: ?Buffer = null, offset: usize = 0 };
+pub const Pass = struct {
+    pipeline: ?objc.Id = null,
+    buffers: [8]Binding = @splat(.{}),
+    values: [8][8]u8 = @splat(@splat(0)),
+    lengths: [8]usize = @splat(0),
+};
+
 pub const Buffer = struct {
     id: *Allocation,
     pub fn length(b: Buffer) usize {
@@ -152,6 +173,7 @@ pub const Buffer = struct {
 };
 
 pub const Device = struct {
+    id: objc.Id = @ptrFromInt(1),
     record: *Record,
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
         if (d.record.fail_at == d.record.allocations.items.len) return error.InjectedBufferFailure;
@@ -247,8 +269,8 @@ pub const CommandBuffer = struct {
     pub fn blit(c: CommandBuffer) BlitEncoder {
         return .{ .record = c.record };
     }
-    pub fn compute(_: CommandBuffer, _: DispatchType) ComputeEncoder {
-        return .{};
+    pub fn compute(c: CommandBuffer, _: DispatchType) ComputeEncoder {
+        return .{ .record = c.record, .id = @ptrCast(c.record) };
     }
     pub fn commit(c: CommandBuffer) void {
         c.record.commits += 1;
@@ -294,13 +316,47 @@ pub const BlitEncoder = struct {
 
 pub const ComputeEncoder = struct {
     id: objc.Id = @ptrFromInt(1),
-    pub fn setPipeline(_: @This(), _: Pipeline) void {}
-    pub fn setBuffer(_: @This(), _: Buffer, _: usize, _: usize) void {}
-    pub fn setValue(_: @This(), _: anytype, _: usize) void {}
-    pub fn setBytes(_: @This(), _: []const u8, _: usize) void {}
-    pub fn dispatchThreads(_: @This(), _: Size, _: Size) void {}
-    pub fn dispatchGroups(_: @This(), _: Size, _: Size) void {}
-    pub fn dispatchIndirect(_: @This(), _: Buffer, _: usize, _: Size) void {}
+    record: ?*Record = null,
+    fn dispatch(e: @This()) void {
+        const r = e.record orelse return;
+        if (!r.record_passes) return;
+        std.debug.assert(r.pass_count < r.passes.len);
+        r.passes[r.pass_count] = r.current;
+        r.pass_count += 1;
+        r.current = .{};
+    }
+    pub fn setPipeline(e: @This(), p: Pipeline) void {
+        if (e.record) |r| r.current.pipeline = p.id;
+    }
+    pub fn setBuffer(e: @This(), b: Buffer, offset: usize, index: usize) void {
+        const r = e.record orelse return;
+        if (index < r.current.buffers.len) r.current.buffers[index] = .{ .buffer = b, .offset = offset };
+    }
+    pub fn setValue(e: @This(), value: anytype, index: usize) void {
+        const r = e.record orelse return;
+        if (index >= r.current.values.len) return;
+        const v = value;
+        const bytes = std.mem.asBytes(&v);
+        const n = @min(bytes.len, r.current.values[index].len);
+        @memcpy(r.current.values[index][0..n], bytes[0..n]);
+        r.current.lengths[index] = bytes.len;
+    }
+    pub fn setBytes(e: @This(), bytes: []const u8, index: usize) void {
+        const r = e.record orelse return;
+        if (index >= r.current.values.len) return;
+        const n = @min(bytes.len, r.current.values[index].len);
+        @memcpy(r.current.values[index][0..n], bytes[0..n]);
+        r.current.lengths[index] = bytes.len;
+    }
+    pub fn dispatchThreads(e: @This(), _: Size, _: Size) void {
+        e.dispatch();
+    }
+    pub fn dispatchGroups(e: @This(), _: Size, _: Size) void {
+        e.dispatch();
+    }
+    pub fn dispatchIndirect(e: @This(), _: Buffer, _: usize, _: Size) void {
+        e.dispatch();
+    }
     pub fn barrier(_: @This()) void {}
     pub fn end(_: @This()) void {}
 };

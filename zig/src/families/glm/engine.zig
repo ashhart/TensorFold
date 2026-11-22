@@ -102,6 +102,7 @@ pub const Engine = struct {
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
+    early_draft: bool = false, // TF_GLM_METAL_EARLY_DRAFT: launch built-in MTP ahead and reuse one-stream absorb outputs
     dflash: ?*@import("metal_dflash_load.zig").Drafter = null, // --drafter: DFlash2 drafts in place of the MTP head
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
@@ -126,6 +127,7 @@ pub const Engine = struct {
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
+        e.early_draft = try platform.environment.read(bool, "TF_GLM_METAL_EARLY_DRAFT", false);
         e.dflash = null;
         e.ep = null;
         e.pr = null;

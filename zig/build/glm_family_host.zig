@@ -8,6 +8,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
+    const glm_env = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM strict env:"} }));
+    b.step("test-glm-env-host", "GLM's strict environment census and default-off Metal draft controls without a GPU").dependOn(&glm_env.step);
+    step.dependOn(&glm_env.step);
     step.dependOn(&pdl.step);
     const exl3 = b.createModule(.{ .root_source_file = b.path("zig/glm_exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
