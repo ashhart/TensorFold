@@ -4,6 +4,7 @@ const price = @import("copy_price.zig");
 
 pub fn rows(r: *depth.Rule, who: depth.Who, chances: []const f64, most: i64, take: bool) !i64 {
     if (most <= 0 or !r.copy_guard or r.family_costs.empty()) return most;
+    if (chances.len == 0) return error.EmptyCopyChances;
     const plain = (try price.plain(r, who)) orelse return most;
     var best: i64 = 1;
     var best_rate: f64 = -1;
