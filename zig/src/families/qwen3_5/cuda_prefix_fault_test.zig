@@ -37,7 +37,7 @@ fn prompt(a: std.mem.Allocator, n: usize) ![]u32 {
     return out;
 }
 
-/// The pool, its store, a cold pass's pages kept at 4096, and a longer prompt whose resume there keeps a cut at 8192.
+/// The pool keeps cold state at 4096 and a longer prompt's page-edge state at 8960.
 const World = struct {
     d: cuda.Driver,
     e: E,
@@ -77,12 +77,12 @@ const World = struct {
         try t.expectEqual(@as(usize, 0), D.hosts);
     }
 
-    /// A resume of `next` that succeeds: from the kept 4096, a mark at 8192, its lane closed again.
+    /// A resume of `next` succeeds from 4096, keeps a page-edge mark at 8960, and closes its lane again.
     fn resumes(w: *World) !void {
         const r = try w.x.open(w.next, 16, 9100, &.{}, null);
         defer w.x.gpa.free(r.plan.marks);
         try t.expectEqual(@as(u32, 4096), r.plan.from);
-        try t.expectEqualSlices(u32, &.{8192}, r.plan.marks);
+        try t.expectEqualSlices(u32, &.{8960}, r.plan.marks);
         try t.expect(w.p.close(r.cache));
         try settled(w.p);
     }
