@@ -54,10 +54,10 @@ const Fake = struct {
     };
     const Plan = struct { from: usize, marks: []u32 };
     const Prefix = struct {
-        pub fn open(_: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32) !?struct { cache: *Cache, plan: Plan } {
+        pub fn open(_: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32, _: ?u64) !?struct { cache: *Cache, plan: Plan } {
             return null;
         }
-        pub fn keep(_: *Prefix, _: *Cache, _: []const u32, _: usize) error{QwenLaneTable}!void {}
+        pub fn keep(_: *Prefix, _: *Cache, _: []const u32, _: ?u64, _: usize) error{QwenLaneTable}!void {}
     };
     const Pages = struct {
         pub fn log(_: *Pages, _: usize, _: usize) void {}

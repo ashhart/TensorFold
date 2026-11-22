@@ -89,9 +89,10 @@ pub const Query = struct {
     images: []const Identity = &.{},
     /// The request's image frame.
     frame: u32 = 0,
+    /// The request's exact cache salt, not just its transformed key words.
+    salt: ?u64 = null,
     /// What the rows depend on beyond key, images and frame.
     namespace: u64 = 0,
-    /// The request's own chunk starts; empty: the store's grid.
     starts: []const u32 = &.{},
     /// Rows this pass prefills; null: the prompt's length.
     prefilled: ?u32 = null,
@@ -99,6 +100,11 @@ pub const Query = struct {
     /// A query of `key` alone, as long as its prompt.
     pub fn of(key: []const u32) Query {
         return .{ .key = key, .prompt_len = @intCast(key.len) };
+    }
+    pub fn salted(key: []const u32, salt: ?u64) Query {
+        var q = of(key);
+        q.salt = salt;
+        return q;
     }
 };
 /// A paged store's `keep`: whether the mark holds a state, and how many leading ids the stream swaps for the store's.
@@ -174,7 +180,7 @@ pub const Store = struct {
 
     /// What the tree matches of `q`: its first `len` words, its images, and its namespace and frame.
     fn keyOf(q: Query, len: usize) Key {
-        return .{ .tokens = q.key[0..len], .images = q.images, .ns = .{ .namespace = q.namespace, .frame = q.frame } };
+        return .{ .tokens = q.key[0..len], .images = q.images, .ns = .{ .namespace = q.namespace, .frame = q.frame, .salt = q.salt } };
     }
 
     /// Where `q` may resume: a page edge on its chunk schedule (the tree's walks take it).
@@ -378,9 +384,10 @@ pub const Store = struct {
     fn sharedKey(k: Key) u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.sliceAsBytes(k.tokens));
-        if (k.ns.namespace != 0 or k.ns.frame != 0 or k.images.len > 0) { // text in the default Ns hashes as before
+        if (k.ns.namespace != 0 or k.ns.frame != 0 or k.ns.salt != null or k.images.len > 0) { // text in the default Ns hashes as before
             h.update(std.mem.asBytes(&k.ns.namespace));
             h.update(std.mem.asBytes(&k.ns.frame));
+            if (k.ns.salt) |salt| h.update(std.mem.asBytes(&salt));
             for (k.images) |i| if (i.at < k.tokens.len) h.update(std.mem.asBytes(&[_]u64{ i.at, i.tokens, i.gh, i.gw, i.hash }));
         }
         return h.final();
