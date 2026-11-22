@@ -1,0 +1,4 @@
+exp(+0) vector 3f800000 scalar 3f800000 (1.0 = 3f800000)
+exp(-0) vector 3f800000 scalar 3f800000
+checked 4294967296 values, mismatches 0 in 18.6 s
+rc 0
