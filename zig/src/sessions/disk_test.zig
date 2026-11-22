@@ -44,6 +44,7 @@ fn freePages(gpa: std.mem.Allocator, x: [][]u32) void {
 fn roundTrip(world: u32, rank: u32) !void {
     const gpa = testing.allocator;
     const io = testing.io;
+    const chunk = 3 * 74_752;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
@@ -53,7 +54,7 @@ fn roundTrip(world: u32, rank: u32) !void {
     var h = try HostPool.init(gpa, &p);
     defer h.deinit();
     // small chunks so pool segments span many chunks; few staging buffers so the pump waits on the lanes
-    const d = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(5), .rank = rank, .world = world, .chunk = 3 * 74_752, .staging = 3, .lanes = 3, .min_tokens = 1 });
+    const d = try disk.Disk.open(gpa, io, .{ .root = root, .compat = @splat(5), .rank = rank, .world = world, .chunk = chunk, .staging = 3, .lanes = 3, .min_tokens = 1 });
     defer d.close();
     const a = try p.newSlot(32 * 256);
     const pos: u64 = 9 * 256 + 100;
@@ -62,7 +63,8 @@ fn roundTrip(world: u32, rank: u32) !void {
     const ids = try gpa.alloc(i32, pos);
     defer gpa.free(ids);
     for (ids, 0..) |*t, i| t.* = @intCast(i * 3 + 1);
-    var blob: [5000]u8 = undefined;
+    // The whole blob spans two disk chunks; both whole and delta restores compare exact bytes.
+    var blob: [chunk + 17]u8 = undefined;
     for (&blob, 0..) |*x, i| x.* = @truncate(9 - i % 5);
     const fp = try familyPages(gpa, &p, a.mapped(), 0, true);
     defer freePages(gpa, fp);
@@ -94,7 +96,9 @@ fn roundTrip(world: u32, rank: u32) !void {
     const tp = try familyPages(gpa, &p, b.mapped(), 0, false);
     defer freePages(gpa, tp);
     const sink: disk.ReadSink = .{ .store = h.store(), .families = &fams, .page = 256, .world = world, .rank = rank, .pages = tp };
-    try testing.expect(try d.readFile(ext.items[0], &sink, false) == null);
+    var whole = (try d.readFile(ext.items[0], &sink, true)).?;
+    defer whole.deinit(gpa);
+    try testing.expectEqualSlices(u8, &blob, whole.blobs[0].bytes);
     var got = (try d.readFile(ext.items[1], &sink, true)).?;
     defer got.deinit(gpa);
     try testing.expectEqualSlices(u8, blob[0..77], got.blobs[0].bytes);

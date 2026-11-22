@@ -10,9 +10,6 @@ const Rows = rows_store.Rows;
 const Name = chain.Name;
 const Span = @import("cache_modes.zig").Span;
 
-/// A state's own file goes out in pieces of this many bytes, so a request waits for one piece at most.
-const piece: u64 = 16 << 20;
-
 /// One whole block a state names: its name, group (window), index and file bytes.
 pub const Want = struct { name: Name, window: u32, k: u32, bytes: u64 };
 
@@ -200,13 +197,19 @@ fn unit(r: *Rows, j: *Job) !void {
         var ranges: std.ArrayList(image.Range) = .empty;
         defer ranges.deinit(r.gpa);
         try image.blockRanges(j.parts, r.keying.block, w.window, w.k, &ranges, r.gpa);
-        const n = image.total(ranges.items);
-        const stage = try r.staged(n);
-        try gather(r.family.ptr, j.entry.saved, ranges.items, stage[0..@intCast(n)]);
         var wr = try file.Writer.open(r.dir, &chain.hex(w.name), ".blk");
         errdefer wr.abort();
         wr.io = r.file_io;
-        try wr.append(stage[0..@intCast(n)]);
+        var pieces: std.ArrayList(image.Range) = .empty;
+        defer pieces.deinit(r.gpa);
+        var cursor: image.Cursor = .{};
+        while (cursor.index < ranges.items.len) {
+            pieces.clearRetainingCapacity();
+            const n = try image.nextChunk(ranges.items, &cursor, image.copyChunk, &pieces, r.gpa);
+            const stage = try r.staged(n);
+            try gather(r.family.ptr, j.entry.saved, pieces.items, stage[0..@intCast(n)]);
+            try wr.append(stage[0..@intCast(n)]);
+        }
         const bytes = try wr.finish(.{ .kind = @backingInt(file.Kind.block), .payload = 0, .payload_hash = 0, .name = w.name, .block = r.keying.block }, &.{}, false);
         try r.blocks.put(r.gpa, chain.stem(w.name), .{ .bytes = bytes });
         r.spent(bytes);
@@ -221,18 +224,10 @@ fn unit(r: *Rows, j: *Job) !void {
     if (j.own_i < j.own.len) {
         var pieces: std.ArrayList(image.Range) = .empty;
         defer pieces.deinit(r.gpa);
-        var n: u64 = 0;
-        while (j.own_i < j.own.len and n < piece) {
-            const g = j.own[j.own_i];
-            const take = @min(g.len - j.own_off, piece - n);
-            try pieces.append(r.gpa, .{ .off = g.off + j.own_off, .len = take });
-            n += take;
-            j.own_off += take;
-            if (j.own_off == g.len) {
-                j.own_i += 1;
-                j.own_off = 0;
-            }
-        }
+        var cursor: image.Cursor = .{ .index = j.own_i, .off = j.own_off };
+        const n = try image.nextChunk(j.own, &cursor, image.copyChunk, &pieces, r.gpa);
+        j.own_i = cursor.index;
+        j.own_off = cursor.off;
         const stage = try r.staged(n);
         try gather(r.family.ptr, j.entry.saved, pieces.items, stage[0..@intCast(n)]);
         try j.writer.?.append(stage[0..@intCast(n)]);

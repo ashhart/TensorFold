@@ -10,7 +10,7 @@ const fixture = @import("rows_async_fixture.zig");
 const t = std.testing;
 
 test "prefetch: a queued write publishes before the next request reads its exact image ahead" {
-    const x = try fixture.Fixture.open("fetch-queued", .evicted, false, 1 << 20);
+    const x = try fixture.Fixture.open("fetch-queued", .evicted, false, 9 << 20);
     defer x.close();
     var gate: fixture.Gate = .{};
     defer gate.release.store(true, .release);
@@ -62,7 +62,7 @@ test "prefetch: a queued write publishes before the next request reads its exact
 }
 
 test "prefetch: closing the store does not join a blocked read past its deadline" {
-    const x = try fixture.Fixture.open("fetch-stop", .evicted, false, 1 << 20);
+    const x = try fixture.Fixture.open("fetch-stop", .evicted, false, 9 << 20);
     defer x.close();
     const tokens = fixture.prompt(3);
     try x.keep(&tokens, 900);
@@ -104,7 +104,7 @@ test "prefetch: closing the store does not join a blocked read past its deadline
 
 test "prefetch: a failed or late staged write releases its request without reading private files" {
     for ([_]bool{ false, true }) |late| {
-        const x = try fixture.Fixture.open("fetch-fallback", .evicted, false, 1 << 20);
+        const x = try fixture.Fixture.open("fetch-fallback", .evicted, false, 9 << 20);
         defer x.close();
         var gate: fixture.Gate = .{ .mode = .full };
         defer gate.release.store(true, .release);
