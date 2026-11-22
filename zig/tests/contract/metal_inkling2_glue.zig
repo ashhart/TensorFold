@@ -221,6 +221,10 @@ pub const Probe = struct {
     fn at(ref: rig_.Ref) host.Ref {
         return .{ .buf = ref.buf, .off = ref.off };
     }
+    /// A convolution's own rows: the taps after their three old rows.
+    fn fresh(ref: rig_.Ref, channels: usize) host.Ref {
+        return .{ .buf = ref.buf, .off = ref.off + 3 * channels * 2 };
+    }
     pub fn run(self: *Probe) !void {
         const pass = self.rig.begin();
         const e = pass.e;
@@ -232,8 +236,8 @@ pub const Probe = struct {
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
-            .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
-            .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
+            .conv_static => host.convStatic(pl, e, at(R[0]), fresh(R[0], n), at(R[1]), y, r, n),
+            .conv_dynamic => host.convDynamic(pl, e, at(R[0]), fresh(R[0], n), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .router => host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
             .swiglu => host.swiglu(pl, e, at(R[0]), y, r, n),
             .logits => host.logits(pl, e, at(R[0]), at(R[1]), y, r, n),
