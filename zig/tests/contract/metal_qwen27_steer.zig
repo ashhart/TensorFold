@@ -338,3 +338,10 @@ pub const Suite = struct {
         if (s.fault_pipe) |pipe| pipe.deinit();
     }
 };
+
+/// The suite built, collected and freed for a contract run: the caller's single statement.
+pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8, gates: bool, seed: u64) !void {
+    var s: Suite = .{ .a = a, .device = device, .queue = queue, .kernels = kernels };
+    defer s.deinit();
+    try s.collect(only, gates, seed);
+}

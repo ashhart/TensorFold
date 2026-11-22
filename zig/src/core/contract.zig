@@ -44,11 +44,13 @@ test {
     _ = @import("contract/simd_pairs_records.zig");
     _ = @import("contract/simd_half_records.zig");
     _ = @import("contract/glm_rows_records.zig");
+    _ = @import("contract/glm_tap_records.zig");
     _ = @import("contract/glm_dflash_records.zig");
     _ = @import("contract/row_wide_records.zig");
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
     _ = @import("contract/idol_records.zig");
+    _ = @import("contract/idol_dino_records.zig");
     _ = @import("contract/metal_pair_records.zig");
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");

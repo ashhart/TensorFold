@@ -28,22 +28,29 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7", &hash(@embedFile("kernels/cuda/scan_rows.cu")));
 }
 test "dense serving: owned launches and projections retain their reviewed argument sequence" {
-    const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++ @embedFile("src/families/qwen3_5/cuda_forward.zig");
+    const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++
+        @embedFile("src/families/qwen3_5/cuda_scan.zig") ++
+        @embedFile("src/families/qwen3_5/cuda_forward.zig");
+    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(" };
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, source, at, "try e.")) |start| {
-        const rest = source[start..];
+    while (true) {
+        var start: ?usize = null;
+        for (prefixes) |prefix| if (std.mem.indexOfPos(u8, source, at, prefix)) |candidate| {
+            if (start) |previous| {
+                if (candidate < previous) start = candidate;
+            } else start = candidate;
+        };
+        const call_start = start orelse break;
+        const rest = source[call_start..];
         const end = std.mem.indexOfScalar(u8, rest, ';') orelse return error.BadSource;
         const call = rest[0 .. end + 1];
-        at = start + 6;
-        if (!(std.mem.startsWith(u8, call, "try e.run(e.fns.") or std.mem.startsWith(u8, call, "try e.proj(") or
-            std.mem.startsWith(u8, call, "try e.norm("))) continue;
-        at = start + end + 1;
+        at = call_start + end + 1;
         for (call) |c| if (!std.ascii.isWhitespace(c)) {
             try out.append(std.testing.allocator, c);
         };
     }
-    // 4dd870b84d's sequence: the first input norm keys on g.first + i (#2579); BF16 norms take norm_shift (#2383)
-    try std.testing.expectEqualStrings("7be514892c77ce544d809f73d5a7e2dec2fd33bcb40c68ab67ab6e409a1c02f8", &hash(out.items));
+    // The launch sequence includes main's moved delta scan and MTP's retained-row tap argument.
+    try std.testing.expectEqualStrings("2099ef3b0a28d63d079b65d191a9c3be7e7c0ff93fb9b53ec9d6a6e61565220d", &hash(out.items));
 }

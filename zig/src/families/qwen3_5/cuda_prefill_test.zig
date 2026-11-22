@@ -71,8 +71,13 @@ const Fake = struct {
     const Int8 = struct { on: bool = false };
     const Keep = @import("cuda_engine.zig").Keep;
     const Engine = struct {
+        const MtpPrompt = @import("cuda_mtp_prompt.zig").State;
+        const PromptTapMode = @import("cuda_mtp_prompt.zig").Mode;
+        const Call = struct { rows: usize, mode: PromptTapMode, tap_from: ?usize };
         scratch_rows: usize = E.grid_rows,
+        mtp_prompt: MtpPrompt = .{},
         rows: std.ArrayList(usize) = .empty,
+        calls: std.ArrayList(Call) = .empty,
         x: u64 = 0,
         stream: cuda.Stream = .{ .d = undefined, .handle = null },
         whole_calls: usize = 0,
@@ -94,6 +99,7 @@ const Fake = struct {
             try t.expectEqual(rows, ids.len);
             try e.rows.append(t.allocator, ids.len);
             try e.keeps.append(t.allocator, keep);
+            try e.calls.append(t.allocator, .{ .rows = rows, .mode = e.mtp_prompt.mode, .tap_from = e.mtp_prompt.from });
             if (keep == .rows) {
                 e.piece_calls += 1;
                 e.piece_rows += rows;
@@ -115,6 +121,7 @@ const Fake = struct {
     prefix: ?*Prefix = null,
     pages: ?*Pages = null,
     readout: readout.Side = .{},
+    mtp: ?*anyopaque = null,
     restore_ok: bool = true,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *Cache) = .empty,
     seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
@@ -139,6 +146,7 @@ const Fake = struct {
         f.caches.deinit(f.gpa);
         f.fills.deinit(f.gpa);
         f.readout.open.deinit(f.gpa);
+        f.e.calls.deinit(f.gpa);
     }
 };
 
@@ -446,4 +454,125 @@ test "Qwen stepped prefill: an unread chunk's last layer launches K/V, both head
     const want = [_]Trace.Tag{ .norm, .kv, .{ .launch = 1 }, .{ .launch = 1 }, .{ .launch = 3 } };
     try t.expectEqual(want.len, trace.tags.items.len);
     for (want, trace.tags.items) |w, got| try t.expect(std.meta.eql(w, got));
+}
+
+test "MTP suffix filtering covers whole and stepped prefill, including capped boundary cuts" {
+    var marker: u8 = 0;
+    const prompt = try t.allocator.alloc(u32, 8192);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 7);
+
+    var one_engine: Fake.Engine = .{};
+    defer one_engine.deinit();
+    var one_shot: Fake = .{ .e = &one_engine, .mtp = @ptrCast(&marker) };
+    defer one_shot.deinit();
+    var full = try lanes.Stream.init(t.allocator, .{ .id = "mtp-full", .prompt = prompt, .max_new = 1, .drafts = true });
+    defer full.deinit(t.allocator);
+    try prefill.whole(&one_shot, &full);
+    try t.expectEqual(@as(usize, 2), one_engine.calls.items.len);
+    try t.expectEqual(@as(usize, 4096), one_engine.calls.items[0].rows);
+    try t.expectEqual(@as(usize, 4096), one_engine.calls.items[1].rows);
+    try t.expectEqual(Fake.Engine.PromptTapMode.none, one_engine.calls.items[0].mode);
+    try t.expectEqual(Fake.Engine.PromptTapMode.mtp, one_engine.calls.items[1].mode);
+    try t.expectEqual(@as(?usize, 6143), one_engine.calls.items[0].tap_from);
+    try t.expectEqual(@as(?usize, 6143), one_engine.calls.items[1].tap_from);
+
+    var step_engine: Fake.Engine = .{};
+    defer step_engine.deinit();
+    var stepped: Fake = .{ .e = &step_engine, .mtp = @ptrCast(&marker) };
+    defer stepped.deinit();
+    var partial = try lanes.Stream.init(t.allocator, .{ .id = "mtp-stepped", .prompt = prompt, .max_new = 1, .drafts = true });
+    defer partial.deinit(t.allocator);
+    while (!try prefill.step(&stepped, &partial, 4096)) {}
+    try t.expectEqual(@as(usize, 3), step_engine.calls.items.len);
+    try t.expectEqual(@as(usize, 4096), step_engine.calls.items[0].rows);
+    try t.expectEqual(@as(usize, 2047), step_engine.calls.items[1].rows);
+    try t.expectEqual(@as(usize, 2049), step_engine.calls.items[2].rows);
+    for (step_engine.calls.items[0..2]) |call| try t.expectEqual(Fake.Engine.PromptTapMode.none, call.mode);
+    try t.expectEqual(Fake.Engine.PromptTapMode.mtp, step_engine.calls.items[2].mode);
+    for (step_engine.calls.items) |call| try t.expectEqual(@as(?usize, 6143), call.tap_from);
+
+    var capped_engine: Fake.Engine = .{};
+    defer capped_engine.deinit();
+    var capped_fake: Fake = .{ .e = &capped_engine, .mtp = @ptrCast(&marker) };
+    defer capped_fake.deinit();
+    var capped_stream = try lanes.Stream.init(t.allocator, .{ .id = "mtp-capped", .prompt = prompt, .max_new = 1, .drafts = true });
+    defer capped_stream.deinit(t.allocator);
+    while (!try prefill.step(&capped_fake, &capped_stream, 512)) {}
+    var at: usize = 0;
+    var saw_boundary = false;
+    for (capped_engine.calls.items) |call| {
+        at += call.rows;
+        if (at < 6143) {
+            try t.expectEqual(Fake.Engine.PromptTapMode.none, call.mode);
+            try t.expect(call.rows <= 512);
+        } else if (at == 6143) {
+            saw_boundary = true;
+            try t.expectEqual(Fake.Engine.PromptTapMode.none, call.mode);
+        } else {
+            try t.expectEqual(Fake.Engine.PromptTapMode.mtp, call.mode);
+            try t.expect(call.rows <= 512);
+        }
+    }
+    try t.expect(saw_boundary);
+    try t.expectEqual(@as(usize, 8192), at);
+
+    var no_draft_engine: Fake.Engine = .{};
+    defer no_draft_engine.deinit();
+    var no_drafts: Fake = .{ .e = &no_draft_engine, .mtp = @ptrCast(&marker) };
+    defer no_drafts.deinit();
+    var target_only = try lanes.Stream.init(t.allocator, .{ .id = "mtp-attached-no-drafts", .prompt = prompt, .max_new = 1, .drafts = false });
+    defer target_only.deinit(t.allocator);
+    try prefill.whole(&no_drafts, &target_only);
+    try t.expectEqual(@as(usize, 2), no_draft_engine.calls.items.len);
+    for (no_draft_engine.calls.items) |call| {
+        try t.expectEqual(Fake.Engine.PromptTapMode.none, call.mode);
+        try t.expectEqual(@as(?usize, 8192), call.tap_from);
+    }
+}
+
+test "MTP suffix filtering is disabled for chunked, resumed, and reuse-marked prefill" {
+    var marker: u8 = 0;
+    const prompt = try t.allocator.alloc(u32, 8192);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 7);
+
+    var chunk_engine: Fake.Engine = .{};
+    defer chunk_engine.deinit();
+    var chunked: Fake = .{ .e = &chunk_engine, .mtp = @ptrCast(&marker) };
+    defer chunked.deinit();
+    var chunks = try lanes.Stream.init(t.allocator, .{ .id = "mtp-request-chunks", .prompt = prompt, .max_new = 1, .drafts = true, .chunks = &.{4096} });
+    defer chunks.deinit(t.allocator);
+    while (!try prefill.step(&chunked, &chunks, 4096)) {}
+    try t.expectEqual(@as(usize, 2), chunk_engine.calls.items.len);
+    for (chunk_engine.calls.items) |call| {
+        try t.expectEqual(Fake.Engine.PromptTapMode.mtp, call.mode);
+        try t.expectEqual(@as(?usize, null), call.tap_from);
+    }
+
+    var reuse_engine: Fake.Engine = .{};
+    defer reuse_engine.deinit();
+    var reuse_fake: Fake = .{ .e = &reuse_engine, .mtp = @ptrCast(&marker) };
+    defer reuse_fake.deinit();
+    var marked = try lanes.Stream.init(t.allocator, .{ .id = "mtp-reuse-mark", .prompt = prompt, .max_new = 1, .drafts = true, .reuse = .{ .marks = &.{4096} } });
+    defer marked.deinit(t.allocator);
+    while (!try prefill.step(&reuse_fake, &marked, 4096)) {}
+    try t.expectEqual(@as(usize, 2), reuse_engine.calls.items.len);
+    for (reuse_engine.calls.items) |call| {
+        try t.expectEqual(Fake.Engine.PromptTapMode.mtp, call.mode);
+        try t.expectEqual(@as(?usize, null), call.tap_from);
+    }
+
+    var resumed_engine: Fake.Engine = .{};
+    defer resumed_engine.deinit();
+    var resumed_fake: Fake = .{ .e = &resumed_engine, .mtp = @ptrCast(&marker) };
+    defer resumed_fake.deinit();
+    var saved: u8 = 0;
+    var resumed = try lanes.Stream.init(t.allocator, .{ .id = "mtp-resumed", .prompt = prompt, .max_new = 1, .drafts = true, .reuse = .{ .saved = @ptrCast(&saved), .at = 4096 } });
+    defer resumed.deinit(t.allocator);
+    try t.expect(try prefill.step(&resumed_fake, &resumed, 4096));
+    try t.expectEqual(@as(usize, 1), resumed_engine.calls.items.len);
+    try t.expectEqual(@as(usize, 4096), resumed_engine.calls.items[0].rows);
+    try t.expectEqual(Fake.Engine.PromptTapMode.mtp, resumed_engine.calls.items[0].mode);
+    try t.expectEqual(@as(?usize, null), resumed_engine.calls.items[0].tap_from);
 }

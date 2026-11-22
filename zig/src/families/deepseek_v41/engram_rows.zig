@@ -64,6 +64,8 @@ pub const Rows = switch (@import("builtin").os.tag) {
     .macos => @import("engram_rows_darwin.zig").Rows,
     else => @import("engram_rows_portable.zig").Rows,
 };
+/// The platform reader's counters (hits, misses, reads, and where they exist pending rows and the wait).
+pub const Stats = @FieldType(Rows, "stats");
 
 /// UE8M0, including its minimum exponent and reserved NaN, as the #826 reference equations.
 pub fn scale(code: u8) f32 {

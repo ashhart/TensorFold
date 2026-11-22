@@ -5,6 +5,8 @@ For opt-in phase timings from native entry to the first completed reply, see the
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
 the drafter, or by itself when the cache holds `z-lab/Qwen3.8-27B-DFlash2`; `--drafter none` serves without it.
+The model's MTP head drafts with `--mtp-drafts` on M1 to M4 (below); without a drafter or the MTP head it decodes
+plain.
 On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
@@ -113,6 +115,19 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## MTP drafts on M1 to M4
+
+`--mtp-drafts N` drafts up to N tokens a round (at most 15) with Qwen3.8-27B's MTP head, through the lane core's
+drafter as on CUDA, so every stream of a shared round drafts. `--mtp-confidence F` (0 to 1) stops a chain where its
+cumulative chance falls below F, and needs `--mtp-drafts`. The head is read from `mtp-4bit.safetensors` beside the
+checkpoint (MLX affine 4-bit, groups of 64, norms stored as 1 + w); no head file is published yet, so it is built
+from the release's `mtp.*` weights and placed there by hand. The flags are off by default, refused with `--drafter`,
+with `TF_QWEN27_METAL_KV_PAGES=1` and on an M5, and replies are byte-equal to `"draft": false`.
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --mtp-drafts 3 --name bench
+```
 
 ## GGUF host adapter
 
@@ -223,7 +238,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
-`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+`--no-drafts` disables all drafts on either backend. On CUDA, `--drafter` can name DFlash2 or a compatible
+checkpoint with MTP weights; use `--no-drafts` to disable all drafts.
 The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
 loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
@@ -276,6 +292,16 @@ tensorfold pull nvidia/Qwen3.8-27B-NVFP4
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
+
+This ModelOpt checkpoint also includes a dense BF16 MTP head. Passing the target itself to `--drafter` selects it;
+TensorFold packs those projections as affine-4 while loading. `--mtp-drafts N` sets the MTP chain depth (default 3).
+Standalone affine-4 MTP checkpoints are supported only for routed MoE targets; dense targets require indexed BF16 MTP
+tensors from the target checkpoint. `--mtp-drafts 0` disables the target MTP head while leaving a separately named DFlash2 drafter eligible;
+`--no-drafts` disables all drafting. Serial and batched chains keep token feedback on the GPU; concurrent batches use
+the same dense or routed MLP dispatch as the serial path. Serial chains are the default; set `TF_MTP_TREES=1` to
+opt in to sampled tree mode. In that mode, rank 0 is the exact full-vocabulary
+target-coupled sample. Runner-up branches are selected from the `lp_top` log-probability candidates, so their Gumbel
+ordering is a proposal heuristic rather than an exhaustive full-vocabulary ranking.
 
 Prompts take bf16 rows on a prompt GEMM that reads the stored bytes: each FP8 byte and each NVFP4 code times its
 block scale is exact in bf16, summed in fp32 over the inputs, the tensor scale last. `--prefill-fp8` restores the FP8

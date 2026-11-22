@@ -91,23 +91,23 @@ pub const Kernels = struct {
     }
 
     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
-    pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
-        return k.scoresTiles(s, qi, wts, w_stride, pk, out, at, rows, np, nb, scale, wscale, heads, pt, ps, score_tiles);
+    pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64, g: sparse.Geometry) !void {
+        return k.scoresTiles(s, qi, wts, w_stride, pk, out, at, rows, np, nb, scale, wscale, heads, pt, ps, score_tiles, g);
     }
 
     /// As scores, `loop` 64-pool tiles a CTA (speed only: every tiling writes the same scores).
-    pub fn scoresTiles(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64, loop: usize) !void {
-        const g: [2]u32 = .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, loop))) };
+    pub fn scoresTiles(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64, loop: usize, g: sparse.Geometry) !void {
+        const grid: [2]u32 = .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, loop))) };
         var a: cuda.Args = .{};
-        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
-        try cuda_pdl.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
+        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)), pt, @as(i64, @intCast(ps)), @as(c_int, @intCast(g.pool)), @as(c_int, @intCast(g.rope)), g.inv }) |v| a.add(v);
+        try cuda_pdl.launch(k.scores_fn, .{ .grid = .{ .x = grid[0], .y = grid[1] }, .block = .{ .x = threads } }, s, &a);
     }
 
-    /// tf_glm_select_rows' launch: each row's 512 best pools of scores [rows][np] ascending into out [rows][512] int64.
-    pub fn pools(k: *const Kernels, s: cuda.Stream, scores_ptr: u64, out: u64, at: u64, rows: usize, np: usize, path: u64) !void {
+    /// tf_glm_select_rows' launch: each row's g.topk best pools of scores [rows][np] into out [rows][g.topk] int64.
+    pub fn pools(k: *const Kernels, s: cuda.Stream, scores_ptr: u64, out: u64, at: u64, rows: usize, np: usize, path: u64, g: sparse.Geometry) !void {
         const t = tile(np);
         var a: cuda.Args = .{};
-        inline for (.{ scores_ptr, out, @as(i64, @intCast(np)), at, @as(c_int, topk), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), path }) |v| a.add(v);
+        inline for (.{ scores_ptr, out, @as(i64, @intCast(np)), at, @as(c_int, @intCast(g.topk)), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), path, @as(c_int, @intCast(g.pool)) }) |v| a.add(v);
         try cuda_pdl.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = pool_threads } }, s, &a);
     }
 };
@@ -222,7 +222,7 @@ test "GLM index: prompt chunks take the kernels; a decode row, an unaligned key 
             .{ .rows = 512, .pk = 0x1000, .cap = 256, .want = &.{ 20, 21, 41 } }, // fewer than 512 pools
         }) |c| {
             Recorded.n = 0;
-            try sparse.selectTokens(set, ops, stream, 0x5000, 0x6000, 160, c.pk, table, 0x7000, 65536, c.rows, 32, 128, c.cap, s, 0x8000, 0x9000);
+            try sparse.selectTokens(set, ops, stream, 0x5000, 0x6000, 160, c.pk, table, 0x7000, 65536, c.rows, 32, 128, .{}, c.cap, s, 0x8000, 0x9000);
             try std.testing.expectEqualSlices(usize, c.want, Recorded.ids[0..Recorded.n]);
         }
     }

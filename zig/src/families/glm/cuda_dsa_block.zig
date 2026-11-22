@@ -14,7 +14,7 @@ const kv_host = @import("cuda_kv_host.zig");
 pub const prompt_att_rows = 512;
 
 /// The indexer's weights, replicated: [wk | weights_proj] [d + heads][dims], wq_b (as stored), gate, LayerNorm, bias.
-pub const Index = struct { kw: projection.Proj, gate: u64, ln_w: u64, ln_b: u64, ape: u64, qb: projection.Proj, heads: usize, d: usize };
+pub const Index = struct { kw: projection.Proj, gate: u64, ln_w: u64, ln_b: u64, ape: u64, qb: projection.Proj, heads: usize, d: usize, geom: sparse.Geometry };
 
 /// One DSA layer on a rank of `heads` heads: proj, norms, q_b, kv_b per head as wk/wv, o, indexer; shapes from config.
 pub const Layer = struct {
@@ -34,6 +34,23 @@ pub const Layer = struct {
     dims: usize,
     eps: f32,
     dense_limit: usize, // the largest context whose top-k selection keeps every visible key (Config.keyWidth)
+    rope: usize = 0, // qk_rope: roped dims past qk in a q head and past lw in a latent row (none on GLM-5.3-Flash)
+    rope_inv: u64 = 0, // their fp32 frequencies [rope / 2] on the device
+
+    /// A latent cache row and an absorbed q row: the latent, then the roped key columns (512 or 576).
+    pub fn row(l: Layer) usize {
+        return l.lw + l.rope;
+    }
+
+    /// A q head's columns from q_b: qk latent-path dims, then the roped ones.
+    pub fn qHead(l: Layer) usize {
+        return l.qk + l.rope;
+    }
+
+    /// The softmax scale: 1 / sqrt(qk + rope), 1 / 16 on both.
+    pub fn scale(l: Layer) f32 {
+        return @floatCast(std.math.pow(f64, @floatFromInt(l.qHead()), -0.5));
+    }
 };
 
 /// The caches: latent bf16 [capacity][lw], index keys/gates bf16 [capacity][128], pooled keys bf16 [pk_rows][128].
@@ -51,23 +68,23 @@ pub const Caches = struct {
 
 /// The block's scratch for up to `rows` rows.
 pub const Scratch = struct {
-    dp: u64, // bf16 [rows][q_lora + lw]
+    dp: u64, // bf16 [rows][q_lora + row]
     qr: u64, // bf16 [rows][q_lora]
     xs_qr: u64, // fp32 [rows][q_lora / 64]
-    lat: u64, // bf16 [rows][lw]
+    lat: u64, // bf16 [rows][row]: the normed latent, then the roped key
     xs_lat: u64, // fp32 [rows][lw / 64]
-    q: u64, // bf16 [rows][heads qk]
+    q: u64, // bf16 [rows][heads qHead]
     ikr: u64, // bf16 [rows][160]
     igr: u64, // fp32 [rows][128]
     router_part: u64, // fp32 [router_ks][rows][128]
-    qa: u64, // bf16 [rows][heads][lw]
+    qa: u64, // bf16 [rows][heads][row]: the absorbed q, then the roped q
     ol: u64, // bf16 [rows][heads][lw]
     vn: u64, // bf16 [rows][heads dv]
     qi: u64, // bf16 [rows][index heads d]
     partials: latent.Partials,
     dummy: u64, // an i32
     select: sparse.Scratch,
-    tokens: u64, // i32 [rows][sparse.width]
+    tokens: u64, // i32 [rows][index width]
     counts: u64, // i32 [rows]
     mm_part: u64, // fp32 split-K partials
     at: u64, // an i32: a prompt block's first position (pos + its first row)
@@ -109,18 +126,18 @@ pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
 
 pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof) !void {
     var stamp = prof.span(profile, stream, .replicated_qakva);
-    const width = l.q_lora + l.lw;
+    const width = l.q_lora + l.row();
     try projection.matmul(set, stream, l.proj, x, x_stride, s.dp, s.mm_part, rows, width, l.dims, false);
     try glue.rmsnorm(set, stream, s.dp, width, l.q_norm, s.qr, l.q_lora, s.xs_qr, l.eps, rows, l.q_lora);
-    try glue.rmsnorm(set, stream, s.dp + l.q_lora * 2, width, l.kv_norm, s.lat, l.lw, s.xs_lat, l.eps, rows, l.lw);
+    try glue.rmsnorm(set, stream, s.dp + l.q_lora * 2, width, l.kv_norm, s.lat, l.row(), s.xs_lat, l.eps, rows, l.lw);
     stamp.end();
     stamp = prof.span(profile, stream, .projections);
     defer stamp.end();
-    try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qk, l.q_lora, false);
+    try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
     const ix = l.index;
     try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
     try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
-    try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.lw);
+    try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
     if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
 }
 
@@ -130,15 +147,18 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     const ix = l.index;
     const kw_rows = ix.d + ix.heads;
     var v = s; // the scratch from row r0
-    v.lat += r0 * l.lw * 2;
+    v.dp += r0 * (l.q_lora + l.row()) * 2;
+    v.lat += r0 * l.row() * 2;
     v.ikr += r0 * kw_rows * 2;
     v.igr += r0 * ix.d * 4;
-    v.qa += r0 * l.heads * l.lw * 2;
+    v.q += r0 * l.heads * l.qHead() * 2;
+    v.qa += r0 * l.heads * l.row() * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
     try writeKeys(k, stream, l, c, v, rows, pos);
+    try ropeQueries(set, stream, l, v, rows, pos);
     const t, const tk = try tables(l, c);
-    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    const scale = l.scale();
     if (host_pos < l.dense_limit) {
         const stamp = prof.span(k.prof, stream, .mla);
         var dc = c;
@@ -149,14 +169,14 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
-        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
         const stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
-            const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, sparse.width);
-            return latent.sparseAttentionFormat(set, stream, v.qa, slots, 0, .{}, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
+            const slots = try g.gather(k.ops, stream, ix.gate, c.lc, c.pt, t.page_rows, pos, v.tokens, v.counts, rows, ix.geom.width());
+            return latent.sparseAttentionFormat(set, stream, v.qa, slots, 0, .{}, v.tokens, v.counts, ix.geom.width(), v.partials, v.ol, rows, l.heads, l.row(), scale);
         };
-        try latent.sparseAttentionFormat(set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
+        try latent.sparseAttentionFormat(set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, ix.geom.width(), v.partials, v.ol, rows, l.heads, l.row(), scale);
     }
 }
 
@@ -168,10 +188,10 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
     const kw_rows = ix.d + ix.heads;
     try prepareProfile(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof); // every row keeps its query, its latent, its keys
     var stamp = prof.span(k.prof, stream, .cache_write);
-    try latent.latentWriteFormat(k.set, stream, s.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw); // all rows, at pos, before any of them attends
+    try writeLatent(k.set, stream, l, c, s, t, pos, rows); // all rows, at pos, before any of them attends
     stamp.end();
     stamp = prof.span(k.prof, stream, .index_update);
-    try sparse.indexUpdate(k.set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows);
+    try sparse.indexUpdate(k.set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows, ix.geom);
     stamp.end();
     try attendLastRow(k, stream, l, c, s, rows, pos, host_pos, nch, t, tk);
     const pstamp = prof.span(k.prof, stream, .projections);
@@ -186,7 +206,8 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
     const ix = l.index;
     const r0 = rows - 1;
     var v = s; // the scratch from the last row (its token lists and partials stay at the front)
-    v.qa += r0 * l.heads * l.lw * 2;
+    v.q += r0 * l.heads * l.qHead() * 2;
+    v.qa += r0 * l.heads * l.row() * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
     var at = pos; // the last row's own position on the device: pos + r0, so its causal limit is unchanged
@@ -198,24 +219,25 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
         try cuda_pdl.launch(try k.ops.function("tf_glm_add_i32"), .{ .grid = .{ .x = 1 }, .block = .{ .x = 32 } }, stream, &a);
         at = v.at;
     }
-    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    try ropeQueries(k.set, stream, l, v, 1, at);
+    const scale = l.scale();
     if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
         var stamp = prof.span(k.prof, stream, .mla);
-        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlock(rows));
+        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.row(), nch, scale, latent.headBlockFor(rows, l.row()));
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
         // one row at host_pos + r0: the same pool bucket, score columns and token list its block computed for it
-        try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
+        try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
         var stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
-        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
+        try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, ix.geom.width(), v.partials, v.ol, 1, l.heads, l.row(), scale);
     }
 }
 
 /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
 fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
-    const hb = latent.headBlock(rows);
+    const hb = latent.headBlockFor(rows, l.row());
     var r0: usize = 0;
     while (r0 < rows) : (r0 += part_rows) {
         const n = @min(part_rows, rows - r0);
@@ -228,15 +250,16 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
             try cuda_pdl.launch(try k.ops.function("tf_glm_add_i32"), .{ .grid = .{ .x = 1 }, .block = .{ .x = 32 } }, stream, &a);
             at = s.at;
         }
-        const off = r0 * l.heads * l.lw * 2;
-        try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb);
+        const qa = s.qa + r0 * l.heads * l.row() * 2;
+        try latent.attentionFormat(k.set, stream, qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, s.ol + r0 * l.heads * l.lw * 2, s.dummy, n, l.heads, l.row(), nch, scale, hb);
     }
 }
 
 /// A cache's tables: latent rows `t`, and pooled keys `tk` (on their own device pages under TF_GLM_KV_HOST).
 fn tables(l: Layer, c: Caches) !struct { latent.Table, latent.Table } {
-    if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
-    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
+    const rb = l.row() * 2;
+    if (c.ps % rb != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
+    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / rb };
     return .{ t, .{ .pt = c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows } };
 }
 
@@ -246,11 +269,27 @@ fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r
     const kw_rows = ix.d + ix.heads;
     const t, const tk = try tables(l, c);
     var stamp = prof.span(k.prof, stream, .cache_write);
-    try latent.latentWriteFormat(set, stream, s.lat, l.lw, c.lc, c.ls, t, pos, rows, l.lw);
+    try writeLatent(set, stream, l, c, s, t, pos, rows);
     stamp.end();
     stamp = prof.span(k.prof, stream, .index_update);
-    try sparse.indexUpdate(set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows);
+    try sparse.indexUpdate(set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows, ix.geom);
     stamp.end();
+}
+
+/// The latent rows into the cache at pos; a roped row's key columns roped first (k_pe from dp, at pos + r).
+fn writeLatent(set: glue.Set, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, t: latent.Table, pos: u64, rows: usize) !void {
+    if (l.rope != 0) {
+        const kpe: latent.RopeRows = .{ .x = s.dp + (l.q_lora + l.lw) * 2, .x_row = l.q_lora + l.row(), .x_head = 0, .out = s.lat + l.lw * 2, .o_row = l.row(), .o_head = 0 };
+        try latent.rope(set, stream, kpe, rows, 1, pos, l.rope_inv);
+    }
+    try latent.latentWriteFormat(set, stream, s.lat, l.row(), c.lc, c.ls, t, pos, rows, l.row());
+}
+
+/// A roped row's queries: each head's rope dims of q (past qk) roped at pos + r into qa past the latent.
+fn ropeQueries(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, rows: usize, pos: u64) !void {
+    if (l.rope == 0) return;
+    const q: latent.RopeRows = .{ .x = s.q + l.qk * 2, .x_row = l.heads * l.qHead(), .x_head = l.qHead(), .out = s.qa + l.lw * 2, .o_row = l.heads * l.row(), .o_head = l.row() };
+    try latent.rope(set, stream, q, rows, l.heads, pos, l.rope_inv);
 }
 
 /// The existing row projections and cache writes, without attention or output projections.

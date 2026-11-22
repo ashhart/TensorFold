@@ -16,7 +16,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
 | `TENSORFOLD_RESTORE_PREFETCH_GIB` | Whole unsigned 64-bit GiB count, capped at 16777216; default 16 |
 | `TENSORFOLD_RESTORE_PREFETCH_MS` | Whole unsigned 64-bit milliseconds, capped at 1099511627776; default 30000 |
-| `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
+| `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids and cache salts ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
 | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
 | `TENSORFOLD_DEVICE_CHECK` | Exactly `0` or `1`; default 1. `0` skips serve's pre-load check against the saved [device profile](device.md) |
 | `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
@@ -26,7 +26,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
-| `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. |
+| `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. Under `--mtp-drafts` the MTP head drafts every stream and this does nothing. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
 | `TF_TIMING` | Exactly `0` or `1`; default off (each call's wall time on stderr while set) |
 | `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
@@ -92,10 +92,22 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
 | `TF_DSV41_ASSETS` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the Engram token map; unset or blank reads it beside the checkpoint |
 | `TF_DSV41_ENGRAM_DIR` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the packed Engram tables; unset or blank takes the checkpoint's `engram_table_dir` |
-| `TF_DSV41_CALIB_FILE` | DeepSeek-V4.1 on Metal: a cost table file (JSON: `verify`, each window's ms by its rows from 1, and `draft`, the drafter pass's ms) that prices draft depth instead of the built-in table. Measure it on the machine that serves; pricing never changes a token. Unset: the built-in table. |
 | `TF_DSV41_ENGRAM_VERIFY` | DeepSeek-V4.1 on Metal: exactly `sample` or `full`; `full` also checks every byte of the Engram tables against their manifest at boot; default `sample` |
-| `TF_DSV41_ENGRAM_CACHE` | DeepSeek-V4.1 on Metal: whole u32 count of Engram records a layer kept cached; default 65536 |
+| `TF_DSV41_ENGRAM_CACHE` | DeepSeek-V4.1 on Metal: whole u32 count of Engram records a layer kept cached; default 4194304 (about 1.2 GiB a layer) |
+| `TF_DSV41_MARKOV_GPU` | DeepSeek-V4.1 on Metal: `1` draws DSpark drafts (greedy, and keyed ones whose sampling races the whole row) on the GPU right behind the drafter's head from the Markov-biased logits over the whole vocabulary, the release's rule; `0` draws them on the host from each row's 64 best logits; drafts only, replies are unchanged; default 1 |
+| `TF_DSV41_DSPARK_BLOCK` | DeepSeek-V4.1 on Metal: drafts a DSpark pass makes, 1 to 15, after a window that verified the checkpoint's whole block of 5 (a pass after any other window makes 5); a block under 5 applies to every pass, and the depth may verify up to all of them; drafts only, replies are unchanged; `0` keeps the checkpoint's block; default 7 |
 | `TF_DSV41_PREFILL_PIECES` | DeepSeek-V4.1: exactly `0` or `1`, default 0. On CUDA, `1` lets the round planner run prompt pieces and decode rows in one pass; on Metal, `1` runs a prompt a chunk at a time between the other streams' rounds (as `--decode-share` above 0, `TENSORFOLD_PREFILL_ORDER=srpt` or a `TENSORFOLD_PREFILL_POLICY`, `_SHARE` or `_BUDGET` also do), replies taking `--decode-share`, else `TENSORFOLD_PREFILL_SHARE`, else 0.25 of wall time beside it; malformed text stops the start naming it |
+| `TF_DSV41_CALIB` | DeepSeek-V4.1 draft pricing, any case: `cached`, `default`, `real`, `measure` or `zig`; unset or blank is `cached` on CUDA, and on Metal reads `TF_DSV41_CALIB_FILE` when set or `default` otherwise. `default` prices rounds from the built-in table with nothing timed; `measure` times a table at start, reports it and prices the rounds from it; `zig` reads this engine's stored table for the same shape, and times and stores one when there is none; `cached` and `real` read a stored table. On Metal a stored table also matches the device and checkpoint that stored it. Checked at startup on Metal; on CUDA a malformed value is refused when the engine opens. [Metal measurements](dsv41-metal-draft-pricing.md) |
+| `TF_DSV41_CALIB_DIR` | DeepSeek-V4.1 draft pricing: a directory path without control characters where stored tables are read and written; unset or blank is `~/.cache/tensorfold/dsv41-calib`. Checked at startup on Metal; unchecked on CUDA |
+| `TF_DSV41_CALIB_FILE` | DeepSeek-V4.1 draft pricing: a path without control characters to one cost table file (JSON: `verify`, `draft`, optional `slot`) read directly instead of searching the directory, including on Metal when `TF_DSV41_CALIB` is unset or blank; unset or blank searches (or keeps `default` on Metal when `TF_DSV41_CALIB` is unset or blank). Checked at startup on Metal; unchecked on CUDA |
+| `TF_DSV41_CALIB_SHAPE` | DeepSeek-V4.1 draft pricing, any case: `raw` or `fit`; naming it times every row from 1 to 16 as CUDA does (slow on Metal); unset times a sparse set on Metal and `raw` on CUDA |
+| `TF_DSV41_CALIB_STAT` | DeepSeek-V4.1 draft pricing, any case: `median` or `min`, the statistic over a window's timed runs; unset is `min` on Metal and `median` on CUDA |
+| `TF_DSV41_CALIB_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs per entry; unset is 3 passes on Metal (cut by the budget) and 5 on CUDA |
+| `TF_DSV41_CALIB_WARM` | DeepSeek-V4.1 draft pricing: whole number 0 through 20 of untimed runs before an entry; unset is 3 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_RECHECK` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 retimed after the sweep; unset is 4 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_CYCLE` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 timed in interleaved cycles; unset is 4 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_DEEP_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs for rows past 8; unset is 5 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_BUDGET_MS` | DeepSeek-V4.1 draft pricing on Metal: whole milliseconds 0 through 600000 after which later passes of the start-up measurement are dropped, each entry keeping its first timed run (0: no limit); unset is 1000. Read and checked on CUDA but not used there |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
@@ -104,6 +116,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_SLIDE_TAP_CHECK` | Exactly `0` or `1`; `1` checks a pass's tapped rows against a fresh run's; default off |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
+| `TF_DSV41_COPY_DRAFTER` | DeepSeek-V4.1 on CUDA: exactly `0` or `1`; enables the lookup planner (regardless of `TF_DSV41_LOOKUP_PLAN`) with continuation-ranked band matching, adaptive doubling (`8 -> 15`), and expected-yield gating; refused when `TF_DSV41_LOOKUP` is blank or off; default off |
 
 The video-token reader has no fixed model-independent token ceiling. Its unsigned storage width is not a useful token budget.
 The request geometry and model context decide whether a parsed budget fits; zero remains accepted as before.
@@ -130,7 +143,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 35 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 36 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -153,9 +166,11 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; default on: two ranks split the BF16 dense projections |
 | `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; default off: each rank keeps its half of the output head |
+| `TF_FLASHNEXT_FUSED_SPLIT` | Exactly `0` or `1`; default off. `1` runs CUDA split-K lane calls of 2,048 columns or more on the fused form, with the same bits; Metal and HIP refuse `1` |
 | `TF_FLASHNEXT_ATTN_LANES` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_WARM_AHEAD` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_TABLE_WARM` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_GATHER_EARLY` | Exactly `0` or `1`; default off. `1` gathers a shared pass's n-gram rows for every stream in one pool call, so the pass shares one distinct-row read and one set of parked readers; the rows, their order and every reply are the per-stream call's |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
@@ -201,3 +216,19 @@ The profile registry reports selected arithmetic/experimental overrides; it does
 See [profiles](profiles.md) for classes, scopes and grouped slide-learning names.
 `capabilities --json` no longer advertises `TENSORFOLD_NO_UPDATE_CHECK` or `HF_HUB_OFFLINE`: the native binary reads neither.
 The command-line `--no-update-check` remains an accepted no-op.
+
+
+### Qwen mapped-host KV capacity mode
+
+`TF_QWEN_KV_HOST=1` opts the dense and MoE CUDA hybrids into mapped pinned-host KV pages (#2637).
+It requires `TF_QWEN_KV_PAGES` and `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1`, and a discrete GPU.
+State and verify runs remain on the device. Spill, disk snapshots and `TF_QWEN_KV_SHARE` are refused by name.
+The default path, with the switch unset, retains its existing plan, allocations and execution.
+
+| Setting | Accepted value | Default | Effect |
+|---|---|---|---|
+| `TF_QWEN_KV_HOST_GIB` | Positive whole GiB, at most 17179869183 | Unset or blank | Optional upper limit; below a whole KV window including lookahead is refused. Runs are not charged to this cap. |
+
+This is a capacity tradeoff, not a speed claim: attention reads mapped host KV over the device interconnect.
+Set `--prompt-cache-gib` explicitly to bound the separate host prompt cache.
+Host-on inference equality and performance on a discrete GPU remain device checks, not host-test results.

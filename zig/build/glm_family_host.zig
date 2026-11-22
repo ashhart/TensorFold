@@ -5,6 +5,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
+    b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
+    step.dependOn(&pdl.step);
     const exl3 = b.createModule(.{ .root_source_file = b.path("zig/glm_exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
     b.step("test-glm-exl3-prompt-host", "Actual EXL3 whole prompt calls, shared-slot ABI and scratch without a GPU").dependOn(&exl3_run.step);
@@ -39,6 +42,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-glm-thin-weights-host", "TF_GLM_LAYERS's admission bytes by tensor from synthetic shard headers").dependOn(&thin_run.step);
     step.dependOn(&thin_run.step);
     b.step("test-glm-tp3-host", "Uneven KDA head shares through actual projection and load planning, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM TP3:"} })).step);
+    b.step("test-glm-exl3-host", "GLM EXL3 admission, mixed-width expert loading and scratch sizing, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM EXL3:"} })).step);
     // TF_GLM_INDEX_CUDA: the launch rules, and (its own slower step) glm_index_*.cuh as host C++ against plain models
     const index_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM index:"} }));
     b.step("test-glm-index-host", "GLM's prompt indexer launch rules without devices").dependOn(&index_run.step);

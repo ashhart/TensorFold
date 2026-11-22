@@ -34,15 +34,18 @@ pub const Mutation = enum {
 };
 
 /// One registered gather: the weights' bits (groups of 64), whether each output goes back to its row's own place.
-pub const Variant = struct { bits: u8, scatter: bool, mutation: Mutation = .none };
+pub const Variant = struct { bits: u8, scatter: bool, glm_m3_fast: bool = false, mutation: Mutation = .none };
 
-/// The widths qwen27 admits for its routed experts on tensor units, each plain and scattering, and three controls.
+/// The widths qwen27 admits for its routed experts on tensor units, each plain and scattering, and controls.
 pub const registered = [_]Variant{
     .{ .bits = 4, .scatter = false },
     .{ .bits = 4, .scatter = true },
     .{ .bits = 8, .scatter = false },
     .{ .bits = 8, .scatter = true },
+    .{ .bits = 4, .scatter = false, .glm_m3_fast = true },
+    .{ .bits = 8, .scatter = true, .glm_m3_fast = true },
     .{ .bits = 4, .scatter = false, .mutation = .tail },
+    .{ .bits = 4, .scatter = false, .glm_m3_fast = true, .mutation = .tail },
     .{ .bits = 8, .scatter = false, .mutation = .expert },
     .{ .bits = 4, .scatter = true, .mutation = .scatter },
 };
@@ -50,10 +53,10 @@ pub const registered = [_]Variant{
 pub fn name(v: Variant) []const u8 {
     return switch (v.mutation) {
         .none => switch (v.bits) {
-            4 => if (v.scatter) "metal affine_mm q4 g64 gather scatter" else "metal affine_mm q4 g64 gather",
-            else => if (v.scatter) "metal affine_mm q8 g64 gather scatter" else "metal affine_mm q8 g64 gather",
+            4 => if (v.glm_m3_fast) (if (v.scatter) "metal affine_mm glm m3 q4 g64 gather scatter" else "metal affine_mm glm m3 q4 g64 gather") else if (v.scatter) "metal affine_mm q4 g64 gather scatter" else "metal affine_mm q4 g64 gather",
+            else => if (v.glm_m3_fast) (if (v.scatter) "metal affine_mm glm m3 q8 g64 gather scatter" else "metal affine_mm glm m3 q8 g64 gather") else if (v.scatter) "metal affine_mm q8 g64 gather scatter" else "metal affine_mm q8 g64 gather",
         },
-        .tail => "control: metal affine_mm gather q4 g64, each expert's last row dropped",
+        .tail => if (v.glm_m3_fast) "control: metal affine_mm glm m3 gather q4 g64, each expert's last row dropped" else "control: metal affine_mm gather q4 g64, each expert's last row dropped",
         .expert => "control: metal affine_mm gather q8 g64, a tile reads its neighbour expert's weights",
         .scatter => "control: metal affine_mm gather scatter q4 g64, outputs left in sorted order",
     };
@@ -93,7 +96,7 @@ pub const Gather = struct {
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant) !Gather {
-        const plain = try mm.source(device, a, .{ .bits = v.bits, .group = 64 });
+        const plain = try mm.source(device, a, .{ .bits = v.bits, .group = 64, .glm_m3_fast = v.glm_m3_fast });
         defer a.free(plain);
         const src = if (v.mutation == .none) try a.dupe(u8, plain) else blk: {
             const e = v.mutation.edit();

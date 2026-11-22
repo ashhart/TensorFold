@@ -336,7 +336,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     errdefer own.link.deinit();
     try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
-    try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
+    try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.latentRow() * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
@@ -523,11 +523,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
         error.InvalidEnvironment => "a TF_GLM_* setting is malformed: the error line before this one names it, its value and the accepted form",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
-        error.TooManyRanks => std.fmt.comptimePrint(
-            "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
-            .{ ranks.max_world, ranks.max_world },
-        ),
-        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 and MIXED_PRECISION checkpoints (the log names what config.json has)",
+        error.TooManyRanks => std.fmt.comptimePrint("GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer", .{ ranks.max_world, ranks.max_world }),
+        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4, MIXED_PRECISION and EXL3 mcg checkpoints (the log names what config.json has)",
+        error.UnreadableExl3 => "an EXL3 routed expert is not an mcg trellis of 1 to 8 bits with its marker and fp16 scales (the log names the tensor)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
         else => null,
     };
@@ -541,7 +539,7 @@ test "a place inside its world of at most 16 ranks serves; a larger world is ref
 }
 
 test "a checkpoint refused for its format, at the entry or by the loader, is explained" {
-    for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
+    for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat, error.UnreadableExl3 }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "TF_KV_SHARE past the slots a startup plan holds is refused, and the refusal is explained" {

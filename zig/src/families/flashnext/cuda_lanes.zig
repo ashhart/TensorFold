@@ -310,28 +310,17 @@ pub fn Namespace(comptime Tri: type) type {
                     l.part_draft = try Parts.take(&self.parts.drafts, self.engine.driver, mtp.Draft.partsBytes(self.head.?.ids.len, self.engine.chunk, self.engine.heads));
                     l.draft = try mtp.Draft.initParts(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, self.engine.heads, l.part_draft.?);
                 } else if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.init(self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, self.engine.heads);
+                if (l.draft) |*d| d.label = s.id;
+                s.cached = 0;
+                // one rank restores first so a kept state's images skip the tower; ranks send every image's rows unfed
+                if (self.ranks == null) try snaps.resumeKept(self, s, l, ids.len);
                 if (s.images.len != 0) {
                     const v = self.vision orelse return error.VisionNotEnabled;
-                    l.seq.media = try v.state(ids, s.images);
+                    l.seq.media = try v.state(ids, s.images, if (self.ranks == null) l.filled.? else 0);
                     if (self.ranks) |r| try r.setMedia(&l.seq);
                 }
-                if (l.draft) |*d| {
-                    d.label = s.id;
-                    d.media = if (l.seq.media) |*m| m.view() else null;
-                }
-
-                s.cached = 0;
-                const saved = s.reuse.saved orelse return l;
-                const kept: *snap.Snap = @ptrCast(@alignCast(saved));
-                if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
-                    s.reuse_failed = true;
-                } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
-                    l.filled = kept.at;
-                    s.cached = @intCast(kept.at);
-                } else |err| switch (err) {
-                    error.SequenceTooShort, error.NoHeadState => s.reuse_failed = true,
-                    else => return err,
-                }
+                if (l.draft) |*d| d.media = if (l.seq.media) |*m| m.view() else null;
+                if (self.ranks != null) try snaps.resumeKept(self, s, l, ids.len);
                 return l;
             }
             /// One prompt chunk, rows picked as it starts, cut at a mark it cannot keep on the way; true once the last.

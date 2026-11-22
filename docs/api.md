@@ -174,12 +174,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
-warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
-embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache, cache_salt
+([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The
+vision, speech, embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
 thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
-[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
-including false, and no callback details or addresses are exposed.
+[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
+and no callback details or addresses are exposed.
 
 Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
 Flags describe the engine; request combinations, context, template and format constraints still apply.
@@ -281,12 +281,13 @@ and `--vision`.
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
 
-One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
 orientation), never in the model's resized frame.
 
 | Model | What the reader returns | Geometry |
 | --- | --- | --- |
 | dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+| GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
 Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
 and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
@@ -295,7 +296,7 @@ key scope.
 
 ### Reader Markdown
 
-The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+Both readers write block text in one Markdown flavour, the one Mistral's page Markdown uses:
 
 - Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
 - GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
@@ -304,12 +305,13 @@ The reader writes block text in one Markdown flavour, the one Mistral's page Mar
 - Lists with `-` or `1.` markers, and code in fenced blocks.
 - No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
   own image references.
+- GLM-OCR's single block holds the whole page's Markdown, headings, tables and math included.
 
 ### Pages and budgets
 
 - Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
-  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
-  decoded pixels disagree is refused as bad input.
+  16 megapixels and 8192 pixels a side for dots.mocr, 32 megapixels for GLM-OCR; a larger image is bad input. An
+  image whose header and decoded pixels disagree is refused as bad input.
 - PDFs need `--vision-pdf`. PDFium renders each selected page at up to 144 DPI, at most 2048 pixels a side and
   about 3.6 megapixels; boxes and sizes are in pixels of the rendered page. Mistral reports that DPI (72 for an
   image). Every PDF of a request is measured before the first page is read (its page count and each selected
@@ -353,7 +355,7 @@ stops the request before its next page or PDF render.
 | `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes decide PDF or image. `{"type": "file"}` is HTTP 400 |
 | `pages` | 0-based page indices as a list or a string such as `"0,2-4"`; duplicates are merged. An image has only page `0`. At most 1024 entries (a range counts its length) before merging, and the page budget after |
 | `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
-| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer`. GLM-OCR marks neither, so `true` is HTTP 400 "this model does not mark page headers or footers" |
 | `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
 | `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
 | `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
@@ -366,6 +368,12 @@ stops the request before its next page or PDF render.
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
+
+### GLM-OCR context
+
+GLM-OCR's default 8192-token window leaves about 2000 tokens for the reply after a full image budget (6144
+tokens). A dense page needs more: start the server with a larger `--context`, or such pages fail as unreadable,
+"the model's output was cut at the context limit".
 
 ## System One on a Clef engine
 
@@ -535,7 +543,9 @@ On CUDA, stop strings are checked after every token on the generated text, reaso
 completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, decode on after a match to an end
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
-unless a stop string or a tool call ended the reply.
+unless a stop string, a tool call or a grammar ended the reply. A grammar's stop token is an end token, and with
+`ignore_eos` it still ends the reply with `finish_reason` `stop` and stays out of the text. End tokens in the
+reasoning, before the grammar starts, stay in it.
 
 ### Exact incremental token IDs
 
@@ -830,6 +840,8 @@ The server does not silently turn a required call into `auto`. Installing the gr
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build) supports them too: rank 0 sends each pick's grammar rows to the
+other ranks, and every rank masks its own vocabulary columns before the pick.
 
 A native grammar request waits at most 2,000 ms for its compile. This holds for every format, including JSON objects
 and schemas, regexes, choices, EBNF and the structural tags of tool calls. Past that the request gets HTTP 400 naming
@@ -1370,6 +1382,28 @@ default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /
 bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
 a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
 
+## Prompt cache salts
+
+By default a kept prompt state is resumed by any request whose prompt starts with the same tokens, whoever sent it.
+`cache_salt` (a non-empty string of at most 1024 bytes, on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`
+and `/v1/messages`) keeps a request's states apart: a state kept under one salt is resumed only by requests with the
+same salt, and states kept without a salt only by requests without one. `serve --cache-salt-per-key` salts every request
+by the API key it matched as well (a request's own `cache_salt` then counts within that key, and no salt a client sends
+stands for another key's), so two keys never resume each other's states; a server without API keys logs that the option
+salts nothing. The salt is hashed with HMAC-SHA-256 under the server's [tool-call id key](#messages-and-tools) (random
+at each start unless `TENSORFOLD_TOOL_ID_KEY_FILE` names one), so no cache key or state name can be tested against a
+guessed salt, and the salt itself is never echoed, stored or logged (`TENSORFOLD_REQUEST_LOG` writes `<redacted>`). The
+hash masks the first four words of the request's cache key. Salts never change the tokens of a reply, and a request
+without a salt is keyed exactly as before. Salted states stay in RAM: they are not written to the `--prompt-cache-disk`
+store, and a salted request never reads a state from it. A salted request also neither drafts from nor adds to the
+`--recall` record, neither reads nor writes `--compact-memory` notes, and a salted `/v1/imprint` ask reports and loads
+only its salt's states. The server's own requests for a salted conversation (the next turn's background prefill,
+compaction's notes, Cortheon's research planner and the server rounds it keeps) stay under the same salt. Engines on the
+shared lane host with its prompt cache report `capabilities.cache_salt` and take salts. Any other engine (one whose own
+host keeps states by tokens alone, a family's own paged cache under `TF_KV_SHARE`, or no prompt cache) returns HTTP 400
+for a salted request, naming its backend, rather than accept a salt it cannot keep apart, and does not start with
+`--cache-salt-per-key`. `TENSORFOLD_SEED_SALT` is unrelated: it only seeds sampling.
+
 ## Conversations on disk
 
 Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
@@ -1557,14 +1591,28 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 | `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except names ending in `_API_KEY`, `_SECRET`, `_PASSWORD`, `_TOKEN`, `_SIGNING_KEY`, `_SECRET_FILE` or `_KEY_FILE` (such as `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE`, `TF_RUNTIME_SIGNING_KEY` and `TF_STAGE_SECRET_FILE`); other names, such as `TF_SLIDE_POCKET_KEY`, are hashed |
 
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
-`reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path; every engine so far),
-`feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`, `--spill-gib`,
-`--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`, `--vision`,
-`--tp` above 1 or `--speed-up`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a text file or
-the executable changed after the server opened or stamped it) or `hash_failed` (a file could not be read; when the
-binary cannot be opened or the text files cannot be stamped at startup, a startup line says why). The engine's facts
-and the epoch are read under the lock every reload takes, so one snapshot never mixes two engines. The snapshot alone
-does not qualify a response cache.
+`reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
+one below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
+`--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
+`--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
+`--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
+text file or the executable, or a checkpoint file the engine stamped, changed after it was opened or stamped) or
+`hash_failed` (a file could not be read; when the binary cannot be opened or the text files cannot be stamped at
+startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one
+snapshot never mixes two engines. The snapshot alone does not qualify a response cache.
+
+The supported path so far is `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: native Qwen3.5-2B on a CUDA build at one rank,
+every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
+rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
+index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
+read `hash_failed` while the model still serves. Once the server is ready it reads every shard byte in full on one
+thread, with no digest cache, and reads `files_changed` if any stamp moved between the load and the end of the read, or if a Hugging Face snapshot's shard
+differs from its blob name. `components.engine` is a SHA-256 over the path, the checkpoint's structure (canonical
+`config.json`, the index, shard names, sizes and headers), every shard's bytes, and the components a kept state's key
+binds (the embedded kernel images, a captured cubin set, the GPU's name, compute capability and driver version, the
+family's resolved facts and the resolved profile values), then the GPU's SM count, the context window, the stream
+count and the staggered segments. An `--idle-unload` reload opens a new engine, which stamps again before its load and
+reads every byte again once it is published. A server whose witness reads `feature_excluded` never reads the weights.
 
 ### Reply binding
 

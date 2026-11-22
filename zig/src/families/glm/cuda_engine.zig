@@ -157,7 +157,7 @@ pub const Engine = struct {
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
         const block32 = if (exl3.isExl3(gpa, text)) null else try @import("cuda_experts.zig").wantsBlock32(gpa, text);
-        var m = try fw.Modules.load(d, ctx, block32);
+        var m = try fw.Modules.load(d, ctx, block32, c.rope != 0);
         errdefer m.deinit();
         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
         var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);

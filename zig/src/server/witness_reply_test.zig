@@ -20,7 +20,7 @@ fn ready(h: *fixture.Harness, engine: *fixture.Engine, c: *fixture.Checkpoint, a
     with.execution_witness = true;
     with.unix_socket = "test";
     try h.start(engine, null, c, with);
-    h.state.?.start();
+    h.state.?.start(h.srv);
     _ = fixture.settled(h.state.?, h.srv);
 }
 
@@ -304,7 +304,7 @@ test "execution witness reply: a key without read is refused before the engine; 
     var h: fixture.Harness = .{ .model = fixture.ChatText.model() };
     try h.start(&engine, &keys, &c, .{ .execution_witness = true });
     defer h.deinit();
-    h.state.?.start();
+    h.state.?.start(h.srv);
     _ = fixture.settled(h.state.?, h.srv);
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();

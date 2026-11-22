@@ -4,7 +4,7 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
 pub const Rule = struct {
@@ -21,6 +21,8 @@ pub const Rule = struct {
     base: u8 = 10,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
+    /// A `.word` setting matches its texts in any case.
+    ignore_case: bool = false,
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
     words: []const []const u8 = &.{},
     /// A legacy name that is ignored, and so never refused, while its canonical name is set.
@@ -38,6 +40,7 @@ pub fn isReal(kind: Kind) bool {
 }
 
 pub const rules = [_]Rule{
+    .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
     .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
@@ -71,7 +74,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
-    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; opt in to sampled MTP tree drafting)" },
     .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
     .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q27_POCKET_OFF", .scope = .cuda, .kind = .path, .forms = "all, or a list of layer:neuron pairs without control characters (default off)" },
@@ -83,6 +86,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
+    .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
@@ -106,7 +110,20 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ASSETS", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
     .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
-    .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
+    .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 4194304)" },
+    .{ .name = "TF_DSV41_MARKOV_GPU", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 draws DSpark drafts on the host from each row's 64 best logits; default 1)" },
+    .{ .name = "TF_DSV41_DSPARK_BLOCK", .scope = .metal, .kind = .u32, .forms = "a whole DSpark block of 1 to 15 drafts, 0 for the checkpoint's (default 7)" },
+    .{ .name = "TF_DSV41_CALIB", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "cached", "default", "real", "measure", "zig" }, .forms = "cached, default, real, measure or zig, in any case (unset or blank: default on Metal)" },
+    .{ .name = "TF_DSV41_CALIB_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding stored cost tables" },
+    .{ .name = "TF_DSV41_CALIB_FILE", .scope = .metal, .kind = .path, .forms = "a path without control characters to one stored cost table" },
+    .{ .name = "TF_DSV41_CALIB_SHAPE", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "raw", "fit" }, .forms = "raw or fit, in any case (naming it times every row 1 to 16)" },
+    .{ .name = "TF_DSV41_CALIB_STAT", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "median", "min" }, .forms = "median or min, in any case" },
+    .{ .name = "TF_DSV41_CALIB_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
+    .{ .name = "TF_DSV41_CALIB_WARM", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 20, .forms = "a whole number of untimed runs from 0 to 20" },
+    .{ .name = "TF_DSV41_CALIB_RECHECK", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
+    .{ .name = "TF_DSV41_CALIB_CYCLE", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
+    .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
+    .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 600000, .forms = "whole milliseconds from 0 to 600000 (0: no limit)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
     .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },
@@ -150,6 +167,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
     .{ .name = "TF_DSV41_LOOKUP_PLAN", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_COPY_DRAFTER", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_GM_V3", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_OWN_PREFILL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
@@ -248,9 +266,11 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_DECODE_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_FUSED_SPLIT", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_ATTN_LANES", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_WARM_AHEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_TABLE_WARM", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_GATHER_EARLY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1: one pooled n-gram gather a shared pass; default 0)" },
     .{ .name = "TF_FLASHNEXT_PROFILE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_VERIFY_HOST_LOGITS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_DRAFTS", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 6; clamped to 1 through 15)" },
@@ -303,7 +323,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
-        for (r.words, 0..) |v, i| if (std.mem.eql(u8, text, v)) return i;
+        for (r.words, 0..) |v, i| if (if (r.ignore_case) std.ascii.eqlIgnoreCase(text, v) else std.mem.eql(u8, text, v)) return i;
         return error.InvalidEnvironment;
     }
     // "auto" travels as 0: the caller reads it back through `parallel`, never the raw number
@@ -314,6 +334,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         return n;
     }
     if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
+    if (r.kind == .names) return try nameCount(r, text);
     // a path travels as 0, its text read by `path`; the file itself is its reader's to check
     if (r.kind == .path) return if (for (text) |ch| {
         if (ch < 0x20 or ch == 0x7f) break true;
@@ -347,6 +368,15 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
+}
+
+/// A comma-separated list's nonblank entries, from one to the row's `max`, without control characters: their count.
+fn nameCount(r: Rule, text: []const u8) Error!u64 {
+    for (text) |ch| if (ch < 0x20 or ch == 0x7f) return error.InvalidEnvironment;
+    var n: u64 = 0;
+    var it = std.mem.tokenizeScalar(u8, text, ',');
+    while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
+    return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
 }
 
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
@@ -427,6 +457,14 @@ pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
+}
+
+/// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
+pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
+    std.debug.assert(rule(name).kind == .names);
+    const raw = sys.getenv(name) orelse return null;
+    _ = (try checked(name, raw)) orelse return null;
+    return raw;
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.

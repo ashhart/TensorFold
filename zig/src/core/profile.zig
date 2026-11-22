@@ -9,6 +9,7 @@ pub const Switch = enum {
     TF_QWEN_KV_PAGES,
     TF_QWEN_KV_PAGES_ALL,
     TF_QWEN_KV_SHARE,
+    TF_QWEN_KV_HOST,
     TF_QWEN_REQUEST_STARTS,
     TF_GLM_REQUEST_STARTS,
     TF_KV_SHARE,
@@ -56,6 +57,7 @@ pub const Switch = enum {
     TF_DSV41_SCHEMA_PROMPT,
     TF_DSV41_ROWS_CAP,
     TF_DSV41_TOOL_GRAMMAR,
+    TF_DSV41_COPY_DRAFTER,
 };
 pub const Syntax = enum { count, one, auto, present, not_zero };
 pub const Scope = struct { backend: []const u8, families: []const []const u8 };
@@ -147,6 +149,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
+    .{ .id = .TF_QWEN_KV_HOST, .families = qwen, .class = .identical, .syntax = .one, .effect = "Keep KV pages in mapped host memory; one stream, state runs on the device", .evidence = "#2637" },
     .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next", "dory" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; no profile qualifies it yet", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
@@ -193,6 +196,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_DSV41_SCHEMA_PROMPT, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Response schema in the encoded prompt", .evidence = "#2370" },
     .{ .id = .TF_DSV41_ROWS_CAP, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .present, .effect = "Rows in each forward bucket", .evidence = "#2370" },
     .{ .id = .TF_DSV41_TOOL_GRAMMAR, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Legacy alias of the server-wide auto-tool grammar policy", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_COPY_DRAFTER, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Adaptive suffix copy drafting in the lookup planner", .evidence = "#2638" },
 };
 
 comptime {

@@ -75,7 +75,7 @@ const common = [_]Reg{
     .{ .v = .{ .kind = .simd_bits, .bits = 8, .group = 64 }, .name = "metal simd_qmm_bits q8 g64" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32 }, .name = "metal lane projection q6 g32 sk1" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32, .sk = 4, .f32_out = true }, .name = "metal lane projection q6 g32 sk4 fp32 out" },
-} ++ affine_k.half;
+} ++ affine_k.half ++ affine_k.glm_m3;
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = @import("metal_lane_variants.zig").m5;
@@ -377,14 +377,15 @@ pub fn main(init: std.process.Init) !u8 {
         }
         gathers.deinit(a);
     }
-    if (tensor) for (gather_k.registered) |v| {
+    for (gather_k.registered) |v| {
+        if (!tensor and !v.glm_m3_fast) continue;
         if (!wanted(o, gather_k.name(v))) continue;
         const p = try a.create(gather_k.Gather);
         errdefer a.destroy(p);
         p.* = try gather_k.Gather.init(a, device, queue, v);
         try gathers.append(a, p);
         try kernels.append(a, p.kernel());
-    };
+    }
     var h3_list: std.ArrayList(*h3_k.H3) = .empty;
     defer for (h3_list.items) |x| x.deinit();
     var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
@@ -433,6 +434,8 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_launches = @import("metal_glm_launch.zig").Suite.init(a, device, queue, &kernels);
     defer glm_launches.deinit();
     try glm_launches.collect(o.only);
+    var glm_tap = try @import("metal_glm_tap_ring.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer glm_tap.destroy();
     var glm_dflash_head: @import("metal_glm_dflash_head.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_dflash_head.deinit();
     try glm_dflash_head.collect(o.only);
@@ -546,35 +549,25 @@ pub fn main(init: std.process.Init) !u8 {
     var pointwise_cases: [pointwise.count]pointwise.Case = undefined;
     try pointwise.collect(a, device, queue, &pointwise_kernels, &pointwise_cases, &kernels, o.only);
     defer for (&pointwise_cases) |*case| case.deinit();
-    const native_hc = try @import("metal_qwen4_hc.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_hc.destroy();
-    const native_qsa_select = try @import("metal_qwen4_qsa_select.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_qsa_select.destroy();
-    const native_qsa_scores = try @import("metal_qwen4_qsa_scores.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_qsa_scores.destroy();
-    const native_qsa_attn = try @import("metal_qwen4_qsa_attn.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_qsa_attn.destroy();
-    const native_qsa_norm = try @import("metal_qwen4_qsa_norm.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_qsa_norm.destroy();
-    const native_ple = try @import("metal_qwen4_ple.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_ple.destroy();
-    const native_gdn = try @import("metal_qwen4_gdn.zig").Suite.create(a, device, queue, &kernels, o.only);
-    defer native_gdn.destroy();
+    var qwen4_suites = try @import("metal_qwen4_main.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer qwen4_suites.destroy();
     const moss_image = try @import("metal_moss_image.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
-    var steer: @import("metal_qwen27_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
-    defer steer.deinit();
-    try steer.collect(o.only, o.gates, o.seed);
+    try @import("metal_qwen27_steer.zig").run(a, device, queue, &kernels, o.only, o.gates, o.seed);
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
     const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol_decoder.destroy();
     const idol_vae = try @import("metal_idol_vae.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol_vae.destroy();
+    const glm_prompt = try @import("metal_glm_prompt.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer glm_prompt.destroy();
+    const idol_dino = try @import("metal_idol_dino.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_dino.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
@@ -584,9 +577,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
-    if (o.limits) {
-        lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
-    }
+    if (o.limits) lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {
         fn of(x: std.Io.Timestamp, y: std.Io.Timestamp) i64 {
