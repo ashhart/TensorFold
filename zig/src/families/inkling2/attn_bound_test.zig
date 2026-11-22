@@ -237,8 +237,21 @@ test "bound: the domain ends where fp32 overflows or the sigmoid leaves the norm
 
 const inf32 = std.math.inf(f32);
 
+test "bound: the domain ends at 2^20 live keys" {
+    const a = t.allocator;
+    inline for (.{ .{ (1 << 20) - 1, true }, .{ 1 << 20, false } }) |c| {
+        const b = try build(a, .{ .pos0 = c[0], .heads = 1, .hd = 1, .drel = 1, .rext = 1, .q = 0, .k = 0, .rel = 0, .proj = 0, .gate = 0 });
+        defer b.free(a);
+        if (c[1]) {
+            (try bound.head(a, b.s, b.in, 0, 0)).free(a);
+        } else {
+            try t.expectError(error.AttnDomain, bound.head(a, b.s, b.in, 0, 0));
+        }
+    }
+}
+
 test "bound: an output below the normal range" {
-    // a value through a tiny sigmoid: the last product rounds on the 2^-149 grid, past the old term, inside the new
+    // a value through a tiny sigmoid: the last product rounds on the 2^-149 grid, which the sigmoid-scaled floor alone misses
     const a = t.allocator;
     var found: usize = 0;
     for ([_]f32{ -87, -86 }) |gate| {
@@ -251,14 +264,14 @@ test "bound: an output below the normal range" {
             const hb = try bound.head(a, c.s, c.in, 0, 0);
             defer hb.free(a);
             const err = @abs(@as(f64, raw[0]) - hb.want[0]);
-            const old = (1 + 0x1p-20) * (hb.mag[0] * std.math.expm1(hb.big) + hb.sg[0] * hb.floor * @exp(hb.big));
-            if (err > old) {
+            const without_abs = (1 + 0x1p-20) * (hb.mag[0] * std.math.expm1(hb.big) + hb.sg[0] * hb.floor * @exp(hb.big));
+            if (err > without_abs) {
                 found += 1;
                 try t.expect(err <= hb.limit(0));
-                if (found == 1) std.debug.print("attn bound below normal: v {e} gate {d}: error {e:.3}, old bound {e:.3}, bound {e:.3}\n", .{ v, gate, err, old, hb.limit(0) });
+                if (found == 1) std.debug.print("attn bound below normal: v {e} gate {d}: error {e:.3}, bound without the absolute term {e:.3}, bound {e:.3}\n", .{ v, gate, err, without_abs, hb.limit(0) });
             }
         }
     }
-    std.debug.print("attn bound below normal: {d} of the values exceed the old expression and stay inside the bound\n", .{found});
+    std.debug.print("attn bound below normal: {d} of the values exceed the bound without its absolute term and stay inside the bound\n", .{found});
     try t.expect(found > 0);
 }

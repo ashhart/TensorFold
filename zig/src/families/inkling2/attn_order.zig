@@ -32,7 +32,7 @@ const Acc = struct {
     l: f32 = 0,
     o: [attn.most_hd]f32 = @splat(0),
 
-    /// A part (m, l, o) folded in: both sides scaled by exp2 of their max less the new one, each operation rounded.
+    /// A part (m, l, o) folded in: both sides scaled by exp2 of their max less the combined max, each operation rounded.
     fn fold(a: *Acc, hd: usize, m: f32, l: f32, o: []const f32) void {
         const mn = @max(a.m, m);
         const x = @exp2(a.m - mn);

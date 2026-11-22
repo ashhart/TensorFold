@@ -6,6 +6,7 @@ const order = @import("attn_order.zig");
 const u: f64 = 0x1p-24; // fp32 unit roundoff
 const u_mma: f64 = 0x1p-23; // a tensor-core add: its adders may truncate
 const u_bf: f64 = 0x1p-8; // bf16 unit roundoff
+const most_live: usize = 1 << 20; // the domain's limit on the keys of a row
 const huge: f64 = 0x1p120; // the domain's limit on every magnitude that enters a product or a sum
 const gate_min: f64 = -87; // 1 + expf(-gate) stays below 2^126 and the sigmoid is a normal number
 
@@ -33,7 +34,7 @@ pub const Head = struct {
         a.free(h.sg);
     }
 
-    /// The bound on |y - want[d]| of the fp32 value before the output's rounding (2^-149: the last product's own).
+    /// The bound on |y - want[d]| of the fp32 value before the output's rounding; its last term, 2^-149, is the final product's.
     pub fn limit(h: Head, d: usize) f64 {
         return (1 + 0x1p-20) * (h.mag[d] * std.math.expm1(h.big) + h.sg[d] * h.floor * @exp(h.big)) + 0x1p-149;
     }
@@ -56,6 +57,7 @@ pub fn head(a: std.mem.Allocator, s: attn.Shape, in: attn.Inputs, row: usize, h:
     const t = s.pos0 + row;
     const lo = attn.first(s, t);
     const nk = t - lo + 1;
+    if (nk > most_live) return error.AttnDomain;
     const kh = h / (s.heads / s.kv_heads);
     const hrow = row * s.heads + h;
     const q = in.q[hrow * hd ..][0..hd];
