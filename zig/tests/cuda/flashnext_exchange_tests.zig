@@ -76,7 +76,7 @@ fn planted(gpu: check.Gpu, c: *Collective, stream: cuda.Stream, rank: usize) !vo
     check.pass("rank {d}: reduce-scatter equals the all-reduce on planted -0, subnormals, extremes, infinities, NaN and two-rank values", .{rank});
 }
 
-const Kernels = struct { moe_sum: cuda.Function };
+const Kernels = struct { pdl: bool = false, moe_sum: cuda.Function };
 const Bufs = struct { y: u64, wts: u64, moe_f32: u64 };
 const Pass = struct { s: *const Bufs, k: Kernels, stream: cuda.Stream, pending_f32: bool = false };
 

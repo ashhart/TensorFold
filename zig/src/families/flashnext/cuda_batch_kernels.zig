@@ -57,6 +57,7 @@ pub const Forms = struct {
 
 pub const Kernels = struct {
     forms: Forms = .{},
+    pdl: bool = false,
     qmm: cuda.Module,
     experts: cuda.Module,
     rows: cuda.Module,
@@ -100,6 +101,7 @@ pub const Kernels = struct {
         const tile_mode = try cuda.experts_tile.mode(if (std.c.getenv("TF_FLASHNEXT_PROMPT_EXPERT_TILE")) |v| std.mem.span(v) else null);
         var k: Kernels = undefined;
         k.forms = Forms.resolve();
+        k.pdl = try @import("cuda_pdl.zig").read(d);
         k.expert_tile = null;
         k.qmm = try cuda.Module.load(d, cuda.kernels.qmm);
         errdefer k.qmm.unload();
@@ -117,6 +119,7 @@ pub const Kernels = struct {
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();
+        k.native_lane.pdl = k.pdl;
         const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
         if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
         var device: c_int = 0;

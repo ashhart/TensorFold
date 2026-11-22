@@ -16,7 +16,7 @@ const Mock = struct {
 };
 
 const Scratch = struct { proj: u64, gq: u64 = 0x10000, gk: u64 = 0x20000, gv: u64 = 0x30000, ggb: u64 = 0x40000, ys: u64 = 0x50000 };
-const Kernels = struct { lanes_keep: cuda.Function, lanes_front: cuda.Function, lanes_chain: cuda.Function, lanes_shift: cuda.Function };
+const Kernels = struct { pdl: bool = false, lanes_keep: cuda.Function, lanes_front: cuda.Function, lanes_chain: cuda.Function, lanes_shift: cuda.Function };
 const Collective = struct { id: u32 = 0 };
 
 /// What once() reads of a batch.Pass: the round's lanes, the projection rows, the kernels, the stream and the model.

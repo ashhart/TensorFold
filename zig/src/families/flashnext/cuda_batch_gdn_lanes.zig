@@ -48,7 +48,7 @@ pub fn once(self: anytype, lw: *const Layer, layer: usize, li: usize) !bool {
     if (keeps) {
         var a: cuda.Args = .{};
         a.add(t);
-        try cuda.launch.launch(self.k.lanes_keep, .{ .grid = .{ .x = 64, .y = n }, .block = .{ .x = 256 } }, self.stream, &a);
+        try cuda.launch.launch(self.k.lanes_keep, .{ .pdl = self.k.pdl, .grid = .{ .x = 64, .y = n }, .block = .{ .x = 256 } }, self.stream, &a);
     }
     var f: cuda.Args = .{};
     f.add(lw.cw.ptr);
@@ -60,7 +60,7 @@ pub fn once(self: anytype, lw: *const Layer, layer: usize, li: usize) !bool {
     f.add(s.ggb);
     f.add(cint(parts.late_rows));
     f.add(t);
-    try cuda.launch.launch(self.k.lanes_front, .{ .grid = .{ .x = @intCast(widest), .y = gdn.nk + gdn.nv, .z = n }, .block = .{ .x = 256 } }, self.stream, &f);
+    try cuda.launch.launch(self.k.lanes_front, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast(widest), .y = gdn.nk + gdn.nv, .z = n }, .block = .{ .x = 256 } }, self.stream, &f);
     var c: cuda.Args = .{};
     c.add(s.gq);
     c.add(s.gk);
@@ -70,10 +70,10 @@ pub fn once(self: anytype, lw: *const Layer, layer: usize, li: usize) !bool {
     c.add(cint(parts.late_rows));
     c.add(cint(parts.late_store));
     c.add(t);
-    try cuda.launch.launch(self.k.lanes_chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16, .z = n }, .block = .{ .x = 128 } }, self.stream, &c);
+    try cuda.launch.launch(self.k.lanes_chain, .{ .pdl = self.k.pdl, .grid = .{ .x = gdn.nv, .y = gdn.dv / 16, .z = n }, .block = .{ .x = 128 } }, self.stream, &c);
     var w: cuda.Args = .{};
     w.add(t);
-    try cuda.launch.launch(self.k.lanes_shift, .{ .grid = .{ .x = @intCast((gdn.conv_dim + 255) / 256), .y = n }, .block = .{ .x = 256 } }, self.stream, &w);
+    try cuda.launch.launch(self.k.lanes_shift, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast((gdn.conv_dim + 255) / 256), .y = n }, .block = .{ .x = 256 } }, self.stream, &w);
     return true;
 }
 

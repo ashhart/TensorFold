@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 37 settings: 25 switches, 9 integers, 1 real, 2 structured" {
+test "Flash Next strict env: the table holds all 38 settings: 26 switches, 9 integers, 1 real, 2 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 25, 9, 1, 2 }, counts);
+    try t.expectEqual([4]usize{ 26, 9, 1, 2 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -67,6 +67,7 @@ test "Flash Next strict env: the dense split and head shard switches keep their 
     for ([_]Switch{
         .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .default = true },
         .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .default = false },
+        .{ .name = "TF_FLASHNEXT_PDL", .default = false },
     }) |s| {
         // unset, empty and whitespace-only all read as unset, so each keeps the default its reader passes
         for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {

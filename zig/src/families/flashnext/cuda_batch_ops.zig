@@ -17,7 +17,7 @@ pub fn sumSlices(k: *const Kernels, stream: cuda.Stream, part: u64, out: u64, bf
     a.add(@as(c_int, @intFromBool(bf16)));
     a.add(@as(c_longlong, @intCast(n)));
     a.add(cint(sk));
-    try cuda.launch.launch(k.sum, .{ .grid = .{ .x = @intCast(cdiv(n, 256)) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda.launch.launch(k.sum, .{ .pdl = k.pdl, .grid = .{ .x = @intCast(cdiv(n, 256)) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 pub fn shiftWindow(k: *const Kernels, stream: cuda.Stream, win: u64, rows_ptr: u64, stride: usize, n: usize, taps: usize, c: usize) !void {
@@ -28,7 +28,7 @@ pub fn shiftWindow(k: *const Kernels, stream: cuda.Stream, win: u64, rows_ptr: u
     a.add(cint(n));
     a.add(cint(taps));
     a.add(cint(c));
-    try cuda.launch.launch(k.shift, .{ .grid = .{ .x = @intCast(cdiv(c, 256)) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda.launch.launch(k.shift, .{ .pdl = k.pdl, .grid = .{ .x = @intCast(cdiv(c, 256)) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// rows x width 16-bit columns from src (src_pitch values a row) to dst (dst_pitch); dst 0: none.
@@ -40,5 +40,5 @@ pub fn copyCols(k: *const Kernels, stream: cuda.Stream, src: u64, src_pitch: usi
     a.add(dst);
     a.add(@as(c_longlong, @intCast(dst_pitch)));
     a.add(cint(width));
-    try cuda.launch.launch(k.copy_cols, .{ .grid = .{ .x = @intCast(cdiv(width, 256)), .y = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda.launch.launch(k.copy_cols, .{ .pdl = k.pdl, .grid = .{ .x = @intCast(cdiv(width, 256)), .y = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
 }
