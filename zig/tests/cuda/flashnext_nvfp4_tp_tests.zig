@@ -103,7 +103,8 @@ pub fn run(gpu: check.Gpu) !void {
     };
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
     defer mod.unload();
-    const router = try cuda.grouped.Router.resolve(mod);
+    var router = try cuda.grouped.Router.resolve(mod);
+    try router.loadSkipLast(mod);
     var batch = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_batch);
     defer batch.unload();
     const ep_picks = try batch.function("fn_ep_picks");
@@ -113,11 +114,8 @@ pub fn run(gpu: check.Gpu) !void {
     const out = try r.out(most * slots * d * 4);
     const pairs = most * slots;
     // one GPU: both experts, global picks, the shared slot skipped
-    try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, pairs * d * 4, r.s.handle), "cuMemsetD8Async");
-    try router.route(r.s, dp, pairs, experts + 1, 16, plan);
-    try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, whole.view(), plan, act, cuda.grouped.maxItems(pairs, experts + 1, 16), experts);
-    try kernels.run(r.s, .down_f32, .{ .x = act, .stride = width }, whole.view(), plan, out, cuda.grouped.maxItems(pairs, experts + 1, 16), experts);
-    const one = try r.back(f32, out, pairs * d);
+    const b: PairBuffers = .{ .x = dx, .act = act, .out = out, .plan = plan };
+    const one = try comparePlans(&r, router, &kernels, b, whole.view(), dp, picks, experts);
     const summed = try a.alloc(f32, pairs * d);
     @memset(summed, 0);
     for (ranks, 0..) |o, rank| {
@@ -131,12 +129,7 @@ pub fn run(gpu: check.Gpu) !void {
             const want: i32 = if (g >= o.first and g < o.first + o.count) g - @as(i32, @intCast(o.first)) else @intCast(o.count);
             try check.expect(l == want, "fn_ep_picks maps global pick {d} to {d} on rank {d}, not {d}", .{ g, want, rank, l });
         }
-        try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, pairs * d * 4, r.s.handle), "cuMemsetD8Async");
-        const skip: i32 = @intCast(o.count);
-        try router.route(r.s, local, pairs, o.count + 1, 16, plan);
-        try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, o.view(), plan, act, cuda.grouped.maxItems(pairs, o.count + 1, 16), skip);
-        try kernels.run(r.s, .down_f32, .{ .x = act, .stride = width }, o.view(), plan, out, cuda.grouped.maxItems(pairs, o.count + 1, 16), skip);
-        const all = try r.back(f32, out, pairs * d);
+        const all = try comparePlans(&r, router, &kernels, b, o.view(), local, got_picks, o.count);
         for (0..most) |row| for (0..slots) |slot| {
             const e: usize = @intCast(picks[row * slots + slot]);
             const at = (row * slots + slot) * d;
@@ -171,4 +164,51 @@ pub fn run(gpu: check.Gpu) !void {
     }
     try check.sameBytes("two expert-parallel ranks summed equal one GPU's bytes", std.mem.sliceAsBytes(summed), std.mem.sliceAsBytes(one));
     r.report("NVFP4 expert parallel: whole experts a rank, fn_ep_picks' local ids, FP64 rows, untouched skipped pairs, and the ranks' sum byte-equal to one GPU");
+}
+
+const PairBuffers = struct { x: u64, act: u64, out: u64, plan: cuda.grouped.Plan };
+
+fn comparePlans(r: *rig.Rig, router: cuda.grouped.Router, kernels: *const fx, b: PairBuffers, layer: cuda.experts.Layer, dp: u64, picks: []const i32, count: usize) ![]f32 {
+    const skip: i32 = @intCast(count);
+    var skipped: usize = 0;
+    for (picks) |e| {
+        if (e == skip) skipped += 1;
+    }
+    const pairs = picks.len;
+    const items = cuda.grouped.maxItems(pairs, count + 1, 16);
+    const plan = b.plan;
+    try router.route(r.s, dp, pairs, count + 1, 16, plan);
+    const legacy_counts = try r.back(i32, plan.counts, 2);
+    const kept_items: usize = @intCast(legacy_counts[0] - @as(i32, @intCast((skipped + 15) / 16)));
+    const kept_pairs = pairs - skipped;
+    const legacy_items = try r.back(i32, plan.items, kept_items * 3);
+    const legacy_members = try r.back(i32, plan.members, kept_pairs);
+    const legacy_y = try pairOutput(r, kernels, b, layer, items, pairs, skip);
+
+    try router.routeSkipLast(r.s, dp, pairs, count + 1, 16, plan);
+    const counts = try r.back(i32, plan.counts, 2);
+    try check.expect(counts[0] == kept_items and counts[1] == legacy_counts[1] - 1, "only sentinel tiles and their expert are removed", .{});
+    const filtered_items = try r.back(i32, plan.items, kept_items * 3);
+    const filtered_members = try r.back(i32, plan.members, kept_pairs);
+    try check.sameBytes("real item descriptors", std.mem.sliceAsBytes(filtered_items), std.mem.sliceAsBytes(legacy_items));
+    try check.sameBytes("real pair indices", std.mem.sliceAsBytes(filtered_members), std.mem.sliceAsBytes(legacy_members));
+    var seen: [most * slots]bool = @splat(false);
+    for (filtered_members) |p| {
+        try check.expect(p >= 0 and p < pairs, "member index in bounds", .{});
+        const i: usize = @intCast(p);
+        try check.expect(picks[i] != skip and !seen[i], "only real pairs, once each", .{});
+        seen[i] = true;
+    }
+    const filtered_y = try pairOutput(r, kernels, b, layer, items, pairs, skip);
+    try check.sameBytes("ordered combine input rows", std.mem.sliceAsBytes(filtered_y), std.mem.sliceAsBytes(legacy_y));
+    return filtered_y;
+}
+
+fn pairOutput(r: *rig.Rig, kernels: *const fx, b: PairBuffers, layer: cuda.experts.Layer, items: usize, pairs: usize, skip: i32) ![]f32 {
+    const gpu = r.gpu;
+    try gpu.d.check(gpu.d.api.cuMemsetD8Async(b.out, 0, pairs * d * 4, r.s.handle), "cuMemsetD8Async");
+    try gpu.d.check(gpu.d.api.cuMemsetD8Async(b.act, 0xff, pairs * width * 2, r.s.handle), "cuMemsetD8Async");
+    try cuda.experts_waves.run(kernels, r.s, .up, .{ .x = b.x, .stride = d, .slots = slots }, layer, b.plan, b.act, items, skip);
+    try cuda.experts_waves.run(kernels, r.s, .down_f32, .{ .x = b.act, .stride = width }, layer, b.plan, b.out, items, skip);
+    return r.back(f32, b.out, pairs * d);
 }

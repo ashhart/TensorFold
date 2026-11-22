@@ -32,6 +32,7 @@ pub const symbols = struct {
 
 pub const Router = struct {
     plan_small: Function,
+    plan_skip_last: ?Function = null,
     plan_rows: Function,
     plan_rank: Function,
     plan_offsets: Function,
@@ -46,6 +47,11 @@ pub const Router = struct {
 
     fn go(f: Function, s: Stream, grid: usize, block: u32, a: *launch_.Args) !void {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = block } }, s, a);
+    }
+
+    /// Load the opt-in planner only when the caller can skip its last expert id.
+    pub fn loadSkipLast(r: *Router, mod: Module) !void {
+        r.plan_skip_last = try mod.function("tf_experts_plan_skip_last");
     }
 
     /// route over the first `rows.*` rows' pairs (`per` a row; `rows` a device int, 0: all), at any width.
@@ -63,11 +69,21 @@ pub const Router = struct {
     /// experts.route: `pairs` int32 expert ids at `picks` grouped into items of at most `tile` pairs (16 decode).
     pub fn route(r: Router, s: Stream, picks: u64, pairs: usize, count: usize, tile: usize, p: Plan) !void {
         if (pairs > small) return r.wide(s, picks, pairs, count, tile, p, null);
+        return smallPlan(r.plan_small, s, picks, pairs, count, tile, p);
+    }
+
+    /// Skip id count - 1 in one-block plans when enabled; wide plans keep the regular sentinel items.
+    pub fn routeSkipLast(r: Router, s: Stream, picks: u64, pairs: usize, count: usize, tile: usize, p: Plan) !void {
+        if (pairs <= small) if (r.plan_skip_last) |f| return smallPlan(f, s, picks, pairs, count, tile, p);
+        return r.route(s, picks, pairs, count, tile, p);
+    }
+
+    fn smallPlan(f: Function, s: Stream, picks: u64, pairs: usize, count: usize, tile: usize, p: Plan) !void {
         var a: launch_.Args = .{};
         a.add(picks);
         for ([_]usize{ pairs, count, tile }) |v| a.add(@as(c_int, @intCast(v)));
         for ([_]u64{ p.members, p.items, p.counts }) |v| a.add(v);
-        return go(r.plan_small, s, 1, 1024, &a);
+        return go(f, s, 1, small, &a);
     }
 
     /// The plan ranked in blocks of 1024 pairs; `live` (a device row count and pairs a row) caps the pairs planned.

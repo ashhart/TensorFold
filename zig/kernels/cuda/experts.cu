@@ -196,9 +196,9 @@ __device__ int place_items(int c, int E, int T, int* __restrict__ items, int* __
   return off;
 }
 
-__global__ void __launch_bounds__(PLAN_THREADS)
-    plan_kernel(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
-                int* __restrict__ items, int* __restrict__ counts) {
+template <bool FILTER>
+__device__ __forceinline__ void plan_small(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+                                           int* __restrict__ items, int* __restrict__ counts) {
   __shared__ int pk[PSMALL];
   __shared__ int cnt[EMAX];
   __shared__ int off[EMAX];
@@ -208,8 +208,7 @@ __global__ void __launch_bounds__(PLAN_THREADS)
   for (int p = tid; p < P; p += PLAN_THREADS) {
     const int e = picks[p];
     pk[p] = e;
-    if (e < 0 || e >= E) continue;
-    atomicAdd(&cnt[e], 1);
+    if (!FILTER || e != E - 1) atomicAdd(&cnt[e], 1);
   }
   __syncthreads();
   const int o = place_items(tid < E ? cnt[tid] : 0, E, T, items, counts);
@@ -217,11 +216,24 @@ __global__ void __launch_bounds__(PLAN_THREADS)
   __syncthreads();
   for (int p = tid; p < P; p += PLAN_THREADS) {
     const int e = pk[p];
-    if (e < 0 || e >= E) continue;
+    if (FILTER && e == E - 1) continue;
     int rank = 0;
     for (int q = 0; q < p; ++q) rank += pk[q] == e;
     members[off[e] + rank] = p;
   }
+}
+
+__global__ void __launch_bounds__(PLAN_THREADS)
+    plan_kernel(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+                int* __restrict__ items, int* __restrict__ counts) {
+  plan_small<false>(picks, P, E, T, members, items, counts);
+}
+
+// The last expert id is a sentinel; keep original pair indices for the output slots.
+extern "C" __global__ void __launch_bounds__(PLAN_THREADS)
+    tf_experts_plan_skip_last(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+                              int* __restrict__ items, int* __restrict__ counts) {
+  plan_small<true>(picks, P, E, T, members, items, counts);
 }
 
 // plan_kernel over the first *rows rows' pairs (per a row): a captured bucket's padding rows get no items.

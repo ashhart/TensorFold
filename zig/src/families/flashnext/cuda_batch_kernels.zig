@@ -127,6 +127,7 @@ pub const Kernels = struct {
         k.tiles = try tk.TileKernels.load(d);
         errdefer k.tiles.unload();
         k.router = try cuda.grouped.Router.resolve(k.experts);
+        if (try @import("sys").environment.read(bool, "TF_FLASHNEXT_PLAN_SKIP", false)) try k.router.loadSkipLast(k.experts);
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();

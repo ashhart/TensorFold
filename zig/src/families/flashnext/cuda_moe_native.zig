@@ -35,7 +35,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     switch (owned.format) {
         .nvfp4 => {
             const pt = nvfp4_tile.size(self.k, n);
-            try self.k.router.route(self.stream, picks, pairs, e, pt, plan);
+            try self.k.router.routeSkipLast(self.stream, picks, pairs, e, pt, plan);
             const items = cuda.grouped.maxItems(pairs, e, pt);
             try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = s.slots }, owned.view(), plan, s.moe_act, items, skip);
             try nvfp4_tile.run(self.k, pt, self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, skip);
