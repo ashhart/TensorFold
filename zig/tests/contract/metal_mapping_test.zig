@@ -72,12 +72,12 @@ test "Metal launch map: paged prompt variants follow M5 and simdgroup eligibilit
     for (registry.all_metal) |d| {
         if (!std.mem.startsWith(u8, d.name, "qwen27 prompt ")) continue;
         count += 1;
-        const units = std.mem.indexOf(u8, d.name, " m5 ") != null;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null or std.mem.indexOf(u8, d.name, " tensor ") != null;
         try launches.requireMapped(d);
         try std.testing.expectEqual(!units, launches.supported(.{ .units = false }, d));
         try std.testing.expectEqual(units, launches.supported(.{ .units = true }, d));
     }
-    try std.testing.expectEqual(@as(usize, 32), count);
+    try std.testing.expectEqual(@as(usize, 40), count);
 }
 
 test "Metal launch map: Inkling2 MMA launches resolve and support all Metal GPUs" {

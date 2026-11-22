@@ -1,4 +1,4 @@
-//! Prompt attention uses eight simdgroups and a 16 KiB score panel, with native bfloat on M3+ and tensor variants on M5.
+//! Eight simdgroups use 16 KiB scores in contiguous/paged libraries; native bfloat needs M3+, tensors M5.
 const M = @import("limits.zig").MetalLaunch;
 const std = @import("std");
 

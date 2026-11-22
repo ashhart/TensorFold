@@ -47,10 +47,10 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
-        if (std.mem.indexOf(u8, d.name, " tensor ") != null)
-            return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
-        if (std.mem.indexOf(u8, d.name, " simd ") != null) return true;
-        return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+        const causal = std.mem.indexOf(u8, d.name, " tensor ") != null or std.mem.indexOf(u8, d.name, " simd ") != null;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null or std.mem.indexOf(u8, d.name, " tensor ") != null;
+        if (causal and units) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+        return device.tensorUnits() == units;
     }
     if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
