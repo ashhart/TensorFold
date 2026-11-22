@@ -146,7 +146,7 @@ pub const Proj = struct {
         }
     }
 
-    /// One BF16 ulp at the magnitude (fp32 transcendentals can land a rounding boundary a ulp off); below ~2^-118 fp32 intermediates can flush subnormal, so the full value is allowed.
+    /// One BF16 ulp at the magnitude; below ~2^-118 fp32 intermediates can flush, so the full value is allowed.
     pub fn bounds(_: *Proj, want: []const f64, mag: []const f64, allow: []f64) !void {
         _ = want;
         for (allow, mag) |*l, m| {

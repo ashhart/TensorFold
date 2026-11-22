@@ -58,8 +58,7 @@ pub const Mapped = struct {
         try m.adoptShard(c, buf);
     }
 
-    /// As adopt for one shard of a multi-file checkpoint: `c` may already hold other shards' tensors.
-    /// On error `buf` is either freed here or owned by `c` for its deinit, never both.
+    /// adopt for one shard of a multi-file checkpoint: on error `buf` is freed here or owned by `c`, never both.
     pub fn adoptShard(m: *const Mapped, c: *ck.Checkpoint, buf: mtl.Buffer) !void {
         {
             errdefer buf.deinit();
@@ -113,8 +112,7 @@ fn touch(span: []const u8, page: usize, lo: usize, hi: usize, sink: *u8) void {
     sink.* = acc;
 }
 
-/// The checkpoint's shards as one set: each file stays a private mapping when its tensors' absolute
-/// offsets meet their consumers' alignment, else it is repacked into an aligned buffer at adopt.
+/// The checkpoint's shards as one set: each file stays mapped when its offsets meet alignment, else repacked.
 pub const Set = struct {
     gpa: std.mem.Allocator,
     files: std.ArrayList(File) = .empty,
