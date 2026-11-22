@@ -94,6 +94,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("qwen27_prompt_records.zig").records ++
     @import("affine_gather_records.zig").records ++
     @import("inkling2_attention_metal_records.zig").records ++
+    @import("inkling2_dense_metal_records.zig").records ++
     @import("inkling2_glue_metal_records.zig").records ++
     @import("inkling2_experts_metal_records.zig").records ++
     @import("inkling2_units_metal_records.zig").records ++
@@ -144,6 +145,7 @@ test {
     _ = @import("mla_cuda_records.zig");
     _ = @import("inkling2_cuda_records.zig");
     _ = @import("inkling2_attention_metal_records.zig");
+    _ = @import("inkling2_dense_metal_records.zig");
     _ = @import("inkling2_glue_metal_records.zig");
     _ = @import("inkling2_experts_metal_records.zig");
     _ = @import("inkling2_units_metal_records.zig");

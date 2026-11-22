@@ -4,6 +4,7 @@ const serving = if (@import("builtin").os.tag.isDarwin()) @import("serving_test.
 test {
     _ = @import("attention_test.zig");
     _ = @import("glue_test.zig");
+    _ = @import("dense_fuse_test.zig");
     _ = @import("experts_test.zig");
     _ = @import("loop_test.zig");
     _ = @import("runtime_test.zig");

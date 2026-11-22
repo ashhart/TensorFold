@@ -31,7 +31,7 @@ pub const sliding_ring = ap.ringFor(1024, max_rows);
 pub const conv_widths = [conv_states]usize{ 1024, 1024, 2304, 2304 };
 pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const conv_bytes = visit_slots * 3 * conv_row_values * 2;
-pub const taps_bytes = visit_slots * (3 + max_rows) * conv_row_values * 2;
+pub const taps_bytes = visit_slots * (3 + window_rows) * conv_row_values * 2;
 
 pub fn globalSlots(capacity: usize) usize {
     return std.mem.alignForward(usize, capacity, ap.tile_keys);
@@ -183,7 +183,7 @@ pub const Cache = struct {
     }
 
     pub fn staged(c: *const Cache, slot: usize, state: usize, rows_before: usize) Ref {
-        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, 3 + max_rows) };
+        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, 3 + window_rows) };
     }
 
     pub fn attentionLayer(c: *const Cache, schedule: *const plan.Plan, slot: usize, rows: usize) ap.Layer {
@@ -193,11 +193,26 @@ pub const Cache = struct {
         return layer;
     }
 
+    pub fn beginIn(c: *Cache, e: mtl.BlitEncoder, rows: usize) !void {
+        if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
+        e.copy(c.conv, 0, c.backup, 0, conv_bytes);
+        c.pending = rows;
+    }
+
     /// Save all four pre-window three-tap histories before KV/conv speculation.
     pub fn begin(c: *Cache, queue: mtl.Queue, rows: usize) !void {
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
         try copyGpu(queue, c.conv, 0, c.backup, 0, conv_bytes, "begin");
         c.pending = rows;
+    }
+
+    pub fn finishCommit(c: *Cache, accepted: usize) void {
+        const start = c.len;
+        c.len += accepted;
+        if (c.tap.buf != null and c.tap.start == start) {
+            c.tap.rows = accepted;
+        } else c.tap = .{};
+        c.pending = null;
     }
 
     /// Commit accepted rows: staged taps select the new state; rejected KV positions are overwritten on replay.
@@ -212,7 +227,7 @@ pub const Cache = struct {
             e.copy(c.backup, 0, c.conv, 0, conv_bytes);
             for (0..visit_slots) |slot| for (0..conv_states) |state| {
                 const bytes = 3 * convWidth(state) * 2;
-                e.copy(c.taps, convByteOffset(slot, state, accepted, 3 + max_rows), c.conv, convByteOffset(slot, state, 0, 3), bytes);
+                e.copy(c.taps, convByteOffset(slot, state, accepted, 3 + window_rows), c.conv, convByteOffset(slot, state, 0, 3), bytes);
             };
             e.end();
             cb.commit();
@@ -222,12 +237,7 @@ pub const Cache = struct {
                 return error.GpuFailed;
             }
         }
-        const start = c.len;
-        c.len += accepted;
-        if (c.tap.buf != null and c.tap.start == start) {
-            c.tap.rows = accepted;
-        } else c.tap = .{};
-        c.pending = null;
+        c.finishCommit(accepted);
     }
 
     pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
@@ -267,11 +277,11 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 pub const argmax_parts: usize = (vocabulary + 7) / 8;
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",      "segs",            "p",          "prelude",   "blocks",        "bank0",    "bank1",   "messages",
-    "partial",  "ar",         "gated",       "mlp_ar",          "mlp_gated",  "q_norm",    "k_norm",        "v_norm",   "q_raw",   "k_raw",
-    "v_raw",    "rel_raw",    "sink",        "gate",            "k_conv",     "v_conv",    "q_prep",        "rel_prep", "rel_tab", "part_o",
-    "part_ml",  "att",        "attn_dense",  "attn_conv",       "mlp_normed", "route_ids", "route_weights", "gu",       "down",    "mlp_out",
-    "mlp_conv", "logits_all", "argmax_vals", "argmax_part_ids", "argmax_ids",
+    "ids",     "pos",      "seg_of",      "segs",            "p",          "prelude",    "blocks",     "bank0",         "bank1",    "messages",
+    "partial", "ar",       "gated",       "mlp_ar",          "mlp_gated",  "q_norm",     "k_norm",     "v_norm",        "q_raw",    "k_raw",
+    "v_raw",   "rel_raw",  "sink",        "gate",            "k_conv",     "v_conv",     "conv_stage", "q_prep",        "rel_prep", "rel_tab",
+    "part_o",  "part_ml",  "att",         "attn_dense",      "attn_conv",  "mlp_normed", "route_ids",  "route_weights", "gu",       "down",
+    "mlp_out", "mlp_conv", "logits_all",  "argmax_vals",     "argmax_part_ids", "argmax_ids",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -283,13 +293,13 @@ fn sizes(rows: usize) [fields.len]usize {
     const fp = 4;
     const batch_cap: usize = @min(r, batch_rows);
     return .{
-        r * 4,                         r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg), r * h * bf,     r * h * bf,     r * block_slots * h * bf,
-        r * h * bf,                    r * h * bf,                                       r * message_entries * h * fp,              r * h * fp,                     3 * r * h * fp, 3 * r * h * fp, r * h * fp,
-        r * h * fp,                    r * h * bf,                                       r * h * bf,                                r * h * bf,                     r * q * bf,     r * kv * bf,    r * kv * bf,
-        r * rel_width * bf,            r * 24 * bf,                                      r * q * bf,                                r * kv * bf,                    r * kv * bf,    r * q * bf,     r * rel_width * bf,
-        r * 24 * ap.extent * bf,       r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,     r * h * bf,     r * h * bf,
-        r * experts_per_token * 4,     r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,     r * h * bf,     batch_cap * vocabulary * fp,
-        batch_cap * argmax_parts * fp, batch_cap * argmax_parts * 4,                     batch_cap * 4,
+        r * 4,                         r * 4,                         r * 4,                         max_segments * @sizeOf(ap.Seg),            r * h * bf,                     r * h * bf,       r * block_slots * h * bf,
+        r * h * bf,                    r * h * bf,                    r * message_entries * h * fp,  r * h * fp,                                3 * r * h * fp,                 3 * r * h * fp,   r * h * fp,
+        r * h * fp,                    r * h * bf,                    r * h * bf,                    r * h * bf,                                r * q * bf,                     r * kv * bf,      r * kv * bf,
+        r * rel_width * bf,            r * 24 * bf,                   r * q * bf,                    r * kv * bf,                               r * kv * bf,                    (3 + r) * h * bf, r * q * bf,
+        r * rel_width * bf,            r * 24 * ap.extent * bf,       r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp, r * q * bf, r * h * bf, r * h * bf,
+        r * h * bf,                    r * experts_per_token * 4,     r * experts_per_token * fp,    r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,       r * h * bf,
+        batch_cap * vocabulary * fp,   batch_cap * argmax_parts * fp, batch_cap * argmax_parts * 4,  batch_cap * 4,
     };
 }
 
@@ -326,6 +336,7 @@ pub const Scratch = struct {
     gate: mtl.Buffer,
     k_conv: mtl.Buffer,
     v_conv: mtl.Buffer,
+    conv_stage: mtl.Buffer,
     q_prep: mtl.Buffer,
     rel_prep: mtl.Buffer,
     rel_tab: mtl.Buffer,
@@ -373,5 +384,5 @@ pub const Scratch = struct {
 };
 
 comptime {
-    if (sliding_ring != 1536 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");
+    if (sliding_ring != 1536 or conv_bytes != 1916928 or taps_bytes != 12140544) @compileError("Inkling cache geometry drift");
 }
