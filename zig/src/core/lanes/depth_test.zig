@@ -168,3 +168,31 @@ test "a granted hold stays only while its stream's expected drafts pay for the v
     try rule.payHolds(&whos, false, &out);
     try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
 }
+
+test "fixed_draft_block prices full block head cost in lone roundCost" {
+    const gpa = std.testing.allocator;
+    var family: Table = .{};
+    defer family.deinit(gpa);
+    try family.put(gpa, 1, 20.0);
+    try family.put(gpa, 2, 22.0);
+    try family.put(gpa, 8, 30.0);
+    var shared: Table = .{};
+    defer shared.deinit(gpa);
+    var rule: Rule = .{
+        .gpa = gpa,
+        .k = .{ .fixed_draft_block = true },
+        .prior = &.{0.8},
+        .most_drafts = 7,
+        .family_costs = &family,
+        .shared_costs = &shared,
+        .mtp_step_ms = 1.0,
+        .plain_guard = true,
+        .node_probabilities = false,
+        .batch_rows = 8,
+    };
+    defer rule.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 20.0), (try rule.roundCost(0, null)).?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 29.0), (try rule.roundCost(1, null)).?, 1e-9);
+    try rule.observeCost(1, 29.0, false, null);
+    try std.testing.expectApproxEqAbs(@as(f64, 37.0), (try rule.roundCost(7, null)).?, 1e-9);
+}
