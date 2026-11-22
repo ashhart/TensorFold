@@ -2,12 +2,27 @@
 const std = @import("std");
 const contract = @import("contract");
 
-pub const Which = enum { prep_sliding, prep_global, rel_table, decode_sliding, decode_global, prompt_m5, prompt_pre_m5, prompt_sliding_m5, prompt_sliding_pre_m5 };
+pub const Which = enum {
+    prep_sliding,
+    prep_global,
+    prep_slots,
+    rel_table,
+    decode_sliding,
+    decode_global,
+    attn_slots_sliding,
+    attn_slots_global,
+    prompt_m5,
+    prompt_pre_m5,
+    prompt_sliding_m5,
+    prompt_sliding_pre_m5,
+};
 pub fn function(w: Which) []const u8 {
     return switch (w) {
         .prep_sliding, .prep_global => "tf_ink2_prep",
+        .prep_slots => "tf_ink2_prep_slots",
         .rel_table => "tf_ink2_rel_table",
         .decode_sliding, .decode_global => "tf_ink2_attn_scalar",
+        .attn_slots_sliding, .attn_slots_global => "tf_ink2_attn_slots",
         .prompt_m5, .prompt_pre_m5 => "tf_ink2_attn_prompt",
         .prompt_sliding_m5, .prompt_sliding_pre_m5 => "tf_ink2_attn_prompt_sliding",
     };
@@ -19,15 +34,20 @@ pub fn isPrompt(w: Which) bool {
     return w == .prompt_m5 or w == .prompt_pre_m5 or isPromptSliding(w);
 }
 pub fn isAttention(w: Which) bool {
-    return w == .decode_sliding or w == .decode_global or isPrompt(w);
+    return w == .decode_sliding or w == .decode_global or w == .attn_slots_sliding or w == .attn_slots_global or isPrompt(w);
+}
+pub fn isSlots(w: Which) bool {
+    return w == .prep_slots or w == .attn_slots_sliding or w == .attn_slots_global;
 }
 
 pub const Mutation = enum {
     none,
     prep_swap_kv,
     prep_tau_off,
+    prep_slots_bad_slot,
     rel_late,
     decode_late_bias,
+    attn_slots_bad_slot,
     merge_no_sink,
     prompt_late_bias,
     prompt_pre_late_bias,
@@ -38,8 +58,10 @@ pub const Mutation = enum {
             .none => "",
             .prep_swap_kv => "control: metal inkling2 attention prep sliding with gated K/V inputs exchanged tf_ink2_prep",
             .prep_tau_off => "control: metal inkling2 attention global prep without tau tf_ink2_prep",
+            .prep_slots_bad_slot => "control: metal inkling2 attention prep slots ignoring rseg slot tf_ink2_prep_slots",
             .rel_late => "control: metal inkling2 attention relative projection one column late tf_ink2_rel_table",
             .decode_late_bias => "control: metal inkling2 attention sliding first key score boosted tf_ink2_attn_scalar",
+            .attn_slots_bad_slot => "control: metal inkling2 attention slots ignoring rseg slot tf_ink2_attn_slots",
             .merge_no_sink => "control: metal inkling2 attention global merge without sink tf_ink2_merge",
             .prompt_late_bias => "control: metal inkling2 prompt m5 first key bias boosted tf_ink2_attn_prompt",
             .prompt_pre_late_bias => "control: metal inkling2 prompt pre-m5 first key bias boosted tf_ink2_attn_prompt",
@@ -55,8 +77,10 @@ pub const Mutation = enum {
             .none => unreachable,
             .prep_swap_kv => .prep_sliding,
             .prep_tau_off => .prep_global,
+            .prep_slots_bad_slot => .prep_slots,
             .rel_late => .rel_table,
             .decode_late_bias => .decode_sliding,
+            .attn_slots_bad_slot => .attn_slots_global,
             .merge_no_sink => .decode_global,
             .prompt_late_bias => .prompt_m5,
             .prompt_pre_late_bias => .prompt_pre_m5,
@@ -76,6 +100,10 @@ pub const Mutation = enum {
                 .from = "const float tau = a.global ? 1.0f + a.alpha * precise::log(max(float(pos + 1) / a.floor_pos, 1.0f)) : 1.0f;",
                 .to = "const float tau = 1.0f;",
             },
+            .prep_slots_bad_slot => .{
+                .from = "device bfloat* dst = (key ? kc_arr[slot] : vc_arr[slot]) + (size_t(h) * ring + pos % ring) * D;",
+                .to = "device bfloat* dst = (key ? kc_arr[0] : vc_arr[0]) + (size_t(h) * ring + pos % ring) * D;",
+            },
             .rel_late => .{
                 .from = "acc += r[j] * float(proj[j * EXTENT + d]);",
                 .to = "acc += r[j] * float(proj[j * EXTENT + (d + 1) % EXTENT]);",
@@ -83,6 +111,10 @@ pub const Mutation = enum {
             .decode_late_bias => .{
                 .from = "const float score = (dot_score * a.scale + bias) * LOG2E;",
                 .to = "const float score = (dot_score * a.scale + bias + (kp == from ? 128.0f : 0.0f)) * LOG2E;",
+            },
+            .attn_slots_bad_slot => .{
+                .from = "const device bfloat* kc_s = kc_arr[slot];",
+                .to = "const device bfloat* kc_s = kc_arr[0];",
             },
             .merge_no_sink => .{
                 .from = "const float sk = float(sink[rh]) * LOG2E, mf = max(mm, sk), a0 = precise::exp2(mm - mf);",
