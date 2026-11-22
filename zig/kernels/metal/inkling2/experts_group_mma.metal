@@ -78,6 +78,7 @@ inline void i2m_stage_x(const device uint4* xrow, uint pass, uint stage, uint bl
   *(threadgroup uint4*)(tgx + (((ss * 2u + (pair >> 3u)) * 8u + (pair & 7u)) * 4u)) = q;
 }
 
+// `at` is (column group, tile); the plan lays tiles along grid x so one expert's tiles run together.
 template <bool NV, bool GATE_UP>
 inline void i2m_group_dot(const device uchar* weight, const device uchar* w_scales, const device float* w_factor,
                           const device bfloat* x, const device uint* order, const device uint4* tiles,
@@ -180,10 +181,10 @@ inline void i2m_group_dot(const device uchar* weight, const device uchar* w_scal
               const device float* w_factor [[buffer(2)]], const device bfloat* x [[buffer(3)]], \
               const device uint* order [[buffer(4)]], device bfloat* out [[buffer(5)]], \
               constant Inkling2ExpDotArgs& a [[buffer(6)]], const device uint4* tiles [[buffer(7)]], \
-              uint2 at [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) { \
+              uint2 grid [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) { \
     threadgroup uint tgw[I2M_WORDS]; \
     threadgroup uint tgx[I2M_XWORDS]; \
-    i2m_group_dot<nv, gate_up>(weight, w_scales, w_factor, x, order, tiles, out, a, tgw, tgx, at, t); \
+    i2m_group_dot<nv, gate_up>(weight, w_scales, w_factor, x, order, tiles, out, a, tgw, tgx, grid.yx, t); \
   }
 
 I2M_GROUP_DOT(inkling2_exp_mma_gate_up_nvfp4, true, true)
