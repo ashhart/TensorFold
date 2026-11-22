@@ -459,7 +459,6 @@ fn plainOne(p: *Linear) void {
     if (p.runs.len == 0 and p.raw == null and p.bits == 4 and p.group == 64 and p.n % 32 == 0) p.plain = true;
 }
 
-
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
 fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, head: Linear) !void {
     var jobs: std.ArrayList(lane.Order) = .empty;
