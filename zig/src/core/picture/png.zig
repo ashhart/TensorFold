@@ -63,12 +63,12 @@ pub fn decodeWithLimits(a: Allocator, data: []const u8, limits: picture.Limits) 
         const c = (try chunk(data, at)) orelse return error.Invalid;
         if (std.mem.eql(u8, c.kind, "fdAT")) return error.Invalid; // frame data before any image data
         try header(arena, &info, c);
+        if (info.hdr) |h| try limits.fits(h.width, h.height);
         at = c.next;
     };
     const h = info.hdr orelse return error.Invalid;
     const bits = bitsPerPixel(h);
     if (bits == 0) return error.Invalid; // no mode: Pillow's open identified no image
-    try limits.fits(h.width, h.height);
     const frames = if (info.frames) |n| @as(u64, n) + @intFromBool(!info.frame_box) else 1;
     if (frames != 1) return error.Animated;
     // every chunk to IEND checked (verify), the consecutive image data gathered

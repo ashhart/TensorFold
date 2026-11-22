@@ -262,6 +262,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     cx.clear_thinking = fields_mod.flag(f, "clear_thinking");
     cx.template_fields = f;
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
+    try @import("prompt_budget.zig").ids(cx, rendered.ids.len);
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
     const window: i64 = srv.info.context_window;

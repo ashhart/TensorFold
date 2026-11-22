@@ -5,7 +5,19 @@ const http = @import("http_conn.zig");
 const body = @import("http_body.zig");
 const server = @import("server.zig");
 const admission = @import("http_admission.zig");
+const json = @import("json");
+const api = @import("engine_api");
+const fields = @import("fields.zig");
+const Value = json.Value;
+const Cx = @import("errors.zig").Cx;
+const MarkText = @import("mark_text.zig").MarkText;
+const expand = @import("images.zig").expand;
 const testing = std.testing;
+
+test {
+    _ = @import("png_limits_test.zig");
+    _ = @import("completion_prompt_test.zig");
+}
 
 const Slow = struct {
     fragments: []const []const u8,
@@ -323,4 +335,251 @@ test "security: an idle connection gives its slot up only with every slot taken"
     try testing.expectEqual(@as(u32, 96), admission.pressure(admission.default_limit));
     try testing.expectEqual(@as(u32, 32), admission.perPeer(admission.default_limit));
     try testing.expectEqual(@as(u32, 1), admission.perPeer(2));
+}
+
+const strict_name = @import("core").resource_limits.switch_name;
+
+const StrictEnv = struct {
+    saved: ?[:0]u8,
+
+    fn init(value: ?[:0]const u8) !StrictEnv {
+        const saved = if (std.c.getenv(strict_name)) |v| try testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+        errdefer if (saved) |v| testing.allocator.free(v);
+        try set(value);
+        return .{ .saved = saved };
+    }
+
+    fn set(value: ?[:0]const u8) !void {
+        const rc = if (value) |v| platform.env.setenv(strict_name, v, 1) else platform.env.unsetenv(strict_name);
+        try testing.expectEqual(@as(c_int, 0), rc);
+    }
+
+    fn restore(s: StrictEnv) void {
+        const rc = if (s.saved) |v| platform.env.setenv(strict_name, v, 1) else platform.env.unsetenv(strict_name);
+        testing.expectEqual(@as(c_int, 0), rc) catch unreachable;
+        if (s.saved) |v| testing.allocator.free(v);
+    }
+};
+
+fn optionalSchema(a: std.mem.Allocator, count: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "{\"type\":\"object\",\"properties\":{");
+    for (0..count) |i| {
+        if (i > 0) try out.append(a, ',');
+        try out.print(a, "\"p{d}\":{{\"type\":\"string\"}}", .{i});
+    }
+    try out.appendSlice(a, "}}");
+    return out.items;
+}
+
+test "HTTP limits: strict JSON rejects an expensive grammar schema before compilation" {
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try json.parse(arena.allocator(), try optionalSchema(arena.allocator(), 8000));
+    try testing.expect(parsed == .err);
+}
+
+test "HTTP limits: strict JSON bounds recursion and individual string allocation" {
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nested: std.ArrayList(u8) = .empty;
+    for (0..65) |_| try nested.append(a, '[');
+    try nested.append(a, '0');
+    for (0..65) |_| try nested.append(a, ']');
+    try testing.expect((try json.parse(a, nested.items)) == .err);
+    const text = try a.alloc(u8, (1 << 20) + 1);
+    @memset(text, 'a');
+    const quoted = try std.fmt.allocPrint(a, "\"{s}\"", .{text});
+    try testing.expect((try json.parse(a, quoted)) == .err);
+}
+
+test "HTTP limits: strict stop and output bounds refuse excess but preserve their boundary" {
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    var stops: std.ArrayList(u8) = .empty;
+    try stops.appendSlice(a, "{\"stop\":[");
+    for (0..17) |i| if (i > 0) try stops.appendSlice(a, ",\"x\"") else try stops.appendSlice(a, "\"x\"");
+    try stops.appendSlice(a, "]}");
+    try testing.expectError(error.Refused, fields.stopOptions(&cx, (try json.parse(a, stops.items)).ok));
+    const stop_text = try a.alloc(u8, 257);
+    @memset(stop_text, 'x');
+    const long_stop = try std.fmt.allocPrint(a, "{{\"stop\":\"{s}\"}}", .{stop_text});
+    try testing.expectError(error.Refused, fields.stopOptions(&cx, (try json.parse(a, long_stop)).ok));
+    try testing.expectError(error.Refused, fields.parseNumbers(&cx, (try json.parse(a, "{\"max_tokens\":32769}")).ok));
+    const accepted = try fields.parseNumbers(&cx, (try json.parse(a, "{\"max_tokens\":32768,\"stop\":\"ok\"}")).ok);
+    try testing.expectEqualStrings("32768", accepted.get("max_tokens").?.int);
+}
+
+test "HTTP limits: strict switch is default-off and registered exactly once" {
+    const strict = try StrictEnv.init(null);
+    defer strict.restore();
+    var env_count: usize = 0;
+    for (@import("cli.zig").env) |name| env_count += @intFromBool(std.mem.eql(u8, name, strict_name));
+    var registry_count: usize = 0;
+    for (api.profile.entries) |entry| if (std.mem.eql(u8, entry.name(), strict_name)) {
+        registry_count += 1;
+        try testing.expectEqual(api.profile.Class.experimental, entry.class);
+        try testing.expectEqual(api.profile.Syntax.one, entry.syntax);
+        try testing.expect(entry.stable == null);
+    };
+    try testing.expectEqual(@as(usize, 1), env_count);
+    try testing.expectEqual(@as(usize, 1), registry_count);
+}
+
+test "HTTP limits: unset strict switch keeps accepted stop and output values" {
+    const strict = try StrictEnv.init(null);
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const accepted = try fields.parseNumbers(&cx, (try json.parse(a, "{\"max_tokens\":32769,\"stop\":[\"a\",\"b\"]}")).ok);
+    try testing.expectEqualStrings("32769", accepted.get("max_tokens").?.int);
+    try testing.expectEqual(@as(usize, 2), (try fields.stopOptions(&cx, accepted)).strings.len);
+}
+
+fn discardQueueEvent(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+
+fn queueCase(strict: bool) !void {
+    const gpa = testing.allocator;
+    var cfg = try @import("lanes").Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: @import("lanes").fake.Fake = .{ .gpa = gpa, .prefill_chunks = 1 };
+    defer target.deinit();
+    var clock: @import("lanes").fake.FixedClock = .{};
+    var core = @import("lanes").Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(gpa, testing.io, &core, .{ .lanes = 1 });
+    defer {
+        for (host.queued.items) |job| gpa.destroy(job);
+        host.queued.deinit(gpa);
+    }
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 1 };
+    var unused: u8 = 0;
+    const sink: api.Sink = .{ .ctx = &unused, .event = discardQueueEvent };
+    const engine = host.engine();
+    for (0..128) |i| try engine.submit(@intCast(i + 1), &request, sink);
+    if (strict) {
+        try testing.expectError(error.Busy, engine.submit(129, &request, sink));
+        try testing.expectEqual(@as(usize, 128), host.queued.items.len);
+    } else {
+        try engine.submit(129, &request, sink);
+        try testing.expectEqual(@as(usize, 129), host.queued.items.len);
+    }
+}
+
+test "HTTP limits: strict engine queue refuses excess while unset remains uncapped" {
+    const plain = try StrictEnv.init(null);
+    try queueCase(false);
+    plain.restore();
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    try queueCase(true);
+}
+
+fn longTextPair(a: std.mem.Allocator) ![2][]const u8 {
+    const text = try a.alloc(u8, 600 << 10);
+    @memset(text, 'x');
+    return .{ text, text };
+}
+
+test "HTTP limits: strict chat preflight caps aggregate text but not image bytes" {
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const texts = try longTextPair(a);
+    const list = try a.alloc(Value, 2);
+    for (texts, list) |text, *slot| {
+        const message = try json.newObject(a);
+        try message.put(a, "role", .{ .string = "user" });
+        try message.put(a, "content", .{ .string = text });
+        slot.* = .{ .object = message };
+    }
+    const raw: Value = .{ .array = list };
+    try testing.expectError(error.Refused, @import("messages.zig").normalizeWith(&cx, raw, "system", false, .{}));
+    const image_text = try a.alloc(u8, 2 << 20);
+    @memset(image_text, 'a');
+    const url = try std.fmt.allocPrint(a, "data:image/png,{s}", .{image_text});
+    const image_url = try json.newObject(a);
+    try image_url.put(a, "url", .{ .string = url });
+    const part = try json.newObject(a);
+    try part.put(a, "type", .{ .string = "image_url" });
+    try part.put(a, "image_url", .{ .object = image_url });
+    const content = try a.alloc(Value, 1);
+    content[0] = .{ .object = part };
+    const message = try json.newObject(a);
+    try message.put(a, "role", .{ .string = "user" });
+    try message.put(a, "content", .{ .array = content });
+    const valid = try a.alloc(Value, 1);
+    valid[0] = .{ .object = message };
+    _ = try @import("messages.zig").normalizeWith(&cx, .{ .array = valid }, "system", false, .{ .images = true, .max_images = 4 });
+}
+
+test "HTTP limits: strict completion preflight caps joined prompt source bytes" {
+    const strict = try StrictEnv.init("1");
+    defer strict.restore();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const texts = try longTextPair(a);
+    const raw = try a.alloc(Value, texts.len);
+    for (texts, raw) |text, *slot| slot.* = .{ .string = text };
+    var srv: @import("server.zig").Server = undefined;
+    try testing.expectError(error.Refused, @import("completion_prompt.zig").legacyPrompt(&srv, &cx, .{ .array = raw }));
+}
+
+fn countingPrepare(ctx: *anyopaque, a: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+    const calls: *u32 = @ptrCast(@alignCast(ctx));
+    calls.* += 1;
+    return .{ .pixels = try a.alloc(f32, 0), .gh = 1, .gw = 1, .tokens = 1, .hash = calls.* };
+}
+
+test "HTTP limits: strict decoded pixels admit exactly 32 MiPixels and refuse the third preparation" {
+    const name = strict_name;
+    const saved = if (std.c.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        _ = if (saved) |v| @import("sys").env.setenv(name, v, 1) else @import("sys").env.unsetenv(name);
+        if (saved) |v| std.testing.allocator.free(v);
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIAAAAAgACAIAAAABmir1"; // signature and CRC-valid IHDR: 8192 x 2048
+    const turn = "{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"" ++ url ++ "\"}}]}";
+    const msgs = (try json.parse(a, "[" ++ turn ++ "," ++ turn ++ "," ++ turn ++ "]")).ok;
+    const ids = [_]u32{ 9, 9, 9 };
+    var calls: u32 = 0;
+    var cx: Cx = .{ .a = a };
+    const v: api.Vision = .{ .ctx = &calls, .prepare = countingPrepare, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    for ([_]struct { strict: ?[:0]const u8, count: usize, refuse: bool }{
+        .{ .strict = "1", .count = 2, .refuse = false },
+        .{ .strict = "1", .count = 3, .refuse = true },
+        .{ .strict = null, .count = 3, .refuse = false },
+    }) |case| {
+        _ = if (case.strict) |value| @import("sys").env.setenv(name, value, 1) else @import("sys").env.unsetenv(name);
+        calls = 0;
+        const result = expand(v, null, MarkText.text(), &cx, .{ .array = msgs.array[0..case.count] }, ids[0..case.count], 0);
+        if (case.refuse) {
+            try std.testing.expectError(error.Refused, result);
+            try std.testing.expectEqual(@as(u32, 2), calls);
+        } else {
+            const x = (try result).?;
+            try std.testing.expectEqual(case.count, x.images.len);
+            try std.testing.expectEqual(@as(u32, @intCast(case.count)), calls);
+        }
+    }
 }

@@ -8,11 +8,15 @@ const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 
+const prompt_budget = @import("prompt_budget.zig");
+
 /// A completion's prompt as the model reads it: token ids as given, anything else as text.
 pub fn legacyPrompt(srv: *Server, cx: *Cx, prompt: ?Value) errors.Refused!chat.Prompt {
+    try prompt_budget.check(cx, prompt, "");
     const p = prompt orelse return .{ .text = "" };
     if (p == .array and p.array.len > 0 and allInts(p.array)) {
         const vocab = srv.text.vocabSize();
+        try prompt_budget.ids(cx, p.array.len);
         const out = try cx.a.alloc(u32, p.array.len);
         for (p.array, out) |t, *slot| slot.* = try promptId(cx, vocab, t);
         return .{ .ids = out };
@@ -39,6 +43,7 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
         .array => |items| {
             if (allInts(items)) {
                 const vocab = srv.text.vocabSize();
+                try prompt_budget.ids(cx, items.len);
                 const toks = try cx.a.alloc(u32, items.len);
                 for (items, toks) |t, *slot| slot.* = try promptId(cx, vocab, t);
                 return srv.text.decode(cx.a, toks) catch return error.OutOfMemory;

@@ -88,7 +88,10 @@ fn imagePart(cx: *Cx, part: Value, kind: []const u8) errors.Refused!Value {
 }
 
 /// `normalize`, keeping image_url (user/tool, `media.images`) and video_url (user, `media.videos`) parts in order.
+const prompt_budget = @import("prompt_budget.zig");
+
 pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, media: Media) errors.Refused!Value {
+    try prompt_budget.check(cx, messages, late_system);
     const images = media.images;
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");

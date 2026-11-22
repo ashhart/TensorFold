@@ -131,23 +131,33 @@ pub fn dataBytesOf(cx: *Cx, url: []const u8, max: usize, comptime noun: []const 
         if (payload.len > 4 * ((max + 2) / 3)) return cx.refuse(noun ++ " data URL exceeds the encoded byte limit");
         const d = std.base64.standard.Decoder;
         const n = d.calcSizeForSlice(payload) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
+        if (n == 0 or n > max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
         const out = try cx.a.alloc(u8, n);
         d.decode(out, payload) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
-        if (out.len == 0 or out.len > max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
         return out;
     }
-    if (payload.len > max * 3) return cx.refuse(noun ++ " data URL exceeds the encoded byte limit");
-    var out: std.ArrayList(u8) = .empty;
+    var decoded: usize = 0;
     var i: usize = 0;
     while (i < payload.len) : (i += 1) {
         if (payload[i] == '%' and i + 2 < payload.len) {
-            const b = std.fmt.parseInt(u8, payload[i + 1 .. i + 3], 16) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
-            try out.append(cx.a, b);
+            _ = std.fmt.parseInt(u8, payload[i + 1 .. i + 3], 16) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
             i += 2;
-        } else try out.append(cx.a, payload[i]);
+        }
+        if (decoded >= max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
+        decoded += 1;
     }
-    if (out.items.len == 0 or out.items.len > max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
-    return out.items;
+    if (decoded == 0) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
+    const out = try cx.a.alloc(u8, decoded);
+    var at: usize = 0;
+    i = 0;
+    while (i < payload.len) : (i += 1) {
+        if (payload[i] == '%' and i + 2 < payload.len) {
+            out[at] = std.fmt.parseInt(u8, payload[i + 1 .. i + 3], 16) catch unreachable;
+            i += 2;
+        } else out[at] = payload[i];
+        at += 1;
+    }
+    return out;
 }
 
 pub const Format = enum { png, jpeg, gif, webp, other };
@@ -212,6 +222,7 @@ pub fn expandWith(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx:
     const frames = try cx.a.alloc(?api.Size, n_images);
     const clips = try cx.a.alloc(api.PreparedVideo, n_videos);
     var bytes_total: usize = 0;
+    var pixels_total: u64 = 0;
     // every URL's download inside one request's seconds (images.py total_timeout_seconds, videos.py's)
     const deadline: std.Io.Timestamp = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(media_fetch.total_s)) else .{ .nanoseconds = 0 };
     var video_budget: videos.Budget = .{ .deadline = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(videos.total_s)) else .{ .nanoseconds = 0 } };
@@ -231,6 +242,13 @@ pub fn expandWith(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx:
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP)
             .png, .jpeg, .webp => {},
             .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG, JPEG or WebP; send one of those", .{i + 1})),
+        }
+        if (@import("core").resource_limits.enabled()) {
+            if (@import("ocr/size.zig").of(bytes)) |wh| {
+                const pixels = @as(u64, wh[0]) * wh[1];
+                if (pixels > (32 << 20) - pixels_total) return cx.refuse("the request's images exceed 32 MiPixels decoded");
+                pixels_total += pixels;
+            }
         }
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
         prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, limits.each, e);

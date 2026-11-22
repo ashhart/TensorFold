@@ -1,5 +1,6 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
 const std = @import("std");
+
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
@@ -8,6 +9,12 @@ const fetch = @import("lane_host_fetch.zig");
 const pressure = @import("lane_host_pressure.zig");
 const ledger = @import("lane_host_ledger.zig");
 const Wait = @import("wait_reason.zig").Wait;
+
+/// Strict input limits cap waiting jobs before the queue's insertion allocation.
+pub fn queueFull(count: usize) bool {
+    const raw = std.c.getenv("TENSORFOLD_HTTP_STRICT_INPUT_LIMITS") orelse return false;
+    return count >= 128 and std.mem.eql(u8, std.mem.span(raw), "1");
+}
 
 /// The queued job to admit (its index), or null to hold, each job held stores why; the caller holds the lock.
 pub fn pick(h: *LaneHost) ?usize {

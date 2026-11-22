@@ -150,3 +150,18 @@ test "a completion prompt's boolean ids get a 400, nested or not" {
     }
     try std.testing.expectEqual(@as(usize, 0), backend.prompt.len);
 }
+
+test "HTTP limits: strict completion caps rendered tokens before engine submission" {
+    const name = "TENSORFOLD_HTTP_STRICT_INPUT_LIMITS";
+    _ = @import("sys").env.setenv(name, "1", 1);
+    defer _ = @import("sys").env.unsetenv(name);
+    var backend: Capture = .{};
+    defer std.testing.allocator.free(backend.prompt);
+    const text = try std.testing.allocator.alloc(u8, 32769);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'a');
+    const prompt = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\"", .{text});
+    defer std.testing.allocator.free(prompt);
+    try std.testing.expectEqual(@as(?u16, 400), try complete(&backend, prompt));
+    try std.testing.expectEqual(@as(usize, 0), backend.prompt.len);
+}
