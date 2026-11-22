@@ -43,7 +43,7 @@ zig/kernels/cuda/nemotron_latent.cu	04fba97043d0948f82a3b9477f448dd76b21f6d11d1a
 zig/kernels/cuda/nemotron_mamba.cu	dcaba12253d3931ae48c7ebd4e13dfb956f540ae19f4ab83130c3f21745be5ec	raw	commits fa2af585f, f0ef17e69; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/nemotron_ops.cu	2ef87c655b49d33214f8856d2ad775aacf6198ab2ca343f87fde588639ecccd1	raw	#3124
 zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe3c3557a48bca96f6511	raw	commits 739c924de, 8cfdaa739, b77a33b08, 7f6f940eb, 05d0617af, bc76d90d6; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/norms.cu	58a6bb5d7077787b53ac452c6d6bdb20bf3387f2a01090f7e042513fe5a0dda6	raw	main d4541b00e0 (rms_scale shared; same SASS)
+zig/kernels/cuda/norms.cu	5211e9bc78eaa4fb744c2f76ec28ca2c28ab0760a408fee23bd82f098b454d2b	raw	main d4541b00e0 (rms_scale shared; same SASS)
 zig/kernels/cuda/nvfp4_experts.cu	dc78d37c1eb1d9a9fff6c1ba9c5f0a9b0eb485a47a56e7b0b2fdbb8bbf1b223b	raw	#2266 (decode cp.async rings, GB10 SASS unchanged); #4493 (opt-in paired prompt experts, 128-row items)
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
 zig/kernels/cuda/prefill_attention.cu	4227f0a9b7a89ac296388a7dcd9e49cd0dd487ed09ee46cc1d4eda94ab8e3741	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged), #2239 (a vision_kernel<64, 8> instance for Qwen3-ASR's audio tower; existing instances unchanged)
