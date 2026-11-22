@@ -66,6 +66,7 @@ const Scratch = struct {
     bank0: u64,
     bank1: u64,
     raw: u64, // three FP32 AR/gate rows per token
+    zeta: u64, // a gate's 64 BF16 bottleneck values per token, between its down and up halves
     messages: u64, // four FP32 message rows per token
     normalized: u64, // three BF16 rows per token
     t: u64,
@@ -245,6 +246,7 @@ pub const Model = struct {
             .bank0 = try m.alloc(rows * h * 2),
             .bank1 = try m.alloc(rows * h * 2),
             .raw = try m.alloc(3 * rows * h * 4),
+            .zeta = try m.alloc(rows * loop_math.rank * 2),
             .messages = try m.alloc(4 * rows * h * 4),
             .normalized = try m.alloc(3 * rows * h * 2),
             .t = try m.alloc(rows * h * 4),
@@ -389,7 +391,7 @@ pub const Model = struct {
                 }
                 for (0..3) |role| {
                     const ctl = lw.controllers[role];
-                    try loop_math.gate(&k.loop, s, m.s.raw + role * raw_stride, m.s.messages + role * raw_stride, ctl.down, ctl.forget, ctl.gain, m.s.raw + role * raw_stride, rows, h, c.eps);
+                    try loop_math.gate(&k.loop, s, m.s.raw + role * raw_stride, m.s.messages + role * raw_stride, ctl.down, ctl.forget, ctl.gain, m.s.zeta, m.s.raw + role * raw_stride, rows, h, c.eps);
                     const norms = [3]u64{ lw.attn.norms[role], lw.attn.norms[role], lw.attn.norms[role] };
                     try ops.mix(&k.glue, s, m.mixArgs(&.{}, m.s.raw + role * raw_stride, 0, norms, m.s.normalized + role * norm_stride, 1, false, rows));
                 }
@@ -474,7 +476,7 @@ pub const Model = struct {
             if (messages) {
                 try loop_math.ar(&k.loop, s, m.arBlocks(mlp_blocks, m.s.t, mlp_query, m.s.raw, 1, false, rows));
                 const ctl = lw.controllers[3];
-                try loop_math.gate(&k.loop, s, m.s.raw, m.s.messages + 3 * raw_stride, ctl.down, ctl.forget, ctl.gain, m.s.raw, rows, h, c.eps);
+                try loop_math.gate(&k.loop, s, m.s.raw, m.s.messages + 3 * raw_stride, ctl.down, ctl.forget, ctl.gain, m.s.zeta, m.s.raw, rows, h, c.eps);
                 try ops.mix(&k.glue, s, m.mixArgs(&.{}, m.s.raw, 0, .{ lw.mlp_norm, lw.mlp_norm, lw.mlp_norm }, m.s.normalized, 1, false, rows));
             } else {
                 try ops.mix(&k.glue, s, m.mixArgs(mlp_blocks, m.s.t, mlp_query, .{ lw.mlp_norm, lw.mlp_norm, lw.mlp_norm }, m.s.normalized, 1, false, rows));
