@@ -3,9 +3,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const op = @import("cpu_rows.zig");
 const kda = @import("kda.zig");
-const kda_fast = @import("kda_fast.zig");
 const mla = @import("cpu_mla.zig");
-const mla_fast = @import("cpu_mla_fast.zig");
 const route = @import("route.zig");
 const State = @import("cpu_state.zig").State;
 
@@ -34,10 +32,6 @@ pub fn Forward(comptime Source: type) type {
             threads: usize,
             count: usize,
             state: ?*State = null,
-
-            fn isFast(self: Run) bool {
-                return if (comptime @hasField(Source, "fast_mode")) self.source.fast_mode else false;
-            }
 
             fn name(self: Run, p: []const u8, n: []const u8) ![]const u8 {
                 return std.mem.concat(self.a, u8, &.{ p, n });
@@ -112,15 +106,7 @@ pub fn Forward(comptime Source: type) type {
                 }
                 const y = try self.alloc(W);
                 const shape = kda.Shape{ .heads = c.kda_heads, .lower_bound = c.lower_bound, .stored_rate = true, .eps = c.eps };
-                if (self.isFast()) {
-                    if (comptime @hasDecl(Source, "workers")) if (self.threads > 1) {
-                        try kda_fast.mixStateOnPool(try self.source.workers(self.threads), y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
-                        return self.linear(p, "o_proj.weight", y, W, c.hidden, true);
-                    };
-                    try kda_fast.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
-                } else {
-                    try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
-                }
+                try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
                 return self.linear(p, "o_proj.weight", y, W, c.hidden, true);
             }
 
@@ -135,17 +121,7 @@ pub fn Forward(comptime Source: type) type {
                 const b = try self.values(p, "kv_b_proj.weight", &.{ c.mla_heads * 256, 512 });
                 const y = try self.alloc(c.mla_heads * 128);
                 const shape = mla.Shape{ .heads = c.mla_heads, .eps = c.eps, .theta = c.rope_theta };
-                if (self.isFast()) {
-                    if (self.state) |state| {
-                        if (comptime @hasDecl(Source, "workers")) if (self.threads > 1) {
-                            try mla_fast.appendOnPool(try self.source.workers(self.threads), self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
-                            return self.linear(p, "dense.weight", y, c.mla_heads * 128, c.hidden, true);
-                        };
-                        try mla_fast.append(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
-                    } else if (comptime @hasDecl(Source, "workers")) {
-                        if (self.threads > 1) try mla_fast.mixOnPool(try self.source.workers(self.threads), self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0) else try mla_fast.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
-                    } else try mla_fast.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
-                } else if (self.state) |state| {
+                if (self.state) |state| {
                     try mla.append(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
                 } else try mla.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
                 return self.linear(p, "dense.weight", y, c.mla_heads * 128, c.hidden, true);
@@ -159,28 +135,6 @@ pub fn Forward(comptime Source: type) type {
                 try route.checkBias(bias, shape);
                 const out = try self.alloc(c.hidden);
                 @memset(out, 0);
-                if (comptime @hasDecl(Source, "projectExpertsBatch")) if (self.count > 1 and self.isFast() and self.threads > 1 and c.hidden <= 2048 and c.moe_inter <= 1024) {
-                    var all_sel: [8][route.max_topk]route.Pick = undefined;
-                    var flat_ids: [8 * route.max_topk]u32 = undefined;
-                    for (0..self.count) |t| {
-                        const n = route.selectF32(scores[t * c.experts ..][0..c.experts], bias, all_sel[t][0..c.topk], shape);
-                        if (n != c.topk) return error.CpuRoute;
-                        for (all_sel[t][0..n], 0..) |pick, j| {
-                            picks[t * c.topk + j] = pick.id;
-                            flat_ids[t * c.topk + j] = pick.id;
-                        }
-                    }
-                    const ys = try self.a.alloc(f32, self.count * c.topk * c.hidden);
-                    try self.source.projectExpertsBatch(p, flat_ids[0 .. self.count * c.topk], self.count, c.topk, x, ys, c.hidden, c.moe_inter, c.expert_limit[layer], self.threads);
-                    for (0..self.count) |t| {
-                        for (all_sel[t][0..c.topk], 0..) |pick, j| {
-                            for (out[t * c.hidden ..][0..c.hidden], ys[(t * c.topk + j) * c.hidden ..][0..c.hidden]) |*o, v| o.* += v * pick.wt;
-                        }
-                    }
-                    const shared = try self.mlp(x, try self.name(p, "shared_experts."), c.shared_inter, c.shared_limit[layer]);
-                    for (out, shared) |*o, v| o.* = op.round(op.round(o.*) + v);
-                    return out;
-                };
                 for (0..self.count) |t| {
                     var selected: [route.max_topk]route.Pick = undefined;
                     const n = route.selectF32(scores[t * c.experts ..][0..c.experts], bias, selected[0..c.topk], shape);

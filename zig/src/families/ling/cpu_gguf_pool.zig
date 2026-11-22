@@ -1,57 +1,24 @@
-//! Persistent CPU workers: rows or whole experts are claimed in chunks, for exact and opt-in fast SDOT paths.
+//! Persistent exact workers: rows or whole experts are claimed in chunks, and each dot keeps its single-thread order.
 const std = @import("std");
 const g = @import("core").gguf;
 const rows = @import("cpu_rows.zig");
 const gguf_rows = @import("cpu_gguf_rows.zig");
-const sdot = @import("cpu_gguf_q4_sdot.zig");
-const repack8 = @import("cpu_gguf_repack8.zig");
 
 /// One routed expert's gate, up and down matrices; its F32 result lands in `out`, one hidden row.
 pub const Expert = struct { gate: g.Tensor, up: g.Tensor, down: g.Tensor, out: [*]f32 };
 
-/// One routed expert with optional 8x4 repacked SDOT views for opt-in fast mode.
-pub const FastExpert = struct {
-    gate: g.Tensor,
-    up: g.Tensor,
-    down: g.Tensor,
-    gate_rep: ?repack8.Repacked = null,
-    up_rep: ?repack8.Repacked = null,
-    down_rep: ?repack8.Repacked = null,
-    use_sdot_gate: bool = false,
-    use_sdot_up: bool = false,
-    use_sdot_down: bool = false,
-    out: [*]f32,
-};
-
-/// One unique routed expert shared by 1..8 prompt rows in a prefill chunk; weights are read once per group.
-pub const FastExpertGroup = struct {
-    expert: FastExpert,
-    n_rows: u8,
-    rows: [8]u8,
-    outs: [8][*]f32,
-};
-
 const Job = struct {
-    mode: enum { rows, experts, sdot_q4k, sdot_q6k, sdot_q50, sdot_q4k_x8, sdot_q6k_x8, fast_experts, fast_experts_batch, heads },
+    mode: enum { rows, experts },
     tensor: g.Tensor = undefined,
-    q4k_x8: [*]const repack8.BlockQ4Kx8 = undefined,
-    q6k_x8: [*]const repack8.BlockQ6Kx8 = undefined,
     input: [*]const f32 = undefined,
-    acts256: [*]const sdot.Activation256 = undefined,
-    acts32: [*]const sdot.Activation32 = undefined,
     output: [*]f32 = undefined,
     count: usize = 1,
     width: usize = 0,
-    blocks_per_row: usize = 0,
     inter: usize = 0,
     n: usize = 0,
     rounded: bool = true,
     limit: f32 = 0,
     experts: [*]const Expert = undefined,
-    fast_experts: [*]const FastExpert = undefined,
-    fast_groups: [*]const FastExpertGroup = undefined,
-    head_ctx: *anyopaque = undefined,
-    head_fn: *const fn (*anyopaque, usize, usize) void = undefined,
     units: usize = 0,
     chunk: usize = 1,
 };
@@ -83,178 +50,18 @@ fn expert(j: *const Job, e: Expert) void {
     range(e.down, gate.ptr, e.out, 1, j.inter, j.width, true, 0, j.width);
 }
 
-fn fastExpert(j: *const Job, e: FastExpert) void {
-    const hidden = j.width;
-    const inter = j.inter;
-    const hidden_blocks = hidden / 256;
-    const inter_blocks = inter / 256;
-    var gate_buf: [1024]f32 = undefined;
-    var up_buf: [1024]f32 = undefined;
-    const gate = gate_buf[0..inter];
-    const up = up_buf[0..inter];
-
-    if (e.use_sdot_gate) {
-        if (e.gate_rep) |rep| switch (rep) {
-            .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.gate.bytes.ptr, j.acts256, gate.ptr, 1, hidden_blocks, inter, true, 0, inter / 8),
-            .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.gate.bytes.ptr, j.acts256, gate.ptr, 1, hidden_blocks, inter, true, 0, inter / 8),
-        } else if (e.gate.kind == .q4_k) {
-            sdot.projectRangeQ4K(e.gate.bytes.ptr, j.acts256, gate.ptr, 1, hidden_blocks, inter, true, 0, inter);
-        } else {
-            sdot.projectRangeQ6K(e.gate.bytes.ptr, j.acts256, gate.ptr, 1, hidden_blocks, inter, true, 0, inter);
-        }
-    } else range(e.gate, j.input, gate.ptr, 1, hidden, inter, true, 0, inter);
-
-    if (e.use_sdot_up) {
-        if (e.up_rep) |rep| switch (rep) {
-            .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.up.bytes.ptr, j.acts256, up.ptr, 1, hidden_blocks, inter, true, 0, inter / 8),
-            .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.up.bytes.ptr, j.acts256, up.ptr, 1, hidden_blocks, inter, true, 0, inter / 8),
-        } else if (e.up.kind == .q4_k) {
-            sdot.projectRangeQ4K(e.up.bytes.ptr, j.acts256, up.ptr, 1, hidden_blocks, inter, true, 0, inter);
-        } else {
-            sdot.projectRangeQ6K(e.up.bytes.ptr, j.acts256, up.ptr, 1, hidden_blocks, inter, true, 0, inter);
-        }
-    } else range(e.up, j.input, up.ptr, 1, hidden, inter, true, 0, inter);
-
-    for (gate, up) |*v, *u| {
-        var silu = rows.round(v.* * rows.sigmoid(v.*));
-        if (j.limit > 0) {
-            silu = @min(silu, j.limit);
-            u.* = std.math.clamp(u.*, -j.limit, j.limit);
-        }
-        v.* = rows.round(silu * u.*);
-    }
-
-    if (e.use_sdot_down) {
-        var down_acts: [8]sdot.Activation256 = undefined;
-        const d_acts = down_acts[0..inter_blocks];
-        if (sdot.quantize256(gate, d_acts, true)) |_| {
-            if (e.down_rep) |rep| switch (rep) {
-                .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.down.bytes.ptr, d_acts.ptr, e.out, 1, inter_blocks, hidden, true, 0, hidden / 8),
-                .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.down.bytes.ptr, d_acts.ptr, e.out, 1, inter_blocks, hidden, true, 0, hidden / 8),
-            } else if (e.down.kind == .q4_k) {
-                sdot.projectRangeQ4K(e.down.bytes.ptr, d_acts.ptr, e.out, 1, inter_blocks, hidden, true, 0, hidden);
-            } else {
-                sdot.projectRangeQ6K(e.down.bytes.ptr, d_acts.ptr, e.out, 1, inter_blocks, hidden, true, 0, hidden);
-            }
-            return;
-        } else |_| {}
-    }
-    range(e.down, gate.ptr, e.out, 1, inter, hidden, true, 0, hidden);
-}
-
-fn fastExpertBatch(j: *const Job, grp: FastExpertGroup) void {
-    const m: usize = grp.n_rows;
-    const e = grp.expert;
-    const hidden = j.width;
-    const inter = j.inter;
-    const hidden_blocks = hidden / 256;
-    const inter_blocks = inter / 256;
-    if (m == 1) {
-        var single_job = j.*;
-        const row: usize = grp.rows[0];
-        single_job.input = j.input + row * hidden;
-        single_job.acts256 = j.acts256 + row * hidden_blocks;
-        var single_e = e;
-        single_e.out = grp.outs[0];
-        fastExpert(&single_job, single_e);
-        return;
-    }
-
-    var in_acts: [64]sdot.Activation256 = undefined;
-    var in_f32: [8 * 2048]f32 = undefined;
-    const need_f32 = !e.use_sdot_gate or !e.use_sdot_up;
-    for (0..m) |r| {
-        const row: usize = grp.rows[r];
-        if (e.use_sdot_gate or e.use_sdot_up) {
-            @memcpy(in_acts[r * hidden_blocks ..][0..hidden_blocks], j.acts256[row * hidden_blocks ..][0..hidden_blocks]);
-        }
-        if (need_f32) {
-            @memcpy(in_f32[r * hidden ..][0..hidden], j.input[row * hidden ..][0..hidden]);
-        }
-    }
-
-    var gate_buf: [8 * 1024]f32 = undefined;
-    var up_buf: [8 * 1024]f32 = undefined;
-    const gate = gate_buf[0 .. m * inter];
-    const up = up_buf[0 .. m * inter];
-
-    if (e.use_sdot_gate) {
-        if (e.gate_rep) |rep| switch (rep) {
-            .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.gate.bytes.ptr, &in_acts, gate.ptr, m, hidden_blocks, inter, true, 0, inter / 8),
-            .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.gate.bytes.ptr, &in_acts, gate.ptr, m, hidden_blocks, inter, true, 0, inter / 8),
-        } else if (e.gate.kind == .q4_k) {
-            sdot.projectRangeQ4K(e.gate.bytes.ptr, &in_acts, gate.ptr, m, hidden_blocks, inter, true, 0, inter);
-        } else {
-            sdot.projectRangeQ6K(e.gate.bytes.ptr, &in_acts, gate.ptr, m, hidden_blocks, inter, true, 0, inter);
-        }
-    } else range(e.gate, &in_f32, gate.ptr, m, hidden, inter, true, 0, inter);
-
-    if (e.use_sdot_up) {
-        if (e.up_rep) |rep| switch (rep) {
-            .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.up.bytes.ptr, &in_acts, up.ptr, m, hidden_blocks, inter, true, 0, inter / 8),
-            .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.up.bytes.ptr, &in_acts, up.ptr, m, hidden_blocks, inter, true, 0, inter / 8),
-        } else if (e.up.kind == .q4_k) {
-            sdot.projectRangeQ4K(e.up.bytes.ptr, &in_acts, up.ptr, m, hidden_blocks, inter, true, 0, inter);
-        } else {
-            sdot.projectRangeQ6K(e.up.bytes.ptr, &in_acts, up.ptr, m, hidden_blocks, inter, true, 0, inter);
-        }
-    } else range(e.up, &in_f32, up.ptr, m, hidden, inter, true, 0, inter);
-
-    for (gate, up) |*v, *u| {
-        var silu = rows.round(v.* * rows.sigmoid(v.*));
-        if (j.limit > 0) {
-            silu = @min(silu, j.limit);
-            u.* = std.math.clamp(u.*, -j.limit, j.limit);
-        }
-        v.* = rows.round(silu * u.*);
-    }
-
-    var out_buf: [8 * 2048]f32 = undefined;
-    var done_sdot = false;
-    if (e.use_sdot_down) {
-        var down_acts: [64]sdot.Activation256 = undefined;
-        var ok = true;
-        for (0..m) |r| {
-            if (sdot.quantize256(gate[r * inter ..][0..inter], down_acts[r * inter_blocks ..][0..inter_blocks], true)) |_| {} else |_| {
-                ok = false;
-                break;
-            }
-        }
-        if (ok) {
-            if (e.down_rep) |rep| switch (rep) {
-                .q4_k => |b| repack8.projectRangeQ4Kx8(b.ptr, e.down.bytes.ptr, &down_acts, &out_buf, m, inter_blocks, hidden, true, 0, hidden / 8),
-                .q6_k => |b| repack8.projectRangeQ6Kx8(b.ptr, e.down.bytes.ptr, &down_acts, &out_buf, m, inter_blocks, hidden, true, 0, hidden / 8),
-            } else if (e.down.kind == .q4_k) {
-                sdot.projectRangeQ4K(e.down.bytes.ptr, &down_acts, &out_buf, m, inter_blocks, hidden, true, 0, hidden);
-            } else {
-                sdot.projectRangeQ6K(e.down.bytes.ptr, &down_acts, &out_buf, m, inter_blocks, hidden, true, 0, hidden);
-            }
-            done_sdot = true;
-        }
-    }
-    if (!done_sdot) range(e.down, gate.ptr, &out_buf, m, inter, hidden, true, 0, hidden);
-    for (0..m) |r| @memcpy(grp.outs[r][0..hidden], out_buf[r * hidden ..][0..hidden]);
-}
-
 fn runJob(j: *const Job, lo: usize, hi: usize) void {
     switch (j.mode) {
         .rows => range(j.tensor, j.input, j.output, j.count, j.width, j.n, j.rounded, lo, hi),
         .experts => for (lo..hi) |i| expert(j, j.experts[i]),
-        .sdot_q4k => sdot.projectRangeQ4K(j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
-        .sdot_q6k => sdot.projectRangeQ6K(j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
-        .sdot_q50 => sdot.projectRangeQ50(j.tensor.bytes.ptr, j.acts32, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
-        .sdot_q4k_x8 => repack8.projectRangeQ4Kx8(j.q4k_x8, j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
-        .sdot_q6k_x8 => repack8.projectRangeQ6Kx8(j.q6k_x8, j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
-        .fast_experts => for (lo..hi) |i| fastExpert(j, j.fast_experts[i]),
-        .fast_experts_batch => for (lo..hi) |i| fastExpertBatch(j, j.fast_groups[i]),
-        .heads => j.head_fn(j.head_ctx, lo, hi),
     }
 }
 
-fn chunkFor(units: usize, threads: usize, min_chunk: usize, max_chunk: usize, even: bool) usize {
-    const target = @max(min_chunk, @min(max_chunk, units / (threads * 4)));
+fn chunkFor(units: usize, threads: usize) usize {
+    // About four claims a thread, 16 to 256 rows each, but never fewer than two chunks a thread.
+    const target = @max(@as(usize, 16), @min(@as(usize, 256), units / (threads * 4)));
     var chunk = @min(target, @max(@as(usize, 1), units / (threads * 2)));
-    if (even and chunk > 1 and chunk % 2 != 0) chunk += 1;
+    if (chunk > 1 and chunk % 2 != 0) chunk += 1;
     return chunk;
 }
 
@@ -416,128 +223,8 @@ pub const Pool = struct {
         const s = try shape(t);
         if (count == 0 or input.len != try std.math.mul(usize, count, s.width) or output.len != try std.math.mul(usize, count, s.n))
             return error.BadLingGgufMatrix;
-        const job = Job{ .mode = .rows, .tensor = t, .input = input.ptr, .output = output.ptr, .count = count, .width = s.width, .n = s.n, .rounded = rounded, .units = s.n, .chunk = chunkFor(s.n, p.threads, 16, 256, true) };
+        const job = Job{ .mode = .rows, .tensor = t, .input = input.ptr, .output = output.ptr, .count = count, .width = s.width, .n = s.n, .rounded = rounded, .units = s.n, .chunk = chunkFor(s.n, p.threads) };
         if (p.made == 0 or s.width * s.n < p.min_weights) return runJob(&job, 0, s.n);
-        p.dispatch(job);
-    }
-
-    /// Opt-in 8x4 repacked SDOT projection across workers; output bytes match 1-thread repack8.
-    pub fn projectSdotRepacked(p: *Pool, a: std.mem.Allocator, rep: repack8.Repacked, t: g.Tensor, input: []const f32, output: []f32, count: usize, rounded: bool) !void {
-        try sdot.checkTarget();
-        const s = try shape(t);
-        if (count == 0 or s.width % 256 != 0 or s.n < 8 or input.len != try std.math.mul(usize, count, s.width) or output.len != try std.math.mul(usize, count, s.n))
-            return error.BadLingGgufMatrix;
-        const bpr = s.width / 256;
-        const total_acts = count * bpr;
-        var small_buf: [64]sdot.Activation256 = undefined;
-        const acts = if (total_acts <= small_buf.len) small_buf[0..total_acts] else try a.alloc(sdot.Activation256, total_acts);
-        defer if (total_acts > small_buf.len) a.free(acts);
-        for (0..count) |r| try sdot.quantize256(input[r * s.width ..][0..s.width], acts[r * bpr ..][0..bpr], true);
-        const groups = s.n / 8;
-        const is_q4 = rep == .q4_k;
-        const job = Job{
-            .mode = if (is_q4) .sdot_q4k_x8 else .sdot_q6k_x8,
-            .tensor = t,
-            .q4k_x8 = if (is_q4) rep.q4_k.ptr else undefined,
-            .q6k_x8 = if (!is_q4) rep.q6_k.ptr else undefined,
-            .acts256 = acts.ptr,
-            .output = output.ptr,
-            .count = count,
-            .width = s.width,
-            .blocks_per_row = bpr,
-            .n = s.n,
-            .rounded = rounded,
-            .units = groups,
-            .chunk = chunkFor(groups, p.threads, 4, 32, false),
-        };
-        if (p.made == 0 or s.width * s.n < p.min_weights) return runJob(&job, 0, groups);
-        p.dispatch(job);
-    }
-
-    /// Opt-in 1-row SDOT projection across workers for Q4_K, Q6_K and Q5_0; output bytes match 1-thread SDOT.
-    pub fn projectSdot(p: *Pool, a: std.mem.Allocator, t: g.Tensor, input: []const f32, output: []f32, count: usize, rounded: bool) !void {
-        try sdot.checkTarget();
-        const s = try shape(t);
-        if (count == 0 or input.len != try std.math.mul(usize, count, s.width) or output.len != try std.math.mul(usize, count, s.n))
-            return error.BadLingGgufMatrix;
-        switch (t.kind) {
-            .q4_k, .q6_k => {
-                const bpr = s.width / 256;
-                const total_acts = count * bpr;
-                var small_buf: [64]sdot.Activation256 = undefined;
-                const acts = if (total_acts <= small_buf.len) small_buf[0..total_acts] else try a.alloc(sdot.Activation256, total_acts);
-                defer if (total_acts > small_buf.len) a.free(acts);
-                for (0..count) |r| {
-                    if (t.kind == .q4_k) try sdot.quantize256(input[r * s.width ..][0..s.width], acts[r * bpr ..][0..bpr], true) else try sdot.quantize256(input[r * s.width ..][0..s.width], acts[r * bpr ..][0..bpr], false);
-                }
-                const job = Job{
-                    .mode = if (t.kind == .q4_k) .sdot_q4k else .sdot_q6k,
-                    .tensor = t,
-                    .acts256 = acts.ptr,
-                    .output = output.ptr,
-                    .count = count,
-                    .width = s.width,
-                    .blocks_per_row = bpr,
-                    .n = s.n,
-                    .rounded = rounded,
-                    .units = s.n,
-                    .chunk = chunkFor(s.n, p.threads, 16, 256, true),
-                };
-                if (p.made == 0 or s.width * s.n < p.min_weights) return runJob(&job, 0, s.n);
-                p.dispatch(job);
-            },
-            .q5_0 => {
-                const bpr = s.width / 32;
-                const total_acts = count * bpr;
-                var small_buf: [64]sdot.Activation32 = undefined;
-                const acts = if (total_acts <= small_buf.len) small_buf[0..total_acts] else try a.alloc(sdot.Activation32, total_acts);
-                defer if (total_acts > small_buf.len) a.free(acts);
-                for (0..count) |r| try sdot.quantize32(input[r * s.width ..][0..s.width], acts[r * bpr ..][0..bpr]);
-                const job = Job{
-                    .mode = .sdot_q50,
-                    .tensor = t,
-                    .acts32 = acts.ptr,
-                    .output = output.ptr,
-                    .count = count,
-                    .width = s.width,
-                    .blocks_per_row = bpr,
-                    .n = s.n,
-                    .rounded = rounded,
-                    .units = s.n,
-                    .chunk = chunkFor(s.n, p.threads, 16, 256, true),
-                };
-                if (p.made == 0 or s.width * s.n < p.min_weights) return runJob(&job, 0, s.n);
-                p.dispatch(job);
-            },
-            else => return error.UnsupportedLingGgufQuant,
-        }
-    }
-
-    /// One row's routed experts in fast mode, one expert a claim; each writes only its own `out`.
-    pub fn expertsFast(p: *Pool, list: []const FastExpert, input: []const f32, acts256: [*]const sdot.Activation256, hidden: usize, inter: usize, limit: f32) !void {
-        if (inter == 0 or inter > 1024 or input.len != hidden) return error.BadLingGgufMatrix;
-        for (list) |e| for ([_]g.Tensor{ e.gate, e.up, e.down }, [_]usize{ hidden, hidden, inter }) |t, width| {
-            const s = try shape(t);
-            if (s.width != width or s.n != hidden + inter - width) return error.BadLingGgufMatrix;
-        };
-        const job = Job{ .mode = .fast_experts, .input = input.ptr, .acts256 = acts256, .width = hidden, .inter = inter, .limit = limit, .fast_experts = list.ptr, .units = list.len, .chunk = 1 };
-        if (p.made == 0) return runJob(&job, 0, list.len);
-        p.dispatch(job);
-    }
-
-    /// Multi-row routed experts grouped by unique expert ID; weights are read once per shared expert.
-    pub fn expertsFastBatch(p: *Pool, groups: []const FastExpertGroup, input: []const f32, acts256: [*]const sdot.Activation256, count: usize, hidden: usize, inter: usize, limit: f32) !void {
-        if (count == 0 or count > 8 or inter == 0 or inter > 1024 or hidden == 0 or hidden > 2048 or input.len != count * hidden) return error.BadLingGgufMatrix;
-        for (groups) |grp| {
-            if (grp.n_rows == 0 or grp.n_rows > 8) return error.BadLingGgufMatrix;
-            for (0..grp.n_rows) |r| if (grp.rows[r] >= count) return error.BadLingGgufMatrix;
-            for ([_]g.Tensor{ grp.expert.gate, grp.expert.up, grp.expert.down }, [_]usize{ hidden, hidden, inter }) |t, width| {
-                const s = try shape(t);
-                if (s.width != width or s.n != hidden + inter - width) return error.BadLingGgufMatrix;
-            }
-        }
-        const job = Job{ .mode = .fast_experts_batch, .input = input.ptr, .acts256 = acts256, .count = count, .width = hidden, .inter = inter, .limit = limit, .fast_groups = groups.ptr, .units = groups.len, .chunk = 1 };
-        if (p.made == 0) return runJob(&job, 0, groups.len);
         p.dispatch(job);
     }
 
@@ -551,15 +238,5 @@ pub const Pool = struct {
         const job = Job{ .mode = .experts, .input = input.ptr, .width = hidden, .inter = inter, .limit = limit, .experts = list.ptr, .units = list.len, .chunk = 1 };
         if (p.made == 0) return runJob(&job, 0, list.len);
         p.dispatch(job);
-    }
-
-    /// Run an independent per-head callback across workers, claiming `chunk` heads at a time.
-    pub fn runHeads(p: *Pool, ctx: *anyopaque, callback: *const fn (*anyopaque, usize, usize) void, count: usize, chunk: usize) void {
-        if (count == 0) return;
-        if (p.made == 0 or count == 1) {
-            callback(ctx, 0, count);
-            return;
-        }
-        p.dispatch(.{ .mode = .heads, .head_ctx = ctx, .head_fn = callback, .units = count, .chunk = @max(@as(usize, 1), chunk) });
     }
 };
