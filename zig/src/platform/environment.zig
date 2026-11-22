@@ -73,6 +73,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
     .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
