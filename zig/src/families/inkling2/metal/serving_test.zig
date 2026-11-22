@@ -11,7 +11,9 @@ const dspark = @import("dspark.zig");
 
 const gpa = std.testing.allocator;
 const io = std.testing.io;
-const context = 256;
+/// A history the prompt cache can end a state on: the family's chunk grid.
+const history = st.prompt_rows;
+const context = 4 * history;
 const made = 24;
 const taps = [_]u32{ 5, 23, 41, 48 };
 
@@ -73,9 +75,9 @@ fn serial(b: lanes.backend.Backend, ids: []const u32) !Reference {
     try b.vtable.prefill_features.?(b.ptr, &s, &taps, .{ .ptr = &sink, .take = TapSink.take });
     defer b.release(&s);
     try std.testing.expectEqual(@as(usize, 1), sink.seen);
+    var next = try b.read(try b.first(&s, ids.len));
     const first = try b.firstRow(&s);
     var out: Reference = .{ .tokens = undefined, .first = first, .tap = sink.bytes };
-    var next = try b.read(try b.first(&s, ids.len));
     out.tokens[0] = next;
     try std.testing.expectEqual(next, first.token);
     for (1..made) |i| {
@@ -210,6 +212,7 @@ fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want
     defer s.deinit(gpa);
     try b.prefill(&s);
     defer b.release(&s);
+    try std.testing.expectEqual(want.tokens[0], try b.read(try b.first(&s, ids.len)));
     try expectFirstRow(want.first, try b.firstRow(&s));
     try std.testing.expectEqualSlices(u8, &want.tap, &(try featureRow(target_b, &s, ids.len - 1)));
 
@@ -234,7 +237,7 @@ fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want
     const path = [_]u32{ 0, 1, 2, 3, 4, 5, 6 };
     var partial_out = [_]lanes.backend.Verified{.{ .sampled = &sampled, .drafts = &echo }};
     try b.verify(&partial, &partial_out);
-    try std.testing.expectEqualSlices(u32, want.tokens[9..17], &sampled);
+    try std.testing.expectEqualSlices(u32, want.tokens[9..16], sampled[0..7]);
     try b.keep(&partial, &.{&path});
     try std.testing.expectEqualSlices(u8, &want.partial_tap, &(try featureRow(target_b, &s, ids.len + 14)));
     try b.draft(&.{.{ .stream = &s, .follow = want.tokens[9..16], .rows = &path, .start = ids.len + 8, .position = ids.len + 16, .depth = 7 }});
@@ -245,10 +248,10 @@ fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want
 
 test "Mini Metal serving matches the host reference token for token" {
     const dir = try checkpoint();
-    const ids = prompt(64, 1);
-    var turn: [80]u32 = undefined;
-    @memcpy(turn[0..64], &ids);
-    @memcpy(turn[64..], &prompt(16, 2));
+    const ids = prompt(history, 1);
+    var turn: [history + 16]u32 = undefined;
+    @memcpy(turn[0..history], &ids);
+    @memcpy(turn[history..], &prompt(16, 2));
     const refs = try withReference(dir, &ids, &turn);
     var tap_nonzero = false;
     for (refs.first.tap) |byte| tap_nonzero = tap_nonzero or byte != 0;
@@ -262,7 +265,11 @@ test "Mini Metal serving matches the host reference token for token" {
     var first = try serve(opened_once, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
     defer first.deinit();
     try expectTokens(&refs.first, &first);
-    var restored = try serve(opened_once, 2, &.{ .prompt = &turn, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
+    var fresh = try serve(opened_once, 2, &.{ .prompt = &turn, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
+    defer fresh.deinit();
+    try std.testing.expectEqual(@as(?u32, 0), fresh.cached);
+    try expectTokens(&refs.second.?, &fresh);
+    var restored = try serve(opened_once, 3, &.{ .prompt = &turn, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
     defer restored.deinit();
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
@@ -271,10 +278,10 @@ test "Mini Metal serving matches the host reference token for token" {
 test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back exactly" {
     const dir = try checkpoint();
     const drafter = @import("sys").getenv("TF_INKLING2_DSPARK_DIR") orelse return error.SkipZigTest;
-    const ids = prompt(64, 3);
-    var turn: [80]u32 = undefined;
-    @memcpy(turn[0..64], &ids);
-    @memcpy(turn[64..], &prompt(16, 2));
+    const ids = prompt(history, 3);
+    var turn: [history + 16]u32 = undefined;
+    @memcpy(turn[0..history], &ids);
+    @memcpy(turn[history..], &prompt(16, 2));
     const refs = try withReference(dir, &ids, &turn);
     try transactions(dir, drafter, &ids, &refs.first);
 
@@ -289,7 +296,11 @@ test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back e
     try expectTokens(&refs.first, &drafted);
     try std.testing.expect(drafted.drafted > 0);
     try std.testing.expect(drafted.accepted > 0);
-    var restored = try serve(opened_once, 12, &.{ .prompt = &turn, .max_tokens = made, .drafts = true, .logprobs = 3, .history_len = ids.len });
+    var fresh = try serve(opened_once, 12, &.{ .prompt = &turn, .max_tokens = made, .drafts = true, .logprobs = 3, .history_len = ids.len });
+    defer fresh.deinit();
+    try std.testing.expectEqual(@as(?u32, 0), fresh.cached);
+    try expectTokens(&refs.second.?, &fresh);
+    var restored = try serve(opened_once, 13, &.{ .prompt = &turn, .max_tokens = made, .drafts = true, .logprobs = 3, .history_len = ids.len });
     defer restored.deinit();
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
