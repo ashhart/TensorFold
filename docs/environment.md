@@ -242,6 +242,8 @@ These settings retain their existing boolean policies rather than gaining new al
   and `TF_SLIDE_FIT_REDUCE` its exact `tree` reduction selection. These developer switches keep their existing semantics.
 - GLM: `GLM_EHPROJ_NAX` retains its first-character `0` disabling rule, `TF_GLM_DFLASH2_PROF` enables by presence,
   even empty or `0`, and `TF_KV_POISON` (also read by Nemotron) is on only for exact `1`.
+- Qwen shared-prefix snapshots: `TF_QWEN_KV_SNAPSHOT_GPU` opts in only for exact `1`. With `TF_QWEN_KV_SHARE=n`,
+  at most `n` states occupy device memory; a failed device allocation retains the pinned-host fallback. Unset keeps host snapshots.
 - The existing tool-grammar, rows-sync, log-time, memory-pressure and XPU-MTP boolean policies are unchanged.
 - Flash Next keeps its lenient readers where they are: `TF_FLASHNEXT_TP` and `TF_FLASHNEXT_LOGITS` take a path,
   `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence,
