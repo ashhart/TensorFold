@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
+- Pull: a refused proxy or timeout setting is named correctly on every configure; the name no longer carries over from an earlier failed one.
 
 - Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs drafter rows for 2 to 8 streams in one pass; about 1% faster at 2 and 4 streams on M3 Ultra, tokens unchanged.
 
