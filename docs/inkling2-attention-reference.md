@@ -1,138 +1,345 @@
-# Inkling 2 decode attention: arithmetic reference
+# Inkling 2 attention: arithmetic reference
 
-This page fixes the arithmetic of Inkling 2 decode attention: the values, where each one rounds to bf16, the order of
-every fp32 sum, what NaN and infinity do, and a bound for an fp32 result against float64. Beside this page, the
-reference is a float64 host model (`zig/src/families/inkling2/attn.zig`) with an fp32 model in that order, an oracle
-(`zig/src/families/inkling2/oracle/attn.py`) and host tests (`zig/src/families/inkling2/attn_test.zig`). It is a
-TensorFold reference, written from `transformers` 5.23.0 `models/inkling2/modeling_inkling2.py` (cited as TF523:line).
-It is a reference for review, not a claim that fp32 scores or P give the same tokens as higher precision; token-level
-gates stay with the engine.
+This page writes down the arithmetic of Inkling 2's attention as #4125's kernels run it: the values, where each one
+rounds to bf16, the order of every fp32 sum, what NaN and infinity do, and a bound for an fp32 result against float64.
+Beside it are a float64 host model (`zig/src/families/inkling2/attn.zig`), an fp32 host model in the kernels' order
+(`zig/src/families/inkling2/attn_order.zig`), the bound as code (`attn_bound.zig`), an oracle
+(`zig/src/families/inkling2/oracle/attn.py`) and host tests (`attn_test.zig`, `attn_bound_test.zig`,
+`attn_order_hand_test.zig`). The kernels are the reference: the host model follows their source, it does not run them.
+Every statement about a kernel carries `file:line` at commit `6dbb32f048a6` (#4125 as merged), in the files
+`zig/kernels/cuda/inkling2/attention.cu` (`attention.cu`), `prompt_attention.cu`,
+`zig/src/families/inkling2/kernels.zig` (`kernels.zig`) and `zig/build/cuda_kernels.zig`. Statements about
+`transformers` 5.23.0 cite `models/inkling2/modeling_inkling2.py` as TF523:line. Nothing here claims that fp32 scores
+or P give the same tokens as higher precision; token-level gates stay with the engine.
 
 ## Scope
 
-One call serves `rows` consecutive decode rows at positions `pos0 .. pos0 + rows - 1` over a dense cache of positions
-`0 .. pos0 + rows - 1`. Per row and query head it gives `hd` outputs. A sliding layer keeps the 1024 newest keys
-(`window = 1024`), a global layer keeps all keys (`window = 0`). Not in scope: the log-tau scaling of `q` and `rel` in
-global layers (TF523:589-602), which comes before this step, the q/k/rel clips, the output projection, and keys beyond
-8192, which the host model refuses.
+The page covers `tf_ink2_rel_table`, `tf_ink2_attn`, `tf_ink2_attn_fold`, `tf_ink2_attn_prompt` and `tf_ink2_merge`:
+from the q, the key and value caches, the rel taps and `rel_logits_proj`, the sink and the gate, as bf16 values, to the
+bf16 output per row, query head and output index. A sliding layer keeps the 1024 newest keys, a global layer all keys.
+Query head `h` reads key head `h / (heads / kv_heads)` (`attention.cu:159`, `:182`). The prompt kernel runs the same
+arithmetic as the others (`prompt_attention.cu:1`; its fold at `:37-47` and its tile body at `:154-197` repeat
+`attention.cu:130-140` and `:232-267`), with the differences that matter for a non-finite value listed under NaN and
+infinity. Not in scope: the preparation before this step (q and k clips, the log-tau scaling of `q` and `rel` in global
+layers, `attention.cu:46-89`), the output projection, and any change to a kernel: this page changes none.
+
+The kernels keep a ring cache (a key at position `p` sits in slot `p % ring`, `attention.cu:87`, `:207`;
+`kernels.zig:41`, `:54-56` round the ring to a multiple of 64); the host model takes a dense cache, one place per
+position, which gives the same values as a ring holding every position. Its shapes are the kernels' at `hd = 128`,
+`d_rel = 16` and 1024 bias columns (`kernels.zig:5-7`) and, for tests, any smaller `hd` (a head is zero-padded to a
+multiple of 16: zero products add nothing), `d_rel <= 32` and any number of columns. It has no limit on the number of
+keys.
 
 ## Values and where they round
 
-Notation: `bf(x)` is round-to-nearest-even to bf16; every input (`q`, `k`, `v`, `rel`, `proj`, `sink`, `gate`) is a bf16
-value held exactly in fp32. Query head `h` reads key/value head `h / (heads / kv_heads)` (TF523 `repeat_kv`, :380-381).
-For row `t` and key `s` with `dist = t - s`:
+Notation: `bf(x)` is round-to-nearest-even to bf16; every input (`q`, `k`, `v`, `rel`, `proj`, `sink`, `gate`) is a
+bf16 value held exactly in fp32 (`attention.cu:25`). The product of two bf16 values is exact in fp32 (a 16-bit
+significand) unless it overflows or lies below `2^-134` (below that, its last bit falls under the fp32 grid `2^-149`),
+so only additions and the operations listed round. For row at position `t`, key `s` and `dist = t - s`:
 
-| Step | Formula | Reference | Rounded to bf16 |
+| Step | Value | Where | Rounded to bf16 |
 |---|---|---|---|
-| dot | `a = sum_i q[i] * k[i]` over `hd` | TF523:383 `torch.matmul` | yes, `bf(a)` |
-| scale | `b = bf(a) * hd^-0.5`, the scale as an fp32 constant | TF523:383 `* scaling`, :414 | yes, `bf(b)` |
-| bias table | `r = sum_j rel[j] * proj[j][dist]` over `d_rel` | TF523:184 | yes, `bf(r)` |
-| bias | `r` only where `0 <= dist < rel_extent`, else 0 (no clamped column) | TF523:186-188 | n/a |
-| logit | `l = bf(b + r)` | TF523:385 | yes |
-| sink | `sink` is a bf16 logit per row and head, with a zero value | TF523:389-392, :453/:577 | input |
-| softmax | `p_s = exp(l_s - m) / (sum_s exp(l_s - m) + exp(sink - m))`, `m = max(l_s, sink)`, in fp32 | TF523:391-392 | `p_s = bf(p_s)` |
-| values | `o = sum_s p_s * v_s`, the sink contributes no term | TF523:396 `torch.matmul` | yes, `bf(o)` |
-| gate | `y = bf(o * sigmoid(gate))`, `sigmoid` in fp32 | TF523:496 (sliding), :628 (global) | yes |
+| bias table | `tab[d] = bf(sum_j rel[j] * proj[j][d])`, `j` in order | `attention.cu:116-120` | yes, once |
+| dot | `D = sum_i q[i] * k[i]`, fp32 accumulator | `attention.cu:222-231` | no |
+| score | `X = (D * scale + bf(tab[dist])) * kLog2e`, `scale = 1 / sqrtf(128)` in fp32; bias 0 where `dist >= 1024` | `attention.cu:14`, `:239-240`; `kernels.zig:180` | no |
+| mask | `X = -inf` for a key that is not live: `t - s >= window`, `s > t`, or outside the step | `attention.cu:237`, `:240` | n/a |
+| P | `P = bf(exp2f(X - mu))`, `mu` the running maximum of the step | `attention.cu:258` | yes, once |
+| denominator | `l += P` over the keys of a lane, in fp32 | `attention.cu:259` | no |
+| values | `acc += P * v`, fp32 accumulator | `attention.cu:268-279` | no |
+| sink | `sk = bf(sink) * kLog2e`, its term `exp2f(sk - mf)` | `attention.cu:377-380` | no |
+| output | `y = o * a / (ll * a + exp2f(sk - mf))`, `out = bf(y * (1 / (1 + expf(-gate))))` | `attention.cu:380-382` | yes, once |
 
-On `rel_extent`: sliding layers use `rel_extent = sliding_window_size` (TF523:413, :512), so every key in the window has
-a bias; global layers use `config.rel_extent`, and a key farther away than `rel_extent - 1` gets no bias. The window
-rule is `t - s < 1024` (mask from `create_sliding_window_causal_mask`, TF523:40, :1291; `masking_utils.py`:95).
+The kernels round to bf16 at exactly three points: the bias table, P and the output. The score (the dot, the scale, the
+bias add and the log2e product), every denominator and every sum of values stay fp32. P is rounded once and that one
+value serves the products and the denominator (`attention.cu:259` adds `bf(p)`). The sink is never rounded after its
+input and enters the denominator only at the merge. The scores are in log2 units; `exp2f` of a difference of two
+log2-unit values is `e^x` of the natural-log difference.
 
-The host model's flag `rounded` selects between this table (all bf16 roundings, bf16 output) and the same arithmetic
-without any bf16 rounding (fp32 output), which the bound below covers.
+## Order of every sum
 
-## Order of every sum (fixed, no atomics)
+1. Bias table: the taps `j = 0 .. 15` add into one fp32 accumulator in order, then one rounding
+   (`attention.cu:118-120`).
+2. Score: 8 chained `k16` mma, `k = 0 .. 7`, from a zero accumulator, fp32 accumulation
+   (`attention.cu:224-230`; the prompt kernel adds the same 8 in the same order, `prompt_attention.cu:147-152`). Then
+   `(sc * scale + bias) * kLog2e` (`attention.cu:240`).
+3. A step is a run of 64-key tiles (aligned to multiples of 64, `attention.cu:205`) from a fresh start: `m = -inf`,
+   `l = 0`, `acc = 0` (`attention.cu:201-203`). A step is a 256-key chunk on a sliding layer and a 1024-key sub-chunk on
+   a global layer (`kernels.zig:12-15`, `attention.cu:127`, `:198`). Per tile:
+   - the maximum `mx` over the tile's live keys (order does not matter), `mn = fmaxf(m, mx)`, `mu = mn == -inf ? 0 :
+     mn`, `alpha = exp2f(m - mu)`, `m = mn`, `l *= alpha` (`attention.cu:232-252`);
+   - `P = bf(exp2f(sc - mu))` and `l += P`, a lane `t = lane & 3` holding the keys `8j + 2t + {0, 1}` of the tile for
+     `j = 0 .. 7` in that order (`attention.cu:255-261`); then `acc *= alpha` (`attention.cu:262-267`);
+   - the values: for `u = 0 .. 3` one mma over 16 keys onto `acc`, so four chained mma a tile in key order
+     (`attention.cu:268-279`).
+4. End of a step: the four lanes' `l` add as `(l0 + l1) + (l2 + l3)` (`attention.cu:281-284`, two xor shuffles; every
+   lane ends with the same bits since addition commutes).
+5. Global layers: the sub-chunks of a chunk of 16384 keys fold in order into one `(M, L, O)`, a row folding the
+   sub-chunks up to its own position (`attention.cu:285-295`, `:354-365`; `prompt_attention.cu:214-228`). A fold:
+   `mn = fmaxf(M, m)`, `a = exp2f(M - mn)`, `b = exp2f(m - mn)`, `L = __fadd_rn(__fmul_rn(L, a), __fmul_rn(l, b))` and
+   the same for each output index (`attention.cu:130-140`; `prompt_attention.cu:37-47`).
+6. Merge: the chunks of the row, `c = lo / chunk .. pos / chunk`, fold in order into `(mm, ll, o)` with
+   `mn = fmaxf(mm, m)`, `a = exp2f(mm - mn)`, `b = exp2f(m - mn)`, `ll = ll * a + l * b`, `o = o * a + po * b`
+   (`attention.cu:351-376`). A sliding layer's chunk is one step; a global chunk is its folded sub-chunks.
+7. Sink and output: `sk = bf(sink) * kLog2e`, `mf = fmaxf(mm, sk)`, `a = exp2f(mm - mf)`,
+   `y = o * a / (ll * a + exp2f(sk - mf))`, then `out = bf(y * (1 / (1 + expf(-gate))))` (`attention.cu:377-382`).
 
-The fp32 model adds in the order of a block of 128 threads, four warps of 32 lanes, with every operation rounded to
-nearest (an `fma` once):
-- Dot over `hd`: lane `l` accumulates `fma(q[d], k[d], acc)` for `d = l, l + 32, l + 64, l + 96` in that order; the
-  warp sum is an xor tree with offsets 16, 8, 4, 2, 1.
-- Bias over `d_rel`: lane `j < d_rel` holds the product `rel[j] * proj[j][dist]`, the same xor tree sums the lanes
-  (lanes `>= d_rel` hold 0).
-- Maximum `m`: the largest of the sink and the logits under `fmaxf`'s rule, so the order of the comparisons does not
-  change it.
-- Denominator `Z`: each thread adds `exp(l_j - m)` for `j = tid, tid + 128, ...` in that order; xor tree per warp; then
-  `(w0 + w1) + (w2 + w3)`; then `exp(sink - m)` is added last. `exp` is CUDA's `expf` (its error: see the bound below),
-  and `p = exp / Z` is one quotient.
-- Values: for each output index `d`, one sequential `fma(p_j, v_j[d], acc)` over the keys in position order.
-- Gate: `sigmoid(g) = 1 / (1 + expf(-g))`, then one product with `o`.
+A step starts from its own maximum, so a weight rounds to bf16 against its step's running maximum, not against the
+maximum of earlier steps; the maximum of earlier steps meets it at the fold and merge, by `exp2f` and a product, which
+do not round to bf16.
+
+What the order does not fix:
+- The order of the 16 products and the accumulator inside one mma, and its rounding, are the hardware's and are not
+  written down in the repository. The products are exact (bf16 times bf16), so only the additions round. The host model
+  adds them in ascending order, each rounded to nearest and unfused: that is the model's choice.
+- Where the source writes a plain `*` and `+`, nvcc may contract them into one fused operation: `attention.cu:119`
+  (`acc += r[j] * bf(...)`), `:240` (`sc * scale + bias`), `:252` with `:259` (`l *= alpha`, then `l += P`),
+  `:373-374` (`ll * a + l * b`, `o * a + po * b`), `:380` (`ll * a + exp2f(...)`), and the same lines of
+  `prompt_attention.cu` (`:160`, `:172`, `:185` with `:193`). The kernels build with `-O3` and no other floating-point
+  flag (`zig/build/cuda_kernels.zig:161-162`, passed to nvcc at `zig/build/cuda_fatbin.zig:24`), and NVIDIA's nvcc
+  documentation (v13.5, options `--fmad`, `--prec-div`, `--ftz`) gives the default of `--fmad` as "This option is set
+  to true and nvcc enables the contraction of floating-point multiplies and adds/subtracts into floating-point
+  multiply-add operations". We state what the source and the build line say and nothing about the code nvcc generated.
+  The folds at `attention.cu:134`, `:139` use `__fmul_rn` and `__fadd_rn` and do not contract. The host model rounds
+  the product and the sum separately at every open site; the bound below counts roundings and holds for either choice,
+  a fused operation having fewer.
+- Division and subnormal numbers: the nvcc documentation says of `--prec-div` "This option is set to true and nvcc
+  enables the IEEE round-to-nearest mode." and of `--ftz` "This option is set to false and nvcc preserves denormal
+  values."; the build line sets neither.
 
 ## NaN and infinity
 
-IEEE propagation, with two places that need a stated rule:
-- `fmaxf` passes a NaN by, so a NaN logit or a NaN sink does not stop `m`; the NaN's `exp` then makes `Z` NaN, so every
-  output of that row and head is NaN (host reference: `attend`, tested for a NaN sink and a NaN key).
-- A `+inf` sink makes the maximum infinite and `exp(sink - m)` is `exp(inf - inf)`, so the row's outputs are NaN; a
-  `-inf` sink contributes 0 (host reference: `attend`, tested for both).
-- A non-finite value `v` stays non-finite where its weight is positive (`inf * p`); a zero weight times an infinite
-  value is NaN, as in `torch.matmul`.
-- An infinite gate saturates `sigmoid` to 1 or 0 (finite); a NaN gate makes the output NaN.
+What follows is what the order above gives, taking IEEE propagation in the mma and the shuffles as given; it is a
+consequence of the source and the host model, not a measurement on a device.
+- A key that is not live scores `-inf` after the mma (`attention.cu:240`), so a NaN or infinite `k` at a masked key
+  changes nothing; its weight is `exp2f(-inf - mu) = 0`.
+- `fmaxf` passes a NaN by, so a NaN score does not stop the maximum, but `exp2f(NaN)` is NaN, `P` is NaN, and so are
+  `l` and every output index of that row and head.
+- A value `v` that is not finite at a live key keeps its output index non-finite where its weight is positive
+  (`inf * P`); where the weight is 0, the product is `0 * inf = NaN`.
+- Masked keys that a block loads: a block loads the keys `max(step start, tile_lo) .. min(step end, tile_hi)`, where
+  `tile_lo` and `tile_hi` come from the first and last of its 64 (row, head) pairs, and zero-fills the rest of a
+  64-key tile (`attention.cu:155-157`, `:204`, `:211-216`). A key in that range that is masked for one row (`kp > pos`
+  or `kp < lo`, `attention.cu:237`) meets that row's `P = 0` in the mma, so a non-finite `v` there is `0 * inf = NaN`
+  in the row's output index of that column (the columns of `v` where it is not finite), whatever the row's own keys
+  hold, and the NaN stays through the rescales, folds and the merge. The other columns of the row stay finite. Which
+  rows are affected depends on the call: rows of one block at different positions see each other's later keys, and in
+  a sliding layer a row sees the keys between the block's first window start and its own. A call of a single row has
+  no such key (its range is its live keys). The host model reproduces this rule for the decode kernel (`block_pairs =
+  64`, `kernels.zig:10`). The prompt kernel loads `b_lo .. min(b_hi, tile_hi)` and skips a tile past a warp's last row
+  (`prompt_attention.cu:84`, `:60-61`, `:143`), so its set differs; the host model does not reproduce it.
+- A NaN sink gives a NaN denominator. A `+inf` sink makes `mf` infinite, `a = exp2f(mm - inf) = 0` and
+  `exp2f(inf - inf)` NaN: every output of that row and head is NaN. A `-inf` sink contributes 0.
+- An infinite gate saturates the sigmoid: `+inf` gives 1, `-inf` gives 0 (so `y * 0` is 0, or NaN if `y` is
+  infinite); a NaN gate gives NaN.
 
 ## FP64 check and its bound
 
-The float64 model (`zig/src/families/inkling2/attn.zig`) evaluates the same formula in float64 with exact bf16 inputs
-and no intermediate rounding. The oracle evaluates the formula in float64 with Python's standard library, and runs
-`transformers`' own `Inkling2RelativeLogits` (TF523:165-188) and `eager_attention_forward` (TF523:368-399) on the same
-bf16 inputs; the causal and sliding mask (`masking_utils.py` of the same release, :76, :95 and :630, as TF523:1290-1291
-builds it) and the output gate (TF523:496, :628) it writes out from the source. Its fixture keeps both results. The host
-tests hold the float64 model to the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's
-largest `|y|`, the fp32 model without roundings to them within `(|y| + top) 2^-16` at least twice over, and the fp32
-model with the table's roundings to the bf16 bits of the `transformers` path (at most one value in a thousand one step
-apart). They do not evaluate the bound below. For an fp32 result `y` in the order above, with finite inputs and no fp32
-value that overflows (this rules out a gate of -89 or below, where `expf(-g)` overflows and `sigmoid` gives 0), the
-bound against the float64 output `want` is
+The float64 model (`attend` with `f64` in `attn.zig`) evaluates the formula of the table above without any rounding:
+with `x = (q . k) hd^-1/2 + bias` in natural-log units, `y = sum_s e^(x_s - M) v_s / (sum_s e^(x_s - M) + e^(sink - M))`
+and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] * proj[j][dist]` where `dist < rext`. The oracle
+evaluates the same formula with Python's standard library (and `transformers`, see the fidelity check). The fp32 model
+in the kernels' order (`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the
+output to bf16 and nothing else, and is held to float64 by the bound below.
 
-`|y - want| <= (1 + 2^-20) * (mag * (exp(L) - 1) + (nk + 1) * (vmax + 1) * 2^-145)`
+Domain. The bound is claimed for a row and head whose inputs satisfy these conditions, checked in float64 from the
+inputs (`head` in `attn_bound.zig` returns `error.AttnDomain` outside them): every `q`, `rel`, `sink` and `gate` of
+the pair, every `proj` entry it reads and every `k` and `v` of the keys its block loads is finite; `gate >= -87` for
+every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk * vmax <
+2^120`. They are sufficient and not sharp, and outside them the page claims nothing. The need is real: at `gate = -89`
+the kernel's `expf(89)` is `inf` (`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 +
+inf)` is 0 and the output 0, where float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already
+subnormal and its quotient has more than `u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is
+`2^127.68`).
 
-`L = 2 eta + 3 lambda(gamma(5)) + 4 lambda(u) + S`
+For one row and head with `nk` live keys, let `u = 2^-24`, `u_mma = 2^-23`, `u_bf = 2^-8`, `gamma(n) = n u / (1 - n u)`
+and `lambda(a) = -ln(1 - a)`. The fp32 result `y` before the output's rounding satisfies, against the float64 result
+`want`,
 
-`S = lambda(gamma(nk / 128 + 8)) + lambda(gamma(nk)) + lambda((nk + 1) 2^-145)`
+`|y - want| <= (1 + 2^-20) * (mag * (exp(L) - 1) + sg * (nk + 1) * (2 vmax + 1) * 2^-130 * exp(L)) + 2^-149`
 
-with `u = 2^-24`, `gamma(n) = n u / (1 - n u)`, `lambda(a) = -ln(1 - a)`, `nk` the number of keys of that row,
-`mag = sum_s (p_s |v_s|) * sigmoid(gate)` the magnitude of the output's terms, `vmax` the largest `|v|` over the row's
-keys and the head's values, and `eta = dl + u (m - min(sink, l_s) + 2 dl)`, with float64's maximum `m` and logits `l_s`,
-the largest error of an fp32 exponent `l_s - m` or `sink - m`. `dl`, the largest error of a logit in the row, is the
-largest `gamma(13) * scale * sum|q k| + gamma(7) * sum|rel proj| + 2^-141` over its keys, the `gamma(7)` term only for a
-key that gets a bias. Each rounding of the order above is counted:
-- `gamma(13)`: a product `q k` passes at most four `fma`s in its lane's chain (every `hd` up to 128), five tree adds,
-  the scale constant (an fp32 rounding of float64's `hd^-0.5`, within two roundings of the exact value), the scaling's
-  product and the bias add.
-- `gamma(7)`: a bias product passes its own rounding, five tree adds and the bias add (every `d_rel` up to 32).
-- `eta`: an fp32 exponent `l_s - m` carries its logit's error (`dl`) and one rounding of the subtraction; `sink - m`
-  carries only the rounding. The fp32 maximum (`fmaxf`, no rounding) lies within `dl` of float64's, so that rounding is
-  at most `u (m - min(sink, l_s) + 2 dl)`. Both errors count against float64's values less the fp32 maximum, a shift
-  that leaves `p` unchanged.
-- `2 eta`: an exponent's error moves its own term and the terms of `Z` (numerator and denominator).
-- `3 lambda(gamma(5))`: NVIDIA's CUDA Programming Guide (v13.5, section 5.6.7, Table 54) lists `expf` with a maximum
-  error of 2 ULP and states: "The maximum ULP error is stated as the maximum observed absolute value of the difference
-  in ULPs between the value returned by the function and a correctly rounded result of the corresponding precision
-  obtained according to the round-to-nearest ties-to-even rounding mode." and "The error bounds are derived from
-  extensive, though not exhaustive, testing. Therefore, they are not guaranteed." Within 2 ulp of the correctly rounded
-  `e^x`, `expf` is within `gamma(5)` of `e^x`; it counts in the numerator, in the terms of `Z` and in `sigmoid`.
-- `4 lambda(u)`: the quotient `p`, the add and the quotient in `sigmoid`, and the final product.
-- `lambda(gamma(nk / 128 + 8))`: a term of `Z` passes at most `ceil(nk / 128) - 1` rounded adds in its thread's chain
-  (the first, onto 0, is exact), five in the xor tree, two combining the warps and the sink's add.
-- `lambda(gamma(nk))`: the value chain of `nk` `fma`s.
-- Subnormal results: below `2^-126` an `fma`, product or quotient is within `2^-150` of its exact value instead of `u`
-  relative, `expf` within `2^-147`, and an add there is exact. This gives the `2^-141` in `dl` (at most 161 products and
-  `fma`s feed a logit), `lambda((nk + 1) 2^-145)` for `Z` (its largest term, `expf(0)`, keeps it above 1/2) and the term
-  with `vmax`. In `sigmoid`, `2^-147` is below `gamma(5)` of `1 + exp(-g)`.
-- The factors multiply: `lambda(a)` bounds `|ln(1 + d)|` for `|d| <= a`, and `lambda(gamma(n))` does so for `n`
-  roundings, so `L` bounds the logarithm of each term's relative error and `exp(L) - 1` the error itself.
-- `1 + 2^-20` covers float64, in `want` and in evaluating the bound: each float64 step rounds at `2^-53`, its `exp`
-  within 1 ulp and the scale as `1 / sqrt(hd)`, and its sums are at most 128 times as long as the fp32 chains, so its
-  error stays below `2^-22` of the bound.
+`mag = sg * sum_s (P_s |v_s|)` with `P_s` the float64 softmax weights (the sink in the denominator), `sg` the sigmoid of
+the gate and `vmax` the largest `|v|` of the row's keys. The terms of `L`, with `T` the tiles of a step (16 global, 4
+sliding), `S` the sub-chunks of a chunk (16 global, 0 sliding), `C` the chunks of the row (global: `floor(t / 16384) +
+1`; sliding: `floor((window - 1) / 256) + 2`, the most a window spans), `M = ceil(hd / 16)` and `E = (T - 1) + S + C +
+1`:
 
-The bound is derived from these counts and that `expf` bound, not fitted to runs.
+`L = L_num + L_den + lambda(gamma(5)) + 4 lambda(u)`
 
-With the bf16 roundings the bound is an interval: the order above run in fp32 with each `expf` over its whole range
-under that bound (within `gamma(5)` of `e^x`, or `2^-147` below `2^-126`), with every stage rounded to bf16 as in the
-table, gives the interval a correct output lies in. No claim of bit equality with PyTorch is made.
+`L_num = eta + lambda(gamma(5)) + lambda(u_bf) + E lambda(gamma(6)) + 4 T lambda(17 u_mma) + (S + C) lambda(u)`
+
+`L_den = eta + lambda(gamma(5)) + lambda(u_bf) + E lambda(gamma(6)) + (16 T + 2 + S + C + 1) lambda(u)`
+
+`eta = ln 2 * (d + u ((Xmax - Xmin) + 2 d))`, `d` the largest absolute error of a score in log2 units, over the keys and
+the sink, and `Xmax`, `Xmin` the largest and smallest log2-unit score (`log2(e)` times `x`) over the keys and the sink;
+
+`dX_s = log2(e) * (hd^-1/2 * A_s * G_dot + B_s * G_bias) + 2^-133`, `G_dot = (1 + 17 u_mma)^M (1 + gamma(6)) - 1`,
+`G_bias = (1 + gamma(d_rel)) (1 + u_bf) (1 + gamma(3)) - 1`, `A_s = sum_i |q_i k_i|`, `B_s = sum_j |rel_j proj_j|` (0
+where the key gets no bias); for the sink `gamma(2) |log2(e) sink| + 2^-133`. The same `L` with the same counts is
+what `attn_bound.zig` evaluates. Each term is a count of roundings in the order above:
+
+- The hypotheses. `exp2f` and `expf` are within 2 ULP of the correctly rounded result: NVIDIA's CUDA Programming Guide
+  (v13.5, section 5.6.7, Exponential Functions, Table 54) lists `expf(x)` and `exp2f(x)` with "2 ULP" for `float`. The
+  same section says "The maximum ULP error is stated as the maximum observed absolute value of the difference in ULPs
+  between the value returned by the function and a correctly rounded result of the corresponding precision obtained
+  according to the round-to-nearest ties-to-even rounding mode. The error bounds are derived from extensive, though not
+  exhaustive, testing. Therefore, they are not guaranteed." Within 2 ULP of the correctly rounded value, which itself is
+  within `u`, the result is within `gamma(5)` of the exact one. The second hypothesis: an mma's result differs from the
+  exact sum of its 17 operands (16 products and the accumulator) by at most `17 u_mma` times the sum of their absolute
+  values. It is the assumption of `zig/tests/cuda/contract_inkling2_attn_ref.zig`: `u_mma = 2^-23` "a tensor-core add:
+  its adders may truncate" (`:24`), the dot's error `abs * scale * 136 * u_mma` (`:158`, 136 is 8 chained mma times 17)
+  and `tiles * (4 * 17 + 1)` in `depth` (`:85`). It is not a guarantee of the hardware, and it covers every order inside
+  an mma. The other fp32 operations round to nearest (above), and a fused operation has fewer roundings than the unfused
+  pair, so every count holds for the open sites.
+- `G_dot`: `M` chained mma (the dot's error against `A_s` is `(1 + 17 u_mma)^M - 1` by induction over the chain), and
+  six roundings of the score: the scale constant (`1 / sqrtf(128)` is two roundings of `hd^-1/2`), the product with it,
+  the add of the bias, the constant `kLog2e` (one rounding of `log2(e)`) and its product.
+- `G_bias`: the fp32 tap sum (`d_rel` adds), the bf16 rounding of the table (`u_bf`), and three roundings after it
+  (the add, `kLog2e`, the product). The table's bf16 rounding is a term of its own and the largest of the score.
+- `eta`: the score's error `d` and the roundings of the differences `X - mu`, of every `exp2f` argument of a rescale
+  and of `sk - mf`. Each is at most `u` of its difference; all differences of a weight are `<= 0` and add up to
+  `Xmax' - X_s`, so a weight's exponent error is at most `u (Xmax - Xmin + 2 d)`. In natural units, a factor of `ln 2`.
+- `lambda(gamma(5))`, `lambda(u_bf)`: the `exp2f` of P, and P's bf16 rounding (`attention.cu:258`): the main term of
+  `L`. It acts on the numerator and, because `l` sums the same rounded P (`attention.cu:259`), on the denominator.
+- `E lambda(gamma(6))`: a weight meets at most `T - 1` rescales of later tiles, `S` folds of a sub-chunk, `C` merges of
+  a chunk and the sink's `a`, each an `exp2f` (`gamma(5)`) and a product (`u`).
+- `4 T lambda(17 u_mma)`: the values' mma chain, four mma a tile over `T` tiles. `(S + C) lambda(u)`: the add of each
+  fold and merge.
+- `16 T + 2 + S + C + 1`: the denominator's adds: 16 a tile in a lane, two combining the lanes, one a fold or merge and
+  the add of the sink's term.
+- `lambda(gamma(5)) + 4 lambda(u)`: the sigmoid's `expf`, its add and its quotient, the quotient `o a / den` and the
+  final product.
+- Domain: under its conditions no fp32 operation of the order overflows. A dot, its scaled and biased value and the
+  product with `log2(e)` stay below `2^123`; every `exp2f` has an argument `<= 0` and a result `<= 1 + gamma(5)`; a
+  sum of `P v` stays below `2^121`; the denominator is at least `exp(-L)` (the largest weight is 1), so `y` stays
+  below `2^122`; and `expf(-gate) <= e^87 < 2^126`, so `1 + expf(-gate)` stays below `2^126` and the sigmoid is a
+  normal number.
+- The last bf16 rounding of the output is not in `L`: the bound on the bf16 result is the fp32 bound `b` plus
+  `u_bf (|want| + b) + 2^-134`.
+- Subnormals: below `2^-126` an operation is within `2^-150` of its exact result, `exp2f` within `2^-148`, and an add
+  is exact; bf16's half step there is `2^-134`. A weight is off by at most `2^-133` in absolute terms, the largest
+  weight is `exp2f(0) = 1` so the denominator is at least `exp(-L)`, and `2^-130 (nk + 1) (2 vmax + 1)` covers the
+  numerator, the denominator and the absolute errors of the last operations. In `dX_s` the bias table rounds to bf16,
+  and where its sum is below `2^-126` that error is absolute, up to `2^-134` (half a bf16 step there), not `u_bf B_s`;
+  times `log2(e)` it is below `2^-133.4`, as is the sink's product with `kLog2e`, and the other subnormal contributions
+  (products below the fp32 grid, each at most `2^-150`) lie below `2^-140`; so `2^-133` covers the score's. The last
+  product `y * sigmoid` rounds absolutely, by up to `2^-150`, where its result is below `2^-126`; the term `2^-149`
+  after the factor `1 + 2^-20` covers that, which `sg` scales away in the other floor term.
+  The factors multiply: `lambda(a)` bounds `|ln(1 + d)|` for `|d| <= a`, so `L` bounds the logarithm of each term's
+  relative error and `exp(L) - 1` the error of the ratio `N / D`.
+- `1 + 2^-20` covers float64, in `want` and in evaluating the bound: its sums of at most `2^20` terms round at `2^-53`
+  each, below `2^-28` of `mag`, while `exp(L) - 1 >= 2^-8`.
+
+The bound is derived from these counts and the two hypotheses, not fitted to runs. It makes no claim about bit
+equality with another implementation.
+
+The host tests evaluate the bound (`attn_bound_test.zig`, `attn_bound.zig`): the fp32 model in the kernels' order
+against the float64 formula, before and after the output's rounding, on the oracle's fixture; on rows across the seams
+(64, 1024 and 16384 keys, global, with the maximum rising across each; a sliding window with chunks at 256; three rows
+of a block; the checkpoint's `hd = 128`, 16 taps, 1024 columns); and on a case for each term: cancellation in the
+values, a large gap between scores, P nearest a bf16 half step, a dominant sink, P below the normal range, an output
+below the normal range (where the last product's absolute error exceeds the sigmoid-scaled floor term), and the ends
+of the domain. Every element is inside its bound, and the worst error over bound is 0.16 before and 0.26 after the
+output's rounding; the tests print each case.
+
+Each rounding point and each seam also has a test whose expected value is written by hand in float64 and does not come
+from the model (`attn_order_hand_test.zig`): the table's tie to even, P rounded once in the products and in the
+denominator, the output after the gate, the dot and scale in fp32, the sink at the merge unrounded, the window, the
+bias distance, the head group, and, for the seams, sums that only the stated grouping gets right: `2^24`, ones and
+`-2^24` put in different tiles, sub-chunks, sliding chunks and global chunks give 0 or 2 depending on whether the ones
+meet before or after the big values.
+
+## Fidelity against Transformers eager (reported)
+
+`transformers` 5.23.0 runs this attention at eager points that are not the kernels'. In the eager path (TF523:368-399
+with the relative logits of TF523:165-188) the bf16 tensors round after the dot (TF523:383), the scale (TF523:383,
+:414), the bias table (TF523:184), the biased logit (TF523:385), the normalised weights (TF523:391-392), the value sum
+(TF523:396) and the gated output (TF523:496, :628): seven roundings, against the kernels' three, and the softmax
+divides before P is rounded. The kernels do not follow that arithmetic and this page does not ask them to; the
+comparison is a reported number, not a gate. The oracle (`zig/src/families/inkling2/oracle/attn.py`) runs
+`Inkling2RelativeLogits` and `eager_attention_forward` on the same bf16 inputs as the fixture, builds the causal and
+sliding mask (`masking_utils.py` of the same release, :76, :95 and :630, as TF523:1290-1291 builds it) and the gate
+from the source, and the fixture keeps both its float64 result and its bf16 bits.
+
+- The eager-point fp32 model (`attend` with `f32` and `rounded`, in `attn.zig`, the seven roundings above with a fixed
+  fp32 order of its own) gives the bf16 bits of the `transformers` path on the fixture: 4800 of 4800 values equal,
+  none a step apart. A libm with another last bit in `exp` may flip a rounding; the test allows one value in a
+  thousand one step apart.
+- The fp32 model in the kernels' order (`attendOrder`) against the same bits: 2118 of 4800 equal, 1689 one step apart
+  and 993 further; the largest difference, as `|got - transformers| / (|transformers| + top)` with `top` the head's
+  largest `|transformers|`, is 6.1e-2. This is the arithmetic difference between the kernels' three roundings and the
+  eager path's seven, on the six fixture cases (tiny-random `inkling-2`, the checkpoint's shapes among them).
+- The float64 model equals the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's largest
+  `|y|`.
 
 ## Falsification
 
-Each of these single changes to the host model turns the host tests red: a rounding left out (the dot, the scaled dot,
-the bias table, the biased logit, `p`, the value sum, the gated output), a window one key too wide, the sink left out of
-the sum, the sink taken at half its weight, the bias applied one distance too far, the scale or the gate missing, the
-wrong key-head group, a value sum in reverse key order, each shape or length guard on its own, the maximum taken
-without the sink, and the sink's term clamped below at -1.
+Each single change below was made alone to the host code (the fp32 model in `attn_order.zig`, the window to `first` in
+`attn.zig`, and the bound's terms and domain checks in `attn_bound.zig`), `zig build test-inkling2-host` was run on it,
+and the change was reverted. The test that turns red is named (test names as in `attn_order_hand_test.zig`,
+`attn_bound_test.zig`, `attn_test.zig` and `attn.zig`; where more than one goes red, the count is given). The unchanged
+tree is green: 78 tests passed and 4 skipped.
+
+| Single change to the host model | A test that turns red (N red in all) |
+|---|---|
+| table: no bf16 rounding | `table: bf16 once, a tie to even` |
+| dot rounded to bf16 (as eager) | `score: the dot and the scale stay fp32` (2 red) |
+| scaled dot rounded to bf16 | `score: the dot and the scale stay fp32` (2 red) |
+| logit rounded to bf16 | `sub-chunk seam: starts from its own maximum` (5 red) |
+| scale missing | `score: the dot and the scale stay fp32` (6 red) |
+| scale 1/hd | `score: the dot and the scale stay fp32` (5 red) |
+| bias not added | `bias: distances under rext only` (7 red) |
+| P not rounded (numerator and denominator) | `P: bf16 once, in the products and the denominator` (7 red) |
+| P rounded for P.V, denominator sums unrounded P | `P: bf16 once, in the products and the denominator` (8 red) |
+| P.V sums unrounded P, denominator rounded | `P: bf16 once, in the products and the denominator` (7 red) |
+| output not rounded | `output: bf16 once, after the gate` |
+| output rounded twice (before the gate too) | `P: bf16 once, in the products and the denominator` (10 red) |
+| value sum rounded to bf16 (as eager) | `bias: distances under rext only` (4 red) |
+| sink term rounded to bf16 | `sink: at the merge, unrounded` (2 red) |
+| sink at half its weight | `sink: at the merge, unrounded` (3 red) |
+| sink left out | `sink: at the merge, unrounded` (4 red) |
+| maximum at the merge without the sink | `NaN: live keys and the sink` |
+| tile of 32 keys | `tile: a weak key rounds against a strong one after it` |
+| tile of 128 keys | `tile seam: P rounds against its tile's maximum, then rescales` |
+| sub-chunk of 512 keys | `sub-chunk: summed alone, then folded` |
+| sub-chunk of 2048 keys | `sub-chunk seam: starts from its own maximum`; `sub-chunk: summed alone, then folded` (3 red) |
+| sliding chunk of 128 keys | `sliding chunk: summed alone, then merged` |
+| sliding chunk of 512 keys | `chunk seam at 256: sliding starts afresh, global does not`; `sliding chunk: summed alone, then merged` (3 red) |
+| global chunk of 8192 keys | `global chunk: its sub-chunks fold first` |
+| global chunk of 32768 keys | `global chunk: its sub-chunks fold first`; `global chunks: merge in order` (2 red) |
+| no rescale between tiles (alpha 1) | `tile seam: P rounds against its tile's maximum, then rescales` (9 red) |
+| denominator not rescaled between tiles | `tile seam: P rounds against its tile's maximum, then rescales` (9 red) |
+| values not rescaled between tiles | `tile seam: P rounds against its tile's maximum, then rescales` (5 red) |
+| fold scales swapped (old by the new part's factor) | `tile seam: P rounds against its tile's maximum, then rescales` (34 red) |
+| chunks merged in reverse order | `global chunks: merge in order`; `sliding chunks: merge in order` (2 red) |
+| masked key scored 0 instead of -inf | `window: exactly `window` keys` (29 red) |
+| block loads only the row's own keys (NaN rule) | `NaN: a non-finite V at a masked key a block loads` |
+| block starts at the row's own window (NaN rule) | `NaN: below the window, a key another row's block loads` |
+| mu without the all-masked guard | `bound: sliding seams` |
+| gate sigmoid with the wrong sign | `NaN: a masked key no block loads is harmless`; `NaN: a non-finite V at a masked key a block loads` (33 red) |
+| gate missing | `gate: its sigmoid` (11 red) |
+| key limit of 8192 kept in the order model | `shapes: over 8192 keys is accepted, a refusal stays a refusal` (4 red) |
+| block of one pair (NaN rule) | `NaN: a non-finite V at a masked key a block loads`; `NaN: below the window, a key another row's block loads` (2 red) |
+| window one key too wide | `window: exactly `window` keys` (6 red) |
+| bias one distance too far | (the table read runs past the last column and `index out of bounds` aborts the test binary: 32 tests terminate, none names a rounding) |
+| bias one distance too short | `bias: distances under rext only` (2 red) |
+| wrong key-head group (h mod kv_heads) | `group: the group's key head` (3 red) |
+| table taps summed in reverse | `table: taps in order` |
+| dot summed in reverse (all dims, one chain) | `score: one chain across k16 blocks` |
+| bound: no absolute term 2^-149 for the last product | `bound: an output below the normal range` |
+| domain: gate bound not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
+| domain: dot magnitude not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
+| domain: infinite value at a loaded key not checked | `bound: the domain ends where fp32 overflows or the sigmoid leaves the normal range` |
+
+These changes leave the host tests green. They are the model's choices or equivalent forms, and their effect is one
+rounding, below what a float64 hand value or the bound can separate:
+- fusing the score `dot * scale + bias` into one `fma` (an open site above), or the fold's product and add (the source
+  pins the fold with `__fmul_rn` and `__fadd_rn`, so the model's separate roundings follow the source, not a test);
+- the order of the 16 products inside one mma, here the products of a tile's `P.V` in descending key order, and the
+  dot's k16 blocks summed apart and then added in order (the page names the order inside an mma as the hardware's);
+- which of the four lanes holds a key of `l` and how the four lane sums add (one lane, or a chain instead of
+  `(l0 + l1) + (l2 + l3)`): one rounding in `l`;
+- the sink folded in before the chunks instead of at the merge: the same operations in another association;
+- the exponent in natural-log units with `exp` instead of log2 units with `exp2f`: the same values up to the rounding of
+  the product with `log2(e)`, which can flip a P only when it lies within about `1e-7` of a bf16 half step;
+- the bound's score floor at `2^-140` instead of `2^-133`: the error it covers is below `2^-133`, while `L` is at least
+  `lambda(u_bf)`, about `2^-8`, so no input can tell the two apart; the value rests on the derivation above.
