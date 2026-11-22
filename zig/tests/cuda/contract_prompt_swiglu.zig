@@ -8,6 +8,7 @@ const gpu_check = @import("check.zig");
 const c = core.contract.spec;
 const g = core.contract.gates;
 const nvfp4 = cuda.nvfp4;
+const glm = @import("glm_cuda");
 
 fn noSums(_: c.Shape) usize {
     return 0;
@@ -24,10 +25,12 @@ const counted = [_]c.Shape{ .{ .rows = 2048, .n = 17408, .k = 5120 }, .{ .rows =
 /// Every bf16 bit pattern as a gate value (row r's gate is r's pattern), against 128 up values a row.
 const sweep_shape = [_]c.Shape{.{ .rows = 65536, .n = 128, .k = 64 }};
 
+const glm_shapes = [_]c.Shape{ .{ .rows = 2048, .n = 6144, .k = 4096 }, .{ .rows = 129, .n = 6144, .k = 4096 }, .{ .rows = 17, .n = 128, .k = 64 }, .{ .rows = 1, .n = 128, .k = 64 } };
+const glm_rule = "every output byte equals separate GLM gate/up BF16 products, copies and the original clamped SwiGLU helper";
 const rule = "every output byte equals two prompt_lean products, then tf_q35_mlp_act, on the same rows and weights";
 
 /// What a registration plants or covers: the served launch, a device row count, every gate value, or a control.
-const Form = enum { served, device_rows, sweep, swapped, gate_ulp };
+const Form = enum { served, device_rows, sweep, swapped, gate_ulp, glm_clamp, glm_unclamped };
 
 /// One FP4 weight's host fixture: e2m1 codes, e4m3 block scales, packed as the loader packs them.
 const Weight = struct {
@@ -69,6 +72,10 @@ pub const Product = struct {
     rig: rig_.Rig,
     prompt: *const nvfp4.Prompt,
     act: cuda.Function,
+    glm_prompt: ?nvfp4.Prompt = null,
+    glm_glue: ?glm.glue.Kernels = null,
+    copy_rows: ?cuda.Function = null,
+    glm_scratch: [3]u64 = @splat(0),
     form: Form = .served,
     gate: cuda.qmmf.Weight = undefined,
     up: cuda.qmmf.Weight = undefined,
@@ -87,16 +94,19 @@ pub const Product = struct {
             .sweep => "cuda prompt16 FP4 lean SwiGLU pair, every bf16 gate value",
             .swapped => "control: lean SwiGLU pair with gate and up swapped",
             .gate_ulp => "control: lean SwiGLU pair with the gate's scale one fp32 ulp up",
+            .glm_clamp => "cuda GLM prefill dense clamped pair",
+            .glm_unclamped => "control: GLM prefill dense pair missing clamp and SiLU rounding",
         };
-        const control = self.form == .swapped or self.form == .gate_ulp;
+        const control = self.form == .swapped or self.form == .gate_ulp or self.form == .glm_unclamped;
         return .{ .spec = .{
             .name = name,
             .accum = .none,
             .depth = noSums,
             .out = .raw,
-            .replaces = if (control) null else "two prompt_lean products, then tf_q35_mlp_act",
-            .nan = .{ .stated = rule },
+            .replaces = if (control) null else if (self.form == .glm_clamp) "GLM NVFP4 gate/up, two copy_rows, clamped swiglu_512" else "two prompt_lean products, then tf_q35_mlp_act",
+            .nan = .{ .stated = if (self.form == .glm_clamp or self.form == .glm_unclamped) glm_rule else rule },
             .served = switch (self.form) {
+                .glm_clamp, .glm_unclamped => &glm_shapes,
                 .sweep => &sweep_shape,
                 .device_rows => &counted,
                 else => &served,
@@ -157,10 +167,20 @@ pub const Product = struct {
         }
         for (&self.base, [_]usize{ 2, 2, 2 }) |*b, size| b.* = try self.rig.scratch(shape.rows * shape.n * size);
         self.out = try self.rig.output(shape.rows * shape.n * 2);
+        if (self.form == .glm_clamp or self.form == .glm_unclamped) {
+            self.glm_scratch[0] = try self.rig.scratch(shape.rows * shape.n * 2);
+            self.glm_scratch[1] = try self.rig.scratch(shape.rows * shape.n * 4);
+            self.glm_scratch[2] = try self.rig.scratch(shape.rows * (shape.n / 64) * 4);
+        }
         return true;
     }
 
     pub fn run(self: *Product) !void {
+        if (self.form == .glm_clamp) return self.glmPath(true, self.out);
+        if (self.form == .glm_unclamped) {
+            try self.prompt.swiglu(self.rig.s, self.x, self.k, self.rows, self.gate, self.up, self.out, 0);
+            return self.rig.s.synchronize();
+        }
         var gate = self.gate;
         var up = self.up;
         if (self.form == .swapped) std.mem.swap(cuda.qmmf.Weight, &gate, &up);
@@ -171,8 +191,14 @@ pub const Product = struct {
 
     /// main's path on the same inputs: the gate and up products, then the act kernel into an output-poisoned buffer.
     pub fn replaced(self: *Product) ![]const u8 {
-        try self.separate();
+        if (self.form == .glm_clamp or self.form == .glm_unclamped) try self.glmPath(false, self.base[2]) else try self.separate();
         return self.rig.bytes(self.base[2], self.rows * self.n * 2);
+    }
+
+    fn glmPath(self: *Product, fused: bool, out: u64) !void {
+        const k = glm.mlp.Kernels{ .shared_once = fused, .set = .{ .glue = &self.glm_glue.? }, .linear = .{ .nvfp4_prompt = &self.glm_prompt.? }, .copy_rows = self.copy_rows.? };
+        try glm.mlp.body(k, self.rig.s, .{ .w = .{ .nvfp4 = .{ .gate = self.gate, .up = self.up, .down = self.gate } }, .width = self.n, .dims = self.k, .limit = 10 }, .{ .tmp = self.glm_scratch[0], .gu = self.glm_scratch[1], .act = out, .xs_act = self.glm_scratch[2], .mm_part = 0 }, self.x, self.k, self.rows, true);
+        try self.rig.s.synchronize();
     }
 
     fn separate(self: *Product) !void {
@@ -198,7 +224,7 @@ pub const Product = struct {
         const got = try self.rig.gpu.gpa.dupe(u8, try self.rig.outputBytes());
         defer self.rig.gpu.gpa.free(got);
         const want = try self.replaced();
-        return if (std.mem.eql(u8, got, want)) null else rule;
+        return if (std.mem.eql(u8, got, want)) null else if (self.form == .glm_clamp or self.form == .glm_unclamped) glm_rule else rule;
     }
 
     pub fn count(self: *Product) usize {
@@ -222,19 +248,31 @@ pub const Product = struct {
 /// The act kernel's module (qwen35) and the registrations over one prompt module.
 pub const Registrations = struct {
     mod: cuda.Module,
-    items: [5]Product,
+    glm_mod: cuda.Module,
+    ops_mod: cuda.Module,
+    items: [7]Product,
 
     pub fn init(gpu: gpu_check.Gpu, s: cuda.Stream, prompt: *const nvfp4.Prompt) !Registrations {
         var mod = try cuda.Module.load(gpu.d, cuda.kernels.qwen35);
         errdefer mod.unload();
         const act = try mod.function("tf_q35_mlp_act");
-        var r: Registrations = .{ .mod = mod, .items = undefined };
-        for (&r.items, std.enums.values(Form)) |*p, form| p.* = .{ .rig = .{ .gpu = gpu, .s = s }, .prompt = prompt, .act = act, .form = form };
+        var glm_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
+        errdefer glm_mod.unload();
+        var ops_mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_ops);
+        errdefer ops_mod.unload();
+        const glue = try glm.glue.Kernels.load(glm_mod);
+        const copies = try ops_mod.function("tf_glm_copy_rows");
+        var gp = prompt.*;
+        try gp.enableGlmClamp();
+        var r: Registrations = .{ .mod = mod, .glm_mod = glm_mod, .ops_mod = ops_mod, .items = undefined };
+        for (&r.items, std.enums.values(Form)) |*p, form| p.* = .{ .rig = .{ .gpu = gpu, .s = s }, .prompt = prompt, .act = act, .form = form, .glm_prompt = gp, .glm_glue = glue, .copy_rows = copies };
         return r;
     }
 
     pub fn deinit(self: *Registrations) void {
         for (&self.items) |*p| p.deinit();
+        self.ops_mod.unload();
+        self.glm_mod.unload();
         self.mod.unload();
     }
 

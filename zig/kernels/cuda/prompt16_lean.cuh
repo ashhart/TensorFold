@@ -8,7 +8,7 @@ struct LeanTile {
 };
 
 // prompt_lean's outputs: the bf16 or fp32 product, or bf16(silu(gate) * up) of a gate/up pair (the act kernel's bits)
-enum LeanOut : int { LEAN_BF16 = 0, LEAN_F32 = 1, LEAN_SWIGLU = 2 };
+enum LeanOut : int { LEAN_BF16 = 0, LEAN_F32 = 1, LEAN_SWIGLU = 2, LEAN_GLM_CLAMP = 3 };
 
 // prompt_kernel's bits on a 128 x 256 tile: same fragments and mma chain over (g, kt); persistent, mbarrier ring.
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, int OUT>
@@ -18,7 +18,7 @@ __global__ void __launch_bounds__(WM * WN * 32, 1) prompt_lean(
         const unsigned char* __restrict__ w2, const uint8_t* __restrict__ bs2, float scale2,
         const int* __restrict__ P) {
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
-    constexpr bool F32 = OUT == LEAN_F32, PAIR = OUT == LEAN_SWIGLU;
+    constexpr bool F32 = OUT == LEAN_F32, PAIR = OUT == LEAN_SWIGLU || OUT == LEAN_GLM_CLAMP;
     constexpr int TN = PAIR ? BN / 2 : BN;  // output columns a tile: a pair's 128 features (gate's and up's blocks)
     static_assert(!PAIR || (MODE == FP4 && BN == 256 && WN == 8), "the pair tile is the FP4 128 x 256 lean tile");
     extern __shared__ __align__(128) unsigned char buf[];
@@ -190,7 +190,11 @@ __global__ void __launch_bounds__(WM * WN * 32, 1) prompt_lean(
                             const float g = acc[i][j][2 * h + e] * scale, u = acc[i][j + 2][2 * h + e] * scale2;
                             const float gf = __bfloat162float(__float2bfloat16_rn(g));
                             const float uf = __bfloat162float(__float2bfloat16_rn(u));
-                            if (col + e < N) dst[e] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * uf);
+                            if (col + e < N) {
+                                if constexpr (OUT == LEAN_GLM_CLAMP)
+                                    dst[e] = __float2bfloat16_rn(glm_moe::swiglu1<false>(gf, uf, 10.0f));
+                                else dst[e] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * uf);
+                            }
                         }
                     }
                 }

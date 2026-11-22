@@ -21,7 +21,7 @@ pub const Layer = struct { w: Weights, width: usize, dims: usize, limit: f32 };
 /// The block's scratch for `rows` rows: a projection's rows, [gate | up], the activation, its sums, split-K partials.
 pub const Scratch = struct { tmp: u64, gu: u64, act: u64, xs_act: u64, mm_part: u64 };
 
-pub const Kernels = struct { set: glue.Set, linear: cuda.qlinear.Linear, copy_rows: cuda.Function };
+pub const Kernels = struct { shared_once: bool = false, set: glue.Set, linear: cuda.qlinear.Linear, copy_rows: cuda.Function };
 
 /// Fp4Linear.__call__ (prefill on a prompt chunk): bf16 out, or fp32 with `wide`; the prompt GEMM needs `ldx` % 8 == 0.
 fn mm(k: Kernels, stream: cuda.Stream, w: cuda.qmmf.Weight, x: u64, ldx: usize, rows: usize, out: u64, wide: bool, prompt: bool) !void {
@@ -75,6 +75,10 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
     };
+    if (k.shared_once and prompt and l.limit == 10 and cuda.nvfp4.Prompt.pairs(q.gate, q.up)) {
+        const p = k.linear.nvfp4_prompt orelse return error.FormatNotLoaded;
+        if (p.lean_glm_clamp != null) return p.glmClamp(stream, x, x_stride, rows, q.gate, q.up, s.act);
+    }
     for ([_]cuda.qmmf.Weight{ q.gate, q.up }, 0..) |proj, j| {
         // Fp4Linear(out=a column slice): the rows computed contiguous, then copied into their half of each row
         try mm(k, stream, proj, x, x_stride, rows, s.tmp, false, prompt);

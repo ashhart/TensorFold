@@ -342,3 +342,15 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
 }
+
+test "GLM shared prefill environment: exactly one family-scoped flag defaults off" {
+    var count: usize = 0;
+    for (e.rules) |rule| if (std.mem.eql(u8, rule.name, "TF_GLM_PREFILL_SHARED_ONCE")) {
+        count += 1;
+        try t.expectEqual(e.Scope.glm, rule.scope);
+        try t.expectEqual(e.Kind.flag, rule.kind);
+    };
+    try t.expectEqual(@as(usize, 1), count);
+    try t.expect(!try e.value(bool, "TF_GLM_PREFILL_SHARED_ONCE", null, false));
+    try t.expect(try e.value(bool, "TF_GLM_PREFILL_SHARED_ONCE", "1", false));
+}

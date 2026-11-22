@@ -70,6 +70,7 @@ pub const Prompt = struct {
     bf16_f32: Function,
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
+    lean_glm_clamp: ?Function = null, // a GLM-only opt-in; existing prompt users do not load it
     lean_swiglu: Function, // a gate/up pair on the lean tile, bf16(silu(gate) * up) out
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
 
@@ -175,6 +176,18 @@ pub const Prompt = struct {
     pub fn swiglu(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, gate: qmmf.Weight, up: qmmf.Weight, y: u64, rows: u64) !void {
         if (!pairs(gate, up)) return error.FormatMismatch;
         return run(s, x, ldx, m, gate, y, p.lean_swiglu, p.leanShape(lean_bn / 2), .{ .w = up, .rows = rows });
+    }
+
+    pub const glm_clamp_symbol: [:0]const u8 = std.fmt.comptimePrint(lean_name, .{3});
+    pub fn enableGlmClamp(p: *Prompt) !void {
+        const f = try p.mod.function(glm_clamp_symbol);
+        try f.allowDynamicShared(leanSharedBytes());
+        p.lean_glm_clamp = f;
+    }
+    /// GLM's limit10: BF16 gate/up, clamp, BF16 SiLU intermediate, RN product, BF16 output.
+    pub fn glmClamp(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, gate: qmmf.Weight, up: qmmf.Weight, y: u64) !void {
+        if (!pairs(gate, up)) return error.FormatMismatch;
+        return run(s, x, ldx, m, gate, y, p.lean_glm_clamp orelse return error.EpilogueNotBuilt, p.leanShape(lean_bn / 2), .{ .w = up, .rows = 0 });
     }
 
     /// Whether swiglu() takes this gate and up: both FP4 of one shape, whole 128-feature tiles.
