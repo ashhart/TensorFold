@@ -122,6 +122,7 @@ test "DeepSeek runtime: every new declaration has a valid value and a named star
         .{ "TF_DSV41_CALIB_RECHECK", "1" },
         .{ "TF_DSV41_CALIB_CYCLE", "1" },
         .{ "TF_DSV41_CALIB_DEEP_REPS", "1" },
+        .{ "TF_DSV41_CALIB_BUDGET_MS", "600000" },
         .{ "TF_DSV41_CODE_ACCEPT", "1" },
         .{ "TF_DSV41_DRAFT_SKIP", "1" },
         .{ "TF_DSV41_SPEC_DRAFT", "1" },

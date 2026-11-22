@@ -351,9 +351,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 } ++ @import("environment_deepseek.zig").rules(Rule);
-
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
-
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
@@ -363,12 +361,10 @@ pub fn retired(name: []const u8, version: []const u8) ?Rule {
     };
     return null;
 }
-
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
 }
-
 /// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
 pub fn registered(comptime name: []const u8) void {
     @setEvalBranchQuota(20 * rules.len * 64);

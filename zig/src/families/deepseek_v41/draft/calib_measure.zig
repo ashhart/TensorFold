@@ -55,9 +55,9 @@ pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
 pub fn methodFrom(get: *const fn ([*:0]const u8) ?[]const u8, base: Method) !Method {
     const env = @import("sys").environment;
     const named = try env.parse("TF_DSV41_CALIB_SHAPE", get("TF_DSV41_CALIB_SHAPE"));
-    const shape: Shape = if (named) |n| @enumFromInt(n) else base.shape;
+    const shape: Shape = if (named) |n| @fromBackingInt(@intCast(n)) else base.shape;
     const d: Method = if (named == null) base else if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
-    const stat: Stat = @enumFromInt(try env.value(u8, "TF_DSV41_CALIB_STAT", get("TF_DSV41_CALIB_STAT"), @intFromEnum(d.stat)));
+    const stat: Stat = @fromBackingInt(@intCast(try env.value(u8, "TF_DSV41_CALIB_STAT", get("TF_DSV41_CALIB_STAT"), @backingInt(d.stat))));
     return .{
         .reps = try env.value(u32, "TF_DSV41_CALIB_REPS", get("TF_DSV41_CALIB_REPS"), d.reps),
         .warm = try env.value(u32, "TF_DSV41_CALIB_WARM", get("TF_DSV41_CALIB_WARM"), d.warm),

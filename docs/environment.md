@@ -319,8 +319,8 @@ Tool controls for decode-TP gates, KV checks and the session-slots CLI stay loca
 | `TF_DSV41_PREPARED` | a path without control characters |
 | `TF_DSV41_PROFILE` | a path without control characters |
 | `TF_DSV41_TRACE_TOKENS` | a path without control characters |
-| `TF_DSV41_CALIB_DIR` | a path without control characters |
-| `TF_DSV41_CALIB_FILE` | a path without control characters |
+| `TF_DSV41_CALIB_DIR` | DeepSeek-V4.1 draft pricing: a directory path without control characters where stored tables are read and written; unset or blank is `~/.cache/tensorfold/dsv41-calib`. Checked at startup on Metal; unchecked on CUDA |
+| `TF_DSV41_CALIB_FILE` | DeepSeek-V4.1 draft pricing: a path without control characters to one cost table file (JSON: `verify`, `draft`, optional `slot`) read directly instead of searching the directory, including on Metal when `TF_DSV41_CALIB` is unset or blank; unset or blank searches (or keeps `default` on Metal when `TF_DSV41_CALIB` is unset or blank). Checked at startup on Metal; unchecked on CUDA |
 | `TF_DSV41_SESSION_DISK` | a path without control characters |
 | `TF_DSV41_PF_DENSE_TABLE` | a path without control characters |
 | `TF_TP_KERNEL_IMAGE` | a transport kernel image path without control characters |
@@ -400,14 +400,14 @@ Tool controls for decode-TP gates, KV checks and the session-slots CLI stay loca
 | `TF_DSV41_PRUNE_KIT` | 0 or 1 |
 | `TF_DSV41_RG_PRUNE` | 0 or 1 |
 | `TF_DSV41_RMS_FOLD` | 0 or 1 |
-| `TF_DSV41_CALIB` | cached or default or real or measure or zig (case-insensitive) |
-| `TF_DSV41_CALIB_SHAPE` | raw or fit (case-insensitive) |
-| `TF_DSV41_CALIB_STAT` | median or min (case-insensitive) |
-| `TF_DSV41_CALIB_REPS` | a whole count 1..50 (default 5) |
-| `TF_DSV41_CALIB_WARM` | a whole count 0..20 (default 3 raw / 2 fit) |
-| `TF_DSV41_CALIB_RECHECK` | a whole count 0..8 (default 4 raw / 2 fit) |
-| `TF_DSV41_CALIB_CYCLE` | a whole count 0..8 (default 4 raw / 0 fit) |
-| `TF_DSV41_CALIB_DEEP_REPS` | a whole count 1..50 (default 5 raw / 3 fit) |
+| `TF_DSV41_CALIB` | DeepSeek-V4.1 draft pricing, any case: `cached`, `default`, `real`, `measure` or `zig`; unset or blank is `cached` on CUDA, and on Metal reads `TF_DSV41_CALIB_FILE` when set or `default` otherwise. `default` prices rounds from the built-in table with nothing timed; `measure` times a table at start, reports it and prices the rounds from it; `zig` reads this engine's stored table for the same shape, and times and stores one when there is none; `cached` and `real` read a stored table. On Metal a stored table also matches the device and checkpoint that stored it. Checked at startup on Metal; on CUDA a malformed value is refused when the engine opens. [Metal measurements](dsv41-metal-draft-pricing.md) |
+| `TF_DSV41_CALIB_SHAPE` | DeepSeek-V4.1 draft pricing, any case: `raw` or `fit`; naming it times every row from 1 to 16 as CUDA does (slow on Metal); unset times a sparse set on Metal and `raw` on CUDA |
+| `TF_DSV41_CALIB_STAT` | DeepSeek-V4.1 draft pricing, any case: `median` or `min`, the statistic over a window's timed runs; unset is `min` on Metal and `median` on CUDA |
+| `TF_DSV41_CALIB_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs per entry; unset is 3 passes on Metal (cut by the budget) and 5 on CUDA |
+| `TF_DSV41_CALIB_WARM` | DeepSeek-V4.1 draft pricing: whole number 0 through 20 of untimed runs before an entry; unset is 3 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_RECHECK` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 retimed after the sweep; unset is 4 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_CYCLE` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 timed in interleaved cycles; unset is 4 on CUDA; ignored by Metal's default method |
+| `TF_DSV41_CALIB_DEEP_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs for rows past 8; unset is 5 on CUDA; ignored by Metal's default method |
 | `TF_DSV41_CODE_ACCEPT` | 0, 1, on, off, true or false (any case) |
 | `TF_DSV41_DRAFT_SKIP` | 0, 1, on, off, true or false (any case) |
 | `TF_DSV41_SPEC_DRAFT` | 0, 1, on, off, true or false (any case) |

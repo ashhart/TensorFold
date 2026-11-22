@@ -323,8 +323,8 @@ test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank ke
     }
 }
 
-test "environment: a malformed calibration setting stops a Metal start naming the setting, its text and the accepted forms" {
-    const metal: e.Flags = .{ .metal = true };
+test "environment: a malformed calibration setting stops a DeepSeek Metal start naming the setting, its text and the accepted forms" {
+    const metal: e.Flags = .{ .metal = true, .dsv41 = true };
     const bad = [_]struct { name: []const u8, raw: []const u8 }{
         .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "abc" },
         .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "600001" },
@@ -339,7 +339,7 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect(std.mem.indexOf(u8, why, c.name) != null);
         try t.expect(std.mem.indexOf(u8, why, c.raw) != null);
         try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
-        // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
+        // Other families do not check the DeepSeek rows.
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
 }
