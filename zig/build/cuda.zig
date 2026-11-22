@@ -78,8 +78,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // check-pdl-loads: no global read above a dependent launch's wait (tools/pdl_early_loads.py)
     if (nvcc) |tool| {
         const check = b.addSystemCommand(&.{ "python3", "tools/pdl_early_loads.py", b.pathJoin(&.{ std.fs.path.dirname(tool) orelse ".", "cuobjdump" }) });
-        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf")) check.addFileArg(file);
-        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images and qmmf (needs -Dnvcc)").dependOn(&check.step);
+        const pdl_images = [_][]const u8{ "qmmf", "norms", "act_rows", "qk_rows", "embed_rows", "tree_round", "window_rows", "window_attention", "window_pages" };
+        for (kernels, images) |k, image| if (image) |file| {
+            if (std.mem.startsWith(u8, k.name, "glm_") or blk: {
+                for (pdl_images) |name| if (std.mem.eql(u8, k.name, name)) break :blk true;
+                break :blk false;
+            }) check.addFileArg(file);
+        };
+        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM, Gemma 4 decode and qmmf images (needs -Dnvcc)").dependOn(&check.step);
     }
     // MiniMax H3's kernel image: its library and the contract's runner take it
     const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {

@@ -1,6 +1,7 @@
 // Token rows for every CUDA family (float64 references: core/embed_ref.zig): MLX affine or bf16 tables.
 
 #include <cuda_bf16.h>
+#include "gemma4_pdl.cuh"
 #include <stdint.h>
 
 namespace tf_embed {
@@ -12,12 +13,13 @@ constexpr int NT = 256;
 using namespace tf_embed;
 
 // out[r, k, i] = bf16(q * s + b) of token ids[r], k < copies: q 4 bits (low first), s and b a group's (32 or 64).
-extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine4(const int* __restrict__ ids,
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine4(int* __restrict__ ids,
                                                                        const uint32_t* __restrict__ w,
                                                                        const __nv_bfloat16* __restrict__ s,
                                                                        const __nv_bfloat16* __restrict__ b,
                                                                        __nv_bfloat16* __restrict__ out, int d, int group,
                                                                        int copies) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * NT + threadIdx.x; // 8 values, one word
     if (8 * c >= d) return;
@@ -35,9 +37,10 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine4(const int
 }
 
 // out[r] = w[ids[r]] for a bf16 table, 16 bytes a thread (d % 8 == 0).
-extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16(const int* __restrict__ ids,
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16(int* __restrict__ ids,
                                                                     const __nv_bfloat16* __restrict__ w,
                                                                     __nv_bfloat16* __restrict__ out, int d) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * NT + threadIdx.x;
     if (8 * c >= d) return;
@@ -45,10 +48,11 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16(const int* _
 }
 
 // Exact BF16 rows repeated across residual streams; no floating-point conversion.
-extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16_copies(const int* __restrict__ ids,
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16_copies(int* __restrict__ ids,
                                                                            const __nv_bfloat16* __restrict__ w,
                                                                            __nv_bfloat16* __restrict__ out, int d,
                                                                            int copies) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * NT + threadIdx.x;
     if (8 * c >= d) return;
@@ -61,21 +65,23 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16_copies(const
 #include "embed_affine.cuh"
 
 // out[r] = bf16(bf16(q * s + b) * scale) of token ids[r]: q `bits` wide, s and b a group's; scale 1: MLX's dequantize.
-extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine(const int* __restrict__ ids,
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine(int* __restrict__ ids,
                                                                       const uint32_t* __restrict__ w,
                                                                       const __nv_bfloat16* __restrict__ s,
                                                                       const __nv_bfloat16* __restrict__ b,
                                                                       __nv_bfloat16* __restrict__ out, int d, int bits,
                                                                       int group, float scale) {
+    gemma4_pdl::enter();
     tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, tf_embed_affine::ROUND);
 }
 
 // tf_embed_rows_affine's 4-bit rows (groups of 64) from a tied head's affine-4 tiles: one table serves both.
-extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_tiles4(const int* __restrict__ ids,
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_tiles4(int* __restrict__ ids,
                                                                       const uint32_t* __restrict__ w,
                                                                       const __nv_bfloat16* __restrict__ s,
                                                                       const __nv_bfloat16* __restrict__ b,
                                                                       __nv_bfloat16* __restrict__ out, int d, int npad,
                                                                       float scale) {
+    gemma4_pdl::enter();
     tf_embed_affine::tile4_rows(ids, w, s, b, out, d, npad, scale, tf_embed_affine::ROUND);
 }

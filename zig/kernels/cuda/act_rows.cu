@@ -3,6 +3,7 @@
 // A thread 8 values with 16-byte loads; a row's bits depend on that row alone.
 
 #include <cuda_bf16.h>
+#include "gemma4_pdl.cuh"
 #include <stdint.h>
 #include "common/reduce.cuh"
 #include "common/act.cuh"
@@ -23,10 +24,11 @@ __device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn
 using namespace tf_act;
 
 // out[r, i] = bf16(silu(gate[r * g_ld + i]) * up[r * u_ld + i]) for i < n (n % 64 == 0); xs (or null) out's sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
-                                                                const __nv_bfloat16* __restrict__ up, long long u_ld,
+extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(__nv_bfloat16* __restrict__ gate, long long g_ld,
+                                                                __nv_bfloat16* __restrict__ up, long long u_ld,
                                                                 __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
                                                                 int n) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
     const bool live = 8 * c < n;
@@ -46,10 +48,11 @@ extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloa
 }
 
 // out[r, h * d + e] = bf16(o[r, h * d + e] * sigmoid(g[r * g_ld + h * g_hs + e])) (d % 64 == 0); xs (or null) its sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_gate_rows(const __nv_bfloat16* __restrict__ o,
-                                                              const __nv_bfloat16* __restrict__ g, long long g_ld,
+extern "C" __global__ void __launch_bounds__(NT) tf_gate_rows(__nv_bfloat16* __restrict__ o,
+                                                              __nv_bfloat16* __restrict__ g, long long g_ld,
                                                               long long g_hs, __nv_bfloat16* __restrict__ out,
                                                               float* __restrict__ xs, int heads, int d) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
     const int n = heads * d;
@@ -71,8 +74,9 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gate_rows(const __nv_bfloat1
 }
 
 // xs[r, j] = the sum of x[r * ld + 64 j ..][0 .. 64] (k % 64 == 0), in group_sum8's order.
-extern "C" __global__ void __launch_bounds__(NT) tf_group_sums_rows(const __nv_bfloat16* __restrict__ x, long long ld,
+extern "C" __global__ void __launch_bounds__(NT) tf_group_sums_rows(__nv_bfloat16* __restrict__ x, long long ld,
                                                                     float* __restrict__ xs, int k) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x;
     const bool live = 8 * c < k;
@@ -82,12 +86,13 @@ extern "C" __global__ void __launch_bounds__(NT) tf_group_sums_rows(const __nv_b
 }
 
 // DFlash2's two-tap conv: out = bf16(x k0 + x[r - 1] k1) [+ res], no r - 1 at a seg block's start, k = bf16(b + dyn).
-extern "C" __global__ void __launch_bounds__(NT) tf_dconv_rows(const __nv_bfloat16* __restrict__ x,
-                                                               const __nv_bfloat16* __restrict__ dyn,
-                                                               const __nv_bfloat16* __restrict__ base,
-                                                               const __nv_bfloat16* __restrict__ res,
+extern "C" __global__ void __launch_bounds__(NT) tf_dconv_rows(__nv_bfloat16* __restrict__ x,
+                                                               __nv_bfloat16* __restrict__ dyn,
+                                                               __nv_bfloat16* __restrict__ base,
+                                                               __nv_bfloat16* __restrict__ res,
                                                                __nv_bfloat16* __restrict__ out, int d, int gs, int branch,
                                                                int seg) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x;
     if (8 * c >= d) return;
@@ -124,6 +129,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_dconv_rows(const __nv_bfloat
 extern "C" __global__ void __launch_bounds__(NT) tf_geglu_rows(const __nv_bfloat16* gate, long long g_ld,
                                                                const __nv_bfloat16* up, long long u_ld,
                                                                __nv_bfloat16* out, float* xs, int n) {
+    gemma4_pdl::enter();
     tf_act_round::rows<true>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::GEGLU_ALL);
 }
 
@@ -131,28 +137,32 @@ extern "C" __global__ void __launch_bounds__(NT) tf_geglu_rows(const __nv_bfloat
 extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows_round(const __nv_bfloat16* gate, long long g_ld,
                                                                       const __nv_bfloat16* up, long long u_ld,
                                                                       __nv_bfloat16* out, float* xs, int n) {
+    gemma4_pdl::enter();
     tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::SWIGLU_ALL);
 }
 
 // out = bf16(cap * tanh(x / cap)) in MLX's bf16 steps: a soft-capped head's logits (final_logit_softcapping).
 extern "C" __global__ void __launch_bounds__(NT) tf_softcap_rows(const __nv_bfloat16* x, __nv_bfloat16* out, int n,
                                                                  float cap) {
+    gemma4_pdl::enter();
     tf_act_round::softcap_rows(x, out, n, cap, tf_act_round::SOFTCAP_ALL);
 }
 
 // Spark2.5's head gate: out[r, h d + e] = bf16(o * bf16(sigmoid(g[r * g_ld + h]))) (d % 64 == 0); xs: out's sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_head_gate_rows(const __nv_bfloat16* __restrict__ o,
-                                                                   const __nv_bfloat16* __restrict__ g, long long g_ld,
+extern "C" __global__ void __launch_bounds__(NT) tf_head_gate_rows(__nv_bfloat16* __restrict__ o,
+                                                                   __nv_bfloat16* __restrict__ g, long long g_ld,
                                                                    __nv_bfloat16* __restrict__ out,
                                                                    float* __restrict__ xs, int heads, int d) {
+    gemma4_pdl::enter();
     tf_act_round::head_gate_rows(o, g, g_ld, out, xs, heads, d, tf_act_round::HEAD_GATE_ALL);
 }
 
 // out = bf16(bf16(gelu(gate)) * up), PyTorch's exact erf GELU in fp32 (Spark2.5's MLP); xs (or null) out's sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
-                                                                  const __nv_bfloat16* __restrict__ up, long long u_ld,
+extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(__nv_bfloat16* __restrict__ gate, long long g_ld,
+                                                                  __nv_bfloat16* __restrict__ up, long long u_ld,
                                                                   __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
                                                                   int n) {
+    gemma4_pdl::enter();
     tf_act_round::gelu_erf_rows(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::GELU_ERF_ALL);
 }
 
@@ -163,6 +173,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfl
 extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_gate_l2_rows(const __nv_bfloat16* o, const __nv_bfloat16* g,
                                                                            long long g_ld, const float* sg, __nv_bfloat16* out,
                                                                            int n, float eps) {
+    gemma4_pdl::enter();
     tf_act_l2::gate_rows<tf_act_l2::GATED>(o, g, g_ld, sg, out, n, eps);
 }
 
@@ -171,5 +182,6 @@ extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_swiglu_l2_rows(co
                                                                              const __nv_bfloat16* u, long long u_ld,
                                                                              const float* sug, const float* suu,
                                                                              __nv_bfloat16* out, int n, float eps) {
+    gemma4_pdl::enter();
     tf_act_l2::swiglu_rows<tf_act_l2::GS | tf_act_l2::US | tf_act_l2::PROD>(g, g_ld, u, u_ld, sug, suu, out, n, eps);
 }

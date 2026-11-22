@@ -1,4 +1,6 @@
 #pragma once
+#include "gemma4_pdl.cuh"
+
 
 // tf_rms_rows_sums at Flash Next's MTP shape (bf16, width 10,240, groups of 32) over `tiles` blocks a row: its bits.
 
@@ -11,7 +13,7 @@ constexpr int CHAINS = tf_norms::NT / TNT; // tf_rms_rows_sums' 1,024 threads' s
 constexpr int STEPS = WIDTH / tf_norms::NT;
 
 // 1 / sqrt(sum / width + eps) as tf_norms::inv_rms forms it: thread c's chain, its warp's xor tree, then the 32 warps'.
-__device__ __forceinline__ float inv_rms(const __nv_bfloat16* __restrict__ x, float eps) {
+__device__ __forceinline__ float inv_rms(__nv_bfloat16* __restrict__ x, float eps) {
     __shared__ float warps[tf_norms::NT / 32];
     __shared__ float inv;
     float part[CHAINS];
@@ -45,8 +47,9 @@ __device__ __forceinline__ float inv_rms(const __nv_bfloat16* __restrict__ x, fl
 
 // Block (tile, row) of tf_rms_rows_sums: the row's inv as it forms it, then the tile's y and its group sums, in order.
 extern "C" __global__ void __launch_bounds__(tf_rms_tiles::TNT) tf_rms_rows_sums_tiles(
-    const __nv_bfloat16* __restrict__ x, long long x_ld, const float* __restrict__ w, __nv_bfloat16* __restrict__ y,
+    __nv_bfloat16* __restrict__ x, long long x_ld, const float* __restrict__ w, __nv_bfloat16* __restrict__ y,
     float* __restrict__ xs, int tiles, float eps) {
+    gemma4_pdl::enter();
     using namespace tf_rms_tiles;
     __shared__ __nv_bfloat16 tile[WIDTH];
     const int span = WIDTH / tiles, first = blockIdx.x * span;

@@ -31,6 +31,9 @@ pub const Tree = extern struct { first: u32, rows: u32, budget: u32, eos_first: 
 
 /// tree_round.cu's kernels, resolved from the loaded `tree_round` module (kernels.tree_round).
 pub const Kernels = struct {
+    /// Launch each round kernel as a dependent launch (TF_GEMMA4_PDL; only Gemma 4's decode sets it).
+    pdl: bool = false,
+
     argmax_fn: Function,
     match_fn: Function,
     keep_fn: Function,
@@ -51,7 +54,7 @@ pub const Kernels = struct {
         a.add(@as(u32, @intCast(rows)));
         a.add(@as(u32, @intCast(vocab)));
         a.add(@as(i32, @intCast(fallback)));
-        try launch_.launch(g.ids_fn, .{ .grid = .{ .x = @intCast((rows + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        try launch_.launch(g.ids_fn, .{ .grid = .{ .x = @intCast((rows + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .pdl = g.pdl }, s, &a);
     }
 
     /// picks[r] for every row of a round's trees: the first largest finite bf16 logit, or none.
@@ -63,7 +66,7 @@ pub const Kernels = struct {
         a.add(picks);
         a.add(@as(u32, @intCast(vocab)));
         a.add(@as(u32, @intCast(stride)));
-        try launch_.launch(g.argmax_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        try launch_.launch(g.argmax_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .pdl = g.pdl }, s, &a);
     }
 
     /// results[t] for `count` trees (Tree [count] at `trees`): each tree's verified path and emitted tokens.
@@ -73,7 +76,7 @@ pub const Kernels = struct {
         for ([_]u64{ tokens, parents, picks, eos, trees, results }) |v| a.add(v);
         a.add(@as(u32, @intCast(vocab)));
         a.add(@as(u32, @intCast(count)));
-        try launch_.launch(g.match_fn, .{ .grid = .{ .x = @intCast((count + 63) / 64), .y = 1, .z = 1 }, .block = .{ .x = 64 } }, s, &a);
+        try launch_.launch(g.match_fn, .{ .grid = .{ .x = @intCast((count + 63) / 64), .y = 1, .z = 1 }, .block = .{ .x = 64 }, .pdl = g.pdl }, s, &a);
     }
 
     /// keep i32 [count, max_rows]: each tree's kept rows (round row indices), -1 past them; counts u32 [count].
@@ -82,7 +85,7 @@ pub const Kernels = struct {
         var a: launch_.Args = .{};
         for ([_]u64{ results, trees, keep, counts }) |v| a.add(v);
         a.add(@as(u32, @intCast(count)));
-        try launch_.launch(g.keep_fn, .{ .grid = .{ .x = @intCast(count), .y = 1, .z = 1 }, .block = .{ .x = max_rows } }, s, &a);
+        try launch_.launch(g.keep_fn, .{ .grid = .{ .x = @intCast(count), .y = 1, .z = 1 }, .block = .{ .x = max_rows }, .pdl = g.pdl }, s, &a);
     }
 
     /// out bf16 [count, max_rows, width]: each tree's kept rows of `rows` (bf16 [round rows, width]), in path order.
@@ -92,7 +95,7 @@ pub const Kernels = struct {
         for ([_]u64{ results, trees, rows, out }) |v| a.add(v);
         a.add(@as(u32, @intCast(width)));
         a.add(@as(u32, @intCast(count)));
-        try launch_.launch(g.gather_fn, .{ .grid = .{ .x = @intCast((width + 255) / 256), .y = @intCast(count), .z = max_rows }, .block = .{ .x = 256 } }, s, &a);
+        try launch_.launch(g.gather_fn, .{ .grid = .{ .x = @intCast((width + 255) / 256), .y = @intCast(count), .z = max_rows }, .block = .{ .x = 256 }, .pdl = g.pdl }, s, &a);
     }
 
     /// head bf16 [count, width]: each tree's last kept row of `logits` (`stride` apart), the next round's first row.
@@ -103,7 +106,7 @@ pub const Kernels = struct {
         a.add(@as(u32, @intCast(width)));
         a.add(@as(u32, @intCast(stride)));
         a.add(@as(u32, @intCast(count)));
-        try launch_.launch(g.head_fn, .{ .grid = .{ .x = @intCast((width + 255) / 256), .y = @intCast(count), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        try launch_.launch(g.head_fn, .{ .grid = .{ .x = @intCast((width + 255) / 256), .y = @intCast(count), .z = 1 }, .block = .{ .x = 256 }, .pdl = g.pdl }, s, &a);
     }
 };
 

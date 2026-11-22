@@ -58,6 +58,9 @@ pub const Out = struct {
 const Dst = extern struct { q: u64, q_ld: i64, q_hs: i64, k: u64, k_ld: i64, k_hs: i64, v: u64, v_ld: i64, v_hs: i64 };
 
 pub const QkRows = struct {
+    /// Launch each row kernel as a dependent launch (TF_GEMMA4_PDL; only Gemma 4's decode sets it).
+    pdl: bool = false,
+
     mod: Module,
     fn_: Function,
     /// tf_qk_rows_w: dim 128 with no or full rotation, a warp a head.
@@ -128,14 +131,14 @@ pub const QkRows = struct {
         if (f != null or hs.dim > 256 or shape.round or shape.v_norm) {
             a.add(if (f != null) last else @as(i32, @intFromBool(shape.v_norm)));
             const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
-            return launch_.launch(f orelse if (shape.round) g.round_fn else g.once_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
+            return launch_.launch(f orelse if (shape.round) g.round_fn else g.once_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) }, .pdl = g.pdl }, s, &a);
         }
         if (hs.dim == 128 and (!roped or shape.rot == 128)) {
             const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast((heads + 3) / 4), .z = 1 };
-            return launch_.launch(g.warp_fn, .{ .grid = grid, .block = .{ .x = 128 } }, s, &a);
+            return launch_.launch(g.warp_fn, .{ .grid = grid, .block = .{ .x = 128 }, .pdl = g.pdl }, s, &a);
         }
         const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
-        try launch_.launch(g.fn_, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
+        try launch_.launch(g.fn_, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) }, .pdl = g.pdl }, s, &a);
     }
 
     /// tf_qk_rows_l2 (or `f`, a control with its arguments) on the shape's RoPE, q scale and caches.
@@ -165,6 +168,6 @@ pub const QkRows = struct {
         a.add(shape.eps);
         const heads = hs.h + (if (src.v != 0) 2 * hs.hk else hs.hk);
         const grid: launch_.Dim3 = .{ .x = @intCast(n), .y = @intCast(heads), .z = 1 };
-        try launch_.launch(f orelse g.l2_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) } }, s, &a);
+        try launch_.launch(f orelse g.l2_fn, .{ .grid = grid, .block = .{ .x = @intCast(hs.dim) }, .pdl = g.pdl }, s, &a);
     }
 };

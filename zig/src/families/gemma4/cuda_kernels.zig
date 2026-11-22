@@ -20,6 +20,8 @@ pub const Kernels = struct {
 
     pub fn load(ctx: *const cuda.Context) !Kernels {
         const d = ctx.d;
+        const pdl = @import("cuda_pdl.zig");
+        try pdl.bind(ctx);
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
         const kk = cuda.kernels;
@@ -50,6 +52,13 @@ pub const Kernels = struct {
         k.act = try cuda.act_rows.ActRows.load(d);
         errdefer k.act.unload();
         k.ple = try @import("cuda_ple.zig").PleRows.load(d);
+        const dep = pdl.on();
+        k.norms.pdl = dep;
+        k.qk.pdl = dep;
+        k.win.pdl = dep;
+        k.act.pdl = dep;
+        k.embed.pdl = dep;
+        k.round.pdl = dep;
         return k;
     }
 
