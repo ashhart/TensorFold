@@ -72,10 +72,10 @@ fn exchangeGlue(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: 
         if (split) {
             for (f.ranks) |r| {
                 const mine = share(n, world, r.w.share.rank);
-                try g.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo));
+                try g.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo), r.b.part + (lo + mine[0]) * D * 4);
             }
             try pieces.shareGlued(f, p, lo, n, last);
-        } else for (f.ranks) |r| try g.glueRows(r, j, site, lo, piece[1], room(r, lo));
+        } else for (f.ranks) |r| try g.glueRows(r, j, site, lo, piece[1], room(r, lo), 0);
         try p.shared[q].record(p.side);
     }
 }
