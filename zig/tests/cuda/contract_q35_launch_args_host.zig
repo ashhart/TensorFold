@@ -25,7 +25,7 @@ fn word(text: []const u8, at: usize) []const u8 {
     return text[at..];
 }
 
-/// A parameter's kind: the geometry struct, a pointer, a count or a scale.
+/// A parameter's kind: geometry struct, pointer, count, scale or Boolean mode.
 fn classify(param: []const u8) ?sig.Kind {
     const text = std.mem.trim(u8, param, " \t\r\n");
     if (text.len == 0) return null;
@@ -35,6 +35,7 @@ fn classify(param: []const u8) ?sig.Kind {
     if (std.mem.indexOfScalar(u8, text, '*') != null) return .ptr;
     if (std.mem.eql(u8, first, "int")) return .i32;
     if (std.mem.eql(u8, first, "float")) return .f32;
+    if (std.mem.eql(u8, first, "bool")) return .boolean;
     return null;
 }
 
@@ -127,11 +128,12 @@ fn tupleElements(a: std.mem.Allocator, tokens: []const Tok, text: []const u8, op
     return out.items;
 }
 
-/// The kind a launch site's argument carries: the geometry struct, a pointer, a count or a scale.
+/// The kind a launch site's argument carries: geometry struct, pointer, count, scale or Boolean mode.
 fn argKind(text: []const u8) sig.Kind {
     if (std.mem.startsWith(u8, text, "@as(f32")) return .f32;
     if (std.mem.startsWith(u8, text, "@as(c_int")) return .i32;
     if (std.mem.eql(u8, text, "geo")) return .geo;
+    if (std.mem.eql(u8, text, "rows_only")) return .boolean;
     return .ptr;
 }
 
