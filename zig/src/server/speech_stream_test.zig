@@ -109,7 +109,7 @@ pub const Bytes = struct {
     pub fn text(t: *Bytes) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
-    fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+    pub fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
         const ids = try a.alloc(u32, input.len);
         for (input, ids) |byte, *id| id.* = byte;
         return ids;
