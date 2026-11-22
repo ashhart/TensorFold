@@ -6,6 +6,7 @@ const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
+pub const ql_span = @import("cuda_draft_ql_span.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 const lp_words = 43;
@@ -189,7 +190,12 @@ fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
             const v = try x3Views(q);
             break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
         },
-        .an, .ql, .bf => return full(d, x, logits, rows),
+        .ql => |w| blk: {
+            if (!ql_span.enabled()) return full(d, x, logits, rows);
+            const v = ql_span.views(w, spans[0][1], tail_tile, spans[1][1]) orelse return full(d, x, logits, rows);
+            break :blk .{ .{ .ql = v.first }, .{ .ql = v.tail }, tail_tile };
+        },
+        .an, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
     const a = logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592
