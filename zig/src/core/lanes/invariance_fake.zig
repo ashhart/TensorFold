@@ -74,8 +74,8 @@ fn samplingFor(plan: inv.Plan, index: usize) ?lanes.Sampling {
 }
 
 fn naturalEos(plan: inv.Plan) u32 {
-    var history: [32]u32 = undefined;
-    const prompt = [_]u32{ 7, 13, 29, 31, 37 };
+    var history: [40]u32 = undefined;
+    const prompt = fixtures.p1;
     @memcpy(history[0..prompt.len], &prompt);
     var length = prompt.len;
     var emitted: [24]u32 = undefined;
@@ -186,7 +186,7 @@ const FakeRunner = struct {
         const n: usize = plan.cohort;
         const eos = [_]u32{naturalEos(plan)};
         for (0..n) |i| {
-            var prompt = [_]u32{ 7, 13, 29, 31, 37 };
+            var prompt = fixtures.p1;
             if (i > 0) prompt[0] += @intCast(i * 3);
             if (plan.restore_at > 0) {
                 var early = try Stream.init(gpa, .{
