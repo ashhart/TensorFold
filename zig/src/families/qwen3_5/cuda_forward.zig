@@ -156,18 +156,21 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             .dense => |m| {
                 // NVFP4 prompt rows: gate, up and the act in one lean pair launch, the same act bytes
                 const paired = e.learning == null and sums == 0 and try modelopt.swiglu(e, m.gate, m.up, x0, e.act, rows, prompt, rp);
+                var acted = false;
                 if (paired) {} else if (m.gate == .x3) {
                     try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
                     try e.projAgain(m.gate, x0, e.gate, rows, prompt);
-                    try e.projAgain(m.up, x0, e.up, rows, prompt);
+                    // TF_Q35_MLP_ACT_FUSED: up writes the act from the gate's rows, its launch and mlp_act's in one
+                    acted = try modelopt.upAct(e, m.gate, m.up, m.down, x0, e.gate, e.act, rows, prompt, rp);
+                    if (!acted) try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(rows * g.intermediate);
                 const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
-                if (!paired) try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                if (!paired and !acted) try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
                 try e.projAgain(m.down, e.act, r0, rows, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },

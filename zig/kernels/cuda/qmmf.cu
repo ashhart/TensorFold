@@ -71,6 +71,29 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
 #undef TF_QMMF_WFIRST
 }
 
+// TF_Q35_MLP_ACT_FUSED: qmmf_kernel's body, its bf16 write-out tf_q35_mlp_act of the gate's rows and bf16(acc*scale)
+template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
+__device__ __forceinline__ void qmmf_act_body(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
+        float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
+        int group, const __nv_bfloat16* __restrict__ act_gate, const int* __restrict__ act_rows) {
+#define TF_QMMF_WFIRST
+#define TF_QMMF_ACT
+#include "qmmf_body.cuh"
+#undef TF_QMMF_ACT
+#undef TF_QMMF_WFIRST
+}
+
+// The FP4 16-row decode instance (one K slice) with that write-out; rows at or past P[2] are left (P null: none).
+extern "C" __global__ void __launch_bounds__(128) tf_qmmf_fp4_up_act16(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
+        float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
+        int group, const __nv_bfloat16* __restrict__ act_gate, const int* __restrict__ act_rows) {
+    qmm_frag::grid_launch();  // a dependent launch, as qmmf_kernel: the gate's launch ends before this reads its rows
+    qmmf_act_body<FP4, 16, 64, 1, 4, 4, false, false, false>(x, w, bs, scale, out, part, M, N, K, SK, npad, ldx, group,
+                                                              act_gate, act_rows);
+}
+
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
 #define TF_SHARED_DOWN(NAME, BM, BN) \
 extern "C" __global__ void __launch_bounds__(128) NAME( \

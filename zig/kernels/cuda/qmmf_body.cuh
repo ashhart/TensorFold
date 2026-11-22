@@ -312,6 +312,22 @@
                     continue;
                 }
                 const float v0 = acc[i][j][2 * h] * scale, v1 = acc[i][j][2 * h + 1] * scale;
+#ifdef TF_QMMF_ACT
+                // the up row written as its MLP act: tf_q35_mlp_act's expression on the gate's and this row's bf16
+                if (act_rows != nullptr && row >= act_rows[2]) continue; // rows past the pass: left as mlp_act leaves them
+                {
+                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * N + col;
+                    const __nv_bfloat16* gp = act_gate + static_cast<size_t>(row) * N + col;
+                    const float u[2] = {__bfloat162float(__float2bfloat16_rn(v0)), __bfloat162float(__float2bfloat16_rn(v1))};
+#pragma unroll
+                    for (int c = 0; c < 2; ++c)
+                        if (col + c < N) {
+                            const float gf = __bfloat162float(gp[c]);
+                            dst[c] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * u[c]);
+                        }
+                    continue;
+                }
+#endif
                 if (F32) {
 #ifdef TF_QMMF_STRIDED
                     float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * ldy + col;
