@@ -7,6 +7,12 @@
 #define I2X_NV_WORDS (2u * I2X_NV_RG * 4u * 32u * 9u)
 #define I2X_MX_WORDS (2u * I2X_MX_RG * 4u * 32u * 17u)
 
+constant float kI2xE2m1[16] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
+
+inline float4 i2x_bf4(float4 x) {
+  return float4(float(bfloat(x.x)), float(bfloat(x.y)), float(bfloat(x.z)), float(bfloat(x.w)));
+}
+
 struct Inkling2ExpPlanArgs {
   uint pairs, experts, tile, gate_up_groups;
   uint down_groups, p0, p1, p2;
