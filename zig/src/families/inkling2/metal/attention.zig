@@ -16,6 +16,7 @@ pub const Kernels = struct {
     decode: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
+    prompt_sliding: mtl.Pipeline,
     units: bool,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device) !Kernels {
@@ -26,16 +27,21 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [5]mtl.Pipeline = undefined;
+        var pipes: [6]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for ([_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib }, [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt" }, &pipes) |lib, name, *pipe| {
+        for (
+            [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib },
+            [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt", "tf_ink2_attn_prompt_sliding" },
+            &pipes,
+        ) |lib, name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
         }
-        return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .rel_table = pipes[1], .decode = pipes[2], .merge = pipes[3], .prompt = pipes[4], .units = units };
+        return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .rel_table = pipes[1], .decode = pipes[2], .merge = pipes[3], .prompt = pipes[4], .prompt_sliding = pipes[5], .units = units };
     }
     pub fn deinit(k: *Kernels) void {
+        k.prompt_sliding.deinit();
         k.prompt.deinit();
         k.merge.deinit();
         k.decode.deinit();
@@ -67,9 +73,15 @@ pub fn relTable(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, rel:
     e.dispatchGroups(mtl.Size.of(r.rows * r.heads, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// The partial sums of every row and head: `merge` reads them after a barrier.
-pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref) !void {
-    const launch = try planning.attend(r, l, stride, slots);
+fn promptSlidingLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, launch: planning.Launch, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, sink: Ref, gate: Ref, out: Ref) void {
+    const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
+    e.setPipeline(k.prompt_sliding);
+    bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, sink, gate, out }, 0);
+    e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 8);
+    e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
+}
+
+fn partialsLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, launch: planning.Launch, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref) void {
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     if (launch.path == .decode) {
         e.setPipeline(k.decode);
@@ -83,9 +95,7 @@ pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
 }
 
-/// The partials of `partials` merged, with the sink and gate, into each row's attention output.
-pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
-    const launch = try planning.attend(r, l, stride, slots);
+fn mergeLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, launch: planning.Launch, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) void {
     const single_sliding = launch.path == .prompt and l.window > 0;
     e.setPipeline(k.merge);
     bind(e, &.{ part_o, part_ml, sink, gate, meta.pos, out }, 0);
@@ -100,10 +110,27 @@ pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: plan
     e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
 }
 
+/// The partial sums of every row and head: `merge` reads them after a barrier.
+pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref) !void {
+    const launch = try planning.attend(r, l, stride, slots);
+    partialsLaunch(k, e, r, l, launch, meta, q, kv, tab, part_o, part_ml);
+}
+
+/// The partials of `partials` merged, with the sink and gate, into each row's attention output.
+pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+    const launch = try planning.attend(r, l, stride, slots);
+    mergeLaunch(k, e, r, l, launch, meta, part_o, part_ml, sink, gate, out);
+}
+
 pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
-    try partials(k, e, r, l, stride, slots, meta, q, kv, tab, part_o, part_ml);
+    const launch = try planning.attend(r, l, stride, slots);
+    if (launch.path == .prompt and l.window > 0) {
+        promptSlidingLaunch(k, e, r, l, launch, meta, q, kv, tab, sink, gate, out);
+        return;
+    }
+    partialsLaunch(k, e, r, l, launch, meta, q, kv, tab, part_o, part_ml);
     e.barrier();
-    try merge(k, e, r, l, stride, slots, meta, part_o, part_ml, sink, gate, out);
+    mergeLaunch(k, e, r, l, launch, meta, part_o, part_ml, sink, gate, out);
 }
 
 test {

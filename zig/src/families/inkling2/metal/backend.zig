@@ -52,7 +52,7 @@ pub const Metal = struct {
         errdefer gpa.destroy(out);
         var scratch = try st.Scratch.init(model.device, st.batch_rows);
         errdefer scratch.deinit();
-        var prompt = try st.Scratch.init(model.device, st.prompt_rows);
+        var prompt = try st.Scratch.initWithStride(model.device, st.prompt_rows, @min(st.max_attention_stride, st.globalStride(options.capacity)));
         errdefer prompt.deinit();
         const tokens = try model.device.buffer(ring * 4, mtl.ResourceOptions.shared);
         errdefer tokens.deinit();

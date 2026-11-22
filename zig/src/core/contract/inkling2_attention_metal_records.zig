@@ -8,6 +8,8 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 attention merge tf_ink2_merge", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "metal inkling2 prompt m5 tf_ink2_attn_prompt", .threads = 256, .tg_memory = 32768, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt", .threads = 256, .tg_memory = 32768, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 prompt m5 tf_ink2_attn_prompt_sliding", .threads = 256, .tg_memory = 32768, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt_sliding", .threads = 256, .tg_memory = 32768, .reserved = 256, .offline = false },
 };
 
 test "Inkling 2 Metal launches respect their resource declarations" {

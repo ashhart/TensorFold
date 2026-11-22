@@ -59,7 +59,7 @@ pub const Call = struct { rows: usize, n: usize, k: usize };
 pub fn valid(kind: Kind, c: Call) bool {
     const key_depth: usize = if (kind == .expert_combine) top_k else 4;
     const max_width: usize = if (kind == .conv_dynamic or kind == .conv_dynamic_segs) 1024 else hidden;
-    if (c.rows == 0 or c.rows > 64) return false;
+    if (c.rows == 0 or c.rows > 512) return false;
     return switch (kind) {
         .embed_norm => c.k == hidden and c.n == hidden,
         .router => c.k == hidden and c.n == top_k,

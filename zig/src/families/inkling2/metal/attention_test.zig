@@ -67,6 +67,9 @@ test "inkling2 metal decode and prompt dispatch geometry" {
     try t.expectEqual(p.Path.prompt, sl_prompt.path);
     try t.expectEqual([3]u32{ 12, 8, 1 }, sl_prompt.grid);
     try t.expectEqual(@as(u32, 1), sl_prompt.partials_rh);
-    const sl_decode = try p.attend(.{ .rows = 1, .last_pos = 20000 }, p.Layer.sliding(1024, 1), 64, 0);
+    const sl_mid = try p.attend(.{ .rows = 40, .last_pos = 20000 }, p.Layer.sliding(1024, 40), 2, 0);
+    try t.expectEqual(p.Path.prompt, sl_mid.path);
+    try t.expectEqual(@as(u32, 1), sl_mid.partials_rh);
+    const sl_decode = try p.attend(.{ .rows = 32, .last_pos = 20000 }, p.Layer.sliding(1024, 32), 64, 0);
     try t.expectEqual(p.Path.decode, sl_decode.path);
 }

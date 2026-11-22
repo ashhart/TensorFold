@@ -53,7 +53,8 @@ pub fn globalSlots(capacity: usize) usize {
 }
 
 pub fn globalStride(capacity: usize) usize {
-    return @max(@as(usize, ap.sliding_chunk / ap.tile_keys + 2), std.math.divCeil(usize, capacity, ap.global_chunk) catch unreachable);
+    const cap: u32 = @intCast(@min(@max(capacity, 1), 1048576));
+    return ap.slotsFor(ap.Layer.global(cap), cap);
 }
 
 pub fn kvBytes(capacity: usize) usize {
@@ -319,7 +320,7 @@ pub const fields = [_][]const u8{
     "mlp_out", "mlp_conv", "conv_segs", "conv_dyn_segs", "logits_all", "argmax_vals", "argmax_part_ids", "argmax_ids",
 };
 
-fn sizes(rows: usize) [fields.len]usize {
+fn sizes(rows: usize, attn_stride: usize) [fields.len]usize {
     const r = rows;
     const h = hidden;
     const q = query_width;
@@ -328,19 +329,23 @@ fn sizes(rows: usize) [fields.len]usize {
     const fp = 4;
     const batch_cap: usize = @min(r, batch_rows);
     return .{
-        r * 4,                                                r * 4,                                                        r * 4,                                            max_segments * @sizeOf(ap.Seg),            r * h * bf,                     r * h * bf,       r * block_slots * h * bf,
-        r * h * bf,                                           r * h * bf,                                                   r * message_entries * h * fp,                     r * h * fp,                                3 * r * h * fp,                 3 * r * h * fp,   r * h * fp,
-        r * h * fp,                                           r * h * bf,                                                   r * h * bf,                                       r * h * bf,                                r * q * bf,                     r * kv * bf,      r * kv * bf,
-        r * rel_width * bf,                                   r * 24 * bf,                                                  r * q * bf,                                       r * kv * bf,                               r * kv * bf,                    (3 + r) * h * bf, r * q * bf,
-        r * rel_width * bf,                                   r * 24 * ap.extent * bf,                                      r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,       r * h * bf,
-        r * h * bf,                                           r * experts_per_token * 4,                                    r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,       r * h * bf,
-        visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), batch_cap * vocabulary * fp,                      batch_cap * argmax_parts * fp,             batch_cap * argmax_parts * 4,   batch_cap * 4,
+        r * 4,                                                r * 4,                                                        r * 4,                                   max_segments * @sizeOf(ap.Seg),            r * h * bf,                     r * h * bf,       r * block_slots * h * bf,
+        r * h * bf,                                           r * h * bf,                                                   r * message_entries * h * fp,            r * h * fp,                                3 * r * h * fp,                 3 * r * h * fp,   r * h * fp,
+        r * h * fp,                                           r * h * bf,                                                   r * h * bf,                              r * h * bf,                                r * q * bf,                     r * kv * bf,      r * kv * bf,
+        r * rel_width * bf,                                   r * 24 * bf,                                                  r * q * bf,                              r * kv * bf,                               r * kv * bf,                    (3 + r) * h * bf, r * q * bf,
+        r * rel_width * bf,                                   r * 24 * ap.extent * bf,                                      r * 24 * attn_stride * ap.head_dim * fp, r * 24 * attn_stride * 2 * fp,             r * q * bf,                     r * h * bf,       r * h * bf,
+        r * h * bf,                                           r * experts_per_token * 4,                                    r * experts_per_token * fp,              r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,       r * h * bf,
+        visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), batch_cap * vocabulary * fp,             batch_cap * argmax_parts * fp,             batch_cap * argmax_parts * 4,   batch_cap * 4,
     };
 }
 
 pub fn scratchBytes(rows: usize) usize {
+    return scratchBytesWithStride(rows, max_attention_stride);
+}
+
+pub fn scratchBytesWithStride(rows: usize, attn_stride: usize) usize {
     var out: usize = 0;
-    for (sizes(rows)) |n| out += n;
+    for (sizes(rows, attn_stride)) |n| out += n;
     return out;
 }
 
@@ -396,11 +401,16 @@ pub const Scratch = struct {
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
     rows: usize,
+    attn_stride: u32,
 
     pub fn init(device: mtl.Device, rows: usize) !Scratch {
+        return initWithStride(device, rows, max_attention_stride);
+    }
+
+    pub fn initWithStride(device: mtl.Device, rows: usize, attn_stride: usize) !Scratch {
         @setEvalBranchQuota(10_000);
-        if (rows == 0 or rows > max_rows) return error.Inkling2ScratchRows;
-        const ns = sizes(rows);
+        if (rows == 0 or rows > max_rows or attn_stride == 0 or attn_stride > max_attention_stride) return error.Inkling2ScratchRows;
+        const ns = sizes(rows, attn_stride);
         var s: Scratch = undefined;
         var made: usize = 0;
         errdefer inline for (fields, 0..) |f, i| if (i < made) @field(s, f).deinit();
@@ -410,6 +420,7 @@ pub const Scratch = struct {
         }
         s.taps = null;
         s.rows = rows;
+        s.attn_stride = @intCast(attn_stride);
         return s;
     }
 

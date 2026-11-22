@@ -11,7 +11,7 @@ constant uint INKLING_LOOP_MESSAGES = 48;
 
 // stride: floats from one row's m to the next (the messages interleave 48 entries a row).
 struct InkLoopArgs { uint rows, stride, roles; };
-constant uint INK2_GATE_SCRATCH_STRIDE = 64u * (2u * INKLING_LOOP_H + INKLING_LOOP_RANK);
+constant uint INK2_GATE_SCRATCH_STRIDE = 512u * (2u * INKLING_LOOP_H + INKLING_LOOP_RANK);
 
 kernel void tf_inkling2_loop_messages(
     const device bfloat* bank0 [[buffer(0)]], const device bfloat* bank1 [[buffer(1)]],

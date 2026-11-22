@@ -374,3 +374,11 @@ test "flight Meta isolates per-flight conv segment tables from shared scratch" {
     try std.testing.expectEqual(@as(usize, @sizeOf(fwd.Meta)), d1.off - d0.off);
     try std.testing.expect(d0.off >= c0.off + state.visit_slots * 3 * @sizeOf(state.InkConvSeg));
 }
+
+test "prompt scratch stride tracks capacity global slots and shrinks part_o on smaller contexts" {
+    try std.testing.expectEqual(@as(usize, 1), state.globalStride(256));
+    try std.testing.expectEqual(@as(usize, 4), state.globalStride(4096));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(65536));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(1048576));
+    try std.testing.expect(state.scratchBytesWithStride(state.prompt_rows, 4) < state.scratchBytes(state.prompt_rows));
+}
