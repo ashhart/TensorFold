@@ -185,7 +185,7 @@ pub const Prep = struct {
     pub fn run(self: *Prep) !void {
         try self.rig.put(self.out[2], self.zeros); // slots no row writes stay 0, so a stray write shows
         try self.rig.put(self.out[3], self.zeros);
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1) };
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.lay.streams) };
         try K.prep(self.k, self.rig.s, r, self.lay.layer, self.config(), self.in[0..4].*, self.in[4..6].*, self.out[0], self.out[1], .{ .k = self.out[2], .v = self.out[3] });
         try self.rig.s.synchronize();
     }
@@ -199,7 +199,7 @@ pub const Prep = struct {
         try self.rig.put(at[3], self.zeros);
         for (self.lay.segs, self.alone) |s, one| {
             const r0: u64 = @intCast(s.row0);
-            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = self.dev[0] + r0 * 4, .seg_of = self.dev[3], .segs = one, .tiles = 0, .n_tiles = 0, .last_pos = @intCast(s.p0 + s.n - 1) };
+            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = self.dev[0] + r0 * 4, .seg_of = self.dev[3], .segs = one, .tiles = 0, .n_tiles = 0, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
             const raw = [4]u64{ self.in[0] + r0 * heads * D * 2, self.in[1] + r0 * kv * D * 2, self.in[2] + r0 * kv * D * 2, self.in[3] + r0 * heads * R * 2 };
             try K.prep(self.k, self.rig.s, r, self.lay.layer, self.config(), raw, self.in[4..6].*, at[0] + r0 * heads * D * 2, at[1] + r0 * heads * R * 2, .{ .k = at[2], .v = at[3] });
         }
@@ -398,7 +398,7 @@ pub const Table = struct {
     }
 
     pub fn run(self: *Table) !void {
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0 };
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0, .streams = 1 };
         try K.relTable(self.k, self.rig.s, r, self.in[0], self.in[2], self.out);
         try self.rig.s.synchronize();
     }

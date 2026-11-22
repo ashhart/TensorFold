@@ -71,7 +71,7 @@ test "inkling2 hip: the dispatcher picks split, fold or prompt by rows, streams 
     const kern = mocked(&r);
     const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
     const no: k.Cache = .{ .k = 0, .v = 0 };
-    var row: k.Rows = .{ .rows = 1, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 1048575 };
+    var row: k.Rows = .{ .rows = 1, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 1048575, .streams = 1 };
     const g = k.Layer.global(1048576);
     Mock.count = 0;
     try k.prep(&kern, s, row, g, .{ .qk_clip = 22.63, .rel_clip = 8, .floor = 8192, .alpha = 0.1, .eps = 1e-6 }, .{ 0, 0, 0, 0 }, .{ 0, 0 }, 0, 0, no);
@@ -90,19 +90,19 @@ test "inkling2 hip: the dispatcher picks split, fold or prompt by rows, streams 
     row.rows = 130;
     row.streams = 2;
     row.n_tiles = 98;
-    try k.attend(&kern, s, row, g, 64, all, 0, no, 0, 0, 0, 0, 0, 0); // two streams, too many rows: the fold
+    try k.attend(&kern, s, row, g, 64, 130 * 24 * 64, 0, no, 0, 0, 0, 0, 0, 0); // two streams, too many rows: the fold
     try t.expectEqual([4]usize{ 5, 6, 4, 6 }, Mock.which[0..4].*);
     try t.expectEqual([3]u32{ 1, 8, 64 }, Mock.grids[0]);
     try t.expectEqual(@as(u32, 256), Mock.blocks[0]);
     try t.expectEqual([3]u32{ 98, 8, 64 }, Mock.grids[2]);
     Mock.count = 0;
     const sl = k.Layer.sliding(1024, 2048);
-    try k.attend(&kern, s, row, sl, k.slotsFor(sl, 1), 0, 0, no, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, row, sl, k.slotsFor(sl, 1), 130 * 24 * k.slotsFor(sl, 1), 0, no, 0, 0, 0, 0, 0, 0);
     try t.expectEqual([3]u32{ 98, 8, 6 }, Mock.grids[0]);
     try t.expectEqual(@as(usize, 3), Mock.which[0]);
 }
 
-const ring_rows: k.Rows = .{ .rows = 4, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 5000 };
+const ring_rows: k.Rows = .{ .rows = 4, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 5000, .streams = 1 };
 
 test "inkling2 hip: attend refuses a ring that is not whole 64-key tiles, and launches nothing" {
     var r: hip.Runtime = undefined;
@@ -115,7 +115,7 @@ test "inkling2 hip: attend refuses a ring that is not whole 64-key tiles, and la
     try t.expectError(error.Inkling2RingTiles, k.attend(&kern, s, ring_rows, g, 1, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
     try t.expectEqual(@as(usize, 0), Mock.count);
     g.ring = 8192;
-    try k.attend(&kern, s, ring_rows, g, 1, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, ring_rows, g, 1, 4 * 24, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
     try t.expectEqual(@as(usize, 2), Mock.count);
 }
 
@@ -131,6 +131,42 @@ test "inkling2 hip: attend refuses a sliding ring shorter than the window plus t
     try t.expectError(error.Inkling2RingShort, k.attend(&kern, s, ring_rows, l, k.slotsFor(l, 1), 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
     try t.expectEqual(@as(usize, 0), Mock.count);
     l.ring = 1088;
-    try k.attend(&kern, s, ring_rows, l, k.slotsFor(l, 1), 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, ring_rows, l, k.slotsFor(l, 1), 4 * 24 * k.slotsFor(l, 1), 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
     try t.expectEqual(@as(usize, 2), Mock.count);
+}
+
+test "inkling2 hip: a multi-stream call never takes the one-stream prompt kernel; zero streams is refused" {
+    var r: hip.Runtime = undefined;
+    r.api.hipModuleLaunchKernel = Mock.launch;
+    const kern = mocked(&r);
+    const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
+    const g = k.Layer.global(1048576);
+    var row: k.Rows = .{ .rows = 70, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 53, .last_pos = 1048575, .streams = 0 };
+    const room = 70 * 24 * 64; // a partial a chunk: no room to split
+    Mock.count = 0;
+    try t.expectError(error.Inkling2Streams, k.attend(&kern, s, row, g, 64, room, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    row.streams = 3;
+    try k.attend(&kern, s, row, g, 64, room, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try t.expectEqual([2]usize{ 4, 6 }, Mock.which[0..2].*); // the fold over the tiles, then the merge
+}
+
+test "inkling2 hip: attend refuses partial buffers smaller than rows x heads x stride, before any launch" {
+    var r: hip.Runtime = undefined;
+    r.api.hipModuleLaunchKernel = Mock.launch;
+    const kern = mocked(&r);
+    const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
+    const sl = k.Layer.sliding(1024, 2048);
+    const stride = k.slotsFor(sl, 1);
+    const row: k.Rows = .{ .rows = 16, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 12, .last_pos = 4095, .streams = 2 };
+    Mock.count = 0;
+    try t.expectError(error.Inkling2PartialRoom, k.attend(&kern, s, row, sl, stride, 16 * 24 * stride - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    const g = k.Layer.global(1048576);
+    var one = row;
+    one.streams = 1;
+    try t.expectError(error.Inkling2PartialRoom, k.attend(&kern, s, one, g, 64, 16 * 24 * 64 - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    try k.attend(&kern, s, row, sl, stride, 16 * 24 * stride, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, one, g, 64, 16 * 24 * 64, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try t.expectEqual([4]usize{ 3, 6, 5, 6 }, Mock.which[0..4].*);
 }
