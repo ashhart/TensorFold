@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_POOL_AFTER_WARMUP=1` (opt-in) sizes dense Qwen3.5's still-empty KV page pool again after warm-up, from the free memory then measured under the same reserve and cap, so pages the first plan held back for warm-up become KV capacity; `/memory` reports the decision; tokens are unchanged, and other modes keep today's pool (#4591).
+
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
 
 - Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs drafter rows for 2 to 8 streams in one pass; about 1% faster at 2 and 4 streams on M3 Ultra, tokens unchanged.
