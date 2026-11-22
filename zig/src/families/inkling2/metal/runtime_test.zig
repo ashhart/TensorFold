@@ -225,3 +225,11 @@ test "A snapshot restores each head's live rows into a cache of another capacity
     try moveLive(queue, &to, got, rows, false);
     try std.testing.expect(std.mem.eql(u8, want.slice(u8, size), got.slice(u8, size)));
 }
+
+test "prompt scratch stride tracks capacity global slots and shrinks part_o on smaller contexts" {
+    try std.testing.expectEqual(@as(usize, 1), state.globalStride(256));
+    try std.testing.expectEqual(@as(usize, 4), state.globalStride(4096));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(65536));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(1048576));
+    try std.testing.expect(state.scratchBytesWithStride(state.prompt_rows, 4) < state.scratchBytes(state.prompt_rows));
+}
