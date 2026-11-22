@@ -1,5 +1,7 @@
 """The Ripple gate tools on synthetic files: KL, top-1, worst rows, identical dumps, replies, an exact-length chat."""
 
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -8,10 +10,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
-
-import ricursive_gate_compare as cmp
 import ricursive_gate_ids as ids_tool
+
+try:
+    import numpy as np
+except ImportError:  # the root pytest job installs pytest and PyYAML only
+    np = None
+if np is not None:
+    import ricursive_gate_compare as cmp
 
 VOCAB, ROWS = 50, 12
 
@@ -31,6 +37,7 @@ def run(*argv: str) -> tuple[int, str]:
     return code, out.getvalue()
 
 
+@unittest.skipIf(np is None, "numpy is not installed")
 class CompareTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
