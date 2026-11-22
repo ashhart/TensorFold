@@ -91,23 +91,16 @@ fn refusal(a: Allocator, o: api.Open) !?[]const u8 {
     return null;
 }
 
-/// Every released shard counts, as core/checkpoint.zig lists them (model*.safetensors), plus the EXL3
-/// pack's dense-*/exl3-layer-* shards and mtp when drafted.
-fn checkpointFileBytes(io: std.Io, dir: []const u8, drafted: bool) u64 {
-    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
-    defer d.close(io);
+/// The bytes the loader maps: core/checkpoint.zig's shard list (index, else model*.safetensors) plus mtp when drafted.
+fn checkpointFileBytes(a: Allocator, io: std.Io, dir: []const u8, drafted: bool) u64 {
+    const files = tf.checkpoint_host.shardFiles(a, io, dir) catch return 0;
+    defer tf.checkpoint_host.freeShardFiles(a, files);
     var total: u64 = 0;
-    var it = d.iterate();
-    while (true) {
-        const e = (it.next(io) catch break) orelse break;
-        if (e.kind != .file and e.kind != .sym_link) continue;
-        const shard = (std.mem.startsWith(u8, e.name, "model") or std.mem.startsWith(u8, e.name, "dense-") or std.mem.startsWith(u8, e.name, "exl3-layer-")) and std.mem.endsWith(u8, e.name, ".safetensors");
-        const head = drafted and std.mem.eql(u8, e.name, "mtp.safetensors");
-        if (!shard and !head) continue;
-        const st = d.statFile(io, e.name, .{}) catch continue;
-        total +|= st.size;
-    }
-    return total;
+    for (files) |path| total +|= (std.Io.Dir.cwd().statFile(io, path, .{}) catch continue).size;
+    if (!drafted) return total;
+    const head = std.fs.path.join(a, &.{ dir, "mtp.safetensors" }) catch return total;
+    defer a.free(head);
+    return total +| (std.Io.Dir.cwd().statFile(io, head, .{}) catch return total).size;
 }
 
 /// Kept-state bytes: --prompt-cache-gib, else half the room; none beside DSpark, so the default never resumes.
@@ -141,7 +134,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const probe = try mtl.Device.init();
     const room = admit.room(probe);
     probe.deinit();
-    const weights = checkpointFileBytes(io, o.dir, o.drafts);
+    const weights = checkpointFileBytes(a, io, o.dir, o.drafts);
     if (weights >= room) {
         problem.* = try std.fmt.allocPrint(a, "Inkling 2 Mini's {d:.2} GiB checkpoint leaves no room under the {d:.2} GiB load limit; free memory", .{ @as(f64, @floatFromInt(weights)) / (1 << 30), @as(f64, @floatFromInt(room)) / (1 << 30) });
         return null;
@@ -312,16 +305,26 @@ test "inkling2 DSpark is the checkpoint's bundled head: --drafter is refused, no
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mtp.safetensors", .data = "678" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other.safetensors", .data = "ignored" });
     const dir = try scratchDir(tmp, a);
-    try std.testing.expectEqual(@as(u64, 5), checkpointFileBytes(std.testing.io, dir, false));
-    try std.testing.expectEqual(@as(u64, 8), checkpointFileBytes(std.testing.io, dir, true));
+    try std.testing.expectEqual(@as(u64, 5), checkpointFileBytes(a, std.testing.io, dir, false));
+    try std.testing.expectEqual(@as(u64, 8), checkpointFileBytes(a, std.testing.io, dir, true));
     var shards = std.testing.tmpDir(.{});
     defer shards.cleanup();
     try shards.dir.writeFile(std.testing.io, .{ .sub_path = "model-00001-of-00002.safetensors", .data = "1234" });
     try shards.dir.writeFile(std.testing.io, .{ .sub_path = "model-00002-of-00002.safetensors", .data = "567" });
     try shards.dir.writeFile(std.testing.io, .{ .sub_path = "mtp.safetensors", .data = "89" });
     const shard_dir = try scratchDir(shards, a);
-    try std.testing.expectEqual(@as(u64, 7), checkpointFileBytes(std.testing.io, shard_dir, false));
-    try std.testing.expectEqual(@as(u64, 9), checkpointFileBytes(std.testing.io, shard_dir, true));
+    try std.testing.expectEqual(@as(u64, 7), checkpointFileBytes(a, std.testing.io, shard_dir, false));
+    try std.testing.expectEqual(@as(u64, 9), checkpointFileBytes(a, std.testing.io, shard_dir, true));
+    var indexed = std.testing.tmpDir(.{});
+    defer indexed.cleanup();
+    try indexed.dir.writeFile(std.testing.io, .{ .sub_path = "model-00001-of-00002.safetensors", .data = "1234" });
+    try indexed.dir.writeFile(std.testing.io, .{ .sub_path = "model-00002-of-00002.safetensors", .data = "567" });
+    try indexed.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00001-of-00002.safetensors"}}
+    });
+    // The index names one shard: the other file is not what the loader maps.
+    try std.testing.expectEqual(@as(u64, 4), checkpointFileBytes(a, std.testing.io, try scratchDir(indexed, a), false));
+    try std.testing.expectEqual(@as(u64, 0), checkpointFileBytes(a, std.testing.io, "/nonexistent-inkling2-dir", true));
 }
 
 test "inkling2 prompt cache budget: half the room, none beside a head, explicit sizes checked" {

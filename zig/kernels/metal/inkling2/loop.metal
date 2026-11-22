@@ -216,3 +216,198 @@ inline uint lp_slot(constant LpGateArgs& a, uint g) { return g == 0 ? a.slot0 : 
     if (i < H) dst[i] = bfloat(float(nw[i]) * (y[e] * inv));
   }
 }
+
+// Few rows: the one-group mix above idles the GPU; statistics and mix run on many groups, same per-thread chains.
+constant constexpr uint LP_STAT = 1 + LP_MAX_QUERIES; // per source: sum of squares, then one dot per query
+
+// Source `grid.x` of row `grid.y`: its sum of squares and each query's dot, as the eight-simdgroup sums of loop_mix.
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_mix_stats(
+    const device bfloat* blocks [[buffer(0)]], const device uchar* partial [[buffer(1)]],
+    const device float* q0 [[buffer(2)]], const device float* q1 [[buffer(3)]], const device float* q2 [[buffer(4)]],
+    const device float* q3 [[buffer(5)]], device float* stats [[buffer(6)]], constant LpMixArgs& a [[buffer(7)]],
+    uint2 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[I2_SGS][LP_STAT];
+  const uint s = grid.x, row = grid.y, H = a.hidden;
+  float acc[LP_STAT] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint i = tid; i < H; i += I2_TG) {
+    const float v = lp_source(blocks, partial, a, s, row, i);
+    acc[0] = fma(v, v, acc[0]);
+    acc[1] = fma(q0[i], v, acc[1]);
+    if (a.queries > 1) acc[2] = fma(q1[i], v, acc[2]);
+    if (a.queries > 2) acc[3] = fma(q2[i], v, acc[3]);
+    if (a.queries > 3) acc[4] = fma(q3[i], v, acc[4]);
+  }
+  for (uint k = 0; k < LP_STAT; ++k) {
+    const float t = simd_sum(acc[k]);
+    if (lane == 0) part[sg][k] = t;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid < LP_STAT) {
+    float t = part[0][tid];
+    for (uint g = 1; g < I2_SGS; ++g) t += part[g][tid];
+    stats[(ulong(row) * LP_MAX_SOURCES + s) * LP_STAT + tid] = t;
+  }
+}
+
+// Element grid.x * 256 + tid of row grid.y: softmax coefficients from the statistics, then every query's fp32 mix.
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_mix_apply(
+    const device bfloat* blocks [[buffer(0)]], const device uchar* partial [[buffer(1)]],
+    const device float* stats [[buffer(2)]], device float* out [[buffer(3)]], constant LpMixArgs& a [[buffer(4)]],
+    uint2 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+  const uint S = a.blocks + 1, H = a.hidden, row = grid.y, i = grid.x * I2_TG + tid;
+  if (i >= H) return;
+  const device float* st = stats + ulong(row) * LP_MAX_SOURCES * LP_STAT;
+  float inv_tg[LP_MAX_SOURCES];
+  for (uint s = 0; s < S; ++s) inv_tg[s] = i2_rsqrt_mean(st[s * LP_STAT], H, a.eps_unweighted);
+  float coef[LP_MAX_QUERIES][LP_MAX_SOURCES];
+  for (uint q = 0; q < LP_MAX_QUERIES; ++q) {
+    for (uint s = 0; s < LP_MAX_SOURCES; ++s) coef[q][s] = 0.0f;
+    if (q >= a.queries) continue;
+    float score[LP_MAX_SOURCES];
+    float m = -INFINITY;
+    for (uint s = 0; s < S; ++s) {
+      score[s] = (st[s * LP_STAT + 1 + q] * inv_tg[s]) * a.scale;
+      m = i2_max(m, score[s]);
+    }
+    float l = 0.0f;
+    for (uint s = 0; s < S; ++s) {
+      score[s] = score[s] == -INFINITY ? 0.0f : metal::precise::exp(score[s] - m);
+      l += score[s];
+    }
+    for (uint s = 0; s < S; ++s) coef[q][s] = inv_tg[s] * (score[s] / l);
+  }
+  float u[LP_MAX_QUERIES] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint s = 0; s < S; ++s) {
+    const float v = lp_source(blocks, partial, a, s, row, i);
+    for (uint q = 0; q < LP_MAX_QUERIES; ++q) u[q] = fma(coef[q][s], v, u[q]);
+  }
+  for (uint q = 0; q < LP_MAX_QUERIES; ++q)
+    if (q < a.queries) out[ulong(q) * a.out_stride + ulong(row) * H + i] = u[q];
+}
+
+// Element grid.x * 256 + tid of gate grid.y, row grid.z: the gated state before its norm, fp32 [gate][rows][hidden].
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_y(
+    const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
+    const device float* msg [[buffer(3)]], const device bfloat* down [[buffer(4)]],
+    const device bfloat* f0 [[buffer(5)]], const device bfloat* f1 [[buffer(6)]], const device bfloat* f2 [[buffer(7)]],
+    const device bfloat* g0 [[buffer(8)]], const device bfloat* g1 [[buffer(9)]], const device bfloat* g2 [[buffer(10)]],
+    device float* y [[buffer(11)]], constant LpGateArgs& a [[buffer(12)]], uint3 grid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+  threadgroup float dn[LP_MAX_RANK];
+  const uint g = grid.y, row = grid.z, H = a.hidden, R = a.rank;
+  if (tid < R) dn[tid] = float(down[(ulong(g) * a.rows + row) * R + tid]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint i = grid.x * I2_TG + tid;
+  if (i >= H) return;
+  const device float* h = (g == 0 ? h0 : (g == 1 ? h1 : h2)) + ulong(row) * H;
+  const device float* m = msg + ulong(lp_slot(a, g)) * a.msg_stride + ulong(row) * H;
+  const device bfloat* wf = (g == 0 ? f0 : (g == 1 ? f1 : f2)) + ulong(i) * R;
+  const device bfloat* wg = (g == 0 ? g0 : (g == 1 ? g1 : g2)) + ulong(i) * R;
+  float f = 0.0f, gn = 0.0f;
+  for (uint r = 0; r < R; ++r) {
+    f = fma(float(wf[r]), dn[r], f);
+    gn = fma(float(wg[r]), dn[r], gn);
+  }
+  const float forget = metal::precise::tanh(f);
+  y[(ulong(g) * a.rows + row) * H + i] = (1.0f - forget) * h[i] + metal::precise::tanh(gn) * m[i];
+}
+
+// Weighted RMS norm of gate grid.y's row grid.x of gate_y's output, rounded to bf16, as the tail of gate_mix.
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_norm(
+    const device float* y [[buffer(0)]], const device bfloat* n0 [[buffer(1)]], const device bfloat* n1 [[buffer(2)]],
+    const device bfloat* n2 [[buffer(3)]], device bfloat* out [[buffer(4)]], constant LpGateArgs& a [[buffer(5)]],
+    uint2 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float scratch[I2_SGS];
+  const uint row = grid.x, g = grid.y, H = a.hidden;
+  const device float* src = y + (ulong(g) * a.rows + row) * H;
+  const device bfloat* nw = g == 0 ? n0 : (g == 1 ? n1 : n2);
+  float v[I2_MAX_ELEMS];
+  float ss = 0.0f;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    v[e] = i < H ? src[i] : 0.0f;
+    ss = fma(v[e], v[e], ss);
+  }
+  const float inv = i2_rsqrt_mean(i2_tg_sum(ss, scratch, sg, lane), H, a.eps_norm);
+  device bfloat* dst = out + ulong(g) * a.out_stride + ulong(row) * H;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i < H) dst[i] = bfloat(float(nw[i]) * (v[e] * inv));
+  }
+}
+
+constant constexpr uint LP_DOT_BLOCK = 2; // gate_dot ranks one threadgroup computes
+
+// Row grid.x of gate grid.y: h and m normed and rounded to bf16, [gate][rows][h then m], as gate_down starts.
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_prep(
+    const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
+    const device float* msg [[buffer(3)]], device bfloat* xn [[buffer(4)]], constant LpGateArgs& a [[buffer(5)]],
+    uint2 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float scratch[I2_SGS];
+  const uint row = grid.x, g = grid.y, H = a.hidden;
+  const device float* h = (g == 0 ? h0 : (g == 1 ? h1 : h2)) + ulong(row) * H;
+  const device float* m = msg + ulong(lp_slot(a, g)) * a.msg_stride + ulong(row) * H;
+  float xh[I2_MAX_ELEMS], xm[I2_MAX_ELEMS];
+  float sh = 0.0f, sm = 0.0f;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    xh[e] = i < H ? h[i] : 0.0f;
+    xm[e] = i < H ? m[i] : 0.0f;
+    sh = fma(xh[e], xh[e], sh);
+    sm = fma(xm[e], xm[e], sm);
+  }
+  const float inv_h = i2_rsqrt_mean(i2_tg_sum(sh, scratch, sg, lane), H, a.eps_unweighted);
+  const float inv_m = i2_rsqrt_mean(i2_tg_sum(sm, scratch, sg, lane), H, a.eps_unweighted);
+  device bfloat* dst = xn + (ulong(g) * a.rows + row) * 2 * H;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i >= H) continue;
+    dst[i] = bfloat(xh[e] * inv_h);
+    dst[H + i] = bfloat(xm[e] * inv_m);
+  }
+}
+
+// Ranks grid.z * 2 ..+2 of gate grid.y, row grid.x, from gate_prep's vectors: as gate_down, the same chains per rank.
+[[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_dot(
+    const device bfloat* xn [[buffer(0)]], const device bfloat* w0 [[buffer(1)]], const device bfloat* w1 [[buffer(2)]],
+    const device bfloat* w2 [[buffer(3)]], device bfloat* down [[buffer(4)]], constant LpGateArgs& a [[buffer(5)]],
+    uint3 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[I2_SGS][LP_DOT_BLOCK];
+  const uint row = grid.x, g = grid.y, r0 = grid.z * LP_DOT_BLOCK;
+  const uint ranks = min(LP_DOT_BLOCK, a.rank - r0);
+  const uint H = a.hidden;
+  const device bfloat* x = xn + (ulong(g) * a.rows + row) * 2 * H;
+  const device bfloat* wr = (g == 0 ? w0 : (g == 1 ? w1 : w2)) + ulong(r0) * 2 * H;
+  float acc[LP_DOT_BLOCK];
+  for (uint j = 0; j < LP_DOT_BLOCK; ++j) acc[j] = 0.0f;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i < H) {
+      const float xh = float(x[i]);
+      for (uint j = 0; j < LP_DOT_BLOCK; ++j)
+        if (j < ranks) acc[j] = fma(float(wr[ulong(j) * 2 * H + i]), xh, acc[j]);
+    }
+  }
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i < H) {
+      const float xm = float(x[H + i]);
+      for (uint j = 0; j < LP_DOT_BLOCK; ++j)
+        if (j < ranks) acc[j] = fma(float(wr[ulong(j) * 2 * H + H + i]), xm, acc[j]);
+    }
+  }
+  for (uint j = 0; j < LP_DOT_BLOCK; ++j) {
+    const float t = simd_sum(acc[j]);
+    if (lane == 0) part[sg][j] = t;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid < ranks) {
+    float t = part[0][tid];
+    for (uint s = 1; s < I2_SGS; ++s) t += part[s][tid];
+    down[(ulong(g) * a.rows + row) * a.rank + r0 + tid] = bfloat(t);
+  }
+}

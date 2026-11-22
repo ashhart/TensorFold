@@ -19,6 +19,10 @@ pub const controls = .{
     .{ Kind.pack, "inkling2 vision pack control writes past payload", "if (i < n) y[i] = bfloat(x[i]);", "if (i < n) y[i] = bfloat(x[i]); if (i == 0) y[n] = bfloat(0);", c.Gate.repeat },
     .{ Kind.qkv, "inkling2 vision qkv control swaps rotary pairing", "const uint e = d ^ 1u;", "const uint e = d ^ 2u;", c.Gate.shapes },
     .{ Kind.residual, "inkling2 vision residual control omits LayerScale", "float(lambda[at.x]) * branch", "branch", c.Gate.shapes },
+    .{ Kind.embed, "inkling2 vision embed control reuses the first bilinear weight", "* weights[i * 4 + k];", "* weights[i * 4];", c.Gate.shapes },
+    .{ Kind.heads, "inkling2 vision heads control ignores the chunk's first row", "ulong(p.r0 + at.y)", "ulong(at.y)", c.Gate.shapes },
+    .{ Kind.bias_gelu, "inkling2 vision bias_gelu control drops the bias", "ik2v_gelu(tf_vis_bf(acc[i] + float(b[at.x])))", "ik2v_gelu(tf_vis_bf(acc[i]))", c.Gate.shapes },
+    .{ Kind.gelu_rows, "inkling2 vision gelu_rows control loses the sign", "ik2v_gelu(float(y[i]))", "ik2v_gelu(fabs(float(y[i])))", c.Gate.shapes },
 };
 
 const pack_shapes = [_]c.Shape{ .{ .rows = 8, .n = 1200, .k = 0 }, .{ .rows = 4, .n = 1200, .k = 0 } };

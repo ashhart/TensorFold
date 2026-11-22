@@ -328,6 +328,11 @@ pub const mutations = [_]Mutation{
     .{ .kind = .q1_f32, .label = "control: inkling2 attention residual, fp32 partial rows read hidden apart", .from = "return ((const device float*)partial)[ulong(row) * a.partial_pitch + i];", .to = "return ((const device float*)partial)[ulong(row) * a.hidden + i];" },
     .{ .kind = .q1_f32, .label = "control: inkling2 attention residual, blocks one row-width apart", .from = "blocks[ulong(s) * a.block_stride + ulong(row) * a.hidden + i]", .to = "blocks[ulong(s) * a.hidden + ulong(row) * a.hidden + i]" },
     .{ .kind = .q1_f32, .label = "control: inkling2 attention residual, eps left out of the sources' norm", .from = "inv_tg[tid] = i2_rsqrt_mean(t, H, a.eps_unweighted);", .to = "inv_tg[tid] = i2_rsqrt_mean(t, H, 0.0f);" },
+    .{ .kind = .q3_f32, .label = "control: inkling2 attention residual, statistics dot the third query with the second", .from = "acc[2] = fma(queries[H + i], v, acc[2]);", .to = "acc[2] = fma(queries[i], v, acc[2]);" },
+    .{ .kind = .q1_f32, .label = "control: inkling2 attention residual, multi-group scores not scaled by hidden^-0.5", .from = "score[s] = a.scale * (t * inv_tg[s]);", .to = "score[s] = (t * inv_tg[s]);" },
+    .{ .kind = .q3_f32, .label = "control: inkling2 attention residual, multi-group queries normed with the first weight", .from = "const device bfloat* w = q == 2 ? w2 : (q == 1 ? w1 : w0);", .to = "const device bfloat* w = w0;" },
+    .{ .kind = .q3_f32, .label = "control: inkling2 attention residual, every query mixed with the first one's weights", .from = "u[q] = fma(coef[q][s], v, u[q]);", .to = "u[q] = fma(coef[0][s], v, u[q]);" },
+    .{ .kind = .q1_f32, .label = "control: inkling2 attention residual, second norm left out of the output", .from = "if (i < H) dst[i] = bfloat(float(w[i]) * (src[i] * inv));", .to = "if (i < H) dst[i] = bfloat(float(w[i]) * src[i]);" },
 };
 
 pub fn controlSource(a: std.mem.Allocator, m: Mutation) ![]u8 {

@@ -20,6 +20,7 @@ pub const controls = .{
     .{ Kind.rnn, "inkling2 draft RNN control drops Markov bias", "raw[o] = bfloat(s + float(bias[o]));", "raw[o] = bfloat(s);", c.Gate.shapes },
     .{ Kind.cell, "inkling2 draft cell control omits recurrent blend", "state[j] = bfloat(keep + add);", "state[j] = bfloat(keep);", c.Gate.shapes },
     .{ Kind.swiglu, "inkling2 draft SwiGLU control loses up product", "* float(up[i]));", ");", c.Gate.shapes },
+    .{ Kind.alpha, "inkling2 draft alpha control omits the last tap from the softmax sum", "for (uint k = 0; k < p.y; k++) z += metal::precise::exp(float(r[k]) - top);", "for (uint k = 0; k + 1 < p.y; k++) z += metal::precise::exp(float(r[k]) - top);", c.Gate.shapes },
     .{
         Kind.fold_b,                                                                                                               "inkling2 draft fold control uses FP16 accumulation",
         "float s = 0.0f;\n  for (uint k = lane; k < p.width; k += 32) s += float(unembed[ulong(v) * p.width + k]) * float(b[k]);", "half s = 0.0h;\n  for (uint k = lane; k < p.width; k += 32) s = half(float(s) + float(unembed[ulong(v) * p.width + k]) * float(b[k]));",

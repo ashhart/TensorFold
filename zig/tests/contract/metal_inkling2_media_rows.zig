@@ -25,6 +25,9 @@ pub const controls = .{
     .{ Kind.layer_norm, "inkling2 vision layer norm control repeats channels", "#define IK2V_ROW(i) float(xr[i])", "#define IK2V_ROW(i) float(xr[(i) % 2])", c.Gate.shapes },
     .{ Kind.softmax, "inkling2 vision softmax control ignores NaN exp", "const float e = metal::precise::exp(s[i] - m);", "const float e = isnan(s[i] - m) ? 0.0f : metal::precise::exp(s[i] - m);", c.Gate.nonfinite },
     .{ Kind.mix_rms, "inkling2 draft mix_rms control repeats first tap", "float(fr[ulong(k) * p.width + i]) * float(alpha[k]);\n    s += m * m;", "float(fr[i]) * float(alpha[k]);\n    s += m * m;", c.Gate.shapes },
+    .{ Kind.embed_block, "inkling2 draft embed_block control drops the norm weight", "r[i] = bfloat(float(embed_w[i]) * (float(e[i]) * inv));", "r[i] = bfloat(float(e[i]) * inv);", c.Gate.shapes },
+    .{ Kind.rms, "inkling2 draft rms control drops the norm weight", "yr[i] = bfloat(float(xr[i]) * inv * float(w[i]));", "yr[i] = bfloat(float(xr[i]) * inv);", c.Gate.shapes },
+    .{ Kind.add_rms, "inkling2 draft add_rms control stores the residual without the delta", "rr[i] = bfloat(v);", "rr[i] = bfloat(float(rr[i]));", c.Gate.shapes },
 };
 
 const Rows = extern struct { rows: u32, width: u32, eps: f32, pitch: u32 = 0, taps: u32 = 0 };

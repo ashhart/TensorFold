@@ -20,6 +20,10 @@ pub const max_hidden = 6144;
 pub const max_group = 8;
 pub const max_experts = 512;
 pub const max_topk = 16;
+/// Rows up to which attnRes runs on many groups (statistics, mix, norm), bit-equal to the one-group row kernel.
+pub const small_rows = 16;
+/// Scratch bytes ahead of the fp32 mixes: per-source statistics, sources * (1 + queries) floats a row.
+const stats_bytes = 8192;
 /// Keys a row's attention chunk covers (kernels/metal/inkling2/attention.metal's I2_CHUNK) and floats of its partial.
 pub const attn_chunk = 2048;
 pub const attn_partial_floats = 132;
@@ -45,6 +49,9 @@ const Kernel = enum {
     residual_attn,
     residual_mlp,
     mv_fuse,
+    attn_res_stats,
+    attn_res_mix,
+    attn_res_norm,
 };
 const kernel_count = @typeInfo(Kernel).@"enum".field_names.len;
 
@@ -306,9 +313,7 @@ pub const Ops = struct {
     pub fn attnRes(o: *const Ops, e: mtl.ComputeEncoder, a: AttnResArgs) !void {
         if (a.rows == 0 or a.nq == 0 or a.nq > max_queries or a.nb + 1 > max_sources or a.hidden == 0 or a.hidden > max_hidden)
             return error.InvalidInkling2Op;
-        e.setPipeline(o.pipe(.attn_res));
-        bind(e, &.{ a.blocks, a.partial, a.queries, a.norms[0], a.norms[if (a.nq > 1) 1 else 0], a.norms[if (a.nq > 2) 2 else 0], a.out });
-        e.setValue(AttnResKernelArgs{
+        const args = AttnResKernelArgs{
             .hidden = a.hidden,
             .blocks = a.nb,
             .block_stride = a.block_stride,
@@ -319,7 +324,30 @@ pub const Ops = struct {
             .eps_unweighted = a.eps_unweighted,
             .eps_norm = a.eps,
             .scale = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(a.hidden)))),
-        }, 7);
+        };
+        const norms = [3]View{ a.norms[0], a.norms[if (a.nq > 1) 1 else 0], a.norms[if (a.nq > 2) 2 else 0] };
+        const mixed_floats = (a.nq - 1) * @as(usize, a.out_stride) + @as(usize, a.rows) * a.hidden;
+        if (a.rows <= small_rows and stats_bytes + mixed_floats * 4 <= o.scratch_bytes) {
+            const stats = View{ .buffer = o.scratch };
+            const mixed = View{ .buffer = o.scratch, .offset = stats_bytes };
+            const groups = std.math.divCeil(u32, a.hidden, 256) catch unreachable;
+            e.setPipeline(o.pipe(.attn_res_stats));
+            bind(e, &.{ a.blocks, a.partial, a.queries, stats });
+            e.setValue(args, 4);
+            e.dispatchGroups(mtl.Size.of(a.nb + 1, a.rows, 1), mtl.Size.of(256, 1, 1));
+            e.setPipeline(o.pipe(.attn_res_mix));
+            bind(e, &.{ a.blocks, a.partial, stats, mixed });
+            e.setValue(args, 4);
+            e.dispatchGroups(mtl.Size.of(groups, a.rows, 1), mtl.Size.of(256, 1, 1));
+            e.setPipeline(o.pipe(.attn_res_norm));
+            bind(e, &.{ mixed, norms[0], norms[1], norms[2], a.out });
+            e.setValue(args, 5);
+            e.dispatchGroups(mtl.Size.of(a.rows, 1, 1), mtl.Size.of(256, 1, 1));
+            return;
+        }
+        e.setPipeline(o.pipe(.attn_res));
+        bind(e, &.{ a.blocks, a.partial, a.queries, norms[0], norms[1], norms[2], a.out });
+        e.setValue(args, 7);
         e.dispatchGroups(mtl.Size.of(a.rows, 1, 1), mtl.Size.of(256, 1, 1));
     }
 

@@ -151,6 +151,35 @@ fn matrix(allocator: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: F
     }
 }
 
+/// Every packed byte live: random codes, scales in a mild range, so FP32 sums are inexact and order-sensitive.
+fn denseMatrix(allocator: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: Format, random: std.Random, n: usize, k: usize, comptime gate_up: bool) !void {
+    const nv = f == .nvfp4;
+    const pitch = if (nv) k / 2 else k;
+    const scale_pitch = k / f.block();
+    const vals = try allocator.alloc(u8, experts * n * pitch);
+    defer allocator.free(vals);
+    const scales = try allocator.alloc(u8, experts * n * scale_pitch);
+    defer allocator.free(scales);
+    random.bytes(vals);
+    for (scales) |*v| v.* = if (nv) 0x30 + random.uintLessThan(u8, 0x28) else 118 + random.uintLessThan(u8, 12);
+    const part = if (gate_up) "w13" else "w2";
+    try name(cp, try rig.input(vals), if (nv) .u8 else .f8_e4m3, &.{ experts, n, pitch }, part, "_weight");
+    try name(cp, try rig.input(scales), if (nv) .f8_e4m3 else .u8, &.{ experts, n, scale_pitch }, part, "_weight_scale");
+    if (nv) {
+        var peaks: [experts]f32 = undefined;
+        for (&peaks, 0..) |*v, e| v.* = wAmax(.random, gate_up, e);
+        try name(cp, try rig.input(std.mem.asBytes(&peaks)), .f32, &.{experts}, part, "_weight_amax");
+        const den = denominator(gate_up);
+        try name(cp, try rig.input(std.mem.asBytes(&den)), .f32, &.{1}, part, "_weight_outer_scale_denominator");
+    }
+}
+
+pub fn dense(a: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: Format, seed: u64, shape: u.c.Shape) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    try denseMatrix(a, rig, cp, f, prng.random(), shape.n * 2, shape.k, true);
+    try denseMatrix(a, rig, cp, f, prng.random(), shape.k, shape.n, false);
+}
+
 pub fn tensors(a: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: Format, fill: u.g.Fill, shape: u.c.Shape) !void {
     try matrix(a, rig, cp, f, fill, shape.n * 2, shape.k, true);
     try matrix(a, rig, cp, f, fill, shape.k, shape.n, false);

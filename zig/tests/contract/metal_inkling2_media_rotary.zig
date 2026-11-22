@@ -17,6 +17,7 @@ pub fn name(comptime k: Kind) []const u8 {
 
 pub const controls = .{
     .{ Kind.ctx_store, "inkling2 draft context control reverses cached V", "vc[dst] = vraw[src];", "vc[dst] = vraw[src ^ 1u];", c.Gate.shapes },
+    .{ Kind.qk_prep, "inkling2 draft qk_prep control rotates every row at the first position", "float(p.pos0 + g.y)", "float(p.pos0)", c.Gate.shapes },
 };
 
 const dim = 128;
