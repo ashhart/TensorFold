@@ -10,6 +10,7 @@ test {
     _ = @import("metal_inkling2_loop_controls.zig");
     _ = @import("metal_inkling2_runtime_controls.zig");
     _ = @import("metal_inkling2_dspark_controls.zig");
+    _ = @import("metal_inkling2_dspark_chain_controls.zig");
     _ = @import("metal_inkling2_split_controls.zig");
     _ = @import("metal_inkling2_vision_controls.zig");
 }
