@@ -103,6 +103,25 @@ def model_cases():
             for name, path in items]
 
 
+def request_id_cases():
+    """A client's valid X-Request-Id comes back on its reply, streamed or not; any other is replaced by the server's."""
+    chat = {"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "max_tokens": 4}
+    items = [
+        ("echo-models", [raw("GET", "/v1/models", headers=(("X-Request-Id", "client-trace-1"),))]),
+        ("echo-stream", [raw("POST", "/v1/chat/completions", {**chat, "stream": True}, (("x-request-id", "client-trace-2"),))]),
+        ("echo-refused", [raw("POST", "/v1/chat/completions", {"model": "fake-model"}, (("X-Request-Id", "client-trace-3"),))]),
+        ("echo-unknown", [raw("GET", "/nope", headers=(("X-Request-Id", "client-trace-4"),))]),
+        ("echo-longest", [raw("GET", "/health", headers=(("X-Request-Id", "k" * 128),))]),
+        ("too-long", [raw("GET", "/health", headers=(("X-Request-Id", "k" * 129),))]),
+        ("spaced", [raw("GET", "/health", headers=(("X-Request-Id", "two words"),))]),
+        ("non-ascii", [raw("GET", "/health", headers=(("X-Request-Id", "café"),))]),
+        ("twice", [raw("GET", "/health", headers=(("X-Request-Id", "one"), ("X-Request-Id", "one")))]),
+        ("none", [raw("POST", "/v1/chat/completions", chat)]),
+    ]
+    return [{"group": "request-id", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
+            for name, raws in items]
+
+
 def admission_cases(stem):
     """Model requests on one connection, the stream last: admission off answers as before its flags existed."""
     say = [{"role": "user", "content": "Hi @script=plain"}]
@@ -142,6 +161,9 @@ def steps():
             item = case(stem + ("-with-key" if keyed_request else "-none"), path=path, method="POST", extra=(("x-api-key", "sk-cli"),) if keyed_request else ())
             item["group"] = "keys"
             auth_cases.append(item)
+    unkeyed = case("echo-without-key", path="/v1/models", extra=(("X-Request-Id", "client-trace-5"),))
+    unkeyed["group"] = "request-id"
+    auth_cases.append(unkeyed)
     return [
         {"kind": "serve", "args": ["--api-key", "sk-cli"], "env": {}, "cases": auth_cases, "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": [], "env": {}, "cases": normal, "then": [{"kind": "terminate"}]},
@@ -154,6 +176,7 @@ def steps():
          "key_file": "app[inference]: sk-app\nmonitor[read]: sk-read\nops: sk-ops\n", "cases": scope_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--alias", "example-org/fake-model"], "env": {}, "cases": model_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": [], "env": {}, "cases": admission_cases("off"), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": [], "env": {}, "cases": request_id_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--max-inflight", "0", "--max-inflight-per-key", "0", "--requests-per-second", "0", "--request-burst", "7"],
          "env": {}, "cases": admission_cases("zero"), "then": [{"kind": "terminate"}]},
     ]

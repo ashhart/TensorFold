@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "102"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"temperature must be a finite number or null\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

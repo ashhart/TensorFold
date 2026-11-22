@@ -2,7 +2,6 @@
 const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");
-const http_body = @import("http_body.zig");
 const openai = @import("openai.zig");
 const routes = @import("routes.zig");
 const pyrepr = @import("pyrepr.zig");
@@ -11,6 +10,7 @@ const translate_mod = @import("responses_translate.zig");
 const store_mod = @import("responses_store.zig");
 const cancel_ids = @import("cancel_ids.zig");
 const background = @import("responses_background.zig");
+const incoming = @import("responses_request.zig");
 const request_gate = @import("request_gate.zig");
 const Sink = @import("responses_sink.zig").Sink;
 const Server = @import("server.zig").Server;
@@ -38,7 +38,7 @@ pub fn refuse(conn: *Conn, a: Allocator, message: []const u8, status: u16, param
     routes.sendValue(conn, a, status, refusal(a, message, param) catch return);
 }
 
-fn refusal(a: Allocator, message: []const u8, param: ?[]const u8) !Value {
+pub fn refusal(a: Allocator, message: []const u8, param: ?[]const u8) !Value {
     const detail = try json.newObject(a);
     try detail.put(a, "message", .{ .string = message });
     try detail.put(a, "type", .{ .string = "invalid_request_error" });
@@ -81,25 +81,11 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
 /// POST /v1/responses as routed: a background response keeps `held`, the route's counts and lease, until it ends.
 pub fn postGated(srv: *Server, conn: *Conn, a: Allocator, held: ?*request_gate.Held) void {
     var cx: Cx = .{ .a = a };
-    const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
-        .ok => |b| b,
-        .refused => |m| return refuse(conn, a, m, 400, null),
-    };
-    const body = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return) {
-        .ok => |v| v,
-        .err => return refuse(conn, a, "the request body is not JSON", 400, null),
-    };
-    // a restricted key is stateless here: checked before any stored conversation is read
-    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
-        return @import("auth_scope_reply.zig").deny(conn, false, why);
-    if (body.get("previous_response_id")) |p| if (p == .string and srv.background_jobs.running(srv.io, p.string, conn.key_digest))
-        return refuse(conn, a, "previous_response_id names a background response still in progress: poll it until it ends", 400, "previous_response_id");
-    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io, .owner = conn.key_digest };
-    const t = translate_mod.translate(&cx, body, history) catch return refuse(conn, a, cx.message, 400, null);
-    if (t.background) return background.create(srv, conn, a, body, t, held);
-    switch (turn(srv, a, conn, &cx, body, t, @import("responses_sink.zig").sse(conn), .{})) {
+    const r = incoming.request(srv, conn, a, &cx) orelse return;
+    if (r.t.background) return background.create(srv, conn, a, r.body, r.t, held);
+    switch (turn(srv, a, conn, &cx, r.body, r.t, @import("responses_sink.zig").sse(conn), .{})) {
         .streamed => {},
-        .refused => |r| routes.sendValue(conn, a, r.status, r.payload),
+        .refused => |x| routes.sendValue(conn, a, x.status, x.payload),
         .whole => |final| routes.sendValue(conn, a, 200, final),
     }
 }
@@ -125,14 +111,7 @@ pub const TurnOptions = struct {
 /// One translated Responses request run as its chat completion, its events sent through ``sink``.
 pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
     const base = opts.base orelse (newBase(srv, a, body, t) catch return .{ .streamed = null });
-    if (!(@import("logprobs.zig").offered(srv, a) catch false)) {
-        if (t.rows_if_offered) {
-            _ = t.chat.object.orderedRemove("logprobs");
-        } else if (json.truthyField(t.chat, "logprobs")) {
-            const payload = refusal(a, "logprobs are not supported by this model or backend", null) catch return .{ .streamed = null };
-            return .{ .refused = .{ .status = 400, .payload = payload } };
-        }
-    }
+    if (incoming.unofferedLogprobs(srv, a, t) catch return .{ .streamed = null }) |payload| return .{ .refused = .{ .status = 400, .payload = payload } };
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
     var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .owner = conn.key_digest, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
