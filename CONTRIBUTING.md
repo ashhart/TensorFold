@@ -34,7 +34,7 @@ Check that `publication` is `public`; `unavailable` means the public update fail
 #### What a public check-in sends
 
 - A `/atc presence` comment on the issue, posted from your GitHub account. Anyone can see it until the session lands.
-- To `https://tensorfold.dev`, which the TensorFold project runs: the issue number, a random session token, that comment's ID and the work state, on the claim or start and again on every pulse.
+- To `https://tensorfold.dev`, which the TensorFold project runs: the issue number, a random session token, that comment's ID, the work state and whether the session shows your GitHub name (the name itself is not sent), on the claim or start and again on every pulse.
 - The comment ID lets the site operator look up your GitHub account, so "anonymous" means the public radar hides your name, not that the operator can't see it. The site also sees your IP address and when you work.
 
 Pass `--local` to keep a session on your machine. You can also claim an issue without ATC by opening a draft pull request whose description says `Fixes #<issue>`.
