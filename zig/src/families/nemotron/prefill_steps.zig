@@ -41,7 +41,7 @@ pub fn whole(b: anytype, ops: anytype, s: *Stream) !void {
     errdefer ops.end(s, false);
     var next: usize = 0;
     while (at < s.prompt_len) at = chunk(b, ops, s, at, &next) catch |err| {
-        if (err == error.Cancelled) try retain(b, s, at);
+        if (err == error.Cancelled) try retain(b, ops, s, at);
         return err;
     };
     try ops.finish(s);
@@ -79,10 +79,10 @@ pub fn step(b: anytype, ops: anytype, s: *Stream) !bool {
 /// The host cancels between chunks: once the queue lands, the state at the pass's last chunk end is kept.
 pub fn cancel(b: anytype, ops: anytype, s: *Stream) !void {
     const at = ops.steps().at.get(s) orelse return;
-    try retain(b, s, at);
+    try retain(b, ops, s, at);
 }
 
-fn retain(b: anytype, s: *Stream, at: usize) !void {
+fn retain(b: anytype, ops: anytype, s: *Stream, at: usize) !void {
     try b.drain();
     ops.end(s, false); // adopted pages the lane never took go back, the marks are freed
     s.fill_at.store(@intCast(at), .monotonic);
