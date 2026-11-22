@@ -63,7 +63,6 @@ test "pull proxy: an unusable proxy or timeout names its variable, never the val
     defer arena.deinit();
     const a = arena.allocator();
     const cases = [_]struct { name: []const u8, value: []const u8, says: []const u8 }{
-        .{ .name = "HTTPS_PROXY", .value = "socks5://ana:s3cret@proxy.example:1080", .says = "only http:// proxies" },
         .{ .name = "HTTP_PROXY", .value = "http://ana:s3cret@[bad", .says = "is not a proxy URL" },
         .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .value = "0", .says = "whole seconds" },
     };
@@ -78,6 +77,22 @@ test "pull proxy: an unusable proxy or timeout names its variable, never the val
         try std.testing.expect(std.mem.indexOf(u8, out.written(), c.says) != null);
         try std.testing.expect(std.mem.indexOf(u8, out.written(), "s3cret") == null);
     }
+}
+
+test "pull proxy: a socks or https:// proxy is skipped by name, never refused (pull connects directly, as 1.3.3 did)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][2][]const u8{ .{ "HTTPS_PROXY", "socks5://ana:s3cret@proxy.example:1080" }, .{ "ALL_PROXY", "https://proxy.example:443" } }) |c| {
+        var m = try env(a, &.{.{ c[0], c[1] }});
+        const s = try route.fromEnv(a, &m);
+        try std.testing.expect(s.https == null);
+        try std.testing.expect(std.ascii.eqlIgnoreCase(s.skipped, c[0]));
+        try std.testing.expect(std.mem.indexOf(u8, s.skipped, "s3cret") == null);
+    }
+    var both = try env(a, &.{ .{ "HTTPS_PROXY", "socks5://proxy.example:1080" }, .{ "HTTP_PROXY", "http://proxy.example:3128" } });
+    const s = try route.fromEnv(a, &both);
+    try std.testing.expect(s.https == null and s.http != null and s.http.?.port == 3128);
 }
 
 test "pull proxy: NO_PROXY matches exact hosts, suffixes, * and host:port" {
