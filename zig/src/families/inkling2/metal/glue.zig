@@ -22,7 +22,7 @@ pub const Pipelines = struct {
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
     route_scores: mtl.Pipeline,
-    /// The router's dots for up to 64 rows; launches in one encoder run in order, so they share it.
+    /// The router's dots for up to 256 rows; launches in one encoder run in order, so they share it.
     route_dots: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -60,7 +60,7 @@ pub const Pipelines = struct {
             .expert_pick = pipes[7],
             .expert_combine = pipes[8],
             .route_scores = pipes[9],
-            .route_dots = try device.buffer(64 * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
+            .route_dots = try device.buffer(256 * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -117,7 +117,7 @@ const RouteArgs = extern struct { rows: u32 };
 /// Router IDs and weights are sorted by ascending expert index for the deterministic expert sum.
 pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
     std.debug.assert(rows > 0);
-    std.debug.assert(rows <= 64);
+    std.debug.assert(rows <= 256);
     e.setPipeline(p.route_scores);
     inline for (.{ x, weight }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setBuffer(p.route_dots, 0, 2);

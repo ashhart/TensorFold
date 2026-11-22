@@ -6,8 +6,8 @@ const ap = @import("attention_plan.zig");
 
 pub const window_rows = 16;
 pub const batch_rows = 32;
-pub const prompt_rows = 64;
-pub const max_rows = 64;
+pub const prompt_rows = 256;
+pub const max_rows = 256;
 pub const max_segments = batch_rows;
 pub const max_attention_stride = 64;
 pub const hidden = 2304;
@@ -365,5 +365,5 @@ pub const Scratch = struct {
 };
 
 comptime {
-    if (sliding_ring != 1088 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");
+    if (sliding_ring != 1280 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");
 }
