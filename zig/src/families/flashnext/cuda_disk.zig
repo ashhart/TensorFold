@@ -120,7 +120,8 @@ pub fn policyOf(c: anytype) [13]u64 {
         // TF_FLASHNEXT_CHUNK_SOLO and _CHUNK as resolved: a pass's rows alone, and beside a decoding stream
         e.chunk,
         e.busy_chunk,
-        @intFromBool(f.gdn_fused),
+        // TF_FLASHNEXT_GDN_FUSED, and TF_FLASHNEXT_GDN_CHAIN_TPR in bit 1 (unset leaves the key as it was)
+        @intFromBool(f.gdn_fused) | @as(u64, @intFromBool(f.gdn_chain_tpr)) << 1,
         // TF_FLASHNEXT_HC_FUSE, and TF_FLASHNEXT_READOUT_FUSED in bit 1 (unset leaves the key as it was)
         @intFromBool(f.hc_fuse) | @as(u64, @intFromBool(f.readout_fused)) << 1,
         @intFromBool(f.in_pass),
