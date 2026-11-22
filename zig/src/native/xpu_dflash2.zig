@@ -52,6 +52,11 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     return .{ .nodes = pick.counts[0], .trial = pick.trial };
 }
 
+/// A finished lone stream files its calibration under its context band, so the next stream starts priced.
+pub fn retain(e: *lanes.Engine, s: *Stream) void {
+    lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
+}
+
 /// A complete lone round of `drafts` took `ms`: the rule blends it into the stream's table, and the trial's result.
 pub fn measured(e: *lanes.Engine, s: *Stream, trial: ?u32, drafts: u32, ms: f64) !void {
     try e.rule.observeCost(drafts, ms, false, lone_costs.marked(lanes.windows.who(s), true));

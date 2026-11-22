@@ -45,7 +45,7 @@ fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u3
         s.rounds += 1;
         if (s.rounds > 1) try ad.measured(e, &s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
     }
-    try lc.keep(e.gpa, lc.slot(&e.lone_kept, &s), &s);
+    ad.retain(e, &s); // the driver's own filing when its stream ends
     return .{ .first = first, .last = last };
 }
 

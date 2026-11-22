@@ -559,6 +559,7 @@ pub const Lanes = struct {
         var pending = pending0;
         var out: [16]u32 = undefined;
         const e = if (dflash2.priced(b.nodes) != null) b.core else null;
+        defer if (e) |x| dflash2.retain(x, s);
         var skip = cold; // a cold drafter context makes the round after a restart no sample
         while (!s.finished) {
             if (hooks.yield(hooks.ctx)) {
