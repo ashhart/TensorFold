@@ -40,7 +40,11 @@ class Scan(unittest.TestCase):
 
     def test_weight_first_copies_pass(self):
         self.check(dump(121, "_ZN7tf_qmmf11qmmf_kernelILi2E", COPY, "ACQBULK"), 0)
+        self.check(dump(120, "tf_qmmf_fp8_qkv_z", COPY, "ACQBULK"), 0)
         self.check(dump(121, "glm_mm16_rows", COPY, "ACQBULK"), 0)
+
+    def test_fp8_pair_still_rejects_regular_loads_before_the_wait(self):
+        self.check(dump(120, "tf_qmmf_fp8_qkv_z", COPY, "LDG.E R4, desc[UR4][R2.64]", "ACQBULK"), 1)
 
     def test_copies_elsewhere_fail(self):
         self.check(dump(121, "glm_mm_reduce", COPY, "ACQBULK"), 1)

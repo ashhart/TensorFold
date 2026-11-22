@@ -18,7 +18,11 @@
 #else
     const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
 #endif
+#ifdef TF_QMMF_TILE_INDEX
+    const int2 at = tile_of(TF_QMMF_TILE_INDEX, M, N, BM, BN, group);
+#else
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
+#endif
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 
 #ifndef TF_QMMF_STRIDED
