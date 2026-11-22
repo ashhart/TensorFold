@@ -98,10 +98,18 @@ pub fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
 }
 
 /// First availability releases admission; terminal readiness may await backpressured chunk recycling.
-fn available(f: *prefetch.Prefetch, name: Name) void {
+pub fn available(f: *prefetch.Prefetch, name: Name) void {
     while (f.pending(name)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
 }
-fn until(f: *prefetch.Prefetch, comptime field: []const u8, n: u64) void {
+/// `name`'s read phase as it stands: `take` removes the detached winner, `forget` the refused states' reads.
+pub fn phased(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
+    f.mutex.lockUncancelable(f.io);
+    defer f.mutex.unlock(f.io);
+    for (f.reads.items) |rd| if (std.mem.eql(u8, &rd.name, &name)) return rd.phase;
+    return null;
+}
+
+pub fn until(f: *prefetch.Prefetch, comptime field: []const u8, n: u64) void {
     while (@field(counts(f), field) < n) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
 }
 
@@ -175,12 +183,20 @@ test "prefetch: an unfinished asynchronous seed has no state or reader after reo
         defer gate.release.store(true, .release);
         x.r.file_io = gate.io();
         _ = try request(a, &x.s, &x.f, turn1, 1400);
-        try t.expect(rows.write.step(x.r));
+        // `step` streams on its caller, so the stage runs beside the held writer; the drain abandons it mid-stream.
+        const stager = try std.Thread.spawn(.{}, struct {
+            fn run(r: *rows.Rows) void {
+                _ = rows.write.step(r);
+            }
+        }.run, .{x.r});
+        defer stager.join();
+        defer gate.release.store(true, .release); // frees the worker before the join above unwinds
         try fixture.Gate.wait(&gate.entered);
+        try t.expectEqual(@as(usize, 1), x.r.worker.?.pending());
         const left = rows.write.drain(x.r, rows.write.nowNs() + 20 * std.time.ns_per_ms);
+        try t.expectEqual(@as(usize, 1), left);
         gate.release.store(true, .release);
         try fixture.Gate.wait(&gate.left);
-        try t.expectEqual(@as(usize, 1), left);
     }
     var x: Server = .{};
     try x.open(dir);
@@ -302,8 +318,8 @@ test "prefetch: a failed read, or a file that fails its check, falls back to tod
     _ = platform.c.close(fd);
     const f = try prefetch.make(x.r, t.io, .{});
     const name = x.start(f, again) orelse return error.NotReadAhead;
-    try t.expectEqual(@as(?prefetch.Phase, .failed), settled(f, name));
-    const got = try request(a, &x.s, &x.f, again, 1404); // the synchronous read finds the garbled block, as today
+    available(f, name); // a read longer than the fixed handoff cannot finish until its request drains it
+    const got = try request(a, &x.s, &x.f, again, 1404); // the drained read finds the garbled block, as today
     try t.expectEqual(@as(u32, 0), got.from);
     try t.expectEqual(fresh(again), got.sum);
     try t.expectEqual(@as(u64, 1), x.r.counts.failed);
@@ -340,7 +356,7 @@ test "prefetch: two requests join one producer; its detached stream belongs to t
     try t.expect(x.f.restored_ok);
     try t.expectEqual(fresh(again), got1.sum);
     try t.expectEqual(fresh(other), got2.sum);
-    try t.expectEqual(@as(u64, 2), x.r.counts.reads); // a detached read belongs to its first engine consumer
+    try t.expectEqual(@as(u64, 1), x.r.counts.reads); // a detached read belongs to its first engine consumer; the second resumed from RAM
     const c = counts(f);
     try t.expectEqual(@as(u64, 1), c.made);
     try t.expectEqual(@as(u64, 1), c.used);

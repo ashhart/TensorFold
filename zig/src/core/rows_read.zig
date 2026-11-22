@@ -74,7 +74,14 @@ fn drain(r: *Rows, f: *prefetch.Prefetch, rd: *prefetch.Read, plan: *const prefe
     var cursor: image.Cursor = .{};
     var done: u64 = 0;
     while (piece < plan.pieces.len and plan.pieces[piece].len == 0) piece += 1;
-    while (try f.next(rd)) |chunk| {
+    while (true) {
+        const chunk = f.next(rd) catch |err| {
+            if (rd.failed_piece) |fp| {
+                const p = plan.pieces[fp];
+                return bad(r, p.name, prefetch.ext(p.kind), err);
+            }
+            return err;
+        } orelse break;
         if (piece == plan.pieces.len or chunk.piece != piece or chunk.off != plan.pieces[piece].off + done) {
             f.recycle(rd, chunk);
             return error.RowsRead;
