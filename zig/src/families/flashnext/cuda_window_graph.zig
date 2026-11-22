@@ -341,7 +341,7 @@ pub fn stageWindow(p: anytype, ids: []const u32, pos0: usize) !void {
     const s = p.s;
     const n = ids.len;
     if (n == 0 or n > s.cap) return error.UnexpectedTensor;
-    try s.ready();
+    try s.select();
     p.pos0 = pos0;
     const was = p.prepared;
     p.prepared = true;

@@ -206,7 +206,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 43 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 44 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -240,6 +240,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_PREFILL_MTP_LEAN` | Exactly `0` or `1`; default off. For eligible lane-free prompt-only MTP rounds, `1` keeps only the KV/indexer caches, skips unread proposal work and graph capture, and uses prompt pieces of up to 3,072 rows |
+| `TF_FLASHNEXT_PROMPT_ASYNC` | Exactly `0` or `1`; default off. `1` double-buffers whole-chunk host staging and skips single-rank non-final no-logits stream drains; tensor-parallel collective completion and final-logits completion stay synchronous |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |

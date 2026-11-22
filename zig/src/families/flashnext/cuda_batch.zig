@@ -508,7 +508,7 @@ pub fn Pass(comptime Tri: type) type {
             self.pending = null;
             self.pending_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
-            if (!self.prepared and !self.staged) try s.ready();
+            if (!self.prepared and !self.staged) try s.select();
             const emb = s.hostEmb(n);
             const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };

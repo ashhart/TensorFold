@@ -38,7 +38,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
                 row0 += l.rows;
             }
             if (logits_host) |lh| {
-                try self.complete();
+                try @import("cuda_prompt_async.zig").beforeLogits(self);
                 const d = self.stream.d;
                 try cuda.memory.download(d, out + (n - 1) * vocab * 2, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
@@ -66,7 +66,7 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             try self.readout(self.m.mixer, 0, 1);
             try self.projectHead(s.logits, 1);
             if (logits_host) |lh| {
-                try self.complete();
+                try @import("cuda_prompt_async.zig").beforeLogits(self);
                 const d = self.stream.d;
                 try cuda.memory.download(d, s.logits, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }

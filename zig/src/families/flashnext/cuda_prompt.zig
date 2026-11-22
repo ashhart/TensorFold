@@ -428,7 +428,7 @@ pub const Engine = struct {
             at += n;
         }
         if (hooks.tail) |t| try t.last(e.stream.*, s.ple_nrow);
-        if (hooks.logits == .none) try e.complete();
+        try @import("cuda_prompt_async.zig").afterChunk(e, hooks.logits == .none, s.staging.?.enabled and e.collective == null);
         seq.fed += ids.len;
     }
     /// A stream's window in a shared pass and the pass over several (cuda_prompt_windows.zig).

@@ -45,7 +45,7 @@ pub const Cache = struct {
         const s = pass.s;
         // a captured round is one row a lane; windows run the plain pass
         if (ids.len != pass.lanes.len) return error.UnexpectedTensor;
-        try s.ready();
+        try s.select();
         for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
         const positions = s.hostPos(ids.len * 4);
         @memset(positions, 0);
