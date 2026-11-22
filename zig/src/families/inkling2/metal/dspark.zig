@@ -112,6 +112,9 @@ pub const Drafter = struct {
         return state.laneBytes(capacity);
     }
 
+    /// A stream's bytes a token of its window; its global rings round the window up by at most `ring_slack` tokens.
+    pub const tokenBytes = state.laneTokenBytes;
+    pub const ring_slack = state.global_step - 1;
     /// Settles pending absorbs and updates the per-lane global ring capacity before any stream opens.
     pub fn setContext(d: *Drafter, window: u32) !void {
         const capacity: usize = @intCast(window);
