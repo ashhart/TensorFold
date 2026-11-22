@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "round_ids.cuh"
+#include "gemma4_pdl.cuh"
 
 namespace tf_tree_round {
 
@@ -40,9 +41,10 @@ __device__ __forceinline__ bool valid(const Result& r, uint32_t rows) {
 using namespace tf_tree_round;
 
 // picks[row]: a row's first largest finite bf16 logit, or INVALID and its nonfinite kinds (1 NaN, 2 +inf, 4 -inf).
-extern "C" __global__ void __launch_bounds__(256) tf_round_bf16_argmax(const uint16_t* __restrict__ logits,
+extern "C" __global__ void __launch_bounds__(256) tf_round_bf16_argmax(uint16_t* __restrict__ logits,
                                                                        Pick* __restrict__ picks, uint32_t vocab,
                                                                        uint32_t stride) {
+    gemma4_pdl::enter();
     __shared__ float values[256];
     __shared__ uint32_t ids[256], masks[256];
     const uint32_t row = blockIdx.x, lane = threadIdx.x;
@@ -76,10 +78,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_round_bf16_argmax(const uin
 }
 
 // out[t]: tree t's verified round (core/tree_round.oracle), one thread a tree.
-extern "C" __global__ void tf_tree_round_match(const uint32_t* __restrict__ tokens, const int32_t* __restrict__ parents,
-                                               const Pick* __restrict__ picks, const uint32_t* __restrict__ eos,
-                                               const Tree* __restrict__ trees, Result* __restrict__ results,
+extern "C" __global__ void tf_tree_round_match(uint32_t* __restrict__ tokens, int32_t* __restrict__ parents,
+                                               Pick* __restrict__ picks, uint32_t* __restrict__ eos,
+                                               Tree* __restrict__ trees, Result* __restrict__ results,
                                                uint32_t vocab, uint32_t count) {
+    gemma4_pdl::enter();
     const uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= count) return;
     const Tree tr = trees[t];
@@ -164,8 +167,9 @@ extern "C" __global__ void tf_tree_round_match(const uint32_t* __restrict__ toke
 }
 
 // keep[t * 16 + i]: tree t's i-th kept row (first + path[i]) or -1 past its consumed count; counts[t]: kept.
-extern "C" __global__ void tf_round_keep_rows(const Result* __restrict__ results, const Tree* __restrict__ trees,
+extern "C" __global__ void tf_round_keep_rows(Result* __restrict__ results, Tree* __restrict__ trees,
                                               int32_t* __restrict__ keep, uint32_t* __restrict__ counts, uint32_t count) {
+    gemma4_pdl::enter();
     const uint32_t t = blockIdx.x, i = threadIdx.x;
     if (t >= count || i >= MAX_ROWS) return;
     const Result& r = results[t];
@@ -175,9 +179,10 @@ extern "C" __global__ void tf_round_keep_rows(const Result* __restrict__ results
 }
 
 // out[t, i, :] = rows[first_t + path_t[i], :] (width bf16 a row) for each tree's kept rows: taps, hidden rows.
-extern "C" __global__ void tf_round_gather_rows(const Result* __restrict__ results, const Tree* __restrict__ trees,
-                                                const uint16_t* __restrict__ rows, uint16_t* __restrict__ out,
+extern "C" __global__ void tf_round_gather_rows(Result* __restrict__ results, Tree* __restrict__ trees,
+                                                uint16_t* __restrict__ rows, uint16_t* __restrict__ out,
                                                 uint32_t width, uint32_t count) {
+    gemma4_pdl::enter();
     const uint32_t t = blockIdx.y, i = blockIdx.z, c = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= count || c >= width) return;
     const Result& r = results[t];
@@ -186,9 +191,10 @@ extern "C" __global__ void tf_round_gather_rows(const Result* __restrict__ resul
 }
 
 // head[t, :] = logits[first_t + the tree's last kept row, :]: the row the next round's first pick reads.
-extern "C" __global__ void tf_round_keep_head(const Result* __restrict__ results, const Tree* __restrict__ trees,
-                                              const uint16_t* __restrict__ logits, uint16_t* __restrict__ head,
+extern "C" __global__ void tf_round_keep_head(Result* __restrict__ results, Tree* __restrict__ trees,
+                                              uint16_t* __restrict__ logits, uint16_t* __restrict__ head,
                                               uint32_t width, uint32_t stride, uint32_t count) {
+    gemma4_pdl::enter();
     const uint32_t t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= count || c >= width) return;
     const Result& r = results[t];
@@ -199,5 +205,6 @@ extern "C" __global__ void tf_round_keep_head(const Result* __restrict__ results
 // picks [rows] as int32 token ids for the next forward (a draft chain's next step): no host round trip between steps.
 extern "C" __global__ void __launch_bounds__(256) tf_round_pick_ids(const uint32_t* picks, int* ids, unsigned rows,
                                                                      unsigned vocab, int fallback) {
+    gemma4_pdl::enter();
     tf_round_ids::pick_ids(picks, ids, rows, vocab, fallback, tf_round_ids::ALL);
 }

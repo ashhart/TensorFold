@@ -46,6 +46,7 @@ test {
     _ = @import("cuda_ple.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_kernels.zig");
+    _ = @import("cuda_pdl.zig");
     _ = @import("cuda_forward.zig");
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_disk.zig");

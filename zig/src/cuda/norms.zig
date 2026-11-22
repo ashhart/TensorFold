@@ -66,6 +66,9 @@ pub const Tail = struct {
 };
 
 pub const Norms = struct {
+    /// Launch each row kernel as a dependent launch (TF_GEMMA4_PDL; only Gemma 4's decode sets it).
+    pdl: bool = false,
+
     mod: Module,
     rms_fn: Function,
     add_rms_fn: Function,
@@ -123,7 +126,7 @@ pub const Norms = struct {
             a.add(y);
             a.add(@as(i32, @intCast(width)));
             a.add(eps);
-            return launch_.launch(n.rms_bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+            return launch_.launch(n.rms_bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
         }
         var a: launch_.Args = .{};
         a.add(x);
@@ -133,7 +136,7 @@ pub const Norms = struct {
         a.add(@as(i32, @backingInt(y_kind)));
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
-        try launch_.launch(n.rms_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(n.rms_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// bf16 rows `x_ld` apart: y = bf16(rms(x) * w) [rows, width], fp32 w, and xs the stored y's sums of each `group`.
@@ -150,7 +153,7 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(@as(i32, @intCast(group)));
         a.add(eps);
-        try launch_.launch(n.rms_sums_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(n.rms_sums_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// rmsSums at rms_tiles.cuh's shape over `tiles` blocks a row (1, 10 or 40): tf_rms_rows_sums' bytes.
@@ -163,7 +166,7 @@ pub const Norms = struct {
         for ([_]u64{ w, y, xs }) |v| a.add(v);
         a.add(@as(i32, @intCast(tiles)));
         a.add(eps);
-        try launch_.launch(n.rms_sums_tiles_fn, .{ .grid = .{ .x = tiles, .y = @intCast(rows), .z = 1 }, .block = .{ .x = tiles_threads } }, s, &a);
+        try launch_.launch(n.rms_sums_tiles_fn, .{ .grid = .{ .x = tiles, .y = @intCast(rows), .z = 1 }, .block = .{ .x = tiles_threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// The residual step: res (fp32, in place) += rms(x) * w1 (w1 null: res += x), then y = rms(res) * w2.
@@ -179,7 +182,7 @@ pub const Norms = struct {
             a.add(y);
             a.add(@as(i32, @intCast(width)));
             a.add(eps);
-            return launch_.launch(n.add_rms_bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+            return launch_.launch(n.add_rms_bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
         }
         var a: launch_.Args = .{};
         a.add(x);
@@ -191,7 +194,7 @@ pub const Norms = struct {
         a.add(@as(i32, @backingInt(y_kind)));
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
-        try launch_.launch(n.add_rms_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(n.add_rms_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// bf16 residual: h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w); xs (or null): y's 64-value sums.
@@ -203,7 +206,7 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
         const f = if (w_kind == .bf16) n.add_rms_h_fn else n.add_rms_h_f32w_fn;
-        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// h = bf16(x + bf16(the `routed` slots' fma chain by wt + the rest's sum)), y = rms(h) w, xs: moe_row's order.
@@ -218,7 +221,7 @@ pub const Norms = struct {
         for ([_]u64{ wt, w, h, y, xs }) |v| a.add(v);
         a.add(eps);
         for ([_]usize{ width, routed, slots }) |v| a.add(@as(i32, @intCast(v)));
-        try launch_.launch(n.moe_add_rms_h_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(n.moe_add_rms_h_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// addRmsH with bf16 weights and a tail's options; with none set it is addRmsH itself, the same kernel and bits.
@@ -231,7 +234,7 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
         const f = n.tail_fns[@intFromBool(t.round)];
-        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// The strided norm of part p of row i at x + i x_ld + p x_part (signed parts; MLX's bf16 steps with `round`).
@@ -250,7 +253,7 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
         const block: u32 = if (round) 128 else 256;
-        try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = block } }, s, &a);
+        try launch_.launch(n.parts_fns[@intFromBool(round)], .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = block }, .pdl = n.pdl }, s, &a);
     }
 
     /// nGPT rows: y = bf16(s / sqrt(sum(s^2) + eps)), s = x, or bf16(x + r) with r; width % 64, at most 8,192.
@@ -261,7 +264,7 @@ pub const Norms = struct {
         for ([_]u64{ x, r orelse 0, y }) |v| a.add(v);
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
-        try launch_.launch(n.l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+        try launch_.launch(n.l2_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// The nGPT residual: h = bf16(l2(a + |alpha scale| (b - a))), a = bf16(l2(res)), b = bf16(l2(out)); bf16 alpha.
@@ -274,7 +277,7 @@ pub const Norms = struct {
         a.add(h);
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
-        try launch_.launch(n.slerp_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads } }, s, &a);
+        try launch_.launch(n.slerp_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = vec_threads }, .pdl = n.pdl }, s, &a);
     }
 
     /// Per head (dv 64/128/256): out = bf16(silu(z) * rms(y) * w), y/z rows at strides y_ld/z_ld; xs: 64-value sums.
@@ -298,7 +301,7 @@ pub const Norms = struct {
         const t = launch_.rowThreads(rows, 256, 32); // a head's lanes stay in one warp either way
         const per_block = t / (dv / 8);
         const grid: launch_.Dim3 = .{ .x = @intCast(rows), .y = @intCast((heads + per_block - 1) / per_block), .z = 1 };
-        try launch_.launch(n.gated_fns[which], .{ .grid = grid, .block = .{ .x = t } }, s, &a);
+        try launch_.launch(n.gated_fns[which], .{ .grid = grid, .block = .{ .x = t }, .pdl = n.pdl }, s, &a);
     }
 };
 

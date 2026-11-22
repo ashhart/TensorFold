@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "attn_odd.cuh"
+#include "gemma4_pdl.cuh"
 
 // Decode: a block a (row, key head); keys walk 64-key tiles by absolute position, so a row's bits are its own.
 
@@ -59,13 +60,14 @@ __device__ __noinline__ void window_part_odd(const __nv_bfloat16* q, const __nv_
 }
 
 // Decode split by key tile (block: row, key head, tile); tf_window_merge folds the partials in tile order.
-extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloat16* __restrict__ q,
-                                                                const __nv_bfloat16* __restrict__ kc,
-                                                                const __nv_bfloat16* __restrict__ vc,
-                                                                const int* __restrict__ pos,
-                                                                const int* __restrict__ slot, float* __restrict__ po,
+extern "C" __global__ void __launch_bounds__(NT) tf_window_part(__nv_bfloat16* __restrict__ q,
+                                                                __nv_bfloat16* __restrict__ kc,
+                                                                __nv_bfloat16* __restrict__ vc,
+                                                                int* __restrict__ pos,
+                                                                int* __restrict__ slot, float* __restrict__ po,
                                                                 float* __restrict__ pm, float* __restrict__ pl, int h,
                                                                 int hk, int d, int win, long long ring, float scale) {
+    gemma4_pdl::enter();
     __shared__ float qs[GMAX * DMAX];
     __shared__ __nv_bfloat16 kt[DMAX * KT]; // K transposed, [d][key], padded: a warp reads 32 keys of one dim
     __shared__ __nv_bfloat16 vs[BN * DMAX];
@@ -132,11 +134,12 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloa
 }
 
 // out [W, H, D] bf16: a row's partials folded in tile order, o = sum_j exp(m_j - M) o_j / sum_j exp(m_j - M) l_j.
-extern "C" __global__ void __launch_bounds__(NT) tf_window_merge(const float* __restrict__ po,
-                                                                 const float* __restrict__ pm,
-                                                                 const float* __restrict__ pl,
+extern "C" __global__ void __launch_bounds__(NT) tf_window_merge(float* __restrict__ po,
+                                                                 float* __restrict__ pm,
+                                                                 float* __restrict__ pl,
                                                                  __nv_bfloat16* __restrict__ out, int h, int hk, int d,
                                                                  int tiles) {
+    gemma4_pdl::enter();
     const int64_t r = blockIdx.x;
     const int kh = blockIdx.y, g = h / hk;
     const int64_t part0 = (r * hk + kh) * tiles;

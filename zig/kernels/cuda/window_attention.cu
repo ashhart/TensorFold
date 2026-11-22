@@ -10,6 +10,7 @@
 #include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
 #include "window_split.cuh"
+#include "gemma4_pdl.cuh"
 
 // Prompt rows: prefill_attention.cu's tensor-core kernel with a window (keys (pos - win, pos]) and a ring of keys.
 namespace tf_window_prompt {
@@ -60,8 +61,8 @@ __device__ __forceinline__ float rowsum(const float (&c)[8]) {
 
 // ODD: every NaN and infinite value leaves the mma, and the rows that see them add them back at float64's weights.
 template <int D, int WARPS, int HPC, int NS, bool ODD, typename... P> // P: empty, or one Pg read as tab[k / tok]
-__device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-                                           const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out,
+__device__ __forceinline__ bool wattn_rows(__nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc,
+                                           __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out,
                                            int p0, int W, int H, int HK, int G, float scale, int win, int ring,
                                            P... pg) {
     constexpr int C = D / 8, K16 = D / 16, NB = D / 8, RB = WARPS / HPC, THREADS = 32 * WARPS;
@@ -287,9 +288,10 @@ __device__ __noinline__ void wattn_odd(const __nv_bfloat16* q, const __nv_bfloat
 
 template <int D, int WARPS, int HPC, int NS>
 __global__ void __launch_bounds__(32 * WARPS, 1)
-wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+wattn_kernel(__nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc,
+             __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
              int G, float scale, int win, int ring) {
+    gemma4_pdl::enter();
     if (wattn_rows<D, WARPS, HPC, NS, false>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring))
         wattn_odd<D, WARPS, HPC, NS>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring);
 }
@@ -304,10 +306,10 @@ __device__ __noinline__ void wattn_odd_pg(const __nv_bfloat16* q, const __nv_bfl
 
 // wattn_kernel over a stream's pages: kc/vc a layer's region, tab the stream's row of page ids.
 template <int D, int WARPS, int HPC, int NS>
-__device__ __forceinline__ void wattn_pg(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-                                         const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+__device__ __forceinline__ void wattn_pg(__nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc,
+                                         __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
                                          int W, int H, int HK, int G, float scale, int win, int ring,
-                                         const int* __restrict__ tab, long long page, int tok) {
+                                         int* __restrict__ tab, long long page, int tok) {
     const Pg pg{tab, page, tok, 0};
     if (wattn_rows<D, WARPS, HPC, NS, false>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg))
         wattn_odd_pg<D, WARPS, HPC, NS>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, pg);
@@ -316,8 +318,8 @@ __device__ __forceinline__ void wattn_pg(const __nv_bfloat16* __restrict__ q, co
 // Decode on tensor cores (d 128): a row's heads one mma tile; warps take every 4th 32-key tile, fold in warp order.
 template <bool ODD>
 __device__ __forceinline__ bool decode_tc_rows(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
-    __nv_bfloat16* __restrict__ out, const int* __restrict__ pos, const int* __restrict__ slot, int h, int hk, int win,
+    __nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc, __nv_bfloat16* __restrict__ vc,
+    __nv_bfloat16* __restrict__ out, int* __restrict__ pos, int* __restrict__ slot, int h, int hk, int win,
     long long ring, float scale) {
     constexpr int D = 128, C = D / 8, K16 = D / 16, NB = D / 8, HB = 32;
     extern __shared__ uint4 smem[];
@@ -558,9 +560,10 @@ __device__ __noinline__ void decode_tc_odd(const __nv_bfloat16* q, const __nv_bf
 }
 
 extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
-    __nv_bfloat16* __restrict__ out, const int* __restrict__ pos, const int* __restrict__ slot, int h, int hk, int win,
+    __nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc, __nv_bfloat16* __restrict__ vc,
+    __nv_bfloat16* __restrict__ out, int* __restrict__ pos, int* __restrict__ slot, int h, int hk, int win,
     long long ring, float scale) {
+    gemma4_pdl::enter();
     if (decode_tc_rows<false>(q, kc, vc, out, pos, slot, h, hk, win, ring, scale))
         decode_tc_odd(q, kc, vc, out, pos, slot, h, hk, win, ring, scale);
 }
@@ -578,9 +581,10 @@ template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv
 // Kolibri-1's full layers' prompt rows over pages: head dim 128, eight warps, four or eight query heads a block.
 #define TF_WATTN_PG(NAME, HPC)                                                                                       \
     extern "C" __global__ void __launch_bounds__(256, 1)                                                              \
-        NAME(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,                               \
-             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,     \
-             int G, float scale, int win, int ring, const int* __restrict__ tab, long long page, int tok) {         \
+        NAME(__nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kc,                               \
+             __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,     \
+             int G, float scale, int win, int ring, int* __restrict__ tab, long long page, int tok) {        \
+    gemma4_pdl::enter();                                                                                          \
         tf_window_prompt::wattn_pg<128, 8, HPC, 8>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring, tab, page, tok); \
     }
 

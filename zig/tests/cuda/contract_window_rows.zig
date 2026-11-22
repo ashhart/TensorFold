@@ -349,8 +349,8 @@ pub const Rows = struct {
         const n = self.call.rows;
         const w = self.win();
         if (self.f.prompt) {
-            try WA.promptWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.call.p0, n, w, if (self.f.image) self.dev[5] else null);
-        } else try WA.decodeWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.dev[3], self.dev[4], w, self.scratch, n);
+            try WA.promptWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.call.p0, n, w, if (self.f.image) self.dev[5] else null, false);
+        } else try WA.decodeWith(&self.fns, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.out, self.dev[3], self.dev[4], w, self.scratch, n, false);
         try self.rig.s.synchronize();
     }
 

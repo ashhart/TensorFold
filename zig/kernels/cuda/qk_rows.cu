@@ -3,6 +3,7 @@
 // A block a (row, head), a thread an element; a head's norm sums in one fixed order, never depending on the row count.
 
 #include "qk_rows.cuh"
+#include "gemma4_pdl.cuh"
 
 using namespace tf_qk;
 
@@ -11,6 +12,7 @@ extern "C" __global__ void __launch_bounds__(MOST) tf_qk_rows(const QkSrc in, co
                                                               const float* sinv, const float* inv, int rot, const int* pos,
                                                               const int* slot, const QkDst dst, __nv_bfloat16* kc, __nv_bfloat16* vc,
                                                               long long len, int h, int hk, float eps) {
+    gemma4_pdl::enter();
     __shared__ float warps[MOST / 32];
     const int d = threadIdx.x;
     const int dim = blockDim.x;
@@ -65,6 +67,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qk_rows_w(const QkSrc in, c
                                                                const int* pos, const int* slot, const QkDst dst,
                                                                __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
                                                                int h, int hk, float eps) {
+    gemma4_pdl::enter();
     constexpr int D = 128, J = D / 32;
     const int lane = threadIdx.x & 31;
     const int64_t r = blockIdx.x;
@@ -144,6 +147,7 @@ extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_qk_rows_once(
                                                                                 const int* pos, const int* slot, const QkDst dst,
                                                                                 __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
                                                                                 int h, int hk, float eps, int vnorm) {
+    gemma4_pdl::enter();
     tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps, vnorm ? tf_qk_round::VNORM : 0);
 }
 
@@ -153,6 +157,7 @@ extern "C" __global__ void __launch_bounds__(tf_qk_round::WIDE) tf_qk_rows_round
                                                                                  const int* pos, const int* slot, const QkDst dst,
                                                                                  __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
                                                                                  int h, int hk, float eps, int vnorm) {
+    gemma4_pdl::enter();
     tf_qk_round::rows(in, nw, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps,
                       tf_qk_round::MLX | (vnorm ? tf_qk_round::VNORM : 0));
 }
@@ -166,5 +171,6 @@ extern "C" __global__ void __launch_bounds__(tf_qk_l2::WIDE) tf_qk_rows_l2(const
                                                                            const int* pos, const int* slot, const QkDst dst,
                                                                            __nv_bfloat16* kc, __nv_bfloat16* vc, long long len,
                                                                            int h, int hk, float eps) {
+    gemma4_pdl::enter();
     tf_qk_l2::rows<tf_qk_l2::ROPE | tf_qk_l2::NORM>(in, qs, cosv, sinv, inv, rot, pos, slot, dst, kc, vc, len, h, hk, eps);
 }

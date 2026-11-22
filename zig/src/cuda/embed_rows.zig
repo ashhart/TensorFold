@@ -14,6 +14,9 @@ const Affine4 = @import("qlinear.zig").Affine4;
 const threads = 256;
 
 pub const EmbedRows = struct {
+    /// Launch each row kernel as a dependent launch (TF_GEMMA4_PDL; only Gemma 4's decode sets it).
+    pdl: bool = false,
+
     mod: Module,
     affine4_fn: Function,
     bf16_fn: Function,
@@ -44,7 +47,7 @@ pub const EmbedRows = struct {
         var a: launch_.Args = .{};
         for ([_]u64{ ids, w, scales, biases, out }) |v| a.add(v);
         for ([_]usize{ d, group, copies }) |v| a.add(@as(i32, @intCast(v)));
-        try launch_.launch(g.affine4_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.affine4_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads }, .pdl = g.pdl }, s, &a);
     }
 
     /// `affine`'s table: codes `bits` wide (2 to 6 or 8) in groups of `group`; `scale` (a bf16 value) on each value.
@@ -62,7 +65,7 @@ pub const EmbedRows = struct {
         for ([_]u64{ ids, w, scales, biases, out }) |v| a.add(v);
         for ([_]usize{ d, o.bits, o.group }) |v| a.add(@as(i32, @intCast(v)));
         a.add(o.scale orelse 1);
-        try launch_.launch(g.affine_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.affine_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads }, .pdl = g.pdl }, s, &a);
     }
 
     /// `affine`'s rows of 4 bits in groups of 64 read from q, the same table packed as a tied head's tiles (d = q.k).
@@ -75,7 +78,7 @@ pub const EmbedRows = struct {
         for ([_]u64{ ids, q.w, q.s, q.b, out }) |v| a.add(v);
         for ([_]usize{ q.k, q.npad }) |v| a.add(@as(i32, @intCast(v)));
         a.add(scale orelse 1);
-        try launch_.launch(g.tiles4_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((q.k / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.tiles4_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((q.k / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads }, .pdl = g.pdl }, s, &a);
     }
 
     /// out [rows, d] = w [vocab, d] bf16 rows at ids.
@@ -85,7 +88,7 @@ pub const EmbedRows = struct {
         var a: launch_.Args = .{};
         for ([_]u64{ ids, w, out }) |v| a.add(v);
         a.add(@as(i32, @intCast(d)));
-        try launch_.launch(g.bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.bf16_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads }, .pdl = g.pdl }, s, &a);
     }
 
     /// Copy exact BF16 bits into out [rows, copies, d], including signed zeros and NaN payloads.
@@ -96,6 +99,6 @@ pub const EmbedRows = struct {
         var a: launch_.Args = .{};
         for ([_]u64{ ids, w, out }) |v| a.add(v);
         for ([_]usize{ d, copies }) |v| a.add(@as(i32, @intCast(v)));
-        try launch_.launch(g.bf16_copies_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.bf16_copies_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads }, .pdl = g.pdl }, s, &a);
     }
 };
