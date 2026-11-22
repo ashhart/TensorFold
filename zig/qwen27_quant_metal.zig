@@ -78,7 +78,7 @@ pub const Device = struct {
     pub fn tensorUnits(d: Device) bool {
         return d.r.tensor_units;
     }
-    pub fn generation(d: Device) usize {
+    pub fn generation(d: Device) u32 {
         return if (d.r.tensor_units) 17 else 15;
     }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
