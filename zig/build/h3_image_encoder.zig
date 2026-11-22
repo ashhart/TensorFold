@@ -2,12 +2,11 @@
 const std = @import("std");
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module) *std.Build.Module {
-    const core = @import("h3_host.zig").coreModule(b, target);
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/image_encoder.zig") });
     const encoder = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/image_encoder.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "h3_image_encoder_kernels", .module = kernels } } });
-    const codec = b.createModule(.{ .root_source_file = b.path("zig/src/core/picture/picture.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const noise = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize });
-    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_encoder.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_image_encoder", .module = encoder }, .{ .name = "picture_codec", .module = codec }, .{ .name = "torch_noise", .module = noise } } });
+    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_encoder.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_image_encoder", .module = encoder }, .{ .name = "core", .module = core }, .{ .name = "torch_noise", .module = noise } } });
 }
 
 /// `zig build tf-h3-image-encoder`: a reference picture to its clean rows, or `selftest`; needs no Metal compiler.

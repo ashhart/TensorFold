@@ -9,8 +9,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         b.addWriteFiles().add("h3-image-prompt-compile-only.fatbin", "");
     const cuda = @import("cuda.zig").runtime(b, target, optimize, &.{});
     const core = @import("h3_host.zig").coreModule(b, target);
-    const fixture = @import("h3_host.zig").fixture(b, core);
-    const rope = @import("h3_image_prompt.zig").rope(b, target);
     const prompt = b.createModule(.{
         .root_source_file = b.path("zig/src/families/h3/prompt_cuda.zig"),
         .target = target,
@@ -19,8 +17,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{
             .{ .name = "cuda", .module = cuda },
             .{ .name = "core", .module = core },
-            .{ .name = "qwen_vl_rope", .module = rope },
-            .{ .name = "checkpoint_fixture", .module = fixture },
         },
     });
     prompt.addAnonymousImport("fatbin_h3_image_prompt", .{ .root_source_file = image });
@@ -32,7 +28,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{
             .{ .name = "h3_prompt_cuda", .module = prompt },
             .{ .name = "tokenizer", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true }) },
-            .{ .name = "checkpoint_fixture", .module = fixture },
+            .{ .name = "core", .module = core },
             .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) },
         },
     });
