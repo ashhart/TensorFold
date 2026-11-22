@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the DeepSeek-V4.1 chat and fixture host tests set the schema-prompt and tool-grammar settings they assume, so a value in the shell's environment can't move their goldens.
+
 - Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ADAPTIVE_BLOCK=1` (opt-in) lets a lone stream draft 8 or 16 DFlash2 block rows by how deep its recent rounds landed; one-stream chat about 2.5% faster on M3 Ultra, tokens unchanged.
 
 - Metal on M5 and later: row projections take the wide kernel from 8 rows instead of 4 (a per-generation cutover table), for #3396's sampled 2- and 4-stream slowdown; replies keep their tokens, and a `tf-row-cutover` bench measures the cutover per chip (#4617, refs #3396).
