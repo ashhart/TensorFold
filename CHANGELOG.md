@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: `serve` with `--drafter` runs Qwen3.8-27B's DFlash2 drafter on the HIP engine through the lane core, where it was refused, and the drafter's weights and per-stream contexts count in the memory plan (#3665, refs #1563). Thanks to @AbrahamCete.
+
 - Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#4504).
 
 - Qwen3-ASR on CUDA (tools only, not served yet): `tf-qwen3-asr` runs a WAV clip through the 0.6B or 1.7B checkpoint (the audio tower, then greedy decode through the Qwen3 CUDA pass the embedding engine runs), `tf-qwen3-asr-forced` teacher-forces a clip on a reference case, and `test-qwen3-asr-host` and `tf-qwen3-asr-check` cover config admission, tensor names, log-mel rows and a float64 tower without a GPU (#2239, refs #2105). Thanks to @jschmied.
