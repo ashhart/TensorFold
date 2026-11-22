@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on Metal: the 4-bit expert scale and bias index is now built on Macs with tensor units (M5) too; same tokens, 2-5% faster one-stream decode on an M5 Ultra (#4547).
+
 - Tests: the lane host's lone-driver test no longer fails under CI load; its fake driver now hands streams back with their cache settled, as the lane core requires, and its scheduling check no longer depends on timing (#4568).
 
 - GLM on Metal: masked sparse attention, its padding entries and the DFlash2 head's q4 matmul give the float64 reference's NaN and Inf instead of dropping or inventing them, which clears nine known kernel-contract failures; finite outputs are unchanged (#4396).
@@ -17,7 +19,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM TP=2 prefill on CUDA: `TF_GLM_INDEX_SPLIT=32768` keeps indexer scores, pools and token rows local on each rank below that position (no blocking all-gathers) and own partials are read in place; outputs are unchanged and the default stays 2048 (#4510).
 
 - GLM at TP=2 on CUDA prefill: dense attention runs only on the rows sparse attention leaves untouched when a chunk crosses the dense limit, and prefill skips projections nothing reads (MTP proposal and query-side work); outputs are unchanged (#4499).
-- Flash Next on Metal: the 4-bit expert scale and bias index is now built on Macs with tensor units (M5) too; same tokens, 2-5% faster one-stream decode on an M5 Ultra (#N).
 
 - CUDA on unified-memory Linux (GB10): the start-up budget counts the checkpoint's own cached pages as room, so a checkpoint that was just read is not refused for them, without dropping them from the page cache before the load (#4427, refs #3192, #1857).
 
