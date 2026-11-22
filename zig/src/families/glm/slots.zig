@@ -329,7 +329,7 @@ pub const Slots = struct {
         x.segs = segs[0..wins.len];
         fwd.backbone(&x, pass, e.sc.ids, total, segs[0].pos);
         fwd.head(&x, pass, e.sc.hidden, e.sc.logits, e.sc.picks, total);
-        if (sl.follow) |f| f.encode(f.ctx, sl, sl.open.?.cb, pass.enc, wins);
+        if (sl.follow) |f| f.encode(f.ctx, sl, sl.open.?.pass.cb, pass.enc, wins);
         sl.ahead = .{ 0, 0 };
         const waited = sl.flushBy(true);
         if (sl.follow) |f| f.land(f.ctx, sl, if (waited) |_| true else |_| false);
