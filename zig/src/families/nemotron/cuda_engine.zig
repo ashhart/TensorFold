@@ -49,8 +49,8 @@ pub const Taps = prompt_hooks.Taps;
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
-/// Streams a shared window holds at most (their rows together at most state.windowRows).
-pub const max_streams = 8;
+/// Streams a shared window holds at most (their rows together at most state.sharedRows; 8 without the wide switch).
+pub const max_streams = @import("cuda_wide.zig").wide_streams;
 
 // pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then a shared window's streams
 const pin_meta = 0;
@@ -158,6 +158,7 @@ pub const Engine = struct {
             e.side.join.deinit();
         };
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
+        e.c.wide_rounds = @import("cuda_wide.zig").on() and @import("cuda_wide.zig").allowed(e.c, e.k.gb10); // before any buffer
         errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
@@ -464,13 +465,13 @@ pub const Engine = struct {
 
     /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
     pub fn verifyShared(e: *Engine, parts: []const Shared) !void {
-        if (parts.len < 1 or parts.len > max_streams) return error.BadWindow;
+        if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadWindow;
         var total: usize = 0;
         for (parts) |p| {
             if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
             total += p.rows;
         }
-        if (total > state.windowRows(e.c)) return error.WindowTooWide;
+        if (total > state.sharedRows(e.c)) return error.WindowTooWide;
         try e.copied.synchronize();
         const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * window_words];
         var views: [max_streams]state.Buffers = undefined;

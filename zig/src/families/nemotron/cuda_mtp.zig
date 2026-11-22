@@ -428,7 +428,7 @@ pub const Head = struct {
             if (p.keep < 1 or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
             total += p.keep;
         }
-        if (total > state.windowRows(e.c)) return error.BadDraftRequest;
+        if (total > state.sharedRows(e.c)) return error.BadDraftRequest;
         // the deepest first: the streams still drafting at a level are the leading rows of the last level's output
         std.mem.sort(Part, parts, {}, struct {
             fn deeper(_: void, x: Part, y: Part) bool {
