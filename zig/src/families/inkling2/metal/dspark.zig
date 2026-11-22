@@ -20,6 +20,8 @@ const dr = lanes.drafter;
 const Stream = lanes.Stream;
 const Ref = k.Ref;
 const tap_list = [_]u32{ 5, 23, 41, 48 };
+/// Drafts a hold offers: four rows a stream keep four streams' shared round at 16 of the forward's 32 rows.
+const hold_depth: u32 = 3;
 
 fn at(buf: mtl.Buffer, off: usize) Ref {
     return .{ .buf = buf, .off = off };
@@ -153,7 +155,7 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = 7, .step_ms = 0, .plain_guard = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
+        return .{ .depth = hold_depth, .step_ms = 0, .plain_guard = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
     }
 
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
