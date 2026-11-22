@@ -5,7 +5,9 @@ const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
 const train_ops = @import("cuda_train_ops.zig");
 const glue = @import("cuda_glue.zig");
-const parts = @import("cuda_wide.zig").wide_streams; // a shared round's or batched draft's parts: nemotron_ops.cu PARTS
+const parts = @import("cuda_wide.zig").wide_streams;
+/// Rows tf_plan_routed stages at most (nemotron_ops.cu pk).
+pub const plan_rows = 32; // a shared round's or batched draft's parts: nemotron_ops.cu PARTS
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -450,7 +452,7 @@ pub const Ops = struct {
 
     /// experts.route's plan over the routed slots alone (rows <= 16, experts <= 128): the shared halves run apart.
     pub fn planRouted(o: Ops, picks: u64, rows: usize, slots: usize, routed: usize, count: usize, tile: usize, p: Plan) !void {
-        if (rows > 32 or slots > 8 or count > 128) return error.PlanTooWide; // nemotron_ops.cu pk: 32 rows of 8 slots
+        if (rows > plan_rows or slots > 8 or count > 128) return error.PlanTooWide; // nemotron_ops.cu pk: 32 rows of 8 slots
         var a: cuda.Args = .{};
         a.add(picks);
         for ([_]usize{ rows, slots, routed, count, tile }) |v| a.add(int(v));
