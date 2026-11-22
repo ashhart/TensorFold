@@ -128,7 +128,7 @@ pub fn planCausalAs(
     act: bool,
     s: S,
 ) Error!void {
-    try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, .one, s);
+    try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, roundRows(p.rows), s);
     const which: usize = @intCast(kind - 1);
     const rows = p.rows;
     const tiles: c_int = @intCast(cdiv(span, 128));
@@ -163,6 +163,11 @@ pub fn planCausalAs(
     try e.add(d_c);
     if (act) try e.add(kind);
     try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
+}
+
+/// The score blocks of a walk's launch: one-row launches keep a block a row, wider ones share a slot's key loads.
+fn roundRows(rows: usize) Rows {
+    return if (rows > 1) .shared else .one;
 }
 
 /// Query heads a score block takes, of one KV head (at most plan.hip's kMaxGroup): the cache is read once for them.
@@ -369,10 +374,12 @@ pub fn planGdnReplay(l: *const Launcher, keep: u64, p: PlanRef, key_heads: usize
     try l.go(l.plan.gdn_replay[wide], dim(@divExact(dv, 8), value_heads, p.slots * layers), dim(32, 8, 1), 0, s, &a);
 }
 
-test "a slot's rows share the score's key loads only at d 256 on long spans with q fp32" {
+test "a slot's rows share the score's key loads only past one row, at d 256 on long spans with q fp32" {
     const std = @import("std");
-    try std.testing.expectEqual(@as(usize, score_rows), blockRows(.shared, 256, score_span, false));
-    try std.testing.expectEqual(@as(usize, 1), blockRows(.one, 256, 1 << 18, false));
+    try std.testing.expectEqual(Rows.one, roundRows(1));
+    try std.testing.expectEqual(Rows.shared, roundRows(2));
+    try std.testing.expectEqual(@as(usize, score_rows), blockRows(roundRows(4), 256, score_span, false));
+    try std.testing.expectEqual(@as(usize, 1), blockRows(roundRows(1), 256, 1 << 18, false));
     try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 256, score_span - 1, false));
     try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 128, 1 << 18, false));
     try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 256, 1 << 18, true));
