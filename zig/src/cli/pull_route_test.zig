@@ -8,6 +8,81 @@ fn env(a: std.mem.Allocator, pairs: []const [2][]const u8) !std.process.Environ.
     return m;
 }
 
+test "pull proxy: repeated configure failures name the current timeout or proxy variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", route.stall_name }) |name| {
+        var first = try env(a, &.{.{ route.connect_name, "0" }});
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &first));
+        try std.testing.expectEqualStrings(route.connect_name, route.refused);
+        const timeout = std.mem.eql(u8, name, route.stall_name);
+        var second = try env(a, &.{.{ name, if (timeout) "0" else "http://user:secret@[bad" }});
+        try std.testing.expectError(if (timeout) error.InvalidEnvironment else error.ProxyUrl, route.configure(a, &second));
+        try std.testing.expect(std.ascii.eqlIgnoreCase(name, route.refused));
+        var out: std.Io.Writer.Allocating = .init(a);
+        try route.refusal(&out.writer, if (timeout) error.InvalidEnvironment else error.ProxyUrl);
+        try std.testing.expect(std.ascii.startsWithIgnoreCase(out.written(), name));
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "secret") == null);
+    }
+}
+
+test "pull proxy: successful configure clears a preceding refusal even without a proxy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    var invalid = try env(a, &.{.{ route.stall_name, "bad" }});
+    var empty = try env(a, &.{});
+    var skipped = try env(a, &.{.{ "HTTPS_PROXY", "socks5://proxy.example:1080" }});
+    var valid = try env(a, &.{.{ "HTTP_PROXY", "http://proxy.example:3128" }});
+    for ([_]?*const std.process.Environ.Map{ null, &empty, &skipped, &valid }) |next| {
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &invalid));
+        try std.testing.expectEqualStrings(route.stall_name, route.refused);
+        try route.configure(a, next);
+        try std.testing.expectEqualStrings("", route.refused);
+    }
+    try std.testing.expectEqual(@as(u32, 30), route.settings.connect_s);
+    try std.testing.expectEqual(@as(u32, 60), route.settings.stall_s);
+    try std.testing.expectEqual(@as(u16, 3128), route.settings.http.?.port);
+}
+
+test "pull proxy: every proxy parse allocation failure names the variable before or after credentials" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    const cases = [_]struct { []const u8, usize }{
+        .{ "proxy.example:3128", 0 },
+        .{ "proxy.example:3128", 1 },
+        .{ "http://proxy.example:3128", 0 },
+        .{ "http://user:secret@proxy.example:3128", 0 },
+        .{ "http://user:secret@proxy.example:3128", 1 },
+    };
+    for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }) |name| for (cases) |c| {
+        var first = try env(a, &.{.{ route.connect_name, "0" }});
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &first));
+        var second = try env(a, &.{.{ name, c[0] }});
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = c[1] });
+        try std.testing.expectError(error.OutOfMemory, route.configure(failing.allocator(), &second));
+        try std.testing.expect(std.ascii.eqlIgnoreCase(name, route.refused));
+        var out: std.Io.Writer.Allocating = .init(a);
+        try route.refusal(&out.writer, error.OutOfMemory);
+        try std.testing.expect(std.ascii.startsWithIgnoreCase(out.written(), name));
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "secret") == null);
+    };
+}
+
 test "pull proxy: each scheme takes its own variable, lower case first, ALL_PROXY last" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
