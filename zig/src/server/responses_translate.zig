@@ -10,11 +10,12 @@ const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
 /// Fields a chat completion reads as they are: OpenAI's and this server's own.
-const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget" };
+const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget", "cache_salt" };
 const refused = [_][2][]const u8{
     .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
     .{ "prompt", "prompt templates are not supported: send input and instructions" },
     .{ "context_management", "context management is not supported" },
+    .{ "execution_witness", "execution_witness is supported on /v1/chat/completions and /v1/completions only" },
 };
 
 pub const Request = struct {

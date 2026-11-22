@@ -1,24 +1,6 @@
-// Qwen3.8 Flash Next MoE router, expert-grouped routed/shared MLP, and logits kernels.
+// Qwen3.8 Flash Next MoE top-k, parallel expert compaction, Xe2 DPAS MoE projections, and logits kernels.
 
-// Router logits [R, 513] f32 = X [R, 2560] bf16 . W [513, 2560] bf16. Grid: ((513 + 3) / 4, R), WG = 64 (4 subgroups).
-KERNEL(64) void fn_router_logits(global const ushort *X, global const ushort *W, global float *OUT, int R) {
-  const int e = get_group_id(0) * 4 + get_sub_group_id();
-  const int r = get_group_id(1);
-  if (e >= 513 || r >= R) return;
-  const int lane = get_sub_group_local_id();
-  global const ushort *xr = X + (long)r * 2560;
-  global const ushort *wr = W + (long)e * 2560;
-  float acc = 0.0f;
-  for (int i = lane * 8; i < 2560; i += 16 * 8) {
-    const ushort8 xv = vload8(0, xr + i);
-    const ushort8 wv = vload8(0, wr + i);
-    for (int j = 0; j < 8; j++) acc = fma(bf(xv[j]), bf(wv[j]), acc);
-  }
-  acc = sub_group_reduce_add(acc);
-  if (lane == 0) OUT[(long)r * 513 + e] = acc;
-}
-
-// Exact top-10 of 512 routed experts (ties: lowest id) + slot 10 shared-expert sigmoid gate. Grid: (R), WG = 128 (8
+// Exact top-10 of 512 routed experts (ties: lowest id) + slot 10 shared-expert sigmoid gate. Grid: (R), WG = 128.
 KERNEL(128) void fn_route_topk(global const float *L, global int *PICK, global float *WTS) {
   local float sv[8];
   local int si[8];
@@ -38,7 +20,6 @@ KERNEL(128) void fn_route_topk(global const float *L, global int *PICK, global f
         bi = idx;
       }
     }
-    // Subgroup best (tie -> lower id)
     const float sg_max = sub_group_reduce_max(bv);
     const int sg_id = sub_group_reduce_min(bv == sg_max ? bi : 0x7fffffff);
     if (lane == 0) {
@@ -76,13 +57,11 @@ KERNEL(128) void fn_route_topk(global const float *L, global int *PICK, global f
   }
 }
 
-// Compact active (row, slot, local_expert) triples on this rank, grouped by local_expert (up to 16 rows/group) while
-KERNEL(128) void fn_moe_compact(global const int *PICK, global int *ACTIVE, global int *EXP_GRP, global int *N_ACT,
+// Parallel expert compaction for R = 1..2048 into 32-pair Xe2 DPAS tiles while preserving ascending slot order per row.
+KERNEL(256) void fn_moe_compact(global const int *PICK, global int *ACTIVE, global int *EXP_GRP, global int *N_ACT,
                                 global int *ROW_LIST, int R, int first_e, int local_e) {
-  local int pick_s[64 * 10];
-  local int slot_pair[64 * 10];
   local int e_cnt[512];
-  local int e_off[512];
+  local int e_cur[512];
   local int g_off[512];
   const int tid = get_local_id(0);
   if (R == 1) {
@@ -92,30 +71,26 @@ KERNEL(128) void fn_moe_compact(global const int *PICK, global int *ACTIVE, glob
         const int le = PICK[s] - first_e;
         if (le >= 0 && le < local_e) {
           ACTIVE[rc] = (s << 10) | le;
-          EXP_GRP[rc] = (le << 20) | (1 << 12) | rc;
+          EXP_GRP[rc] = (le << 22) | (1 << 16) | rc;
           ROW_LIST[rc] = rc;
           rc++;
         }
       }
       ROW_LIST[rc] = -1;
       N_ACT[0] = rc;
+      N_ACT[1] = rc;
     }
     return;
   }
-  const int total_slots = R * 10;
-  for (int idx = tid; idx < total_slots; idx += 128) {
-    const int r = idx / 10, s = idx % 10;
-    pick_s[idx] = PICK[(long)r * 11 + s] - first_e;
-  }
-  for (int le = tid; le < local_e; le += 128) e_cnt[le] = 0;
+  for (int le = tid; le < local_e; le += 256) e_cnt[le] = 0;
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  for (int le = tid; le < local_e; le += 128) {
-    int c = 0;
-    for (int idx = 0; idx < total_slots; idx++) {
-      if (pick_s[idx] == le) c++;
+  for (int r = tid; r < R; r += 256) {
+    global const int *pr = PICK + (long)r * 11;
+    for (int s = 0; s < 10; s++) {
+      const int le = pr[s] - first_e;
+      if (le >= 0 && le < local_e) atomic_inc(&e_cnt[le]);
     }
-    e_cnt[le] = c;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -123,314 +98,340 @@ KERNEL(128) void fn_moe_compact(global const int *PICK, global int *ACTIVE, glob
     int p_acc = 0, g_acc = 0;
     for (int le = 0; le < local_e; le++) {
       const int c = e_cnt[le];
-      e_off[le] = p_acc;
+      e_cur[le] = p_acc;
       g_off[le] = g_acc;
       p_acc += c;
-      g_acc += (c + 15) >> 4;
+      g_acc += (c + 31) >> 5;
     }
     N_ACT[0] = g_acc;
+    N_ACT[1] = p_acc;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  for (int le = tid; le < local_e; le += 128) {
+  for (int le = tid; le < local_e; le += 256) {
     const int c = e_cnt[le];
     if (c == 0) continue;
-    int p_at = e_off[le];
-    for (int idx = 0; idx < total_slots; idx++) {
-      if (pick_s[idx] == le) {
-        const int r = idx / 10, s = idx % 10;
-        const int pair_idx = p_at++;
-        ACTIVE[pair_idx] = (r << 16) | (s << 10) | le;
-        slot_pair[idx] = pair_idx;
-      }
-    }
-    const int p0 = e_off[le], g0 = g_off[le];
-    for (int g = 0; g * 16 < c; g++) {
-      const int m = min(16, c - g * 16);
-      EXP_GRP[g0 + g] = (le << 20) | (m << 12) | (p0 + g * 16);
+    const int p0 = e_cur[le], g0 = g_off[le];
+    for (int g = 0; g * 32 < c; g++) {
+      const int m = min(32, c - g * 32);
+      EXP_GRP[g0 + g] = (le << 22) | (m << 16) | (p0 + g * 32);
     }
   }
-  barrier(CLK_LOCAL_MEM_FENCE);
 
-  for (int r = tid; r < R; r += 128) {
+  for (int r = tid; r < R; r += 256) {
+    global const int *pr = PICK + (long)r * 11;
     int rc = 0;
     for (int s = 0; s < 10; s++) {
-      const int le = pick_s[r * 10 + s];
+      const int le = pr[s] - first_e;
       if (le >= 0 && le < local_e) {
-        ROW_LIST[r * 11 + rc++] = slot_pair[r * 10 + s];
+        const int pair_idx = atomic_inc(&e_cur[le]);
+        ACTIVE[pair_idx] = (r << 14) | (s << 10) | le;
+        ROW_LIST[(long)r * 11 + rc++] = pair_idx;
       }
     }
-    ROW_LIST[r * 11 + rc] = -1;
+    ROW_LIST[(long)r * 11 + rc] = -1;
   }
 }
 
-// Routed expert SwiGLU up projection grouped by local expert (up to 16 rows share 1 weight load!): Grid: (640 / 16,
-KERNEL(256) void fn_moe_routed_up(global const ushort *X, global const int *ACTIVE, global const int *EXP_GRP,
-                                  global const int *N_ACT,
-                                  global const uint *GW, global const ushort *GS, global const ushort *GB,
-                                  global const uint *UW, global const ushort *US, global const ushort *UB,
-                                  global ushort *MOE_ACT) {
-  local int rows_s[16];
-  const int grp_idx = get_group_id(1);
+// Per-pair Routed Gate+Up for R = 1..16 (WG = 64: 4-way Split-K over K=2560). Grid: (40, R * min(10, local_e)).
+KERNEL(64) void fn_moe_up_1(global const ushort *X, global const int *ACTIVE, global const int *N_ACT,
+                            global const uint *GW, global const ushort *GS, global const ushort *GB,
+                            global const uint *UW, global const ushort *US, global const ushort *UB,
+                            global ushort *MOE_ACT) {
+  local float gp[4][16], up[4][16];
+  const int pair_idx = (int)get_group_id(1);
+  if (pair_idx >= N_ACT[1]) return;
+  const int pk = ACTIVE[pair_idx];
+  const int row_i = (pk >> 14) & 0x3FFF;
+  const int le = pk & 0x3FF;
+  global const ushort *xr = X + (long)row_i * 2560;
+  const int nb_col = (int)get_group_id(0);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const long nb = (long)le * 40 + nb_col;
+  float gq = 0.0f, uq = 0.0f;
+  for (int g = sg * 20; g < (sg + 1) * 20; g++) {
+    const short a_lo = (short)xr[g * 32 + lane];
+    const short a_hi = (short)xr[g * 32 + 16 + lane];
+    const float xs = dpas32_1(a_lo, a_hi, ONES_BF16, ONES_BF16);
+    int8 gb0, gb1, ub0, ub1; float gsc, gbi, usc, ubi;
+    load_q4_tile(GW, GS, GB, nb, 80, g, lane, &gb0, &gb1, &gsc, &gbi);
+    load_q4_tile(UW, US, UB, nb, 80, g, lane, &ub0, &ub1, &usc, &ubi);
+    const float gd = dpas32_1(a_lo, a_hi, gb0, gb1);
+    const float ud = dpas32_1(a_lo, a_hi, ub0, ub1);
+    gq = fma(xs, gbi, fma(gd, gsc, gq));
+    uq = fma(xs, ubi, fma(ud, usc, uq));
+  }
+  gp[sg][lane] = gq;
+  up[sg][lane] = uq;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (sg == 0) {
+    const float gr = (((gp[0][lane]  + gp[1][lane]) + gp[2][lane] ) + gp[3][lane]);
+    const float ur = (((up[0][lane] + up[1][lane]) + up[2][lane]) + up[3][lane]);
+    MOE_ACT[(long)pair_idx * 640 + nb_col * 16 + lane] = to_bf(bsilu(rbf(gr)) * rbf(ur));
+  }
+}
+
+// Multi-row Expert-Grouped Routed Gate+Up on Xe2 DPAS: WG = 256 (4 M-sgs x 4 N-sgs = [32 pairs x 64 cols]).
+KERNEL(256) void fn_moe_up_dpas(global const ushort *X, global const int *ACTIVE, global const int *EXP_GRP,
+                                global const int *N_ACT,
+                                global const uint *GW, global const ushort *GS, global const ushort *GB,
+                                global const uint *UW, global const ushort *US, global const ushort *UB,
+                                global ushort *MOE_ACT) {
+  local int rows_s[32];
+  local ushort xl[32][160];
+  const int grp_idx = (int)get_group_id(1);
   if (grp_idx >= N_ACT[0]) return;
-  const int grp = EXP_GRP[grp_idx];
-  const int le = (grp >> 20) & 0x3FF;
-  const int m = (grp >> 12) & 0xFF;
-  const int p0 = grp & 0xFFF;
-  const int lid = get_local_id(0);
-  if (lid < m) rows_s[lid] = ACTIVE[p0 + lid] >> 16;
+  const uint grp = (uint)EXP_GRP[grp_idx];
+  const int le = (int)((grp >> 22) & 0x1FFu);
+  const int m = (int)((grp >> 16) & 0x3Fu);
+  const int p0 = (int)(grp & 0xFFFFu);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);
+  if (lid < m) rows_s[lid] = (ACTIVE[p0 + lid] >> 14) & 0x3FFF;
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int lane = get_sub_group_local_id();
-  const long erow = (long)le * 640 + col;
-  const int words = 2560 / 8, groups = 2560 / 32;
-  global const uint *gw = GW + erow * words, *uw = UW + erow * words;
-  global const ushort *gs = GS + erow * groups, *gb = GB + erow * groups;
-  global const ushort *us = US + erow * groups, *ub = UB + erow * groups;
-  float g_acc[16], u_acc[16];
-  for (int j = 0; j < m; j++) {
-    g_acc[j] = 0.0f;
-    u_acc[j] = 0.0f;
-  }
-  for (int wi = lane; wi < words; wi += 16) {
-    const int g = wi >> 2;
-    const uint pg = gw[wi], pu = uw[wi];
-    const float gs_v = bf(gs[g]), gb_v = bf(gb[g]);
-    const float us_v = bf(us[g]), ub_v = bf(ub[g]);
-    const float qg0 = (float)(pg & 15u), qg1 = (float)((pg >> 4) & 15u), qg2 = (float)((pg >> 8) & 15u), qg3 = (float)((pg >> 12) & 15u);
-    const float qg4 = (float)((pg >> 16) & 15u), qg5 = (float)((pg >> 20) & 15u), qg6 = (float)((pg >> 24) & 15u), qg7 = (float)((pg >> 28) & 15u);
-    const float qu0 = (float)(pu & 15u), qu1 = (float)((pu >> 4) & 15u), qu2 = (float)((pu >> 8) & 15u), qu3 = (float)((pu >> 12) & 15u);
-    const float qu4 = (float)((pu >> 16) & 15u), qu5 = (float)((pu >> 20) & 15u), qu6 = (float)((pu >> 24) & 15u), qu7 = (float)((pu >> 28) & 15u);
-    for (int j = 0; j < m; j++) {
-      const ushort8 xv = vload8(0, X + (long)rows_s[j] * 2560 + wi * 8);
-      const float x0 = bf(xv.s0), x1 = bf(xv.s1), x2 = bf(xv.s2), x3 = bf(xv.s3);
-      const float x4 = bf(xv.s4), x5 = bf(xv.s5), x6 = bf(xv.s6), x7 = bf(xv.s7);
-      const float sx = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
-      const float dg = x0 * qg0 + x1 * qg1 + x2 * qg2 + x3 * qg3 + x4 * qg4 + x5 * qg5 + x6 * qg6 + x7 * qg7;
-      const float du = x0 * qu0 + x1 * qu1 + x2 * qu2 + x3 * qu3 + x4 * qu4 + x5 * qu5 + x6 * qu6 + x7 * qu7;
-      g_acc[j] += gs_v * dg + gb_v * sx;
-      u_acc[j] += us_v * du + ub_v * sx;
+  const int sg_m = sg >> 2, sg_n = sg & 3;
+  const int nb_col = (int)get_group_id(0) * 4 + sg_n;
+  const bool nb_ok = (nb_col < 40);
+  const long safe_nb = nb_ok ? ((long)le * 40 + nb_col) : 0;
+  const int m_pad = min(32, (m + 7) & ~7);
+  float8 ga = 0.0f, ua = 0.0f;
+
+  for (int q = 0; q < 4; q++) {
+    float8 g0 = 0.0f, u0 = 0.0f;
+    for (int g = q * 20; g < (q + 1) * 20; g += 5) {
+      for (int e = lid; e < m_pad * 40; e += 256) {
+        const int rr = e / 40, cc = (e % 40) * 4;
+        const ushort4 v = (rr < m) ? vload4(0, X + (long)rows_s[rr] * 2560 + g * 32 + cc) : (ushort4)(0);
+        xl[rr][cc + 0] = v.s0; xl[rr][cc + 1] = v.s1; xl[rr][cc + 2] = v.s2; xl[rr][cc + 3] = v.s3;
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      if (sg_m * 8 < m) {
+        for (int sub = 0; sub < 5; sub++) {
+          short8 a0, a1;
+          const int kb = sub * 32;
+          for (int r = 0; r < 8; r++) {
+            a0[r] = (short)xl[sg_m * 8 + r][kb + lane];
+            a1[r] = (short)xl[sg_m * 8 + r][kb + 16 + lane];
+          }
+          const float8 xs = dpas32_8(a0, a1, ONES_BF16, ONES_BF16);
+          int8 b0 = 0, b1 = 0;
+          float sc = 0.0f, bi = 0.0f;
+          if (nb_ok) load_q4_tile(GW, GS, GB, safe_nb, 80, g + sub, lane, &b0, &b1, &sc, &bi);
+          const float8 gd = dpas32_8(a0, a1, b0, b1);
+          for (int r = 0; r < 8; r++) g0[r] = fma(xs[r], bi, fma(gd[r], sc, g0[r]));
+          if (nb_ok) load_q4_tile(UW, US, UB, safe_nb, 80, g + sub, lane, &b0, &b1, &sc, &bi);
+          const float8 ud = dpas32_8(a0, a1, b0, b1);
+          for (int r = 0; r < 8; r++) u0[r] = fma(xs[r], bi, fma(ud[r], sc, u0[r]));
+        }
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
     }
+    ga = (q == 0) ? g0 : (ga + g0);
+    ua = (q == 0) ? u0 : (ua + u0);
   }
-  for (int j = 0; j < m; j++) {
-    const float gr = sub_group_reduce_add(g_acc[j]);
-    const float ur = sub_group_reduce_add(u_acc[j]);
-    if (lane == 0) {
-      MOE_ACT[(long)(p0 + j) * 640 + col] = to_bf(bsilu(rbf(gr)) * rbf(ur));
+
+  if (nb_ok) {
+    const int col = nb_col * 16 + lane;
+    for (int r = 0; r < 8; r++) {
+      const int j0 = sg_m * 8 + r;
+      if (j0 < m) MOE_ACT[(long)(p0 + j0) * 640 + col] = to_bf(bsilu(rbf(ga[r])) * rbf(ua[r]));
     }
   }
 }
 
-// Shared expert SwiGLU up projection over this rank's `sh_w` columns (640 / TP): Grid: ((sh_w + 15) / 16, (R + 15) /
-KERNEL(256) void fn_moe_shared_up(global const ushort *X, global const uint *GW, global const ushort *GS,
-                                  global const ushort *GB, global const uint *UW, global const ushort *US,
-                                  global const ushort *UB, global ushort *SH_ACT, int sh_w, int R) {
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int r0 = get_group_id(1) * 16;
-  if (col >= sh_w || r0 >= R) return;
-  const int m = min(16, R - r0);
-  float g_acc[16], u_acc[16];
-  q4g32_dot16(GW, GS, GB, X + (long)r0 * 2560, 2560, m, col, 2560, g_acc);
-  q4g32_dot16(UW, US, UB, X + (long)r0 * 2560, 2560, m, col, 2560, u_acc);
-  if (get_sub_group_local_id() == 0) {
-    for (int r = 0; r < m; r++) {
-      SH_ACT[(long)(r0 + r) * sh_w + col] = to_bf(bsilu(rbf(g_acc[r])) * rbf(u_acc[r]));
+// Per-pair Routed Down for R = 1..16 (K=640 -> 20 groups, N=2560 = 160 tiles). Grid: (160, R * min(10, local_e)).
+KERNEL(64) void fn_moe_down_1(global const ushort *MOE_ACT, global const int *ACTIVE, global const int *N_ACT,
+                              global const uint *DW, global const ushort *DS, global const ushort *DB,
+                              global float *MOE_DOWN) {
+  local float kp[4][16];
+  const int pair_idx = (int)get_group_id(1);
+  if (pair_idx >= N_ACT[1]) return;
+  const int le = ACTIVE[pair_idx] & 0x3FF;
+  const int nb_col = (int)get_group_id(0);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const long nb = (long)le * 160 + nb_col;
+  global const ushort *xa = MOE_ACT + (long)pair_idx * 640;
+  float qacc = 0.0f;
+  for (int g = sg * 5; g < (sg + 1) * 5; g++) {
+    const short a_lo = (short)xa[g * 32 + lane];
+    const short a_hi = (short)xa[g * 32 + 16 + lane];
+    const float xs = dpas32_1(a_lo, a_hi, ONES_BF16, ONES_BF16);
+    int8 b0, b1; float sc, bi;
+    load_q4_tile(DW, DS, DB, nb, 20, g, lane, &b0, &b1, &sc, &bi);
+    const float d = dpas32_1(a_lo, a_hi, b0, b1);
+    qacc = fma(xs, bi, fma(d, sc, qacc));
+  }
+  kp[sg][lane] = qacc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (sg == 0) {
+    MOE_DOWN[(long)pair_idx * 2560 + nb_col * 16 + lane] = (((kp[0][lane]  + kp[1][lane]) + kp[2][lane] ) + kp[3][lane]);
+  }
+}
+
+// Multi-row Expert-Grouped Routed Down on Xe2 DPAS: WG = 128 ([32 active pairs x 64 cols], K=640).
+KERNEL(128) void fn_moe_down_dpas(global const ushort *MOE_ACT, global const int *EXP_GRP, global const int *N_ACT,
+                                  global const uint *DW, global const ushort *DS, global const ushort *DB,
+                                  global float *MOE_DOWN) {
+  local ushort xl[32][160];
+  const int grp_idx = (int)get_group_id(1);
+  if (grp_idx >= N_ACT[0]) return;
+  const uint grp = (uint)EXP_GRP[grp_idx];
+  const int le = (int)((grp >> 22) & 0x1FFu);
+  const int m = (int)((grp >> 16) & 0x3Fu);
+  const int p0 = (int)(grp & 0xFFFFu);
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);
+  const int sg_m = sg >> 2, sg_n = sg & 3;
+  const int nb_col = (int)get_group_id(0) * 4 + sg_n;
+  const long nb = (long)le * 160 + nb_col;
+  const int m_pad = min(32, (m + 7) & ~7);
+  float8 acc0 = 0.0f, acc1 = 0.0f;
+
+  for (int q = 0; q < 4; q++) {
+    for (int e = lid; e < m_pad * 40; e += 128) {
+      const int rr = e / 40, cc = (e % 40) * 4;
+      const ushort4 v = (rr < m) ? vload4(0, MOE_ACT + (long)(p0 + rr) * 640 + q * 160 + cc) : (ushort4)(0);
+      xl[rr][cc + 0] = v.s0; xl[rr][cc + 1] = v.s1; xl[rr][cc + 2] = v.s2; xl[rr][cc + 3] = v.s3;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float8 q0 = 0.0f, q1 = 0.0f;
+    if (sg_m * 16 < m) {
+      for (int lg = 0; lg < 5; lg++) {
+        const int g = q * 5 + lg;
+        int8 b0, b1; float sc, bi;
+        load_q4_tile(DW, DS, DB, nb, 20, g, lane, &b0, &b1, &sc, &bi);
+        short8 a0_0, a0_1, a1_0, a1_1;
+        for (int r = 0; r < 8; r++) {
+          a0_0[r] = (short)xl[sg_m * 16 + r][lg * 32 + lane];
+          a0_1[r] = (short)xl[sg_m * 16 + r][lg * 32 + 16 + lane];
+          a1_0[r] = (short)xl[sg_m * 16 + 8 + r][lg * 32 + lane];
+          a1_1[r] = (short)xl[sg_m * 16 + 8 + r][lg * 32 + 16 + lane];
+        }
+        const float8 xs0 = dpas32_8(a0_0, a0_1, ONES_BF16, ONES_BF16);
+        const float8 d0 = dpas32_8(a0_0, a0_1, b0, b1);
+        for (int r = 0; r < 8; r++) q0[r] = fma(xs0[r], bi, fma(d0[r], sc, q0[r]));
+        if (sg_m * 16 + 8 < m) {
+          const float8 xs1 = dpas32_8(a1_0, a1_1, ONES_BF16, ONES_BF16);
+          const float8 d1 = dpas32_8(a1_0, a1_1, b0, b1);
+          for (int r = 0; r < 8; r++) q1[r] = fma(xs1[r], bi, fma(d1[r], sc, q1[r]));
+        }
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    acc0 = (q == 0) ? q0 : (acc0 + q0);
+    acc1 = (q == 0) ? q1 : (acc1 + q1);
+  }
+
+  const int col = nb_col * 16 + lane;
+  for (int r = 0; r < 8; r++) {
+    const int j0 = sg_m * 16 + r;
+    if (j0 < m) MOE_DOWN[(long)(p0 + j0) * 2560 + col] = acc0[r];
+    const int j1 = j0 + 8;
+    if (j1 < m) MOE_DOWN[(long)(p0 + j1) * 2560 + col] = acc1[r];
+  }
+}
+
+// 1..16-row Shared Expert SwiGLU Up on Xe2 DPAS (grid: (sh_w / 16, R), 128 B SLM).
+KERNEL(64) void fn_moe_sh_up_1(global const ushort *X,
+                               global const uint *GW, global const ushort *GS, global const ushort *GB,
+                               global const uint *UW, global const ushort *US, global const ushort *UB,
+                               global ushort *SH_ACT, int sh_w) {
+  local float gp[4][16], up[4][16];
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const int nb = (int)get_group_id(0), row_i = (int)get_group_id(1);
+  if (nb >= sh_w / 16) return;
+  global const ushort *xr = X + (long)row_i * 2560;
+  float gq = 0.0f, uq = 0.0f;
+  for (int g = sg * 20; g < (sg + 1) * 20; g++) {
+    const short a_lo = (short)xr[g * 32 + lane];
+    const short a_hi = (short)xr[g * 32 + 16 + lane];
+    const float xs = dpas32_1(a_lo, a_hi, ONES_BF16, ONES_BF16);
+    int8 gb0, gb1, ub0, ub1; float gsc, gbi, usc, ubi;
+    load_q4_tile(GW, GS, GB, nb, 80, g, lane, &gb0, &gb1, &gsc, &gbi);
+    load_q4_tile(UW, US, UB, nb, 80, g, lane, &ub0, &ub1, &usc, &ubi);
+    const float gd = dpas32_1(a_lo, a_hi, gb0, gb1);
+    const float ud = dpas32_1(a_lo, a_hi, ub0, ub1);
+    gq = fma(xs, gbi, fma(gd, gsc, gq));
+    uq = fma(xs, ubi, fma(ud, usc, uq));
+  }
+  gp[sg][lane] = gq;
+  up[sg][lane] = uq;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (sg == 0) {
+    const float gr = (((gp[0][lane] + gp[1][lane]) + gp[2][lane]) + gp[3][lane]);
+    const float ur = (((up[0][lane] + up[1][lane]) + up[2][lane]) + up[3][lane]);
+    SH_ACT[(long)row_i * sh_w + nb * 16 + lane] = to_bf(bsilu(rbf(gr)) * rbf(ur));
+  }
+}
+
+KERNEL(128) void fn_moe_sh_up_dpas(global const ushort *X,
+                                   global const uint *GW, global const ushort *GS, global const ushort *GB,
+                                   global const uint *UW, global const ushort *US, global const ushort *UB,
+                                   global ushort *SH_ACT, int sh_w, int R) {
+  local ushort xl[32][64];
+  const int sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);
+  const int sg_m = sg >> 1, sg_n = sg & 1;
+  const int m0 = (int)get_group_id(1) * 32;
+  const int nb = (int)get_group_id(0) * 2 + sg_n;
+  const int col = nb * 16 + lane;
+  const int nb_max = sh_w / 16;
+  const bool nb_ok = (nb < nb_max);
+  const long safe_nb = nb_ok ? (long)nb : 0;
+  float8 ga = 0.0f, ua = 0.0f;
+  for (int q = 0; q < 4; q++) {
+    float8 g0 = 0.0f, u0 = 0.0f;
+    for (int g = q * 20; g < (q + 1) * 20; g += 2) {
+      for (int e = lid; e < 32 * 16; e += 128) {
+        const int rr = e >> 4, cc = (e & 15) * 4;
+        const ushort4 v = (m0 + rr < R) ? vload4(0, X + (long)(m0 + rr) * 2560 + g * 32 + cc) : (ushort4)(0);
+        xl[rr][cc + 0] = v.s0; xl[rr][cc + 1] = v.s1; xl[rr][cc + 2] = v.s2; xl[rr][cc + 3] = v.s3;
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      for (int sub = 0; sub < 2; sub++) {
+        short8 a0, a1;
+        const int kb = sub * 32;
+        for (int r = 0; r < 8; r++) {
+          a0[r] = (short)xl[sg_m * 8 + r][kb + lane];
+          a1[r] = (short)xl[sg_m * 8 + r][kb + 16 + lane];
+        }
+        const float8 xs = dpas32_8(a0, a1, ONES_BF16, ONES_BF16);
+        int8 b0 = 0, b1 = 0;
+        float sc = 0.0f, bi = 0.0f;
+        if (nb_ok) load_q4_tile(GW, GS, GB, safe_nb, 80, g + sub, lane, &b0, &b1, &sc, &bi);
+        const float8 gd = dpas32_8(a0, a1, b0, b1);
+        for (int r = 0; r < 8; r++) g0[r] = fma(xs[r], bi, fma(gd[r], sc, g0[r]));
+        if (nb_ok) load_q4_tile(UW, US, UB, safe_nb, 80, g + sub, lane, &b0, &b1, &sc, &bi);
+        const float8 ud = dpas32_8(a0, a1, b0, b1);
+        for (int r = 0; r < 8; r++) u0[r] = fma(xs[r], bi, fma(ud[r], sc, u0[r]));
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    ga = (q == 0) ? g0 : (ga + g0);
+    ua = (q == 0) ? u0 : (ua + u0);
+  }
+  if (col < sh_w) {
+    for (int r = 0; r < 8; r++) {
+      const int row0 = m0 + sg_m * 8 + r;
+      if (row0 < R) SH_ACT[(long)row0 * sh_w + col] = to_bf(bsilu(rbf(ga[r])) * rbf(ua[r]));
     }
   }
 }
 
-// Combined local MoE down projection (routed active pairs + sharded shared expert) -> OUT [R, 2560] fp32! Grid: (2560
-KERNEL(256) void fn_moe_down_combine(global const ushort *MOE_ACT, global const ushort *SH_ACT,
-                                     global const int *ACTIVE, global const int *ROW_LIST, global const float *WTS,
-                                     global const uint *DW, global const ushort *DS, global const ushort *DB,
-                                     global const uint *SDW, global const ushort *SDS, global const ushort *SDB,
-                                     global float *OUT, int sh_w, int R) {
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int r = get_group_id(1);
+// Pure-bandwidth MoE Combine in exact ascending slot order (0..9 + shared slot 10): Grid (10, R), WG = 256.
+KERNEL(256) void fn_moe_combine(global const float *MOE_DOWN, global const float *SH_OUT,
+                                global const int *ACTIVE, global const int *ROW_LIST, global const float *WTS,
+                                global float *OUT, int has_sh, int R) {
+  const int col = (int)get_group_id(0) * 256 + (int)get_local_id(0);
+  const int r = (int)get_group_id(1);
   if (col >= 2560 || r >= R) return;
-  const int lane = get_sub_group_local_id();
   float total = 0.0f;
-
-  // 1. Active local routed experts for row r in ascending slot order
   for (int c = 0; c < 10; c++) {
-    const int pair_idx = ROW_LIST[r * 11 + c];
+    const int pair_idx = ROW_LIST[(long)r * 11 + c];
     if (pair_idx < 0) break;
-    const int packed = ACTIVE[pair_idx];
-    const int slot = (packed >> 10) & 0x3F;
-    const int le = packed & 0x3FF;
-    const float wt = WTS[(long)r * 11 + slot];
-    const long drow = (long)le * 2560 + col;
-    // K = 640 -> 80 words = 5 words per lane!
-    global const uint *wr = DW + drow * 80;
-    global const ushort *sr = DS + drow * 20, *br = DB + drow * 20;
-    global const ushort *xa = MOE_ACT + (long)pair_idx * 640;
-    float acc = 0.0f;
-    for (int wi = lane; wi < 80; wi += 16) {
-      const uint pk = wr[wi];
-      const int g = wi >> 2;
-      const ushort8 xv = vload8(0, xa + wi * 8);
-      const float x0 = bf(xv.s0), x1 = bf(xv.s1), x2 = bf(xv.s2), x3 = bf(xv.s3);
-      const float x4 = bf(xv.s4), x5 = bf(xv.s5), x6 = bf(xv.s6), x7 = bf(xv.s7);
-      const float dot = x0 * (float)(pk & 15u) + x1 * (float)((pk >> 4) & 15u) + x2 * (float)((pk >> 8) & 15u) +
-                        x3 * (float)((pk >> 12) & 15u) + x4 * (float)((pk >> 16) & 15u) + x5 * (float)((pk >> 20) & 15u) +
-                        x6 * (float)((pk >> 24) & 15u) + x7 * (float)((pk >> 28) & 15u);
-      const float sx = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
-      acc += bf(sr[g]) * dot + bf(br[g]) * sx;
-    }
-    acc = sub_group_reduce_add(acc);
-    total = fma(acc, wt, total);
+    const int slot = (ACTIVE[pair_idx] >> 10) & 0xF;
+    total = fma(MOE_DOWN[(long)pair_idx * 2560 + col], WTS[(long)r * 11 + slot], total);
   }
-
-  // 2. Shared expert slice (sh_w = 640 / TP -> sh_w/8 words, sh_w/32 groups)
-  if (sh_w > 0) {
-    const int swords = sh_w / 8, sgroups = sh_w / 32;
-    global const uint *swr = SDW + (long)col * swords;
-    global const ushort *ssr = SDS + (long)col * sgroups, *sbr = SDB + (long)col * sgroups;
-    global const ushort *sxa = SH_ACT + (long)r * sh_w;
-    float sacc = 0.0f;
-    for (int wi = lane; wi < swords; wi += 16) {
-      const uint pk = swr[wi];
-      const int g = wi >> 2;
-      const ushort8 xv = vload8(0, sxa + wi * 8);
-      const float x0 = bf(xv.s0), x1 = bf(xv.s1), x2 = bf(xv.s2), x3 = bf(xv.s3);
-      const float x4 = bf(xv.s4), x5 = bf(xv.s5), x6 = bf(xv.s6), x7 = bf(xv.s7);
-      const float dot = x0 * (float)(pk & 15u) + x1 * (float)((pk >> 4) & 15u) + x2 * (float)((pk >> 8) & 15u) +
-                        x3 * (float)((pk >> 12) & 15u) + x4 * (float)((pk >> 16) & 15u) + x5 * (float)((pk >> 20) & 15u) +
-                        x6 * (float)((pk >> 24) & 15u) + x7 * (float)((pk >> 28) & 15u);
-      const float sx = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
-      sacc += bf(ssr[g]) * dot + bf(sbr[g]) * sx;
-    }
-    sacc = sub_group_reduce_add(sacc);
-    total = fma(sacc, WTS[(long)r * 11 + 10], total);
+  if (has_sh) {
+    total = fma(SH_OUT[(long)r * 2560 + col], WTS[(long)r * 11 + 10], total);
   }
-
-  if (lane == 0) OUT[(long)r * 2560 + col] = total;
-}
-
-// 8. Logits Argmax, Log-Sum-Exp (MTP confidence), and Top-64 Candidates
-
-// Two-stage argmax + log-sum-exp over BF16 logits [R, V]: Stage 1: grid (256, R), WG = 256 -> PV[r*256 + g] = max,
-KERNEL(256) void fn_logits_part(global const ushort *L, int V, global float *PV, global int *PI, global float *PS) {
-  local float bv[256], bs[256];
-  local int bi[256];
-  const int lid = get_local_id(0), gid = get_group_id(0), row = get_group_id(1);
-  const int per = (V + 255) / 256, lo = gid * per, hi = min(V, lo + per);
-  float best = -INFINITY;
-  int idx = 0x7fffffff;
-  for (int i = lo + lid; i < hi; i += 256) {
-    const float v = bf(L[(long)row * V + i]);
-    if (v > best) {
-      best = v;
-      idx = i;
-    }
-  }
-  bv[lid] = best;
-  bi[lid] = idx;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  float gmax = bv[0];
-  int gidx = bi[0];
-  for (int i = 1; i < 256; i++) {
-    if (bv[i] > gmax || (bv[i] == gmax && bi[i] < gidx)) {
-      gmax = bv[i];
-      gidx = bi[i];
-    }
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  float s = 0.0f;
-  if (gmax > -INFINITY) {
-    for (int i = lo + lid; i < hi; i += 256) s += exp(bf(L[(long)row * V + i]) - gmax);
-  }
-  bs[lid] = s;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    float tot = 0.0f;
-    for (int i = 0; i < 256; i++) tot += bs[i];
-    PV[row * 256 + gid] = gmax;
-    PI[row * 256 + gid] = gidx;
-    PS[row * 256 + gid] = tot;
-  }
-}
-
-// Stage 2: grid (R), WG = 256 -> OUT_TOK[r] = argmax, OUT_BEST[r*4 + 0..2] = (max, lse, id_bits).
-KERNEL(256) void fn_logits_best(global const float *PV, global const int *PI, global const float *PS,
-                                global int *OUT_TOK, global float *OUT_BEST) {
-  local float bv[256], bs[256];
-  local int bi[256];
-  const int lid = get_local_id(0), row = get_group_id(0);
-  bv[lid] = PV[row * 256 + lid];
-  bi[lid] = PI[row * 256 + lid];
-  bs[lid] = PS[row * 256 + lid];
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    float best = bv[0];
-    int idx = bi[0];
-    for (int i = 1; i < 256; i++) {
-      if (bv[i] > best || (bv[i] == best && bi[i] < idx)) {
-        best = bv[i];
-        idx = bi[i];
-      }
-    }
-    float sum = 0.0f;
-    if (best > -INFINITY) {
-      for (int i = 0; i < 256; i++) {
-        if (bv[i] > -INFINITY) sum += bs[i] * exp(bv[i] - best);
-      }
-    }
-    OUT_TOK[row] = idx;
-    OUT_BEST[row * 4 + 0] = best;
-    OUT_BEST[row * 4 + 1] = best + log(sum);
-    OUT_BEST[row * 4 + 2] = as_float(idx);
-    OUT_BEST[row * 4 + 3] = 0.0f;
-  }
-}
-
-// Top-64 candidates of one BF16 logits row `L + row * V`: Stage 1 keeps top-64 per 256-slice, Stage 2 merges. Grid:
-KERNEL(64) void fn_topk64_part(global const ushort *L, int V, int row, global float *TV, global int *TI) {
-  local float sv[64];
-  local int si[64];
-  const int tid = get_local_id(0), gid = get_group_id(0);
-  const int per = (V + 255) / 256, lo = gid * per, hi = min(V, lo + per);
-  float my_v[32];
-  int my_i[32];
-  int cnt = 0;
-  for (int i = lo + tid; i < hi; i += 64) {
-    my_v[cnt] = bf(L[(long)row * V + i]);
-    my_i[cnt] = i;
-    cnt++;
-  }
-  for (int k = 0; k < 64; k++) {
-    float bv = -INFINITY;
-    int bi = 0x7fffffff, bj = -1;
-    for (int j = 0; j < cnt; j++) {
-      if (my_v[j] > bv || (my_v[j] == bv && my_i[j] < bi)) {
-        bv = my_v[j];
-        bi = my_i[j];
-        bj = j;
-      }
-    }
-    sv[tid] = bv;
-    si[tid] = bi;
-    barrier(CLK_LOCAL_MEM_FENCE);
-    float wv = sv[0];
-    int wi = si[0];
-    for (int u = 1; u < 64; u++) {
-      if (sv[u] > wv || (sv[u] == wv && si[u] < wi)) {
-        wv = sv[u];
-        wi = si[u];
-      }
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (bj >= 0 && my_i[bj] == wi) my_v[bj] = -INFINITY;
-    if (tid == 0) {
-      TV[gid * 64 + k] = wv;
-      TI[gid * 64 + k] = wi;
-    }
-  }
-}
-
-// Convert BF16 row [V] to FP32 row [V] (for full-vocab host sampling when top_k == 0 or top_k > 64).
-KERNEL(256) void fn_bf16_to_f32(global const ushort *IN, global float *OUT, int N) {
-  const int i = get_global_id(0);
-  if (i < N) OUT[i] = bf(IN[i]);
+  OUT[(long)r * 2560 + col] = total;
 }

@@ -5,6 +5,7 @@ const host = @import("dsv41");
 const kv = @import("kv.zig");
 const snapshots = @import("snapshots.zig");
 const pipelines = @import("pipelines.zig");
+const picks = @import("pick.zig");
 const target_ = @import("target.zig");
 
 const iface = host.iface;
@@ -195,7 +196,7 @@ pub const Tree = struct {
                 const o = &tr.open[trees[w[0]]];
                 const ch = &o.chains[w[1]];
                 for (ch.rows[0..ch.n], 0..) |row, i| {
-                    const got = try t.choose(lg[(r0 + i) * V ..][0..V], o.draws[row], o.sampling);
+                    const got = try picks.choose(t, lg[(r0 + i) * V ..][0..V], o.draws[row], o.sampling);
                     // a row run again in front of a branch must choose as it did on its own chain
                     if (o.done[row] and o.out[row] != got) return error.BranchUnstable;
                     if (o.home[row] == w[1]) {

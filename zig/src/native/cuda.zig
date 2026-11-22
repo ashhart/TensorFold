@@ -1,5 +1,4 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
-const openDrama = @import("drama_open.zig").open;
 const std = @import("std");
 const platform = @import("sys");
 const cuda = @import("cuda");
@@ -25,6 +24,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 const cuda_families = @import("cuda_families.zig");
+const cuda_witness = @import("cuda_witness.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 pub const registry = cuda_families.registry;
 /// --record opens here (engines.zig refuses it for a backend without this).
@@ -80,6 +80,7 @@ pub const Host = struct {
     health: ?api.HealthSource = null,
     startup_phase: @import("cuda_startup_phase.zig").Hook = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
+    witness: ?*cuda_witness.Witness = null, // --execution-witness on its first path, closed before the family
     served: drafted.Served = .{ .backend = undefined, .facts = .{}, .stream_bytes = 0 }, // the family's backend, wrapped with --drafter's draft model when given
     fn followFamily(p: *anyopaque) anyerror!void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -156,6 +157,7 @@ pub const Host = struct {
     }
 };
 const refusals = @import("cuda_refusal.zig");
+const open_family = @import("cuda_open.zig");
 const record = @import("cuda_record.zig");
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -163,21 +165,18 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     defer report.deinit();
     if (try refusals.startup(a, o, problem)) return null;
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
+    // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
+    if (@import("moss_image_spec.zig").recognize(a, io, o.dir)) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
-        if (refusals.lfm2(o)) |why| {
-            problem.* = why;
-            return null;
-        }
-        return lfm2.open(a, gpa, io, o, problem);
+    switch (try open_family.special(a, gpa, io, o, problem)) {
+        .not_mine => {},
+        .opened => |engine| return engine,
     }
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
@@ -269,6 +268,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         },
     };
     if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir); // GB10: drop cached shards (#1857)
+    const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.Witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
+    defer cuda_witness.release(witness);
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -456,6 +457,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     h.kv = kv_pages.watchOf(F, loaded, paged);
     h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
+    h.witness = cuda_witness.bound(F, witness, loaded, &g.ctx, .{ @intCast(window), @intCast(streams), @intCast(segments) });
     const readouts: ?lanes.readout.Info = if (@hasField(@TypeOf(loaded), "readouts")) loaded.readouts else null;
     try h.serve(io, served.facts, loaded.rows, familyInfo(F, .{
         .benchmark_ranks = bench.ranks,
@@ -482,8 +484,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
+        .witness = cuda_witness.source(h.witness),
     }), .{ .ctx = loaded.ctx, .text = F.explain }, snaps.warmQuiet(F));
     opened = true;
+    if (h.witness) |w| w.adopted = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
@@ -496,7 +500,9 @@ const toGib = family_memory.toGib;
 const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
+    _ = @import("cuda_qwen_host_test.zig");
     _ = @import("cuda_family_info.zig");
+    _ = @import("moss_image_host_test.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;
@@ -552,6 +558,7 @@ test {
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
     _ = @import("cuda_disk_identity_test.zig");
+    _ = cuda_witness;
 }
 test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
     try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);

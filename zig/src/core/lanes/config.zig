@@ -29,13 +29,13 @@ pub const Model = struct {
     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
-    copy_guard: bool = false, // a lone stream's copies compete with its own plain rounds (a family opts in)
     draft_confidence: ?f64 = null,
     floor_rates: bool = false, // Constants.floor_rates: a head whose steps cost more than the floor's cut saves
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
     shared_drafts: u32 = 0, // allocate_shared_drafts: a shared round's most head drafts a stream (0: drafts)
+    shared_mtp_cap: u32 = 0, // most head drafts a stream chains in a shared round; a lone one chains `drafts` (0: off)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     shared_step_ms: ?f64 = null, // a separate shared head step; null keeps mtp_step_ms
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
@@ -77,7 +77,6 @@ pub const Config = struct {
     speculate_early: bool,
     pipelined: bool,
     plain_guard: bool,
-    copy_guard: bool = false, // Model.copy_guard: off unless the family sets it (lanes/lone_copy.zig)
     most_drafts: u32,
     draft_confidence: ?f64 = null,
     family_streams: bool,
@@ -110,6 +109,7 @@ pub const Config = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
     shared_drafts: u32 = 0, // Model.shared_drafts
+    shared_mtp_cap: u32 = 0, // Model.shared_mtp_cap
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
     context_copies: bool = false, // Model.context_copies, within the existing verification width
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
@@ -166,7 +166,6 @@ pub const Config = struct {
             .speculate_early = m.speculate_early and !(m.root_copies and m.copy_drafts),
             .pipelined = m.gpu_tokens,
             .plain_guard = m.plain_guard,
-            .copy_guard = m.copy_guard,
             .most_drafts = @min(m.drafts, @min(width - 1, max_draft)),
             .draft_confidence = m.draft_confidence,
             .family_streams = streams,
@@ -200,6 +199,7 @@ pub const Config = struct {
             },
             .draft_step_ms = m.draft_step_ms,
             .shared_drafts = m.shared_drafts,
+            .shared_mtp_cap = m.shared_mtp_cap,
         };
     }
 

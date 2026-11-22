@@ -94,6 +94,7 @@ test {
     _ = shard_edit;
     _ = lora_merge;
     _ = quant;
+    _ = @import("runtime_lora.zig");
     _ = quant.gptq;
     _ = nvfp4_rows;
     _ = route_ref;

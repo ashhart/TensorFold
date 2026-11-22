@@ -14,6 +14,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *std.B
     const run = b.addRunArtifact(tests);
     b.step("test-video-library-host", "Video candidate order with a recording opener, without real libraries").dependOn(&run.step);
     host_tests.dependOn(&run.step);
+    const seek_mod = b.createModule(.{ .target = b.graph.host, .link_libc = true });
+    seek_mod.addCSourceFile(.{ .file = b.path("zig/tests/mem_seek_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined" } });
+    const seek = b.addExecutable(.{ .name = "tf-mem-seek-test", .root_module = seek_mod });
+    const seek_run = b.addRunArtifact(seek);
+    b.step("test-video-memory-seek-host", "Checked FFmpeg memory seeks at signed integer extremes").dependOn(&seek_run.step);
+    host_tests.dependOn(&seek_run.step);
     const cross = b.step("check-video-layout-linux", "Compile the Linux video probe and stub without execution");
     const exports = b.step("check-video-exports-linux", "Link a planted Linux stub as `video` links; read its exports");
     inline for (.{ .aarch64, .x86_64 }) |arch| {

@@ -124,6 +124,33 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     return final_name;
 }
 
+/// Whether an existing cached blob still has the digest and byte count the hub advertised.
+pub fn cachedMatches(io: std.Io, path: []const u8, e: Entry) !bool {
+    if (try fileStat(io, path) != e.size) return false;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var git = std.crypto.hash.Sha1.init(.{});
+    var git_head: [32]u8 = undefined;
+    if (e.git_sha1 != null) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
+    var buf: [64 << 10]u8 = undefined;
+    var at: u64 = 0;
+    while (at < e.size) {
+        const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, e.size - at))], at);
+        if (n == 0) return false;
+        hash.update(buf[0..n]);
+        if (e.git_sha1 != null) git.update(buf[0..n]);
+        at += n;
+    }
+    if (e.sha256) |want| {
+        var got: [32]u8 = undefined;
+        hash.final(&got);
+        return std.mem.eql(u8, &got, &want);
+    }
+    if (e.git_sha1) |want| return std.mem.eql(u8, &git.finalResult(), &want);
+    return false;
+}
+
 pub fn fileStat(io: std.Io, path: []const u8) !u64 {
     const st = try std.Io.Dir.cwd().statFile(io, path, .{});
     return st.size;

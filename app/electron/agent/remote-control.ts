@@ -4,7 +4,7 @@ import { remoteDeviceStatus } from './device-status'
 import { loadStaticFile } from './remote-static'
 import { DEFAULT_REMOTE_STREAM_BUFFER_BYTES, KeepTailRemoteEventBuffer } from './remote-stream-buffer'
 import { PairingAttemptLimiter, authToken, tokenMatches, securityRoleAllows, requiredRoleForRemoteMutation, remoteMutationNeedsOwnerToken } from './remote-control-auth'
-import { readJson, writeJson, writeRemoteStatic } from './remote-control-http'
+import { PAIRING_BODY_BYTES, readJson, writeJson, writeRemoteStatic } from './remote-control-http'
 import { remoteControlCommandCatalog } from './remote-control-catalog'
 import { handleRemoteMutation } from './remote-control-mutations'
 import type { RemoteWorkspaceScope } from './local-workspace-policy'
@@ -245,6 +245,12 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
       return
     }
 
+    // Both pairing entry points enforce the small pre-auth cap, including chunked bodies.
+    // readJson caches the parse so the redeemed route can consume that same body later.
+    if (req.method === 'POST' && (url.pathname === '/v1/auth/pair' || url.pathname === '/v1/auth/pair/session')) {
+      await readJson(req, PAIRING_BODY_BYTES)
+    }
+
     // Redeem a one-time pairing credential for a device session token (VST-035). Handled
     // BEFORE the bearer-token gate: a fresh device has no session/owner token yet — the
     // credential IS its authorization, verified constant-time inside redeemPairingLink. This
@@ -264,7 +270,7 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
         writeJson(res, 429, { error: 'pairing_rate_limited' })
         return
       }
-      const body = await readJson(req)
+      const body = await readJson(req, PAIRING_BODY_BYTES)
       const credential = String(body.credential ?? authToken(req) ?? '')
       const result = await deps.pairing.redeemPairingLink(credential, typeof body.clientInfo === 'string' ? body.clientInfo : null)
       if (!result.ok || !result.session) {

@@ -53,6 +53,12 @@ pub const Engine = engine.Engine;
 pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
+
+/// The named cut points the backend honors for this request.
+pub fn cutPoints(s: *const Stream) []const u32 {
+    return s.chunks;
+}
+
 pub const Sampling = sampling.Sampling;
 pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;
@@ -63,6 +69,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
     _ = @import("plain_streams_test.zig");
+    _ = @import("deep_chain_test.zig");
     _ = @import("late_draft_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
@@ -102,8 +109,6 @@ pub const learned_dirs = @import("learned_dirs.zig");
 
 test {
     _ = @import("context_copy_price_test.zig");
-    _ = @import("lone_copy_price_test.zig");
-    _ = @import("lone_copy_sampled_test.zig");
-    _ = @import("copy_price_test.zig");
     _ = @import("sampling_row.zig");
+    _ = @import("sampling_row_test.zig");
 }

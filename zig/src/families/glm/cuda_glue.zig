@@ -19,6 +19,8 @@ pub const Set = struct {
     dsel: bool = false,
     /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
     dscore: ?*const index_mod.Kernels = null,
+    /// Full GLM-5.3's roped latent rows (576): cuda.mla's absorb, rope and 16-head chunk tiles; GLM-5.3-Flash: none.
+    mla: ?*const cuda.mla.Mla = null,
 };
 
 /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.

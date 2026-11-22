@@ -24,7 +24,7 @@ const ple_tail_n = ld.ple_tail_n;
 const gdn_taps = ld.gdn_taps;
 const max_tp = ld.max_tp;
 const max_verify_rows = ld.max_verify_rows;
-const chunk_rows = ld.chunk_rows;
+const attn_tile_rows = ld.attn_tile_rows;
 const Dev = ld.Dev;
 const TpShape = ld.TpShape;
 
@@ -127,9 +127,11 @@ pub const RankActs = struct {
     active: *anyopaque, // [chunk_rows * 10] i32
     exp_grp: *anyopaque, // [chunk_rows * 10] i32
     n_act: *anyopaque, // [4] i32
-    row_list: *anyopaque, // [chunk_rows * 11] i32
-    moe_act: *anyopaque, // [chunk_rows * 10, 640] bf16
-    sh_act: *anyopaque, // [chunk_rows, sh_w] bf16
+    row_list: *anyopaque, // [chunk_cap * 11] i32
+    moe_act: *anyopaque, // [chunk_cap * 10, 640] bf16
+    moe_down: *anyopaque, // [chunk_cap * 10, 2560] f32
+    sh_act: *anyopaque, // [chunk_cap, sh_w] bf16
+    sh_out: *anyopaque, // [chunk_cap, 2560] f32
     // Logits & Draft Head scratch
     shard_logits: *anyopaque, // [max_verify_rows, vocab_per] bf16
     shard_dlogits: ?*anyopaque = null, // [1, draft_len] bf16
@@ -155,52 +157,55 @@ pub fn allocHostSlice(comptime T: type, d0: *Dev, gpus: []ze.Gpu, count: usize) 
     return slice;
 }
 
-pub fn allocRankActs(d: *Dev, shp: TpShape, rk: usize, nb_max: usize, draft_total: usize, has_mtp: bool) !RankActs {
+pub fn allocRankActs(d: *Dev, shp: TpShape, rk: usize, chunk_cap: usize, nb_max: usize, draft_total: usize, has_mtp: bool) !RankActs {
     const max_pw = @max(shp.gdn_pw, shp.attn_pw);
+    const mtp_fc_rows = streams * chunk_cap;
     var a: RankActs = .{
-        .ids = try d.allocZero(chunk_rows * 4),
+        .ids = try d.allocZero(chunk_cap * 4),
         .dummy = try d.allocZero(4096),
-        .h = try d.allocZero(chunk_rows * wide * 2),
-        .prompt_streams = try d.allocZero(chunk_rows * wide * 2),
-        .norm = try d.allocZero(chunk_rows * wide * 2),
-        .act = try d.allocZero(chunk_rows * low * 2),
-        .inj = try d.allocZero(chunk_rows * streams * 2),
-        .mixed = try d.allocZero(chunk_rows * dims * 2),
-        .branch = try d.allocZero(chunk_rows * dims * 4),
-        .mtp_branch = try d.allocZero(chunk_rows * dims * 2),
-        .proj = try d.allocZero(chunk_rows * max_pw * 2),
-        .ple_emb = try d.allocZero(chunk_rows * dims * 2),
-        .ple_keys = try d.allocZero(chunk_rows * wide * 2),
-        .ple_vals = try d.allocZero(chunk_rows * dims * 2),
-        .ple_gated = try d.allocZero(chunk_rows * wide * 2),
-        .ple_pss = try d.allocZero(chunk_rows * streams * 4),
-        .ple_nrow = try d.allocZero(chunk_rows * wide * 2),
-        .gq = try d.allocZero(chunk_rows * shp.nk * 128 * 4),
-        .gk = try d.allocZero(chunk_rows * shp.nk * 128 * 4),
-        .gv = try d.allocZero(chunk_rows * shp.nv * 128 * 4),
-        .ggb = try d.allocZero(chunk_rows * shp.nv * 2 * 4),
-        .ys = try d.allocZero(chunk_rows * shp.nv * 128 * 4),
-        .gout = try d.allocZero(chunk_rows * shp.gdn_vdim * 2),
-        .q = try d.allocZero(chunk_rows * shp.nq * head_dim * 2),
-        .iq = try d.allocZero(chunk_rows * index_heads * index_dim * 2),
-        .qsa_sc = try d.allocZero(chunk_rows * nb_max * 4),
-        .qsa_ids = try d.allocZero(chunk_rows * index_idw * 4),
-        .qsa_nkr = try d.allocZero(chunk_rows * 4),
-        .qsa_spr = try d.allocZero(chunk_rows * 4),
-        .pm = try d.allocZero(chunk_rows * shp.nq * max_attn_slices * 4),
-        .pl = try d.allocZero(chunk_rows * shp.nq * max_attn_slices * 4),
-        .po = try d.allocZero(chunk_rows * shp.nq * max_attn_slices * head_dim * 4),
-        .ao = try d.allocZero(chunk_rows * shp.nq * head_dim * 2),
-        .agated = try d.allocZero(chunk_rows * shp.attn_odim * 2),
-        .router_l = try d.allocZero(chunk_rows * 513 * 4),
-        .picks = try d.allocZero(chunk_rows * slots * 4),
-        .wts = try d.allocZero(chunk_rows * slots * 4),
-        .active = try d.allocZero(chunk_rows * 10 * 4),
-        .exp_grp = try d.allocZero(chunk_rows * 10 * 4),
+        .h = try d.allocZero(chunk_cap * wide * 2),
+        .prompt_streams = try d.allocZero(chunk_cap * wide * 2),
+        .norm = try d.allocZero(chunk_cap * wide * 2),
+        .act = try d.allocZero(chunk_cap * low * 2),
+        .inj = try d.allocZero(chunk_cap * streams * 2),
+        .mixed = try d.allocZero(chunk_cap * dims * 2),
+        .branch = try d.allocZero(chunk_cap * dims * 4),
+        .mtp_branch = try d.allocZero(chunk_cap * dims * 2),
+        .proj = try d.allocZero(chunk_cap * max_pw * 2),
+        .ple_emb = try d.allocZero(chunk_cap * dims * 2),
+        .ple_keys = try d.allocZero(chunk_cap * wide * 2),
+        .ple_vals = try d.allocZero(chunk_cap * dims * 2),
+        .ple_gated = try d.allocZero(mtp_fc_rows * dims * 2),
+        .ple_pss = try d.allocZero(chunk_cap * streams * 4),
+        .ple_nrow = try d.allocZero(chunk_cap * wide * 2),
+        .gq = try d.allocZero(chunk_cap * shp.nk * 128 * 4),
+        .gk = try d.allocZero(chunk_cap * shp.nk * 128 * 4),
+        .gv = try d.allocZero(chunk_cap * shp.nv * 128 * 4),
+        .ggb = try d.allocZero(chunk_cap * shp.nv * 2 * 4),
+        .ys = try d.allocZero(chunk_cap * shp.nv * 128 * 4),
+        .gout = try d.allocZero(chunk_cap * shp.gdn_vdim * 2),
+        .q = try d.allocZero(chunk_cap * shp.nq * head_dim * 2),
+        .iq = try d.allocZero(chunk_cap * index_heads * index_dim * 2),
+        .qsa_sc = try d.allocZero(attn_tile_rows * nb_max * 4),
+        .qsa_ids = try d.allocZero(attn_tile_rows * index_idw * 4),
+        .qsa_nkr = try d.allocZero(attn_tile_rows * 4),
+        .qsa_spr = try d.allocZero(attn_tile_rows * 4),
+        .pm = try d.allocZero(attn_tile_rows * shp.nq * max_attn_slices * 4),
+        .pl = try d.allocZero(attn_tile_rows * shp.nq * max_attn_slices * 4),
+        .po = try d.allocZero(attn_tile_rows * shp.nq * max_attn_slices * head_dim * 4),
+        .ao = try d.allocZero(chunk_cap * shp.nq * head_dim * 2),
+        .agated = try d.allocZero(chunk_cap * shp.attn_odim * 2),
+        .router_l = try d.allocZero(chunk_cap * 513 * 4),
+        .picks = try d.allocZero(chunk_cap * slots * 4),
+        .wts = try d.allocZero(chunk_cap * slots * 4),
+        .active = try d.allocZero(chunk_cap * 10 * 4),
+        .exp_grp = try d.allocZero(chunk_cap * 10 * 4),
         .n_act = try d.allocZero(16),
-        .row_list = try d.allocZero(chunk_rows * slots * 4),
-        .moe_act = try d.allocZero(chunk_rows * 10 * moe_w * 2),
-        .sh_act = try d.allocZero(chunk_rows * shp.sh_w * 2),
+        .row_list = try d.allocZero(chunk_cap * slots * 4),
+        .moe_act = try d.allocZero(chunk_cap * 10 * moe_w * 2),
+        .moe_down = try d.allocZero(chunk_cap * 10 * dims * 4),
+        .sh_act = try d.allocZero(chunk_cap * @max(shp.sh_w, 16) * 2),
+        .sh_out = try d.allocZero(chunk_cap * dims * 4),
         .shard_logits = try d.allocZero(max_verify_rows * shp.vocab_per * 2),
     };
     if (has_mtp) {

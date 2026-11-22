@@ -14,12 +14,31 @@ const Spec = struct {
     pub const model_type = "qwen4_exp";
     pub const name = "flashnext-xpu";
     pub const Engine = fn_xpu.Engine;
-    pub const cache_rules: api.prompt_cache.Rules = .{ .planned = true, .grid = 64 };
+    pub const chunk_invariant = true;
+    pub const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 1, .planned = false, .chunk = 1, .chunk_starts = false };
 
-    pub fn promptRows(_: *const Engine) u32 {
-        return 64;
+    pub fn promptRows(e: *const Engine) u32 {
+        return e.busy_rows;
+    }
+
+    pub fn soloRows(e: *const Engine) u32 {
+        return e.solo_rows;
     }
 };
+
+pub fn parseChunkOpts(chunk_raw: ?[]const u8, solo_raw: ?[]const u8) !struct { busy: u32, solo: u32 } {
+    const max_c = fn_xpu.ld.max_chunk_rows;
+    const busy: usize = if (chunk_raw) |s| blk: {
+        const n = std.fmt.parseInt(usize, s, 10) catch return error.BadChunk;
+        if (n == 0 or n > max_c) return error.BadChunk;
+        break :blk n;
+    } else fn_xpu.ld.chunk_rows;
+    const solo: usize = if (solo_raw) |s|
+        lanes.solo_chunk.parse(s, .{ .busy = busy, .most = max_c }) catch return error.BadChunkSolo
+    else
+        @max(busy, fn_xpu.ld.default_solo_rows);
+    return .{ .busy = @intCast(busy), .solo = @intCast(solo) };
+}
 
 var stopping = std.atomic.Value(bool).init(false);
 var prev_int: std.posix.Sigaction = undefined;
@@ -95,11 +114,29 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     const mtp_env = try settings.read(?bool, "XPU_MTP", null);
     const want_mtp = if (mtp_env == false) false else o.drafts;
+    const chunk_busy: u32 = try settings.read(u32, "XPU_CHUNK", @intCast(fn_xpu.ld.chunk_rows));
+    const solo_default: u32 = @max(chunk_busy, @as(u32, @intCast(fn_xpu.ld.default_solo_rows)));
+    const chunk_solo: u32 = try settings.read(u32, "XPU_CHUNK_SOLO", solo_default);
+    if (chunk_solo < chunk_busy or chunk_solo > fn_xpu.ld.max_chunk_rows) {
+        problem.* = try std.fmt.allocPrint(
+            a,
+            "invalid XPU_CHUNK_SOLO: expected a whole row count from {d} to {d}",
+            .{ chunk_busy, fn_xpu.ld.max_chunk_rows },
+        );
+        return null;
+    }
+    const chunks = .{ .busy = chunk_busy, .solo = chunk_solo };
+    const mtp_depth: u32 = try settings.read(u32, "XPU_MTP_DEPTH", 6);
+    const mtp_conf: f64 = try settings.read(f64, "XPU_MTP_CONF", -0.4);
 
     const engine = fn_xpu.Engine.init(gpa, io, o.dir, .{
         .context = @intCast(window),
         .tp = tp,
         .mtp = want_mtp,
+        .busy_rows = chunks.busy,
+        .solo_rows = chunks.solo,
+        .mtp_drafts = mtp_depth,
+        .mtp_conf = mtp_conf,
     }) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine could not load Qwen3.8 Flash Next from {s} at tp={d}: {s}", .{ o.dir, tp, @errorName(err) });
         return null;
@@ -167,7 +204,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .context_window = @intCast(window),
         .context_fitted = true,
         .startup = h.startup,
-        .prefill_step = if (drafted) Spec.promptRows(engine) else 0,
     });
 
     const left_after_streams = mem_free -| (@as(u64, extra) * per_seq);

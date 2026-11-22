@@ -15,5 +15,7 @@ pub const iface = @import("draft/iface.zig");
 pub const serve_lanes = @import("serve_lanes.zig");
 pub const calib_env = @import("draft/calib_env.zig");
 pub const calib_lanes = @import("calib_lanes.zig");
+pub const calib_measure = @import("draft/calib_measure.zig");
+pub const costs = @import("draft/costs.zig");
 pub const lanes = @import("lanes");
 pub const api = @import("engine_api");

@@ -68,7 +68,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, io:
     mixFin(x, e, ma);
     try attn.encode(x, e, w);
     e.barrier();
-    try ffn(x, e, w, io, .{ .experts = c.experts, .topk = c.topk, .route = x.p.route });
+    try ffn(x, e, w, io, .{ .experts = c.experts, .topk = c.topk, .route = x.p.route, .plan = x.p.gate_plan });
 }
 
 /// After the attention's barrier: hc post, hc pre, the MoE (of shape `sh`) and its hc post, then a barrier.

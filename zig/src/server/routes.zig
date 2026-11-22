@@ -18,10 +18,12 @@ const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
 const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
+const witness = @import("witness.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
+const flush = @import("cache_flush.zig");
 const slide_forget = @import("slide_forget.zig");
 const voice_routes = @import("drama_voice_routes.zig");
 const Server = @import("server.zig").Server;
@@ -110,6 +112,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
+    if (std.mem.eql(u8, route, witness.path)) return witness.route(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, "/api/tags")) return ollama.tags(srv, conn, a);
     if (std.mem.eql(u8, route, "/api/show")) return ollama.show(srv, conn, a);
@@ -134,6 +137,10 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (@import("responses_background.zig").cancelPath(route)) |rid| { // cancel bypasses admission
         discardBody(conn, a);
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
+    }
+    if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
+        discardBody(conn, a);
+        return flush.post(srv, conn, a);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");

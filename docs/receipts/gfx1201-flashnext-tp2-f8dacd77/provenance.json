@@ -1,0 +1,19 @@
+{
+ "issue": "https://github.com/ashhart/TensorFold/issues/2401",
+ "source_commit": "f8dacd777f1d846c48befd37159e74d52f759edb (git describe v1.2.7-399-gf8dacd777: 399 commits past the v1.2.7 tag, clean tree)",
+ "source_dirty": false,
+ "host": "<GPU_HOST>",
+ "gpu": "2 x AMD Radeon AI PRO R9700 (gfx1201, 32 GiB), ranks on HIP devices 3 and 0",
+ "hip": "7.2.53211-97f5574fe (ROCm 7.2.4)",
+ "clang": "AMD clang 22.0.0git",
+ "zig": "0.17.0",
+ "build_command": "zig build native-hip -Dhip=true -Dhip-arch=gfx1201 -Dhipcc=/opt/rocm/bin/hipcc -Dhip-device-lib=/opt/rocm/lib/llvm/lib/clang/22/lib/amdgcn/bitcode -Doptimize=ReleaseFast",
+ "build_exit": 0,
+ "binaries_sha256": {
+  "zig-out/native-hip/bin/tensorfold-native (measurements)": "2abff44a19768ab762b2fb221750edb76a8cbe9e9d7858107c1d54964ef9ee1d",
+  "zig-out/native-hip/bin/tensorfold-native (rebuilt with -Dversion=1.2.7 for the gates)": "21d8fcbe874c66497eedf245baf1a75ead299da52664a92d0b97230ededb0358",
+  "zig-out/bin/tf-qwen35-test": "d2ddb61a74d0dca22f1769d819968df920582f9d149b6127996049265f462652"
+ },
+ "checkpoints": "checkpoints.json contains verified public Hugging Face revision and per-file LFS SHA-256 hashes (29 files, 0 mismatches)",
+ "scope": "Two-rank Flash Next oQ2-MTP decode and cold-prefill measurement on gfx1201, with bench alone/serial equality evidence. Not a model-fidelity, multi-host or all-family qualification. Prompt-cache with MTP is outside the qualified scope at --tp 2."
+}

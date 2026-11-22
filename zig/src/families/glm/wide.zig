@@ -45,6 +45,7 @@ pub const Pipes = struct {
     mm6: affine_mm.Pipes,
     zeros: mtl.Buffer, // expert ids all 0: a dense GLU through the by-ids kernel (the shared expert)
     hash: u64, // every source compiled here
+    mm_bm: u32, // affine_mm dense row-tile height: 32 pre-M5 (TF_GLM_M3_FAST), 64 on M5
 
     pub fn deinit(p: *Pipes) void {
         inline for (.{
@@ -188,11 +189,12 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     h.update(sources.ops_embed_norm);
     try lib(made, device, sources.ops_embed_norm, &.{ "tf_embed_b6_g64", "tf_embed_b8_g64" }, &p.embed);
     for ([_]u8{ 8, 2, 5, 6 }, [_]*affine_mm.Pipes{ &p.mm8, &p.mm2, &p.mm5, &p.mm6 }) |bits, out| {
-        const src = try affine_mm.source(device, gpa, .{ .bits = bits, .group = 64 });
+        const src = try affine_mm.source(device, gpa, .{ .bits = bits, .group = 64, .glm_m3_fast = !device.tensorUnits() });
         defer gpa.free(src);
         h.update(src);
         try lib(made, device, src, &affine_mm.names, out);
     }
+    p.mm_bm = if (device.tensorUnits()) 64 else 32;
     p.zeros = try device.buffer(64 * 4, mtl.ResourceOptions.shared);
     @memset(p.zeros.slice(i32, 64), 0);
     p.hash = h.final();
@@ -263,7 +265,7 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
     var head = q;
     head.n = ny;
     affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, h * kx, io.ldx); // a head's sums one row apart
-    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
+    affine_mm.denseBatchBm(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
         .x_row = @intCast(io.ldx),
         .y_row = @intCast(io.ldo),
         .sums_row = @intCast(h),
@@ -271,7 +273,7 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
         .y_batch = @intCast(ny),
         .sums_batch = 1,
         .w_batch = @intCast(ny),
-    });
+    }, p.mm_bm);
 }
 
 /// x [rows, k] through bf16 W [n, k]: scalar path, kept for tests / non-prefill callers (decode-side eh uses mtp.zig).
@@ -470,17 +472,8 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
         };
         if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
         summed = true;
-        affine_mm.denseBatch(
-            e,
-            pipes,
-            io.in,
-            sums,
-            one,
-            part.out,
-            io.rows,
-            1,
-            .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) },
-        );
+        const strides: affine_mm.Strides = .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) };
+        affine_mm.denseBatchBm(e, pipes, io.in, sums, one, part.out, io.rows, 1, strides, p.mm_bm);
     }
 }
 

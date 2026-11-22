@@ -46,11 +46,11 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | Scope | Routes |
 | --- | --- |
 | `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
-| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, adding or deleting voices (`--manage-voices`), another method, or a suffix alias such as `/alt/completions`
-that the server answers for a full key. The route
+`/v1/imprint`, adding or deleting voices (`--manage-voices`), `/v1/prompt_cache/flush`, another method, or a suffix
+alias such as `/alt/completions` that the server answers for a full key. The route
 is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
 `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
 or a parked model reloads. The public routes stay public.
@@ -60,6 +60,9 @@ and no `previous_response_id`, with the whole conversation in `input`; anything 
 a Responses socket, a `previous_response_id` that the socket's own cache holds is allowed. A request keeps the scopes
 it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one model,
 its prompt cache and the metrics.
+
+A reply's binding carries the read-scoped execution witness, so `"execution_witness": true` needs `read` beside
+`inference`; a key without `read` answers 403 `insufficient_scope` naming the field before the request is planned.
 
 
 ## Browser request headers
@@ -171,12 +174,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
-warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
-embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache, cache_salt
+([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The
+vision, speech, embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
 thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
-[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
-including false, and no callback details or addresses are exposed.
+[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
+and no callback details or addresses are exposed.
 
 Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
 Flags describe the engine; request combinations, context, template and format constraints still apply.
@@ -278,12 +281,13 @@ and `--vision`.
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
 
-One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
 orientation), never in the model's resized frame.
 
 | Model | What the reader returns | Geometry |
 | --- | --- | --- |
 | dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+| GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
 Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
 and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
@@ -292,7 +296,7 @@ key scope.
 
 ### Reader Markdown
 
-The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+Both readers write block text in one Markdown flavour, the one Mistral's page Markdown uses:
 
 - Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
 - GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
@@ -301,12 +305,13 @@ The reader writes block text in one Markdown flavour, the one Mistral's page Mar
 - Lists with `-` or `1.` markers, and code in fenced blocks.
 - No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
   own image references.
+- GLM-OCR's single block holds the whole page's Markdown, headings, tables and math included.
 
 ### Pages and budgets
 
 - Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
-  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
-  decoded pixels disagree is refused as bad input.
+  16 megapixels and 8192 pixels a side for dots.mocr, 32 megapixels for GLM-OCR; a larger image is bad input. An
+  image whose header and decoded pixels disagree is refused as bad input.
 - PDFs need `--vision-pdf`. PDFium renders each selected page at up to 144 DPI, at most 2048 pixels a side and
   about 3.6 megapixels; boxes and sizes are in pixels of the rendered page. Mistral reports that DPI (72 for an
   image). Every PDF of a request is measured before the first page is read (its page count and each selected
@@ -350,7 +355,7 @@ stops the request before its next page or PDF render.
 | `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes decide PDF or image. `{"type": "file"}` is HTTP 400 |
 | `pages` | 0-based page indices as a list or a string such as `"0,2-4"`; duplicates are merged. An image has only page `0`. At most 1024 entries (a range counts its length) before merging, and the page budget after |
 | `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
-| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer`. GLM-OCR marks neither, so `true` is HTTP 400 "this model does not mark page headers or footers" |
 | `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
 | `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
 | `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
@@ -363,6 +368,12 @@ stops the request before its next page or PDF render.
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
+
+### GLM-OCR context
+
+GLM-OCR's default 8192-token window leaves about 2000 tokens for the reply after a full image budget (6144
+tokens). A dense page needs more: start the server with a larger `--context`, or such pages fail as unreadable,
+"the model's output was cut at the context limit".
 
 ## System One on a Clef engine
 
@@ -469,6 +480,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `priority` | `background` yields to foreground requests | Both |
 | `deadline_s` | Seconds, more than 0 and at most 1,000,000, on chat and legacy completions: at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave, usage and token ids. A reply that ends first, or a [cancel](#cancel-a-request) that came first, keeps its own ending; without the field nothing changes | Native |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
+| `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400, a key with `inference` but not `read` 403 | Both |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -531,7 +543,9 @@ On CUDA, stop strings are checked after every token on the generated text, reaso
 completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, decode on after a match to an end
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
-unless a stop string or a tool call ended the reply.
+unless a stop string, a tool call or a grammar ended the reply. A grammar's stop token is an end token, and with
+`ignore_eos` it still ends the reply with `finish_reason` `stop` and stays out of the text. End tokens in the
+reasoning, before the grammar starts, stay in it.
 
 ### Exact incremental token IDs
 
@@ -826,6 +840,8 @@ The server does not silently turn a required call into `auto`. Installing the gr
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build) supports them too: rank 0 sends each pick's grammar rows to the
+other ranks, and every rank masks its own vocabulary columns before the pick.
 
 A native grammar request waits at most 2,000 ms for its compile. This holds for every format, including JSON objects
 and schemas, regexes, choices, EBNF and the structural tags of tool calls. Past that the request gets HTTP 400 naming
@@ -1366,6 +1382,28 @@ default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /
 bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
 a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
 
+## Prompt cache salts
+
+By default a kept prompt state is resumed by any request whose prompt starts with the same tokens, whoever sent it.
+`cache_salt` (a non-empty string of at most 1024 bytes, on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`
+and `/v1/messages`) keeps a request's states apart: a state kept under one salt is resumed only by requests with the
+same salt, and states kept without a salt only by requests without one. `serve --cache-salt-per-key` salts every request
+by the API key it matched as well (a request's own `cache_salt` then counts within that key, and no salt a client sends
+stands for another key's), so two keys never resume each other's states; a server without API keys logs that the option
+salts nothing. The salt is hashed with HMAC-SHA-256 under the server's [tool-call id key](#messages-and-tools) (random
+at each start unless `TENSORFOLD_TOOL_ID_KEY_FILE` names one), so no cache key or state name can be tested against a
+guessed salt, and the salt itself is never echoed, stored or logged (`TENSORFOLD_REQUEST_LOG` writes `<redacted>`). The
+hash masks the first four words of the request's cache key. Salts never change the tokens of a reply, and a request
+without a salt is keyed exactly as before. Salted states stay in RAM: they are not written to the `--prompt-cache-disk`
+store, and a salted request never reads a state from it. A salted request also neither drafts from nor adds to the
+`--recall` record, neither reads nor writes `--compact-memory` notes, and a salted `/v1/imprint` ask reports and loads
+only its salt's states. The server's own requests for a salted conversation (the next turn's background prefill,
+compaction's notes, Cortheon's research planner and the server rounds it keeps) stay under the same salt. Engines on the
+shared lane host with its prompt cache report `capabilities.cache_salt` and take salts. Any other engine (one whose own
+host keeps states by tokens alone, a family's own paged cache under `TF_KV_SHARE`, or no prompt cache) returns HTTP 400
+for a salted request, naming its backend, rather than accept a salt it cannot keep apart, and does not start with
+`--cache-salt-per-key`. `TENSORFOLD_SEED_SALT` is unrelated: it only seeds sampling.
+
 ## Conversations on disk
 
 Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
@@ -1477,7 +1515,8 @@ an engine that keeps no prompt states answers 501.
 - `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
   store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
   its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
-  and the order the stores were last opened in). States in RAM stay until they are evicted.
+  and the order the stores were last opened in). States in RAM stay until they are evicted, or until a
+  [flush](#flush-the-prompt-cache).
 
 What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
 their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
@@ -1528,6 +1567,86 @@ server sends the counters described under [Responses](#responses). For memory fi
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
 
+## Execution witness
+
+`serve --execution-witness` (off by default) adds `GET /v1/execution/witness`, a read-scoped snapshot of what serves
+replies. Without the flag the route answers 404, nothing is hashed and replies are unchanged. The flag needs an API key
+(`--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`) or `--unix-socket`, whose owner-only socket stands for one;
+without either the server refuses to start. Hashing starts after the server is ready, on a thread of its own, and a read
+never hashes: it copies the latest snapshot. A stop ends a hash in progress at its next block.
+
+A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "instance", "epoch", "path", "components"}`:
+
+| Field | Meaning |
+| --- | --- |
+| `content` | SHA-256 over `path` and every component; the same files, build and settings give the same value after a restart |
+| `witness` | SHA-256 over `content`, `instance` and `epoch`: a restart or an engine reload always gives a new one |
+| `instance` | 128 random bits drawn when this process started |
+| `epoch` | The engine's generation: 1 at startup, one more each time `--idle-unload` reloads it |
+| `path` | The engine's label for the supported path it attests |
+| `components.engine` | The engine's own digest of what it binds for that path |
+| `components.binary` | The running executable's SHA-256, read from the file the server opened before loading the model (`/proc/self/exe` on Linux, the executable's path elsewhere) |
+| `components.text` | The checkpoint's tokenizer, template, special-token and EOS files (or their absence) and `--chat-template`'s file, whose stamps the server took before loading them |
+| `components.preparation` | The serve defaults a request starts from: sampling, `--instruct-sampling`, max tokens, thinking, loop guard, seed salt, drafts, and the loaded template and EOS ids |
+| `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except names ending in `_API_KEY`, `_SECRET`, `_PASSWORD`, `_TOKEN`, `_SIGNING_KEY`, `_SECRET_FILE` or `_KEY_FILE` (such as `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE`, `TF_RUNTIME_SIGNING_KEY` and `TF_STAGE_SECRET_FILE`); other names, such as `TF_SLIDE_POCKET_KEY`, are hashed |
+
+Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
+`reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
+one below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
+`--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
+`--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
+`--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
+text file or the executable, or a checkpoint file the engine stamped, changed after it was opened or stamped) or
+`hash_failed` (a file could not be read; when the binary cannot be opened or the text files cannot be stamped at
+startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one
+snapshot never mixes two engines. The snapshot alone does not qualify a response cache.
+
+The supported path so far is `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: native Qwen3.5-2B on a CUDA build at one rank,
+every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
+rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
+index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
+read `hash_failed` while the model still serves. Once the server is ready it reads every shard byte in full on one
+thread, with no digest cache, and reads `files_changed` if any stamp moved between the load and the end of the read, or if a Hugging Face snapshot's shard
+differs from its blob name. `components.engine` is a SHA-256 over the path, the checkpoint's structure (canonical
+`config.json`, the index, shard names, sizes and headers), every shard's bytes, and the components a kept state's key
+binds (the embedded kernel images, a captured cubin set, the GPU's name, compute capability and driver version, the
+family's resolved facts and the resolved profile values), then the GPU's SM count, the context window, the stream
+count and the staggered segments. An `--idle-unload` reload opens a new engine, which stamps again before its load and
+reads every byte again once it is published. A server whose witness reads `feature_excluded` never reads the weights.
+
+### Reply binding
+
+A chat completion or completion with `"execution_witness": true` carries a top-level `execution_witness` object on the
+whole reply, or on a stream's finish chunk (not on the separate usage chunk). It is read just before the engine takes
+the request and again once the reply ends; the request keeps the engine from parking in between. The witness is
+read-scoped, so a scoped key needs `read` beside `inference` to ask (else 403 `insufficient_scope`); a full or `[admin]`
+key may always ask. Only these two routes carry the binding: `/v1/responses`, `/v1/messages` (and its `count_tokens`),
+`/api/chat` and `/api/generate` rebuild the request and answer a true `execution_witness` with HTTP 400.
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `known` when the witness was known at both reads, with the same `epoch` and `witness`; else `unknown` |
+| `binding` | Known only: SHA-256 over `witness`, `prompt_sha256`, `request_sha256`, `token_sha256` and `finish_reason` |
+| `witness`, `path` | Known only: the snapshot's, as `GET /v1/execution/witness` gives them |
+| `instance`, `epoch` | The process and the engine generation at the end |
+| `reason`, `feature`, `admitted_epoch` | Unknown only: the snapshot's reason, or `epoch_changed`, `witness_changed` or `unbound` (below); the epoch at admission |
+| `prompt_sha256` | The prompt's token ids after the template, hashed as `tensorfold.token_sha256` hashes the reply's |
+| `token_sha256` | The reply's token ids, equal to `tensorfold.token_sha256` |
+| `finish_reason` | The reply's |
+| `request` | The resolved request the engine read: `max_tokens` after the window's clamp; `sampling` (null when greedy, else the `seed` actually used, `temperature`, `top_k`, `top_p` and `min_p`); `presence_penalty`, `frequency_penalty`; `eos` and `stop`; `drafts`; `think_budget`, `think_close`, `think_end`, `answer_max`; `loop_guard`, `loop_stop`; `call` (a required tool call's gate); `structure` (the grammar's `kind`, `text_sha256`, `after`, `budget`); `logprobs`, `prompt_logprobs`, `decide` and `untaught` |
+| `request_sha256` | SHA-256 over `request`, walked in order as below |
+
+Every field is length-prefixed: its byte length as a little-endian u64, then its bytes. `request_sha256` hashes the field
+`tensorfold resolved request v1`, then the value: `n` for null; `b` then `1` or `0`; `i` then the integer's decimal
+text; `f` then the float's IEEE-754 bits as a little-endian u64 (every float in the reply round-trips); `s` then the
+string; `a` then the count as a little-endian u64, then each item; `o` then the count, then each key as a field and its
+value. `binding` hashes the field `tensorfold execution binding v1`, then `witness`, `prompt_sha256`, `request_sha256`,
+`token_sha256` and `finish_reason`, each as its text in the reply. A reply that took a path that binds nothing (with
+`--compact-at` or `--cortheon`, which the witness already excludes) carries only `schema`, `state: "unknown"`, `reason`
+(and `feature`), `instance` and `epoch`, with the snapshot's reason. `reason` is `unbound` if that snapshot reads known;
+no route does that today, since each path that binds nothing runs only under a flag the witness excludes, so `unbound`
+would mean a reply path that skipped the binding by mistake. No response cache reads the binding yet.
+
 ## Cancel a request
 
 `POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its
@@ -1547,6 +1666,31 @@ a forwarded address is never read. Behind a reverse proxy every caller's socket 
 also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Via`,
 `CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
 a proxied server keys.
+
+## Flush the prompt cache
+
+`POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
+for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
+queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
+"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
+cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
+long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
+given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
+keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
+may still resume from one. The body, if any, is ignored.
+
+An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
+answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,
+the flush is withdrawn: nothing is dropped, new requests start again, and the answer is 503 `timeout`. While a flush
+waits, `--idle-unload` does not unload the model; a model it has already unloaded is not loaded for a flush, which
+answers 503 `model_unloaded` (no state is in RAM then, and the states it saved to disk stay until a flush after the next
+request loads it).
+
+Who may flush is decided as for [cancelling a request](#cancel-a-request). With API keys it is an admin route: a full
+or `[admin]` key may flush from any address, a scoped key gets 403 `insufficient_scope` and a missing key 401. Without
+keys only a caller whose socket is on the loopback address (127.0.0.0/8 or ::1) may flush, and only when the request
+carries none of the proxy headers listed there; anyone else gets 403 `loopback_only`.
 
 ## The Responses API
 
@@ -1594,7 +1738,7 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
+others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `execution_witness`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names. `message.output_text.logprobs` asks for logprobs where the engine has them
@@ -1699,7 +1843,8 @@ is an explicit off, which returns HTTP 400 when the template cannot honor it (se
 `/v1/messages` submits. Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
-system messages, per-message output configuration and inline tool changes are unsupported.
+system messages, per-message output configuration and inline tool changes are unsupported, and a true
+`execution_witness` answers HTTP 400 (see [Reply binding](#reply-binding)).
 JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
 That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar` from the release archive instead
 ([structured output](#structured-output)).

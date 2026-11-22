@@ -12,6 +12,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     });
     const merge_tests = b.addRunArtifact(b.addTest(.{ .root_module = merge_mod }));
     b.step("test-merge", "tensorfold merge: synthetic-tensor and folder tests (no model, no GPU)").dependOn(&merge_tests.step);
+    const runtime_mod = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/runtime_lora.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const runtime_tests = b.addRunArtifact(b.addTest(.{ .root_module = runtime_mod }));
+    b.step("test-runtime-lora", "Runtime PEFT overlays: exact host arithmetic, identities and refusal without a model or GPU").dependOn(&runtime_tests.step);
     const merge_check = b.addExecutable(.{ .name = "tf-merge-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/merge_check.zig"),
         .target = target,
