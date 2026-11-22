@@ -1,4 +1,4 @@
-//! One FastH3 block in bf16: products on tfp::gemm_nax (MLX's GEMM, fp32 sums), FastH3's routed attention in bf16.
+//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, tested against MLX's gemm_nax), FastH3's routed attention in bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
