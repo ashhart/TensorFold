@@ -113,3 +113,40 @@ test "nemotron cuda steps: the lanes report each chunk's fill, so the host accou
     // drafted.zig steps a target only with all three: else --drafter falls back to the whole pass
     try std.testing.expect(vt.prefill_step != null and vt.reports_fill and vt.features != null);
 }
+
+const Kept = struct {
+    calls: usize = 0,
+    at: u32 = 0,
+    fn kept(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+        const k: *Kept = @ptrCast(@alignCast(ctx));
+        k.calls += 1;
+        k.at = at;
+    }
+};
+
+/// A pass standing between its chunks at row `at`, on the engine's own sequence, as a first step leaves it.
+fn between(r: *Rig, s: *lanes.Stream, prompt: []const u32, at: usize) !void {
+    try r.b.lanes.put(a, s, .{ .seq = &r.e.own, .own = true });
+    r.b.own_free = false;
+    const cancel: engine.Cancel = .{ .ptr = s, .check = Cuda.cancelled, .yields = false };
+    try r.b.fills.put(a, s, .{ .prompt = prompt, .from = 0, .s = at, .dump = null, .head = null, .cancel = cancel, .keep = null, .chunks = &.{}, .lessons = false, .wide = true, .background = false });
+}
+
+test "nemotron cuda steps: a lane-host cancel between chunks keeps the prefix its last chunk reached (REV59 2)" {
+    var r: Rig = .{};
+    r.init();
+    r.e.vision = null;
+    defer r.deinit();
+    var kept: Kept = .{};
+    const prompt: [12]u32 = @splat(3);
+    var s = try lanes.Stream.init(a, .{ .id = "cancel", .prompt = &prompt, .max_new = 4, .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.kept } } });
+    defer s.deinit(a);
+    const keep = r.b.backend().vtable.cancel_prefill orelse return error.MissingCancelHook;
+    try keep(&r.b, &s); // no pass between chunks: nothing to keep
+    try std.testing.expectEqual(@as(usize, 0), kept.calls);
+    try between(&r, &s, &prompt, 8);
+    try keep(&r.b, &s);
+    try std.testing.expectEqual(@as(usize, 1), kept.calls);
+    try std.testing.expectEqual(@as(u32, 8), kept.at);
+    try std.testing.expectEqual(&r.e.own, r.e.bound); // saved from the stream's own sequence
+}

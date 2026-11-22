@@ -88,6 +88,7 @@ pub const Cuda = struct {
             .vtable = &.{
                 .prefill = prefillFn,
                 .prefill_step = fill.step,
+                .cancel_prefill = fill.keepCancelled,
                 .first = firstFn,
                 .queue = queueFn,
                 .read = readFn,
