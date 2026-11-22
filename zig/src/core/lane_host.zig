@@ -139,7 +139,6 @@ pub const LaneHost = struct {
         h.filling.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
-        h.st.live_tokens.deinit(h.gpa);
         @import("lane_host_status.zig").freeSlots(h);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
@@ -210,6 +209,7 @@ pub const LaneHost = struct {
         // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
         if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
+        defer @import("lane_host_status.zig").publish(h); // a reader sees the queue at once, after the unlock below
         defer h.unlock();
         const unavailable = h.closing.load(.acquire) or (if (h.health) |source| !source.read(source.ctx) else false);
         if (unavailable or h.stale.load(.acquire) or pressure.refuses(h)) {
@@ -224,7 +224,6 @@ pub const LaneHost = struct {
             return error.Busy;
         };
         h.load.started += 1;
-        @import("lane_host_status.zig").publish(h); // a reader sees the queue at once
         h.wake.signal(h.io);
     }
 
@@ -294,6 +293,7 @@ pub const LaneHost = struct {
         h.send(job);
         if (!job.stream.finished) return false;
         h.remove(job);
+        @import("lane_host_status.zig").publish(h); // the job left the list before the event
         const reason: Reason = switch (job.stream.reason) {
             .length => .length,
             .cancelled => .cancelled,
@@ -458,6 +458,7 @@ pub const LaneHost = struct {
         job.prefilled = done;
         load.credit(h, job);
         h.unlock();
+        @import("lane_host_status.zig").publish(h); // the fill ends here
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
         if (h.cache) |store| {
@@ -513,7 +514,6 @@ pub const LaneHost = struct {
     }
 
     fn run(h: *LaneHost) void {
-        @import("lane_host_status.zig").engineStart(h);
         defer scoring.close(h);
         if (!@import("lane_thread.zig").start(h)) return;
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
