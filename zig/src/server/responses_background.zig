@@ -23,7 +23,8 @@ const cancel_wait_ms = 2000;
 /// The background responses not yet ended; an ended one is an ordinary stored response.
 pub const Manager = struct {
     mutex: std.Io.Mutex = .init,
-    ended: std.Io.Condition = .init, // broadcast when a job leaves `jobs`
+    ended: std.Io.Condition = .init, // broadcast when a job leaves `jobs`; only cancel's timed waits use it
+    drained: std.Io.Condition = .init, // the same broadcast for shutdown's untimed wait, apart from the timed ones
     jobs: std.ArrayList(*Job) = .empty,
     bytes: usize = 0, // the copied requests' memory, against limits.bytes
     closed: bool = false,
@@ -107,7 +108,7 @@ pub const Manager = struct {
         defer m.mutex.unlock(srv.io);
         m.closed = true;
         for (m.jobs.items) |j| j.stop();
-        while (m.jobs.items.len > 0) m.ended.waitUncancelable(srv.io, &m.mutex);
+        while (m.jobs.items.len > 0) m.drained.waitUncancelable(srv.io, &m.mutex);
         m.jobs.deinit(srv.gpa);
         m.jobs = .empty;
     }
@@ -128,6 +129,7 @@ pub const Manager = struct {
         m.bytes -= j.charge;
         j.free();
         m.ended.broadcast(srv.io);
+        m.drained.broadcast(srv.io);
     }
 };
 
