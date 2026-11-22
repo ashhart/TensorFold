@@ -27,6 +27,7 @@ pub fn host(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, b.graph.host, .debug));
     const draft_root = b.createModule(.{ .root_source_file = b.path("zig/glm_early_draft_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = draft_metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
+    if (b.graph.host.result.os.tag == .macos) draft_root.linkSystemLibrary("objc", .{}); // the recording fake still references objc symbols
     const draft_run = b.addRunArtifact(b.addTest(.{ .root_module = draft_root }));
     const draft_step = b.step("test-glm-early-draft-host", "Real GLM MTP direct bindings and launch lifecycle without shaders or a GPU");
     draft_step.dependOn(&draft_run.step);
