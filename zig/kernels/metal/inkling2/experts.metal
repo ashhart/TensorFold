@@ -399,23 +399,29 @@ inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uin
   Y[at] = bfloat(ink2_mx_weight(W[at], S[row * (a.k / 32u) + col / 32u]));
 }
 
-// Threadgroup (x, y) is outputs 256x to 256x + 255 of token y, one thread an output.
+// Threadgroup (x, y) is outputs 256x to 256x + 255 of token y, a thread an output; the first topk order the routes.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_combine(
     device const bfloat* down [[buffer(0)]], device const int* ids [[buffer(1)]],
     device const float* weights [[buffer(2)]], device bfloat* Y [[buffer(3)]],
     constant Ink2MatrixArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
     uint t [[thread_index_in_threadgroup]]) {
   const uint n = tg.x * 256u + t, group = tg.y;
-  if (n >= a.n) return;
-  // Outer expert order, not route-slot order, fixes the reference's accumulation order.
   const uint base = group * a.topk;
+  threadgroup uint order[32];
+  if (a.topk > 32u) return;
+  if (t < a.topk) {
+    // A route's rank among the token's routes by expert, an equal expert by slot: the reference's accumulation order.
+    const int id = ids[base + t];
+    uint rank = 0;
+    for (uint o = 0; o < a.topk; ++o) rank += (ids[base + o] < id || (ids[base + o] == id && o < t)) ? 1u : 0u;
+    order[rank] = t;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (n >= a.n) return;
   float sum = 0.0f;
-  for (uint r = 0; r < a.topk; ++r)
-    for (uint slot = 0; slot < a.topk; ++slot) {
-      const int id = ids[base + slot];
-      uint rank = 0;
-      for (uint o = 0; o < a.topk; ++o) rank += (ids[base + o] < id || (ids[base + o] == id && o < slot)) ? 1u : 0u;
-      if (rank == r && uint(id) < a.experts) sum += weights[base + slot] * float(down[ulong(base + slot) * a.n + n]);
-    }
+  for (uint r = 0; r < a.topk; ++r) {
+    const uint slot = order[r];
+    if (uint(ids[base + slot]) < a.experts) sum += weights[base + slot] * float(down[ulong(base + slot) * a.n + n]);
+  }
   Y[ulong(group) * a.n + n] = bfloat(sum);
 }

@@ -40,7 +40,7 @@ pub const Mutation = enum {
             .nv_decode_nibble => .{ .from = "W[row * (a.k / 2u) + col / 2u], col,", .to = "W[row * (a.k / 2u) + col / 2u], col + 1u," },
             .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k, lane);", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k, lane);" },
             .mx_decode_scale => .{ .from = "S[row * (a.k / 32u) + col / 32u]", .to = "S[row * (a.k / 32u) + col / 16u]" },
-            .combine_slot_order => .{ .from = "if (rank == r && uint(id) < a.experts)", .to = "if (slot == r && uint(id) < a.experts)" },
+            .combine_slot_order => .{ .from = "const uint slot = order[r];", .to = "const uint slot = r;" },
         };
     }
 };
