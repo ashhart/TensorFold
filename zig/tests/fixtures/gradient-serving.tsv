@@ -18,7 +18,7 @@ zig/kernels/cuda/flashnext_mtp.cu	5d213b1b4a1d0588eea3acb4633a0c8bc4d9bdf6f27485
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228	raw
 zig/kernels/cuda/glm_glue.cu	74e69a7c20827d498c190334fffaa896f2a4f05e107fdf9d2d34b09b55a1c75c	raw	#2722 (one added line, the include of glm_index_decode.cuh: the decode select's scan and merge)
-zig/kernels/cuda/glm_glue_attn.cuh	2a0bc3c4966555fad4ae812e62b28558f41774fd5b2dbef6fa9b6d220ba260d8	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_attn.cuh	8d13a92cc32e3385c3a081390044778d819ae672ffc50bd2bb5fc1e65d8de09a	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); #4377: index scores keep a visible key's NaN; GLM CUDA kernel contract nonfinite gates pass on GB10
 zig/kernels/cuda/glm_glue_bmm.cuh	6077ea47fc9f462f072a973d44ef4cab711526a3f374cfeb91f1cd65f5fad8f9	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_hc.cuh	0fc7a68598eb22884edf28d39d051399e85e2e3e13fd45953c8d3faf5defd3b8	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_index.cuh	76c330e99c8dca37589873f7082f35046027873635973d3ef1f2af286b3884a6	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)

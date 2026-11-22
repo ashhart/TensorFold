@@ -162,9 +162,8 @@ A replacement kernel names the kernel it replaces and gives `replaced`, which ru
 A gate failure on a kernel already shipped is reported, not hidden. Until its fix lands, its spec can carry a
 `known` entry naming the gate and what fails. That gate must keep failing (the run prints `KNOWN`); once a fix makes
 it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
-MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. GLM-5.3-Flash's
-`tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
-Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` gives 0 for a NaN dot where float64 keeps
+MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s. Nemotron's Metal
+`tf_xup_w3` gives 0 for a NaN dot where float64 keeps
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
 HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row whose every score is NaN where
 float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
