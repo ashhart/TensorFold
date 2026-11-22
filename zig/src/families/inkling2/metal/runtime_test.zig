@@ -1,5 +1,7 @@
 //! Host-only schedule, cache-layout, accepted-history and compact-snapshot checks.
 const std = @import("std");
+const mtl = @import("metal");
+const ap = @import("attention_plan.zig");
 const cfg = @import("../config.zig");
 const layer_plan = @import("../plan.zig");
 const state = @import("state.zig");
@@ -173,4 +175,52 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
+}
+
+/// Every head's first `rows` rows of every slot's keys and values, then the convolution states, to or from `flat`.
+fn moveLive(queue: mtl.Queue, cache: *const state.Cache, flat: mtl.Buffer, rows: usize, into: bool) !void {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    const n = rows * ap.head_dim * 2;
+    var at: usize = 0;
+    for (0..state.visit_slots) |slot| for ([_]usize{ cache.key_at[slot], cache.value_at[slot] }) |base| for (0..state.kv_width / ap.head_dim) |h| {
+        const off = base + h * cache.ring(slot) * ap.head_dim * 2;
+        if (into) e.copy(flat, at, cache.kv, off, n) else e.copy(cache.kv, off, flat, at, n);
+        at += n;
+    };
+    if (into) e.copy(flat, at, cache.conv, 0, state.conv_bytes) else e.copy(cache.conv, 0, flat, at, state.conv_bytes);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.GpuFailed;
+}
+
+test "A snapshot restores each head's live rows into a cache of another capacity" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    const p = schedule();
+    const rows = 100;
+    var from = try state.Cache.init(device, 200, &p);
+    defer from.deinit();
+    var to = try state.Cache.init(device, 500, &p);
+    defer to.deinit();
+    try std.testing.expect(from.ring(5) != to.ring(5) and from.globals[5] and rows < from.ring(0));
+    const size = state.visit_slots * 2 * state.kv_width * 2 * rows + state.conv_bytes;
+    const want = try device.buffer(size, mtl.ResourceOptions.shared);
+    defer want.deinit();
+    const got = try device.buffer(size, mtl.ResourceOptions.shared);
+    defer got.deinit();
+    var prng = std.Random.DefaultPrng.init(7);
+    prng.random().bytes(want.slice(u8, size));
+    try moveLive(queue, &from, want, rows, true);
+    from.len = rows;
+    var snap = try snapshot.save(device, queue, &from);
+    defer snap.deinit();
+    try snapshot.restore(&to, queue, &snap);
+    try std.testing.expectEqual(@as(usize, rows), to.len);
+    try moveLive(queue, &to, got, rows, false);
+    try std.testing.expect(std.mem.eql(u8, want.slice(u8, size), got.slice(u8, size)));
 }
