@@ -16,10 +16,17 @@ const controls = [_]Control{
     .{ .kind = .down, .name = "control: inkling2 loop controller drops message half of down projection", .from = "fma(float(wr[ulong(j) * 2 * H + H + i]), xm[e], acc[j])", .to = "fma(float(wr[ulong(j) * 2 * H + i]), xm[e], acc[j])" },
     .{ .kind = .qkv, .name = "control: inkling2 loop controller adds forget gate", .from = "1.0f - metal::precise::tanh(f)", .to = "1.0f + metal::precise::tanh(f)" },
     .{ .kind = .mlp, .name = "control: inkling2 loop MLP reads query message", .from = "return g == 0 ? a.slot0", .to = "return g == 0 ? 0" },
+    .{ .kind = .messages, .name = "control: inkling2 loop statistics dot the third query with the second", .from = "acc[2] = fma(q1[i], v, acc[2]);", .to = "acc[2] = fma(q0[i], v, acc[2]);" },
+    .{ .kind = .down, .name = "control: inkling2 loop controller norms the message with the state's scale", .from = "dst[H + i] = bfloat(xm[e] * inv_m);", .to = "dst[H + i] = bfloat(xm[e] * inv_h);" },
+    .{ .kind = .messages, .name = "control: inkling2 loop multi-group messages use unnormalized values", .from = "coef[q][s] = inv_tg[s] * (score[s] / l);", .to = "coef[q][s] = score[s] / l;" },
+    .{ .kind = .down, .name = "control: inkling2 loop multi-group controller drops message half", .from = "fma(float(wr[ulong(j) * 2 * H + H + i]), xm, acc[j])", .to = "fma(float(wr[ulong(j) * 2 * H + i]), xm, acc[j])" },
+    .{ .kind = .qkv, .name = "control: inkling2 loop multi-group controller adds forget gate", .from = "(1.0f - forget)", .to = "(1.0f + forget)" },
+    .{ .kind = .qkv, .name = "control: inkling2 loop gate output skips the norm weight", .from = "dst[i] = bfloat(float(nw[i]) * (v[e] * inv));", .to = "dst[i] = bfloat(v[e] * inv);" },
 };
 
-const mix_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 1 }, .{ .rows = 3, .n = 96, .k = 8 }, .{ .rows = 2, .n = 128, .k = 0 } };
-const gate_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 64 }, .{ .rows = 2, .n = 96, .k = 7 }, .{ .rows = 3, .n = 128, .k = 128 } };
+// Rows past loop.small_rows run the one-group kernels, the rest the multi-group ones.
+const mix_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 1 }, .{ .rows = 3, .n = 96, .k = 8 }, .{ .rows = 2, .n = 128, .k = 0 }, .{ .rows = 17, .n = 128, .k = 3 } };
+const gate_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 64 }, .{ .rows = 2, .n = 96, .k = 7 }, .{ .rows = 3, .n = 128, .k = 128 }, .{ .rows = 17, .n = 96, .k = 9 } };
 fn noSums(_: c.Shape) usize {
     return 0;
 }
@@ -100,7 +107,7 @@ const Probe = struct {
         const rows = shape.rows;
         const h = shape.n;
         const k = shape.k;
-        if (rows == 0 or rows > 8 or h == 0 or h > loop.max_hidden) return false;
+        if (rows == 0 or rows > 17 or h == 0 or h > loop.max_hidden) return false;
         if (p.isMix()) {
             if (k >= loop.max_sources) return false;
         } else if (k == 0 or k > loop.max_rank) return false;
