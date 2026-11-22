@@ -108,8 +108,7 @@ test "inkling2 kernels: sliding partials are a row's window at any depth, a tile
 }
 
 /// A call's sliding stores as tf_ink2_attn makes them: each slot the merge reads once; returns the old strays.
-fn slidingStores(a: std.mem.Allocator, p0: usize, n: usize) !usize {
-    const group = 6;
+fn slidingStores(a: std.mem.Allocator, p0: usize, n: usize, group: u32) !usize {
     const l = k.Layer.sliding(1024, 2048);
     const stride: usize = k.slotsFor(l, 1); // 5 below 81,920: a stray store lands on a neighbour (row, head)'s slots
     const count = try a.alloc(u8, n * group * stride);
@@ -147,12 +146,46 @@ fn slidingStores(a: std.mem.Allocator, p0: usize, n: usize) !usize {
 test "inkling2 kernels: sliding stores stay in their own slots for windows that straddle a chunk edge" {
     const a = t.allocator;
     // the drafted check's long text: 8-row windows at 2,296..2,302 (a window's first keys cross chunk 5's edge)
-    try t.expectEqual(@as(usize, 0), try slidingStores(a, 2295, 8));
-    try t.expect(try slidingStores(a, 2300, 8) > 0);
-    try t.expect(try slidingStores(a, 2296, 8) > 0);
-    var p0: usize = 0;
-    while (p0 < 4400) : (p0 += 1) for (1..9) |n| {
-        _ = try slidingStores(a, p0, n);
+    try t.expectEqual(@as(usize, 0), try slidingStores(a, 2295, 8, 6));
+    try t.expect(try slidingStores(a, 2300, 8, 6) > 0);
+    try t.expect(try slidingStores(a, 2296, 8, 6) > 0);
+    // Small's 6 query heads a key head at TP=2, Mini's 3 (24 over 8 key heads)
+    for ([_]u32{ 6, 3 }) |group| {
+        var p0: usize = 0;
+        while (p0 < 4400) : (p0 += 1) for (1..9) |n| {
+            _ = try slidingStores(a, p0, n, group);
+        };
+        for ([_]usize{ 0, 2048, 4096 }) |at| _ = try slidingStores(a, at, 2048, group);
+    }
+}
+
+test "inkling2 kernels: Mini's 8 key heads launch a group of 3; heads that do not split are refused, nothing launched" {
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Fake.launch;
+    const fun = struct {
+        fn of(drv: *const cuda.Driver, i: usize) cuda.Function {
+            return .{ .d = drv, .handle = @ptrFromInt(i) };
+        }
     };
-    for ([_]usize{ 0, 2048, 4096 }) |at| _ = try slidingStores(a, at, 2048);
+    const kern: k.Kernels = .{ .mod = .{ .d = &d, .handle = null }, .prep = fun.of(&d, 1), .rel_table = fun.of(&d, 2), .attn = fun.of(&d, 3), .merge = fun.of(&d, 4), .attn_fold = fun.of(&d, 3), .pmod = .{ .d = &d, .handle = null }, .attn_prompt = fun.of(&d, 3) };
+    const s: cuda.Stream = .{ .d = &d, .handle = null };
+    const cfg: k.Prep = .{ .qk_clip = 22.6, .rel_clip = 8, .floor = 8192, .alpha = 0.1, .eps = 1e-6 };
+    const l = k.Layer.global(1048576);
+    var r: k.Rows = .{ .rows = 2048, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 1048575 };
+    Fake.count = 0;
+    try k.prep(&kern, s, r, l, cfg, .{ 0, 0, 0, 0 }, .{ 0, 0 }, 0, 0, .{ .k = 0, .v = 0 });
+    try t.expectEqual([3]u32{ 2048, 40, 1 }, Fake.grids[0]); // 24 q heads, 8 k and 8 v heads a row
+    // a 2,048-row prompt call: 2,048 x 3 pairs a key head in blocks of 128
+    try k.attend(&kern, s, r, l, 64, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try t.expectEqual([3]u32{ 48, 8, 64 }, Fake.grids[2]);
+    try t.expectEqual(@as(u32, 6), k.tileChunks(3, k.Layer.sliding(1024, 1))); // a tile's 21 rows and their windows
+    try t.expectEqual(@as(usize, 96), k.tileCount(2048, 3));
+    const counted = Fake.count;
+    for ([_][2]u32{ .{ 24, 5 }, .{ 24, 0 }, .{ 0, 8 } }) |h| {
+        r.heads = h[0];
+        r.kv_heads = h[1];
+        try t.expectError(error.Inkling2Heads, k.prep(&kern, s, r, l, cfg, .{ 0, 0, 0, 0 }, .{ 0, 0 }, 0, 0, .{ .k = 0, .v = 0 }));
+        try t.expectError(error.Inkling2Heads, k.attend(&kern, s, r, l, 64, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    }
+    try t.expectEqual(counted, Fake.count);
 }
