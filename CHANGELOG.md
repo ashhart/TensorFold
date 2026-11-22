@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the DeepSeek-V4.1 chat and fixture host tests set the schema-prompt and tool-grammar settings they assume, so a value in the shell's environment can't move their goldens.
+
 - Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
 ## 1.3.4
