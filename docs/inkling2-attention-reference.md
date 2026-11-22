@@ -2,13 +2,13 @@
 
 This page writes down the arithmetic of Inkling 2's attention as #4125's kernels run it: the values, where each one
 rounds to bf16, the order of every fp32 sum, what NaN and infinity do, and a bound for an fp32 result against float64.
-Beside it are a float64 host model (`zig/src/families/inkling2/attn.zig`), an fp32 host model in the kernels' order
+Beside it are a float64 host model (`zig/src/families/inkling2/attn.zig`), the fp32 model in the kernels' order
 (`zig/src/families/inkling2/attn_order.zig`), the bound as code (`attn_bound.zig`), an oracle
 (`zig/src/families/inkling2/oracle/attn.py`) and host tests (`attn_test.zig`, `attn_bound_test.zig`,
 `attn_order_hand_test.zig`). The kernels are the reference: the host model follows their source, it does not run them.
-Every statement about a kernel carries `file:line` at commit `6dbb32f048a6` (#4125 as merged), in the files
+Every statement about a kernel's source carries `file:line` at commit `6dbb32f048a6` (#4125 as merged), in the files
 `zig/kernels/cuda/inkling2/attention.cu` (`attention.cu`), `prompt_attention.cu`,
-`zig/src/families/inkling2/kernels.zig` (`kernels.zig`) and `zig/build/cuda_kernels.zig`. Statements about
+`zig/src/families/inkling2/kernels.zig` (`kernels.zig`), `zig/build/cuda_kernels.zig`, `zig/build/cuda_fatbin.zig` and `zig/tests/cuda/contract_inkling2_attn_ref.zig` (`contract_inkling2_attn_ref.zig`). Statements about
 `transformers` 5.23.0 cite `models/inkling2/modeling_inkling2.py` as TF523:line. Nothing here claims that fp32 scores
 or P give the same tokens as higher precision; token-level gates stay with the engine.
 
@@ -27,8 +27,7 @@ The kernels keep a ring cache (a key at position `p` sits in slot `p % ring`, `a
 `kernels.zig:41`, `:54-56` round the ring to a multiple of 64); the host model takes a dense cache, one place per
 position, which gives the same values as a ring holding every position. Its shapes are the kernels' at `hd = 128`,
 `d_rel = 16` and 1024 bias columns (`kernels.zig:5-7`) and, for tests, any smaller `hd` (a head is zero-padded to a
-multiple of 16: zero products add nothing), `d_rel <= 32` and any number of columns. It has no limit on the number of
-keys.
+multiple of 16: zero products add nothing), `d_rel <= 32` and any number of columns. The fp32 model in the kernels' order has no limit on the number of keys; the float64 model in `attn.zig` takes at most `most_keys = 8192` (`attn.zig:8`).
 
 ## Values and where they round
 
@@ -124,8 +123,7 @@ consequence of the source and the host model, not a measurement on a device.
   hold, and the NaN stays through the rescales, folds and the merge. The other columns of the row stay finite. Which
   rows are affected depends on the call: rows of one block at different positions see each other's later keys, and in
   a sliding layer a row sees the keys between the block's first window start and its own. A call of a single row has
-  no such key (its range is its live keys). The host model reproduces this rule for the decode kernel (`block_pairs =
-  64`, `kernels.zig:10`). The prompt kernel loads `b_lo .. min(b_hi, tile_hi)` and skips a tile past a warp's last row
+  no such key (its range is its live keys). The host model reproduces this rule for the decode kernel (`block_pairs = 64` in the model, `tile_pairs` at `kernels.zig:10`). The prompt kernel loads `b_lo .. min(b_hi, tile_hi)` and skips a tile past a warp's last row
   (`prompt_attention.cu:84`, `:60-61`, `:143`), so its set differs; the host model does not reproduce it.
 - A NaN sink gives a NaN denominator. A `+inf` sink makes `mf` infinite, `a = exp2f(mm - inf) = 0` and
   `exp2f(inf - inf)` NaN: every output of that row and head is NaN. A `-inf` sink contributes 0.
@@ -134,18 +132,16 @@ consequence of the source and the host model, not a measurement on a device.
 
 ## FP64 check and its bound
 
-The float64 model (`attend` with `f64` in `attn.zig`) evaluates the formula of the table above without any rounding:
+The float64 model (`attend` with `f64` in `attn.zig`, at most `most_keys = 8192` keys) evaluates the formula of the table above without any rounding:
 with `x = (q . k) hd^-1/2 + bias` in natural-log units, `y = sum_s e^(x_s - M) v_s / (sum_s e^(x_s - M) + e^(sink - M))`
-and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] * proj[j][dist]` where `dist < rext`. The oracle
-evaluates the same formula with Python's standard library (and `transformers`, see the fidelity check). The fp32 model
+and `out = y * sigmoid(gate)`; the bias is the exact `sum_j rel[j] * proj[j][dist]` where `dist < rext`. The bound's own float64 value is `head` in `attn_bound.zig`: the same formula in log2 units, run a second time beside `attend` and without its key limit. The oracle evaluates the same formula with Python's standard library (and `transformers`, see the fidelity check). The fp32 model
 in the kernels' order (`attendOrder` in `attn_order.zig`) follows the order above, rounds the bias table, P and the
 output to bf16 and nothing else, and is held to float64 by the bound below.
 
 Domain. The bound is claimed for a row and head whose inputs satisfy these conditions, checked in float64 from the
 inputs (`head` in `attn_bound.zig` returns `error.AttnDomain` outside them): every `q`, `rel`, `sink` and `gate` of
 the pair, every `proj` entry it reads and every `k` and `v` of the keys its block loads is finite; `gate >= -87` for
-every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk * vmax <
-2^120`. They are sufficient and not sharp, and outside them the page claims nothing. The need is real: at `gate = -89`
+every output index; `A_s < 2^120` and `B_s < 2^120` (below) for every live key and `|sink| < 2^120`; `nk <= 2^20` and `nk * vmax < 2^120`. They are sufficient and not sharp, and outside them the page claims nothing. The need is real: at `gate = -89`
 the kernel's `expf(89)` is `inf` (`e^89` is about `4.5e38`, above the largest fp32 number), the sigmoid `1 / (1 +
 inf)` is 0 and the output 0, where float64 has `1 * 2.2e-39`; and at `-88` the sigmoid `2^-126.96` is already
 subnormal and its quotient has more than `u` of error (`e^87` is `2^125.5`, `e^88` is `2^126.96`, `e^88.5` is
@@ -178,8 +174,7 @@ where the key gets no bias); for the sink `gamma(2) |log2(e) sink| + 2^-133`. Th
 what `attn_bound.zig` evaluates. Each term is a count of roundings in the order above:
 
 - The hypotheses. `exp2f` and `expf` are within 2 ULP of the correctly rounded result: NVIDIA's CUDA Programming Guide
-  (v13.5, section 5.6.7, Exponential Functions, Table 54) lists `expf(x)` and `exp2f(x)` with "2 ULP" for `float`. The
-  same section says "The maximum ULP error is stated as the maximum observed absolute value of the difference in ULPs
+  (v13.5, section 5.6.7.2, Exponential Functions, Table 54) lists `expf(x)` and `exp2f(x)` with "2 ULP" for `float`. Section 5.6.7 says "The maximum ULP error is stated as the maximum observed absolute value of the difference in ULPs
   between the value returned by the function and a correctly rounded result of the corresponding precision obtained
   according to the round-to-nearest ties-to-even rounding mode. The error bounds are derived from extensive, though not
   exhaustive, testing. Therefore, they are not guaranteed." Within 2 ULP of the correctly rounded value, which itself is
@@ -204,8 +199,7 @@ what `attn_bound.zig` evaluates. Each term is a count of roundings in the order 
   a chunk and the sink's `a`, each an `exp2f` (`gamma(5)`) and a product (`u`).
 - `4 T lambda(17 u_mma)`: the values' mma chain, four mma a tile over `T` tiles. `(S + C) lambda(u)`: the add of each
   fold and merge.
-- `16 T + 2 + S + C + 1`: the denominator's adds: 16 a tile in a lane, two combining the lanes, one a fold or merge and
-  the add of the sink's term.
+- `16 T + 2 + S + C + 1`: the denominator's adds: 16 a tile in a lane, two combining the lanes, one for each fold or merge (`S + C`) and the add of the sink's term.
 - `lambda(gamma(5)) + 4 lambda(u)`: the sigmoid's `expf`, its add and its quotient, the quotient `o a / den` and the
   final product.
 - Domain: under its conditions no fp32 operation of the order overflows. A dot, its scaled and biased value and the
@@ -224,7 +218,7 @@ what `attn_bound.zig` evaluates. Each term is a count of roundings in the order 
   (products below the fp32 grid, each at most `2^-150`) lie below `2^-140`; so `2^-133` covers the score's. The last
   product `y * sigmoid` rounds absolutely, by up to `2^-150`, where its result is below `2^-126`; the term `2^-149`
   after the factor `1 + 2^-20` covers that, which `sg` scales away in the other floor term.
-  The factors multiply: `lambda(a)` bounds `|ln(1 + d)|` for `|d| <= a`, so `L` bounds the logarithm of each term's
+- The factors multiply: `lambda(a)` bounds `|ln(1 + d)|` for `|d| <= a`, so `L` bounds the logarithm of each term's
   relative error and `exp(L) - 1` the error of the ratio `N / D`.
 - `1 + 2^-20` covers float64, in `want` and in evaluating the bound: its sums of at most `2^20` terms round at `2^-53`
   each, below `2^-28` of `mag`, while `exp(L) - 1 >= 2^-8`.
@@ -268,15 +262,14 @@ from the source, and the fixture keeps both its float64 result and its bf16 bits
   and 993 further; the largest difference, as `|got - transformers| / (|transformers| + top)` with `top` the head's
   largest `|transformers|`, is 6.1e-2. This is the arithmetic difference between the kernels' three roundings and the
   eager path's seven, on the six fixture cases (tiny-random `inkling-2`, the checkpoint's shapes among them).
-- The float64 model equals the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's largest
-  `|y|`.
+- The float64 model equals the oracle's float64 values within `(|y| + top) 2^-40` per element, `top` the head's largest `|y|`.
+- The fixture `zig/src/families/inkling2/fixtures/attn_tiny.bin` (SHA-256 `96aadd48918923fe5a4d165740bc337340476aeeacc5c3ee63600d8dcd7d0cde`) comes from `python3 zig/src/families/inkling2/oracle/attn.py write <model_dir>`, run on a local copy of `tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7` (`model.safetensors` SHA-256 `ac7f0eaa84e50b53c4afce3ea7eecdc49ccca21bd467edb16f3d052d9099a3de`) with `transformers` 5.23.0 and `torch` 2.15.0+cpu (`attn.py:13-16`).
 
 ## Falsification
 
 Each single change below was made alone to the host code (the fp32 model in `attn_order.zig`, the window to `first` in
 `attn.zig`, and the bound's terms and domain checks in `attn_bound.zig`), `zig build test-inkling2-host` was run on it,
-and the change was reverted. The test that turns red is named (test names as in `attn_order_hand_test.zig`,
-`attn_bound_test.zig`, `attn_test.zig` and `attn.zig`; where more than one goes red, the count is given). The unchanged
+and the change was reverted. The test that turns red is named (test names as in `attn_order_hand_test.zig` and `attn_bound_test.zig`; where more than one goes red, the count is given). The unchanged
 tree is green: 78 tests passed and 4 skipped.
 
 | Single change to the host model | A test that turns red (N red in all) |

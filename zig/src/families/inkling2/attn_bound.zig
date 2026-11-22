@@ -34,7 +34,7 @@ pub const Head = struct {
         a.free(h.sg);
     }
 
-    /// The bound on |y - want[d]| of the fp32 value before the output's rounding; its last term, 2^-149, is the final product's.
+    /// The bound on |y - want[d]| of the fp32 value before the output's rounding; the term 2^-149 is the final product's.
     pub fn limit(h: Head, d: usize) f64 {
         return (1 + 0x1p-20) * (h.mag[d] * std.math.expm1(h.big) + h.sg[d] * h.floor * @exp(h.big)) + 0x1p-149;
     }

@@ -251,7 +251,7 @@ test "bound: the domain ends at 2^20 live keys" {
 }
 
 test "bound: an output below the normal range" {
-    // a value through a tiny sigmoid: the last product rounds on the 2^-149 grid, which the sigmoid-scaled floor alone misses
+    // a value through a tiny sigmoid: its last product rounds on the 2^-149 grid, which the scaled floor alone misses
     const a = t.allocator;
     var found: usize = 0;
     for ([_]f32{ -87, -86 }) |gate| {
