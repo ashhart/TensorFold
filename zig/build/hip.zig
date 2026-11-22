@@ -194,6 +194,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
+    b.step("test-nemotron-hip-faults-host", "Nemotron HIP adoption rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP page faults:"} })).step);
     const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
