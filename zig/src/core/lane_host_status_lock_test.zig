@@ -1,6 +1,4 @@
-//! A status read must never wait for another status read (issue 3200): a monitoring client
-//! parked inside a slow source read (health, fsr) must not hold the host's lock, or the next
-//! reader and the round that shares that lock wait for it.
+//! A status read must never wait for another status read (issue 3200): a slow source read holds no lock.
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
@@ -8,8 +6,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const Event = api.Event;
 const Request = api.Request;
 
-/// A health source the test parks the reader inside: `read` signals `entered`, then waits
-/// for `release`, exactly the shape of a slow backend probe a dashboard read makes.
+/// A health source the test parks the reader inside: `read` signals `entered`, then waits for `release`.
 const Gate = struct {
     entered: std.atomic.Value(bool) = .init(false),
     release: std.atomic.Value(bool) = .init(false),
@@ -19,8 +16,7 @@ const Gate = struct {
         const g: *Gate = @ptrCast(@alignCast(ctx));
         if (g.calls.fetchAdd(1, .monotonic) != 0) return true; // only the first read parks
         g.entered.store(true, .release);
-        // auto-release: under the old code the caller holds the host's lock here, so nothing
-        // else can set `release`; the cap keeps that run failing, not hanging
+        // auto-release: under the old code the caller holds the host's lock here, so nothing else can set `release`
         var ms: usize = 0;
         while (!g.release.load(.acquire) and ms < 1500) : (ms += 1)
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
@@ -58,8 +54,7 @@ test "status: a read parked in a slow source read does not block the next read" 
     try host.start();
     defer host.stop();
 
-    // The reader's first status read parks inside health.read and stays there until the
-    // release: the shape of a dashboard polling a slow backend counter.
+    // The reader's first status read parks inside health.read: a dashboard polling a slow backend counter.
     const Reader = struct {
         fn run(engine: api.Engine, gated: *Gate) void {
             _ = gated;
@@ -137,7 +132,7 @@ test "status: a reader hammering the status during rounds never makes the round 
         if (status.running > 0) break;
         std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch {};
     }
-    const baseline = host.round_waits.load(.monotonic);
+    const baseline = host.st.round_waits.load(.monotonic);
 
     // Four monitoring clients poll the status as fast as they can while the round runs.
     const Hammer = struct {
@@ -159,5 +154,5 @@ test "status: a reader hammering the status during rounds never makes the round 
     while (!tally.done.load(.acquire) and deadline < 10000) : (deadline += 1)
         std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch {};
     try std.testing.expect(tally.done.load(.acquire)); // the request finished under the hammering
-    try std.testing.expectEqual(baseline, host.round_waits.load(.monotonic)); // and no round waited for a reader
+    try std.testing.expectEqual(baseline, host.st.round_waits.load(.monotonic)); // and no round waited for a reader
 }
