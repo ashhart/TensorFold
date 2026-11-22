@@ -5,6 +5,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
     step.dependOn(&pdl.step);

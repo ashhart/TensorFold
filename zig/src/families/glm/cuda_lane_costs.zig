@@ -170,13 +170,14 @@ fn keyShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8, pin:
     const hex = std.fmt.bytesToHex(e.checkpoint_digest, .lower);
     const draft_hex = std.fmt.bytesToHex(if (e.drafter) |dr| dr.checkpoint_digest else @as([32]u8, @splat(0)), .lower);
     const tail: []const u8 = if (pin) |f| (if (f) " form factored" else " form classic") else "";
-    return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s} pad{d} pdl{d} dsel{d} wide{d}{s}", .{
+    return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} host{d} roce{d} p2p{s}/{s}/{s} pad{d} pdl{d} dsel{d} wide{d}{s}{s}", .{
         sm,                                          driver,                       e.share.world,                          hex[0..],                                   @intFromBool(e.drafter != null),
         if (e.drafter) |dr| dr.bits else @as(u8, 0), draft_hex[0..],               set.layers,                             @intFromBool(set.l2pf.on),                  @intFromBool(set.l2pf.named),
         set.l2pf.mb,                                 set.l2pf.ctas,                set.l2pf.pace_gbps,                     e.m.experts.nvfp4.warps,                    @intFromBool(set.kda_wide),
         @intFromBool(set.tiled),                     set.dense_bits,               set.head_bits,                          @intFromBool(set.kv8),                      @intFromBool(set.pages),
         set.kv_host,                                 @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "", sys.getenv("NCCL_MAX_NCHANNELS") orelse "",
-        @intFromBool(set.kda_pad),                   @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),                tail,
+        @intFromBool(set.kda_pad),                   @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),                if (e.m.experts.wide_tile) " expertTile64" else "",
+        tail,
     });
 }
 
@@ -265,13 +266,14 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
     e.m.experts.nvfp4.warps = 4;
     e.m.mm.pdl = true;
     e.m.dsel = true;
+    e.m.experts.wide_tile = false;
     var dr: dflash.Drafter = undefined;
     dr.bits = 4;
     dr.checkpoint_digest = @splat(2);
     e.drafter = &dr;
     var base: [512]u8 = undefined;
     const before = try keyShape(&e, 121, 13000, &base, null);
-    for (0..15) |which| {
+    for (0..16) |which| {
         const original = e.settings;
         switch (which) {
             0 => dr.bits = 0,
@@ -289,6 +291,7 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
             12 => e.m.mm.pdl = false,
             13 => e.m.dsel = false,
             14 => e.settings.roce_wide = true,
+            15 => e.m.experts.wide_tile = true,
             else => unreachable,
         }
         var changed: [512]u8 = undefined;
@@ -301,6 +304,7 @@ test "GLM cost identity: the consumed key includes drafter precision and all tim
         e.m.experts.nvfp4.warps = 4;
         e.m.mm.pdl = true;
         e.m.dsel = true;
+        e.m.experts.wide_tile = false;
     }
     // a named form only ends the identity, so the race's key stays as it was
     var classic: [512]u8 = undefined;
@@ -357,6 +361,7 @@ test "GLM cost identity: a record kept at one named form is not reused at the ot
     e.m.experts.nvfp4.warps = 4;
     e.m.mm.pdl = true;
     e.m.dsel = true;
+    e.m.experts.wide_tile = false;
     e.drafter = null;
     var shapes: [2][512]u8 = undefined;
     var keys: [2][32]u8 = undefined;
