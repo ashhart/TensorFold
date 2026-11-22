@@ -80,15 +80,15 @@ test "Every visit and convolution role has disjoint persistent and staged bytes"
         if (slot != 0 or cs != 0) try std.testing.expect(off >= previous_persistent);
         previous_persistent = off + len;
         for (0..4) |accepted| {
-            const source = state.convByteOffset(slot, cs, accepted, 3 + state.max_rows);
+            const source = state.convByteOffset(slot, cs, accepted, state.stage_rows);
             try std.testing.expect(source + len <= state.taps_bytes);
         }
     };
     try std.testing.expectEqual(state.conv_bytes, previous_persistent);
     // Decode acceptance k preserves exactly old[k], old[k+1], old[k+2] through raw[k..k+3].
     for (0..state.window_rows + 1) |accepted| {
-        const old = state.convByteOffset(47, 3, 0, 3 + state.max_rows);
-        const selected = state.convByteOffset(47, 3, accepted, 3 + state.max_rows);
+        const old = state.convByteOffset(47, 3, 0, state.stage_rows);
+        const selected = state.convByteOffset(47, 3, accepted, state.stage_rows);
         try std.testing.expectEqual(old + accepted * state.hidden * 2, selected);
     }
 }

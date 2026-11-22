@@ -31,7 +31,13 @@ pub const sliding_ring = ap.ringFor(1024, max_rows);
 pub const conv_widths = [conv_states]usize{ 1024, 1024, 2304, 2304 };
 pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const conv_bytes = visit_slots * 3 * conv_row_values * 2;
-pub const taps_bytes = visit_slots * (3 + max_rows) * conv_row_values * 2;
+/// A cache stages a round's taps: three old rows and a window. A wider chunk stages in its scratch.
+pub const stage_rows = 3 + window_rows;
+pub const taps_bytes = visit_slots * stage_rows * conv_row_values * 2;
+/// A scratch's staged taps for a chunk of up to `rows`; none where a cache's own staging holds them.
+pub fn stageBytes(rows: usize) usize {
+    return if (rows > window_rows) visit_slots * (3 + rows) * conv_row_values * 2 else 0;
+}
 
 pub fn globalSlots(capacity: usize) usize {
     return std.mem.alignForward(usize, capacity, ap.tile_keys);
@@ -184,7 +190,7 @@ pub const Cache = struct {
     }
 
     pub fn staged(c: *const Cache, slot: usize, state: usize, rows_before: usize) Ref {
-        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, 3 + max_rows) };
+        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, stage_rows) };
     }
 
     pub fn attentionLayer(c: *const Cache, schedule: *const plan.Plan, slot: usize, rows: usize) ap.Layer {
@@ -213,7 +219,7 @@ pub const Cache = struct {
             e.copy(c.backup, 0, c.conv, 0, conv_bytes);
             for (0..visit_slots) |slot| for (0..conv_states) |state| {
                 const bytes = 3 * convWidth(state) * 2;
-                e.copy(c.taps, convByteOffset(slot, state, accepted, 3 + max_rows), c.conv, convByteOffset(slot, state, 0, 3), bytes);
+                e.copy(c.taps, convByteOffset(slot, state, accepted, stage_rows), c.conv, convByteOffset(slot, state, 0, 3), bytes);
             };
             e.end();
             cb.commit();
@@ -293,7 +299,7 @@ fn sizes(rows: usize) [fields.len]usize {
 pub fn scratchBytes(rows: usize) usize {
     var out: usize = 0;
     for (sizes(rows)) |n| out += n;
-    return out;
+    return out + stageBytes(rows);
 }
 
 pub const Scratch = struct {
@@ -341,6 +347,8 @@ pub const Scratch = struct {
     logits_all: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
+    /// The staged convolution taps of a chunk wider than a window: this scratch then holds one stream's rows.
+    stage: ?mtl.Buffer = null,
     rows: usize,
 
     pub fn init(device: mtl.Device, rows: usize) !Scratch {
@@ -356,13 +364,19 @@ pub const Scratch = struct {
         }
         s.taps = null;
         s.rows = rows;
+        s.stage = if (stageBytes(rows) > 0) try device.buffer(stageBytes(rows), mtl.ResourceOptions.private) else null;
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
         inline for (fields) |f| @field(s, f).deinit();
         if (s.taps) |b| b.deinit();
+        if (s.stage) |b| b.deinit();
         s.* = undefined;
+    }
+
+    pub fn staged(s: *const Scratch, slot: usize, state: usize, rows_before: usize) Ref {
+        return .{ .buf = s.stage.?, .off = convByteOffset(slot, state, rows_before, 3 + s.rows) };
     }
 };
 
