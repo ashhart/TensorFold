@@ -6,6 +6,15 @@ const shard = @import("cuda_shard.zig");
 
 pub const model_type = "glm_moe_dsa";
 
+/// The CUDA pieces' Config of either checkpoint: full GLM-5.3's by its model_type, GLM-5.3-Flash's otherwise.
+pub fn of(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer parsed.deinit();
+    const t = if (parsed.value == .object) parsed.value.object.get("model_type") else null;
+    if (t != null and t.? == .string and std.mem.eql(u8, t.?.string, model_type)) return parse(gpa, json);
+    return cfg.parse(gpa, json);
+}
+
 fn flag(o: std.json.ObjectMap, key: []const u8, default: bool) bool {
     const v = o.get(key) orelse return default;
     return v != .bool or v.bool;
@@ -38,7 +47,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
         .shared_inter = d.moe_inter * @as(u32, @intCast(if (t.get("n_shared_experts")) |v| v.integer else 1)),
         .routed_scale = d.routed_scale,
         .norm_topk = flag(t, "norm_topk_prob", true),
-        .swiglu_limit = 0,
+        .swiglu_limit = std.math.inf(f32), // no clamp: min(g, inf) and [-inf, inf] keep every finite value
         .kda_heads = 0,
         .mla_heads = d.heads,
         .nope = d.nope,
@@ -51,7 +60,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
         .i_dim = d.i_dim,
         .i_topk = d.i_topk,
         .kpool = 1,
-        .hc = 0,
+        .hc = 1, // one residual stream: no hyper-connections
         .sinkhorn = 0,
         .mtp = d.mtp,
         .eos = d.eos,
@@ -95,7 +104,8 @@ test "full GLM-5.3's config.json: every layer MLA, 576-wide roped rows, pools of
     const json = try dsaConfig(testing.allocator, 78, 3, 256, 154880);
     defer testing.allocator.free(json);
     const c = try parse(testing.allocator, json);
-    try testing.expect(c.dsa and c.exl3 and c.head_unit == 128 and c.hc == 0 and c.kda_heads == 0);
+    try testing.expect(c.dsa and c.exl3 and c.head_unit == 128 and c.hc == 1 and c.kda_heads == 0);
+    try testing.expect((try of(testing.allocator, json)).dsa);
     try testing.expectEqual(@as(u32, 576), c.latentRow());
     try testing.expectEqual(@as(u32, 2048), c.keyWidth());
     try testing.expectEqual(@as(u32, 79), c.countKind(.mla) + 1); // countKind counts the backbone; the MTP layer is MLA too
@@ -136,6 +146,7 @@ test "a synthetic count parses; GLM-5.3-Flash's config, other widths and tied em
     const flash = try cfg.textConfig(gpa, 2, 1, &.{1}, 16, 8192, 4096);
     defer gpa.free(flash);
     try testing.expectError(error.NotGlmMoeDsa, parse(gpa, flash));
+    try testing.expect(!(try of(gpa, flash)).dsa);
 }
 
 test "tensorfold_activation_dtype: bfloat16 parses, float32 refuses by name" {

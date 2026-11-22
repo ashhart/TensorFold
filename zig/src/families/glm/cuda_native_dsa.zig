@@ -1,0 +1,45 @@
+//! The glm_moe_dsa model type (full GLM-5.3) on GLM-5.3-Flash's CUDA engine: config_dsa's shape, the same lanes.
+const native = @import("cuda_native.zig");
+
+pub const model_type = @import("config_dsa.zig").model_type;
+/// Mia-AiLab's EXL3 export: routed experts in mcg trellises, everything else bf16.
+pub const formats: []const []const u8 = &.{"exl3"};
+pub const default_context = native.default_context;
+pub const ceiling_switch = native.ceiling_switch;
+pub const raisedCeiling = native.raisedCeiling;
+pub const max_segments = native.max_segments;
+pub const prompt_rows = native.prompt_rows;
+pub const snap_grid = native.snap_grid;
+pub const explains_open = native.explains_open;
+pub const Room = native.Room;
+pub const Options = native.Options;
+pub const takes_drafter = false; // no DFlash2 for full GLM-5.3: its MTP head drafts
+pub const Peer = native.Peer;
+pub const LoneRun = native.LoneRun;
+pub const Loaded = native.Loaded;
+pub const benchmark = native.benchmark;
+pub const attach = native.attach;
+pub const share_states = native.share_states;
+pub const priceWindows = native.priceWindows;
+pub const fits = native.fits;
+pub const kvPool = native.kvPool;
+pub const Place = native.Place;
+pub const place = native.place;
+pub const weightShare = native.weightShare;
+pub const capacity = native.capacity;
+pub const window_rows = native.window_rows;
+pub const open = native.open;
+pub const snap_bytes = native.snap_bytes;
+pub const snap_min_bytes = native.snap_min_bytes;
+pub const snap_ready = native.snap_ready;
+pub const snap_charged = native.snap_charged;
+pub const snap_spare = native.snap_spare;
+pub const snap_reuses = native.snap_reuses;
+pub const snap_save = native.snap_save;
+pub const snap_restore = native.snap_restore;
+pub const share_pool = native.share_pool;
+pub const share_attach = native.share_attach;
+pub const share_kept_ppm = native.share_kept_ppm;
+pub const snap_drop = native.snap_drop;
+pub const startup_phase = native.startup_phase;
+pub const explain = native.explain;
