@@ -19,6 +19,7 @@ pub const Settings = struct {
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
     pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
+    pair_experts: bool = false, // TF_GLM_PAIR_EXPERTS=1: paired chunks share 128-pair NVFP4 routed-expert items (0: two 64-pair passes)
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
@@ -107,6 +108,12 @@ pub const Settings = struct {
         if (get("TF_GLM_PROMPT_PAIR")) |v| {
             if (std.mem.eql(u8, v, "1")) s.pair = true else if (std.mem.eql(u8, v, "0")) s.pair = false else {
                 problem.* = "TF_GLM_PROMPT_PAIR: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_PAIR_EXPERTS")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.pair_experts = true else if (std.mem.eql(u8, v, "0")) s.pair_experts = false else {
+                problem.* = "TF_GLM_PAIR_EXPERTS: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -219,7 +226,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 22, // this struct's version (21, roce_wide's, plus draft_split)
+    layout: u32 = 23, // this struct's version (22, plus pair_experts)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -232,6 +239,7 @@ pub const Fingerprint = extern struct {
     kv_live_half: u32 = 0, // TF_GLM_KV_LIVE_HALF: every rank keeps the live KDA half alone (1) or the head whole (0)
     pieces: u32,
     pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank
+    pair_experts: u32 = 0, // TF_GLM_PAIR_EXPERTS: every rank sizes the joint plan and twin scratch alike
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
@@ -268,6 +276,7 @@ pub const Fingerprint = extern struct {
         kv_live_half,
         pieces,
         pair,
+        pair_experts,
         layers,
         mtp,
         vision,
@@ -314,6 +323,7 @@ pub const Fingerprint = extern struct {
             .kv_live_half = @intFromBool(s.kv_live_half),
             .pieces = s.pieces,
             .pair = @intFromBool(s.pair),
+            .pair_experts = @intFromBool(s.pair_experts),
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
@@ -354,6 +364,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "kv_live_half",
             "pieces",
             "pair",
+            "pair_experts",
             "layers",
             "mtp",
             "vision",
@@ -479,6 +490,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kv_live_half => "TF_GLM_KV_LIVE_HALF",
         .pieces => "TF_GLM_OVERLAP_PIECES",
         .pair => "TF_GLM_PROMPT_PAIR",
+        .pair_experts => "TF_GLM_PAIR_EXPERTS",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
@@ -514,4 +526,29 @@ pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limi
 /// The checkpoint digest a rank sends: its metadata and every shard byte, read again only for a file that changed.
 pub fn artifact(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
     return @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
+}
+test "TF_GLM_PAIR_EXPERTS: off by default, 0 or 1, and every rank must agree" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "1" else null;
+        }
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "0" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PAIR_EXPERTS")) "2" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).pair_experts);
+    const on = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(on.pair_experts);
+    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).pair_experts);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_PAIR_EXPERTS: 0 or 1", problem);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, on, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), @splat(0)) };
+    try std.testing.expectEqual(Mismatch{ .field = .pair_experts, .rank = 1 }, mismatch(&all).?);
 }
