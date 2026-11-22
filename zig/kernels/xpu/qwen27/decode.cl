@@ -74,6 +74,9 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
 
 // Decode attention by key slices: one subgroup per (row, K/V head, query part, slice). Grid y is AKV * QPARTS.
 #define SPLIT 32
+#if Q27_QPG > 8
+#error "attn_decode keeps head a's running max in lanes a and a + 8: at most 8 heads"
+#endif
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
@@ -93,7 +96,7 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     base = TREE ? POS[wf] : 0x7fffffff;
   }
   const int last = MT ? POS[t] : p0 + DEPTH(t), j0 = sp * SPLIT, j1 = min(j0 + SPLIT, last + 1);
-  float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
+  float q[Q27_QPG][16], o[Q27_QPG][16], l[Q27_QPG], mv = -INFINITY; // mv: head a's running max in lanes a and a + 8
   for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
 #if Q27_QPARTS == 1
@@ -103,7 +106,6 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
 #endif
       o[a][i] = 0.0f;
     }
-    m[a] = -INFINITY;
     l[a] = 0.0f;
   }
   for (int j = j0; j < j1; j++) {
@@ -127,12 +129,16 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
       for (int i = 0; i < 16; i++) kv[i] = (float)v8[i * 16 + lane] * vs;
     } else
       for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * Q27_AKV + hk) * 256 + i * 16 + lane]);
+    // The running maxima sit in lanes a and a + 8 of mv, the scores in sv: all the exponentials are one vector exp.
+    float sv = -INFINITY;
+    for (int a = 0; a < Q27_QPG; a++) sv = select(sv, sc[a], (int)((lane & 7) == a));
+    const float mn = fmax(mv, sv);
+    const float e = exp((lane < 8 ? mv : sv) - mn); // lanes below 8: exp(m - mn), the others: exp(sc - mn)
+    mv = mn;
     for (int a = 0; a < Q27_QPG; a++) {
-      const float mn = fmax(m[a], sc[a]);
-      const float al = exp(m[a] - mn), p = exp(sc[a] - mn);
+      const float al = sub_group_broadcast(e, a), p = sub_group_broadcast(e, a + 8);
       l[a] = l[a] * al + p;
       for (int i = 0; i < 16; i++) o[a][i] = o[a][i] * al + p * kv[i];
-      m[a] = mn;
     }
   }
   for (int a = 0; a < Q27_QPG; a++) {
@@ -142,7 +148,7 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
 #endif
     if (lane == 0) {
-      PM[base] = m[a];
+      PM[base] = sub_group_broadcast(mv, a);
       PL[base] = l[a];
     }
     for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
