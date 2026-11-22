@@ -2,6 +2,7 @@
 
 pub const common = @embedFile("common.metal");
 pub const loop = @embedFile("loop.metal");
+pub const loop_down = @embedFile("loop_down.metal");
 
-/// The library the runtime compiles: common helpers, then the three kernels named inkling2_loop_*.
-pub const ops = common ++ "\n" ++ loop;
+/// The library the runtime compiles: common helpers, then the kernels named inkling2_loop_*.
+pub const ops = common ++ "\n" ++ loop ++ "\n" ++ loop_down;

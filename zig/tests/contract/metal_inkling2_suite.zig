@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
+const sources = @import("kernel_sources");
 const u = @import("inkling2_util.zig");
 const conv = @import("metal_inkling2_conv.zig");
 const norm = @import("metal_inkling2_norm.zig");
@@ -109,7 +110,12 @@ pub const Suite = struct {
         // The dense projection's faults are edits of the shared matvec and tile sources the probe builds itself.
         for (linear.controls) |ctl| {
             if (!wanted(only, ctl.label)) continue;
-            const p = try s.hold(linear.Probe, linear.Probe.init(s.a, s.device, s.queue, try s.production_ops(), ctl.kind, ctl.label));
+            const o = if (ctl.tile == 0) try s.production_ops() else blk: {
+                const text = try std.fmt.allocPrint(s.a, "#define TF_CTL_DENSE {d}\n{s}", .{ ctl.tile, sources.inkling2_ops });
+                defer s.a.free(text);
+                break :blk try s.controlOps(text);
+            };
+            const p = try s.hold(linear.Probe, linear.Probe.init(s.a, s.device, s.queue, o, ctl.kind, ctl.label));
             try s.kernels.append(s.a, linear.controlKernel(p));
         }
     }

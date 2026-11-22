@@ -24,6 +24,10 @@ pub const Kind = enum {
     ctl_tail,
     ctl_half,
     ctl_flush,
+    /// The same faults in the dense MMA tile alone (inkling2_dense_mma_*), the matvec and the dsv41 tile intact.
+    ctl_tile_tail,
+    ctl_tile_half,
+    ctl_tile_flush,
 };
 
 /// The kinds the suite registers on the production operators.
@@ -34,12 +38,12 @@ fn f32Out(k: Kind) bool {
 }
 /// Kinds whose gate 1 runs 16 more rows than the harness asks: an MMA tile and a partial one.
 fn bumped(k: Kind) bool {
-    return k == .alone_bf16 or k == .alone_f32 or k == .split_bf16;
+    return k == .alone_bf16 or k == .alone_f32 or k == .split_bf16 or k == .ctl_tile_flush;
 }
 
 pub fn name(k: Kind) []const u8 {
     return switch (k) {
-        .bf16, .ctl_tail, .ctl_half, .ctl_flush => "metal inkling2 linear",
+        .bf16, .ctl_tail, .ctl_half, .ctl_flush, .ctl_tile_tail, .ctl_tile_half, .ctl_tile_flush => "metal inkling2 linear",
         .f32 => "metal inkling2 linear, f32 out",
         .alone_bf16 => "metal inkling2 linear, each row its own one-row call",
         .alone_f32 => "metal inkling2 linear, f32 out, each row its own one-row call",
@@ -121,7 +125,7 @@ const head_served = [_]c.Shape{
 
 fn servedOf(k: Kind) []const c.Shape {
     return switch (k) {
-        .alone_bf16, .alone_f32, .split_bf16 => &seam_served,
+        .alone_bf16, .alone_f32, .split_bf16, .ctl_tile_flush => &seam_served,
         .head => &head_served,
         else => &plain_served,
     };
@@ -419,21 +423,25 @@ pub const Probe = struct {
     }
 };
 
-/// A planted fault in the matvec and the tile (their sources' TF_CTL edits); `controlKernel` names the gate.
-pub const Control = struct { kind: Kind, label: []const u8 };
+/// A planted fault in the matvec and the dsv41 tile (TF_CTL edits), or with `tile` in the dense MMA tile.
+pub const Control = struct { kind: Kind, label: []const u8, tile: u8 = 0 };
 
 pub const controls = [_]Control{
     .{ .kind = .ctl_tail, .label = "control: inkling2 linear, a partial last K step dropped" },
     .{ .kind = .ctl_half, .label = "control: inkling2 linear, sums rounded to fp16" },
     .{ .kind = .ctl_flush, .label = "control: inkling2 linear, non-finite outputs flushed" },
+    .{ .kind = .ctl_tile_tail, .label = "control: inkling2 dense tile, the last K chunk dropped", .tile = 2 },
+    .{ .kind = .ctl_tile_half, .label = "control: inkling2 dense tile, sums rounded to fp16", .tile = 3 },
+    .{ .kind = .ctl_tile_flush, .label = "control: inkling2 dense tile, non-finite inputs flushed", .tile = 1 },
 };
 
 pub fn controlKernel(p: *Probe) g.Kernel {
     var k = p.kernel();
     k.control = switch (p.kind) {
-        .ctl_tail => .shapes,
+        .ctl_tail, .ctl_tile_tail => .shapes,
         .ctl_half => .sums,
-        .ctl_flush => .nonfinite,
+        .ctl_tile_half => .shapes,
+        .ctl_flush, .ctl_tile_flush => .nonfinite,
         else => unreachable,
     };
     return k;

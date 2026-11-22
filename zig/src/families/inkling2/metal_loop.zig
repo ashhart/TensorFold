@@ -20,14 +20,17 @@ pub const dot_block = 2;
 /// Mix statistics: sources * (1 + queries) floats a row.
 const stat_floats = max_sources * (1 + max_queries);
 const stats_bytes = 4096;
-/// Scratch: statistics, then the largest of the gates' pre-norm states and normed down inputs.
-const scratch_bytes = stats_bytes + max_gates * small_rows * max_hidden * 4;
+/// Gate-y MMA tile (inkling2_loop_gate_y_mma): rows and hidden columns of one simdgroup's output, and its rank step.
+const gate_tile = 16;
+const gate_step = 8;
+/// Gate-down MMA (inkling2_loop_gate_down_mma) chains cover 256 elements of a row, so it needs a multiple of that.
+const down_hidden = 256;
 
 comptime {
     std.debug.assert(small_rows * stat_floats * 4 <= stats_bytes);
 }
 
-const Kernel = enum { mix, gate_down, gate_mix, mix_stats, mix_apply, gate_y, gate_norm, gate_prep, gate_dot };
+const Kernel = enum { mix, gate_down, gate_mix, mix_stats, mix_apply, gate_y, gate_norm, gate_prep, gate_dot, gate_y_mma, gate_down_mma };
 const kernel_count = @typeInfo(Kernel).@"enum".field_names.len;
 
 /// Every symbol the library defines, in pipeline order (the registration list the contract's launch records name).
@@ -119,16 +122,19 @@ pub const GateMixArgs = struct {
     eps: f32,
 };
 
+/// The largest call: its pre-norm gate states (fp32, every gate) live in the scratch past the statistics.
+pub const Options = struct { rows: u32 = 64, hidden: u32 = max_hidden };
+
 pub const Ops = struct {
     pipes: [kernel_count]mtl.Pipeline,
     scratch: mtl.Buffer,
 
-    pub fn load(device: mtl.Device) !Ops {
-        return loadSource(device, sources.inkling2_loop_ops);
+    pub fn load(device: mtl.Device, options: Options) !Ops {
+        return loadSource(device, options, sources.inkling2_loop_ops);
     }
 
     /// The same operators from other text (the contract's planted controls edit the source).
-    pub fn loadSource(device: mtl.Device, text: []const u8) !Ops {
+    pub fn loadSource(device: mtl.Device, options: Options, text: []const u8) !Ops {
         var compile = mtl.CompileOptions.mlx();
         compile.math_functions = .precise;
         const library = try mtl.Library.fromSource(device, text, compile);
@@ -139,9 +145,10 @@ pub const Ops = struct {
         for (symbols, 0..) |name, i| {
             o.pipes[i] = try mtl.Pipeline.init(device, library, name, false);
             loaded += 1;
-            if (o.pipes[i].maxThreads() < 256 or o.pipes[i].simdWidth() != 32) return error.LoopLaunchLimit;
+            if (o.pipes[i].maxThreads() < launchThreads(@fromBackingInt(@intCast(i))) or o.pipes[i].simdWidth() != 32) return error.LoopLaunchLimit;
         }
-        o.scratch = try device.buffer(scratch_bytes, mtl.ResourceOptions.private);
+        const states = max_gates * @max(options.rows, small_rows) * @as(usize, options.hidden) * 4;
+        o.scratch = try device.buffer(stats_bytes + states, mtl.ResourceOptions.private);
         return o;
     }
 
@@ -205,12 +212,23 @@ pub const Ops = struct {
             .eps_unweighted = a.eps_unweighted,
             .eps_norm = 0,
         };
-        if (a.rows <= small_rows) {
-            const normed = View{ .buffer = o.scratch, .offset = stats_bytes };
+        const normed = View{ .buffer = o.scratch, .offset = stats_bytes };
+        const mma = a.hidden % down_hidden == 0 and stats_bytes + @as(usize, a.gates) * a.rows * a.hidden * 4 <= o.scratch.length() and
+            aligned16(a.down_w[0..a.gates]);
+        if (a.rows <= small_rows or mma) {
             e.setPipeline(o.pipe(.gate_prep));
             bind(e, &.{ a.h[0], a.h[if (a.gates > 1) 1 else 0], a.h[if (a.gates > 2) 2 else 0], a.msg, normed });
             e.setValue(args, 5);
             e.dispatchGroups(mtl.Size.of(a.rows, a.gates, 1), mtl.Size.of(256, 1, 1));
+            if (a.rows > small_rows) {
+                e.setPipeline(o.pipe(.gate_down_mma));
+                e.setBuffer(normed.buffer, normed.offset, 0);
+                bind3(e, 1, a.down_w, a.gates);
+                e.setBuffer(a.down.buffer, a.down.offset, 4);
+                e.setValue(args, 5);
+                e.dispatchGroups(mtl.Size.of(divCeil(a.rank, gate_tile), divCeil(a.rows, gate_tile), a.gates), mtl.Size.of(128, 1, 1));
+                return;
+            }
             e.setPipeline(o.pipe(.gate_dot));
             e.setBuffer(normed.buffer, normed.offset, 0);
             bind3(e, 1, a.down_w, a.gates);
@@ -259,6 +277,24 @@ pub const Ops = struct {
             e.dispatchGroups(mtl.Size.of(a.rows, a.gates, 1), mtl.Size.of(256, 1, 1));
             return;
         }
+        const y_bytes = @as(usize, a.gates) * a.rows * a.hidden * 4;
+        if (a.rank % gate_step == 0 and stats_bytes + y_bytes <= o.scratch.length()) {
+            const y = View{ .buffer = o.scratch, .offset = stats_bytes };
+            e.setPipeline(o.pipe(.gate_y_mma));
+            bind(e, &.{ hs[0], hs[1], hs[2], a.msg, a.down });
+            bind3(e, 5, a.forget, a.gates);
+            bind3(e, 8, a.gain, a.gates);
+            e.setBuffer(y.buffer, y.offset, 11);
+            e.setValue(args, 12);
+            e.dispatchGroups(mtl.Size.of(divCeil(a.hidden, gate_tile), divCeil(a.rows, gate_tile), a.gates), mtl.Size.of(32, 1, 1));
+            e.setPipeline(o.pipe(.gate_norm));
+            e.setBuffer(y.buffer, y.offset, 0);
+            bind3(e, 1, a.norms, a.gates);
+            e.setBuffer(a.out.buffer, a.out.offset, 4);
+            e.setValue(args, 5);
+            e.dispatchGroups(mtl.Size.of(a.rows, a.gates, 1), mtl.Size.of(256, 1, 1));
+            return;
+        }
         e.setPipeline(o.pipe(.gate_mix));
         bind(e, &.{ hs[0], hs[1], hs[2], a.msg, a.down });
         bind3(e, 5, a.forget, a.gates);
@@ -269,6 +305,24 @@ pub const Ops = struct {
         e.dispatchGroups(mtl.Size.of(a.rows, a.gates, 1), mtl.Size.of(256, 1, 1));
     }
 };
+
+/// Threads a kernel is launched with: the MMA kernels use whole simdgroups of a tile, the rest eight.
+fn launchThreads(k: Kernel) u32 {
+    return switch (k) {
+        .gate_y_mma => 32,
+        .gate_down_mma => 128,
+        else => 256,
+    };
+}
+
+fn aligned16(views: []const View) bool {
+    for (views) |w| if (w.offset % 16 != 0) return false;
+    return true;
+}
+
+fn divCeil(a: u32, b: u32) u32 {
+    return std.math.divCeil(u32, a, b) catch unreachable;
+}
 
 fn bind(e: mtl.ComputeEncoder, views: []const View) void {
     for (views, 0..) |v, i| e.setBuffer(v.buffer, v.offset, i);

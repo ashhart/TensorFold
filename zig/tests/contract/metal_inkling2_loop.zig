@@ -22,11 +22,16 @@ const controls = [_]Control{
     .{ .kind = .down, .name = "control: inkling2 loop multi-group controller drops message half", .from = "fma(float(wr[ulong(j) * 2 * H + H + i]), xm, acc[j])", .to = "fma(float(wr[ulong(j) * 2 * H + i]), xm, acc[j])" },
     .{ .kind = .qkv, .name = "control: inkling2 loop multi-group controller adds forget gate", .from = "(1.0f - forget)", .to = "(1.0f + forget)" },
     .{ .kind = .qkv, .name = "control: inkling2 loop gate output skips the norm weight", .from = "dst[i] = bfloat(float(nw[i]) * (v[e] * inv));", .to = "dst[i] = bfloat(v[e] * inv);" },
+    .{ .kind = .qkv, .name = "control: inkling2 loop MMA gate states skip the first rank step", .from = "for (uint k = 0; k < R; k += 8u) {", .to = "for (uint k = 8u; k < R; k += 8u) {" },
+    .{ .kind = .qkv, .name = "control: inkling2 loop MMA gate states take the gain from the forget weights", .from = "gb[j].thread_elements()[0] = wg[c * R + k + fm];", .to = "gb[j].thread_elements()[0] = wf[c * R + k + fm];" },
+    .{ .kind = .down, .name = "control: inkling2 loop MMA controller drops the last chain step", .from = "for (uint e = steps & ~7u; e < steps; ++e) {", .to = "for (uint e = steps & ~7u; e + 1u < steps; ++e) {" },
+    .{ .kind = .down, .name = "control: inkling2 loop MMA controller keeps only the last slice", .from = "total[t] = s == 0 ? slice_sum : total[t] + slice_sum;", .to = "total[t] = slice_sum;" },
+    .{ .kind = .down, .name = "control: inkling2 loop MMA controller reads the state for the message half", .from = "return e < steps_half ? 256u * e : hidden + 256u * (e - steps_half);", .to = "return 256u * (e % steps_half);" },
 };
 
-// Rows past loop.small_rows run the one-group kernels, the rest the multi-group ones.
+// Rows past loop.small_rows run the one-group kernels (gate states and down on MMA), the rest the multi-group ones.
 const mix_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 1 }, .{ .rows = 3, .n = 96, .k = 8 }, .{ .rows = 2, .n = 128, .k = 0 }, .{ .rows = 17, .n = 128, .k = 3 } };
-const gate_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 64 }, .{ .rows = 2, .n = 96, .k = 7 }, .{ .rows = 3, .n = 128, .k = 128 }, .{ .rows = 17, .n = 96, .k = 9 } };
+const gate_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 64 }, .{ .rows = 2, .n = 96, .k = 7 }, .{ .rows = 3, .n = 128, .k = 128 }, .{ .rows = 17, .n = 96, .k = 9 }, .{ .rows = 17, .n = 96, .k = 64 }, .{ .rows = 33, .n = 130, .k = 8 }, .{ .rows = 40, .n = 2304, .k = 64 }, .{ .rows = 19, .n = 33, .k = 128 }, .{ .rows = 17, .n = 768, .k = 16 }, .{ .rows = 19, .n = 512, .k = 128 }, .{ .rows = 33, .n = 2560, .k = 64 } };
 fn noSums(_: c.Shape) usize {
     return 0;
 }
@@ -107,7 +112,7 @@ const Probe = struct {
         const rows = shape.rows;
         const h = shape.n;
         const k = shape.k;
-        if (rows == 0 or rows > 17 or h == 0 or h > loop.max_hidden) return false;
+        if (rows == 0 or rows > 40 or h == 0 or h > loop.max_hidden) return false;
         if (p.isMix()) {
             if (k >= loop.max_sources) return false;
         } else if (k == 0 or k > loop.max_rank) return false;
@@ -289,8 +294,8 @@ pub const Suite = struct {
         const ops = if (control) |ctl| blk: {
             const source = try u.mutate(s.a, sources.inkling2_loop_ops, ctl.from, ctl.to);
             defer s.a.free(source);
-            break :blk try loop.Ops.loadSource(s.device, source);
-        } else try loop.Ops.load(s.device);
+            break :blk try loop.Ops.loadSource(s.device, .{}, source);
+        } else try loop.Ops.load(s.device, .{});
         p.* = .{ .arena = .init(s.a), .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .ops = ops, .kind = kind, .name = name };
         errdefer p.deinit();
         try s.held.ensureUnusedCapacity(s.a, 1);

@@ -185,7 +185,7 @@ pub const Model = struct {
         errdefer m.weights.deinit(gpa);
         m.ops = try ops_mod.Ops.load(m.device, .{ .scratch_bytes = opsScratch(t, options) });
         errdefer m.ops.deinit();
-        m.loop_ops = try loop_mod.Ops.load(m.device);
+        m.loop_ops = try loop_mod.Ops.load(m.device, .{ .rows = options.rows, .hidden = t.hidden });
         errdefer m.loop_ops.deinit();
         m.store = try ex.Store.load(gpa, m.device, &m.checkpoint, &m.config, options.rows);
         errdefer m.store.deinit();

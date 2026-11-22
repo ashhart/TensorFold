@@ -313,6 +313,64 @@ constant constexpr uint LP_STAT = 1 + LP_MAX_QUERIES; // per source: sum of squa
   y[(ulong(g) * a.rows + row) * H + i] = (1.0f - forget) * h[i] + metal::precise::tanh(gn) * m[i];
 }
 
+// gate_y on MMA for many rows (rank % 8 == 0): 16 rows x 16 columns a simdgroup, forget and gain one rank-order chain.
+[[kernel, max_total_threads_per_threadgroup(32)]] void inkling2_loop_gate_y_mma(
+    const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
+    const device float* msg [[buffer(3)]], const device bfloat* down [[buffer(4)]],
+    const device bfloat* f0 [[buffer(5)]], const device bfloat* f1 [[buffer(6)]], const device bfloat* f2 [[buffer(7)]],
+    const device bfloat* g0 [[buffer(8)]], const device bfloat* g1 [[buffer(9)]], const device bfloat* g2 [[buffer(10)]],
+    device float* y [[buffer(11)]], constant LpGateArgs& a [[buffer(12)]], uint3 grid [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint g = grid.z, H = a.hidden, R = a.rank, rows = a.rows;
+  const uint r0 = grid.y * 16u, c0 = grid.x * 16u;
+  const uint qid = lane >> 2u;
+  const uint fm = (qid & 4u) + ((lane >> 1u) & 3u);
+  const uint fn = (qid & 2u) * 2u + (lane & 1u) * 2u;
+  const device bfloat* dn = down + ulong(g) * rows * R;
+  const device bfloat* wf = g == 0 ? f0 : (g == 1 ? f1 : f2);
+  const device bfloat* wg = g == 0 ? g0 : (g == 1 ? g1 : g2);
+  simdgroup_matrix<float, 8, 8> fa[2][2], ga[2][2];
+  for (uint i = 0; i < 2; ++i)
+    for (uint j = 0; j < 2; ++j) {
+      fa[i][j] = simdgroup_matrix<float, 8, 8>(0.0f);
+      ga[i][j] = simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+  for (uint k = 0; k < R; k += 8u) {
+    simdgroup_matrix<bfloat, 8, 8> xa[2], fb[2], gb[2];
+    for (uint i = 0; i < 2; ++i) {
+      const device bfloat* p = dn + ulong(min(r0 + i * 8u + fm, rows - 1u)) * R + k + fn;
+      xa[i].thread_elements()[0] = p[0];
+      xa[i].thread_elements()[1] = p[1];
+    }
+    for (uint j = 0; j < 2; ++j) {
+      const ulong c = min(c0 + j * 8u + fn, H - 1u), d = min(c0 + j * 8u + fn + 1u, H - 1u);
+      fb[j].thread_elements()[0] = wf[c * R + k + fm];
+      fb[j].thread_elements()[1] = wf[d * R + k + fm];
+      gb[j].thread_elements()[0] = wg[c * R + k + fm];
+      gb[j].thread_elements()[1] = wg[d * R + k + fm];
+    }
+    for (uint i = 0; i < 2; ++i)
+      for (uint j = 0; j < 2; ++j) {
+        simdgroup_multiply_accumulate(fa[i][j], xa[i], fb[j], fa[i][j]);
+        simdgroup_multiply_accumulate(ga[i][j], xa[i], gb[j], ga[i][j]);
+      }
+  }
+  const device float* hp = g == 0 ? h0 : (g == 1 ? h1 : h2);
+  const device float* mp = msg + ulong(lp_slot(a, g)) * a.msg_stride;
+  for (uint i = 0; i < 2; ++i) {
+    const uint row = r0 + i * 8u + fm;
+    if (row >= rows) continue;
+    for (uint j = 0; j < 2; ++j)
+      for (uint e = 0; e < 2; ++e) {
+        const uint col = c0 + j * 8u + fn + e;
+        if (col >= H) continue;
+        const float keep = metal::precise::tanh(fa[i][j].thread_elements()[e]);
+        const ulong at = ulong(row) * H + col;
+        y[(ulong(g) * rows + row) * H + col] = (1.0f - keep) * hp[at] + metal::precise::tanh(ga[i][j].thread_elements()[e]) * mp[at];
+      }
+  }
+}
+
 // Weighted RMS norm of gate grid.y's row grid.x of gate_y's output, rounded to bf16, as the tail of gate_mix.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_norm(
     const device float* y [[buffer(0)]], const device bfloat* n0 [[buffer(1)]], const device bfloat* n1 [[buffer(2)]],
