@@ -47,6 +47,7 @@ pub const Config = struct {
     hc_eps: f32 = 1e-6,
     sinkhorn: u32 = 20,
     mtp: u32 = 1,
+    shares: u32 = 0, // the shares every rank count sums in (full GLM-5.3: 3; 0: one a rank, as GLM-5.3-Flash)
     dsa: bool = false, // full GLM-5.3 (glm_moe_dsa): every layer MLA, a plain residual (hc 1), no KDA, SwiGLU unclamped
     tp: u32 = 1, // tensor parallel: the Macs splitting the attention heads
     tp_rank: u32 = 0,

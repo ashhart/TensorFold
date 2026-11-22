@@ -114,6 +114,7 @@ test {
     _ = @import("cuda_zero_budget_test.zig");
     _ = native;
     _ = native_dsa;
+    _ = @import("cuda_engine_shares.zig");
     _ = @import("cuda_qpack.zig");
     _ = share;
     _ = @import("cuda_mtp_chance.zig");
