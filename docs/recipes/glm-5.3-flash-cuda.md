@@ -100,8 +100,13 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
 - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
   too, and every 2,048 rows from the last cut, so a chat's next turn resumes where its previous turn's history ends
   instead of at the last 2,048-row point. Rank 0 sends the cuts to the other ranks. A pass with starts takes no solo
-  or batched pass. GLM refuses the switch at startup with `TF_KV_SHARE` above 0 or with `--learn-conversations`
-  (#2404, part of #2396).
+  or batched pass. With a prompt cache it also runs warm turns: 150 ms after a reply, in idle time, rank 0 prefills
+  the reply as the next turn's prompt will render it and keeps the states at the next turn's own cuts inside it, so
+  after a reply longer than 2,048 tokens the next turn resumes inside the reply. The cuts are the ones above (starts
+  at least 256 tokens apart), so a resumed turn chunks as a cold one and its tokens are the same; a request that
+  arrives stops the warm pass at its next chunk. Kept states then carry DFlash2's context ring on every rank, so a
+  resumed turn drafts from the same window as a fresh one. GLM refuses the switch at startup with `TF_KV_SHARE`
+  above 0 or with `--learn-conversations` (#2404, part of #2396; warm turns #3109).
 - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
   (#1761).
