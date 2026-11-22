@@ -257,7 +257,6 @@ pub const Drafter = struct {
         var ids: [state.window_rows]i32 = undefined; // R <= window_rows: perPass
         for (items, 0..) |it, k| {
             if (it.out.len > T or it.p + T > it.caches.capacity) return error.BadDraft;
-            if (it.anchor >= c.vocab) return error.InvalidMiniMaxToken; // embed and the Markov table read it unchecked
             ids[k * T] = @intCast(it.anchor);
             for (1..T) |j| ids[k * T + j] = @intCast(dr.w.c.noise);
         }
