@@ -165,6 +165,18 @@ test "dense config refuses MoE and tied embedding heads" {
     try std.testing.expectError(error.TiedEmbeddingHead, parse(a, tied, null));
 }
 
+test "a tied head parses only with its switch, dense, and marks the config" {
+    const a = std.testing.allocator;
+    const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
+    defer a.free(tied);
+    var p: cfg.Problem = .{};
+    try std.testing.expectError(error.TiedEmbeddingHead, cfg.parseTied(a, tied, null, &p, false));
+    try std.testing.expect((try cfg.parseTied(a, tied, null, &p, true)).tied_head);
+    const untied = try edit(a, "tie_word_embeddings", .{ .bool = false });
+    defer a.free(untied);
+    try std.testing.expect(!(try cfg.parseTied(a, untied, null, &p, true)).tied_head);
+}
+
 test "invalid scalar shapes and types fail without a cast trap" {
     const a = std.testing.allocator;
     for ([_]std.json.Value{ .{ .integer = -1 }, .{ .integer = 0 }, .{ .bool = true }, .{ .integer = 4294967296 } }) |v| {
