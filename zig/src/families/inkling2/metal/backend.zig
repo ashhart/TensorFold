@@ -221,7 +221,7 @@ pub const Metal = struct {
         const capture = self.prepared and stream != null;
         if (capture) _ = self.nextTapGeneration();
         const taps: ?st.Ref = if (capture) .{ .buf = s.taps.? } else null;
-        try fwd.run(self.model, s, cache, ids[0..end], .{ .taps = taps });
+        try fwd.run(self.model, s, cache, ids[0..end], .{ .taps = taps, .prompt = true });
         if (capture) {
             if (self.sink) |k| try k.take(k.ptr, stream.?, .{
                 .buffer = @intFromPtr(s.taps.?.id),

@@ -19,6 +19,8 @@ pub const Options = struct {
     ids: ?Ref = null,
     flight: ?*mtl.CommandBuffer = null,
     taps: ?state.Ref = null,
+    /// A prompt's rows: its projections run on the tensor units where the GPU has them.
+    prompt: bool = false,
 };
 
 pub const FinalPlan = struct { work_rows: usize, logits_rows: usize, logits_row: usize, capture_rows: usize };
@@ -108,6 +110,13 @@ pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: R
         e.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
         base += take;
     }
+}
+
+/// A visit's projection: a prompt's rows on the tensor units, a round's rows as `dense`.
+fn project(m: *const Model, e: mtl.ComputeEncoder, prompt: bool, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) !void {
+    const k = weight.shape[weight.rank - 1];
+    if (!prompt or m.experts.units == null or (k != 2304 and k != 3072)) return dense(m, e, weight, input, out, rows);
+    try experts.denseUnits(&m.experts, e, x(input), x(.{ .buf = weight.buffer, .off = weight.offset }), x(out), @intCast(rows), @intCast(weight.shape[weight.rank - 2]), @intCast(k));
 }
 
 /// One row because M2's AR ABI is [sources,H] -> [queries,H]. Batch composition never mixes rows.
@@ -329,7 +338,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
 }
 
 /// A visit's launches in dependency order; a barrier follows every step a later launch reads.
-fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, rows: usize, taps: ?state.Ref) !void {
+fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, rows: usize, taps: ?state.Ref, prompt: bool) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
     if (taps) |to| {
@@ -349,15 +358,15 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     prepareAttentionInputs(m, e, s, v, rows);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    dense(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
-    dense(m, e, w.attn.wk, knorm, at(s.k_raw, 0), rows);
-    dense(m, e, w.attn.wv, vnorm, at(s.v_raw, 0), rows);
-    dense(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
-    dense(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
-    dense(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
+    try project(m, e, prompt, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
+    try project(m, e, prompt, w.attn.wk, knorm, at(s.k_raw, 0), rows);
+    try project(m, e, prompt, w.attn.wv, vnorm, at(s.v_raw, 0), rows);
+    try project(m, e, prompt, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
+    try project(m, e, prompt, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
+    try project(m, e, prompt, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
     e.barrier();
     try attendSegments(m, e, s, v, segments);
-    dense(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
+    try project(m, e, prompt, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     e.barrier();
     postConv(m, e, segments, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
     runtime(m, e, .attention_partial, &.{ at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.partial, 0) }, rows * state.hidden, if (lp.boundary) lp.blocks_in + 1 else 0);
@@ -427,7 +436,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     e.barrier();
     for (m.weight_plan.visits[0..m.weight_plan.n_visits], 0..) |*v, vi| {
-        try visit(m, e, s, v, segments, rows, options.taps);
+        try visit(m, e, s, v, segments, rows, options.taps, options.prompt);
         if (n_parts < cuts.len and vi + 1 == cuts[n_parts]) {
             e.end();
             cb.commit();
