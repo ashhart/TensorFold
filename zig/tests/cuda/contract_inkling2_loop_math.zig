@@ -264,7 +264,7 @@ pub const Messages = struct {
                         const beta = ref.Iv.of(ref.bf(self.banks[b][row * cols + i])).mul(inv[b]);
                         value = value.add(logits[b].mul(beta));
                     }
-                    const at = ((row * layers + j) * 4 + role) * cols + i;
+                    const at = ((j * 4 + role) * self.shape.rows + row) * cols + i;
                     out[at] = value;
                 }
             };
@@ -301,7 +301,7 @@ pub const Messages = struct {
                 const w1 = e1 / den;
                 for (0..cols) |i| {
                     const want = w0 * beta0[i] + w1 * beta1[i];
-                    const at = ((row * layers + j) * 4 + role) * cols + i;
+                    const at = ((j * 4 + role) * self.shape.rows + row) * cols + i;
                     const value = ref.readF32(got, at);
                     if (!close(value, want)) return fail(msg, "row {d} core {d} role {d} col {d}: {e} where {e} is due", .{ row, j, role, i, value, want });
                 }
