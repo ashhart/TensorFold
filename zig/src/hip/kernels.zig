@@ -20,6 +20,7 @@ pub const Group = enum {
     qwen_vision,
     draft,
     exl3,
+    inkling2,
 };
 pub const group_count = @typeInfo(Group).@"enum".field_names.len;
 
