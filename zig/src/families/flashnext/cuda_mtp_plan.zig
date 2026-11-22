@@ -3,6 +3,9 @@
 /// The head's rows a pass takes at most (the MTP's own rows).
 pub const piece_rows: usize = 256;
 
+/// Prompt-only rows a piece takes under TF_FLASHNEXT_PREFILL_MTP_LEAN; proposal paths keep `piece_rows`.
+pub const prefill_piece_rows: usize = 3072;
+
 /// The batched head's requests: the pass's rows, the score rows and the rows a pass takes.
 pub const Plan = struct {
     /// The pass's rows to reserve: the admitted capacity bounds them, so the head never grows the shared scratch.
@@ -17,6 +20,11 @@ pub const Plan = struct {
 pub fn reserveRows(total: usize) usize {
     const rows: usize = @min(total, piece_rows);
     return @max(@as(usize, 32), 2 * rows);
+}
+
+/// Two scratch rows per prompt-only token, bounded at the wider opt-in piece.
+pub fn reservePrefillRows(total: usize) usize {
+    return @max(@as(usize, 32), 2 * @min(total, prefill_piece_rows));
 }
 
 /// The head's plan from the admitted capacity and the rows to draft.
