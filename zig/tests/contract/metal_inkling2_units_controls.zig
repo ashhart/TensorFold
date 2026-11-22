@@ -9,6 +9,10 @@ pub const Mutation = enum {
     nv_down_phi,
     mx_gu_scale,
     mx_down_scale,
+    nv_gu_t_phi,
+    nv_down_t_phi,
+    mx_gu_t_scale,
+    mx_down_t_scale,
     logits_cap,
     dense_store,
 
@@ -19,6 +23,10 @@ pub const Mutation = enum {
             .nv_down_phi => "control: metal inkling2 units tf_ink2_nvfp4_down_units phi",
             .mx_gu_scale => "control: metal inkling2 units tf_ink2_mxfp8_gu_units scale",
             .mx_down_scale => "control: metal inkling2 units tf_ink2_mxfp8_down_units scale",
+            .nv_gu_t_phi => "control: metal inkling2 units tf_ink2_nvfp4_gu_units_t phi",
+            .nv_down_t_phi => "control: metal inkling2 units tf_ink2_nvfp4_down_units_t phi",
+            .mx_gu_t_scale => "control: metal inkling2 units tf_ink2_mxfp8_gu_units_t scale",
+            .mx_down_t_scale => "control: metal inkling2 units tf_ink2_mxfp8_down_units_t scale",
             .logits_cap => "control: metal inkling2 units tf_ink2_logits_units cap",
             .dense_store => "control: metal inkling2 units tf_ink2_dense_units store",
         };
@@ -35,7 +43,9 @@ pub const Mutation = enum {
             .nv_gu_phi => .{ .from = "ink2_units<false, true>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_units<false, true>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
             .nv_down_phi => .{ .from = "ink2_units<false, false>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_units<false, false>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
             // Both MXFP8 entries decode through one helper; a control compiles only its selected entry.
-            .mx_gu_scale, .mx_down_scale => .{ .from = "const int shift = int(scales[b / 2u]) - 127;", .to = "const int shift = int(scales[b / 2u]) - 126;" },
+            .nv_gu_t_phi => .{ .from = "ink2_units_t<false, true>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_units_t<false, true>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
+            .nv_down_t_phi => .{ .from = "ink2_units_t<false, false>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_units_t<false, false>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
+            .mx_gu_scale, .mx_down_scale, .mx_gu_t_scale, .mx_down_t_scale => .{ .from = "const int shift = int(scales[b / 2u]) - 127;", .to = "const int shift = int(scales[b / 2u]) - 126;" },
             .logits_cap => .{ .from = "precise::divide(float(bfloat(dot)), 30.0f)", .to = "precise::divide(float(bfloat(dot)), 15.0f)" },
             .dense_store => .{ .from = "Y[row * a.n + v] = bfloat(dot);", .to = "Y[row * a.n + v] = bfloat(2.0f * dot);" },
         };
