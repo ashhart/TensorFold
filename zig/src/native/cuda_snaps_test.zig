@@ -188,7 +188,7 @@ test "request starts: snap_cut_invariant: message starts are on by default for i
     for (prompt, 0..) |*t, j| t.* = @intCast(j + 1);
     const marks = try store.marks(a, prompt, 0, 10000, &.{}, &.{6000}, &.{});
     try std.testing.expectEqualSlices(u32, &.{6000}, marks);
-
+}
 test "GLM warm turns: only the request-start opt-in turns them on, and GLM's cuts stay 256 apart as on main" {
     const snaps = @import("cuda_snaps.zig");
     const env = @import("sys").env;
