@@ -100,10 +100,9 @@ pub fn shared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_s
     try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
     try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
     try projection.matmul(k.set, stream, l.shared_down, s.sact + lo * l.shared * 2, l.shared, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
-    if (direct(k, l, hi, prompt)) { // body ran these rows direct: a decode window, filled whole (forward.ffn)
+    if (direct(k, l, hi, prompt)) { // body ran these rows direct: a decode window, filled whole; fill sums it (combineTail)
         if (lo != 0) return error.BadWindow;
-        const y = try exl3.directOut(l.exl3.?, s.x3, hi, l.count, d, l.routed.width, l.routed.limit);
-        return glue.combineTail(k.set, stream, y, s.sy, s.wts, out, n, d, slots);
+        return;
     }
     var a: cuda.Args = .{};
     a.add(s.sy + lo * d * 4);
@@ -124,5 +123,10 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const stamp = prof_mod.span(k.prof, stream, .shared_expert);
     defer stamp.end();
     try shared(k, stream, l, s, x, x_stride, lo, hi, prompt);
+    if (direct(k, l, hi, prompt)) { // TF_GLM_MOE_DIRECT: the routed sum straight from the flat picks, then the shared slot
+        const d = l.routed.dims;
+        const y = try exl3.directOut(l.exl3.?, s.x3, hi, l.count, d, l.routed.width, l.routed.limit);
+        return glue.combineTail(k.set, stream, y, s.sy, s.wts, out, hi - lo, d, l.top_k + 1);
+    }
     try combine(k, stream, l, s, lo, hi, prompt, out);
 }
