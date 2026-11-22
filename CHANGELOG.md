@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
+
+## 1.3.4
+
 - `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
 
 - Server: `response_format: json_object` with `grammar_budget: true` works again on large vocabularies: the server's fixed `json_object` rule gets budget limits sized to it (computed once per tokenizer), while every client-supplied grammar keeps the limits from #4378; a budget refusal now names what it hit (work, edges, bytes, timeout or busy slots) (#4615, follows #4378).
@@ -14,15 +18,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: a DFlash2 hold runs only the rows its drafts need (a frame takes its deepest stream's drafts plus the pending row, within the block), and a draft's marginal cost is measured at load to price holds (0.56 ms a draft on gfx1151 against the full block's 1.73 ms), so the depth rule prices shared rounds at what a hold costs; the 27B recipe's DFlash2 figures are refreshed on current main, and nothing changes without `--drafter` (#3918, fixes #1563). Thanks to @AbrahamCete.
 
-- GLM at TP=2 on CUDA: with `TF_GLM_PAIR_EXPERTS=1` (opt-in), paired prompt chunks pass each rank's own FFN partial under the default split reduction, so their hidden states and tokens match the unpaired path; off, nothing changes (#4619, fixes #4493).
+- GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` (opt-in) runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once, and each rank passes its own FFN partial under the default split reduction, so tokens match the unpaired path; prompts +15% at 2K and about +5% at 8K and 32K on two GB10s; off, nothing changes (#4493, #4619).
 
 - Tests: requests with `n` from 2 to 16 give back every `--max-inflight` and per-key place on each way they can end (done, disconnect, a failing choice, 429, 400, cancel, shutdown), plus a seeded concurrent disconnect case (#4602).
 
 - Tests: the Nemotron HIP page-fault suite compiles again (its fixture builds ids through `hip_serve.pages`), and the Flash Next recipe says the scale index runs on every Mac since #4547 (#4605). Thanks to @AIFlowML.
 
 - Server: tool-call arguments whose text contains `NaN` or `Infinity` (Qwen XML, GLM, Gemma, MiniMax string values, LFM2 Python strings) parse again; only values read as JSON refuse the non-finite literals. LFM2 tools with parameters named like schema keywords (`pattern`, `format`, `not`, `if`) are supported again (#4604, follows #4378).
-
-- GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once; outputs are unchanged, +4.8% at 8K and +5.4% at 32K prompts on two GB10s, off by default (#4493).
 
 - MiniMax-H3-Image on Metal: `tf-h3-image-server` loads the prompt encoder, transformer and decoder once and serves one text-to-image request per input line, keeping the weights resident between pictures (#3718). Thanks to @plotarmordev.
 
@@ -35,8 +37,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Pull: `tensorfold pull` honours the proxy environment on every hop of a redirect (`https_proxy`/`HTTPS_PROXY`, `http_proxy`/`HTTP_PROXY`, `all_proxy`/`ALL_PROXY`, lower case first, and `NO_PROXY` for exact hosts, domain suffixes and ports), tunnels https names through a real `CONNECT` under std's HTTP and TLS (only `http://` proxies, others refused naming the variable), and bounds every connect with `TENSORFOLD_PULL_CONNECT_SECONDS` (default 30) and every read with `TENSORFOLD_PULL_STALL_SECONDS` (default 60), where a stalled file resumes from its `.incomplete` bytes with a Range request up to three times and a failure names the proxy's scheme, host and port, never its credentials (#4140, part of #3692).
 
 - Server: `/v1/audio/speech` adds `wav24`, `wav32f` and `flac`, with an optional `sample_rate` and `channels: 2`; the default `wav` and `pcm` replies stay byte-identical and `mp3`, `opus` and `aac` are refused by name (#3138).
-
-- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - GLM-5.3-Flash on CUDA: `TF_GLM_MOE_DIRECT=1` (off by default) runs a decode window's EXL3 experts without their two row copies and the shared expert's slot write, summing the slot rows bit-equal to the default path, so replies are unchanged (#3659, for #3570). Thanks to @ultradaoto.
 
@@ -79,7 +79,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: a lane-core conformance suite pins fresh = resumed cache state, tree windows = plain decode, run-to-run reproducibility, stop reasons and malformed-parent refusal on the host, with a ledger of seven decode invariants in docs/conformance-ledger.md (#4472).
 
-- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#4469).
+- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#4469). Thanks to @joshuaswarren (#4454).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#4467).
 
@@ -103,8 +103,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the lane host explore test's replay check no longer depends on thread timing; the test thread's idle send waits until no engine yield point is mid-decision, so a seed replays its schedule the same on a loaded runner (#4414).
 
 - Kernel contract: the GLM Metal contract runs to the end on M1 to M4 Macs again (its KDA and index texts carry the pre-M5 define the loader adds), and gate 5 resolves GLM's routed-expert row launches on every Mac instead of stopping with `UnknownLaunch` (#4397).
-
-- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
 - Docs: the first world-4 Flash Next receipt on HIP, oQ2-MTP at `--tp 4` on four Radeon AI PRO R9700s, with a same-binary world-2 control run that separates the world effect from engine changes (#4210, refs #2401). Thanks to @timmyit.
 
