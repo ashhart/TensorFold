@@ -4,6 +4,12 @@ const mtl = @import("metal");
 const Ref = @import("projection.zig").Ref;
 const Glue = @import("glue_gpu.zig").Kernels;
 const stages = @import("core").qwen35_stages;
+const root = @import("root");
+
+/// Built in only when the program's root says `pub const qwen27_stages = true` (tf-qwen27-run): served code has none.
+pub const on = @hasDecl(root, "qwen27_stages") and root.qwen27_stages;
+/// The planes a tool's one runner records into (null: none); void unless built in, so no served type changes.
+pub var active: if (on) ?*Planes else void = if (on) null else {};
 
 pub const Planes = struct {
     buffer: mtl.Buffer,
@@ -40,12 +46,7 @@ pub fn admit(windows: anytype) !void {
     try stages.admit(windows.len, windows.len == 1 and stages.isChain(windows[0].parents), true);
 }
 
-/// The forward pass's stage hook: each stage's rows into `planes` through the model's glue.
-pub const Hook = struct {
-    planes: *Planes,
-    glue: Glue,
-
-    pub fn record(h: Hook, e: mtl.ComputeEncoder, at: stages.Point, x: Ref, rows: u32) !void {
-        try h.planes.record(h.glue, e, at, x, rows);
-    }
-};
+/// A pass's stage rows into the active planes, when stages are built in and asked for.
+pub inline fn record(glue: Glue, e: mtl.ComputeEncoder, at: stages.Point, x: Ref, rows: u32) !void {
+    if (on) if (active) |p| try p.record(glue, e, at, x, rows);
+}
