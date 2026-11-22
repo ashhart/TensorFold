@@ -207,14 +207,14 @@ kernel void tf_ink2_dspark_kappa(const device bfloat* y [[buffer(0)]], const dev
   out[i] = sum;
 }
 
-kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+static inline void dspark_recurrent_step(const device bfloat* state, const device float* kappa, const device bfloat* rnn_weight, const device bfloat* markov, device bfloat* z, device bfloat* next_state, device bfloat* lambda, uint token, uint i) {
   if (i >= DSP_RANK) return;
   float values[3];
   for (uint part = 0; part < 3; ++part) {
     const uint channel = part * DSP_RANK + i;
     float sum = 0.0f;
     for (uint d = 0; d < DSP_RANK; ++d) sum += float(state[d]) * float(rnn_weight[channel * 5120 + d]);
-    for (uint d = 0; d < DSP_RANK; ++d) sum += float(markov[uint64_t(a.token) * DSP_RANK + d]) * float(rnn_weight[channel * 5120 + 256 + d]);
+    for (uint d = 0; d < DSP_RANK; ++d) sum += float(markov[uint64_t(token) * DSP_RANK + d]) * float(rnn_weight[channel * 5120 + 256 + d]);
     sum += float(kappa[channel]);
     const bfloat rounded = bfloat(sum);
     z[channel] = rounded;
@@ -227,6 +227,40 @@ kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], c
   const bfloat right = bfloat(float(keep) * float(candidate));
   next_state[i] = bfloat(float(left) + float(right));
   lambda[i] = bfloat(tanh(values[2]));
+}
+
+kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+  dspark_recurrent_step(state, kappa, rnn_weight, markov, z, next_state, lambda, a.token, i);
+}
+
+// The recurrent step after held[a.token]: the chain's previous token read on the GPU.
+kernel void tf_ink2_dspark_chain_step(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], const device uint* held [[buffer(8)]], uint i [[thread_position_in_grid]]) {
+  dspark_recurrent_step(state, kappa, rnn_weight, markov, z, next_state, lambda, held[a.token], i);
+}
+
+// held[a.token + 1] = the first greatest of the 200,058 logits; a NaN is never chosen unless logit 0 is one.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void tf_ink2_dspark_chain_pick(const device bfloat* logits [[buffer(0)]], device uint* held [[buffer(1)]], constant DsparkTokenArgs& a [[buffer(2)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float values[32];
+  threadgroup uint places[32];
+  float best = -INFINITY;
+  uint at = 0xffffffffu;
+  for (uint i = t; i < 200058u; i += 1024u) {
+    const float raw = float(logits[i]);
+    const float v = isnan(raw) ? -INFINITY : raw;
+    if (v > best || (v == best && i < at)) { best = v; at = i; }
+  }
+  for (ushort o = 16; o > 0; o >>= 1) {
+    const float ov = simd_shuffle_xor(best, o);
+    const uint oi = simd_shuffle_xor(at, o);
+    if (ov > best || (ov == best && oi < at)) { best = ov; at = oi; }
+  }
+  if (lane == 0) { values[sg] = best; places[sg] = at; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t != 0) return;
+  for (uint g = 0; g < 32; ++g)
+    if (values[g] > best || (values[g] == best && places[g] < at)) { best = values[g]; at = places[g]; }
+  held[a.token + 1] = isnan(float(logits[0])) ? 0u : at;
 }
 
 // A simdgroup an id: eight columns a lane a step, every row sharing the read of unembed[id]; rounded once to BF16.
