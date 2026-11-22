@@ -37,6 +37,7 @@ pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
 pub const qmmf_shared = @import("qmmf_shared.zig");
 pub const qmmf = @import("qmmf.zig");
+pub const qmmf_group = @import("qmmf_group.zig");
 pub const fp8 = @import("fp8.zig");
 pub const mxfp8 = @import("mxfp8.zig");
 pub const exlr8 = @import("exlr8.zig");
@@ -133,6 +134,7 @@ test {
     _ = segments;
     _ = @import("qmmf.zig");
     _ = @import("qmmf_shared.zig");
+    _ = @import("qmmf_group.zig");
     _ = @import("fp8.zig");
     _ = @import("mxfp8.zig");
     _ = carveout;
