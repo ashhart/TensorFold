@@ -1,9 +1,6 @@
 #!/bin/sh
-# drama3_replay_gate.sh LOG: passes when --replay 1 stopped at the chunk 4 or 16 PCM compare, every earlier check exact.
-# a fork-lane frame mismatch after chunk 16 logs the same as a chunk 16 PCM one: replay.zig prints nothing between them
+# drama3_replay_gate.sh LOG: passes when --replay 1 ended PCM-only, a codec chunk 4 or 16 PCM difference after every exact check.
+# replay.zig prints that outcome only once frames, graphs, poison/reset, chunk 1 PCM and both fork lanes matched
 log=$1
-tail -n 1 "$log" | grep -qx 'error: ReplayMismatch' || exit 1
-case "$(grep -o '^codec requested [0-9]*' "$log" | cut -d' ' -f3 | tr '\n' ' ')" in
-'1 1 4 ' | '1 1 4 16 ') exit 0 ;;
-*) exit 1 ;;
-esac
+tail -n 1 "$log" | grep -qx 'error: ReplayPcmOnly' || exit 1
+tail -n 2 "$log" | head -n 1 | grep -Eq '^Drama replay PCM only: codec chunk (4|16) against 1, max abs .*; every exact check passed$'
