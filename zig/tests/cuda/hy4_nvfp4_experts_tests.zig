@@ -1,5 +1,4 @@
-//! Hy4-flash's NVFP4 routed experts (moe_nvfp4_cuda.zig): ModelOpt per-expert tensors through core's grouped
-//! kernels, every pair FP64-bounded with Hy4's SwiGLU clamp, the narrow and wide plans, and a wrong shape refused.
+//! Hy4-flash's NVFP4 routed experts: pairs FP64-bounded under the SwiGLU clamp, a wrong shape refused.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -156,8 +155,7 @@ pub fn run(gpu: check.Gpu) !void {
     r.report("Hy4 NVFP4 routed experts: 8 experts, 4 picks a row, rows 1/5/64/255/256/300 (narrow and wide plans), gate-up and fp32 down FP64-bounded with the SwiGLU clamp crossed; a wider stored gate refused");
 }
 
-/// The published build's own experts (atakans/Hy4-flash-NVFP4): every expert of one layer loaded and packed, 64 rows of
-/// 16 picks run, the first 8 rows' 128 pairs FP64-bounded and equal to the same rows in an 8-row run.
+/// The published build's experts at one layer: 64 rows of 16 picks, the first 8 FP64-bounded and equal to an 8-row run.
 pub fn runCheckpoint(gpu: check.Gpu, dir: []const u8, layer: usize) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
