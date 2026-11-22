@@ -10,7 +10,8 @@ EVERY_DECODE = (1, 1, 4, 16, 1)
 
 
 def pcm_only(chunk: int) -> str:
-    return f"Drama replay PCM only: codec chunk {chunk} against 1, max abs 3.052e-5, RMS 4.317e-6; every exact check passed"
+    return (f"Drama replay PCM only: codec chunk {chunk} against 1, max abs 3.052e-5, RMS 4.317e-6; "
+            "every exact check passed")
 
 
 def log(*chunks: int, last: str = "error: ReplayMismatch", info: tuple[str, ...] = ()) -> list[str]:
@@ -36,7 +37,7 @@ class ReplayGateTests(unittest.TestCase):
         self.assertEqual(gate(log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(pcm_only(4), pcm_only(16)))), 0)
 
     def test_fork_frame_mismatch_after_chunk_16_fails(self):
-        """Igor's fixture on #4463: the PCM differed at chunk 4/16, then a forked frame differed (replay.zig's frame loop)."""
+        """Igor's fixture on #4463: PCM differed at chunk 4/16, then a forked frame differed (replay.zig frame loop)."""
         self.assertNotEqual(gate(log(1, 1, 4, 16)), 0)
 
     def test_frame_mismatch_fails(self):
@@ -56,6 +57,12 @@ class ReplayGateTests(unittest.TestCase):
 
     def test_chunk_1_pcm_only_line_fails(self):
         self.assertNotEqual(gate(log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(pcm_only(1),))), 0)
+
+    def test_malformed_pcm_only_line_fails(self):
+        for line in (pcm_only(4).replace(", RMS 4.317e-6", ""), pcm_only(4).replace("max abs 3.052e-5", "max abs x"),
+                     pcm_only(4) + " extra"):
+            with self.subTest(line=line):
+                self.assertNotEqual(gate(log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(line,))), 0)
 
 
 if __name__ == "__main__":

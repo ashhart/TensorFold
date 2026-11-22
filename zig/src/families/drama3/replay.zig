@@ -66,8 +66,7 @@ pub fn Replay(comptime d3: type) type {
             std.debug.print("codec requested {d}, actual sizes {any}\n", .{ chunk, sink.sizes[0..sink.calls] });
         }
 
-        /// Fails on the first exact mismatch; a codec chunk 4 or 16 PCM difference is ReplayPcmOnly once every exact
-        /// check has passed. ``report`` prints each chunk's codec sizes and the outcome line (CLI receipt).
+        /// Exact checks fail first; a chunk 4/16 PCM difference alone is ReplayPcmOnly. ``report``: the CLI receipt.
         pub fn verify(
             gpa: std.mem.Allocator,
             io: std.Io,
