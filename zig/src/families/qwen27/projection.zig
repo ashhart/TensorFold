@@ -74,8 +74,8 @@ fn splitFor(parts: []const Triple, k: usize) !Split {
 /// 5-bit g64 matrices as byte codes (quant_gpu byteProduct) on tensor units when TF_Q27_FIVE_BYTES=1.
 fn bytesOn(device: mtl.Device, parts: []const Triple) bool {
     if (!device.tensorUnits() or parts.len == 0) return false;
-    const v = std.c.getenv("TF_Q27_FIVE_BYTES") orelse return false;
-    if (!std.mem.eql(u8, std.mem.span(v), "1")) return false;
+    const v = (@import("sys").environment.Process{}).get("TF_Q27_FIVE_BYTES") orelse return false;
+    if (!std.mem.eql(u8, v, "1")) return false;
     const k = parts[0].weight.shape[1] * 32 / 5;
     var n: usize = 0;
     for (parts) |p| {

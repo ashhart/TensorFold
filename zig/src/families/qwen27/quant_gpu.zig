@@ -363,7 +363,6 @@ pub const Kernels = struct {
         }
     }
 
-
     /// simd_qmm's tiles at any width (4-bit: its bits), else the row kernel; output row m at y + m * stride values.
     fn strided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32, whole: usize) !void {
         // `whole` is the checkpoint matrix's rows (0: the staged rows), so a rank splits K as one Mac does.

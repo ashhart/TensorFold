@@ -531,4 +531,3 @@ fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mt
     };
     return b;
 }
-
