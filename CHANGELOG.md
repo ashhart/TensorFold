@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on).
+- Tests: the admission HTTP stress test waits for its choices to submit before a client walks away, so it no longer fails on loaded hosts.
 
 - Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
