@@ -127,7 +127,8 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = hold_depth, .step_ms = d.step_ms, .plain_guard = true, .batched = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
+        // No plain rounds: one draft pays from about a third landing, and the guard's estimate near that line is noise.
+        return .{ .depth = hold_depth, .step_ms = d.step_ms, .plain_guard = false, .batched = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
     }
 
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
