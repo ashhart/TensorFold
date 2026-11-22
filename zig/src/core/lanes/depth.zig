@@ -17,10 +17,16 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    copy_ms: ?Table = null, // opt-in copy prices, independent of the head depth rule
+    copy_plain: ?u64 = null,
+    copy_wait: ?u64 = null,
+    copy_band: ?usize = null,
+    copy_rounds: u64 = 0,
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
         if (st.ms) |*t| t.deinit(gpa);
+        if (st.copy_ms) |*t| t.deinit(gpa);
     }
 };
 
@@ -47,6 +53,7 @@ pub const Probe = struct {
 pub const Overhead = struct { streams: u32, ms: f64, head: f64 = 0.0 };
 
 pub const Rule = struct {
+    pub const copyRows = @import("copy_rule.zig").rows;
     gpa: Allocator,
     k: Constants = .{},
     prior: []const f64,
@@ -57,6 +64,7 @@ pub const Rule = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
+    copy_guard: bool = false, // copy_rule.zig only; existing head pricing never reads it
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
