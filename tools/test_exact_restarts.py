@@ -85,3 +85,43 @@ def test_server_that_fails_to_start_is_named(tmp_path):
 def test_request_ids_reads_the_tensorfold_block(server):
     Stub.ids = BASE_IDS[:4]
     assert er.request_ids(server, PROMPT, 4) == BASE_IDS[:4]
+
+
+def test_a_busy_peer_error_fails_the_run(monkeypatch):
+    calls = []
+
+    def fake(base, item, tokens, api_key=None, timeout=600):
+        calls.append(1)
+        if len(calls) > 1:
+            raise urllib.error.HTTPError(base, 500, "peer failed", {}, None)
+        return BASE_IDS
+
+    monkeypatch.setattr(er, "request_ids", fake)
+    with pytest.raises(urllib.error.HTTPError, match="peer failed"):
+        er.collect("http://127.0.0.1:1", [PROMPT], 16, busy=3)
+
+
+def test_a_busy_peer_with_different_tokens_fails_the_run(monkeypatch):
+    calls = []
+
+    def fake(base, item, tokens, api_key=None, timeout=600):
+        calls.append(1)
+        return BASE_IDS if len(calls) == 1 else BASE_IDS[:3] + [999] + BASE_IDS[4:]
+
+    monkeypatch.setattr(er, "request_ids", fake)
+    with pytest.raises(RuntimeError, match="busy peer"):
+        er.collect("http://127.0.0.1:1", [PROMPT], 16, busy=3)
+
+
+def test_attached_mode_reports_unrunnable_scenarios_as_not_run(server, monkeypatch, tmp_path, capsys):
+    Stub.ids = BASE_IDS
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text(json.dumps([PROMPT]))
+    out = tmp_path / "report.json"
+    monkeypatch.setattr(sys, "argv", ["exact_restarts.py", "--base", server, "--drafter", "d",
+                                    "--prompts", str(prompts), "--output", str(out)])
+    assert er.main() == 0
+    report = json.loads(out.read_text())
+    assert report["scenarios"] == ["busy"]
+    assert set(report["not_run"]) == {"restart", "parallel", "draft"}
+    assert "not run" in capsys.readouterr().out
