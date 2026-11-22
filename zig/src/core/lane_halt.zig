@@ -5,7 +5,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 /// `LaneHost.halt`: the engine thread stops at the next round boundary; what is left fails with `reason`.
 pub fn halt(h: *LaneHost, reason: []const u8) void {
     h.mutex.lockUncancelable(h.io);
-    h.closing = true;
+    h.closing.store(true, .release);
     h.halt_reason = reason;
     h.wake.broadcast(h.io);
     h.unlock();
