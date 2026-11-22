@@ -198,6 +198,7 @@ pub fn build(b: *std.Build) void {
         gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
         @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/glm_disk_host.zig").steps(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, test_step);
         @import("zig/build/prefill_widths_metal.zig").compileHost(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
         @import("zig/build/prefill_widths_metal.zig").rest(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
@@ -215,6 +216,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/glm_pdl_scan.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    @import("zig/build/pull_tests.zig").compile(b, target, draft_ids);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
     @import("zig/build/no_backend_host.zig").steps(b, test_step);
     if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);

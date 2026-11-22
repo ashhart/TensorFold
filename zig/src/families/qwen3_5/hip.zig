@@ -56,6 +56,8 @@ test {
     _ = radix;
     _ = native_engine;
     _ = pages;
+    _ = state;
+    _ = @import("backend/hip/forward/state_fault_test.zig");
     _ = plan;
     _ = slicing;
     _ = @import("backend/hip/draft/config_test.zig");

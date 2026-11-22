@@ -88,7 +88,7 @@ test "CUDA startup: Nemotron's complete line keeps its existing bytes" {
 }
 
 test "CUDA startup: every other registered family retains its declared pass size" {
-    inline for (.{ nemo, @import("nemotron").omni, @import("glm_cuda").native, @import("qwen35").native, @import("qwen35").native_moe, @import("kolibri1").native }) |F| {
+    inline for (.{ nemo, @import("nemotron").omni, @import("glm_cuda").native, @import("kolibri1").native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
         try std.testing.expect(!@hasField(Loaded, "prompt_rows"));
         const loaded: Loaded = undefined;
@@ -104,4 +104,50 @@ test "CUDA startup: Flash Next cache cuts use the loaded cold pass size, and its
     try std.testing.expect(!rules.chunk_starts and rules.lookahead == 1);
     try std.testing.expect(rules.warm == .waits and !rules.planned); // a mark one token short of the pass's end
     try std.testing.expectEqual(nemo.warm_quiet, flash.native.warm_quiet);
+}
+
+fn qwenRows(raw: ?[]const u8, context: usize) !@import("qwen35").native.Loaded {
+    const qwen = @import("qwen35");
+    var e: qwen.Engine = undefined;
+    e.scratch_rows = qwen.solo.scratchRows(try qwen.solo.rowsOf(raw, false), context);
+    var loaded: qwen.native.Loaded = undefined;
+    loaded.rows = 2;
+    loaded.prompt_rows = @intCast(e.scratch_rows);
+    return loaded;
+}
+
+test "CUDA startup: Qwen's real solo reader reports default 4096 and enabled 8192 in line and cache rules" {
+    const qwen = @import("qwen35");
+    inline for (.{ .{ @as(?[]const u8, null), 4096 }, .{ @as(?[]const u8, "8192"), 8192 } }) |case| {
+        const loaded = try qwenRows(case[0], 32768);
+        const text = try line(qwen.native, loaded);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(expected(case[1]), text);
+        const rules = @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded));
+        try std.testing.expectEqual(@as(u32, case[1]), rules.chunk);
+        try std.testing.expect(rules.planned and rules.grid == 4096);
+        try std.testing.expectEqual(@as(u32, 8192), qwen.native.prompt_rows); // the real upper bound stays
+        try std.testing.expectEqual(@as(usize, 8192), qwen.engine.max_rows);
+    }
+}
+
+test "CUDA startup: Qwen's context-capped loaded rows survive a later environment change" {
+    const qwen = @import("qwen35");
+    const name = "TF_QWEN35_CHUNK_SOLO";
+    const previous = if (std.c.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer if (previous) |v| {
+        _ = env.setenv(name, v, 1);
+        std.testing.allocator.free(v);
+    } else {
+        _ = env.unsetenv(name);
+    };
+    const loaded = try qwenRows("8192", 6000);
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, "4096", 1));
+    try std.testing.expectEqual(@as(u32, 6000), startup.rows(qwen.native, loaded));
+    try std.testing.expectEqual(@as(u32, 6000), @import("cuda_snaps.zig").passRules(qwen.native, startup.rows(qwen.native, loaded)).chunk);
+    const text = try line(qwen.native, loaded);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected(6000), text);
+    const tiny = try qwenRows(null, 1);
+    try std.testing.expectEqual(@as(u32, 32), startup.rows(qwen.native, tiny));
 }

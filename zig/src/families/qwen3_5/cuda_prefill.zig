@@ -157,7 +157,7 @@ test "a yielded pass keeps its completed prefix and stops before the next chunk,
         }
     };
     const FakePrefix = struct {
-        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) !void {}
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: ?u64, _: usize) !void {}
     };
     const FakePages = struct {
         fn log(_: *@This(), _: usize, _: usize) void {}
@@ -322,9 +322,10 @@ fn opening(self: anytype, stream: *lanes.Stream, stepped: bool) !Fill {
         return err;
     };
     errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
-    // TF_QWEN_KV_SHARE: the kept pages this prompt resumes, adopted; images and request cuts keep their own grid
+    // TF_QWEN_KV_SHARE: snapshots use the request's effective key, not raw prompt ids
+    const cache_key = if (stream.key.len != 0) stream.key else ids;
     const share = self.prefix != null and stream.images.len == 0 and stream.chunks.len == 0;
-    const shared = if (share) try self.prefix.?.open(ids, stream.max_new, stream.history_len, stream.shared_prefixes) else null;
+    const shared = if (share) try self.prefix.?.open(cache_key, stream.max_new, stream.history_len, stream.shared_prefixes, stream.cache_salt) else null;
     errdefer if (shared) |x| self.gpa.free(x.plan.marks);
     const cache = if (shared) |x| x.cache else try self.take(ids.len, stream.max_new);
     errdefer self.give(cache);
@@ -432,7 +433,7 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     const cold = forward_end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
     if (f.kept) |k| {
         if (cold and forward_end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(forward_end)) != null)
-            self.prefix.?.keep(cache, ids, forward_end) catch |err| {
+            self.prefix.?.keep(cache, if (stream.key.len != 0) stream.key else ids, stream.cache_salt, forward_end) catch |err| {
                 if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
                 std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
             };

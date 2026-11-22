@@ -49,6 +49,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "\t100 ", .n = 100 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .raw = "\t4294967295 ", .n = std.math.maxInt(u32) },
+    .{ .name = "TENSORFOLD_PULL_CONNECT_SECONDS", .raw = " 30\t", .n = 30 },
+    .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .raw = " 0\t", .n = 0 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .raw = "65537", .n = 65537 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .raw = "16777217", .n = 16777217 },

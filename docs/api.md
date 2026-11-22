@@ -1169,6 +1169,16 @@ has started, a failure is an `error` event holding OpenAI's error object, then `
 already completed stay sent. A client that disconnects, or a write that fails, cancels the picture at its next step,
 and no later picture is submitted.
 
+## Speech formats
+
+`POST /v1/audio/speech` answers in `response_format` `wav` (the default: 16-bit mono at the model's rate), `pcm` (the
+same samples, little-endian, no header), `wav24` (24-bit), `wav32f` (IEEE float WAV carrying the model's samples bit for
+bit at its own rate, unclipped) or `flac` (16-bit FLAC that decodes to the `wav` reply's samples). `mp3`, `opus` and
+`aac` are refused by name. `sample_rate` resamples the take to 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000,
+88200, 96000, 176400 or 192000 Hz with the band-limited resampler the reference voices use. `channels: 2` writes each
+sample on both channels. Without these fields, or with them at the model's rate and 1, `wav` and `pcm` replies are the
+same bytes as before. A stream (`stream: true`) stays 16-bit mono PCM at the model's rate and refuses other values.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
@@ -1484,10 +1494,14 @@ up to N GiB under `~/.cache/tensorfold/spilled` for every model together, and re
 matches resumes from it, token for token as a fresh prompt pass, after a restart too. An eviction stages a copy before
 releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
 the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
+GLM-5.3-Flash also stages each resident state when it is kept, with or without `--spill-gib`, because its slots and
+shared pool can reuse those rows before an eviction. A busy permit waits and retries; an oversized image streams
+in bounded pieces. The log names the staging reason; other admission or copy failures still skip that save.
 An idle unload and a planned stop also save the states still in RAM, newest first, within the same disk cap and
 20-second stop budget. The next engine open scans those files and restores them through the same path as evictions.
-Older queued saves cannot evict states saved earlier in that close. States that exceed a staging permit, disk cap,
-daily budget or free-disk floor are skipped; unfinished writes are cancelled at the deadline.
+Older queued saves cannot evict states saved earlier in that close. States that exceed the disk cap, daily budget
+or free-disk floor are skipped; ordinary eviction saves also skip images that exceed their staging permit.
+Unfinished writes are cancelled at the deadline.
 Past N GiB other models' spilled sets go first, then the state this server used least recently. A damaged file is
 deleted and its tokens are prefilled, and a write cut off midway leaves nothing a later turn or a restart reads.
 `--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; it

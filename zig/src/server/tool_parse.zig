@@ -9,8 +9,10 @@ const tool_dsml = @import("tool_dsml.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_streaming = @import("tool_streaming.zig");
+const tool_json_close = @import("tool_json_close.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
+pub const putBack = @import("tool_string_marks.zig").putBack;
 const strip = reply_text.pyStrip;
 
 // the streaming half (deltas and the wrapper) is beside this file, in tool_streaming.zig.
@@ -72,7 +74,7 @@ pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
                 break :blk .{ .start = s, .end = end, .payload = text[s..end], .complete = e != null };
             }
             if (!no_tc and std.ascii.startsWithIgnoreCase(text[s..], "<tool_call>")) {
-                if (findCI(text, "</tool_call>", s + 11)) |e| {
+                if (tool_json_close.find(text, s + 11)) |e| {
                     break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) };
                 }
                 no_tc = true;
@@ -119,7 +121,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     var rejected: usize = 0;
     var kept_unoffered: usize = 0;
     var kept_malformed: usize = 0;
-    for (envs) |env| {
+    next_envelope: for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
         if (!env.complete) {
@@ -162,7 +164,14 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             continue;
         }
         for (parsed.?) |c| {
-            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, &known)).?, c.arguments));
+            if (max_calls != null and calls.items.len >= max_calls.?) continue;
+            const call = (try openaiCall(a, (try callName(a, c, &known)).?, c.arguments)) orelse {
+                try residue.appendSlice(a, text[env.start..env.end]);
+                rejected += 1;
+                kept_malformed += 1;
+                continue :next_envelope;
+            };
+            try calls.append(a, call);
         }
     }
     try residue.appendSlice(a, text[cursor..]);
@@ -217,7 +226,7 @@ pub fn openCall(text: []const u8) ?usize {
             pos = code.skip_end;
             continue;
         }
-        pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
+        pos = (tool_json_close.find(text, s + 11) orelse break s) + 12;
         code.jumpTo(pos);
     } else null;
 }
@@ -241,8 +250,9 @@ fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
-/// ``_openai_tool_call``: the call under ``name`` (``callName``), arguments as compact JSON.
-fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!Value {
+/// A named ``_openai_tool_call`` with compact JSON arguments, or null when arguments are non-finite.
+fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!?Value {
+    if (!tool_params.finiteDecoded(arguments)) return null;
     const function = try json.newObject(a);
     try function.put(a, "name", .{ .string = name });
     try function.put(a, "arguments", .{ .string = try json.stringify(a, arguments, .{ .ascii = false, .compact = true }) });
@@ -255,6 +265,7 @@ fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!
 
 fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize) Allocator.Error!?[]Value {
     const stripped = stripFence(strip(text));
+    if (!tool_params.finiteJson(stripped)) return null;
     if (stripped.len == 0 or (stripped[0] != '[' and stripped[0] != '{')) return null;
     const value = switch (try json.parseText(a, stripped)) {
         .ok => |v| v,
@@ -276,7 +287,11 @@ fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMa
         const c = parsed orelse return null;
         // bare JSON naming a tool the request did not offer is a structured answer, the reply's content
         const name = known.get(try std.ascii.allocLowerString(a, c.name)) orelse return null;
-        try calls.append(a, try openaiCall(a, name, c.arguments));
+        const call = (try openaiCall(a, name, c.arguments)) orelse {
+            if (max_calls == null) return null;
+            continue;
+        };
+        try calls.append(a, call);
     }
     return if (calls.items.len > 0) calls.items else null;
 }
@@ -297,6 +312,7 @@ fn stripFence(text: []const u8) []const u8 {
 
 /// ``_parse_tool_call_payload``: one call from a block; null when it is not one, Invalid where Python raises.
 fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool) Error!?Call {
+    if (!tool_params.finiteJson(block)) return error.Invalid;
     if (std.mem.startsWith(u8, block, "call:") or std.mem.startsWith(u8, block, ":")) {
         if (try gemmaCall(a, block)) |c| return c;
     }
@@ -333,7 +349,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
             };
             if (name.len == 0) return error.Invalid;
             const object = try jsonObject(a, args);
-            if (complete and !tool_params.finite(object)) return error.Invalid;
+            if (!tool_params.finiteDecoded(object)) return error.Invalid;
             return .{ .name = name, .arguments = object };
         }
     }
@@ -557,33 +573,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     return .{ .name = name, .arguments = try jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
 }
 
-/// Each mark ``\x00{i}\x00`` in `text` as `quoted[i]`, as replacing i = 0, 1, ... in turn does; no `quoted` has a NUL.
-pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Allocator.Error![]const u8 {
-    var nul: std.ArrayList(usize) = .empty;
-    for (text, 0..) |ch, at| if (ch == 0) try nul.append(a, at);
-    const n = nul.items;
-    var marks: std.ArrayList(u128) = .empty; // index << 64 | the NUL that opens the mark
-    for (0..n.len -| 1) |k| {
-        const digits = text[n[k] + 1 .. n[k + 1]];
-        if (digits.len == 0 or (digits.len > 1 and digits[0] == '0') or std.mem.indexOfNone(u8, digits, "0123456789") != null) continue;
-        const index = std.fmt.parseInt(usize, digits, 10) catch continue;
-        if (index < quoted.len) try marks.append(a, @as(u128, index) << 64 | k);
-    }
-    // two marks share a NUL only where the call's own text has NULs: the lower index went first, then the leftmost
-    std.mem.sort(u128, marks.items, {}, std.sort.asc(u128)); // one pass over the text, then M log M for M marks
-    const opens = try a.alloc(?usize, n.len); // the index of the mark each NUL opens
-    @memset(opens, null);
-    for (marks.items) |m| {
-        const k: usize = @truncate(m); // a NUL is taken when it opens a mark or closes the one before it
-        if (opens[k] == null and opens[k + 1] == null and (k == 0 or opens[k - 1] == null)) opens[k] = @intCast(m >> 64);
-    }
-    var out: std.ArrayList(u8) = .empty;
-    var cursor: usize = 0;
-    for (opens, 0..) |open, k| if (open) |index| {
-        try out.appendSlice(a, text[cursor..n[k]]);
-        try out.appendSlice(a, quoted[index]);
-        cursor = n[k + 1] + 1;
-    };
-    try out.appendSlice(a, text[cursor..]);
-    return out.items;
+test {
+    _ = @import("tool_protocol_security_test.zig");
+    _ = @import("tool_json_close.zig");
 }

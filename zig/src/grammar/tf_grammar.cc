@@ -183,8 +183,8 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
     return nullptr;
 }
 
-// Compiles holding a slot, abandoned ones included; tests wait for 0 before they end.
-int tfg_compiling(void* c) { return (int)static_cast<Compiler*>(c)->state->compiles.Active(); }
+// Compiles and budget explorations holding slots; tests wait for every worker's cleanup.
+int tfg_compiling(void* c) { return (int)(static_cast<Compiler*>(c)->state->compiles.Active() + static_cast<Compiler*>(c)->state->budgets.Active()); }
 
 void tfg_free(void* g) { delete static_cast<Compiled*>(g); }
 

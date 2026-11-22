@@ -172,6 +172,28 @@ extern "C" __global__ void tf_glm_combine(
   *reinterpret_cast<float4*>(o + 4) = make_float4(a[4], a[5], a[6], a[7]);
 }
 
+// tf_glm_combine with the last slot apart (#3570): y [rows][slots - 1][d], tail [rows][d], fp32; its fmas in order.
+extern "C" __global__ void tf_glm_combine_tail(
+        const float* y, const float* tail, const float* wts, float* out, int64_t d, int slots) {
+  glm_pdl::enter();
+  const int64_t c = glm_glue::col8();
+  if (c >= d) return;
+  const int64_t r = blockIdx.x;
+  float a[8] = {};
+  for (int k = 0; k < slots; ++k) {
+    float v[8];
+    if (k + 1 < slots)
+      glm_glue::ld8(y + (r * (slots - 1) + k) * d + c, v);
+    else
+      glm_glue::ld8(tail + r * d + c, v);
+    const float w = wts[r * slots + k];
+    for (int j = 0; j < 8; ++j) a[j] = __fmaf_rn(v[j], w, a[j]);
+  }
+  float* o = out + r * d + c;
+  *reinterpret_cast<float4*>(o) = make_float4(a[0], a[1], a[2], a[3]);
+  *reinterpret_cast<float4*>(o + 4) = make_float4(a[4], a[5], a[6], a[7]);
+}
+
 // glue._router_sum and qmm._reduce: ks slices of `total` fp32 added in order (fp32 or bf16 out), 8 values a thread.
 extern "C" __global__ void tf_glm_slice_sum(const float* part, void* out, int64_t total, int ks, int f32) {
   glm_pdl::enter();
