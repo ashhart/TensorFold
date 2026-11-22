@@ -48,6 +48,8 @@ pub const Config = struct {
     silence_mid: bool = false,
     silence_guard: bool = false,
     cfg: ?@import("drama_cfg.zig").Options = null,
+    /// The flock a voice holds while it synthesizes, so batch work on this GPU gives way (gpu_turn.zig).
+    speech_lock: []const u8 = @import("gpu_turn.zig").path,
     prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
     cache_salt_per_key: bool = false, // --cache-salt-per-key: the matched API key salts each request's prompt cache
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
