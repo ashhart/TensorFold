@@ -25,7 +25,7 @@ pub const function_names = [_][:0]const u8{
 };
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
-pub const grouped_rows: u32 = 4;
+pub const grouped_rows: u32 = 8;
 const group_cap: u32 = 64;
 
 pub const Pipelines = struct {
