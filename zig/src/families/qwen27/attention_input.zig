@@ -1,9 +1,10 @@
 //! The attention projection stage writes K/V interleaved; the consumers read that layout directly.
 pub fn project(k: anytype, e: anytype, weights: anytype, f: anytype, sums: anytype, rows: u32, t0: u32) !void {
     var q_sums = sums;
-    switch (@typeInfo(@TypeOf(sums))) {
-        .optional => if (q_sums) |*s| s.offset += @as(usize, t0) * 4,
-        else => q_sums.ref.offset += @as(usize, t0) * 4,
+    if (@typeInfo(@TypeOf(sums)) == .optional) {
+        if (q_sums) |*sum| sum.offset += @as(usize, t0) * 4;
+    } else {
+        q_sums.ref.offset += @as(usize, t0) * 4;
     }
     var q_in: @TypeOf(f.get(.input)) = f.get(.input);
     q_in.offset += @as(usize, t0) * weights.q.k * 2;
@@ -15,6 +16,7 @@ pub fn project(k: anytype, e: anytype, weights: anytype, f: anytype, sums: anyty
 }
 
 const std = @import("std");
+const Field = enum { input, dims, q_gate, mixed, key, value, sums };
 const Ref = struct { field: Field, offset: usize = 0 };
 const Weight = struct { field: Field, k: usize = 1, n: usize = 1 };
 const Recording = struct {
