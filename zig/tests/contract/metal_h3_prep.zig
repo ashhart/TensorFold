@@ -228,7 +228,7 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
             self.in.a = x;
             self.in.b = w;
             self.in.d = bias;
-            try self.upload(try std.mem.concat(al, f64, &.{ x, pad }), true);
+            try self.upload(if (pad.len == 0) x else try std.mem.concat(al, f64, &.{ x, pad }), true);
             try self.upload(w, true);
             try self.output(launched(self) * s.n * 2);
             try self.baseOutput(launched(self) * s.n * 2);
