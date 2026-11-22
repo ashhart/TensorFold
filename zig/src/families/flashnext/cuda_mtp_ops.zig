@@ -12,6 +12,7 @@ const plan = @import("cuda_mtp_plan.zig");
 const roll = @import("cuda_mtp_roll.zig");
 const pieces = @import("cuda_mtp_pieces.zig");
 const draw = @import("cuda_mtp_draw.zig");
+const graph_tail = @import("cuda_graph_tail.zig");
 const module = @This();
 
 /// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
@@ -288,9 +289,33 @@ pub fn Ops(comptime Tri: type) type {
             d.rows = n;
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
-            try o.e.forward(Tri, o.tri, seq, ids, .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() });
-            if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            const hooks: batch.Hooks = .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() };
+            const ahead = d.best_ahead;
+            d.best_ahead = false;
+            d.best_queued = false;
+            if (graph_tail.on()) {
+                // the same copies and row best in the same order, inside the window's graph when it has one
+                var tail: graph_tail.Tail = .{};
+                if (keeps) {
+                    tail.before = .{ .dst = d.saved.ptr + d.layout.tail_at, .src = seq.tail.ptr, .n = ple_tail_n * wide * 2 };
+                    tail.after = .{ .dst = d.saved.ptr + d.layout.nrow_at, .n = n * wide * 2 };
+                }
+                if (ahead) {
+                    tail.head = o.h;
+                    tail.scores = d.logits.ptr;
+                    tail.vocab = vocab;
+                    tail.rows = n;
+                    tail.best = d.best.ptr;
+                }
+                var with = hooks;
+                with.tail = &tail;
+                try o.e.forward(Tri, o.tri, seq, ids, with);
+                d.best_queued = ahead;
+            } else {
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+                try o.e.forward(Tri, o.tri, seq, ids, hooks);
+                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+            }
             d.open = keeps;
         }
 

@@ -93,6 +93,10 @@ pub const Draft = struct {
     /// The scores a sampled draw reads on the host (a window's rows, or the draft head's row).
     host: []u16,
     best_host: [max_rows * 4]f32 = undefined,
+    /// TF_FLASHNEXT_GRAPH_TAIL: set before verify when the next draws reduce the window's rows to their best.
+    best_ahead: bool = false,
+    /// TF_FLASHNEXT_GRAPH_TAIL: the verify queued that reduction after its pass, so draws skips its own.
+    best_queued: bool = false,
 
     /// `saved`'s pieces and the spares' size at the model's heads: conv windows, projection rows, tail, n-gram rows.
     pub const Layout = struct {

@@ -169,6 +169,8 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     x.host = host;
     x.rows = 1;
     x.fed0 = 2050;
+    x.best_ahead = false;
+    x.best_queued = false;
     x.best = .{ .d = d, .ptr = 0x1000, .len = @import("cuda_mtp_draft.zig").best_bytes };
     x.out = .{ .d = d, .ptr = 0x2000, .len = wt.wide * 2 };
     x.dlogits = .{ .d = d, .ptr = 0x3000, .len = 6 };
