@@ -82,6 +82,11 @@ pub const Model = struct {
         return m.forwardDump(ids, pos, audio, null);
     }
 
+    /// A planted fault for tf-qwen3-asr-xpu-forced: every layer's q_norm and k_norm swapped (again: back).
+    pub fn swapQkNorms(m: *Model) void {
+        for (m.lw.layers) |*l| std.mem.swap(u64, &l.q_norm, &l.k_norm);
+    }
+
     /// forward with its stages (lm_embed, lm_layer{i}, lm_norm) to `sink`.
     pub fn forwardDump(m: *Model, ids: []const u32, pos: usize, audio: ?Splice, sink: ?Dump) !u32 {
         m.lr.sink = sink;

@@ -210,6 +210,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const asr_main = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "qwen3_asr", .module = asr }, .{ .name = "tokenizer", .module = tokenizer } } });
     const asr_exe = b.addExecutable(.{ .name = "tf-qwen3-asr-xpu", .root_module = asr_main });
     b.step("tf-qwen3-asr-xpu", "Build tf-qwen3-asr-xpu, Qwen3-ASR's tower and language model on the Intel GPU on a clip").dependOn(&b.addInstallArtifact(asr_exe, .{}).step);
+    // teacher-forced on a case's greedy ids under #2239's tie rule, as tf-qwen3-asr-forced on CUDA
+    const asr_forced = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_xpu_forced.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "qwen3_asr", .module = asr } } });
+    const asr_forced_exe = b.addExecutable(.{ .name = "tf-qwen3-asr-xpu-forced", .root_module = asr_forced });
+    b.step("tf-qwen3-asr-xpu-forced", "Build tf-qwen3-asr-xpu-forced, a clip teacher-forced on a case under the tie rule").dependOn(&b.addInstallArtifact(asr_forced_exe, .{}).step);
     const checkpoint_cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, core), .{ .name = "core", .module = core } } });
     const server = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
