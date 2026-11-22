@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `TF_GLM_KV_SPLIT=1`, admission counts each KV owner class on its own and chooses a stream's owner once inside the reservation, and a request larger than one whole class is refused by name even while other streams run (#3676, part of #2444). Thanks to @jschmied.
+
 - HIP: `serve` with `--drafter` runs Qwen3.8-27B's DFlash2 drafter on the HIP engine through the lane core, where it was refused, and the drafter's weights and per-stream contexts count in the memory plan (#3665, refs #1563). Thanks to @AbrahamCete.
 
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
