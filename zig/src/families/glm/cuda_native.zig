@@ -175,6 +175,7 @@ const Owned = struct {
     group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
     e: *engine.Engine,
     link: follow.Link,
+    control: ?cuda.tp_control.Channel, // opened before a follower hides NCCL_COMM_ID, then owned by link
     lanes: glm_lanes.Lanes,
     layout: ?kv.Layout,
     share: usize, // TF_KV_SHARE: states the shared store over the pool's pages keeps (0: the host store)
@@ -250,6 +251,9 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     own.benchmark_group = null;
     own.share = a.share;
     own.copies = copies;
+    own.control = null;
+    errdefer if (own.control) |*c| c.deinit();
+    own.control = try cuda.tp_control.Channel.open(io, p.rank, p.world, 0);
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
@@ -332,7 +336,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
     errdefer if (own.group.multi) |m| m.deinit(m.ctx);
     own.e.installGroup(&own.group);
-    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
+    own.link = try follow.Link.initHost(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision), &own.control);
     errdefer own.link.deinit();
     try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };

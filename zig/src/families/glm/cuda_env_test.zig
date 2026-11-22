@@ -12,6 +12,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_VISION_HOST" },
     .{ .name = "TF_GLM_PROF" },
     .{ .name = "TF_GLM_LINK_WAIT" },
+    .{ .name = "TF_GLM_HOST_CONTROL" },
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
@@ -115,6 +116,7 @@ test "GLM strict env: the actual readers and the open's check keep defaults, 0 a
         .{ .name = "TF_GLM_HOST_CACHE", .read = @import("cuda_snapshot_pages.zig").onHost },
         .{ .name = "TF_GLM_VISION_HOST", .read = @import("cuda_vision_weights.zig").onHost },
         .{ .name = "TF_GLM_PROF", .read = @import("cuda_prof.zig").Prof.wanted },
+        .{ .name = "TF_GLM_HOST_CONTROL", .read = @import("cuda").tp_control.Channel.wanted },
     };
     const startup = @import("cuda_env.zig").startup;
     for (cases) |c| {
