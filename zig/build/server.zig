@@ -3,6 +3,7 @@ const std = @import("std");
 
 /// The web launcher uses fake PATH tools and no model, network or device.
 pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
+    @import("request_access_host.zig").steps(b, all);
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/web_cli.zig"),
         .target = b.graph.host,
