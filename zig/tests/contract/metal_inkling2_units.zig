@@ -62,12 +62,12 @@ pub fn spec(k: Kind, control: bool) c.Spec {
         .ops = if (isGu(k)) 12 else 3,
         .mids = if (isGu(k)) 3 else 0,
         .out = .bf16,
-        // An expert's pairs go 16 a band: one expert takes every row here, so 20 rows cross a band.
-        .tiles = .{ .{ .size = 16 }, .{}, .{} },
+        // An expert's pairs go 32 a band (two 16-pair halves): 20 crosses 16 and 40 crosses 32.
+        .tiles = .{ .{ .size = 32 }, .{}, .{} },
         .served = if (isGu(k))
-            &.{ .{ .rows = 2, .n = 16, .k = gu_k }, .{ .rows = 5, .n = 32, .k = gu_k }, .{ .rows = 20, .n = 16, .k = gu_k } }
+            &.{ .{ .rows = 2, .n = 16, .k = gu_k }, .{ .rows = 5, .n = 32, .k = gu_k }, .{ .rows = 20, .n = 16, .k = gu_k }, .{ .rows = 40, .n = 16, .k = gu_k } }
         else
-            &.{ .{ .rows = 2, .n = 32, .k = down_k }, .{ .rows = 5, .n = 64, .k = down_k }, .{ .rows = 20, .n = 32, .k = down_k } },
+            &.{ .{ .rows = 2, .n = 32, .k = down_k }, .{ .rows = 5, .n = 64, .k = down_k }, .{ .rows = 20, .n = 32, .k = down_k }, .{ .rows = 40, .n = 32, .k = down_k } },
         .sums = .{ .f16 = 0, .bf16 = 0, .why = "independent FP64 terms and explicit BF16 nodes" },
     };
 }
