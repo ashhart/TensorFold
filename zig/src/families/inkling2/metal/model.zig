@@ -10,6 +10,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const mv_mma = @import("../../deepseek_v41/metal/mv_mma.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -203,6 +204,7 @@ pub const Model = struct {
     experts: experts.Pipelines,
     loop: loop.Pipelines,
     dense: [6]mtl.Pipeline,
+    dense_mma: mv_mma.Pipelines,
     norm: mtl.Pipeline,
     runtime: [runtime_names.len]mtl.Pipeline,
 
@@ -264,6 +266,8 @@ pub const Model = struct {
             m.norm.deinit();
             for (m.dense) |p| p.deinit();
         }
+        m.dense_mma = try mv_mma.Pipelines.load(m.device);
+        errdefer m.dense_mma.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, runtime_source, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -280,6 +284,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         for (m.runtime) |p| p.deinit();
+        m.dense_mma.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
         m.loop.deinit();

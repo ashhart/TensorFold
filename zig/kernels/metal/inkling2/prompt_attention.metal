@@ -6,13 +6,13 @@ using namespace metal;
 constant constexpr uint D = 128, EXTENT = 1024, KEYS = 64, PAIRS = 128;
 constant constexpr float LOG2E = 1.4426950408889634f;
 struct InkPromptSeg { int row0, n, p0, pad; long off; };
-struct InkPromptArgs { uint heads, kv_heads, ring, chunk, c0, chunks; float scale; };
+struct InkPromptArgs { uint heads, kv_heads, ring, window, chunk, c0, chunks; float scale; };
 
-inline size_t ink_prompt_rh(const InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
+inline size_t ink_prompt_rh(const thread InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
   return (size_t(s.row0) + pair / group) * heads + kvh * group + pair % group;
 }
 
-inline void ink_fold(float& mm, float& ll, float m, float l, float& a, float& b) {
+inline void ink_fold(thread float& mm, thread float& ll, float m, float l, thread float& a, thread float& b) {
   const float mn = max(mm, m);
   a = precise::exp2(mm - mn);
   b = precise::exp2(m - mn);
@@ -43,15 +43,27 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
   const InkPromptSeg s = segs[0];
   const uint group = a.heads / a.kv_heads, total = uint(s.n) * group, m0 = tg.x * PAIRS;
   if (m0 >= total) return;
-  const uint kvh = tg.y, c = a.c0 + tg.z, b_lo = c * a.chunk;
+  const uint kvh = tg.y, c = a.c0 + tg.z;
   const uint tile_hi = uint(s.p0) + min(m0 + PAIRS - 1, total - 1) / group;
+  const uint tile_lo_pos = uint(s.p0) + m0 / group;
+  const uint b_lo = a.window ? (tile_lo_pos + 1 > a.window ? tile_lo_pos + 1 - a.window : 0) : c * a.chunk;
   if (b_lo > tile_hi) return;
-  const uint k_hi = min(b_lo + a.chunk - 1, tile_hi), m = m0 + 16 * sg;
+  const uint k_hi = a.window ? tile_hi : min(b_lo + a.chunk - 1, tile_hi), m = m0 + 16 * sg;
   const short2 home = tfp::frag_home(ushort(lane));
   const uint row_a = m + uint(home.y), row_b = row_a + 8;
   const uint pair_a = min(row_a, total - 1), pair_b = min(row_b, total - 1);
   const device bfloat* qb0 = q + ink_prompt_rh(s, a.heads, group, kvh, pair_a) * D;
   const device bfloat* qb1 = q + ink_prompt_rh(s, a.heads, group, kvh, pair_b) * D;
+  tfp::frag<bfloat> qf[8];
+  if (m < total) {
+    TF_UNROLL
+    for (uint d = 0; d < 8; ++d) {
+      tfp::frag_get_rows(qf[d], qb0, qb1, 16 * d, home, row_a < total, row_b < total);
+    }
+  }
+  const uint sg_lo_pos = uint(s.p0) + m / group;
+  const uint sg_lo = a.window && sg_lo_pos + 1 > a.window ? sg_lo_pos + 1 - a.window : 0;
+  const uint sg_hi = uint(s.p0) + min(m + 15, total - 1) / group;
   const size_t hb = s.off + size_t(kvh) * a.ring * D;
   tfp::frag<float> acc[8], out[8];
   for (uint d = 0; d < 8; ++d) { acc[d] = tfp::frag<float>(0); out[d] = tfp::frag<float>(0); }
@@ -67,21 +79,21 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
       vs[e] = live ? vc[at] : bfloat(0);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if ((kt - b_lo) % 1024 == 0) {
+    if (!a.window && (kt - b_lo) % 1024 == 0) {
       for (uint d = 0; d < 8; ++d) acc[d] = tfp::frag<float>(0);
       top[0] = top[1] = -INFINITY; mass[0] = mass[1] = 0.0f;
     }
     tfp::frag<float> score[4] = {tfp::frag<float>(0), tfp::frag<float>(0), tfp::frag<float>(0), tfp::frag<float>(0)};
-    if (m < total && kt <= uint(s.p0) + min(m + 15, total - 1) / group) {
+    if (m < total && kt <= sg_hi && (!a.window || kt + KEYS > sg_lo)) {
+      TF_UNROLL
       for (uint d = 0; d < 8; ++d) {
-        tfp::frag<bfloat> qa, kb0, kb1, kb2, kb3;
-        tfp::frag_get_rows(qa, qb0, qb1, 16 * d, home, row_a < total, row_b < total);
+        tfp::frag<bfloat> kb0, kb1, kb2, kb3;
         tfp::frag_get_t(kb0, ks, D, 0, 16 * d, home);
         tfp::frag_get_t(kb1, ks, D, 16, 16 * d, home);
         tfp::frag_get_t(kb2, ks, D, 32, 16 * d, home);
         tfp::frag_get_t(kb3, ks, D, 48, 16 * d, home);
-        tfp::mma_16x32<false, true>(score[0], score[1], qa, kb0, kb1);
-        tfp::mma_16x32<false, true>(score[2], score[3], qa, kb2, kb3);
+        tfp::mma_16x32<false, true>(score[0], score[1], qf[d], kb0, kb1);
+        tfp::mma_16x32<false, true>(score[2], score[3], qf[d], kb2, kb3);
       }
       float peak[2] = {top[0], top[1]};
       const uint sub_lo = b_lo + ((kt - b_lo) / 1024) * 1024, sub_hi = sub_lo + 1023;
@@ -89,7 +101,9 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
         const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e), kp = kt + 16 * f + col;
         const uint lr = row < total ? row / group : 0, pos = uint(s.p0) + lr;
         const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-        const bool live = row < total && kp <= pos && kp >= sub_lo && kp <= sub_hi;
+        const uint lo = a.window ? (pos + 1 > a.window ? pos + 1 - a.window : 0) : sub_lo;
+        const uint hi = a.window ? pos : min(pos, sub_hi);
+        const bool live = row < total && kp >= lo && kp <= hi;
         const uint distance = live ? pos - kp : 0;
         const float bias = live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;
         score[f][e] = live ? (score[f][e] * a.scale + bias) * LOG2E : -INFINITY;
@@ -118,7 +132,7 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
         tfp::mma_16x32<false, false>(acc[d], acc[d + 1], p[f], v0, v1);
       }
     }
-    const bool fold_now = (kt - b_lo) % 1024 == 960 || kt + KEYS > k_hi;
+    const bool fold_now = (!a.window && (kt - b_lo) % 1024 == 960) || kt + KEYS > k_hi;
     if (fold_now && m < total) for (uint h = 0; h < 2; ++h) {
       if (top[h] == -INFINITY) continue;
       float x, y;
