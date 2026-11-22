@@ -79,6 +79,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
     .{ .name = "TF_DFLASH_QL_SPAN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 spans)" },
+    .{ .name = "TF_DFLASH_GRAPH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 replays DFlash2 holds and live absorbs from CUDA graphs)" },
     .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; opt in to sampled MTP tree drafting)" },
     .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
     .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
