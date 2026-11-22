@@ -15,7 +15,7 @@ fn edit(kind: p.Kind) Edit {
         },
         .widen => .{ .from = "if (i < a.count) y[i] = float(x[i]);", .to = "if (i < a.count) y[i] = 2.0f * float(x[i]);" },
         .attention_partial => .{ .from = "blocks[row * 4 * 2304 + (a.boundary - 1) * 2304 + d] = p[i];", .to = "blocks[row * 2304 + (a.boundary - 1) * 2304 + d] = p[i];" },
-        .mlp_partial => .{ .from = "p[i] = bfloat(t[i] + float(x[i]));", .to = "p[i] = bfloat(t[i] - float(x[i]));" },
+        .mlp_partial => .{ .from = "bfloat(t[i] + float(ink2_conv(", .to = "bfloat(t[i] - float(ink2_conv(" },
         .capture_tap => .{ .from = "y[row * 4 * 2304 + a.boundary * 2304 + d] = x[i];", .to = "y[row * 4 * 2304 + ((a.boundary + 1) % 4) * 2304 + d] = x[i];" },
     };
 }

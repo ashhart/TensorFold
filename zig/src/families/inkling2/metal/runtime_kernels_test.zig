@@ -94,6 +94,25 @@ test "attention restart and addition references cover every valid boundary" {
     for (1..5) |boundary| try near(@as(f64, ulp), p.attentionPartial(std.math.nan(f32), ulp, boundary));
 }
 
+test "the folded convolution reads three old rows then the launch's, and rounds once to BF16" {
+    const a = t.allocator;
+    const taps = try a.alloc(f32, 5 * p.hidden);
+    defer a.free(taps);
+    const weight = try a.alloc(f32, 4 * p.hidden);
+    defer a.free(weight);
+    @memset(taps, 0);
+    @memset(weight, 0);
+    // Row 1 at d = 7: its own tap is row 4 of the taps, and weight j multiplies row 1 + j.
+    taps[4 * p.hidden + 7] = 2;
+    try near(p.roundBf16(@as(f32, 2) / @sqrt(@as(f32, 5))), p.conv(taps, weight, 1, 7));
+    taps[1 * p.hidden + 7] = 3;
+    weight[7 * 4 + 0] = 0.5;
+    try near(p.roundBf16(@as(f32, 3.5) / @sqrt(@as(f32, 5))), p.conv(taps, weight, 1, 7));
+    weight[7 * 4 + 3] = -1;
+    try near(p.roundBf16(@as(f32, 1.5) / @sqrt(@as(f32, 5))), p.conv(taps, weight, 1, 7));
+    try near(0, p.conv(taps, weight, 0, 7));
+}
+
 test "MLP partial rounds its FP32 sum to nearest-even BF16" {
     try near(1, p.roundBf16(@as(f32, 1.00390625)));
     try near(1.015625, p.roundBf16(@as(f32, 1.01171875)));

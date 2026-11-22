@@ -173,7 +173,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     e.barrier();
 }
 
-/// A stream's staged taps: a chunk wider than a window stages in the scratch, which then holds that stream alone.
+/// A stream's staged taps, which the commit reads: a chunk wider than a window stages in the scratch, one stream's.
 fn staged(s: *const state.Scratch, cache: *const state.Cache, rows: usize, slot: usize, conv_state: usize, rows_before: usize) Ref {
     return if (rows > state.window_rows) s.staged(slot, conv_state, rows_before) else cache.staged(slot, conv_state, rows_before);
 }
@@ -184,18 +184,26 @@ fn stagePostConv(m: *const Model, e: mtl.ComputeEncoder, s: *const state.Scratch
     copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), staged(s, cache, rows, slot, conv_state, 3), rows * channels);
 }
 
-/// Every stream's static convolution of `raw` into `out`: the taps staged, a barrier, the convolutions, a barrier.
-fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *const state.Scratch, segments: []const Segment, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref) void {
-    const channels = state.convWidth(conv_state);
+/// Every stream's attention output convolved and added to the running sum, beside the staging of its taps; a barrier.
+fn attentionPartial(m: *const Model, e: mtl.ComputeEncoder, s: *const state.Scratch, segments: []const Segment, v: *const layer_plan.Visit, boundary: usize) void {
+    const H = state.hidden;
     var base: usize = 0;
     for (segments) |seg| {
-        stagePostConv(m, e, s, seg.cache, slot, conv_state, raw, base, seg.rows);
+        stagePostConv(m, e, s, seg.cache, v.cache_slot, 2, at(s.attn_dense, 0), base, seg.rows);
+        runtime(m, e, .attention_partial, &.{ at(s.p, base * H * 2), seg.cache.history(v.cache_slot, 2), at(s.attn_dense, base * H * 2), r(m.weights.layers[v.layer].attn_conv), at(s.blocks, base * state.block_slots * H * 2), at(s.partial, base * H * 4) }, seg.rows * H, boundary);
         base += seg.rows;
     }
     e.barrier();
-    base = 0;
+}
+
+/// Every stream's expert output convolved into the running p, which it leaves widened as the next visit's partial.
+fn mlpPartial(m: *const Model, e: mtl.ComputeEncoder, s: *const state.Scratch, segments: []const Segment, v: *const layer_plan.Visit) void {
+    const H = state.hidden;
+    var base: usize = 0;
     for (segments) |seg| {
-        glue.convStatic(&m.glue, e, staged(s, seg.cache, seg.rows, slot, conv_state, 0), r(weight), at(out.buf, out.off + base * channels * 2), @intCast(seg.rows), @intCast(channels));
+        const t = at(s.partial, base * H * 4);
+        stagePostConv(m, e, s, seg.cache, v.cache_slot, 3, at(s.mlp_out, 0), base, seg.rows);
+        runtime(m, e, .mlp_partial, &.{ t, seg.cache.history(v.cache_slot, 3), at(s.mlp_out, base * H * 2), r(m.weights.layers[v.layer].mlp_conv), at(s.p, base * H * 2), t }, seg.rows * H, 0);
         base += seg.rows;
     }
     e.barrier();
@@ -235,7 +243,6 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     }
     const all = items[0..segments.len];
     for (all) |it| for ([_]bool{ true, false }) |key| stageConvInput(m, e, s, it.cache, v, it.base, key, it.rows);
-    e.barrier();
     for (all) |it| for ([_]bool{ true, false }) |key| convInputForAttention(m, e, s, it.cache, v, it.base, it.rows, key);
     e.barrier();
     for (all) |it| {
@@ -257,7 +264,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     e.barrier();
 }
 
-const ConvInput = struct { raw: Ref, projected: Ref, normalized: Ref, taps: Ref, state: usize };
+const ConvInput = struct { raw: Ref, projected: Ref, normalized: Ref, taps: Ref, old: Ref, state: usize };
 
 fn convInput(s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, local_ungated: bool, base: usize, key: bool, rows: usize) ConvInput {
     const cs: usize = if (key) 0 else 1;
@@ -267,11 +274,12 @@ fn convInput(s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit,
         .projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2),
         .normalized = at(normalized.buf, normalized.off + base * state.hidden * 2),
         .taps = staged(s, cache, rows, v.cache_slot, cs, 0),
+        .old = cache.history(v.cache_slot, cs),
         .state = cs,
     };
 }
 
-/// A convolution's three old rows and its new rows staged: `convInputForAttention` reads them after a barrier.
+/// A convolution's three old rows and its new rows staged for the commit, beside the convolution that reads both.
 fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, key: bool, rows: usize) void {
     const c = convInput(s, cache, v, !v.hasMessages() and m.weight_plan.at(v.layer).kind != .global, base, key, rows);
     copyBf16(m, e, cache.history(v.cache_slot, c.state), c.taps, 3 * state.kv_width);
@@ -282,8 +290,8 @@ fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scrat
     const w = &m.weights.layers[v.layer];
     const c = convInput(s, cache, v, !v.hasMessages() and m.weight_plan.at(v.layer).kind != .global, base, key, rows);
     switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-        .static => |weight| glue.convStatic(&m.glue, e, c.taps, r(weight), c.raw, @intCast(rows), state.kv_width),
-        .dynamic => |d| glue.convDynamic(&m.glue, e, c.taps, c.normalized, r(d.static_w), r(d.projection), c.raw, @intCast(rows), state.kv_width),
+        .static => |weight| glue.convStatic(&m.glue, e, c.old, c.projected, r(weight), c.raw, @intCast(rows), state.kv_width),
+        .dynamic => |d| glue.convDynamic(&m.glue, e, c.old, c.projected, c.normalized, r(d.static_w), r(d.projection), c.raw, @intCast(rows), state.kv_width),
     }
 }
 
@@ -356,11 +364,13 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         };
         if (channel) |ch| captureTap(m, e, at(s.p, 0), to, rows, ch);
     }
-    if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, rows);
     const w = &m.weights.layers[v.layer];
-    // The running BF16 p is the partial AR source before attention replaces it with t.
-    widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
-    e.barrier();
+    // The partial AR source is p widened, which the visit before left; a reset restores p, so it widens again.
+    if (v.pass > 1 and v.layer == 6) {
+        bankAndReset(m, e, s, rows);
+        widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+        e.barrier();
+    }
     prepareAttentionInputs(m, e, s, v, rows);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
@@ -374,9 +384,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     try attendSegments(m, e, s, v, segments, prompt);
     try project(m, e, prompt, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     e.barrier();
-    postConv(m, e, s, segments, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
-    runtime(m, e, .attention_partial, &.{ at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.partial, 0) }, rows * state.hidden, if (lp.boundary) lp.blocks_in + 1 else 0);
-    e.barrier();
+    attentionPartial(m, e, s, segments, v, if (lp.boundary) lp.blocks_in + 1 else 0);
     residual(m, e, s, m.weights.mlp_queries[v.layer], lp.mlp_sources, rows);
     e.barrier();
     if (gated) {
@@ -391,9 +399,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     e.barrier();
     try routedExperts(m, e, s, v.layer, rows);
     e.barrier();
-    postConv(m, e, s, segments, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
-    runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
-    e.barrier();
+    mlpPartial(m, e, s, segments, v);
     if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
 }
 
@@ -440,6 +446,8 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     errdefer if (n_parts > 0) parts[n_parts - 1].wait();
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     e.barrier();
+    widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+    e.barrier();
     for (m.weight_plan.visits[0..m.weight_plan.n_visits], 0..) |*v, vi| {
         try visit(m, e, s, v, segments, rows, options.taps, options.prompt);
         if (n_parts < cuts.len and vi + 1 == cuts[n_parts]) {
@@ -451,8 +459,6 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
             e = cb.compute(.concurrent);
         }
     }
-    widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
-    e.barrier();
     const final = finalPlan(rows, options.all, options.taps != null);
     if (final.work_rows == rows) {
         glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, @intCast(rows));

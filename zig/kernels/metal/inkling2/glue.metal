@@ -97,22 +97,28 @@ kernel void tf_inkling2_ar(
 }
 
 struct InkConvArgs { uint rows, channels; };
+// Row i of a convolution's taps: a stream's three old rows, then the launch's own.
+inline float ink_tap(const device bfloat* old, const device bfloat* fresh, uint i, uint channels, uint c) {
+  return i < 3u ? float(old[size_t(i) * channels + c]) : float(fresh[size_t(i - 3u) * channels + c]);
+}
+
 kernel void tf_inkling2_conv_static(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
-    device bfloat* out [[buffer(2)]], constant InkConvArgs& a [[buffer(3)]],
-    uint2 at [[thread_position_in_grid]]) {
+    const device bfloat* old [[buffer(0)]], const device bfloat* fresh [[buffer(1)]],
+    const device bfloat* weight [[buffer(2)]], device bfloat* out [[buffer(3)]],
+    constant InkConvArgs& a [[buffer(4)]], uint2 at [[thread_position_in_grid]]) {
   const uint c = at.x, r = at.y;
   if (c >= a.channels || r >= a.rows) return;
-  float sum = float(taps[size_t(r + 3) * a.channels + c]);
+  float sum = ink_tap(old, fresh, r + 3u, a.channels, c);
   for (uint tap = 0; tap < 4; ++tap)
-    sum += float(weight[c * 4 + tap]) * float(taps[size_t(r + tap) * a.channels + c]);
+    sum += float(weight[c * 4 + tap]) * ink_tap(old, fresh, r + tap, a.channels, c);
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
 kernel void tf_inkling2_conv_dynamic(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
-    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
-    device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
+    const device bfloat* old [[buffer(0)]], const device bfloat* fresh [[buffer(1)]],
+    const device bfloat* input [[buffer(2)]], const device bfloat* static_w [[buffer(3)]],
+    const device bfloat* projection [[buffer(4)]], device bfloat* out [[buffer(5)]],
+    constant InkConvArgs& a [[buffer(6)]],
     uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
   if (r >= a.rows) return;
   threadgroup float projected[32];
@@ -124,10 +130,10 @@ kernel void tf_inkling2_conv_dynamic(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint c = t; c < a.channels; c += 256) {
-    float sum = float(taps[size_t(r + 3) * a.channels + c]);
+    float sum = ink_tap(old, fresh, r + 3u, a.channels, c);
     for (uint lag = 0; lag < 4; ++lag) {
       const float w = float(static_w[lag * a.channels + c]) + projected[4 * (c / 128) + lag];
-      sum += w * float(taps[size_t(r + 3 - lag) * a.channels + c]);
+      sum += w * ink_tap(old, fresh, r + 3u - lag, a.channels, c);
     }
     out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
   }

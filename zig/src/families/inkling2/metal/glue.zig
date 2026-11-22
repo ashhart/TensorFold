@@ -95,21 +95,21 @@ pub fn arRows(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: 
 /// The depth mix's threads a threadgroup: a row's 2,304 values, four a thread.
 const ar_threads = 576;
 const ConvArgs = extern struct { rows: u32, channels: u32 };
-/// taps contains three old rows followed by `rows` current BF16 inputs.
-pub fn convStatic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, weight: Ref, out: Ref, rows: u32, channels: u32) void {
+/// A static convolution over a stream's three old rows (`old`) and the launch's `rows` rows (`fresh`).
+pub fn convStatic(p: *const Pipelines, e: mtl.ComputeEncoder, old: Ref, fresh: Ref, weight: Ref, out: Ref, rows: u32, channels: u32) void {
     std.debug.assert(rows > 0 and channels > 0);
     e.setPipeline(p.conv_static);
-    inline for (.{ taps, weight, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 3);
+    inline for (.{ old, fresh, weight, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 4);
     e.dispatchThreads(mtl.Size.of(channels, rows, 1), unit);
 }
 
 /// Dynamic static_w is [lag][channel], the opposite orientation to static convolution taps.
-pub fn convDynamic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, input: Ref, static_w: Ref, projection: Ref, out: Ref, rows: u32, channels: u32) void {
+pub fn convDynamic(p: *const Pipelines, e: mtl.ComputeEncoder, old: Ref, fresh: Ref, input: Ref, static_w: Ref, projection: Ref, out: Ref, rows: u32, channels: u32) void {
     std.debug.assert(rows > 0 and channels > 0 and channels <= 1024);
     e.setPipeline(p.conv_dynamic);
-    inline for (.{ taps, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 5);
+    inline for (.{ old, fresh, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 6);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 

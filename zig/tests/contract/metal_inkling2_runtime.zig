@@ -32,6 +32,10 @@ pub const Probe = struct {
     blocks: rig_.Ref = undefined,
     blocks_before: []u16 = &.{},
     out: rig_.Ref = undefined,
+    /// A partial's convolution: taps [3 + rows][H], weight [H][4], and the widened p the MLP partial also writes.
+    taps: rig_.Ref = undefined,
+    weight: rig_.Ref = undefined,
+    wide: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.runtime);
@@ -91,7 +95,7 @@ pub const Probe = struct {
     };
     const vt_checked = g.hooks(Probe);
     pub fn kernel(self: *Probe) g.Kernel {
-        return .{ .ctx = self, .vt = if (self.kind == .attention_partial) &vt_checked else &vt_plain, .spec = .{
+        return .{ .ctx = self, .vt = if (self.kind == .attention_partial or self.kind == .mlp_partial) &vt_checked else &vt_plain, .spec = .{
             .name = self.kind.label(),
             .accum = .none,
             .depth = depth,
@@ -119,6 +123,18 @@ pub const Probe = struct {
         for (bits, values) |*b, v| b.* = c.toBf16(v);
         return self.rig.input(std.mem.sliceAsBytes(bits));
     }
+    /// f[1] becomes the convolution of fresh taps and a weight, both bound for the kernel to take it itself.
+    fn convolved(self: *Probe, rng: std.Random) !void {
+        const rows = self.shape.rows;
+        const taps = try self.floats((rows + 3) * p.hidden, rng);
+        const weight = try self.floats(4 * p.hidden, rng);
+        round(taps);
+        round(weight);
+        self.f[1] = try self.arena.allocator().alloc(f32, rows * p.hidden);
+        for (self.f[1], 0..) |*y, i| y.* = p.conv(taps, weight, i / p.hidden, i % p.hidden);
+        self.taps = try self.input(taps, true);
+        self.weight = try self.input(weight, true);
+    }
     pub fn prepare(self: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         const call = p.Call{ .rows = shape.rows, .n = shape.n, .k = shape.k };
         if (!p.valid(self.kind, call)) return false;
@@ -134,20 +150,17 @@ pub const Probe = struct {
         switch (self.kind) {
             .copy_bf16, .widen, .capture_tap => round(self.f[0]),
             .attention_partial => {
-                self.f[1] = try self.floats(n, rng);
+                try self.convolved(rng);
                 round(self.f[0]);
-                round(self.f[1]);
                 const blocks = try self.arena.allocator().alloc(u16, shape.rows * p.block_slots * p.hidden);
                 for (blocks) |*b| b.* = c.toBf16(value(rng));
                 self.blocks_before = blocks;
                 self.blocks = try self.rig.scratch(std.mem.sliceAsBytes(blocks).len);
                 @memcpy(self.rig.bytes(self.blocks, std.mem.sliceAsBytes(blocks).len), std.mem.sliceAsBytes(blocks));
-                self.refs[1] = try self.input(self.f[1], true);
             },
             .mlp_partial => {
-                self.f[1] = try self.floats(n, rng);
-                round(self.f[1]);
-                self.refs[1] = try self.input(self.f[1], true);
+                try self.convolved(rng);
+                self.wide = try self.rig.scratch(n * 4);
             },
             .copy_f32 => {},
         }
@@ -175,16 +188,20 @@ pub const Probe = struct {
                 e.setBuffer(self.out.buf, self.out.off, 1);
                 e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 2);
             },
-            .attention_partial => {
-                e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
-                e.setBuffer(self.blocks.buf, self.blocks.off, 2);
-                e.setBuffer(self.out.buf, self.out.off, 3);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 4);
-            },
-            .mlp_partial => {
-                e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
-                e.setBuffer(self.out.buf, self.out.off, 2);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 3);
+            .attention_partial, .mlp_partial => {
+                // The taps' first three rows are the old ones; the launch's own follow them.
+                e.setBuffer(self.taps.buf, self.taps.off, 1);
+                e.setBuffer(self.taps.buf, self.taps.off + 3 * p.hidden * 2, 2);
+                e.setBuffer(self.weight.buf, self.weight.off, 3);
+                const second = if (self.kind == .attention_partial) self.blocks else self.wide;
+                if (self.kind == .attention_partial) {
+                    e.setBuffer(second.buf, second.off, 4);
+                    e.setBuffer(self.out.buf, self.out.off, 5);
+                } else {
+                    e.setBuffer(self.out.buf, self.out.off, 4);
+                    e.setBuffer(second.buf, second.off, 5);
+                }
+                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 6);
             },
         }
         e.dispatchThreads(mtl.Size.of(p.geometry(.{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }).count, 1, 1), mtl.Size.of(p.threads, 1, 1));
@@ -215,7 +232,8 @@ pub const Probe = struct {
     }
 
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
-        if (self.kind != .attention_partial or (gate != .shapes and gate != .nonfinite)) return "numeric hooks must be used";
+        const mlp = self.kind == .mlp_partial;
+        if ((self.kind != .attention_partial and !mlp) or (gate != .shapes and gate != .nonfinite)) return "numeric hooks must be used";
         const want = try self.a.alloc(f64, self.count());
         defer self.a.free(want);
         const mag = try self.a.alloc(f64, self.count());
@@ -224,12 +242,23 @@ pub const Probe = struct {
         const bytes = try self.rig.outputBytes();
         var planted: usize = 0;
         for (want, 0..) |w, i| {
-            const got = c.read(.f32, bytes, i);
+            const got = c.read(if (mlp) .bf16 else .f32, bytes, i);
             if (c.classOf(got) != c.classOf(w)) return "partial's floating-point class differs";
             if (c.classOf(w) != .finite) planted += 1;
-            if (gate == .shapes and std.math.isFinite(w) and got != w) return "FP32 partial differs from the FP64 reference's explicit rounding";
+            if (gate == .shapes and std.math.isFinite(w) and got != w) return "partial differs from the FP64 reference's explicit rounding";
         }
         if (gate == .nonfinite and (planted == 0 or planted == want.len)) return "the planted NaN does not discriminate finite and non-finite partials";
+        if (mlp) {
+            // The second output is p as stored, widened: the next visit's partial source.
+            const wide = self.rig.bytes(self.wide, want.len * 4);
+            for (0..want.len) |i| {
+                const stored = c.read(.bf16, bytes, i);
+                const widened = c.read(.f32, wide, i);
+                if (c.classOf(stored) != c.classOf(widened)) return "the widened p's floating-point class differs from p";
+                if (std.math.isFinite(stored) and stored != widened) return "the widened p differs from the p it stored";
+            }
+            return null;
+        }
         const block_bytes = self.rig.bytes(self.blocks, std.mem.sliceAsBytes(self.blocks_before).len);
         const got_blocks = std.mem.bytesAsSlice(u16, block_bytes);
         for (0..self.shape.rows) |row| for (0..p.block_slots) |slot| for (0..p.hidden) |d| {

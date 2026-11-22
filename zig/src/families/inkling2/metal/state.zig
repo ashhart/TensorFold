@@ -272,11 +272,10 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",     "segs",      "p",          "prelude",   "blocks",        "bank0",    "bank1",   "messages",
-    "partial",  "ar",         "gated",      "mlp_ar",    "mlp_gated",  "q_norm",    "k_norm",        "v_norm",   "q_raw",   "k_raw",
-    "v_raw",    "rel_raw",    "sink",       "gate",      "k_conv",     "v_conv",    "q_prep",        "rel_prep", "rel_tab", "part_o",
-    "part_ml",  "att",        "attn_dense", "attn_conv", "mlp_normed", "route_ids", "route_weights", "gu",       "down",    "mlp_out",
-    "mlp_conv", "logits_all",
+    "ids",     "pos",     "seg_of",     "segs",       "p",         "prelude",       "blocks", "bank0",    "bank1",   "messages",
+    "partial", "ar",      "gated",      "mlp_ar",     "mlp_gated", "q_norm",        "k_norm", "v_norm",   "q_raw",   "k_raw",
+    "v_raw",   "rel_raw", "sink",       "gate",       "k_conv",    "v_conv",        "q_prep", "rel_prep", "rel_tab", "part_o",
+    "part_ml", "att",     "attn_dense", "mlp_normed", "route_ids", "route_weights", "gu",     "down",     "mlp_out", "logits_all",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -287,12 +286,12 @@ fn sizes(rows: usize) [fields.len]usize {
     const bf = 2;
     const fp = 4;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg), r * h * bf,     r * h * bf,     r * block_slots * h * bf,
-        r * h * bf,                r * h * bf,                                       r * message_entries * h * fp,              r * h * fp,                     3 * r * h * fp, 3 * r * h * fp, r * h * fp,
-        r * h * fp,                r * h * bf,                                       r * h * bf,                                r * h * bf,                     r * q * bf,     r * kv * bf,    r * kv * bf,
-        r * rel_width * bf,        r * 24 * bf,                                      r * q * bf,                                r * kv * bf,                    r * kv * bf,    r * q * bf,     r * rel_width * bf,
-        r * 24 * ap.extent * bf,   r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,     r * h * bf,     r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,     r * h * bf,     @as(usize, @min(r, batch_rows)) * vocabulary * fp,
+        r * 4,                      r * 4,                                            r * 4,                                  max_segments * @sizeOf(ap.Seg), r * h * bf,                                        r * h * bf,     r * block_slots * h * bf,
+        r * h * bf,                 r * h * bf,                                       r * message_entries * h * fp,           r * h * fp,                     3 * r * h * fp,                                    3 * r * h * fp, r * h * fp,
+        r * h * fp,                 r * h * bf,                                       r * h * bf,                             r * h * bf,                     r * q * bf,                                        r * kv * bf,    r * kv * bf,
+        r * rel_width * bf,         r * 24 * bf,                                      r * q * bf,                             r * kv * bf,                    r * kv * bf,                                       r * q * bf,     r * rel_width * bf,
+        r * 24 * ap.extent * bf,    r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp, r * q * bf,                     r * h * bf,                                        r * h * bf,     r * experts_per_token * 4,
+        r * experts_per_token * fp, r * experts_per_token * intermediate * bf,        r * experts_per_token * h * bf,         r * h * bf,                     @as(usize, @min(r, batch_rows)) * vocabulary * fp,
     };
 }
 
@@ -336,14 +335,12 @@ pub const Scratch = struct {
     part_ml: mtl.Buffer,
     att: mtl.Buffer,
     attn_dense: mtl.Buffer,
-    attn_conv: mtl.Buffer,
     mlp_normed: mtl.Buffer,
     route_ids: mtl.Buffer,
     route_weights: mtl.Buffer,
     gu: mtl.Buffer,
     down: mtl.Buffer,
     mlp_out: mtl.Buffer,
-    mlp_conv: mtl.Buffer,
     logits_all: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
