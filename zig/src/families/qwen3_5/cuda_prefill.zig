@@ -157,7 +157,7 @@ test "a yielded pass keeps its completed prefix and stops before the next chunk,
         }
     };
     const FakePrefix = struct {
-        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) !void {}
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: ?u64, _: usize) !void {}
     };
     const FakePages = struct {
         fn log(_: *@This(), _: usize, _: usize) void {}
