@@ -366,20 +366,31 @@ if (t >= depth || hh >= h || ww >= w) return;
   const uint tp = t + t_pre;
   const uint hp = hh + pad_l + pad_r;
   const uint wp = ww + pad_l + pad_r;
-  const uint ot = at3.x, oh = at3.y, ow = at3.z;
+  const uint co = at3.x, oh = at3.y, ozw = at3.z;
+  const uint out_w_calc = (wp - kw) / sw + 1;
+  const uint ot = ozw / out_w_calc;
+  const uint ow = ozw % out_w_calc;
+  if (co >= c_out) return;
   if (ot >= (tp - kt) / st + 1) return;
   if (oh >= (hp - kh) / sh + 1) return;
-  if (ow >= (wp - kw) / sw + 1) return;
-  float sum = B[c_out];
+  if (ow >= out_w_calc) return;
+  float sum = B[co];
   for (uint ci = 0; ci < c_in; ci++) {
     for (uint ktt = 0; ktt < kt; ktt++) {
       const uint tt = ot * st + ktt;
+      // causal temporal: source frame index = tt - t_pre
+      if (tt < t_pre) continue;
+      const uint stt = tt - t_pre;
+      if (stt >= t) continue;
       for (uint khh = 0; khh < kh; khh++) {
-        const uint th = oh * sh + khh;
+        // spatial: source = oh*sh + khh - pad_l
+        const int shh = (int)(oh * sh + khh) - (int)pad_l;
+        if (shh < 0 || shh >= (int)hh) continue;
         for (uint kww = 0; kww < kw; kww++) {
-          const uint tw = ow * sw + kww;
-          const float iv = IN[(ci * tp + tt) * hp * wp + th * wp + tw];
-          const float wv = W[((c_out * c_in + ci) * kt + ktt) * kh * kw + khh * kw + kww];
+          const int sww = (int)(ow * sw + kww) - (int)pad_l;
+          if (sww < 0 || sww >= (int)ww) continue;
+          const float iv = IN[(ci * t + stt) * hh * ww + shh * ww + sww];
+          const float wv = W[((co * c_in + ci) * kt + ktt) * kh * kw + khh * kw + kww];
           sum += iv * wv;
         }
       }
@@ -388,5 +399,5 @@ if (t >= depth || hh >= h || ww >= w) return;
   const uint out_t = (tp - kt) / st + 1;
   const uint out_h = (hp - kh) / sh + 1;
   const uint out_w = (wp - kw) / sw + 1;
-  OUT[(c_out * out_t + ot) * out_h * out_w + oh * out_w + ow] = sum;
+  OUT[(co * out_t + ot) * out_h * out_w + oh * out_w + ow] = sum;
 }

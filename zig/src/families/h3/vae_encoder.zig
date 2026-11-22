@@ -1,8 +1,10 @@
 //! H3 video VAE CNN encoder (fp32 CPU reference port).
 //! Spec: video_vae/vae_cnn.py EncoderFCN3D + conv.py causal Conv3d.
 const std = @import("std");
+const mtl = @import("metal");
 
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+
 extern "c" fn fwrite(ptr: [*]const u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
 extern "c" fn fclose(stream: *anyopaque) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
@@ -223,6 +225,69 @@ pub fn conv1x1(
             out[co * n + i] = sum;
         }
     }
+    return out;
+}
+
+/// Metal dispatch of the causal conv3x3x3 kernel. input/weight/bias
+/// are host fp32 buffers; kernel is the encoder's h3_vae_enc_conv.
+pub fn conv3dMetal(
+    device: mtl.Device,
+    queue: mtl.Queue,
+    pipeline: mtl.Pipeline,
+    gpa: std.mem.Allocator,
+    input: []const f32,
+    weight: []const f32,
+    bias: []const f32,
+    c_in: usize,
+    c_out: usize,
+    t: usize,
+    h: usize,
+    w: usize,
+    causal_t: bool,
+    spatial_pad: usize,
+    pad_right: usize,
+    pad_bottom: usize,
+) ![]f32 {
+    const kt = 3;
+    const pt = kt / 2;
+    const t_pre: usize = if (causal_t) pt * 2 else pt;
+    const tp = t + t_pre;
+    const hp = h + spatial_pad + pad_bottom;
+    const wp = w + spatial_pad + pad_right;
+    const out_t = (tp - kt) + 1;
+    const out_h = (hp - 3) + 1;
+    const out_w = (wp - 3) + 1;
+
+    const in_buf = try device.buffer(input.len * 4, mtl.ResourceOptions.shared);
+    defer in_buf.deinit();
+    @memcpy(in_buf.slice(f32, input.len), input);
+    const w_buf = try device.buffer(weight.len * 4, mtl.ResourceOptions.shared);
+    defer w_buf.deinit();
+    @memcpy(w_buf.slice(f32, weight.len), weight);
+    const b_buf = try device.buffer(bias.len * 4, mtl.ResourceOptions.shared);
+    defer b_buf.deinit();
+    @memcpy(b_buf.slice(f32, bias.len), bias);
+    const out_buf = try device.buffer(c_out * out_t * out_h * out_w * 4, mtl.ResourceOptions.shared);
+
+    const cb = queue.commandBuffer();
+    const enc_ = cb.compute(.concurrent);
+    enc_.setPipeline(pipeline);
+    enc_.setBuffer(in_buf, 0, 0);
+    enc_.setBuffer(w_buf, 0, 1);
+    enc_.setBuffer(b_buf, 0, 2);
+    enc_.setBuffer(out_buf, 0, 3);
+    const causal_u: u32 = if (causal_t) 1 else 0;
+    enc_.setValue([12]u32{
+        @intCast(c_in), @intCast(t), @intCast(h), @intCast(w), @intCast(c_out),
+        1, 1, 1, causal_u, @intCast(spatial_pad), @intCast(pad_right), @intCast(pad_bottom),
+    }, 4);
+    enc_.dispatchThreads(mtl.Size.of(c_out * out_t, out_h, out_w), mtl.Size.of(1, 1, 1));
+    enc_.end();
+    cb.commit();
+    cb.wait();
+    const out = try gpa.alloc(f32, c_out * out_t * out_h * out_w);
+    @memcpy(out, out_buf.slice(f32, out.len));
+    out_buf.deinit();
     return out;
 }
 

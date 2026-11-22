@@ -64,9 +64,9 @@ const names = [_][]const u8{
     "h3_vae_layernorm",
     "h3_vae_postquant",
     "h3_vae_unpatch",
-    "h3_vae_enc_conv",
     "h3_vae_vextract",
     "h3_vae_attention_il",
+    "h3_vae_enc_conv",
 };
 
 pub const Decoder = struct {

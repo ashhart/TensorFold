@@ -1,27 +1,23 @@
-//! H3 video VAE CNN encoder: full forward on synthetic weights.
+//! H3 video VAE CNN encoder: Metal conv validation against CPU.
 const std = @import("std");
 const enc = @import("vae_encoder");
+const mtl = @import("metal");
+const vit = @import("vae");
 
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
-extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
-extern "c" fn fclose(stream: *anyopaque) c_int;
 extern "c" fn fwrite(ptr: [*]const u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
-extern "c" fn fseek(stream: *anyopaque, offset: c_long, whence: c_int) c_int;
-extern "c" fn ftell(stream: *anyopaque) c_long;
+extern "c" fn fclose(stream: *anyopaque) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 
 fn loadF32(gpa: std.mem.Allocator, path: []const u8) ![]f32 {
     var path_buf: [512]u8 = undefined;
     const formatted = try std.fmt.bufPrint(&path_buf, "{s}", .{path});
     path_buf[formatted.len] = 0;
-    const pz: [*:0]const u8 = @ptrCast(&path_buf);
-    const file = fopen(pz, "rb") orelse return error.CannotOpen;
+    const file = fopen(@ptrCast(&path_buf), "rb") orelse return error.CannotOpen;
     defer _ = fclose(file);
-    // get size
-    const seek_end: c_int = 2;
-    const seek_set: c_int = 0;
-    _ = fseek(file, 0, seek_end);
+    _ = fseek(file, 0, 2);
     const size = ftell(file);
-    _ = fseek(file, 0, seek_set);
+    _ = fseek(file, 0, 0);
     const n: usize = @intCast(@divExact(size, @as(c_long, 4)));
     const out = try gpa.alloc(f32, n);
     const raw = try gpa.alloc(u8, @intCast(size));
@@ -31,132 +27,50 @@ fn loadF32(gpa: std.mem.Allocator, path: []const u8) ![]f32 {
     return out;
 }
 
-fn fileExists(path: []const u8) bool {
-    var path_buf: [512]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&path_buf, "{s}", .{path}) catch return false;
-    path_buf[formatted.len] = 0;
-    const file = fopen(@ptrCast(&path_buf), "rb") orelse return false;
-    _ = fclose(file);
-    return true;
-}
+extern "c" fn fseek(stream: *anyopaque, offset: c_long, whence: c_int) c_int;
+extern "c" fn ftell(stream: *anyopaque) c_long;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2) {
-        std.debug.print("usage: tf-h3-vae-encode weights_dir [T H W]", .{});
+    if (args.len < 3) {
+        std.debug.print("usage: tf-h3-vae-encode pipeline_dir weights_dir", .{});
         return;
     }
-    if (args.len > 1 and std.mem.eql(u8, args[1], "conv3d3")) {
-        var w3: [81]f32 = undefined;
-        for (0..81) |i| w3[i] = 1.0;
-        const b3 = [_]f32{0.0};
-        var inp = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-        const out = try enc.conv3d(gpa, &inp, &w3, &b3, 3, 1, 1, 2, 2, 3, 3, 3, 1, 1, 1, true, 1, 0, 0);
-        defer gpa.free(out);
-        std.debug.print("CONV3D3 out[0]={d} (expect 78)", .{out[0]});
-        // channel indexing test: kernel (1,1,1) weights = [1, 10, 100] per channel
-        const w1 = [_]f32{ 1, 10, 100 };
-        const b1 = [_]f32{0.0};
-        const out2 = try enc.conv3d(gpa, &inp, &w1, &b1, 3, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, false, 0, 0, 0);
-        defer gpa.free(out2);
-        std.debug.print("CHANIDX outs: {d} {d} {d} {d} (expect 951 1062 973 1284)", .{ out2[0], out2[1], out2[2], out2[3] });
-        return;
-    }
-    const wdir = args[1];
-    var t_in: usize = 3;
-    var h_in: usize = 64;
-    var w_in: usize = 64;
-    if (args.len >= 5) {
-        t_in = try std.fmt.parseInt(usize, args[2], 10);
-        h_in = try std.fmt.parseInt(usize, args[3], 10);
-        w_in = try std.fmt.parseInt(usize, args[4], 10);
-    }
+    const device = try mtl.Device.init();
+    const queue = try device.queue();
+    // Load decoder lib for its pipelines (encoder kernel is in same source)
+    const decoder = try vit.Decoder.load(gpa, init.io, device, args[1]);
+    defer decoder.vit_checkpoint.deinit();
+    const pipeline = decoder.p[8]; // h3_vae_enc_conv
 
-    var encoder = enc.Encoder.init(.{});
-    var w = enc.AllWeights{
-        .conv_in_w = undefined, .conv_in_b = undefined,
-        .levels = undefined,
-        .norm_out_w = undefined, .norm_out_b = undefined,
-        .conv_out_w = undefined, .conv_out_b = undefined,
-        .quant_w = undefined, .quant_b = undefined,
+    // synthetic input (3, 1, 8, 8)
+    var input: [3 * 1 * 8 * 8]f32 = undefined;
+    for (0..3) |c| for (0..1) |t| for (0..8) |hh| for (0..8) |ww| {
+        input[((c * 1) + t) * 64 + hh * 8 + ww] = @floatFromInt(c * 64 + hh * 8 + ww);
     };
-    var path_buf: [512]u8 = undefined;
-    w.conv_in_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_conv_in_weight.f32", .{wdir}));
-    w.conv_in_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_conv_in_bias.f32", .{wdir}));
-    for (0..6) |level| {
-        w.levels[level] = .{ .blocks = undefined };
-        for (0..2) |bi| {
-            w.levels[level].blocks[bi] = .{
-                .norm1_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_norm1_weight.f32", .{ wdir, level, bi })),
-                .norm1_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_norm1_bias.f32", .{ wdir, level, bi })),
-                .conv1_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv1_weight.f32", .{ wdir, level, bi })),
-                .conv1_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv1_bias.f32", .{ wdir, level, bi })),
-                .norm2_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_norm2_weight.f32", .{ wdir, level, bi })),
-                .norm2_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_norm2_bias.f32", .{ wdir, level, bi })),
-                .conv2_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv2_weight.f32", .{ wdir, level, bi })),
-                .conv2_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv2_bias.f32", .{ wdir, level, bi })),
-                .nin_w = null,
-                .nin_b = null,
-            };
-            // nin_shortcut if exists
-            const nin_path = try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_nin_shortcut_weight.f32", .{ wdir, level, bi });
-            if (fileExists(nin_path)) {
-                w.levels[level].blocks[bi].nin_w = try loadF32(gpa, nin_path);
-                const nb_path = try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_nin_shortcut_bias.f32", .{ wdir, level, bi });
-                w.levels[level].blocks[bi].nin_b = try loadF32(gpa, nb_path);
-            }
-        }
-        // downsample — level 0..3 have it, 4-5 don't
-        if (level < 4) {
-            w.levels[level].down_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_downsample_conv_weight.f32", .{ wdir, level }));
-            w.levels[level].down_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_downsample_conv_bias.f32", .{ wdir, level }));
-        }
-    }
-    w.norm_out_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_norm_out_weight.f32", .{wdir}));
-    w.norm_out_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_norm_out_bias.f32", .{wdir}));
-    w.conv_out_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_conv_out_weight.f32", .{wdir}));
-    w.conv_out_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_conv_out_bias.f32", .{wdir}));
-    w.quant_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/quant_conv_weight.f32", .{wdir}));
-    w.quant_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/quant_conv_bias.f32", .{wdir}));
+    // conv weights: 4 output channels, kernel (1,3,3,3) causal
+    const c_out = 4;
+    var wgt: [4 * 3 * 27]f32 = undefined;
+    for (0..wgt.len) |i| wgt[i] = @floatFromInt(i % 7);
+    var bias: [4]f32 = .{ 0.1, 0.2, 0.3, 0.4 };
 
-    // synthetic input: (3, T, H, W) gradient
-    const x = try gpa.alloc(f32, 3 * t_in * h_in * w_in);
-    for (0..3) |c| {
-        for (0..t_in) |t| {
-            for (0..h_in) |hh| {
-                for (0..w_in) |ww| {
-                    x[((c * t_in) + t) * h_in * w_in + hh * w_in + ww] =
-                        @as(f32, @floatFromInt(c + t + hh + ww)) / 100.0;
-                }
-            }
-        }
-    }
+    // CPU reference
+    const cpu_out = try enc.conv3d(gpa, &input, &wgt, &bias, 3, c_out, 1, 8, 8, 3, 3, 3, 1, 1, 1, true, 1, 0, 0);
+    defer gpa.free(cpu_out);
 
-    std.debug.print("encoding {d}x{d}x{d}...", .{ t_in, h_in, w_in });
-    const moments = try encoder.forward(gpa, x, t_in, h_in, w_in, &w);
-    // moments: (48, T, H/16, W/16)
-    const oh = h_in / 16;
-    const ow = w_in / 16;
-    var mean_sum: f64 = 0;
-    for (0..24) |c| {
-        for (0..t_in) |t| {
-            for (0..oh) |hh| {
-                for (0..ow) |ww| {
-                    mean_sum += moments[((c * t_in) + t) * oh * ow + hh * ow + ww];
-                }
-            }
-        }
+    // Metal
+    const metal_out = try enc.conv3dMetal(device, queue, pipeline, gpa, &input, &wgt, &bias, 3, c_out, 1, 8, 8, true, 1, 0, 0);
+    defer gpa.free(metal_out);
+
+    var max_diff: f32 = 0;
+    for (0..cpu_out.len) |i| {
+        const d = @abs(cpu_out[i] - metal_out[i]);
+        if (d > max_diff) max_diff = d;
     }
-    std.debug.print("mean-of-mean: {d:.6}", .{mean_sum / @as(f64, @floatFromInt(24 * t_in * oh * ow))});
-    // write moments
-    {
-        var pz_buf: [512]u8 = undefined;
-        const formatted = try std.fmt.bufPrint(&pz_buf, "moments.f32", .{});
-        pz_buf[formatted.len] = 0;
-        const file = fopen(@ptrCast(&pz_buf), "wb") orelse return error.CannotWrite;
-        _ = fwrite(@ptrCast(moments.ptr), 4, moments.len, file);
-        _ = fclose(file);
+    std.debug.print("METAL-CONV max diff vs CPU: {d:.6} (len {d})", .{ max_diff, cpu_out.len });
+    for (0..@min(8, cpu_out.len)) |i| {
+        std.debug.print("  [{d}] cpu={d:.4} metal={d:.4}", .{ i, cpu_out[i], metal_out[i] });
     }
-    std.debug.print("moments written to moments.f32", .{});
 }
