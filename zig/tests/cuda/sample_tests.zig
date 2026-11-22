@@ -162,7 +162,75 @@ pub fn draws(gpu: Gpu) !void {
     try check.expect(differ == 0, "sample: {d} of {d} draws differ", .{ differ, total });
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});
+    try probabilityOutputOptional(gpu);
     try @import("sample_proposal_tests.zig").run(gpu);
+}
+
+/// A null probability output preserves tf_draw's token for full-row and candidate sampling.
+fn probabilityOutputOptional(gpu: Gpu) !void {
+    const gpa = gpu.gpa;
+    var module = try cuda.Module.load(gpu.d, cuda.kernels.sample);
+    defer module.unload();
+    const draw_fn = try module.function("tf_draw");
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+
+    const host = try gpa.alloc(u16, vocab);
+    defer gpa.free(host);
+    const wide = try gpa.alloc(f32, vocab);
+    defer gpa.free(wide);
+    fill(.spread, 0x3711, host, wide);
+    var logits = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(host));
+    defer logits.free();
+    var rule = try cuda.DeviceBuffer.alloc(gpu.d, @sizeOf(Rule));
+    defer rule.free();
+    var meta = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&[4]i32{ 1234, 0, 0, 0 }));
+    defer meta.free();
+    var tok = try cuda.DeviceBuffer.alloc(gpu.d, 4);
+    defer tok.free();
+    var prob = try cuda.DeviceBuffer.alloc(gpu.d, 4);
+    defer prob.free();
+
+    var cases: usize = 0;
+    for ([_]u32{ 0, 20, 1024, 1500 }) |k| for ([_]f64{ 1.0, 0.95 }) |p| {
+        const sampling: lanes.Sampling = .{ .seed = 0x5EED_3711, .temperature = 1, .top_k = k, .top_p = p };
+        const rule_data = ruleOf(sampling);
+        try rule.uploadAsync(0, std.mem.asBytes(&rule_data), stream.handle);
+
+        var args: cuda.Args = .{};
+        args.add(logits.ptr);
+        args.add(@as(u32, vocab));
+        args.add(rule.ptr);
+        args.add(meta.ptr);
+        args.add(@as(i32, 0));
+        args.add(tok.ptr);
+        args.add(prob.ptr);
+        try cuda.launch.launch(draw_fn, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, stream, &args);
+        try stream.synchronize();
+        var with_prob: u32 = undefined;
+        try tok.download(0, std.mem.asBytes(&with_prob));
+
+        args = .{};
+        args.add(logits.ptr);
+        args.add(@as(u32, vocab));
+        args.add(rule.ptr);
+        args.add(meta.ptr);
+        args.add(@as(i32, 0));
+        args.add(tok.ptr);
+        args.add(@as(u64, 0));
+        try cuda.launch.launch(draw_fn, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, stream, &args);
+        try stream.synchronize();
+        var without_prob: u32 = undefined;
+        try tok.download(0, std.mem.asBytes(&without_prob));
+
+        try check.expect(
+            with_prob == without_prob,
+            "sample null PROB changed token for top_k {d}, top_p {d}: {d} != {d}",
+            .{ k, p, with_prob, without_prob },
+        );
+        cases += 1;
+    };
+    check.pass("sample optional probability: {d} settings preserve tf_draw token IDs", .{cases});
 }
 
 /// topkRows' two stages against tf_logprob_rows: the same k ids and logits, word for word, on every row kind and width.

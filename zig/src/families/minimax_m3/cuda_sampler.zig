@@ -36,7 +36,6 @@ pub const Sampler = struct {
     rule: cuda.DeviceBuffer,
     meta: cuda.DeviceBuffer,
     tok: cuda.DeviceBuffer,
-    prob: cuda.DeviceBuffer,
 
     pub fn init(d: *const cuda.Driver, vocab: usize, rows: usize) !Sampler {
         var m = try cuda.Module.load(d, cuda.kernels.sample);
@@ -50,14 +49,11 @@ pub const Sampler = struct {
         errdefer r.free();
         var meta = try cuda.DeviceBuffer.alloc(d, 16);
         errdefer meta.free();
-        var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        errdefer tok.free();
-        const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+        const tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
+        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok };
     }
 
     pub fn deinit(s: *Sampler) void {
-        s.prob.free();
         s.tok.free();
         s.meta.free();
         s.rule.free();
@@ -85,7 +81,7 @@ pub const Sampler = struct {
         args.add(s.meta.ptr);
         args.add(@as(i32, 0));
         args.add(s.tok.ptr);
-        args.add(s.prob.ptr);
+        args.add(@as(u64, 0));
         try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
         try stream.synchronize();
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
