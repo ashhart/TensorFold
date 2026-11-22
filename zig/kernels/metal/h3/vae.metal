@@ -349,3 +349,44 @@ if (t >= depth || hh >= h || ww >= w) return;
   const uint h = at.x / hd;
   OUT[(h * rows + r) * hd + i] = QKV[r * 3 * dim + h * 3 * hd + 2 * hd + i];
 }
+[[kernel]] void h3_vae_enc_conv(
+  const device float* IN [[buffer(0)]],
+  const device float* W [[buffer(1)]],
+  const device float* B [[buffer(2)]],
+  device float* OUT [[buffer(3)]],
+  constant uint* P [[buffer(4)]],
+  uint3 at3 [[thread_position_in_grid]]) {
+  const uint c_in = P[0], t = P[1], hh = P[2], ww = P[3], c_out = P[4];
+  const uint st = P[5], sh = P[6], sw = P[7];
+  const uint causal = P[8];
+  const uint pad_l = P[9], pad_r = P[10], pad_b = P[11];
+  const uint kt = 3, kh = 3, kw = 3;
+  const uint pt = kt / 2;
+  const uint t_pre = (causal == 1) ? pt * 2 : pt;
+  const uint tp = t + t_pre;
+  const uint hp = hh + pad_l + pad_r;
+  const uint wp = ww + pad_l + pad_r;
+  const uint ot = at3.x, oh = at3.y, ow = at3.z;
+  if (ot >= (tp - kt) / st + 1) return;
+  if (oh >= (hp - kh) / sh + 1) return;
+  if (ow >= (wp - kw) / sw + 1) return;
+  float sum = B[c_out];
+  for (uint ci = 0; ci < c_in; ci++) {
+    for (uint ktt = 0; ktt < kt; ktt++) {
+      const uint tt = ot * st + ktt;
+      for (uint khh = 0; khh < kh; khh++) {
+        const uint th = oh * sh + khh;
+        for (uint kww = 0; kww < kw; kww++) {
+          const uint tw = ow * sw + kww;
+          const float iv = IN[(ci * tp + tt) * hp * wp + th * wp + tw];
+          const float wv = W[((c_out * c_in + ci) * kt + ktt) * kh * kw + khh * kw + kww];
+          sum += iv * wv;
+        }
+      }
+    }
+  }
+  const uint out_t = (tp - kt) / st + 1;
+  const uint out_h = (hp - kh) / sh + 1;
+  const uint out_w = (wp - kw) / sw + 1;
+  OUT[(c_out * out_t + ot) * out_h * out_w + oh * out_w + ow] = sum;
+}
