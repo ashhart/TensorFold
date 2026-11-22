@@ -3,12 +3,13 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import engineManifest from '../../../../build/engine.json' with { type: 'json' }
 import { fileURLToPath } from 'node:url'
 
 let args = process.argv.slice(2)
 let scenario = 'complete'
 if (args[0]?.startsWith('scenario:')) scenario = args.shift().slice(9)
-const engineVersion = scenario === 'old-version' ? '1.0.12' : scenario === 'unknown-version' ? '9.9.9' : '1.1.0'
+const engineVersion = scenario === 'old-version' ? '1.0.12' : scenario === 'unknown-version' ? '9.9.9' : engineManifest.version
 if (args[0] === '--version') { console.log(`tensorfold-native ${engineVersion}`); process.exit(0) }
 if (args[0] !== 'benchmark') {
   const fixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../test-fixtures/fake-engine.mjs')
