@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.3.4
 
 - `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
+- Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
 - Server: `response_format: json_object` with `grammar_budget: true` works again on large vocabularies: the server's fixed `json_object` rule gets budget limits sized to it (computed once per tokenizer), while every client-supplied grammar keeps the limits from #4378; a budget refusal now names what it hit (work, edges, bytes, timeout or busy slots) (#4615, follows #4378).
 
