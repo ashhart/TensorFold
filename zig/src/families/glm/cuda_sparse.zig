@@ -147,7 +147,7 @@ pub fn selectTokens(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u6
     return selectTokensProfile(set, ops, stream, qi, wts, w_stride, pk, t, t, pos, host_pos, rows, heads, d, g, np_max_cap, s, tokens, counts, null, null);
 }
 
-/// With `split`, this rank picks for its block of rows only (as one pass would, block by block) and gathers the rest; `lt`: the latent rows' table.
+/// With `split`, this rank picks for its block of rows only and gathers the rest; `lt`: the latent rows' table.
 pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, t: latent.Table, lt: latent.Table, pos: u64, host_pos: usize, rows: usize, heads: usize, d: usize, g: Geometry, np_max_cap: usize, s: Scratch, tokens: u64, counts: u64, split: ?Split, profile: ?*@import("cuda_prof.zig").Prof) !void {
     const prof = @import("cuda_prof.zig");
     try g.check();
