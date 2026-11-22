@@ -36,6 +36,7 @@ pub const Kernels = struct {
     stream_mean: cuda.Function,
     rank_sum: cuda.Function,
     hc_post: cuda.Function,
+    hc_post_own: cuda.Function,
     combine: cuda.Function,
     slice_sum: cuda.Function,
     top1: cuda.Function,
@@ -241,6 +242,14 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
     var a: cuda.Args = .{};
     inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
     try rows8Launch(set.glue.hc_post, stream, &a, rows, d, .{ x, xout, g });
+}
+
+/// Split prefill's hc_post: rank me reads own in place instead of its unused slot in gathered g.
+pub fn hcPostOwn(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u64, comb: u64, rows: usize, d: usize, s: usize, world: usize, own: u64, me: usize) !void {
+    if (s != 4) return error.StreamsNotFour;
+    var a: cuda.Args = .{};
+    inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world), own, cint(me) }) |v| a.add(v);
+    try rows8Launch(set.glue.hc_post_own, stream, &a, rows, d, .{ x, xout, own, g });
 }
 
 /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
