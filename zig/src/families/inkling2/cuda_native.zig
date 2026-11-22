@@ -102,7 +102,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     var merged: core.safetensors.Header = .empty;
     for (ck.files.items) |file| try @import("names.zig").merge(header_arena.allocator(), &merged, file.names);
     try @import("names.zig").precisions(merged, c.text.layers, &precisions);
-    const p = try plan_.build(&c.text, &precisions);
+    const p = try plan_.build(&c.text, precisions[0..c.text.layers]);
     var w = try @import("loop_weights.zig").load(gpa, ctx.d, &ck, &c, p);
     errdefer w.deinit();
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
