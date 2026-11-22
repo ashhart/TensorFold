@@ -187,8 +187,7 @@ fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors
 /// A synthesis' output lane and its GPU turn (renders on this GPU pause while it is held).
 pub const Lane = struct { released: bool = false, turn: ?std.Io.File = null };
 
-/// Acquired errors, final replies and completed stream observations release the lane before client writes,
-/// so neither another voice nor a render waits on a slow client.
+/// Errors, final replies and completed streams release the lane before client writes: a slow client blocks no one.
 pub fn releaseLane(srv: *Server, lane: *Lane) void {
     if (lane.released) return;
     lane.released = true;
