@@ -452,10 +452,15 @@ match #4125's CUDA bits; it keeps CUDA's rounding points and is held to the same
 (`tf_ink2_attn_fold`) to 1M keys on a ring that wraps. Every P is rounded to bf16 before its sum and P V, the sink enters
 last as a raw logit and the merge takes the raw gate's sigmoid, rounding once. The split launch (a block a 1,024-key
 sub-chunk) and the prompt launch (`tf_ink2_attn_prompt`: 8 pairs a block share one LDS stage while the next tile loads
-into registers, 37 KiB) are bit-equal to the fold, and three streams in one launch are bit-equal to each stream alone,
-at its row and cache offsets (prep, sliding, fold and split). Eight controls go red at `shapes`: a bias one distance
-late, no sink, one q a bf16 step up (prompt), a window one key long, the sink and gate given after their sigmoid (as
-#4387's glue did), tau off, a table read one column late, and a prep writing one stream's keys into another's slots.
+into registers, 37,120 bytes or 36.25 KiB) are bit-equal to the fold, and three streams in one launch are bit-equal to
+each stream alone, at its row and cache offsets (prep, sliding, fold and split). The float64 bound allows P's bf16
+rounding either way, so two exact cases pin it (sliding and fold): rows below position 64 with q 0, no sink, a gate
+whose sigmoid is 1 and integer values, and biases drawn so each bf16(exp2f) is certain, where every sum is exact in
+fp32 and each output must equal bf16(fp32(sum P v / sum P)) bit for bit. Eight controls go red at `shapes`: a bias one
+distance late, no sink, one q a bf16 step up (prompt), a window one key long, the sink and gate given after their
+sigmoid (as #4387's glue did), tau off, a table read one column late, and a prep writing one stream's keys into
+another's slots. `attend()` refuses a ring that is not whole 64-key tiles or is shorter than the window plus the
+call's rows less one.
 
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
