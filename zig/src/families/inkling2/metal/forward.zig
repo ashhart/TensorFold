@@ -9,6 +9,7 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_fuse = @import("dense_fuse.zig");
+const dense_units = @import("dense_units.zig");
 const mv_mma = @import("../../deepseek_v41/metal/mv_mma.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
@@ -98,10 +99,14 @@ fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, o
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Every projection uses the shared BF16 matvec's FP32 reduction and one BF16 store.
+/// Every projection uses the shared BF16 matvec's FP32 reduction and one BF16 store (tensor units across all widths).
 pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     const k = weight.shape[weight.rank - 1];
     const n = weight.shape[weight.rank - 2];
+    if (m.dense_units) |*du| if (k % 128 == 0) {
+        dense_units.encode(du, e, input, .{ .buf = weight.buffer, .off = weight.offset }, out, .{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(k) }) catch unreachable;
+        return;
+    };
     if (rows > 32 and k >= 32) {
         mv_mma.encode(&m.dense_mma, e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, .{ .k = @intCast(k), .n = @intCast(n), .rows = @intCast(rows), .out = .bf16 }) catch unreachable;
         return;
@@ -391,7 +396,34 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     prepareAttentionInputs(m, e, s, v, rows);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    if (rows <= 32) {
+    if (m.dense_units) |*du| {
+        dense_units.encode6(du, e, .{
+            .xq = at(s.q_norm, 0),
+            .xk = knorm,
+            .xv = vnorm,
+            .wq = r(w.attn.wq),
+            .wk = r(w.attn.wk),
+            .wv = r(w.attn.wv),
+            .wr = r(w.attn.wr),
+            .ws = r(w.attn.sink),
+            .wg = r(w.attn.gate),
+            .yq = at(s.q_raw, 0),
+            .yk = at(s.k_raw, 0),
+            .yv = at(s.v_raw, 0),
+            .yr = at(s.rel_raw, 0),
+            .ys = at(s.sink, 0),
+            .yg = at(s.gate, 0),
+        }, .{
+            .rows = @intCast(rows),
+            .k = state.hidden,
+            .nq = @intCast(w.attn.wq.shape[0]),
+            .nk = @intCast(w.attn.wk.shape[0]),
+            .nv = @intCast(w.attn.wv.shape[0]),
+            .nr = @intCast(w.attn.wr.shape[0]),
+            .ns = @intCast(w.attn.sink.shape[0]),
+            .ng = @intCast(w.attn.gate.shape[0]),
+        }) catch unreachable;
+    } else if (rows <= 32) {
         try dense_fuse.encode6(
             &m.dense_fuse,
             e,
