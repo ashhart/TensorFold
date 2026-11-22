@@ -234,17 +234,32 @@ kernel void tf_inkling2_swiglu(
 }
 
 struct InkLogitArgs { uint rows, vocab; };
+// Threadgroup (x, y) handles 8 vocab rows x up to 8 token rows; a simdgroup per vocab row shares unembed reads.
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_logits(
     const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
     device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
-    uint2 at [[thread_position_in_grid]]) {
-  const uint v = at.x, r = at.y;
-  if (v >= a.vocab || r >= a.rows) return;
-  float dot = 0.0f;
-  for (uint d = 0; d < 2304; ++d)
-    dot += float(unembed[size_t(v) * 2304 + d]) * float(h[size_t(r) * 2304 + d]);
-  // A9(a): unembedding rounds to bf16 before it widens for softcap30.
-  out[size_t(r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
+    uint3 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint v = tg.x * 8u + sg;
+  const uint r0 = tg.y * 8u;
+  if (v >= a.vocab || r0 >= a.rows) return;
+  const uint rn = min(8u, a.rows - r0);
+  const device bfloat* w = unembed + size_t(v) * 2304u;
+  float acc[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+  for (uint i = 8u * lane; i < 2304u; i += 256u) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4u));
+    for (uint r = 0u; r < rn; ++r) {
+      const device bfloat* hr = h + size_t(r0 + r) * 2304u + i;
+      const float4 x0 = float4(*(const device bfloat4*)hr), x1 = float4(*(const device bfloat4*)(hr + 4u));
+      acc[r] += dot(w0, x0) + dot(w1, x1);
+    }
+  }
+  for (uint r = 0u; r < rn; ++r) {
+    const float dot = simd_sum(acc[r]);
+    // A9(a): unembedding rounds to bf16 before it widens for softcap30.
+    if (lane == 0u) out[size_t(r0 + r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
+  }
 }
 
 struct InkExpertArgs { uint rows, channels; };
