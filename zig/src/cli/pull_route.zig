@@ -211,8 +211,7 @@ var addresses: [64]AddressDeadline = @splat(.{});
 var address_count: usize = 0;
 var address_next: usize = 0; // once full, the oldest entry is replaced (a pull over rotating CDN addresses never runs out)
 
-/// Carries a name's original deadline to each address the resolver returned. A full table drops its oldest address,
-/// whose connect then takes a fresh deadline (addressDeadline returns null), instead of failing the pull.
+/// Carries a name's deadline to each resolved address; when full, the oldest goes (its connect gets a fresh deadline).
 pub fn rememberAddress(io: std.Io, address: std.Io.net.IpAddress, deadline: std.Io.Clock.Timestamp) error{TooManyHosts}!void {
     lock.lockUncancelable(io);
     defer lock.unlock(io);
