@@ -54,6 +54,8 @@ pub const PlanArgs = plan.PlanArgs;
 pub const PlanRef = plan.PlanRef;
 /// Rows of one slot a block of the shared-row score kernels takes.
 pub const score_rows = plan.score_rows;
+/// Rows of one slot a block of the shared-row values kernels takes.
+pub const apply_rows = plan.apply_rows;
 pub const PlanKeep = plan.Keep;
 /// The stream tile's columns a lane, for launches that copy its geometry.
 pub const stream_pick = @import("launches/stream_pick.zig");
@@ -134,6 +136,9 @@ pub const Launcher = struct {
         sum_act: Function,
         attend: [2]Function,
         apply: [2]Function,
+        /// apply at d 256 on long spans, q fp32, in a multi-row launch (plan_rows.hip): as score256_lone and _rows
+        apply_lone: [2]Function,
+        apply_rows: [2]Function,
         keep: Function,
         gather: Function,
         gdn: [2]Function, // dk 128, 16
@@ -231,6 +236,8 @@ pub const Launcher = struct {
             .sum_act = try pl.function("tf_sum_partials_act"),
             .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
+            .apply_lone = .{ try plr.function("tf_plan_lone_apply_f16"), try plr.function("tf_plan_lone_apply_bf16") },
+            .apply_rows = .{ try plr.function("tf_plan_rows_apply_f16"), try plr.function("tf_plan_rows_apply_bf16") },
             .keep = try pl.function("tf_plan_keep"),
             .gather = try pl.function("tf_plan_gather"),
             .gdn = .{ try gd.function("tf_gdn_plan_128"), try gd.function("tf_gdn_plan_16") },
@@ -400,6 +407,7 @@ pub const Launcher = struct {
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
     pub const planScore = plan.planScore;
+    pub const planApply = plan.planApply;
     pub const planKvWriteAct = plan.planKvWriteAct;
     pub const planTap = plan.planTap;
     pub const tapRows = plan.tapRows;

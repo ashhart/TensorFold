@@ -129,38 +129,21 @@ pub fn planCausalAs(
     s: S,
 ) Error!void {
     try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, roundRows(p.rows), s);
-    const which: usize = @intCast(kind - 1);
     const rows = p.rows;
     const tiles: c_int = @intCast(cdiv(span, 128));
-    const span_c: c_int = @intCast(span);
-    const heads_c: c_int = @intCast(heads);
-    const kv_c: c_int = @intCast(kv_heads);
-    const d_c: c_int = @intCast(d);
-    const layer_c: c_int = @intCast(layer);
     var b: Args = .{};
     try b.add(scores);
     try b.add(stats);
-    try b.add(span_c);
+    try b.add(@as(c_int, @intCast(span)));
     try b.add(@as(c_int, 0));
     try b.add(p.args.pos);
     try l.go(l.softmax_stats, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);
-    var c: Args = .{};
-    try c.add(scores);
-    try c.add(stats);
-    try c.add(partials);
-    try c.add(span_c);
-    try c.add(heads_c);
-    try c.add(kv_c);
-    try c.add(d_c);
-    try c.add(p.args);
-    try c.add(layer_c);
-    const apply = @divExact(heads, applyGroup(scoreGroup(heads, kv_heads), @intCast(tiles), heads, rows));
-    try l.go(l.plan.apply[which], dim(tiles, apply, rows), dim(256, 1, 1), 0, s, &c);
+    try planApply(l, scores, stats, partials, p, layer, heads, kv_heads, d, span, kind, act, .one, s);
     var e: Args = .{};
     try e.add(partials);
     try e.add(out);
     try e.add(tiles);
-    try e.add(d_c);
+    try e.add(@as(c_int, @intCast(d)));
     if (act) try e.add(kind);
     try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
 }
@@ -270,6 +253,55 @@ pub fn planAttend(
 
 /// Blocks under which the values' walk splits a KV head's query heads over more blocks.
 const apply_blocks = 128;
+/// Rows of one slot a tf_plan_rows_apply_* block weighs from one read of their values (plan_rows.hip's kApplyRows).
+pub const apply_rows = 4;
+/// Query heads a tf_plan_rows_apply_* block takes at most (plan_rows.hip's kApplyHeads): the weights its LDS holds.
+const apply_heads = 8;
+
+/// planCausalAs's values step: each row's 128-key tiles of its weighted values, (rows, heads, tiles, d) fp32 partials.
+pub fn planApply(
+    l: *const Launcher,
+    scores: u64,
+    stats: u64,
+    partials: u64,
+    p: PlanRef,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    kind: c_int,
+    act: bool,
+    rows: Rows,
+    s: S,
+) Error!void {
+    if (d > 256 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0 or kind < 1 or kind > 2) return invalid("planned attention");
+    const which: usize = @intCast(kind - 1);
+    const tiles = cdiv(span, 128);
+    var a: Args = .{};
+    try a.add(scores);
+    try a.add(stats);
+    try a.add(partials);
+    try a.add(@as(c_int, @intCast(span)));
+    try a.add(@as(c_int, @intCast(heads)));
+    try a.add(@as(c_int, @intCast(kv_heads)));
+    try a.add(@as(c_int, @intCast(d)));
+    try a.add(p.args);
+    try a.add(@as(c_int, @intCast(layer)));
+    const group = applyGroup(scoreGroup(heads, kv_heads), tiles, heads, p.rows);
+    const grid = dim(tiles, @divExact(heads, group), p.rows);
+    if (applyRows(rows, d, span, act, group) > 1) {
+        // the rows of one-row slots at the one-row kernel's occupancy, then the chunks of the others, both on this grid
+        try l.go(l.plan.apply_lone[which], grid, dim(256, 1, 1), 0, s, &a);
+        return l.go(l.plan.apply_rows[which], grid, dim(256, 1, 1), 0, s, &a);
+    }
+    try l.go(l.plan.apply[which], grid, dim(256, 1, 1), 0, s, &a);
+}
+
+/// Rows an apply block weighs: a chunk of its slot's where the score's blocks share theirs and its heads fit the LDS.
+fn applyRows(rows: Rows, d: usize, span: usize, act: bool, group: usize) usize {
+    return if (blockRows(rows, d, span, act) > 1 and group <= apply_heads) apply_rows else 1;
+}
 
 /// Query heads an apply block takes: fewer while the grid is small (a head's sums do not depend on its block).
 fn applyGroup(group: usize, tiles: usize, heads: usize, rows: usize) usize {
@@ -385,6 +417,19 @@ test "a slot's rows share the score's key loads only past one row, at d 256 on l
     try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 256, 1 << 18, true));
     try std.testing.expectEqual(@as(usize, 8), scoreGroup(16, 2));
     try std.testing.expectEqual(@as(usize, 16), scoreGroup(64, 2));
+}
+
+test "a slot's rows share the values' loads in chunks of four where the score's do, with at most 8 heads a block" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, apply_rows), applyRows(roundRows(4), 256, score_span, false, apply_heads));
+    try std.testing.expectEqual(@as(usize, 1), applyRows(roundRows(1), 256, 1 << 18, false, 8));
+    try std.testing.expectEqual(@as(usize, 1), applyRows(.shared, 256, score_span - 1, false, 8));
+    try std.testing.expectEqual(@as(usize, 1), applyRows(.shared, 128, 1 << 18, false, 8));
+    try std.testing.expectEqual(@as(usize, 1), applyRows(.shared, 256, 1 << 18, true, 8));
+    try std.testing.expectEqual(@as(usize, 1), applyRows(.shared, 256, 1 << 18, false, 16));
+    // the served groups: Qwen3.6-35B-A3B's 16 heads over 2 KV heads, Qwen3.8-27B's 24 over 4
+    try std.testing.expectEqual(@as(usize, 8), applyGroup(scoreGroup(16, 2), cdiv(score_span, 128), 16, 2));
+    try std.testing.expectEqual(@as(usize, 6), applyGroup(scoreGroup(24, 4), cdiv(score_span, 128), 24, 2));
 }
 
 test "a small walk splits the heads of a KV head, a wide one keeps them together" {
