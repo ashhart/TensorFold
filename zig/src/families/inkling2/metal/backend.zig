@@ -96,9 +96,13 @@ pub const Metal = struct {
         const self = cast(ptr);
         try validateTaps(&self.model.config, taps);
         if (!self.prepared) return error.UnpreparedInkling2Taps;
-        const tp = (try self.cacheOf(stream)).tap;
+        const cache = try self.cacheOf(stream);
+        var tp = cache.tap;
+        const off = st.featureOffset(tp, start, count, self.tap_gen) catch |err| blk: {
+            tp = cache.fill_tap;
+            break :blk st.featureOffset(tp, start, count, self.tap_gen) catch return err;
+        };
         const buf = tp.buf orelse return error.Inkling2TapsNotHeld;
-        const off = try st.featureOffset(tp, start, count, self.tap_gen);
         return .{ .buffer = @intFromPtr(buf.id), .offset = off, .rows = count, .row_bytes = @intCast(st.feature_row_bytes), .space = .device, .dtype = .bf16 };
     }
 
@@ -117,7 +121,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .keep_full_lone = true, .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .keep_full_lone = true, .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -196,53 +200,60 @@ pub const Metal = struct {
     }
 
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !void {
-        const base = cache.len;
         var at: usize = 0;
-        while (at < ids.len) {
-            var end = @min(ids.len, at + st.prompt_rows);
-            if (stream) |sm| {
-                if (sm.isCancelled()) return error.Cancelled;
-                for (sm.chunks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-                for (sm.reuse.marks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-            }
-            const s = if (end - at > st.batch_rows) &self.prompt else &self.scratch;
-            const capture = self.prepared and stream != null;
-            if (capture) _ = self.nextTapGeneration();
-            const taps: ?st.Ref = if (capture) .{ .buf = s.taps.? } else null;
-            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = taps });
-            if (capture) {
-                const rows = end - at;
-                if (self.sink) |k| try k.take(k.ptr, stream.?, .{
-                    .buffer = @intFromPtr(s.taps.?.id),
-                    .offset = 0,
-                    .rows = @intCast(rows),
-                    .row_bytes = @intCast(st.feature_row_bytes),
-                    .space = .device,
-                    .dtype = .bf16,
-                }, @intCast(cache.len));
-                if (base + end == stream.?.prompt().len) {
-                    if (cache.last_tap == null) {
-                        cache.last_tap = try self.model.device.buffer(st.feature_row_bytes, mtl.ResourceOptions.shared);
-                        if (cache.follow) |f| f.join(f.ctx, cache.last_tap.?);
-                    }
-                    const bytes = s.taps.?.slice(u8, rows * st.feature_row_bytes);
-                    @memcpy(cache.last_tap.?.slice(u8, st.feature_row_bytes), bytes[(rows - 1) * st.feature_row_bytes ..][0..st.feature_row_bytes]);
-                    cache.tap = .{ .buf = cache.last_tap, .start = @intCast(cache.len + rows - 1), .rows = 1 };
-                }
-            }
-            cache.len += end - at;
-            if (stream) |sm| lanes.prefill_widths.completed(self.gpa, sm, end - at);
-            at = end;
-            if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
-        }
+        while (at < ids.len) at += try self.feedChunk(cache, ids[at..], stream);
     }
 
-    fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
+    /// One chunk of `ids` from the cache's length, cut at the stream's planned chunks and kept marks: its rows.
+    fn feedChunk(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !usize {
+        const base = cache.len;
+        var end: usize = @min(ids.len, st.prompt_rows);
+        if (stream) |sm| {
+            if (sm.isCancelled()) return error.Cancelled;
+            for (sm.chunks) |x| if (x > base and x < base + end) {
+                end = x - base;
+            };
+            for (sm.reuse.marks) |x| if (x > base and x < base + end) {
+                end = x - base;
+            };
+        }
+        const s = if (end > st.batch_rows) &self.prompt else &self.scratch;
+        const capture = self.prepared and stream != null;
+        if (capture) _ = self.nextTapGeneration();
+        const taps: ?st.Ref = if (capture) .{ .buf = s.taps.? } else null;
+        try fwd.run(self.model, s, cache, ids[0..end], .{ .taps = taps });
+        if (capture) {
+            if (self.sink) |k| try k.take(k.ptr, stream.?, .{
+                .buffer = @intFromPtr(s.taps.?.id),
+                .offset = 0,
+                .rows = @intCast(end),
+                .row_bytes = @intCast(st.feature_row_bytes),
+                .space = .device,
+                .dtype = .bf16,
+            }, @intCast(base)) else {
+                cache.fill_tap = .{ .buf = s.taps, .start = @intCast(base), .rows = end, .gen = self.tap_gen };
+            }
+            if (base + end == stream.?.prompt().len) {
+                if (cache.last_tap == null) {
+                    cache.last_tap = try self.model.device.buffer(st.feature_row_bytes, mtl.ResourceOptions.shared);
+                    if (cache.follow) |f| f.join(f.ctx, cache.last_tap.?);
+                }
+                const bytes = s.taps.?.slice(u8, end * st.feature_row_bytes);
+                @memcpy(cache.last_tap.?.slice(u8, st.feature_row_bytes), bytes[(end - 1) * st.feature_row_bytes ..][0..st.feature_row_bytes]);
+                cache.tap = .{ .buf = cache.last_tap, .start = @intCast(base + end - 1), .rows = 1 };
+            }
+        }
+        cache.len += end;
+        if (stream) |sm| {
+            lanes.prefill_widths.completed(self.gpa, sm, end);
+            sm.fill_at.store(@intCast(cache.len), .monotonic);
+            if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
+        }
+        return end;
+    }
+
+    /// The stream's cache made and a kept prefix restored: the pass goes on from the cache's length.
+    fn opening(self: *Metal, stream: *lanes.Stream) !*st.Cache {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
         if (stream.images.len > 0) return error.InklingHasNoImageTower;
@@ -266,7 +277,32 @@ pub const Metal = struct {
                 if (snapshot.restore(cache, self.model.queue, snap)) stream.cached = @intCast(snap.at) else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        try self.feed(cache, ids[cache.len..], stream);
+        return cache;
+    }
+
+    /// A pass that failed: its cache goes, as the whole pass's error leaves it.
+    fn drop(self: *Metal, stream: *lanes.Stream) void {
+        const entry = self.caches.fetchRemove(stream) orelse return;
+        self.held -= st.cacheBytes(entry.value.capacity);
+        entry.value.deinit();
+        self.gpa.destroy(entry.value);
+    }
+
+    fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        const cache = try self.opening(stream);
+        errdefer self.drop(stream);
+        try self.feed(cache, stream.prompt()[cache.len..], stream);
+    }
+
+    /// One chunk a call at the whole pass's cuts, other streams' rounds between them; `max_rows` is never set.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+        const self = cast(ptr);
+        const cache = self.caches.get(stream) orelse try self.opening(stream);
+        errdefer self.drop(stream);
+        const ids = stream.prompt();
+        _ = try self.feedChunk(cache, ids[cache.len..], stream);
+        return cache.len == ids.len;
     }
 
     pub fn warm(self: *Metal) !void {
