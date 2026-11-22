@@ -94,7 +94,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/voices")) {
         if (srv.info.speech == null) return unknown(conn, a);
-        const value = srv.voices.listing(a) catch return;
+        const value = @import("speech_voices.zig").listing(srv, a) catch return;
         return sendValue(conn, a, 200, value);
     }
     if (std.mem.eql(u8, route, "/memory") or std.mem.eql(u8, route, "/v1/memory"))

@@ -23,8 +23,14 @@ pub fn isField(key: []const u8) bool {
     return false;
 }
 
+/// Drama 3's defaults and top-k ceiling.
 pub fn parse(cx: *errors.Cx, body: Value) errors.Refused!Options {
-    var out: Options = .{};
+    return parseFrom(cx, body, .{}, 64);
+}
+
+/// The request's sampling fields over `base`, with top_k from 1 through `max_top_k`.
+pub fn parseFrom(cx: *errors.Cx, body: Value, base: Options, comptime max_top_k: u32) errors.Refused!Options {
+    var out = base;
     if (body.field("temperature")) |value|
         out.temperature = try number(cx, value, std.math.floatMax(f32), "temperature must be a finite nonnegative f32 number");
     if (body.field("top_p")) |value| {
@@ -32,10 +38,10 @@ pub fn parse(cx: *errors.Cx, body: Value) errors.Refused!Options {
         if (out.top_p == 0) return cx.refuse("top_p must be greater than 0");
     }
     if (body.field("top_k")) |value| {
-        const message = "top_k must be an integer from 1 through 64";
+        const message = std.fmt.comptimePrint("top_k must be an integer from 1 through {d}", .{max_top_k});
         if (value != .int) return cx.refuse(message);
         const n = std.fmt.parseInt(u32, value.int, 10) catch return cx.refuse(message);
-        if (n == 0 or n > 64) return cx.refuse(message);
+        if (n == 0 or n > max_top_k) return cx.refuse(message);
         out.top_k = n;
     }
     if (body.field("seed")) |value| {
