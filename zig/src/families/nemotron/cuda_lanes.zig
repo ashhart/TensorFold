@@ -83,24 +83,28 @@ pub const Cuda = struct {
         self.prompt_out.free();
     }
     pub fn backend(self: *Cuda) be.Backend {
-        return .{ .ptr = self, .vtable = &.{
-            .prefill = prefillFn,
-            .prefill_step = fill.step,
-            .first = firstFn,
-            .queue = queueFn,
-            .read = readFn,
-            .verify = verifyFn,
-            .keep = keepFn,
-            .draft = draftFn,
-            .release = releaseFn,
-            .first_row = firstRowFn,
-            .first_masked = firstMaskedFn,
-            .held = heldFn,
-            .probabilities = probabilitiesFn,
-            .prepare_features = prepareFeaturesFn,
-            .features = featuresFn,
-            .prompt_rows = true,
-        } };
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .prefill = prefillFn,
+                .prefill_step = fill.step,
+                .first = firstFn,
+                .queue = queueFn,
+                .read = readFn,
+                .verify = verifyFn,
+                .keep = keepFn,
+                .draft = draftFn,
+                .release = releaseFn,
+                .first_row = firstRowFn,
+                .first_masked = firstMaskedFn,
+                .held = heldFn,
+                .probabilities = probabilitiesFn,
+                .prepare_features = prepareFeaturesFn,
+                .features = featuresFn,
+                .prompt_rows = true,
+                .reports_fill = true, // each chunk's rows in fill_at: the host's accounting and Drafted's stepping read them
+            },
+        };
     }
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
     pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
