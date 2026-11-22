@@ -125,7 +125,7 @@ pub const Engine = struct {
             std.log.err("{s}: {s}", .{ cfg_path, why.text() });
             return err;
         };
-        const c = try config.parse(gpa, text);
+        const c = try @import("config_dsa.zig").of(gpa, text);
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);

@@ -24,7 +24,7 @@ pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64
     const p = checked(.{ .rank = rank, .world = world }) catch return total;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total;
-    const c = config.parse(a, text) catch return total;
+    const c = @import("config_dsa.zig").of(a, text) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
     const whole = @import("cuda_thin_bytes.zig").count(a, io, dir, total, ranks.environment("TF_GLM_LAYERS"), c.layers, drafts and c.mtp > 0);
     return @intCast(@as(u128, whole) * f[0] / f[1]);
