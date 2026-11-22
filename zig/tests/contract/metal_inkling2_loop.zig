@@ -13,7 +13,7 @@ const Kind = enum { messages, mix_f32, down, qkv, mlp };
 const Control = struct { kind: Kind, name: []const u8, from: []const u8, to: []const u8 };
 const controls = [_]Control{
     .{ .kind = .messages, .name = "control: inkling2 loop messages use unnormalized values", .from = "coef[q][s] = (score[s] / l) * inv_tg[s];", .to = "coef[q][s] = score[s] / l;" },
-    .{ .kind = .down, .name = "control: inkling2 loop controller drops message half of down projection", .from = "fma(float(wr[H + i]), xm[e], acc)", .to = "fma(float(wr[i]), xm[e], acc)" },
+    .{ .kind = .down, .name = "control: inkling2 loop controller drops message half of down projection", .from = "fma(float(wr[ulong(j) * 2 * H + H + i]), xm[e], acc[j])", .to = "fma(float(wr[ulong(j) * 2 * H + i]), xm[e], acc[j])" },
     .{ .kind = .qkv, .name = "control: inkling2 loop controller adds forget gate", .from = "1.0f - metal::precise::tanh(f)", .to = "1.0f + metal::precise::tanh(f)" },
     .{ .kind = .mlp, .name = "control: inkling2 loop MLP reads query message", .from = "return g == 0 ? a.slot0", .to = "return g == 0 ? 0" },
 };
