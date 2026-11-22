@@ -235,10 +235,20 @@ test "5-bit byte codes give the lane kernel's bits, prompt rows and decoded rows
     defer r.deinit();
     // The byte product runs the tensor op on uint8 codes: chips with tensor units only.
     if (!r.device.tensorUnits()) return error.SkipZigTest;
+    const env = @import("sys").env;
+    const flag = "TF_Q27_FIVE_BYTES";
+    const saved = if (std.c.getenv(flag)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer if (saved) |v| {
+        _ = env.setenv(flag, v, 1);
+        std.testing.allocator.free(v);
+    } else _ = env.unsetenv(flag);
     const t = try synth(r.device, &r.owned, 64, 5, 4);
+    // Lane-versus-byte parity needs the flag unset while the lane comparison is prepared.
+    _ = env.unsetenv(flag);
     const lanes = try projection.prepare(r.device, std.testing.allocator, &r.owned, &.{t}, 32);
-    const bytes = try projection.prepareBytes(r.device, std.testing.allocator, &r.owned, &.{t}, k, 32);
-    try std.testing.expect(bytes.bytes and !lanes.bytes);
+    _ = env.setenv(flag, "1", 1);
+    const bytes = try projection.prepare(r.device, std.testing.allocator, &r.owned, &.{t}, 32);
+    try std.testing.expect(bytes.bytes and !lanes.bytes); // separately, the enabled flag really selects dispatch
     try expectPassesEqual(r.device, &r.kern, bytes, lanes);
     try expectPassesEqual(r.device, &r.kern, lanes, bytes);
 }

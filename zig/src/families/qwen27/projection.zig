@@ -86,7 +86,6 @@ fn bytesOn(device: mtl.Device, parts: []const Triple) bool {
 }
 
 pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, tile: u32) !Linear {
-    if (tile == 32 and bytesOn(device, parts)) return prepareBytes(device, allocator, owned, parts, parts[0].weight.shape[1] * 32 / 5, tile);
     if (tile != 32 or parts.len == 0) return error.BadProjectionShape;
     const bits = parts[0].bits;
     const group = parts[0].group;
@@ -106,6 +105,7 @@ pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Arr
         if (p.scales.dtype != .bf16 or p.biases.dtype != .bf16 or p.scales.rank != 2 or p.biases.rank != 2 or p.scales.shape[0] != rows or p.biases.shape[0] != rows or p.scales.shape[1] != k / group or p.biases.shape[1] != k / group) return error.BadAffineMetadata;
         n = try std.math.add(usize, n, rows);
     }
+    if (bytesOn(device, parts)) return prepareBytes(device, allocator, owned, parts, k, tile);
     if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices, gn);
     slices = laneSplit(bits, group, key);
     if (bits != 4 or group != 64) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices, gn);
