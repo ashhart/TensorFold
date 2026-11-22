@@ -15,6 +15,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
+    .{ .name = "TF_GLM_SHARED_FIRST" },
     .{ .name = "TF_GLM_DSEL", .default = true },
     .{ .name = "TF_GLM_DSCORES", .default = true },
 };
