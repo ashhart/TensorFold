@@ -8,6 +8,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const mv_mma = @import("../../deepseek_v41/metal/mv_mma.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 const Model = model_file.Model;
@@ -94,6 +95,10 @@ fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, o
 pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     const k = weight.shape[weight.rank - 1];
     const n = weight.shape[weight.rank - 2];
+    if (rows > 32 and k >= 32) {
+        mv_mma.encode(&m.dense_mma, e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, .{ .k = @intCast(k), .n = @intCast(n), .rows = @intCast(rows), .out = .bf16 }) catch unreachable;
+        return;
+    }
     var base: usize = 0;
     while (base < rows) {
         const left = rows - base;
@@ -123,7 +128,12 @@ fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows:
     }
     copyBf16(m, e, at(s.p, 0), at(s.bank1, 0), rows * state.hidden);
     e.barrier();
-    loop.crossPassMessageAttention(&m.loop, e, l(at(s.bank0, 0)), l(at(s.bank1, 0)), l(r(m.weights.cross_queries)), l(r(m.weights.cross_kv_queries)), l(at(s.messages, 0)), @intCast(rows));
+    var base: usize = 0;
+    while (base < rows) {
+        const take = @min(rows - base, 64);
+        loop.crossPassMessageAttention(&m.loop, e, l(row(s.bank0, base, state.hidden * 2)), l(row(s.bank1, base, state.hidden * 2)), l(r(m.weights.cross_queries)), l(r(m.weights.cross_kv_queries)), l(row(s.messages, base, state.message_entries * state.hidden * 4)), @intCast(take));
+        base += take;
+    }
     // The prelude p is restored, but every visit's KV and convolution state remains live.
     copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
     e.barrier();
@@ -144,14 +154,19 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     if (gated) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        var roles: [3]loop.Gate = undefined;
-        for (&roles, 0..) |*g, role| {
-            const c = controllers[role];
-            const source_role = if (lp.kind == .local) 0 else role;
-            g.* = .{ .h = l(arRow(s, source_role, rows, 0, false)), .m = l(messageRow(s, core, role, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(arRow(s, role, rows, 0, true)) };
+        var base: usize = 0;
+        while (base < rows) {
+            const take = @min(rows - base, 64);
+            var roles: [3]loop.Gate = undefined;
+            for (&roles, 0..) |*g, role| {
+                const c = controllers[role];
+                const source_role = if (lp.kind == .local) 0 else role;
+                g.* = .{ .h = l(arRow(s, source_role, rows, base, false)), .m = l(messageRow(s, core, role, base)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(arRow(s, role, rows, base, true)) };
+            }
+            loop.gatesEach(&m.loop, e, &roles, @intCast(take), state.message_entries * state.hidden);
+            e.barrier();
+            base += take;
         }
-        loop.gatesEach(&m.loop, e, &roles, @intCast(rows), state.message_entries * state.hidden);
-        e.barrier();
     }
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
     if (!gated and lp.kind == .local) {
@@ -367,13 +382,23 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        loop.gatesStrided(&m.loop, e, l(at(s.mlp_ar, 0)), l(messageRow(s, core, 3, 0)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(at(s.mlp_gated, 0)), @intCast(rows), state.message_entries * state.hidden);
-        e.barrier();
+        var base: usize = 0;
+        while (base < rows) {
+            const take = @min(rows - base, 64);
+            loop.gatesStrided(&m.loop, e, l(row(s.mlp_ar, base, state.hidden * 4)), l(messageRow(s, core, 3, base)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(row(s.mlp_gated, base, state.hidden * 4)), @intCast(take), state.message_entries * state.hidden);
+            e.barrier();
+            base += take;
+        }
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     e.barrier();
-    glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
-    e.barrier();
+    var rbase: usize = 0;
+    while (rbase < rows) {
+        const take = @min(rows - rbase, 64);
+        glue.router(&m.glue, e, row(s.mlp_normed, rbase, state.hidden * 2), r(w.router_weight), r(w.router_bias), row(s.route_ids, rbase, state.experts_per_token * 4), row(s.route_weights, rbase, state.experts_per_token * 4), @intCast(take));
+        e.barrier();
+        rbase += take;
+    }
     try routedExperts(m, e, s, v.layer, rows);
     e.barrier();
     postConv(m, e, segments, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
@@ -395,7 +420,7 @@ pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const
 
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
-    if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
+    if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1) or (options.all and rows > state.batch_rows)) return error.Inkling2RowsExceeded;
     var total: usize = 0;
     var base: usize = 0;
     for (segments, 0..) |seg, si| {
