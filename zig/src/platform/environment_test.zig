@@ -118,7 +118,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
-        .{ "TF_CUDA_CARVEOUT_SOURCE", "1" },    .{ "TF_CUDA_CARVEOUT_SOURCE", "drm " },
+        .{ "TF_CUDA_CARVEOUT_SOURCE", "1" },           .{ "TF_CUDA_CARVEOUT_SOURCE", "drm " },
         .{ "TF_CUDA_CARVEOUT_MIB", "0" },              .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
         .{ "TF_ROCE_GID_INDEX", "2147483648" },        .{ "TF_PROMPT_ROWS", "16" },
         .{ "TF_PROMPT_ROWS", "129" },                  .{ "TF_PROMPT_ROWS", "2064" },
