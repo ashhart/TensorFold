@@ -216,6 +216,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts")) return @import("hy4_nvfp4_experts_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts-ckpt")) return @import("hy4_nvfp4_experts_tests.zig").runCheckpoint(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10));
     if (std.mem.eql(u8, cmd, "nvfp4-b32")) return nvfp4_b32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-nz5")) return @import("nvfp4_nz5_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt")) return @import("qmmf_prompt_tests.zig").run(gpu);
