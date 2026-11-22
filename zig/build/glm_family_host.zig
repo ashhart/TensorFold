@@ -8,6 +8,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
     step.dependOn(&pdl.step);
+    const keep_fold = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_GLM_KEEP_FOLD"} }));
+    b.step("test-glm-keep-fold-host", "Folded GLM follower keep ordering, setting validation and rank agreement without devices").dependOn(&keep_fold.step);
+    step.dependOn(&keep_fold.step);
     const exl3 = b.createModule(.{ .root_source_file = b.path("zig/glm_exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
     b.step("test-glm-exl3-prompt-host", "Actual EXL3 whole prompt calls, shared-slot ABI and scratch without a GPU").dependOn(&exl3_run.step);

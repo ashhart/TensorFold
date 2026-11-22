@@ -582,3 +582,7 @@ test "TF_GLM_L2PF: read with the settings, carried in the fingerprint, and ranks
     all[1].l2pf[3] = 0; // rank 1 unpaced
     try std.testing.expectEqual(Mismatch{ .field = .l2pf, .rank = 1 }, mismatch(&all).?);
 }
+
+test {
+    _ = @import("cuda_ranks_fold_test.zig");
+}

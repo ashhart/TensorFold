@@ -24,7 +24,7 @@ pub const Header = extern struct {
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
     flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
+    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows; verify/draft/block with TF_GLM_KEEP_FOLD: k+1, or 0 for no keep
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -55,8 +55,11 @@ pub const Link = struct {
     gpa: std.mem.Allocator,
     wait: bool, // TF_GLM_LINK_WAIT=1: every step uploaded and waited for, as before the put
     asleep: bool = false, // rank 0: the other ranks sleep on their lines (cuda.tp_watch) until its next step
+    fold_keep: bool = false, // TF_GLM_KEEP_FOLD=1: fold the next keep into the following verify/draft/block header
+    commit_keep: ?usize = null, // rank 0: a keep already executed locally but not yet sent to the other ranks
+    commit_slot: u32 = 0, // rank 0: the slot on which commit_keep ran
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize, fold_keep: bool) !Link {
         const max_ids = @max(asked_ids, prompt_wire.words);
         const buf = try cuda.DeviceBuffer.alloc(d, 64 + max_ids * 4);
         errdefer {
@@ -64,7 +67,7 @@ pub const Link = struct {
             owned.free();
         }
         const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
-        return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
+        return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait, .fold_keep = fold_keep };
     }
 
     pub fn deinit(l: *Link) void {
@@ -131,6 +134,64 @@ pub const Link = struct {
     }
 };
 
+pub fn keepHeader(n: usize) Header {
+    return .{ .kind = @backingInt(Kind.keep), .a = n };
+}
+
+fn foldsKeep(kind: Kind) bool {
+    return switch (kind) {
+        .verify, .draft, .block => true,
+        else => false,
+    };
+}
+
+/// A foldable step's deferred keep, with zero encoding the historical no-keep form.
+fn foldedKeep(h: Header) ?usize {
+    if (h.a == 0 or !foldsKeep(@fromBackingInt(@intCast(h.kind)))) return null;
+    return @intCast(h.a - 1);
+}
+
+pub const Outgoing = struct {
+    before: ?Header = null, // a non-foldable command needs the historical standalone keep first
+    before_slot: u32 = 0, // the slot the standalone keep ran on (it may precede a bind)
+    h: Header,
+    folded: bool = false,
+};
+
+pub fn outgoing(l: *const Link, h: Header, slot: u32) Outgoing {
+    const n = l.commit_keep orelse return .{ .h = h };
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    if (!foldsKeep(kind) or l.commit_slot != slot) return .{ .before = keepHeader(n), .before_slot = l.commit_slot, .h = h };
+    var folded = h;
+    folded.a = n + 1;
+    return .{ .h = folded, .folded = true };
+}
+
+/// The follower side of verify/draft/block/keep. A folded keep runs before its step, exactly as a standalone one did.
+pub fn foldableStep(e: anytype, h: Header, ids: []const u32, sampled: *[engine.shared_rows]u32, drafts: *[engine.max_drafts]u32, chances: *[engine.max_drafts]f64) !bool {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    if (!foldsKeep(kind) and kind != .keep) return false;
+    if (foldedKeep(h)) |n| try e.keep(n);
+    switch (kind) {
+        .verify => try e.verify(ids, sampled[0..ids.len], 0),
+        .draft => {
+            const owned = try e.gpa.dupe(u32, ids);
+            defer e.gpa.free(owned);
+            try e.draft(h.flags & 1 != 0, owned, h.depth, drafts, if (h.flags & 2 != 0) chances else null);
+        },
+        .block => {
+            const k = h.depth;
+            if (k == 0 or k > dflash.MAX_S or ids.len != 3 * k) return error.BadStep;
+            var reqs: [dflash.MAX_S]dflash.Req = undefined;
+            for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = ids[3 * i], .pos = 0, .n = ids[3 * i + 1], .anchor = ids[3 * i + 2], .propose = @import("dflash_proposals.zig").enabled(h.flags, i) };
+            try e.draftBlock(reqs[0..k]);
+        },
+        .keep => try e.keep(@intCast(h.a)),
+        else => unreachable,
+    }
+    return true;
+}
+
 /// A prompt step's outcome (Leader.chunk): the first token once it ends the prompt, and the rows it took.
 pub const Chunk = struct { first: ?u32, rows: usize };
 
@@ -141,8 +202,22 @@ pub const Leader = struct {
 
     /// The step on the bound stream's sequence (its slot) to every rank.
     fn send(x: Leader, h: Header, ids: []const u32) !void {
+        const out = outgoing(x.link, h, x.e.slot);
+        if (out.before) |first| {
+            try x.transmitAt(first, &.{}, out.before_slot);
+            x.link.commit_keep = null;
+        }
+        try x.transmit(out.h, ids);
+        if (out.folded) x.link.commit_keep = null;
+    }
+
+    fn transmit(x: Leader, h: Header, ids: []const u32) !void {
+        return x.transmitAt(h, ids, x.e.slot);
+    }
+
+    fn transmitAt(x: Leader, h: Header, ids: []const u32, slot: u32) !void {
         var hh = h;
-        hh.slot = x.e.slot;
+        hh.slot = slot;
         if (x.link.asleep) { // the other ranks wait on their lines, not in NCCL: wake them for this step
             cuda.tp_watch.wake();
             x.link.asleep = false;
@@ -185,6 +260,11 @@ pub const Leader = struct {
         }
     }
 
+    fn flushKeep(x: Leader) !void {
+        const n = x.link.commit_keep orelse return;
+        try x.transmitAt(keepHeader(n), &.{}, x.link.commit_slot);
+        x.link.commit_keep = null;
+    }
     pub fn begin(x: Leader, s: ?sampler.Sampling) !void {
         return x.beginOn(s, &.{}, 0);
     }
@@ -268,6 +348,20 @@ pub const Leader = struct {
         try x.e.verify(ids, out, bits);
     }
 
+    /// Fold the next keep into a compatible step only when TF_GLM_KEEP_FOLD=1.
+    pub fn keep(x: Leader, n: usize) !void {
+        try x.flushKeep();
+        try x.flush();
+        if (x.link.fold_keep) {
+            try x.e.keep(n);
+            x.link.commit_keep = n;
+            x.link.commit_slot = x.e.slot;
+        } else {
+            try x.send(keepHeader(n), &.{});
+            try x.e.keep(n);
+        }
+    }
+
     /// Several streams' windows in one forward on every rank (Engine.verifyShared): parts' slots and rows, then ids.
     pub fn verifyShared(x: Leader, parts: []const engine.Part) !void {
         if (parts.len == 0 or parts.len > engine.max_shared) return error.WindowTooWide;
@@ -291,12 +385,6 @@ pub const Leader = struct {
         try x.flush();
         try x.send(.{ .kind = @backingInt(Kind.many), .depth = @intCast(parts.len) }, ids);
         try x.e.prefillMany(parts, firsts);
-    }
-
-    pub fn keep(x: Leader, n: usize) !void {
-        try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
-        try x.e.keep(n);
     }
 
     /// Structured output's first token: every rank gathers the prompt's last row again, rank 0 draws it among `bits`.
@@ -336,21 +424,32 @@ pub const Leader = struct {
 };
 
 /// A prompt step whose rows go through the head (Leader.rows): this rank's columns join each pass's broadcasts.
-fn promptRows(h: Header) bool {
+pub fn promptRows(h: Header) bool {
     const kind: Kind = @fromBackingInt(@intCast(h.kind));
     return (kind == .prefill or kind == .chunk) and h.flags & 1 != 0;
 }
 
 /// A prompt chunk whose indexer rows split across the ranks (Leader.chunk): this rank picks for its block of rows.
-fn indexSplit(h: Header) bool {
+pub fn indexSplit(h: Header) bool {
     const kind: Kind = @fromBackingInt(@intCast(h.kind));
     return kind == .chunk and h.flags & 2 != 0;
 }
 
 /// A verify step under a grammar (Engine.structured): this rank's columns join the gather of each draw's whole rows.
-fn structuredStep(h: Header) bool {
+pub fn structuredStep(h: Header) bool {
     const kind: Kind = @fromBackingInt(@intCast(h.kind));
     return (kind == .verify or kind == .shared) and h.flags & 1 != 0;
+}
+
+/// A folded block binds its keep's slot; an ordinary block binds each request itself.
+pub fn bindStep(e: anytype, h: Header) !void {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    const unbound = switch (kind) {
+        .end, .drop, .shared, .many, .idle, .snapshots, .pool, .form => true,
+        .block => h.a == 0,
+        else => false,
+    };
+    if (!unbound) try e.bind(h.slot);
 }
 
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
@@ -363,10 +462,12 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form) try e.bind(h.slot);
+        try bindStep(e, h);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
+        if (try foldableStep(e, h, step.ids, &sampled, &drafts, &chances)) continue;
         switch (kind) {
+            .verify, .keep, .draft, .block => unreachable, // foldableStep handled these above
             .begin => {
                 if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
@@ -395,7 +496,6 @@ pub fn follow(e: *Engine, link: *Link) !void {
                     else => return err,
                 };
             },
-            .verify => try e.verify(step.ids, sampled[0..step.ids.len], 0),
             .redraw => _ = try e.redrawFirst(@intCast(h.a), 0),
             .shared => {
                 const k = h.depth;
@@ -419,20 +519,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 var firsts: [engine.max_together]u32 = undefined;
                 try e.prefillMany(decoded, &firsts);
             },
-            .keep => try e.keep(@intCast(h.a)),
             .form => e.m.experts.fact = h.a,
-            .draft => {
-                const ids = try e.gpa.dupe(u32, step.ids);
-                defer e.gpa.free(ids);
-                try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts, if (h.flags & 2 != 0) &chances else null);
-            },
-            .block => {
-                const k = h.depth;
-                if (k == 0 or k > dflash.MAX_S or step.ids.len != 3 * k) return error.BadStep;
-                var reqs: [dflash.MAX_S]dflash.Req = undefined;
-                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2], .propose = @import("dflash_proposals.zig").enabled(h.flags, i) };
-                try e.draftBlock(reqs[0..k]);
-            },
             .image => {
                 const v = e.images orelse return error.NoVision; // the ranks agreed on --vision (cuda_ranks)
                 try v.take(h.slot, step.ids);
@@ -450,15 +537,6 @@ pub fn follow(e: *Engine, link: *Link) !void {
     }
 }
 
-test "a step's header is 64 bytes and keeps its fields" {
-    const h: Header = .{ .kind = @backingInt(Kind.draft), .n = 3, .depth = 2, .flags = 1, .a = 7, .seed = 1 << 62, .temperature = 0.6, .top_p = 0.95, .top_k = 20 };
-    const bytes = std.mem.asBytes(&h);
-    var back: Header = undefined;
-    @memcpy(std.mem.asBytes(&back), bytes);
-    try std.testing.expectEqual(h, back);
-    try std.testing.expectEqual(Kind.draft, @as(Kind, @fromBackingInt(@intCast(back.kind))));
-}
-
 // The production image-step serializer, isolated so the host can test the offered video limits.
 pub fn spanWords(a: std.mem.Allocator, spans: []const images_mod.Span, max_words: usize) ![]u32 {
     const n = std.math.mul(usize, spans.len, 3) catch return error.TooManyIds;
@@ -467,75 +545,7 @@ pub fn spanWords(a: std.mem.Allocator, spans: []const images_mod.Span, max_words
     for (spans, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
     return words;
 }
-test "128 video pairs cross the span serializer and a follower's receiver; one word short is refused" {
-    const a = std.testing.allocator;
-    var spans: [128]images_mod.Span = undefined;
-    for (&spans, 0..) |*sp, i| sp.* = .{ .at = @intCast(i * 2), .n = 1, .row = @intCast(i) };
-    const words = try spanWords(a, &spans, 3 * spans.len);
-    defer a.free(words);
-    var v: images_mod.Images = undefined;
-    v.gpa = a;
-    v.spans = .empty;
-    v.slot = 9;
-    defer v.spans.deinit(a);
-    v.limits = .{ .image_tokens = 64, .max_images = 8, .video_tokens = 128, .max_frames = 256 };
-    v.video_ids = .{ 1, 2, 3 };
-    try v.take(9, words);
-    try std.testing.expectEqualSlices(images_mod.Span, &spans, v.spans.items);
-    try std.testing.expectEqual(@as(u32, 9), v.slot);
-    try std.testing.expectEqual(@as(usize, 128), v.rowCount());
-    try std.testing.expectError(error.TooManyIds, spanWords(a, &spans, 3 * spans.len - 1));
-}
 
-test "a link whose host allocation fails frees its device buffer" {
-    const Mock = struct {
-        var frees: usize = 0;
-        fn alloc(ptr: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
-            ptr.* = 4096;
-            return 0;
-        }
-        fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
-            frees += 1;
-            return 0;
-        }
-    };
-    Mock.frees = 0;
-    var d: cuda.Driver = undefined;
-    d.api.cuMemAlloc_v2 = Mock.alloc;
-    d.api.cuMemFree_v2 = Mock.free;
-    var lib: cuda.nccl.Library = undefined;
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    const before = cuda.usage(false).device;
-    defer {
-        if (Mock.frees == 0) {
-            var leaked: cuda.DeviceBuffer = .{ .d = &d, .ptr = 4096, .len = 64 + 128 * 4 };
-            leaked.free();
-        }
-    }
-    try std.testing.expectError(error.OutOfMemory, Link.init(failing.allocator(), &d, &lib, null, .{ .d = &d, .handle = null }, 128));
-    try std.testing.expectEqual(@as(usize, 1), Mock.frees);
-    try std.testing.expectEqual(before, cuda.usage(false).device);
-}
-test "flag 1 asks for prompt rows on prefill and chunk steps only (begin's is sampling, draft's from the prompt)" {
-    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048, .top_k = 4000 }));
-    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.prefill), .flags = 1 }));
-    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.chunk), .depth = 2048, .top_k = 4000 }));
-    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.begin), .flags = 1, .seed = 7 }));
-    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.draft), .flags = 1, .depth = 3 }));
-}
-
-test "flag 1 on verify and shared steps draws from whole rows; a prompt step's flag 1 does not" {
-    try std.testing.expect(structuredStep(.{ .kind = @backingInt(Kind.verify), .flags = 1, .n = 4 }));
-    try std.testing.expect(structuredStep(.{ .kind = @backingInt(Kind.shared), .flags = 1, .depth = 2 }));
-    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.verify), .n = 4 }));
-    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048 }));
-    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.begin), .flags = 1 }));
-}
-
-test "flag 2 on a chunk splits its indexer rows across the ranks, beside flag 1's prompt rows; elsewhere it does not" {
-    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 2, .depth = 65536, .top_k = 70000 }));
-    try std.testing.expect(indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
-    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 3, .depth = 65536, .top_k = 70000 }));
-    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 65536, .top_k = 70000 }));
-    try std.testing.expect(!indexSplit(.{ .kind = @backingInt(Kind.prefill), .flags = 2 }));
+test {
+    _ = @import("cuda_follow_test.zig");
 }

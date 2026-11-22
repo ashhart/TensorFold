@@ -12,6 +12,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_VISION_HOST" },
     .{ .name = "TF_GLM_PROF" },
     .{ .name = "TF_GLM_LINK_WAIT" },
+    .{ .name = "TF_GLM_KEEP_FOLD" },
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },

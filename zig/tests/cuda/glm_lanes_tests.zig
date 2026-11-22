@@ -45,7 +45,7 @@ pub fn coverCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
     try e.prepareSnapshots(2 * e.stateBytes(4096));
-    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
+    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity, false);
     defer link.deinit();
     if (rank != 0) {
         try glm.follow.follow(e, &link);
@@ -153,7 +153,7 @@ pub fn concurrentCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, ra
     };
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
-    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
+    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity, false);
     defer link.deinit();
     if (rank != 0) {
         try glm.follow.follow(e, &link);
@@ -232,7 +232,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
     };
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = dc.capacity, .mtp = true, .settings = set });
     defer e.deinit();
-    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity);
+    var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, dc.capacity, false);
     defer link.deinit();
     if (rank != 0) {
         try glm.follow.follow(e, &link);
