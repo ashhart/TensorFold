@@ -83,7 +83,7 @@ pub const Backend = struct {
         errdefer primitives.deinit();
         const attention = try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = c.window + 16, .output = .bf16 });
         errdefer attention.deinit();
-        const attention_full: ?core.shared_attention.Attention = if (c.span() > c.window) try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = c.span() + 16, .output = .bf16 }) else null;
+        const attention_full: ?core.shared_attention.Attention = if (c.span() > c.window) try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = c.span() + 16, .output = .bf16 }) else null;
         errdefer if (attention_full) |x| x.deinit();
         const topk = try core.bf16_topk_gpu.Ops.init(target.device);
         errdefer topk.deinit();
