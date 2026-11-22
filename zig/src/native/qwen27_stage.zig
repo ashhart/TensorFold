@@ -207,6 +207,23 @@ pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, mode: plan.Mod
     kept = true;
 }
 
+/// Rounds in flight (Lead.pipe) are CUDA's: a Metal stage runs one round at a time in v1, refused before any send.
+pub const Held = struct {};
+
+pub fn hold(_: std.mem.Allocator, _: *Engine) !Held {
+    return error.MetalStagePipe;
+}
+
+pub fn unhold(_: std.mem.Allocator, _: *Held) void {}
+
+pub fn issue(_: *Engine, _: []const Part, _: []const u32, _: plan.Mode, _: driver.Hop, _: *Held) !void {
+    return error.MetalStagePipe;
+}
+
+pub fn complete(_: *Engine, _: []const Part, _: plan.Mode, _: driver.Hop, _: *Held) !void {
+    return error.MetalStagePipe;
+}
+
 pub const Driver = driver.Driver(@This());
 pub const Entry = driver.Entry;
 pub const Slots = Driver.Slots;
