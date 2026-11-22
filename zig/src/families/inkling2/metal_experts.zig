@@ -13,7 +13,7 @@ const simd_width = 32;
 const max_width = 2304;
 const max_experts = 128;
 const max_topk = 8;
-const dot_rows = 4 * (threads / simd_width);
+const dot_rows = 2 * (threads / simd_width);
 
 const Kernel = enum { gate_up_nvfp4, gate_up_mxfp8, down_nvfp4, down_mxfp8, combine };
 pub const symbols = blk: {

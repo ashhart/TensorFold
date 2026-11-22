@@ -1,9 +1,9 @@
-// Each SIMDgroup decodes four adjacent packed weight rows to BF16 and reduces K in a fixed FP32 tree.
+// Each SIMDgroup decodes two adjacent packed weight rows to BF16 and reduces K in a fixed FP32 tree.
 #define I2X_DOT_THREADS 256u
 #define I2X_COMBINE_THREADS 256u
 
-inline float4 i2x_bf4(float4 x) {
-  return float4(float(bfloat(x.x)), float(bfloat(x.y)), float(bfloat(x.z)), float(bfloat(x.w)));
+inline float2 i2x_bf2(float2 x) {
+  return float2(float(bfloat(x.x)), float(bfloat(x.y)));
 }
 
 inline float i2x_swiglu(float gate, float up, float gate_cap, float up_cap) {
@@ -13,26 +13,31 @@ inline float i2x_swiglu(float gate, float up, float gate_cap, float up_cap) {
   return (gate * sigmoid) * up;
 }
 
+// Two E2M1 codes of one byte as FP16 bit pairs; the product's 2^14 is carried by the NVFP4 block scale.
+inline float2 i2x_e2m1_pair(uint code) {
+  return float2(as_type<half2>(((code * 0x00200200u) & 0x0e000e00u) | ((code * 0x01001000u) & 0x80008000u)));
+}
+
 template <bool NV, bool GATE_UP>
 inline void i2x_dot(const device uchar* weight, const device uchar* w_scales,
                     const device float* w_factor, const device bfloat* x,
                     const device uint* ids, device bfloat* out,
                     constant Inkling2ExpDotArgs& a, uint2 at, uint lane, uint sg) {
   if (at.y >= a.pairs) return;
-  const uint col = (at.x * 8u + sg) * (GATE_UP ? 2u : 4u);
+  const uint col = (at.x * 8u + sg) * (GATE_UP ? 1u : 2u);
   if (col >= a.out_width) return;
   const uint expert = ids[at.y];
   device bfloat* dst = out + ulong(at.y) * a.out_width + col;
   if (expert >= a.experts) {
     if (lane == 0u) {
       dst[0] = bfloat(0.0f);
-      dst[1] = bfloat(0.0f);
-      if (!GATE_UP) { dst[2] = bfloat(0.0f); dst[3] = bfloat(0.0f); }
+      if (!GATE_UP) dst[1] = bfloat(0.0f);
     }
     return;
   }
   const uint input_row = at.y / a.src_div;
   const uint pitch = NV ? a.k / 2u : a.k;
+  const uint stride = pitch / 4u;
   const uint blocks = a.k / (NV ? 16u : 32u);
   const ulong w_row = ulong(expert) * a.n + col * (GATE_UP ? 2u : 1u);
   x += ulong(input_row) * a.k;
@@ -40,34 +45,34 @@ inline void i2x_dot(const device uchar* weight, const device uchar* w_scales,
   w_scales += w_row * blocks;
   const float factor = NV ? w_factor[expert] : 1.0f;
 
-  float4 accum = 0.0f;
+  float2 accum = 0.0f;
   for (uint block = lane; block < blocks; block += 32u) {
-    float4 part = 0.0f;
-    const uint base = block * (NV ? 8u : 32u);
-    const uchar4 sw = uchar4(w_scales[block], w_scales[blocks + block],
-                             w_scales[2u * blocks + block], w_scales[3u * blocks + block]);
-    const float4 scale = NV ? float4(i2x_e4m3(sw.x), i2x_e4m3(sw.y), i2x_e4m3(sw.z), i2x_e4m3(sw.w))
-                            : float4(i2x_mx_scale(sw.x), i2x_mx_scale(sw.y), i2x_mx_scale(sw.z), i2x_mx_scale(sw.w));
+    float2 part = 0.0f;
+    const uint sx = w_scales[block], sy = w_scales[blocks + block];
+    const device uint* row = (const device uint*)(weight + block * (NV ? 8u : 32u));
     if (NV) {
+      const float2 scale = float2(i2x_e4m3(sx), i2x_e4m3(sy)) * 16384.0f;
+      const device bfloat* xb = x + block * 16u;
       for (uint i = 0u; i < 8u; ++i) {
-        const uint p = base + i;
-        const uint4 w = uint4(weight[p], weight[pitch + p], weight[2u * pitch + p], weight[3u * pitch + p]);
-        const float4 low = float4(kI2xE2m1[w.x & 15u], kI2xE2m1[w.y & 15u],
-                                   kI2xE2m1[w.z & 15u], kI2xE2m1[w.w & 15u]);
-        const float4 high = float4(kI2xE2m1[w.x >> 4u], kI2xE2m1[w.y >> 4u],
-                                    kI2xE2m1[w.z >> 4u], kI2xE2m1[w.w >> 4u]);
-        const float4 w_low = i2x_bf4((low * scale) * factor);
-        const float4 w_high = i2x_bf4((high * scale) * factor);
-        part += w_low * float(x[2u * p]);
-        part += w_high * float(x[2u * p + 1u]);
+        const uint shift = 8u * (i & 3u);
+        const uint2 code = uint2((row[i >> 2u] >> shift) & 255u, (row[stride + (i >> 2u)] >> shift) & 255u);
+        const float2 lo = i2x_e2m1_pair(code.x), hi = i2x_e2m1_pair(code.y);
+        const float2 low = float2(lo.x, hi.x);
+        const float2 high = float2(lo.y, hi.y);
+        const float2 w_low = i2x_bf2((low * scale) * factor);
+        const float2 w_high = i2x_bf2((high * scale) * factor);
+        part += w_low * float(xb[2u * i]);
+        part += w_high * float(xb[2u * i + 1u]);
       }
     } else {
-      const float4 mantissa = select(float4(1.0f), float4(0.5f), sw == uchar4(0));
+      const float2 scale = float2(i2x_mx_scale(sx), i2x_mx_scale(sy));
+      const float2 mantissa = select(float2(1.0f), float2(0.5f), uint2(sx, sy) == uint2(0));
+      const device bfloat* xb = x + block * 32u;
       for (uint i = 0u; i < 32u; ++i) {
-        const uint p = base + i;
-        const float4 w = float4(i2x_e4m3(weight[p]), i2x_e4m3(weight[pitch + p]),
-                                  i2x_e4m3(weight[2u * pitch + p]), i2x_e4m3(weight[3u * pitch + p]));
-        part += i2x_bf4((w * mantissa) * scale) * float(x[p]);
+        const uint shift = 8u * (i & 3u);
+        const uint2 code = uint2((row[i >> 2u] >> shift) & 255u, (row[stride + (i >> 2u)] >> shift) & 255u);
+        const float2 w = float2(i2x_e4m3(code.x), i2x_e4m3(code.y));
+        part += i2x_bf2((w * mantissa) * scale) * float(xb[i]);
       }
     }
     accum += part;
@@ -75,15 +80,12 @@ inline void i2x_dot(const device uchar* weight, const device uchar* w_scales,
   for (uint shift = 16u; shift != 0u; shift >>= 1u) accum += simd_shuffle_xor(accum, shift);
   if (lane != 0u) return;
   if (GATE_UP) {
-    // The gate_up rows interleave gate and up: (x, y) and (z, w) are each one output row's (gate, up) for SwiGLU.
-    const float4 v = i2x_bf4(accum);
+    // The gate_up rows interleave gate and up: (x, y) are one output row's (gate, up) for SwiGLU.
+    const float2 v = i2x_bf2(accum);
     dst[0] = bfloat(i2x_swiglu(v.x, v.y, a.gate_cap, a.up_cap));
-    dst[1] = bfloat(i2x_swiglu(v.z, v.w, a.gate_cap, a.up_cap));
   } else {
     dst[0] = bfloat(accum.x);
     dst[1] = bfloat(accum.y);
-    dst[2] = bfloat(accum.z);
-    dst[3] = bfloat(accum.w);
   }
 }
 
