@@ -31,7 +31,7 @@ const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_do
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
-const group_cap: u32 = 64;
+const group_cap: u32 = 256;
 
 pub const Pipelines = struct {
     entries: [function_names.len]mtl.Pipeline,
@@ -180,7 +180,7 @@ fn launchGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, c: C
     e.dispatchGroups(mtl.Size.of((c.n + 7) / 8, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Each expert's route pairs for the grouped launches that follow; at most 64 rows.
+/// Each expert's route pairs for the grouped launches that follow; at most 256 rows.
 pub fn group(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !void {
     try plan.check(c);
     if (c.rows > group_cap or c.experts != plan.expert_count) return error.BadExpertShape;

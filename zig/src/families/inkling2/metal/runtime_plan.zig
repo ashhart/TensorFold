@@ -4,7 +4,7 @@ const std = @import("std");
 pub const hidden = 2304;
 pub const block_slots = 4;
 pub const tap_channels = 4;
-pub const max_rows = 64;
+pub const max_rows = 256;
 pub const threads: u32 = 256;
 pub const RuntimeArgs = extern struct { count: u32, boundary: u32 };
 
