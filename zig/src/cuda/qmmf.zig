@@ -6,7 +6,6 @@ const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const abi = @import("abi.zig");
-
 const Driver = driver.Driver;
 const Module = module.Module;
 const Function = module.Function;
