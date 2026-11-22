@@ -228,6 +228,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").experts_units
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dense "))
+            @import("inkling2_metal").dense_fuse
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
             @import("inkling2_metal").prompt_attention
         else

@@ -315,15 +315,28 @@ pub const Metal = struct {
             if (w.masks.len != 0 and w.masks.len != rows * words) return error.InvalidInklingMasks;
             const cache = try self.cacheOf(w.stream);
             if (cache.pending != null) return error.InklingWindowAlreadyOpen;
+            for (segments[0..i]) |prev| if (prev.cache == cache) return error.InklingWindowAlreadyOpen;
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
             segments[i] = .{ .cache = cache, .rows = rows };
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        for (segments[0..windows.len]) |seg| {
-            try seg.cache.begin(self.model.queue, seg.rows);
-            begun += 1;
+        if (windows.len > 0) {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = self.model.queue.commandBuffer();
+            const e = cb.blit();
+            for (segments[0..windows.len]) |seg| try seg.cache.beginIn(e, seg.rows);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                for (segments[0..windows.len]) |seg| seg.cache.pending = null;
+                std.log.err("inkling2_loop verify begin: {s}", .{msg});
+                return error.GpuFailed;
+            }
+            begun = windows.len;
         }
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
@@ -346,13 +359,34 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
-        if (windows.len != paths.len) return error.InvalidInklingWindows;
-        for (windows, paths) |w, path| {
+        if (windows.len != paths.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
+        var caches: [st.batch_rows]*st.Cache = undefined;
+        var need_commit = false;
+        for (windows, paths, 0..) |w, path, i| {
             const cache = try self.cacheOf(w.stream);
-            for (path, 0..) |r, i| if (r != i) return error.UnsupportedInklingTree;
+            for (caches[0..i]) |prev| if (prev == cache) return error.UnsupportedInklingWindow;
+            for (path, 0..) |r, j| if (r != j) return error.UnsupportedInklingTree;
             if (path.len == 0 or path.len > w.rows() or cache.pending == null or cache.pending.? != w.rows()) return error.UnsupportedInklingWindow;
-            try cache.commit(self.model.queue, path.len);
+            caches[i] = cache;
+            if (path.len < w.rows()) need_commit = true;
         }
+        if (need_commit) {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = self.model.queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            for (caches[0..windows.len], paths) |cache, path| {
+                if (path.len < cache.pending.?) fwd.commitHistories(self.model, e, cache, path.len);
+            }
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("inkling2_loop keep commit: {s}", .{msg});
+                return error.GpuFailed;
+            }
+        }
+        for (caches[0..windows.len], paths) |cache, path| cache.finishCommit(path.len);
     }
 
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) !void {

@@ -4,7 +4,9 @@ const mtl = @import("metal");
 const g = @import("contract").gates;
 
 pub const Suites = struct {
+    a: std.mem.Allocator,
     attention: @import("metal_inkling2_attention.zig").Suite,
+    dense: @import("metal_inkling2_dense.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
     units: @import("metal_inkling2_units.zig").Suite,
@@ -12,9 +14,12 @@ pub const Suites = struct {
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
 
-    pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
-        var s = Suites{
+    pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suites {
+        const s = try a.create(Suites);
+        s.* = .{
+            .a = a,
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dense = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -22,8 +27,9 @@ pub const Suites = struct {
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
-        errdefer s.deinit();
+        errdefer s.destroy();
         try s.attention.collect(only);
+        try s.dense.collect(only);
         try s.glue.collect(only);
         try s.experts.collect(only);
         try s.units.collect(only);
@@ -33,13 +39,15 @@ pub const Suites = struct {
         return s;
     }
 
-    pub fn deinit(s: *Suites) void {
+    pub fn destroy(s: *Suites) void {
         s.attention.deinit();
+        s.dense.deinit();
         s.glue.deinit();
         s.experts.deinit();
         s.units.deinit();
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();
+        s.a.destroy(s);
     }
 };

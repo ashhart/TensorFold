@@ -10,6 +10,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const dense_fuse = @import("dense_fuse.zig");
 const mv_mma = @import("../../deepseek_v41/metal/mv_mma.zig");
 
 pub const Tensor = ck.Tensor;
@@ -66,7 +67,7 @@ pub const Weights = struct {
 /// Scalar copies and residuals around dispatch stay on Metal; forward never reads tensors back to the host.
 pub const runtime_source = sources.inkling2_runtime;
 
-pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap };
+pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap, stage_conv, commit_histories };
 pub const runtime_names = [_][:0]const u8{
     "tf_ink2_copy_bf16",
     "tf_ink2_copy_f32",
@@ -74,6 +75,8 @@ pub const runtime_names = [_][:0]const u8{
     "tf_ink2_attention_partial",
     "tf_ink2_mlp_partial",
     "tf_ink2_capture_tap",
+    "tf_ink2_stage_conv",
+    "tf_ink2_commit_histories",
 };
 
 pub fn admitConfig(c: *const cfg.Config) !void {
@@ -204,6 +207,7 @@ pub const Model = struct {
     experts: experts.Pipelines,
     loop: loop.Pipelines,
     dense: [6]mtl.Pipeline,
+    dense_fuse: dense_fuse.Pipelines,
     dense_mma: mv_mma.Pipelines,
     norm: mtl.Pipeline,
     runtime: [runtime_names.len]mtl.Pipeline,
@@ -266,6 +270,8 @@ pub const Model = struct {
             m.norm.deinit();
             for (m.dense) |p| p.deinit();
         }
+        m.dense_fuse = try dense_fuse.Pipelines.load(m.device);
+        errdefer m.dense_fuse.deinit();
         m.dense_mma = try mv_mma.Pipelines.load(m.device);
         errdefer m.dense_mma.deinit();
         {
@@ -285,6 +291,7 @@ pub const Model = struct {
     pub fn deinit(m: *Model) void {
         for (m.runtime) |p| p.deinit();
         m.dense_mma.deinit();
+        m.dense_fuse.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
         m.loop.deinit();
