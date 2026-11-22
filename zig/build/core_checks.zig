@@ -16,6 +16,14 @@ pub fn rowWidths(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     }) });
     const about = "The row projection at every MLX width and group: fp64 reference, windows, strides, stock bytes";
     b.step("tf-row-widths-check", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    const bench = b.addExecutable(.{ .name = "tf-row-cutover", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/row_cutover_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "row_projection", .module = row_mod } },
+    }) });
+    b.step("tf-row-cutover", "Time the narrow and wide row kernels at 1 to 32 rows and print each width's cutover").dependOn(&b.addInstallArtifact(bench, .{}).step);
 }
 
 /// tf-affine-ref: the prompt products (affine_mm, simd_qmm) against float64, every row's bits in every window.
