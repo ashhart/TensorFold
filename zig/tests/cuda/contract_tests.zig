@@ -112,6 +112,10 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var rank_sum = try cuda.rank_scatter.RankScatter.load(gpu.d);
     defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    var mtp_set: @import("contract_nemotron_mtp.zig").Set = undefined;
+    try mtp_set.init(gpu, s);
+    defer mtp_set.deinit();
+    try mtp_set.append(a, &kernels);
     defer kernels.deinit(a);
     var vit = try cuda.vit.Kernels.load(gpu.d);
     defer vit.unload();

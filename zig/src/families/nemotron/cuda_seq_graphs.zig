@@ -36,6 +36,7 @@ pub fn logFromEnv() bool {
 
 /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
 pub fn record(e: *Engine, body: Engine.Body) !cuda.graph.Exec {
+    if (body == .mtp_chain) return @import("cuda_mtp_graph.zig").record(body.mtp_chain.h, body.mtp_chain.rows, body.mtp_chain.vocab);
     const t0 = std.Io.Clock.awake.now(e.io);
     try cuda.graph.beginCapture(e.stream, .thread_local);
     recordBody(e, body) catch |err| {
@@ -63,6 +64,7 @@ fn recordBody(e: *Engine, body: Engine.Body) !void {
             if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
             try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[engine.pin_sampled..][0..w.rows]), e.b.sampled);
         },
+        .mtp_chain => unreachable,
         .head => |x| try x.h.level(x.rows, x.j, x.vocab),
     }
 }

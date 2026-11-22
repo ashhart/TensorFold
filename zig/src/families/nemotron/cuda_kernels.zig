@@ -74,6 +74,10 @@ pub const Kernels = struct {
     gather_rows: cuda.Function, // a batched draft's rows from each part into the head's rows
     gather_last: cuda.Function, // a batched draft's last rows moved down, in order
     scatter_rows: cuda.Function, // a level's tokens and probabilities to each part's buffers
+    mtp_graph_mode: bool = false,
+    mtp_greedy: cuda.Function,
+    mtp_start: cuda.Function,
+    mtp_control: cuda.Function,
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
@@ -112,6 +116,15 @@ pub const Kernels = struct {
         k.add_row = try k.mods[7].function("tf_add_row");
         k.add_bf16 = try k.mods[7].function("tf_add_bf16");
         k.splice_rows = try k.mods[7].function("tf_splice_rows");
+        k.mtp_graph_mode = try @import("cuda_mtp_graph.zig").enabled();
+        k.mtp_greedy = .{ .d = d, .handle = null };
+        k.mtp_start = .{ .d = d, .handle = null };
+        k.mtp_control = .{ .d = d, .handle = null };
+        if (k.mtp_graph_mode) {
+            k.mtp_greedy = try k.mods[19].function("tf_nemo_mtp_greedy");
+            k.mtp_start = try k.mods[19].function("tf_nemo_mtp_start");
+            k.mtp_control = try k.mods[19].function("tf_nemo_mtp_control");
+        }
         k.gather_rows = try k.mods[7].function("tf_nemo_gather_rows");
         k.gather_last = try k.mods[7].function("tf_nemo_gather_last");
         k.scatter_rows = try k.mods[7].function("tf_nemo_scatter_rows");

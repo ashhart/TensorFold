@@ -25,11 +25,14 @@ fn copyRoom(rows: usize, window: usize) usize {
 /// Start a round's head work: an absorb for a copied chain, else level 1 of head `v` (the rule reads the later levels).
 fn queue(h: *Head, keep: usize, copied: bool, v: Vocab) !void {
     try h.begin(keep);
+    if (!copied and @import("cuda_mtp_graph.zig").available(h)) return;
     try h.launch(if (copied) 0 else 1, v);
 }
 
 /// The drafts this round verifies: the rule reads each level's confidence before drafting the next.
 fn depth(h: *Head, rule: *const DepthRule, v: Vocab) !usize {
+    if (try @import("cuda_mtp_graph.zig").depth(h, rule, v)) |n| return n;
+    if (h.levels == 0) try h.launch(1, v);
     var run: f64 = 1.0;
     var n: usize = 0;
     var j: usize = 1;
@@ -133,7 +136,8 @@ pub const Rounds = struct {
         r.vocab = h.vocab(r.index.ctx.items);
         r.copied = r.copies();
         try h.again(kept);
-        try h.launch(if (r.copied.len > 0) 0 else 1, r.vocab);
+        if (r.copied.len > 0 or !@import("cuda_mtp_graph.zig").available(h))
+            try h.launch(if (r.copied.len > 0) 0 else 1, r.vocab);
         return r;
     }
 

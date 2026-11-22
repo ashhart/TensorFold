@@ -259,6 +259,7 @@ pub const Engine = struct {
     pub const Body = union(enum) {
         window: struct { rows: usize, feed: bool, mask: Mask = .{} },
         head: struct { h: *Head, rows: usize, j: usize, vocab: @import("cuda_mtp.zig").Vocab },
+        mtp_chain: struct { h: *Head, rows: usize, vocab: @import("cuda_mtp.zig").Vocab },
     };
 
     pub const record = seq_graphs.record;
@@ -270,7 +271,7 @@ pub const Engine = struct {
     }
 
     /// Step `id` from the bound sequence's own capture of `body`, made the first time (and again after a recapture).
-    fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
+    pub fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
         if (e.bound.epoch != e.epoch) {
             seq_graphs.free(e.gpa, &e.bound.graphs);
             e.bound.epoch = e.epoch;

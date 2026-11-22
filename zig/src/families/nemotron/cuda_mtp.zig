@@ -49,6 +49,9 @@ pub const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_c
 pub const Head = struct {
     // Host fixtures replace only the network transform; projection, chain scheduling and sample dispatch stay real.
     pub var test_network: if (@import("builtin").is_test) ?*const fn (*Head, []const Span, bool) anyerror!void else void = if (@import("builtin").is_test) null else {};
+    graph_mode: bool = false,
+    auto_allowed: bool = false,
+    loop: ?@import("cuda_mtp_graph.zig").Loop = null,
     e: *Engine,
     buf: cuda.DeviceBuffer,
     pinned: cuda.HostBuffer,
@@ -123,6 +126,7 @@ pub const Head = struct {
 
     pub fn init(e: *Engine) !*Head {
         if (e.c.bolt or e.w.mtp == null) return error.NoMtpHead;
+        const graph_mode = e.k.mtp_graph_mode;
         const c = e.c;
         const D: usize = c.hidden;
         const R: usize = state.pass_rows;
@@ -134,7 +138,7 @@ pub const Head = struct {
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
         const h = try e.gpa.create(Head);
         errdefer e.gpa.destroy(h);
-        h.* = .{ .e = e, .buf = undefined, .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0, .rules = 0, .pos_slab = 0, .tok_rows = 0, .prob_rows = 0 };
+        h.* = .{ .graph_mode = graph_mode, .e = e, .buf = undefined, .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0, .rules = 0, .pos_slab = 0, .tok_rows = 0, .prob_rows = 0 };
         errdefer if (!h.cleanup()) @panic("MTP construction completion failed; keeping all parents until process exit");
         h.buf = try cuda.DeviceBuffer.alloc(e.ctx.d, total);
         h.has_buf = true;
@@ -154,6 +158,7 @@ pub const Head = struct {
             r.* = try cuda.Event.init(e.ctx.d, false);
             h.ready_made += 1;
         }
+        if (graph_mode) h.loop = try @import("cuda_mtp_graph.zig").Loop.init(h);
         e.head = h;
         inline for (seq_fields, &e.own.head) |name, *ptr| ptr.* = @field(h, name);
         return h;
@@ -171,6 +176,11 @@ pub const Head = struct {
     }
     fn cleanup(h: *Head) bool {
         if (h.has_buf) h.e.stream.synchronize() catch return false;
+        if (h.loop) |*l| {
+            l.deinit();
+            h.loop = null;
+            h.e.epoch +%= 1; // cached sequence graphs must not replay this loop after another head is constructed
+        }
         for (&h.absorb_graphs) |*g| if (g.*) |*x| x.deinit();
         for (&h.first_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         for (&h.chain_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
@@ -228,7 +238,7 @@ pub const Head = struct {
     }
 
     /// MTPHead._forward: rows at the head's positions; with `tail`, the last row's output and head `v`'s logits.
-    fn forward(h: *Head, rows: usize, tail: bool, meta: u64, v: Vocab) !void {
+    pub fn forward(h: *Head, rows: usize, tail: bool, meta: u64, v: Vocab) !void {
         _ = try h.forwardSpans(&.{.{ .row0 = 0, .rows = rows, .meta = meta, .k_cache = h.k_cache, .v_cache = h.v_cache, .vocab = v, .table = h.e.b.table }}, tail);
     }
 
@@ -312,11 +322,17 @@ pub const Head = struct {
     }
 
     /// Level j's draft from head `v`'s logits: by the stream's rule (sample.cu), else greedy _keyed over the top 28.
-    fn sample(h: *Head, logits: u64, rule: ?u64, meta: u64, out: u64, prob: u64, j: usize, v: Vocab) !void {
+    pub fn sample(h: *Head, logits: u64, rule: ?u64, meta: u64, out: u64, prob: u64, j: usize, v: Vocab) !void {
         const e = h.e;
         const n = h.width(v);
         const ids: ?u64 = if (v == .subset) e.w.draft_ids else null; // the whole head's columns are the ids
         if (rule) |r| return e.ops().draw(logits, n, r, meta, j - 1, out, 1, ids, prob);
+        if (h.graph_mode) {
+            var args: cuda.Args = .{};
+            for ([_]u64{ logits, ids orelse 0, out, prob }) |x| args.add(x);
+            args.add(@as(c_int, @intCast(n)));
+            return cuda.launch.launch(e.k.mtp_greedy, .{ .grid = .{ .x = 1 }, .block = .{ .x = 256 } }, e.stream, &args);
+        }
         const k = sampler.greedy_draft;
         const count = sampler.count(k.k, n);
         const t = e.ops().torch();
@@ -329,6 +345,7 @@ pub const Head = struct {
 
     /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the draw mode, per head.
     pub fn capture(h: *Head) !void {
+        h.auto_allowed = h.graph_mode;
         const rows = state.windowRows(h.e.c);
         for ([_]Vocab{ .subset, .full }) |v| {
             if (v == .full and h.e.w.draft_coverage == null) continue;
@@ -510,6 +527,11 @@ pub const Head = struct {
         try h.ready[j - 1].synchronize();
         const p: *volatile f32 = &h.pinned.slice(f32)[host_probs + j - 1];
         return p.*;
+    }
+
+    pub fn acceptGraphDrafts(h: *Head, ids: []const u32, probabilities: []const f32) void {
+        @memcpy(h.pinned.slice(u32)[host_drafts..][0..ids.len], ids);
+        @memcpy(h.pinned.slice(f32)[host_probs..][0..probabilities.len], probabilities);
     }
 
     /// The drafts of this round's levels (valid once their levels have run).
