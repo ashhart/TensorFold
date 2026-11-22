@@ -98,6 +98,11 @@ const score_keys_short = 2;
 const score_span = 16384;
 /// Steps of its warps' keys a tf_plan_score256_* block walks (plan.hip's kScoreSteps).
 const score_steps = 8;
+/// Rows of one slot a tf_plan_rows_score256_* block scores from one read of their keys (plan_rows.hip's kRows).
+pub const score_rows = 2;
+
+/// Which blocks score a walk's rows: a block a row, or a slot's rows in chunks of `score_rows` a block.
+pub const Rows = enum { one, shared };
 
 /// One query a row (rows, heads, d) fp32 over its slot's caches up to its position; the walk covers `span` keys.
 pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64, partials: u64, p: PlanRef, layer: usize, heads: usize, kv_heads: usize, d: usize, span: usize, scale: f32, kind: c_int, s: S) Error!void {
@@ -123,7 +128,7 @@ pub fn planCausalAs(
     act: bool,
     s: S,
 ) Error!void {
-    if (d > 256 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0 or kind < 1 or kind > 2) return invalid("planned attention");
+    try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, .one, s);
     const which: usize = @intCast(kind - 1);
     const rows = p.rows;
     const tiles: c_int = @intCast(cdiv(span, 128));
@@ -132,28 +137,6 @@ pub fn planCausalAs(
     const kv_c: c_int = @intCast(kv_heads);
     const d_c: c_int = @intCast(d);
     const layer_c: c_int = @intCast(layer);
-    // a block takes `group` query heads of one KV head (at most plan.hip's kMaxGroup): the cache is read once for them
-    var group = @divExact(heads, kv_heads);
-    while (group > 16) group = @divExact(group, smallestFactor(group));
-    const blocks = @divExact(heads, group);
-    var a: Args = .{};
-    try a.add(q);
-    try a.add(scores);
-    try a.add(span_c);
-    try a.add(heads_c);
-    try a.add(kv_c);
-    try a.add(d_c);
-    try a.add(scale);
-    try a.add(p.args);
-    try a.add(layer_c);
-    // four warps a block score their keys for the block's heads; short spans take fewer keys a warp to fill the card
-    const long = span >= score_span;
-    const keys: usize = if (long) score_keys else score_keys_short;
-    // d = 256 (the Qwen checkpoints) on long spans takes its own kernels, a block walking score_steps steps
-    const wide = long and d == 256;
-    const fns = if (wide) (if (act) l.plan.score256_act else l.plan.score256) else if (act) (if (long) l.plan.score_act else l.plan.score2_act) else if (long) l.plan.score else l.plan.score2;
-    const steps: usize = if (wide) score_steps else 1;
-    try l.go(fns[which], dim(cdiv(span, 4 * keys * steps), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
     var b: Args = .{};
     try b.add(scores);
     try b.add(stats);
@@ -171,7 +154,7 @@ pub fn planCausalAs(
     try c.add(d_c);
     try c.add(p.args);
     try c.add(layer_c);
-    const apply = @divExact(heads, applyGroup(group, @intCast(tiles), heads, rows));
+    const apply = @divExact(heads, applyGroup(scoreGroup(heads, kv_heads), @intCast(tiles), heads, rows));
     try l.go(l.plan.apply[which], dim(tiles, apply, rows), dim(256, 1, 1), 0, s, &c);
     var e: Args = .{};
     try e.add(partials);
@@ -180,6 +163,66 @@ pub fn planCausalAs(
     try e.add(d_c);
     if (act) try e.add(kind);
     try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
+}
+
+/// Query heads a score block takes, of one KV head (at most plan.hip's kMaxGroup): the cache is read once for them.
+fn scoreGroup(heads: usize, kv_heads: usize) usize {
+    var group = @divExact(heads, kv_heads);
+    while (group > 16) group = @divExact(group, smallestFactor(group));
+    return group;
+}
+
+/// Rows a score block works: a chunk of its slot's when `rows` shares them at d = 256 on long spans with q fp32.
+fn blockRows(rows: Rows, d: usize, span: usize, act: bool) usize {
+    return if (rows == .shared and d == 256 and span >= score_span and !act) score_rows else 1;
+}
+
+/// planCausalAs's score step: each row's scores (rows, heads, span) fp32 against its slot's keys, -inf past its own.
+pub fn planScore(
+    l: *const Launcher,
+    q: u64,
+    scores: u64,
+    p: PlanRef,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+    kind: c_int,
+    act: bool,
+    rows: Rows,
+    s: S,
+) Error!void {
+    if (d > 256 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0 or kind < 1 or kind > 2) return invalid("planned attention");
+    const which: usize = @intCast(kind - 1);
+    const group = scoreGroup(heads, kv_heads);
+    var a: Args = .{};
+    try a.add(q);
+    try a.add(scores);
+    try a.add(@as(c_int, @intCast(span)));
+    try a.add(@as(c_int, @intCast(heads)));
+    try a.add(@as(c_int, @intCast(kv_heads)));
+    try a.add(@as(c_int, @intCast(d)));
+    try a.add(scale);
+    try a.add(p.args);
+    try a.add(@as(c_int, @intCast(layer)));
+    // four warps a block score their keys for the block's heads; short spans take fewer keys a warp to fill the card
+    const long = span >= score_span;
+    const keys: usize = if (long) score_keys else score_keys_short;
+    // d = 256 (the Qwen checkpoints) on long spans takes its own kernels, a block walking score_steps steps
+    const wide = long and d == 256;
+    const steps: usize = if (wide) score_steps else 1;
+    const grid = dim(cdiv(span, 4 * keys * steps), @divExact(heads, group), p.rows);
+    const lds: u32 = @intCast(group * d * 4);
+    const chunk = blockRows(rows, d, span, act);
+    if (chunk > 1) {
+        // the rows of one-row slots at the one-row kernel's occupancy, then the chunks of the others, both on this grid
+        try l.go(l.plan.score256_lone[which], grid, dim(128, 1, 1), lds, s, &a);
+        return l.go(l.plan.score256_rows[which], grid, dim(128, 1, 1), @intCast(chunk * lds), s, &a);
+    }
+    const fns = if (wide) (if (act) l.plan.score256_act else l.plan.score256) else if (act) (if (long) l.plan.score_act else l.plan.score2_act) else if (long) l.plan.score else l.plan.score2;
+    try l.go(fns[which], grid, dim(128, 1, 1), lds, s, &a);
 }
 
 /// Keys the one-block walk (`planAttend`) takes at most.
@@ -324,6 +367,17 @@ pub fn planGdnReplay(l: *const Launcher, keep: u64, p: PlanRef, key_heads: usize
     try a.add(@as(c_int, @intCast(p.slots)));
     const wide: usize = if (dk == 128) 0 else 1;
     try l.go(l.plan.gdn_replay[wide], dim(@divExact(dv, 8), value_heads, p.slots * layers), dim(32, 8, 1), 0, s, &a);
+}
+
+test "a slot's rows share the score's key loads only at d 256 on long spans with q fp32" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, score_rows), blockRows(.shared, 256, score_span, false));
+    try std.testing.expectEqual(@as(usize, 1), blockRows(.one, 256, 1 << 18, false));
+    try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 256, score_span - 1, false));
+    try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 128, 1 << 18, false));
+    try std.testing.expectEqual(@as(usize, 1), blockRows(.shared, 256, 1 << 18, true));
+    try std.testing.expectEqual(@as(usize, 8), scoreGroup(16, 2));
+    try std.testing.expectEqual(@as(usize, 16), scoreGroup(64, 2));
 }
 
 test "a small walk splits the heads of a KV head, a wide one keeps them together" {
