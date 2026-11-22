@@ -64,6 +64,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const mo_experts = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen ModelOpt experts:"} }));
     b.step("test-qwen35-modelopt-experts-host", "Each NVFP4 expert part through core's reader, Qwen's own scale refusal").dependOn(&mo_experts.step);
     step.dependOn(&mo_experts.step);
+    const lever7 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"REV295"} }));
+    b.step("test-qwen35-lever7-host", "REV295 xs, active-table and graph behavior without devices").dependOn(&lever7.step);
+    step.dependOn(&lever7.step);
     const share_faults = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen share faults:"} }));
     b.step("test-qwen35-share-faults-host", "TF_QWEN_KV_SHARE's pages through failed allocations, lanes, promises, uploads and copies without devices").dependOn(&share_faults.step);
     const admission = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_exl3_loader_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
