@@ -156,6 +156,8 @@ test "--mtp-drafts 0 reaches drafter selection so an MTP refusal does not suppre
     const served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(called);
     try std.testing.expect(served.held == null);
+}
+
 test "--drafter: the served facts carry what the drafter timed at reserve, not the untimed facts it opened with" {
     const Timed = struct {
         timed: bool = false,
