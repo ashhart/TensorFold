@@ -1,8 +1,8 @@
-//! Inkling 2's attention for decode rows on the host: the formula in float64, and in fp32 in the page's order.
+//! Inkling 2's attention on the host: the formula in float64, and in fp32 at Transformers' eager rounding points.
 const std = @import("std");
 const bf16_round = @import("bf16_round");
 
-/// The widest head, the most bias states and the most keys of a row.
+/// The widest head, the most bias states and the most keys of a row for `attend`'s fp32 model.
 pub const most_hd = 128;
 pub const most_rel = 32;
 pub const most_keys = 8192;
@@ -17,11 +17,16 @@ pub const Error = error{AttnShape};
 
 /// Refuses empty sizes, ungrouped heads, sizes past the limits above, over 65535 rows and arrays of other lengths.
 pub fn shaped(s: Shape, in: Inputs, out_len: usize) Error!void {
+    return shapedWithin(s, in, out_len, most_keys);
+}
+
+/// `shaped` with `keys` as the most keys of a row.
+pub fn shapedWithin(s: Shape, in: Inputs, out_len: usize, keys: usize) Error!void {
     if (s.heads == 0 or s.kv_heads == 0 or s.heads % s.kv_heads != 0) return error.AttnShape;
     if (s.hd == 0 or s.hd > most_hd or s.drel == 0 or s.drel > most_rel or s.rext == 0) return error.AttnShape;
     if (s.rows == 0 or s.rows > 65535) return error.AttnShape;
     const pos = s.pos0 + s.rows;
-    if ((if (s.window == 0) pos else s.window) > most_keys) return error.AttnShape;
+    if ((if (s.window == 0) pos else s.window) > keys) return error.AttnShape;
     const out = s.rows * s.heads * s.hd;
     const cache = pos * s.kv_heads * s.hd;
     if (out_len != out or in.q.len != out or in.gate.len != out or in.k.len != cache or in.v.len != cache) return error.AttnShape;
@@ -29,7 +34,7 @@ pub fn shaped(s: Shape, in: Inputs, out_len: usize) Error!void {
 }
 
 /// The first key a row at position `t` attends.
-fn first(s: Shape, t: usize) usize {
+pub fn first(s: Shape, t: usize) usize {
     return if (s.window > 0 and t + 1 > s.window) t + 1 - s.window else 0;
 }
 
@@ -52,7 +57,7 @@ fn rnd(rounded: bool, x: f32) f32 {
     return if (rounded) bf16_round.round32(x) else x;
 }
 
-/// The formula in float64 (T = f64), or fp32 in the page's order of sums, with the reference's roundings if rounded.
+/// The formula in float64 (T = f64), or fp32 in the eager model's order of sums, rounded as Transformers if `rounded`.
 pub fn attend(comptime T: type, rounded: bool, s: Shape, in: Inputs, out: []T) Error!void {
     try shaped(s, in, out.len);
     for (0..s.rows) |row| for (0..s.heads) |h| head(T, rounded, s, in, row, h, out[(row * s.heads + h) * s.hd ..][0..s.hd]);
@@ -91,7 +96,7 @@ fn head(comptime T: type, rounded: bool, s: Shape, in: Inputs, row: usize, h: us
     }
 }
 
-/// (q . k) * scale: float64 in a chain, or fp32 in the page's order: lane l a chain over l, l + 32, ..., then the tree.
+/// (q . k) * scale: float64 in a chain, or fp32 as the eager model adds: lane l over l, l + 32, ..., then the tree.
 fn scaledDot(comptime T: type, rounded: bool, q: []const f32, k: []const f32, scale: T) T {
     if (T == f64) {
         var sum: f64 = 0;
