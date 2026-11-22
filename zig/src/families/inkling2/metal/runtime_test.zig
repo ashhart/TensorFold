@@ -175,3 +175,11 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
 }
+
+test "prompt scratch stride tracks capacity global slots and shrinks part_o on smaller contexts" {
+    try std.testing.expectEqual(@as(usize, 1), state.globalStride(256));
+    try std.testing.expectEqual(@as(usize, 4), state.globalStride(4096));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(65536));
+    try std.testing.expectEqual(@as(usize, 64), state.globalStride(1048576));
+    try std.testing.expect(state.scratchBytesWithStride(state.prompt_rows, 4) < state.scratchBytes(state.prompt_rows));
+}

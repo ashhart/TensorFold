@@ -62,6 +62,14 @@ fn spec(w: Which) c.Spec {
             s.name = "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt";
             s.served = &prompt_shapes;
         },
+        .prompt_sliding_m5 => {
+            s.name = "metal inkling2 prompt m5 tf_ink2_attn_prompt_sliding";
+            s.served = &prompt_shapes;
+        },
+        .prompt_sliding_pre_m5 => {
+            s.name = "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt_sliding";
+            s.served = &prompt_shapes;
+        },
     }
     return s;
 }
@@ -163,7 +171,7 @@ pub const Probe = struct {
     pml: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, m: Mutation) !Probe {
-        const plain = if (controls.isPrompt(w)) (if (w == .prompt_pre_m5) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
+        const plain = if (controls.isPrompt(w)) (if (w == .prompt_pre_m5 or w == .prompt_sliding_pre_m5) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
         const text = try controls.apply(a, plain, m);
         defer a.free(text);
         var lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
@@ -173,7 +181,7 @@ pub const Probe = struct {
         var merge_lib: ?mtl.Library = null;
         errdefer if (merge_lib) |loaded| loaded.deinit();
         var merge: mtl.Pipeline = undefined;
-        const fused = controls.isAttention(w);
+        const fused = controls.isAttention(w) and !controls.isPromptSliding(w);
         if (fused) {
             if (controls.isPrompt(w)) merge_lib = try mtl.Library.fromSource(device, sources.attention, mtl.CompileOptions.mlx());
             const merge_library = if (merge_lib) |loaded| loaded else lib;
@@ -226,8 +234,8 @@ pub const Probe = struct {
         p.rig.reset();
         p.shape = s;
         p.fill = fill;
-        const global = p.which == .prep_global or p.which == .decode_global or controls.isPrompt(p.which);
-        const sliding = p.which == .prep_sliding or p.which == .decode_sliding;
+        const global = p.which == .prep_global or p.which == .decode_global or p.which == .prompt_m5 or p.which == .prompt_pre_m5;
+        const sliding = p.which == .prep_sliding or p.which == .decode_sliding or controls.isPromptSliding(p.which);
         p.layer = .{ .window = if (sliding) 1024 else 0, .ring = 2048, .chunk = if (sliding) 256 else plan.global_chunk, .tau = global };
         const rows = s.rows;
         const rh = rows * H;
@@ -335,10 +343,12 @@ pub const Probe = struct {
         p.meta[1] = try p.rig.input(std.mem.sliceAsBytes(seg32));
         p.meta[2] = try p.rig.input(std.mem.sliceAsBytes(&seg));
         if (controls.isAttention(p.which)) {
-            const stride = plan.slotsFor(p.layer, p.shape.k);
-            const parts = rows * H * stride;
-            p.po = try p.rig.scratch(parts * D * 4);
-            p.pml = try p.rig.scratch(parts * 8);
+            if (p.fused) {
+                const stride = plan.slotsFor(p.layer, p.shape.k);
+                const parts = rows * H * stride;
+                p.po = try p.rig.scratch(parts * D * 4);
+                p.pml = try p.rig.scratch(parts * 8);
+            }
             p.out[0] = try p.rig.output(p.count() * 2);
         } else for (p.sizes(), 0..) |n, i| p.out[i] = try p.rig.output(n * 2);
     }
@@ -361,6 +371,16 @@ pub const Probe = struct {
             for (p.out, 9..) |r, i| e.setBuffer(r.buf, r.off, i);
             e.setValue(plan.PrepArgs{ .heads = H, .kv_heads = KV, .ring = ring, .global = @intFromBool(p.layer.tau), .qk_clip = 22.627416997969522, .rel_clip = 8, .floor_pos = 8192, .alpha = 0.1, .eps = 1e-6 }, 13);
             e.dispatchGroups(mtl.Size.of(rows, H + 2 * KV, 1), mtl.Size.of(32, 1, 1));
+        } else if (controls.isPromptSliding(p.which)) {
+            for (p.refs[0..4], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+            e.setBuffer(p.meta[2].buf, p.meta[2].off, 4);
+            e.setBuffer(p.refs[4].buf, p.refs[4].off, 5);
+            e.setBuffer(p.refs[5].buf, p.refs[5].off, 6);
+            e.setBuffer(p.out[0].buf, p.out[0].off, 7);
+            const sc: f32 = 1.0 / @sqrt(@as(f32, D));
+            e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = 0, .chunks = 1, .scale = sc }, 8);
+            const blocks = (rows * (H / KV) + plan.prompt_pairs - 1) / plan.prompt_pairs;
+            e.dispatchGroups(mtl.Size.of(blocks, KV, 1), mtl.Size.of(256, 1, 1));
         } else {
             const stride = plan.slotsFor(p.layer, p.shape.k);
             for (p.refs[0..4], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
@@ -519,8 +539,8 @@ pub const Probe = struct {
 
 fn supported(device: mtl.Device, w: Which) bool {
     return switch (w) {
-        .prompt_m5 => device.tensorUnits(),
-        .prompt_pre_m5 => !device.tensorUnits(),
+        .prompt_m5, .prompt_sliding_m5 => device.tensorUnits(),
+        .prompt_pre_m5, .prompt_sliding_pre_m5 => !device.tensorUnits(),
         else => true,
     };
 }

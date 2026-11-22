@@ -33,13 +33,12 @@ inline void ink_rows(thread const tfp::frag<float>* s, thread float (&r)[2], boo
 }
 
 // 128 (row, head) pairs and one key head/chunk a 256-thread group; each simdgroup owns 16 pairs.
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
-    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
-    const device InkPromptSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
-    constant InkPromptArgs& a [[buffer(7)]], uint3 tg [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
-  threadgroup bfloat ks[KEYS * D], vs[KEYS * D];
+template <bool FINISH>
+inline void ink2_attn_prompt_impl(const device bfloat* q, const device bfloat* kc, const device bfloat* vc,
+    const device bfloat* tab, const device InkPromptSeg* segs, device float* part_o, device float2* part_ml,
+    const device bfloat* sink, const device bfloat* gate, device bfloat* att_out,
+    threadgroup bfloat* ks, threadgroup bfloat* vs, constant InkPromptArgs& a,
+    uint3 tg, uint sg, uint lane, uint t) {
   const InkPromptSeg s = segs[0];
   const uint group = a.heads / a.kv_heads, total = uint(s.n) * group, m0 = tg.x * PAIRS;
   if (m0 >= total) return;
@@ -134,7 +133,13 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
     }
     const bool fold_now = (!a.window && (kt - b_lo) % 1024 == 960) || kt + KEYS > k_hi;
     if (fold_now && m < total) for (uint h = 0; h < 2; ++h) {
-      if (top[h] == -INFINITY) continue;
+      if (top[h] == -INFINITY) {
+        if (isnan(mass[h])) {
+          upper[h] = whole[h] = NAN;
+          for (uint d = 0; d < 8; ++d) for (uint e = 4 * h; e < 4 * h + 4; ++e) out[d][e] = NAN;
+        }
+        continue;
+      }
       float x, y;
       ink_fold(upper[h], whole[h], top[h], mass[h], x, y);
       for (uint d = 0; d < 8; ++d) for (uint e = 4 * h; e < 4 * h + 4; ++e) out[d][e] = out[d][e] * x + acc[d][e] * y;
@@ -142,6 +147,27 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
     threadgroup_barrier(mem_flags::mem_threadgroup); // no simdgroup reads ks/vs when the next tile overwrites them
   }
   if (m >= total) return;
+  if (FINISH) {
+    if (a.window == 0) return;
+    for (uint e = 0; e < 8; ++e) {
+      const uint h = e >> 2;
+      const uint row = m + uint(home.y) + h * 8;
+      if (row >= total) continue;
+      const uint pos = uint(s.p0) + row / group;
+      if (b_lo > pos) continue;
+      const uint col_in_16 = uint(home.x) + TF_COL(e);
+      const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
+      const float sk = float(sink[prow]) * LOG2E;
+      const float mf = max(upper[h], sk), a0 = precise::exp2(upper[h] - mf);
+      const float den = whole[h] * a0 + precise::exp2(sk - mf);
+      for (uint d = 0; d < 8; ++d) {
+        const float y = out[d][e] * a0 / den;
+        const float gv = float(gate[prow * D + 16 * d + col_in_16]);
+        att_out[prow * D + 16 * d + col_in_16] = bfloat(y * (1.0f / (1.0f + precise::exp(-gv))));
+      }
+    }
+    return;
+  }
   for (uint d = 0; d < 8; ++d) for (uint e = 0; e < 8; ++e) {
     const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e);
     if (row >= total) continue;
@@ -156,4 +182,26 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
     const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
     part_ml[prow * a.chunks + c - a.c0] = float2(upper[h], whole[h]);
   }
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
+    const device InkPromptSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
+    constant InkPromptArgs& a [[buffer(7)]], uint3 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup bfloat ks[KEYS * D], vs[KEYS * D];
+  ink2_attn_prompt_impl<false>(q, kc, vc, tab, segs, part_o, part_ml, nullptr, nullptr, nullptr, ks, vs, a, tg, sg, lane, t);
+}
+
+// Sliding-window prompt attention with sink-last merge and gate fused into the final BF16 store.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_attn_prompt_sliding(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
+    const device InkPromptSeg* segs [[buffer(4)]], const device bfloat* sink [[buffer(5)]],
+    const device bfloat* gate [[buffer(6)]], device bfloat* out [[buffer(7)]],
+    constant InkPromptArgs& a [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup bfloat ks[KEYS * D], vs[KEYS * D];
+  ink2_attn_prompt_impl<true>(q, kc, vc, tab, segs, nullptr, nullptr, sink, gate, out, ks, vs, a, tg, sg, lane, t);
 }
