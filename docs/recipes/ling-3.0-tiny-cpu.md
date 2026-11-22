@@ -72,9 +72,11 @@ llama.cpp's `llama-tokenize` on the same file.
   help up to the number of fast cores. Rows are claimed in chunks, so a slower core takes fewer, but an expert on a
   slow core is still waited for: start with the count of the board's fastest cores and try one more or fewer. Workers
   spin between projections and sleep only when idle, so while decoding each thread keeps a core busy; leave a core
-  free if the board has other work. The engine does not pin threads itself. On a board with mixed cores, run it under
-  `taskset -c LIST` with `LIST` set to the fast cores (on the Qualcomm board measured below, `taskset -c 0,3,5,7` with
-  4 threads); the cores with the highest `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` are the fast ones.
+  free if the board has other work. On Linux, when the process may run on at least as many CPUs as threads, each
+  thread is pinned to one of the first allowed CPUs in order, so the allowed set decides which cores do the work. On a
+  board with mixed cores, run it under `taskset -c LIST` with `LIST` set to the fast cores (on the Qualcomm board
+  measured below, `taskset -c 0,3,5,7` with 4 threads); the cores with the highest
+  `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` are the fast ones.
 
 - **More threads than cores.** Because workers spin, a thread count above the cores they run on is much slower, not a
   little: 8 threads held to 4 cores decoded at 0.7 tokens a second, against 5.3 with 4 threads.
