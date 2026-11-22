@@ -2,6 +2,9 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    const sampler_prob = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM sampler PROB output"} }));
+    const sampler_prob_step = b.step("test-glm-sampler-prob-host", "GLM CUDA sampler output pointer and storage without a GPU");
+    sampler_prob_step.dependOn(&sampler_prob.step);
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;

@@ -61,6 +61,16 @@ pub const Sampler = struct {
         s.module.unload();
     }
 
+    pub fn appendDrawArgs(s: *const Sampler, args: *cuda.Args) void {
+        args.add(s.full.ptr);
+        args.add(@as(u32, @intCast(s.vocab)));
+        args.add(s.rule.ptr);
+        args.add(s.meta.ptr);
+        args.add(@as(i32, 0));
+        args.add(s.tok.ptr);
+        args.add(@as(u64, 0));
+    }
+
     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
         try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
@@ -70,18 +80,11 @@ pub const Sampler = struct {
     /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1, ...
     pub fn drawFull(s: *Sampler, stream: cuda.Stream, rows: usize, first: u64, r: Rule, out: []u32) !void {
         std.debug.assert(rows <= s.rows and out.len >= rows and first >= 1);
-        const V = s.vocab;
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
         try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
         var args: cuda.Args = .{};
-        args.add(s.full.ptr);
-        args.add(@as(u32, @intCast(V)));
-        args.add(s.rule.ptr);
-        args.add(s.meta.ptr);
-        args.add(@as(i32, 0));
-        args.add(s.tok.ptr);
-        args.add(@as(u64, 0));
+        s.appendDrawArgs(&args);
         try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
         try stream.synchronize();
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
@@ -159,3 +162,21 @@ const Spread = struct {
         };
     }
 };
+
+test "MiniMax sampler PROB output is absent from storage and launch" {
+    try std.testing.expect(!@hasField(Sampler, "prob"));
+    try std.testing.expect(comptime @hasDecl(Sampler, "appendDrawArgs"));
+    if (comptime @hasDecl(Sampler, "appendDrawArgs")) {
+        var sampler: Sampler = undefined;
+        sampler.full = .{ .d = undefined, .ptr = 0x1000, .len = 0 };
+        sampler.vocab = 17;
+        sampler.rule = .{ .d = undefined, .ptr = 0x2000, .len = 0 };
+        sampler.meta = .{ .d = undefined, .ptr = 0x3000, .len = 0 };
+        sampler.tok = .{ .d = undefined, .ptr = 0x4000, .len = 0 };
+        var args: cuda.Args = .{};
+        sampler.appendDrawArgs(&args);
+        const expected = [_]u64{ 0x1000, 17, 0x2000, 0x3000, 0, 0x4000, 0 };
+        try std.testing.expectEqual(expected.len, args.count);
+        for (expected, 0..) |value, i| try std.testing.expectEqual(@as(?u64, value), args.integer(i));
+    }
+}
