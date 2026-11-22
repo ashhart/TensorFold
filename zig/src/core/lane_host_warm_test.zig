@@ -188,25 +188,26 @@ test "a warm pass its cache keeps nothing of runs no chunk: no planned mark, and
     try std.testing.expectEqual(@as(usize, 0), chunks.n.load(.monotonic)); // the GPU never ran a chunk of it
 }
 
+const FakeSnaps = struct {
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return 64 + 4 * @as(u64, at);
+    }
+    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!prompt_cache.Saved {
+        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+        return f.save(@ptrCast(@alignCast(owner.?)), at);
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: prompt_cache.Saved) anyerror!void {
+        return error.BackendRestores;
+    }
+    fn drop(ptr: *anyopaque, saved: prompt_cache.Saved) void {
+        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+        f.drop(saved);
+    }
+};
+
 test "a warm_usable store keeps a warm pass's grid mark but not its end off the grid; without it, the end too" {
     const gpa = std.testing.allocator;
     const pc = api.prompt_cache;
-    const Snaps = struct {
-        fn bytes(_: *anyopaque, at: u32) u64 {
-            return 64 + 4 * @as(u64, at);
-        }
-        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            return f.save(@ptrCast(@alignCast(owner.?)), at);
-        }
-        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
-            return error.BackendRestores;
-        }
-        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            f.drop(saved);
-        }
-    };
     for ([_]bool{ true, false }) |usable| {
         var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         defer cfg.deinit(gpa);
@@ -216,7 +217,7 @@ test "a warm_usable store keeps a warm pass's grid mark but not its end off the 
         var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
         defer core.deinit();
         // dots.mocr's rules, scaled down: a grid of 4 and no request starts, so only multiples of 4 resume
-        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 400);
+        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = FakeSnaps.bytes, .save = FakeSnaps.save, .restore = FakeSnaps.restore, .drop = FakeSnaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 400);
         defer store.deinit();
         var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
         host.cache = &store;
@@ -485,4 +486,59 @@ test "a warm pass gives way to a request still filling its prompt: no quiet wait
         // without the wait, the pass asked before its next chunk; with it, the GPU never ran one of it
         try std.testing.expectEqual(@as(usize, @intFromBool(quiet == 0)), behind.chunks.load(.monotonic));
     }
+}
+
+test "a tool follow-up that removes reply reasoning resumes at the changed row and matches a cold reply" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var store = prompt_cache.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = FakeSnaps.bytes, .save = FakeSnaps.save, .restore = FakeSnaps.restore, .drop = FakeSnaps.drop } }, .{ .chunk = 1, .min_prompt = 0, .warm = .waits }, 8192);
+    defer store.deinit();
+    const Capture = struct {
+        box: Box = .{},
+        ids: [4]u32 = undefined,
+        cached: u32 = 0,
+        fn event(ctx: *anyopaque, id: Id, e: *const Event) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            switch (e.*) {
+                .prefilled => |n| c.cached = n,
+                .tokens => |ids| @memcpy(c.ids[c.box.tokens..][0..ids.len], ids),
+                else => {},
+            }
+            Box.event(&c.box, id, e);
+        }
+    };
+    // Tokenized renders: the warm guess retains private thought before the tool call.
+    const guessed = [_]u32{ 1, 2, 3, 4, 70, 71, 80, 81, 9 };
+    const rendered = [_]u32{ 1, 2, 3, 4, 80, 81, 9, 90, 91, 10 };
+    const diff: u32 = @intCast(std.mem.indexOfDiff(u32, &guessed, &rendered).?);
+    const warm: Request = .{ .prompt = &guessed, .max_tokens = 0, .background = true, .history_len = guessed.len, .rewind_len = diff, .born = 2, .decode_spans = &.{.{ 2, 8 }} };
+    const next: Request = .{ .prompt = &rendered, .max_tokens = 4, .decode_spans = &.{.{ 2, 6 }} };
+    var warm_reply: Capture = .{};
+    var fresh_reply: Capture = .{};
+    for ([_]bool{ true, false }, [_]*Capture{ &warm_reply, &fresh_reply }) |cached, reply| {
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1, .warm_turns = cached });
+        host.decoded_rows = true;
+        if (cached) host.cache = &store;
+        try host.start();
+        defer host.stop();
+        if (cached) {
+            var box: Box = .{};
+            try host.engine().submit(1, &warm, .{ .ctx = &box, .event = Box.event });
+            try std.testing.expectEqual(Reason.length, box.wait());
+            const extended = guessed ++ [_]u32{90};
+            try std.testing.expectEqual(@as(u32, guessed.len), store.find(&extended, &.{}, warm.decode_spans).?.at);
+        }
+        try host.engine().submit(2, &next, .{ .ctx = reply, .event = Capture.event });
+        try std.testing.expectEqual(Reason.length, reply.box.wait());
+        try std.testing.expectEqual(reply.ids.len, reply.box.tokens);
+    }
+    try std.testing.expectEqual(diff, warm_reply.cached);
+    try std.testing.expectEqual(@as(u32, 0), fresh_reply.cached);
+    try std.testing.expectEqualSlices(u32, &fresh_reply.ids, &warm_reply.ids);
 }

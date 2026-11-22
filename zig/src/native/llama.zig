@@ -37,6 +37,7 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const warm_turns = try @import("sys").environment.read(bool, "TF_LLAMA_METAL_WARM_TURNS", false);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = fl.Model.load(gpa, io, o.dir) catch |err| {
@@ -133,15 +134,23 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.metal.warm_turns = warm_turns;
+    h.host.decoded_rows = warm_turns;
+    if (warm_turns) h.host.info_.prefill_min_chunk = 1;
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
         const M = fl.backend.Metal;
         // prompt chunks change arithmetic with their rows
-        const rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = true, .grid = fl.state.prompt_rows, .min_prompt = 0 };
+        const rules: api.prompt_cache.Rules = if (warm_turns)
+            .{ .chunk = 1, .min_prompt = 0, .warm = .waits }
+        else
+            .{ .lookahead = 0, .planned = true, .grid = fl.state.prompt_rows, .min_prompt = 0 };
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, budget));
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
+        h.host.info_.warm_turns = warm_turns;
+        if (warm_turns) h.host.warm_quiet = 150 * std.time.ns_per_ms;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
     }
     errdefer if (h.cache) |*store| store.deinit();

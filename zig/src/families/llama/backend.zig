@@ -32,6 +32,7 @@ pub const Slots = struct {
 };
 
 pub const Metal = struct {
+    warm_turns: bool = false,
     gpa: std.mem.Allocator,
     model: *Model,
     options: Options,
@@ -174,12 +175,19 @@ pub const Metal = struct {
 
     /// Run `ids` at the cache's end in prompt chunks; a stream's pass stops at its chunk starts and reuse marks.
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !void {
+        // Prompt and decode-span rows use the same one-row kernels in the opt-in mode.
+        const exact = self.warm_turns and stream != null;
+        const rows: usize = if (exact) 1 else st.prompt_rows;
         const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
-            var end = @min(ids.len, at + st.prompt_rows);
+            var end = @min(ids.len, at + rows);
             if (stream) |sm| {
-                if (sm.isCancelled()) return error.Cancelled;
+                const cancelled = sm.isCancelled();
+                if (cancelled or (exact and sm.yields())) {
+                    if (exact) sm.keepInterruptedPrefill(@intCast(cache.len));
+                    return if (cancelled) error.Cancelled else error.Yielded;
+                }
                 for (sm.chunks) |x| if (x > base + at and x < base + end) {
                     end = x - base;
                 };
