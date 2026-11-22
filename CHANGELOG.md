@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Qwen3.8-Flash-Next and Qwen3.8-27B accept `presence_penalty` and `frequency_penalty`, counting each reply row and its own draft path so drafted replies match undrafted ones; at zero the default path is unchanged (#3145).
 
 
+- Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#N).
 
 - Tests: a lane-host case checks that a third short request queued behind two long ones at two slots starts within two rounds of a slot freeing and then gets its fair share of rounds, with full outputs for every request (#N).
 
