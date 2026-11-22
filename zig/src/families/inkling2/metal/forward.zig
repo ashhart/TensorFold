@@ -191,8 +191,8 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
         try convInputForAttention(m, e, s, cache, v, base, rows, true);
         try convInputForAttention(m, e, s, cache, v, base, rows, false);
-        attention.prep(&m.attention, e, rr, layer, prep, meta, .{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) }, .{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) }, a(at(s.q_prep, base * state.query_width * 2)), a(at(s.rel_prep, base * 24 * ap.extent * 2)), kv);
-        attention.relTable(&m.attention, e, rr, a(at(s.rel_prep, base * 24 * ap.extent * 2)), a(r(m.weights.layers[v.layer].attn.rel_projection)), a(at(s.rel_tab, base * 24 * ap.extent * 2)));
+        attention.prep(&m.attention, e, rr, layer, prep, meta, .{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) }, .{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) }, a(at(s.q_prep, base * state.query_width * 2)), a(at(s.rel_prep, base * state.rel_width * 2)), kv);
+        attention.relTable(&m.attention, e, rr, a(at(s.rel_prep, base * state.rel_width * 2)), a(r(m.weights.layers[v.layer].attn.rel_projection)), a(at(s.rel_tab, base * 24 * ap.extent * 2)));
         try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, a(at(s.q_prep, base * state.query_width * 2)), kv, a(at(s.rel_tab, base * 24 * ap.extent * 2)), a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4)), a(at(s.part_ml, base * 24 * state.max_attention_stride * 8)), a(at(s.sink, base * 24 * 2)), a(at(s.gate, base * state.query_width * 2)), a(at(s.att, base * state.query_width * 2)));
         base += rows;
     }
