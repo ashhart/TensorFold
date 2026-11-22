@@ -20,6 +20,7 @@ pub const split_rows = 64;
 pub const prompt_pairs = 128;
 pub const prompt_threads = 256;
 pub const prompt_shared = 3 * 2 * tile_keys * head_dim * 2;
+pub const prompt_shared_i8 = 2 * tile_keys * head_dim * 2;
 
 /// One stream's rows in a call (attention.cu's Seg): rows row0.. at positions p0.., its caches `off` elements in.
 pub const Seg = extern struct { row0: i32, n: i32, p0: i32, pad: i32 = 0, off: i64 };
@@ -47,8 +48,8 @@ pub const Layer = struct {
     }
 };
 
-/// A layer's caches (addresses): K and V rows.
-pub const Cache = struct { k: u64, v: u64 };
+/// A layer's caches (addresses): K and V rows, plus per-(token, head) scales when int8.
+pub const Cache = struct { k: u64, v: u64, ks: u64 = 0, vs: u64 = 0 };
 
 /// Sliding ring slots: the window plus a call's rows less one, so a chunk never overwrites keys it still reads.
 pub fn ringFor(window: u32, rows: u32) u32 {
@@ -78,11 +79,8 @@ pub fn chunks(last_pos: usize, chunk: u32) u32 {
     return @intCast(last_pos / chunk + 1);
 }
 
-/// Scratch bytes of a call: the bias table (bf16) and the partials (fp32 sums plus each chunk's max and total).
-pub fn tableBytes(rows: usize, heads: u32) usize {
-    return rows * heads * extent * 2;
-}
-
+/// Scratch bytes of a call's partials (fp32 sums plus each chunk's max and total). Every kernel forms its biases
+/// from the prepared rel rows and the transposed projection: no call has a bias table.
 pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
     return rows * heads * n_chunks * (head_dim * 4 + 8);
 }
@@ -90,12 +88,16 @@ pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
 pub const Kernels = struct {
     mod: cuda.Module,
     prep: cuda.Function,
-    rel_table: cuda.Function,
+    prep_i8: cuda.Function,
     attn: cuda.Function,
+    attn_i8: cuda.Function,
     attn_fold: cuda.Function,
+    attn_fold_i8: cuda.Function,
     merge: cuda.Function,
     pmod: cuda.Module,
     attn_prompt: cuda.Function,
+    attn_prompt_i8: cuda.Function,
+    attn_prompt_sliding: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -105,14 +107,22 @@ pub const Kernels = struct {
         errdefer pmod.unload();
         const attn_prompt = try pmod.function("tf_ink2_attn_prompt");
         try attn_prompt.allowDynamicShared(prompt_shared);
+        const attn_prompt_i8 = try pmod.function("tf_ink2_attn_prompt_i8");
+        try attn_prompt_i8.allowDynamicShared(prompt_shared_i8);
+        const attn_prompt_sliding = try pmod.function("tf_ink2_attn_prompt_sliding");
+        try attn_prompt_sliding.allowDynamicShared(prompt_shared);
         return .{
             .mod = mod,
             .pmod = pmod,
             .attn_prompt = attn_prompt,
+            .attn_prompt_i8 = attn_prompt_i8,
+            .attn_prompt_sliding = attn_prompt_sliding,
             .prep = try mod.function("tf_ink2_prep"),
-            .rel_table = try mod.function("tf_ink2_rel_table"),
+            .prep_i8 = try mod.function("tf_ink2_prep_i8"),
             .attn = try mod.function("tf_ink2_attn"),
+            .attn_i8 = try mod.function("tf_ink2_attn_i8"),
             .attn_fold = try mod.function("tf_ink2_attn_fold"),
+            .attn_fold_i8 = try mod.function("tf_ink2_attn_fold_i8"),
             .merge = try mod.function("tf_ink2_merge"),
         };
     }
@@ -153,35 +163,53 @@ fn goShared(f: cuda.Function, s: cuda.Stream, grid: cuda.Dim3, threads: u32, sha
     try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads }, .shared = shared }, s, a);
 }
 
-/// q, rel (per head) and k, v (per key head, written to the caches at pos % ring) from the projections' rows.
-pub fn prep(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, c: Prep, raw: [4]u64, scales: [2]u64, q: u64, rel: u64, kv: Cache) !void {
+/// q, rel (per head) and k, v (per key head, written to the caches at pos % ring) from the projections' rows. A row's
+/// raw q and rel sit `lds` elements after the last row's (the fused projection's rows, read in place).
+pub fn prep(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, c: Prep, raw: [4]u64, lds: [2]u32, scales: [2]u64, q: u64, rel: u64, kv: Cache) !void {
     var a: cuda.Args = .{};
     for (raw) |v| a.add(v);
     for (scales) |v| a.add(v);
     for ([_]u64{ r.pos, r.seg_of, r.segs, q, rel, kv.k, kv.v }) |v| a.add(v);
+    if (kv.ks != 0) {
+        a.add(kv.ks);
+        a.add(kv.vs);
+    }
     a.add(int(r.heads));
     a.add(int(r.kv_heads));
     a.add(int(l.ring));
     a.add(int(@intFromBool(l.tau)));
     for ([_]f32{ c.qk_clip, c.rel_clip, c.floor, c.alpha, c.eps }) |v| a.add(v);
-    try go(k.prep, s, .{ .x = r.rows, .y = r.heads + 2 * r.kv_heads }, 32, &a);
+    for (lds) |v| a.add(int(v));
+    try go(if (kv.ks != 0) k.prep_i8 else k.prep, s, .{ .x = r.rows, .y = r.heads + 2 * r.kv_heads }, 32, &a);
 }
 
-/// The bias table of each (row, head): its rel vector against the layer's rel_logits_proj [16][1024].
-pub fn relTable(k: *const Kernels, s: cuda.Stream, r: Rows, rel: u64, proj: u64, tab: u64) !void {
-    var a: cuda.Args = .{};
-    for ([_]u64{ rel, proj, tab }) |v| a.add(v);
-    try go(k.rel_table, s, .{ .x = r.rows * r.heads }, 256, &a);
-}
-
-/// Attention into chunk partials (`stride` a row and head; a split call's sub-chunks), then the ordered merge.
-pub fn attend(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, stride: u32, slots: usize, q: u64, kv: Cache, tab: u64, part_o: u64, part_ml: u64, sink: u64, gate: u64, out: u64) !void {
+/// Attention into chunk partials (`stride` a row and head; a split call's sub-chunks), then the ordered merge. Every
+/// kernel forms its biases from `rel` (prepared, [rows*heads][16]) and `proj_t` (rel_logits_proj transposed,
+/// [extent][16]) as tf_ink2_rel_table would have: the same bits, no table. A row's gate sits `gate_ld` elements after
+/// the last row's.
+pub fn attend(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, stride: u32, slots: usize, q: u64, kv: Cache, rel: u64, proj_t: u64, part_o: u64, part_ml: u64, sink: u64, gate: u64, gate_ld: u32, out: u64) !void {
     if (slotsFor(l, r.last_pos + 1) > stride) return error.Inkling2Partials;
     const scale: f32 = 1.0 / @sqrt(@as(f32, head_dim));
     var a: cuda.Args = .{};
-    for ([_]u64{ q, kv.k, kv.v, tab, r.segs, r.tiles, part_o, part_ml }) |v| a.add(v);
+    if (kv.ks != 0) {
+        std.debug.assert(l.window == 0);
+        for ([_]u64{ q, kv.k, kv.v, kv.ks, kv.vs, rel, proj_t, r.segs, r.tiles, part_o, part_ml }) |v| a.add(v);
+    } else {
+        for ([_]u64{ q, kv.k, kv.v, rel, proj_t, r.segs, r.tiles, part_o, part_ml }) |v| a.add(v);
+    }
     var slots_rh = stride; // partials a row and head
     var per: u32 = 1; // partials a chunk: its sub-chunks' when split
+    if (l.window > 0 and r.streams == 1 and r.rows > split_rows) {
+        // One sliding-window prefill pass: direct bf16 out, no merge kernel afterwards.
+        var p: cuda.Args = .{};
+        for ([_]u64{ q, kv.k, kv.v, rel, proj_t, r.segs, sink, gate, out }) |v| p.add(v);
+        for ([_]u32{ r.heads, r.kv_heads, l.ring, l.window }) |v| p.add(int(v));
+        p.add(scale);
+        p.add(int(gate_ld));
+        const blocks = std.math.divCeil(u32, r.rows * (r.heads / r.kv_heads), prompt_pairs) catch unreachable;
+        try goShared(k.attn_prompt_sliding, s, .{ .x = blocks, .y = r.kv_heads, .z = 1 }, prompt_threads, prompt_shared, &p);
+        return;
+    }
     if (l.window > 0) {
         for ([_]u32{ r.heads, r.kv_heads, l.ring, l.window, l.chunk, 0, stride }) |v| a.add(int(v));
         a.add(scale);
@@ -194,22 +222,26 @@ pub fn attend(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, stride: u32,
         for ([_]u32{ r.heads, r.kv_heads, l.ring, 0, l.chunk, 0, slots_rh }) |v| a.add(int(v));
         a.add(scale);
         a.add(int(1));
-        try go(k.attn, s, .{ .x = r.n_tiles, .y = r.kv_heads, .z = slots_rh }, 128, &a);
+        try go(if (kv.ks != 0) k.attn_i8 else k.attn, s, .{ .x = r.n_tiles, .y = r.kv_heads, .z = slots_rh }, 128, &a);
     } else if (r.streams == 1) { // one stream's rows: 128 pairs a block share each K/V tile, the fold's bits
         var p: cuda.Args = .{};
-        for ([_]u64{ q, kv.k, kv.v, tab, r.segs, part_o, part_ml }) |v| p.add(v);
+        if (kv.ks != 0) {
+            for ([_]u64{ q, kv.k, kv.v, kv.ks, kv.vs, rel, proj_t, r.segs, part_o, part_ml }) |v| p.add(v);
+        } else {
+            for ([_]u64{ q, kv.k, kv.v, rel, proj_t, r.segs, part_o, part_ml }) |v| p.add(v);
+        }
         for ([_]u32{ r.heads, r.kv_heads, l.ring, l.chunk, 0, stride }) |v| p.add(int(v));
         p.add(scale);
         const blocks = std.math.divCeil(u32, r.rows * (r.heads / r.kv_heads), prompt_pairs) catch unreachable;
-        try goShared(k.attn_prompt, s, .{ .x = blocks, .y = r.kv_heads, .z = stride }, prompt_threads, prompt_shared, &p);
+        try goShared(if (kv.ks != 0) k.attn_prompt_i8 else k.attn_prompt, s, .{ .x = blocks, .y = r.kv_heads, .z = stride }, prompt_threads, if (kv.ks != 0) prompt_shared_i8 else prompt_shared, &p);
     } else { // a block a chunk, its sub-chunks folded in order
         for ([_]u32{ r.heads, r.kv_heads, l.ring, l.chunk, 0, stride }) |v| a.add(int(v));
         a.add(scale);
-        try go(k.attn_fold, s, .{ .x = r.n_tiles, .y = r.kv_heads, .z = stride }, 128, &a);
+        try go(if (kv.ks != 0) k.attn_fold_i8 else k.attn_fold, s, .{ .x = r.n_tiles, .y = r.kv_heads, .z = stride }, 128, &a);
     }
     var b: cuda.Args = .{};
     for ([_]u64{ part_o, part_ml, sink, gate, r.pos, out }) |v| b.add(v);
-    for ([_]u32{ r.heads, l.window, l.chunk, 0, slots_rh, per }) |v| b.add(int(v));
+    for ([_]u32{ r.heads, l.window, l.chunk, 0, slots_rh, per, gate_ld }) |v| b.add(int(v));
     try go(k.merge, s, .{ .x = r.rows * r.heads }, head_dim, &b);
 }
 

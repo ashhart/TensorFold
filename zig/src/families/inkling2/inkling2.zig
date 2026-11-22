@@ -6,6 +6,8 @@ pub const kernels = @import("kernels.zig");
 pub const ops = @import("ops.zig");
 pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
+pub const bf12 = @import("bf12.zig");
+pub const sm121a_pack = @import("sm121a_pack.zig");
 pub const loop = @import("loop.zig");
 pub const loop_model = @import("loop_model.zig");
 pub const loop_math_cuda = @import("loop_math_cuda.zig");
@@ -21,6 +23,8 @@ test {
     _ = ops;
     _ = experts;
     _ = modelopt;
+    _ = bf12;
+    _ = sm121a_pack;
     _ = native;
     _ = loop;
     _ = loop_model;

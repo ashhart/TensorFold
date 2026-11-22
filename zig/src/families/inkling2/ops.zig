@@ -18,6 +18,7 @@ pub const MixArgs = extern struct {
     rows: i32,
     c: i32,
     eps: f32,
+    blocks_normed: i32 = 0, // nonzero: `blocks` are FP32 rows, each already divided by its RMS (loop_math.prenorm's mix output)
 };
 
 /// ops.cu's ConvArgs, field for field.
@@ -33,6 +34,7 @@ pub const ConvArgs = extern struct {
     hist: u64 = 0, // fp32 [rows][c]: each row's input as the state keeps it (0: none)
     part_stride: i64 = 0, // elements between the ranks' partials of x (parts > 1)
     state_stride: i64 = 0, // elements between the streams' states
+    hist_stride: i64 = 0, // 0: hist rows are the call's rows; else elements between the streams' hist regions (each from row 0)
     parts: i32 = 1,
     x_bf16: i32 = 0,
     round_in: i32 = 0,
@@ -65,9 +67,11 @@ pub const Kernels = struct {
     prompt_tail: cuda.Function,
     embed: cuda.Function,
     mix: cuda.Function,
+    mix_reg: cuda.Function,
     mix_rows: cuda.Function,
     rowdot: cuda.Function,
     topk: cuda.Function,
+    topk_128: cuda.Function,
     gateup: cuda.Function,
     conv: cuda.Function,
     softcap: cuda.Function,
@@ -90,9 +94,11 @@ pub const Kernels = struct {
             .prompt_tail = try rows_mod.function("tf_ink2_prompt_tail"),
             .embed = try mod.function("tf_ink2_embed"),
             .mix = try mod.function("tf_ink2_mix"),
+            .mix_reg = try mod.function("tf_ink2_mix_reg"),
             .mix_rows = try mod.function("tf_ink2_mix_rows"),
             .rowdot = try mod.function("tf_ink2_rowdot"),
             .topk = try mod.function("tf_ink2_topk"),
+            .topk_128 = try mod.function("tf_ink2_topk_128"),
             .gateup = try mod.function("tf_ink2_gateup"),
             .conv = try mod.function("tf_ink2_conv"),
             .softcap = try mod.function("tf_ink2_softcap"),
@@ -128,11 +134,13 @@ pub fn embed(k: *const Kernels, s: cuda.Stream, ids: u64, rows: usize, table: u6
     try go(k.embed, s, .{ .x = @intCast(rows) }, 256, &a);
 }
 
-/// The residual mix of each row and query, normed: a block a row.
+/// The residual mix of each row and query, normed: a block a row. C <= 2560 takes the single-load
+/// register-cached path (bit-exact vs tf_ink2_mix); wider calls keep the staged/rows kernels.
 pub fn mix(k: *const Kernels, s: cuda.Stream, m: MixArgs) !void {
     if (m.c > 10 * 512 or @rem(m.c, 128) != 0) return error.Inkling2MixWidth; // ops.cu: kMixCache x 512 columns, 16-byte copies
     var a: cuda.Args = .{};
     a.add(m);
+    if (m.c <= 5 * 512) return go(k.mix_reg, s, .{ .x = @intCast(m.rows) }, 512, &a);
     try go(if (m.rows <= 16) k.mix else k.mix_rows, s, .{ .x = @intCast(m.rows) }, 512, &a); // equal bits either way
 }
 
@@ -156,6 +164,8 @@ pub fn topk(k: *const Kernels, s: cuda.Stream, scores: u64, bias: u64, pick: u64
     a.add(int(experts));
     a.add(int(top));
     a.add(scale);
+    // 128 or fewer experts: one a thread (4 warps), bit-identical picks and weights.
+    if (experts <= 128) return go(k.topk_128, s, .{ .x = @intCast(rows) }, 128, &a);
     try go(k.topk, s, .{ .x = @intCast(rows) }, 512, &a);
 }
 
@@ -247,8 +257,8 @@ pub fn putWords(k: *const Kernels, s: cuda.Stream, dst: u64, n: usize, words: Wo
 }
 
 test "ops: the argument structs keep ops.cu's layouts" {
-    try std.testing.expectEqual(@as(usize, 8 * 8 + 8 + 8 + 3 * 8 + 8 + 6 * 4), @sizeOf(MixArgs));
-    try std.testing.expectEqual(@as(usize, 9 * 8 + 2 * 8 + 7 * 4 + 4), @sizeOf(ConvArgs));
+    try std.testing.expectEqual(@as(usize, 8 * 8 + 8 + 8 + 3 * 8 + 8 + 8 * 4), @sizeOf(MixArgs));
+    try std.testing.expectEqual(@as(usize, 9 * 8 + 3 * 8 + 7 * 4 + 4), @sizeOf(ConvArgs));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RewindSite));
     try std.testing.expectEqual(@as(usize, 6 * 8 + 6 * 4), @sizeOf(GateUpArgs));
 }

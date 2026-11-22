@@ -16,6 +16,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
 pub const window_rows: u32 = engine.window_rows;
 pub const explains_open = true;
+pub const takes_drafter = true;
 
 pub const VisionOptions = struct { image_tokens: u32, max_images: u32 };
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
@@ -23,11 +24,12 @@ pub const Options = struct {
     context: usize,
     drafts: bool,
     segments: usize = 1,
+    lanes: u32 = 1,
+    lanes_fixed: bool = false,
     slide: bool = false,
     vision: ?VisionOptions = null,
     precision: ?enum { full } = null,
     room: ?Room = null,
-    drafter: ?[]const u8 = null,
     tp: usize = 1,
     rank: usize = 0,
     master: ?[]const u8 = null,
@@ -80,7 +82,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (kernels != null) return error.Inkling2CapturedKernels;
     if (o.segments != 1 or o.tp != 1 or o.rank != 0) return error.Inkling2LoopOneRankOnly;
     if (o.vision != null) return error.Inkling2LoopTextOnly;
-    if (o.drafter != null) return error.Inkling2DSparkPending;
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
@@ -102,7 +103,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     var merged: core.safetensors.Header = .empty;
     for (ck.files.items) |file| try @import("names.zig").merge(header_arena.allocator(), &merged, file.names);
     try @import("names.zig").precisions(merged, c.text.layers, &precisions);
-    const p = try plan_.build(&c.text, &precisions);
+    const p = try plan_.build(&c.text, precisions[0..c.text.layers]);
     var w = try @import("loop_weights.zig").load(gpa, ctx.d, &ck, &c, p);
     errdefer w.deinit();
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
@@ -111,8 +112,18 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer k.deinit();
     var stream = try cuda.Stream.init(ctx.d, true);
     errdefer stream.deinit();
-    var m = try engine.Model.init(gpa, ctx.d, stream, &w, o.context);
+    const kv_int8 = loop.kvInt8Enabled();
+    var slots: u32 = @max(1, @min(o.lanes, engine.max_segments));
+    if (o.room) |rm| if (rm.read(rm.ctx)) |avail| {
+        const per_slot = (try loop.CacheLayout.initMode(&w.c.text, &w.p, @intCast(o.context), kv_int8)).bytes;
+        const fit: u32 = @intCast(@min(@as(u64, engine.max_segments), avail / @max(per_slot, 1)));
+        if (o.lanes_fixed and fit < slots) return error.Inkling2LoopSlotsDoNotFit;
+        if (fit == 0) return error.Inkling2LoopSlotsDoNotFit;
+        if (fit < slots) slots = fit;
+    };
+    var m = try engine.Model.initMode(gpa, ctx.d, stream, &w, o.context, slots, kv_int8);
     errdefer m.deinit();
+    if (kv_int8) std.log.info("inkling2: global KV cache int8 enabled (per_slot={d}B)", .{m.layout.bytes});
     var be = try backend.Backend.init(gpa, ctx.d, &m, &k, stream);
     errdefer be.deinit();
     const out = try gpa.create(Owned);
@@ -122,7 +133,24 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     out.model.w = &out.weights;
     out.backend.m = &out.model;
     out.backend.k = &out.kernels;
-    return .{ .backend = out.backend.backend(), .facts = out.backend.facts(), .rows = window_rows, .stream_bytes = out.model.layout.bytes, .ctx = out, .deinit = release, .target = out };
+    return .{ .backend = out.backend.backend(), .facts = out.backend.facts(), .rows = window_rows, .stream_bytes = out.model.layout.bytes, .free_streams = slots, .ctx = out, .deinit = release, .target = out };
+}
+
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, _: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    const o = own(p);
+    const d = try @import("dspark_cuda.zig").Drafter.init(gpa, io, o, dir);
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+}
+
+fn closeDrafter(p: *anyopaque) void {
+    const d: *@import("dspark_cuda.zig").Drafter = @ptrCast(@alignCast(p));
+    d.deinit();
+}
+
+fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
+    const d: *@import("dspark_cuda.zig").Drafter = @ptrCast(@alignCast(p));
+    // Commit the admitted lane caches up front; fixed weights + scratch were committed at init.
+    try d.reserve(streams);
 }
 
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
@@ -144,6 +172,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.Inkling2LoopOneRankOnly => "Inkling 2 Mini runs at one CUDA rank with one segment; TP and multi-segment modes are refused",
+        error.Inkling2LoopSlotsDoNotFit => "Inkling 2 Mini cannot fit the requested --parallel streams at this --context; lower --parallel or --context",
         error.Inkling2LoopTextOnly => "Inkling 2 Mini is text-only on CUDA: images and --vision are refused",
         error.Inkling2DSparkPending => "the Mini DSpark drafter has names and taps but no native draft engine in this build",
         error.Inkling2CapturedKernels => "Inkling 2 Mini runs the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
@@ -155,7 +184,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 test "Mini native registration and refusal wording are explicit" {
     try std.testing.expectEqualStrings("inkling2_loop", model_type);
     try std.testing.expect(max_segments == 1 and prompt_rows == 2048 and window_rows == 16);
-    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopTextOnly, error.Inkling2DSparkPending, error.Inkling2CapturedKernels }) |err| {
+    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopSlotsDoNotFit, error.Inkling2LoopTextOnly, error.Inkling2DSparkPending, error.Inkling2CapturedKernels }) |err| {
         try std.testing.expect(explain(null, err) != null);
     }
 }

@@ -10,11 +10,20 @@ pub fn validateLoad(c: *const config.Config, rank: usize, images: bool) !void {
     if (lp.gate_rank != 64) return error.UnsupportedLoopGateRank;
 }
 
+pub fn kvInt8Enabled() bool {
+    const raw = std.c.getenv("TF_INKLING2_KV_INT8") orelse return false;
+    const s = std.mem.span(raw);
+    return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "on") or std.mem.eql(u8, s, "yes");
+}
+
 pub const SnapshotSlot = struct {
     kv_offset: u64,
     kv_bytes: u64,
     conv_offset: u64,
     conv_bytes: u64,
+    kv_int8: bool = false,
+    k_codes_bytes: u64 = 0,
+    k_scales_bytes: u64 = 0,
 };
 
 /// A stream or a saved prompt owns the same complete layout: no visit shares KV or convolution state with another.
@@ -24,6 +33,10 @@ pub const CacheLayout = struct {
     bytes: u64,
 
     pub fn init(c: *const config.Text, p: *const plan_.Plan, context: u32) !CacheLayout {
+        return initMode(c, p, context, false);
+    }
+
+    pub fn initMode(c: *const config.Text, p: *const plan_.Plan, context: u32, kv_int8: bool) !CacheLayout {
         if (context == 0 or context > c.max_context or p.n_visits != c.visitCount()) return error.BadLoopCache;
         var out: CacheLayout = undefined;
         out.n = p.n_visits;
@@ -36,10 +49,25 @@ pub const CacheLayout = struct {
                 std.mem.alignForward(u32, context, 64)
             else
                 std.mem.alignForward(u32, c.window + rows - 1, 64);
-            const kv = try std.math.mul(u64, tokens, 2 * @as(u64, layer.heads.kv * layer.heads.dim * 2));
+            const use_i8 = kv_int8 and layer.kind == .global;
+            var k_codes: u64 = 0;
+            var k_scales: u64 = 0;
+            const kv = if (use_i8) blk: {
+                k_codes = try std.math.mul(u64, tokens, @as(u64, layer.heads.kv) * layer.heads.dim);
+                k_scales = try std.math.mul(u64, tokens, @as(u64, layer.heads.kv) * 4);
+                break :blk try std.math.add(u64, 2 * k_codes, 2 * k_scales);
+            } else try std.math.mul(u64, tokens, 2 * @as(u64, layer.heads.kv * layer.heads.dim * 2));
             // The recurrence rounds each site then widens its complete state to FP32 before the FMAs.
             const conv = try std.math.mul(u64, conv_values, 4);
-            out.slots[i] = .{ .kv_offset = out.bytes, .kv_bytes = kv, .conv_offset = 0, .conv_bytes = conv };
+            out.slots[i] = .{
+                .kv_offset = out.bytes,
+                .kv_bytes = kv,
+                .conv_offset = 0,
+                .conv_bytes = conv,
+                .kv_int8 = use_i8,
+                .k_codes_bytes = k_codes,
+                .k_scales_bytes = k_scales,
+            };
             out.bytes = try std.math.add(u64, out.bytes, kv);
         }
         var conv_offset = out.bytes;
@@ -151,4 +179,20 @@ test "pass two resets and only completed passes with a successor capture message
         if (visit.pass > 0 and visit.pass < lp.passes and visit.layer + 1 == lp.core_end) banks += 1;
     }
     try std.testing.expectEqual(lp.passes - 1, banks);
+}
+
+test "Mini int8 global KV layout halves global cache and stays 64-byte aligned" {
+    const config_test = @import("config_test.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var why: config.Why = .{};
+    const c = try config.parse(arena.allocator(), config_test.mini, &why);
+    var prec: [24]plan_.Precision = @splat(.nvfp4);
+    const p = try plan_.build(&c.text, &prec);
+    const layout = try CacheLayout.initMode(&c.text, &p, 262_144, true);
+    try std.testing.expect(!layout.at(0).kv_int8);
+    try std.testing.expect(layout.at(5).kv_int8);
+    try std.testing.expectEqual(@as(u64, 262_144 * 8 * (2 * 128 + 2 * 4)), layout.at(5).kv_bytes);
+    try std.testing.expectEqual(@as(u64, 4_936_335_360), layout.bytes);
+    try std.testing.expectEqual(@as(u64, 0), layout.bytes % 64);
 }

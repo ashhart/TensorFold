@@ -19,10 +19,36 @@ const invoke_close = "</atem:invoke>";
 const parameter = "<atem:parameter name=\"";
 const parameter_close = "</atem:parameter>";
 
-/// Whether replies take this form: every marker is one token and the template writes `to=self` messages.
-pub fn detect(text: anytype) bool {
+pub const Style = enum { muse, inkling2 };
+
+const ink_start = "<|message_model|>";
+const ink_end = "<|end_message|>";
+const ink_eos = "<|content_model_end_sampling|>";
+const ink_thinking = "<|content_thinking|>";
+const ink_text = "<|content_text|>";
+const ink_tool_json = "<|content_invoke_tool_json|>";
+const ink_tool_text = "<|content_invoke_tool_text|>";
+const ink_closers = [_][]const u8{ ink_end, ink_eos, ink_start };
+const ink_headers = [_][]const u8{ ink_thinking, ink_text, ink_tool_json, ink_tool_text };
+const ink_reach = blk: {
+    var n: usize = 0;
+    for (ink_closers) |e| n = @max(n, e.len);
+    break :blk n - 1;
+};
+
+pub fn detectMuse(text: anytype) bool {
     for ([_][]const u8{ start, message, ends[0], ends[1] }) |m| if (text.tokenId(m) == null) return false;
     return std.mem.indexOf(u8, text.templateSource(), "to=self") != null;
+}
+
+pub fn detectInkling2(text: anytype) bool {
+    for ([_][]const u8{ ink_start, ink_thinking, ink_text, ink_end }) |m| if (text.tokenId(m) == null) return false;
+    return true;
+}
+
+/// Whether replies take this form: Muse's `to=self` or Inkling-2-Mini's `<|message_model|>` / `<|content_*|>` messages.
+pub fn detect(text: anytype) bool {
+    return detectMuse(text) or detectInkling2(text);
 }
 
 /// How the text ends: still streaming, at the model's end token, cut by max_tokens, or at a stop string.
@@ -148,6 +174,7 @@ fn grow(a: Allocator, out: *std.ArrayList(u8), o: *Open, text: []const u8) Alloc
 
 /// How one chat's reply reads: the message its prompt left open, the request's tools and thinking switch.
 pub const Reading = struct {
+    style: Style = .muse,
     /// The prompt after its last `<|start|>` when no end follows it (`assistant`, or `assistant to=self<|message|>`).
     lead: []const u8 = "",
     tools: []const Value = &.{},
@@ -171,6 +198,15 @@ pub const Reading = struct {
 
     pub fn of(a: Allocator, text: anytype, prompt: []const u32, tools: []const Value, thinking: bool) Allocator.Error!Reading {
         var r: Reading = .{ .tools = tools, .reasoning = thinking };
+        if (detectInkling2(text)) {
+            r.style = .inkling2;
+            const id = text.tokenId(ink_start) orelse return r;
+            const at = std.mem.lastIndexOfScalar(u32, prompt, id) orelse return r;
+            const lead = try text.decode(a, prompt[at + 1 ..]);
+            if (std.mem.indexOf(u8, lead, ink_end) != null or std.mem.indexOf(u8, lead, ink_eos) != null) return r;
+            r.lead = lead;
+            return r;
+        }
         const id = text.tokenId(start) orelse return r;
         const at = std.mem.lastIndexOfScalar(u32, prompt, id) orelse return r;
         const lead = try text.decode(a, prompt[at + 1 ..]);
@@ -179,9 +215,30 @@ pub const Reading = struct {
         return r;
     }
 
+    fn inkKindOf(marker: []const u8) Kind {
+        if (std.mem.eql(u8, marker, ink_thinking)) return .reasoning;
+        if (std.mem.eql(u8, marker, ink_text)) return .answer;
+        return .call;
+    }
+
+    fn inkRecipient(header: []const u8) []const u8 {
+        var h = header;
+        if (findTag(h, 0, ink_start)) |s| h = h[s + ink_start.len ..];
+        return reply_text.pyStrip(h);
+    }
+
     /// A fresh read: new lists (an earlier split's text stays as it was), the lead's open message if it has one.
     fn restart(r: *Reading, a: Allocator) Allocator.Error!void {
         r.st = .{ .ready = true };
+        if (r.style == .inkling2) {
+            for (ink_headers) |hdr| if (findTag(r.lead, 0, hdr)) |m| {
+                r.st.open = .{ .kind = inkKindOf(hdr), .recipient = try a.dupe(u8, inkRecipient(r.lead[0..m])), .b0 = 0, .scan = 0 };
+                r.st.any = true;
+                r.st.first = false;
+                return;
+            };
+            return;
+        }
         const m = findTag(r.lead, 0, message) orelse return;
         var header = r.lead[0..m];
         if (std.mem.startsWith(u8, header, start)) header = header[start.len..];
@@ -217,7 +274,18 @@ pub const Reading = struct {
         switch (o.kind) {
             .reasoning => if (r.reasoning) try grow(a, &r.st.reasoning, o, text),
             .answer => try grow(a, &r.st.answer, o, text),
-            .call => if (done and !o.begun) try grow(a, &r.st.answer, o, (try calls(a, text, o.recipient, r.tools, as)) orelse text),
+            .call => if (done and !o.begun) {
+                if (r.style == .inkling2) {
+                    const stripped = reply_text.pyStrip(text);
+                    const wrapped = if (r.tools.len > 0 and as != .stopped and stripped.len > 0)
+                        try std.fmt.allocPrint(a, "<tool_call>\n{s}\n</tool_call>", .{stripped})
+                    else
+                        stripped;
+                    try grow(a, &r.st.answer, o, wrapped);
+                } else {
+                    try grow(a, &r.st.answer, o, (try calls(a, text, o.recipient, r.tools, as)) orelse text);
+                }
+            },
         }
     }
 
@@ -229,22 +297,41 @@ pub const Reading = struct {
         const st = &r.st;
         while (true) {
             if (st.open == null) { // the next header, the lead before the reply's first
-                const m = findTag(reply, st.at, message) orelse break;
-                var header = reply[st.at..m];
-                if (st.first) header = try std.mem.concat(a, u8, &.{ r.lead, header });
-                if (std.mem.startsWith(u8, header, start)) header = header[start.len..];
-                st.first = false;
-                st.any = true;
-                st.open = .{ .kind = kindOf(header), .recipient = try a.dupe(u8, recipientOf(header) orelse ""), .b0 = m + message.len, .scan = m + message.len };
-                st.at = m + message.len;
+                if (r.style == .inkling2) {
+                    var m: ?usize = null;
+                    var marker: []const u8 = "";
+                    for (ink_headers) |hdr| if (findTag(reply, st.at, hdr)) |at| {
+                        if (m == null or at < m.?) {
+                            m = at;
+                            marker = hdr;
+                        }
+                    };
+                    const at_m = m orelse break;
+                    const rec = inkRecipient(reply[st.at..at_m]);
+                    st.first = false;
+                    st.any = true;
+                    st.open = .{ .kind = inkKindOf(marker), .recipient = try a.dupe(u8, rec), .b0 = at_m + marker.len, .scan = at_m + marker.len };
+                    st.at = at_m + marker.len;
+                } else {
+                    const m = findTag(reply, st.at, message) orelse break;
+                    var header = reply[st.at..m];
+                    if (st.first) header = try std.mem.concat(a, u8, &.{ r.lead, header });
+                    if (std.mem.startsWith(u8, header, start)) header = header[start.len..];
+                    st.first = false;
+                    st.any = true;
+                    st.open = .{ .kind = kindOf(header), .recipient = try a.dupe(u8, recipientOf(header) orelse ""), .b0 = m + message.len, .scan = m + message.len };
+                    st.at = m + message.len;
+                }
             }
             const o = &st.open.?;
             var b1 = reply.len;
             var next = reply.len;
             var closed = false;
-            for (closers) |e| if (findTag(reply[0..b1], o.scan, e)) |at| {
+            const active_closers: []const []const u8 = if (r.style == .inkling2) &ink_closers else &closers;
+            const restart_tok = if (r.style == .inkling2) ink_start else start;
+            for (active_closers) |e| if (findTag(reply[0..b1], o.scan, e)) |at| {
                 b1 = at;
-                next = if (std.mem.eql(u8, e, start)) at else at + e.len;
+                next = if (std.mem.eql(u8, e, restart_tok)) at else at + e.len;
                 closed = true;
             };
             if (closed) {
@@ -253,10 +340,11 @@ pub const Reading = struct {
                 st.at = next;
                 continue;
             }
-            o.scan = @max(o.b0, reply.len -| reach); // a closer begun before the end is found next call
+            const r_reach = if (r.style == .inkling2) ink_reach else reach;
+            o.scan = @max(o.b0, reply.len -| r_reach); // a closer begun before the end is found next call
             if (end == .streaming) {
                 var held: usize = 0;
-                for (closers) |e| held = @max(held, reply_text.partialTag(reply[o.b0..], e));
+                for (active_closers) |e| held = @max(held, reply_text.partialTag(reply[o.b0..], e));
                 try r.body(a, o, reply[o.b0 .. reply.len - held], false, end);
             } else try r.body(a, o, reply[o.b0..], true, end);
             break;

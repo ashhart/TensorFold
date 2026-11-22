@@ -62,6 +62,7 @@ struct MixArgs {
     uint16_t* out;                       // bf16 [nq, rows, C]
     int n_blocks, partial_bf16, nq, rows, C;
     float eps;
+    int blocks_normed;                   // nonzero: `blocks` are fp32 rows, each already divided by its RMS (tf_ink2_loop_prenorm)
 };
 
 constexpr int kMixStage = 4, kMixCols = kMixStage * 512;  // tf_ink2_mix: slices of 512 columns staged at a time
@@ -69,9 +70,10 @@ constexpr int kMixStage = 4, kMixCols = kMixStage * 512;  // tf_ink2_mix: slices
 __device__ __forceinline__ void mixStage(const MixArgs& a, size_t row, int c0, uint16_t (*sb)[kMixCols], unsigned char* sp) {
     const int cols = min(kMixCols, a.C - c0);  // a multiple of 8: C % 128 == 0 (ops.zig)
     const int chunks = cols / 8;               // 16 bytes of bf16 a chunk
-    for (int j = 0; j < a.n_blocks; ++j)
-        for (int i = threadIdx.x; i < chunks; i += blockDim.x)
-            __pipeline_memcpy_async(&sb[j][i * 8], a.blocks[j] + row * a.C + c0 + i * 8, 16);
+    if (!a.blocks_normed)  // normalized blocks are read where they are, fp32
+        for (int j = 0; j < a.n_blocks; ++j)
+            for (int i = threadIdx.x; i < chunks; i += blockDim.x)
+                __pipeline_memcpy_async(&sb[j][i * 8], a.blocks[j] + row * a.C + c0 + i * 8, 16);
     const int pe = a.partial_bf16 ? 2 : 4;
     const unsigned char* p = static_cast<const unsigned char*>(a.partial) + (row * a.C + c0) * pe;
     for (int i = threadIdx.x; i < cols * pe / 16; i += blockDim.x) __pipeline_memcpy_async(sp + i * 16, p + i * 16, 16);
@@ -91,8 +93,8 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
     const size_t row = blockIdx.x;
     const int C = a.C, n = a.n_blocks + 1;
     // block j's column c, staged: thread t reads only the columns t + 512 k it adds, in the order the sums always took
-    auto entry = [&](int j, int i) -> float {
-        if (j < a.n_blocks) return bf(sb[j][i]);
+    auto entry = [&](int j, int i, int c) -> float {
+        if (j < a.n_blocks) return a.blocks_normed ? reinterpret_cast<const float*>(a.blocks[j])[row * C + c] : bf(sb[j][i]);
         return a.partial_bf16 ? bf(reinterpret_cast<const uint16_t*>(sp)[i]) : reinterpret_cast<const float*>(sp)[i];
     };
     if (a.query) {
@@ -103,12 +105,13 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
             for (int i = threadIdx.x; i < kMixCols && c0 + i < C; i += blockDim.x) {
 #pragma unroll
                 for (int j = 0; j < kMaxBlocks + 1; ++j)
-                    if (j < n) { const float x = entry(j, i); ss[j] += x * x; }
+                    if (j < n && !(a.blocks_normed && j < a.n_blocks)) { const float x = entry(j, i, c0 + i); ss[j] += x * x; }
             }
             __syncthreads();
         }
         blockSums<kMaxBlocks + 1>(ss, sh);
-        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) rr[j] = rsqrtf(ss[j] / C + 1e-6f); __syncthreads();
+        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) rr[j] = a.blocks_normed && j < a.n_blocks ? 1.0f : rsqrtf(ss[j] / C + 1e-6f);
+        __syncthreads();
         float v[kV] = {};
         for (int c0 = 0; c0 < C; c0 += kMixCols) {
             mixStage(a, row, c0, sb, sp);
@@ -119,7 +122,7 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
                 for (int q = 0; q < kMaxQueries; ++q) qc[q] = q < a.nq ? a.query[static_cast<size_t>(q) * C + c] : 0.0f;
 #pragma unroll
                 for (int j = 0; j < kMaxBlocks + 1; ++j) if (j < n) {
-                    const float normalized = entry(j, i) * rr[j];
+                    const float normalized = entry(j, i, c) * rr[j];
 #pragma unroll
                     for (int q = 0; q < kMaxQueries; ++q)
                         if (q < a.nq) v[j * (1 + kMaxQueries) + 1 + q] += qc[q] * normalized;
@@ -157,13 +160,13 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
 #pragma unroll
                 for (int j = 0; j < kMaxBlocks + 1; ++j)
                     if (j < n) {
-                        const float x = entry(j, i);
+                        const float x = entry(j, i, c);
 #pragma unroll
                         for (int q = 0; q < kMaxQueries; ++q)
                             if (q < a.nq) h[q] += wts[q][j] * (x * rr[j]);
                     }
             } else {
-                h[0] = entry(a.n_blocks, i);
+                h[0] = entry(a.n_blocks, i, c);
             }
         }
 #pragma unroll
@@ -186,6 +189,118 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
     }
 }
 
+// Single-load register-cached mix for C <= 5 x 512 (one block a row, 512 threads): Pass 0 loads the
+// partial row and every block row ONCE into registers (no SMEM staging, no cp.async round-trips);
+// Passes 1-3 keep tf_ink2_mix's exact thread/column accumulation order and blockSums trees, so output
+// is 100% bit-exact (columns past C contribute h = 0.0f, exactly as the staged path's guards do).
+constexpr int kFastCols = 5;
+extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix_reg(const MixArgs a) {
+    constexpr int kV = (kMaxBlocks + 1) * (1 + kMaxQueries);
+    __shared__ float sh[32 * kV];
+    __shared__ float wts[kMaxQueries][kMaxBlocks + 1];
+    __shared__ float rr[kMaxBlocks + 1];
+    const size_t row = blockIdx.x;
+    const int C = a.C, n = a.n_blocks + 1;
+    const float* prow_f = static_cast<const float*>(a.partial) + row * C;
+    const uint16_t* prow_h = static_cast<const uint16_t*>(a.partial) + row * C;
+    float px[kFastCols];
+    float bx[kMaxBlocks][kFastCols];
+#pragma unroll
+    for (int k = 0; k < kFastCols; ++k) {
+        const int c = threadIdx.x + k * 512;
+        const bool ok = c < C;
+        px[k] = ok ? (a.partial_bf16 ? bf(prow_h[c]) : prow_f[c]) : 0.0f;
+#pragma unroll
+        for (int j = 0; j < kMaxBlocks; ++j) {
+            bx[j][k] = (ok && j < a.n_blocks)
+                           ? (a.blocks_normed ? reinterpret_cast<const float*>(a.blocks[j])[row * C + c]
+                                              : bf(a.blocks[j][row * C + c]))
+                           : 0.0f;
+        }
+    }
+    auto src = [&](int j, int k) -> float { return j < a.n_blocks ? bx[j][k] : px[k]; };
+    if (a.query) {
+        float ss[kMaxBlocks + 1] = {};
+#pragma unroll
+        for (int k = 0; k < kFastCols; ++k) {
+            const int c = threadIdx.x + k * 512;
+            if (c >= C) continue;
+#pragma unroll
+            for (int j = 0; j < kMaxBlocks + 1; ++j)
+                if (j < n && !(a.blocks_normed && j < a.n_blocks)) { const float x = src(j, k); ss[j] += x * x; }
+        }
+        blockSums<kMaxBlocks + 1>(ss, sh);
+        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) rr[j] = a.blocks_normed && j < a.n_blocks ? 1.0f : rsqrtf(ss[j] / C + 1e-6f);
+        __syncthreads();
+        float v[kV] = {};
+#pragma unroll
+        for (int k = 0; k < kFastCols; ++k) {
+            const int c = threadIdx.x + k * 512;
+            if (c >= C) continue;
+            float qc[kMaxQueries];
+#pragma unroll
+            for (int q = 0; q < kMaxQueries; ++q) qc[q] = q < a.nq ? a.query[static_cast<size_t>(q) * C + c] : 0.0f;
+#pragma unroll
+            for (int j = 0; j < kMaxBlocks + 1; ++j) if (j < n) {
+                const float normalized = src(j, k) * rr[j];
+#pragma unroll
+                for (int q = 0; q < kMaxQueries; ++q)
+                    if (q < a.nq) v[j * (1 + kMaxQueries) + 1 + q] += qc[q] * normalized;
+            }
+        }
+        blockSums<kV>(v, sh);
+        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) for (int q = 0; q < a.nq; ++q) wts[q][j] =
+            v[j * (1 + kMaxQueries) + 1 + q] * rsqrtf(static_cast<float>(C));
+        __syncthreads();
+        if (threadIdx.x < a.nq) {
+            float* l = wts[threadIdx.x];
+            float m = -INFINITY, t = 0.0f;
+            for (int j = 0; j < n; ++j) m = fmaxf(m, l[j]);
+            for (int j = 0; j < n; ++j) t += expf(l[j] - m);
+            for (int j = 0; j < n; ++j) l[j] = expf(l[j] - m) / t;
+        }
+        __syncthreads();
+    }
+    float s[kMaxQueries] = {0.0f, 0.0f, 0.0f};
+    float hc[kMaxQueries][kFastCols];
+#pragma unroll
+    for (int k = 0; k < kFastCols; ++k) {
+        const int c = threadIdx.x + k * 512;
+        float h[kMaxQueries] = {0.0f, 0.0f, 0.0f};
+        if (c < C) {
+            if (a.query) {
+#pragma unroll
+                for (int j = 0; j < kMaxBlocks + 1; ++j)
+                    if (j < n) {
+                        const float x = src(j, k);
+#pragma unroll
+                        for (int q = 0; q < kMaxQueries; ++q)
+                            if (q < a.nq) h[q] += wts[q][j] * (x * rr[j]);
+                    }
+            } else {
+                h[0] = px[k];
+            }
+        }
+#pragma unroll
+        for (int q = 0; q < kMaxQueries; ++q) {
+            s[q] += h[q] * h[q];
+            hc[q][k] = h[q];
+        }
+    }
+    blockSums<kMaxQueries>(s, sh);
+#pragma unroll
+    for (int q = 0; q < kMaxQueries; ++q) {
+        if (q >= a.nq) break;
+        const float r = rsqrtf(s[q] / C + a.eps);
+        uint16_t* o = a.out + (static_cast<size_t>(q) * a.rows + row) * C;
+#pragma unroll
+        for (int k = 0; k < kFastCols; ++k) {
+            const int c = threadIdx.x + k * 512;
+            if (c < C) o[c] = tobf(bf(a.norm[q][c]) * (hc[q][k] * r));
+        }
+    }
+}
+
 // Wide calls (prompt chunks, wide verifies): the block-by-block mix, which hides its loads behind other rows.
 extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix_rows(const MixArgs a) {
     __shared__ float sh[32 * (1 + kMaxQueries)];
@@ -194,12 +309,14 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix_rows(const MixArgs
     const size_t row = blockIdx.x;
     const int C = a.C, n = a.n_blocks + 1;
     auto entry = [&](int j, int c) -> float {
-        if (j < a.n_blocks) return bf(a.blocks[j][row * C + c]);
+        if (j < a.n_blocks)
+            return a.blocks_normed ? reinterpret_cast<const float*>(a.blocks[j])[row * C + c] : bf(a.blocks[j][row * C + c]);
         return a.partial_bf16 ? bf(static_cast<const uint16_t*>(a.partial)[row * C + c])
                               : static_cast<const float*>(a.partial)[row * C + c];
     };
     if (a.query) {
         for (int j = 0; j < n; ++j) {
+            if (j < a.n_blocks && a.blocks_normed) { if (threadIdx.x == 0) rr[j] = 1.0f; continue; }
             float ss[1] = {0.0f};
             for (int c = threadIdx.x; c < C; c += blockDim.x) { const float x = entry(j, c); ss[0] += x * x; }
             blockSums<1>(ss, sh); if (threadIdx.x == 0) rr[j] = rsqrtf(ss[0] / C + 1e-6f);
@@ -320,6 +437,73 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_topk(const float* __re
     }
 }
 
+// Router picks per row (128-expert fast path, 1 expert a thread): top-K of score + bias (ties to the lower id), weights score / sum(scores) * scale (fp32).
+extern "C" __global__ void __launch_bounds__(128) tf_ink2_topk_128(const float* __restrict__ scores, const float* __restrict__ bias,
+                                                              int* __restrict__ pick, float* __restrict__ wts, int E, int K,
+                                                              float scale) {
+    __shared__ float bv[16];
+    __shared__ int bi[16];
+    __shared__ float chosen[32];
+    __shared__ int chosen_id[32];
+    const size_t row = blockIdx.x;
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    float sel[8];
+    const int per = (E + blockDim.x - 1) / blockDim.x;
+    for (int i = 0; i < per && i < 8; ++i) {
+        const int e = threadIdx.x + i * blockDim.x;
+        sel[i] = e < E ? scores[row * E + e] + bias[e] : -INFINITY;
+    }
+    for (int k = 0; k < K; ++k) {
+        float v = -INFINITY;
+        int id = 0x7fffffff;
+        for (int i = 0; i < per && i < 8; ++i) {
+            const int e = threadIdx.x + i * blockDim.x;
+            if (e < E && (sel[i] > v || (sel[i] == v && e < id))) { v = sel[i]; id = e; }
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, v, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, id, o);
+            if (ov > v || (ov == v && oi < id)) { v = ov; id = oi; }
+        }
+        if (lane == 0) { bv[w] = v; bi[w] = id; }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float m = bv[0];
+            int mi = bi[0];
+            for (int i = 1; i < nw; ++i)
+                if (bv[i] > m || (bv[i] == m && bi[i] < mi)) { m = bv[i]; mi = bi[i]; }
+            chosen_id[k] = mi;
+            chosen[k] = scores[row * E + mi];
+        }
+        __syncthreads();
+        const int got = chosen_id[k];
+        if (got % blockDim.x == static_cast<int>(threadIdx.x)) sel[got / blockDim.x] = -INFINITY;
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        float t = 0.0f;
+        for (int k = 0; k < K; ++k) t += chosen[k];
+        for (int k = 0; k < K; ++k) {
+            pick[row * K + k] = chosen_id[k];
+            wts[row * K + k] = chosen[k] / (t + 1e-20f) * scale;
+        }
+    }
+}
+
+// Split one [rows, na+nb+nc] bf16 row stream into three contiguous [rows, n] outputs (fused Q/R/Gate readout).
+extern "C" __global__ void __launch_bounds__(256) tf_ink2_split3(const uint16_t* __restrict__ src, uint16_t* __restrict__ a,
+                                                                   uint16_t* __restrict__ b, uint16_t* __restrict__ c,
+                                                                   int rows, int na, int nb, int nc) {
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t total = static_cast<size_t>(rows) * (na + nb + nc);
+    if (i >= total) return;
+    const size_t row = i / (na + nb + nc), d = i - row * (na + nb + nc);
+    const size_t base = row * (na + nb + nc);
+    if (d < (size_t)na) a[row * na + d] = src[base + d];
+    else if (d < (size_t)(na + nb)) b[row * nb + (d - na)] = src[base + d];
+    else c[row * nc + (d - na - nb)] = src[base + d];
+}
+
 // The shared gate/up epilogue with Inkling's softcapped SwiGLU: gcap tanh(g/gcap) sigmoid(g) ucap tanh(u/ucap).
 struct GateUpArgs {
     const float* z;      // [(mat * sk + split) * P + p] * N + col
@@ -379,6 +563,8 @@ struct ConvArgs {
     float* hist;            // fp32 [rows, C]: each row's input as the state keeps it (null: none)
     long long part_stride;
     long long state_stride;  // elements between the streams' states
+    long long hist_stride;   // 0: hist rows are the call's rows; else elements between the streams' hist regions,
+                             // each holding its stream's rows from 0 (row t of stream s at hist + s.slot * stride + t - row0)
     int parts, x_bf16, round_in, heads, C, rows, mode;  // mode 0: out = y; 1: resid = base + bf16(y); 2: resid + bf16(y)
 };
 
@@ -402,7 +588,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_ink2_conv(const ConvArgs a)
         const size_t at = static_cast<size_t>(t) * C + c;
         const float x = input(t);
         float y;
-        if (a.hist) a.hist[at] = x;
+        if (a.hist) a.hist[a.hist_stride ? sg.z * a.hist_stride + static_cast<size_t>(t - sg.x) * C + c : at] = x;
         if (a.dyn) {
             const float* d = a.dyn + (static_cast<size_t>(t) * a.heads + hd) * kConvTaps;
             y = (bf(a.w[c]) + d[0]) * x + (bf(a.w[C + c]) + d[1]) * h2;

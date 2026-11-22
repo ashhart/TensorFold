@@ -162,29 +162,187 @@ __device__ __forceinline__ void combine(const int32_t* __restrict__ pick, const 
   out[i] = __float2bfloat16_rn(total);
 }
 
+// combine, 8 adjacent columns a thread (hidden % 8 == 0, 16-byte aligned rows): one 16-byte load a pair, the
+// pairs taken in the same ascending-expert order, each column's terms in the same __fmul_rn/__fadd_rn order.
+__device__ __forceinline__ void combine8(const int32_t* __restrict__ pick, const float* __restrict__ wts,
+                                         const __nv_bfloat16* __restrict__ ey, __nv_bfloat16* __restrict__ out,
+                                         int rows, int hidden, int slots, int experts) {
+  const int groups = hidden / 8;
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= rows * groups) return;
+  const int r = i / groups, h = (i - r * groups) * 8;
+  float total[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+  uint32_t seen = 0;
+  for (int n = 0; n < slots; ++n) {
+    int best = -1;
+    int32_t id = 0;
+    for (int s = 0; s < slots; ++s) {
+      if (seen & (1u << s)) continue;
+      const int32_t expert = pick[r * slots + s];
+      if (expert < 0 || expert >= experts) continue;
+      if (best < 0 || expert < id) {
+        best = s;
+        id = expert;
+      }
+    }
+    if (best < 0) break;
+    seen |= 1u << best;
+    const int pair = r * slots + best;
+    const float w = __ldg(wts + pair);
+    const uint4 v = __ldg(reinterpret_cast<const uint4*>(ey + static_cast<size_t>(pair) * hidden + h));
+    const uint32_t u[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      total[2 * k] = __fadd_rn(total[2 * k], __fmul_rn(w, __uint_as_float(u[k] << 16)));
+      total[2 * k + 1] = __fadd_rn(total[2 * k + 1], __fmul_rn(w, __uint_as_float(u[k] & 0xffff0000u)));
+    }
+  }
+  uint32_t o[4];
+#pragma unroll
+  for (int k = 0; k < 4; ++k)
+    o[k] = static_cast<uint32_t>(__bfloat16_as_ushort(__float2bfloat16_rn(total[2 * k]))) |
+           (static_cast<uint32_t>(__bfloat16_as_ushort(__float2bfloat16_rn(total[2 * k + 1]))) << 16);
+  *reinterpret_cast<uint4*>(out + static_cast<size_t>(r) * hidden + h) = make_uint4(o[0], o[1], o[2], o[3]);
+}
+
+constexpr int kPlanChunk = 1024;  // the multi-block plan: the most pairs a chunk (its picks staged in shared memory)
+
 } // namespace ink2o
 
 // Pair indices are row * slots + slot. Items hold a physical expert ID, a global member offset and a count.
-extern "C" __global__ void __launch_bounds__(32) tf_ink2moe_plan(const int32_t* __restrict__ pick,
+// Single-block 256-thread parallel counting sort: shared-memory counts, exclusive prefix sums, then one
+// thread a expert writes its members by scanning pairs in ascending order, so `items`, `members` and
+// `item_count` are 100% bit-identical to the serial scan (experts <= 512, arbitrary pairs).
+extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_plan(const int32_t* __restrict__ pick,
     int* __restrict__ items, int* __restrict__ members, int* __restrict__ item_count,
     int rows, int slots, int experts, int tile) {
-  if (blockIdx.x || threadIdx.x) return;
+  if (blockIdx.x) return;
+  const int tid = threadIdx.x;
   const int pairs = rows * slots;
-  int used = 0, at = 0;
-  for (int e = 0; e < experts; ++e) {
-    const int first = used;
-    for (int pair = 0; pair < pairs; ++pair) {
-      if (pick[pair] == e) members[used++] = pair;
+  __shared__ int cnt[512];
+  __shared__ int off[512];
+  __shared__ int item_off[512];
+  __shared__ int spick[256];
+  for (int e = tid; e < experts; e += 256) cnt[e] = 0;
+  __syncthreads();
+  for (int p = tid; p < pairs; p += 256) {
+    const int e = pick[p];
+    if (e >= 0 && e < experts) atomicAdd(&cnt[e], 1);
+  }
+  __syncthreads();
+  if (tid == 0) {
+    int run = 0, total_items = 0;
+    for (int e = 0; e < experts; ++e) {
+      off[e] = run;
+      run += cnt[e];
+      item_off[e] = total_items;
+      total_items += (cnt[e] + tile - 1) / tile;
     }
-    const int count = used - first;
-    for (int off = 0; off < count; off += tile) {
-      items[3 * at] = e;
-      items[3 * at + 1] = first + off;
-      items[3 * at + 2] = (count - off < tile) ? count - off : tile;
-      ++at;
+    *item_count = total_items;
+  }
+  __syncthreads();
+  if (pairs <= 256) {
+    if (tid < pairs) spick[tid] = pick[tid];
+    __syncthreads();
+    for (int e = tid; e < experts; e += 256) {
+      int k = 0;
+      for (int pair = 0; pair < pairs; ++pair)
+        if (spick[pair] == e) members[off[e] + k++] = pair;
+      const int nt = (cnt[e] + tile - 1) / tile;
+      for (int t = 0; t < nt; ++t) {
+        items[3 * (item_off[e] + t)] = e;
+        items[3 * (item_off[e] + t) + 1] = off[e] + t * tile;
+        items[3 * (item_off[e] + t) + 2] = (cnt[e] - t * tile < tile) ? cnt[e] - t * tile : tile;
+      }
+    }
+  } else {
+    for (int e = tid; e < experts; e += 256) {
+      int k = 0;
+      for (int pair = 0; pair < pairs; ++pair)
+        if (pick[pair] == e) members[off[e] + k++] = pair;
+      const int nt = (cnt[e] + tile - 1) / tile;
+      for (int t = 0; t < nt; ++t) {
+        items[3 * (item_off[e] + t)] = e;
+        items[3 * (item_off[e] + t) + 1] = off[e] + t * tile;
+        items[3 * (item_off[e] + t) + 2] = (cnt[e] - t * tile < tile) ? cnt[e] - t * tile : tile;
+      }
     }
   }
-  *item_count = at;
+}
+
+// The multi-block plan (wide calls): the same items, members and item_count as tf_ink2moe_plan, bit for bit.
+// Pass 1, a block a chunk of `chunk` pairs: the chunk's per-expert counts into hist[chunk][expert].
+extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_plan_count(const int32_t* __restrict__ pick,
+    int* __restrict__ hist, int pairs, int experts, int chunk) {
+  __shared__ int cnt[512];
+  const int tid = threadIdx.x, b = blockIdx.x;
+  const int p0 = b * chunk, p1 = min(pairs, p0 + chunk);
+  for (int e = tid; e < experts; e += 256) cnt[e] = 0;
+  __syncthreads();
+  for (int p = p0 + tid; p < p1; p += 256) {
+    const int e = pick[p];
+    if (e >= 0 && e < experts) atomicAdd(&cnt[e], 1);
+  }
+  __syncthreads();
+  for (int e = tid; e < experts; e += 256) hist[b * experts + e] = cnt[e];
+}
+
+// Pass 2, one block: each expert's total, the serial plan's offsets and items; hist[b][e] becomes the first member
+// slot of chunk b's pairs of expert e (chunks ascending, so pair order holds across chunks).
+extern "C" __global__ void __launch_bounds__(512) tf_ink2moe_plan_scan(int* __restrict__ hist, int* __restrict__ items,
+    int* __restrict__ item_count, int blocks, int experts, int tile) {
+  __shared__ int cnt[512];
+  __shared__ int off[512];
+  __shared__ int item_off[512];
+  const int e = threadIdx.x;
+  if (e < experts) {
+    int c = 0;
+    for (int b = 0; b < blocks; ++b) c += hist[b * experts + e];
+    cnt[e] = c;
+  }
+  __syncthreads();
+  if (e == 0) {
+    int run = 0, total_items = 0;
+    for (int x = 0; x < experts; ++x) {
+      off[x] = run;
+      run += cnt[x];
+      item_off[x] = total_items;
+      total_items += (cnt[x] + tile - 1) / tile;
+    }
+    *item_count = total_items;
+  }
+  __syncthreads();
+  if (e >= experts) return;
+  int run = off[e];
+  for (int b = 0; b < blocks; ++b) {
+    const int h = hist[b * experts + e];
+    hist[b * experts + e] = run;
+    run += h;
+  }
+  const int nt = (cnt[e] + tile - 1) / tile;
+  for (int t = 0; t < nt; ++t) {
+    items[3 * (item_off[e] + t)] = e;
+    items[3 * (item_off[e] + t) + 1] = off[e] + t * tile;
+    items[3 * (item_off[e] + t) + 2] = (cnt[e] - t * tile < tile) ? cnt[e] - t * tile : tile;
+  }
+}
+
+// Pass 3, a block a chunk: each pair at its chunk's slot for its expert plus its rank among the chunk's earlier
+// pairs of that expert, which is the serial scan's ascending pair order.
+extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_plan_scatter(const int32_t* __restrict__ pick,
+    const int* __restrict__ hist, int* __restrict__ members, int pairs, int experts, int chunk) {
+  __shared__ int sp[ink2o::kPlanChunk];
+  const int tid = threadIdx.x, b = blockIdx.x;
+  const int p0 = b * chunk, n = min(pairs - p0, chunk);
+  for (int i = tid; i < n; i += 256) sp[i] = pick[p0 + i];
+  __syncthreads();
+  for (int i = tid; i < n; i += 256) {
+    const int e = sp[i];
+    if (e < 0 || e >= experts) continue;
+    int k = 0;
+    for (int j = 0; j < i; ++j) k += sp[j] == e;
+    members[hist[b * experts + e] + k] = p0 + i;
+  }
 }
 
 #define TF_INK2_MOE(NAME, RT)                                                                                         \
@@ -201,4 +359,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_act(const __nv_bflo
 extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_combine(const int32_t* p, const float* w, const __nv_bfloat16* e,
     __nv_bfloat16* o, int rows, int hidden, int slots, int experts) {
   ink2o::combine(p, w, e, o, rows, hidden, slots, experts);
+}
+extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_combine8(const int32_t* p, const float* w, const __nv_bfloat16* e,
+    __nv_bfloat16* o, int rows, int hidden, int slots, int experts) {
+  ink2o::combine8(p, w, e, o, rows, hidden, slots, experts);
 }

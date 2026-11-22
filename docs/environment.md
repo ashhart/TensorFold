@@ -24,6 +24,12 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
+| `TF_INKLING2_BF12` | Exactly `0` or `1`; default off: Inkling 2 Mini's wo, wr, dynamic-convolution and output rows are packed as lossless BF12 at load and run on the tensor-core BF12 matmul for up to 16 rows (needs the sm_121a kernel set) |
+| `TF_INKLING2_NVFP4_OMMA` | Exactly `0` or `1`; default off: the NVFP4 layers' routed experts are repacked at load and run as W4A4 on sm_121a OMMA.SF (lossy; the MXFP8 layers keep their kernels) |
+| `TF_INKLING2_GRAPH` | Exactly `0` or `1`; default on: Inkling 2 CUDA decode replays one captured graph a token |
+| `TF_INKLING2_DSPARK_LANDING` | Exactly `0` or `1`; default on: DSpark calibrates its per-step hold chances from landed draft history |
+| `TF_INKLING2_DSPARK_SLACK` | Whole u32 count of extra drafts a DSpark hold offers past the stream's last grant; default 2 |
+| `TF_INKLING2_MULTI_EXACT` | Exactly `0` or `1`; default off: multi-stream forwards with 64+ rows use the sk=1 BF12 path (`1` keeps the 64-row decode split-K pinning) |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
 | `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. |

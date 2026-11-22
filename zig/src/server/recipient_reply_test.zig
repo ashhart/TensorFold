@@ -429,3 +429,40 @@ test "recipient replies: a reply with no markup streams as it comes; one that ma
     for ([_][]const u8{ " t", " to", " to=se", " <" }) |p| try std.testing.expectEqualStrings("", (try h.split(a, p, .streaming)).answer);
     try std.testing.expectEqualStrings("hi", (try h.split(a, " to=user<|message|>hi", .streaming)).answer);
 }
+
+test "inkling2 replies: thinking + text + tool calls in streaming and non-streaming without token leaks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, weather[",\"tools\":".len..])).ok.array;
+
+    const full_reply = "<|message_model|><|content_thinking|>Need to think.<|end_message|><|message_model|><|content_text|>Here is the answer.<|end_message|><|content_model_end_sampling|>";
+    var r_full: recipient_reply.Reading = .{ .style = .inkling2, .reasoning = true };
+    const s_full = try r_full.split(a, full_reply, .ended);
+    try std.testing.expectEqualStrings("Need to think.", s_full.reasoning);
+    try std.testing.expectEqualStrings("Here is the answer.", s_full.answer);
+
+    // Streamed character by character: must never leak any <|...|> marker and must match fresh split
+    var r_stream: recipient_reply.Reading = .{ .style = .inkling2, .reasoning = true };
+    for (1..full_reply.len + 1) |n| {
+        const s = try r_stream.split(a, full_reply[0..n], .streaming);
+        try std.testing.expect(std.mem.indexOf(u8, s.reasoning, "<|") == null);
+        try std.testing.expect(std.mem.indexOf(u8, s.answer, "<|") == null);
+    }
+    const s_done = try r_stream.split(a, full_reply, .ended);
+    try std.testing.expectEqualStrings("Need to think.", s_done.reasoning);
+    try std.testing.expectEqualStrings("Here is the answer.", s_done.answer);
+
+    // Thinking off with prefilled <|content_text|> lead
+    var r_off: recipient_reply.Reading = .{ .style = .inkling2, .lead = "<|content_text|>", .reasoning = false };
+    const s_off = try r_off.split(a, "Hi there!<|end_message|>", .ended);
+    try std.testing.expectEqualStrings("", s_off.reasoning);
+    try std.testing.expectEqualStrings("Hi there!", s_off.answer);
+
+    // Tool call wrapped for tool_parse
+    const tool_reply = "<|message_model|>weather<|content_invoke_tool_json|>{\"name\":\"weather\",\"args\":{\"city\":\"Oslo\"}}<|end_message|>";
+    var r_tool: recipient_reply.Reading = .{ .style = .inkling2, .tools = tools, .reasoning = true };
+    const s_tool = try r_tool.split(a, tool_reply, .ended);
+    try std.testing.expectEqualStrings("", s_tool.reasoning);
+    try std.testing.expectEqualStrings("<tool_call>\n{\"name\":\"weather\",\"args\":{\"city\":\"Oslo\"}}\n</tool_call>", s_tool.answer);
+}

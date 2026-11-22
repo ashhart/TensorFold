@@ -168,6 +168,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations
     .{ .name = "inkling2_loop_math", .src = "inkling2/loop_math", .flags = &.{"-O3"} }, // Mini residuals, cross-pass messages, gates and split QKV
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue }, // ours: Inkling 2's vision tower glue and attention
+    .{ .name = "inkling2_bf12", .src = "inkling2/bf12", .flags = &.{"-O3"} }, // ours: Mini's lossless 12-bit bf16 dense linears (TF_INKLING2_BF12=1)
+    .{ .name = "inkling2_dspark", .src = "inkling2/dspark", .flags = glue }, // ours: Mini's CUDA DSpark block-8 drafter
+    .{ .name = "inkling2_sm121a_moe", .src = "inkling2/sm121a_moe", .flags = &.{ "-O3", "--expt-relaxed-constexpr" }, .arch_specific = true, .min_sm = 120 }, // ours: sm_121a NVFP4 OMMA.SF routed experts (TF_INKLING2_NVFP4_OMMA=1) and MXFP8 QMMA GEMMs
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts

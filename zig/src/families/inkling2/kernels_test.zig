@@ -24,7 +24,6 @@ test "inkling2 kernels: chunks and scratch at the context targets (1M x 1 and 8 
     try t.expectEqual(@as(usize, 24 * 64 * 520), k.partialBytes(1, 24, 64));
     // a 2,048-row prompt chunk at 1M depth: 1.6 GB of partials, 100 MiB of table
     try t.expectEqual(@as(usize, 1635778560), k.partialBytes(2048, 24, 64));
-    try t.expectEqual(@as(usize, 100663296), k.tableBytes(2048, 24));
     const s = k.Layer.sliding(1024, 2048);
     try t.expectEqual(@as(u32, 3072), s.ring);
     try t.expect(s.ring % k.tile_keys == 0 and s.ring >= 1024 + 2048 - 1);
@@ -60,36 +59,35 @@ test "inkling2 kernels: one decode row at 1M splits 64 chunks into sub-chunks fo
             return .{ .d = drv, .handle = @ptrFromInt(i) };
         }
     };
-    const kern: k.Kernels = .{ .mod = .{ .d = &d, .handle = null }, .prep = fun.of(&d, 1), .rel_table = fun.of(&d, 2), .attn = fun.of(&d, 3), .merge = fun.of(&d, 4), .attn_fold = fun.of(&d, 3), .pmod = .{ .d = &d, .handle = null }, .attn_prompt = fun.of(&d, 3) };
+    const kern: k.Kernels = .{ .mod = .{ .d = &d, .handle = null }, .prep = fun.of(&d, 1), .prep_i8 = fun.of(&d, 1), .attn = fun.of(&d, 3), .attn_i8 = fun.of(&d, 3), .merge = fun.of(&d, 4), .attn_fold = fun.of(&d, 3), .attn_fold_i8 = fun.of(&d, 3), .pmod = .{ .d = &d, .handle = null }, .attn_prompt = fun.of(&d, 3), .attn_prompt_i8 = fun.of(&d, 3), .attn_prompt_sliding = fun.of(&d, 3) };
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     const r: k.Rows = .{ .rows = 1, .heads = 24, .kv_heads = 4, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 1048575 };
     const l = k.Layer.global(1048576);
-    try k.prep(&kern, s, r, l, .{ .qk_clip = 22.6, .rel_clip = 8, .floor = 128000, .alpha = 0.1, .eps = 1e-6 }, .{ 0, 0, 0, 0 }, .{ 0, 0 }, 0, 0, .{ .k = 0, .v = 0 });
-    try k.relTable(&kern, s, r, 0, 0, 0);
+    try k.prep(&kern, s, r, l, .{ .qk_clip = 22.6, .rel_clip = 8, .floor = 128000, .alpha = 0.1, .eps = 1e-6 }, .{ 0, 0, 0, 0 }, .{ 24 * 128, 24 * 16 }, .{ 0, 0 }, 0, 0, .{ .k = 0, .v = 0 });
     const all = 24 * 64 * k.subs;
-    try k.attend(&kern, s, r, l, 64, all, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
-    try t.expectError(error.Inkling2Partials, k.attend(&kern, s, r, l, 63, all, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
-    try t.expectEqual(@as(usize, 4), Fake.count);
+    try k.attend(&kern, s, r, l, 64, all, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0, 24 * 128, 0);
+    try t.expectError(error.Inkling2Partials, k.attend(&kern, s, r, l, 63, all, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0, 24 * 128, 0));
+    // no bias-table launch: prep, the split attention, the merge
+    try t.expectEqual(@as(usize, 3), Fake.count);
     try t.expectEqual([3]u32{ 1, 32, 1 }, Fake.grids[0]);
-    try t.expectEqual([3]u32{ 24, 1, 1 }, Fake.grids[1]);
     try t.expectEqual([3]u32{ 1, 4, 64 * k.subs }, Fake.grids[2]);
     try t.expectEqual([3]u32{ 24, 1, 1 }, Fake.grids[3]);
-    try t.expectEqual([4]u32{ 32, 256, 128, 128 }, Fake.blocks[0..4].*);
-    try t.expectEqual([4]u32{ 0, 0, 0, 0 }, Fake.shared[0..4].*);
+    try t.expectEqual([3]u32{ 32, 128, 128 }, .{ Fake.blocks[0], Fake.blocks[2], Fake.blocks[3] });
+    try t.expectEqual([3]u32{ 0, 0, 0 }, .{ Fake.shared[0], Fake.shared[2], Fake.shared[3] });
     // too few partials for every sub-chunk: one block a chunk, its sub-chunks folded inside
-    try k.attend(&kern, s, r, l, 64, all - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, r, l, 64, all - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0, 24 * 128, 0);
     try t.expectEqual([3]u32{ 1, 4, 64 }, Fake.grids[2]);
     try t.expectEqual(@as(u32, k.prompt_threads), Fake.blocks[2]);
     try t.expectEqual(@as(u32, 98304), Fake.shared[2]);
     // two streams' rows keep the fold kernel; a 2,048-row prompt call takes 96 blocks of 128 pairs a key head
     var two = r;
     two.streams = 2;
-    try k.attend(&kern, s, two, l, 64, all - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, two, l, 64, all - 1, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0, 24 * 128, 0);
     try t.expectEqual(@as(u32, 128), Fake.blocks[2]);
     try t.expectEqual(@as(u32, 0), Fake.shared[2]);
     var prompt = r;
     prompt.rows = 2048;
-    try k.attend(&kern, s, prompt, l, 64, 2048 * 24 * 64, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try k.attend(&kern, s, prompt, l, 64, 2048 * 24 * 64, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0, 24 * 128, 0);
     try t.expectEqual([3]u32{ 96, 4, 64 }, Fake.grids[2]);
     try t.expect(!k.split(.{ .rows = 65, .heads = 24, .kv_heads = 4, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 7, .last_pos = 100 }, 1, 1 << 30));
 }

@@ -235,9 +235,10 @@ pub const Server = struct {
         srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
-        if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
+        if (srv.recipients and srv.effort_levels.len > 0)
+            srv.off_effort = fields.coerceEffort(if (recipient_reply.detectInkling2(text)) "none" else "minimal", srv.effort_levels);
         // MiniMax-M3's template decides on its own; thinking off closes the block in the prompt (prompt.zig)
-        srv.thinking_switch = minimax or std.mem.indexOf(u8, source, "enable_thinking") != null or
+        srv.thinking_switch = minimax or recipient_reply.detectInkling2(text) or std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
@@ -251,7 +252,7 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
-        srv.info.thinking_applicable = srv.close_id != null;
+        srv.info.thinking_applicable = srv.close_id != null or recipient_reply.detectInkling2(text);
         srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
