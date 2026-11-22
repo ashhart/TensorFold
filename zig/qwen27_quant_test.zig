@@ -377,27 +377,52 @@ test "qwen27 quant: a split that cannot fit takes fewer blocks and never changes
     try t.expectEqual(@as(u8, 4), lane_projection.blockTm(4, 4));
     try t.expectEqual(@as(u8, 2), lane_projection.blockTm(8, 4));
     try t.expectEqual(@as(u8, 2), lane_projection.blockTm(8, 2));
-    try t.expectEqual(@as(u8, 1), quant.promptTm(false, 2));
-    for ([_]u8{ 1, 2, 4 }, 0..) |tm, index| try t.expectEqual(tm, quant.promptTm(true, index));
+    try t.expectEqual(@as(u8, 1), quant.promptTm(quant.longPrompt("Apple M3 Ultra", false), 4));
 }
 
-test "qwen27 quant: opted-in prompt rows keep each width's split and dispatch whole blocks" {
-    for ([_]u8{ 1, 2, 4 }) |tm| for ([_]u8{ 4, 6, 8 }) |bits| {
-        var r: mtl.Record = .{};
-        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true, .prompt = true, .prompt_tm = tm };
-        defer k.deinit();
-        var p = matrix(&r, 34816);
-        p.bits = bits;
-        p.slices = 2;
-        try launch(&k, &r, p, 2048);
-        var it = k.lanes.keyIterator();
-        const key = it.next().?.*;
-        try t.expectEqual(tm, key.tm);
-        // the 4-bit path already takes the prompt split; 6- and 8-bit keep the split that fixes their bits today
-        try t.expectEqual(@as(u32, if (bits == 4) 1 else 2), key.slices);
-        try t.expectEqual(@as(usize, 1), r.count);
-        try t.expectEqual(@as(usize, 128 / tm), r.launches[0].grid.height);
+test "qwen27 quant: M5 prompt schedules from explicit and default block counts" {
+    const env = @import("sys").environment;
+    const shapes = [_]struct { n: u32, k: u32, prompt_sk: u32, decode_sk: u32 }{
+        .{ .n = 34816, .k = 5120, .prompt_sk = 1, .decode_sk = 2 },
+        .{ .n = 10240, .k = 5120, .prompt_sk = 1, .decode_sk = 4 },
+        .{ .n = 5120, .k = 17408, .prompt_sk = 2, .decode_sk = 8 },
+        .{ .n = 5120, .k = 6144, .prompt_sk = 2, .decode_sk = 8 },
+        .{ .n = 12288, .k = 5120, .prompt_sk = 2, .decode_sk = 4 },
+        .{ .n = 6240, .k = 5120, .prompt_sk = 4, .decode_sk = 8 },
+        .{ .n = 2048, .k = 5120, .prompt_sk = 8, .decode_sk = 8 },
     };
+    const long = quant.longPrompt("Apple M5 Ultra", true);
+    for ([_]?[]const u8{ "1", "2", "4", null, "" }, [_]u8{ 1, 2, 4, 4, 1 }) |raw, want| {
+        const blocks = try env.value(u8, "TF_Q27_PROMPT_TM", raw, if (raw == null) 4 else 1);
+        try t.expectEqual(want, blocks);
+        for (shapes) |shape| for ([_]u8{ 4, 6, 8 }) |bits| {
+            var r: mtl.Record = .{ .tensor_units = true };
+            var k = quant.Kernels{
+                .allocator = a,
+                .device = r.device(),
+                .long_prompt = long,
+                .prompt = true,
+                .prompt_tm = quant.promptTm(long, blocks),
+            };
+            defer k.deinit();
+            var p = matrix(&r, shape.n);
+            p.k = shape.k;
+            p.bits = bits;
+            p.slices = if (bits == 4 and shape.n == 6240) 4 else shape.decode_sk;
+            const sk = if (bits == 4) shape.prompt_sk else shape.decode_sk;
+            const tm = if (sk == 8 and want == 4) 2 else want;
+            for ([_]u32{ 129, 512, 1024, 2048 }) |rows| {
+                r.count = 0;
+                try launch(&k, &r, p, rows);
+                var it = k.lanes.keyIterator();
+                const key = it.next().?.*;
+                try t.expectEqual(tm, key.tm);
+                try t.expectEqual(sk, key.slices);
+                try t.expectEqual(@as(usize, 1), r.count);
+                try t.expectEqual(@as(usize, (rows + 16 * @as(u32, tm) - 1) / (16 * @as(u32, tm))), r.launches[0].grid.height);
+            }
+        };
+    }
 }
 
 test "qwen27 quant: decoded rows and an eight-way split stay within their block limits" {

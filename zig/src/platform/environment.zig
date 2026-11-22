@@ -23,8 +23,10 @@ pub const Rule = struct {
     only: []const u64 = &.{},
     /// A `.word` setting matches its texts in any case.
     ignore_case: bool = false,
-    /// A `.word` setting's accepted texts; the parsed value is the matching index.
+    /// A `.word` setting's accepted texts.
     words: []const []const u8 = &.{},
+    /// A word returns its mapped value when supplied, otherwise its index.
+    word_values: []const u64 = &.{},
     /// A legacy name that is ignored, and so never refused, while its canonical name is set.
     alias_of: ?[:0]const u8 = null,
     /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
@@ -101,7 +103,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
-    .{ .name = "TF_Q27_PROMPT_TM", .scope = .metal, .kind = .word, .words = &.{ "1", "2", "4" }, .forms = "1, 2 or 4 (16-row blocks per weight read in the 27B's long prompt rows on an M5 Ultra; unset or blank is 1)" },
+    .{ .name = "TF_Q27_PROMPT_TM", .scope = .metal, .kind = .word, .words = &.{ "1", "2", "4" }, .word_values = &.{ 1, 2, 4 }, .forms = "1, 2 or 4 (16-row blocks per weight read in the 27B's long prompt rows on an M5 Ultra; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
@@ -324,7 +326,10 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .word) {
-        for (r.words, 0..) |v, i| if (if (r.ignore_case) std.ascii.eqlIgnoreCase(text, v) else std.mem.eql(u8, text, v)) return i;
+        for (r.words, 0..) |v, i| {
+            const matches = if (r.ignore_case) std.ascii.eqlIgnoreCase(text, v) else std.mem.eql(u8, text, v);
+            if (matches) return if (r.word_values.len == 0) i else r.word_values[i];
+        }
         return error.InvalidEnvironment;
     }
     // "auto" travels as 0: the caller reads it back through `parallel`, never the raw number

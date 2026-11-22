@@ -38,9 +38,9 @@ test "only prompt chunks past 128 rows take the long key" {
     try std.testing.expect(!longKey(false, true, 2048));
 }
 
-/// TF_Q27_PROMPT_TM's word index (1, 2 or 4 blocks) on a `longPrompt` chip; every other chip keeps one block.
-pub fn promptTm(long_prompt: bool, index: u64) u8 {
-    return if (long_prompt) @as(u8, 1) << @intCast(index) else 1;
+/// Every chip outside the long-prompt path keeps one block.
+pub fn promptTm(long_prompt: bool, blocks: u8) u8 {
+    return if (long_prompt) blocks else 1;
 }
 
 pub const Kernels = struct {
