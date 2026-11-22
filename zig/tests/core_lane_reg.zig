@@ -114,12 +114,26 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const device = try mtl.Device.init();
     defer device.deinit();
+    const args = try init.minimal.args.toSlice(a);
+    const only_long = args.len == 2 and std.mem.eql(u8, args[1], "--lane-long-only");
+    const only_block = args.len == 2 and std.mem.eql(u8, args[1], "--lane-block-only");
+    if (args.len > 1 and !only_long and !only_block) return error.BadArguments;
+    if (only_block and !device.tensorUnits()) {
+        const held = try @import("core_lane_block.zig").refused(a, device);
+        std.debug.print("LANE BLOCK REFUSED PASS cases={d}: no tensor units, so prompt rows keep today's kernels\n", .{held});
+        return;
+    }
     if (!device.tensorUnits()) return error.TensorUnitsRequired;
     const queue = try device.queue();
     defer queue.deinit();
-    const args = try init.minimal.args.toSlice(a);
-    const only_long = args.len == 2 and std.mem.eql(u8, args[1], "--lane-long-only");
-    if (args.len > 1 and !only_long) return error.BadArguments;
+    if (only_block) {
+        const blocks = try lane.RegOrder.init(device);
+        defer blocks.deinit();
+        var random = std.Random.DefaultPrng.init(0x7e9);
+        const checked = try @import("core_lane_block.zig").check(a, device, queue, blocks, random.random());
+        std.debug.print("LANE BLOCK CHECK PASS cases={d}: every byte equals today's kernel at each split and cut\n", .{checked});
+        return;
+    }
     if (only_long) {
         var random = std.Random.DefaultPrng.init(0x7e9);
         const checked = try @import("core_lane_long.zig").check(a, device, queue, random.random());

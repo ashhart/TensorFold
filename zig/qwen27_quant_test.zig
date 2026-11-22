@@ -352,3 +352,102 @@ test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only it
     try t.expectEqual(@as(u32, 6), k.cache.count());
     try t.expectEqual(@as(usize, 6), r.libraries);
 }
+
+test "qwen27 quant: block source is appended only when opted in" {
+    const off = lane_projection.Layout{ .n = 64, .k = 5120, .format = .{ .bits = 8, .group = 64 }, .precompute_sums = true, .row_blocks = true, .rows = 2048 };
+    const plain = try lane_projection.source(a, off);
+    defer a.free(plain);
+    try t.expect(std.mem.indexOf(u8, plain, "tf_lane_block") == null);
+    try t.expect(std.mem.indexOf(u8, plain, "TF_TM") == null);
+    var on = off;
+    on.tm = 4;
+    const wide = try lane_projection.source(a, on);
+    defer a.free(wide);
+    try t.expect(std.mem.indexOf(u8, wide, "#define TF_TM 4\n") != null);
+    try t.expect(std.mem.endsWith(u8, wide, @import("kernel_sources").core_lane_block));
+    on.tm = 3;
+    try t.expectError(error.InvalidSchedule, on.validate());
+    on.tm = 2;
+    on.format.bits = 5;
+    try t.expectError(error.UnsupportedBlockFormat, on.validate());
+}
+
+test "qwen27 quant: a split that cannot fit takes fewer blocks and never changes" {
+    try t.expectEqual(@as(u8, 4), lane_projection.blockTm(1, 4));
+    try t.expectEqual(@as(u8, 4), lane_projection.blockTm(4, 4));
+    try t.expectEqual(@as(u8, 2), lane_projection.blockTm(8, 4));
+    try t.expectEqual(@as(u8, 2), lane_projection.blockTm(8, 2));
+    try t.expectEqual(@as(u8, 1), quant.promptTm(false, 2));
+    for ([_]u8{ 1, 2, 4 }, 0..) |tm, index| try t.expectEqual(tm, quant.promptTm(true, index));
+}
+
+test "qwen27 quant: opted-in prompt rows keep each width's split and dispatch whole blocks" {
+    for ([_]u8{ 1, 2, 4 }) |tm| for ([_]u8{ 4, 6, 8 }) |bits| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true, .prompt = true, .prompt_tm = tm };
+        defer k.deinit();
+        var p = matrix(&r, 34816);
+        p.bits = bits;
+        p.slices = 2;
+        try launch(&k, &r, p, 2048);
+        var it = k.lanes.keyIterator();
+        const key = it.next().?.*;
+        try t.expectEqual(tm, key.tm);
+        // the 4-bit path already takes the prompt split; 6- and 8-bit keep the split that fixes their bits today
+        try t.expectEqual(@as(u32, if (bits == 4) 1 else 2), key.slices);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(usize, 128 / tm), r.launches[0].grid.height);
+    };
+}
+
+test "qwen27 quant: decoded rows and an eight-way split stay within their block limits" {
+    var r: mtl.Record = .{};
+    var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true, .prompt = true, .prompt_tm = 4 };
+    defer k.deinit();
+    var p = matrix(&r, 2048);
+    p.bits = 8;
+    p.slices = 8;
+    try launch(&k, &r, p, 2048);
+    var it = k.lanes.keyIterator();
+    try t.expectEqual(@as(u8, 2), it.next().?.tm);
+    try t.expectEqual(@as(usize, 64), r.launches[0].grid.height);
+    k.prompt = false;
+    r.count = 0;
+    try launch(&k, &r, p, 16);
+    try t.expectEqual(@as(usize, 1), r.launches[0].grid.height);
+}
+
+test "qwen27 quant: block code addresses reach every tiled 6- and 8-bit code once" {
+    var prng = std.Random.DefaultPrng.init(0x212);
+    for ([_]u8{ 6, 8 }) |bits| {
+        const wp: usize = 64 * @as(usize, bits) / 32;
+        var codes: [32][64]u8 = undefined;
+        var words: [32 * 16]u32 = @splat(0);
+        for (0..32) |col| for (0..64) |code| {
+            const v = prng.random().int(u8) & @as(u8, @intCast((@as(u16, 1) << @intCast(bits)) - 1));
+            codes[col][code] = v;
+            const at = col * wp * 32 + code * bits;
+            for (0..bits) |bit| words[(at + bit) / 32] |= @as(u32, (v >> @intCast(bit)) & 1) << @intCast((at + bit) % 32);
+        };
+        var seen: [32][64]bool = @splat(@splat(false));
+        for (0..32) |l| for (0..4) |nj| for (0..4) |kc| {
+            const k0 = 4 * (l & 1) + 8 * ((l >> 3) & 1);
+            const c = ((l >> 1) & 3) + 4 * ((l >> 4) & 1) + 8 * nj;
+            const col = words[c * wp ..];
+            var v: u32 = undefined;
+            if (bits == 8) v = col[(k0 + 16 * kc) / 4] else {
+                const bit = 6 * (k0 + 16 * kc);
+                const sh: u5 = @intCast(bit & 31);
+                v = col[bit >> 5] >> sh;
+                if (sh > 8) v |= col[(bit >> 5) + 1] << @intCast(32 - @as(u6, sh));
+            }
+            for (0..4) |e| {
+                const got = (v >> @intCast(bits * e)) & ((@as(u32, 1) << @intCast(bits)) - 1);
+                try t.expectEqual(@as(u32, codes[c][k0 + 16 * kc + e]), got);
+                try t.expect(!seen[c][k0 + 16 * kc + e]);
+                seen[c][k0 + 16 * kc + e] = true;
+            }
+        };
+        for (seen) |column| for (column) |hit| try t.expect(hit);
+    }
+}

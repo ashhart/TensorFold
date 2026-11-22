@@ -45,6 +45,8 @@ pub const Layout = struct {
     y_stride: ?usize = null,
     /// Reg layouts: the kernel adds its rows' group sums with the sums pass's loop (no sums dispatch, same words).
     inline_sums: bool = false,
+    /// 16-row blocks per threadgroup on one weight read (1, 2 or 4); above 1 appends lane_block.metal.
+    tm: u8 = 1,
 
     pub fn validate(l: Layout) !void {
         try l.format.validate();
@@ -58,6 +60,8 @@ pub const Layout = struct {
         if (l.cooperative) {
             if (l.rows != reg_rows) return error.InvalidSchedule;
         } else if (l.rows < @as(usize, if (l.reg) reg_rows else 16) or l.rows % 16 != 0 or l.rows > max_reg_rows) return error.InvalidSchedule;
+        if (l.tm != 1 and l.tm != 2 and l.tm != 4) return error.InvalidSchedule;
+        if (l.tm > 1 and (l.format.group != 64 or (l.format.bits != 4 and l.format.bits != 6 and l.format.bits != 8) or l.n % 32 != 0 or !l.precompute_sums or l.cooperative or l.inline_sums or l.reg != (l.format.bits == 4) or (!l.reg and !l.row_blocks))) return error.UnsupportedBlockFormat;
         const g = l.groupCut();
         if (g[1] == 0 or g[0] >= l.k / l.format.group or g[1] > l.k / l.format.group - g[0]) return error.InvalidGroupCut;
         if (l.groups != null and l.output != .f32) return error.PartialOutputNeedsFloat;
@@ -88,6 +92,7 @@ pub const Layout = struct {
     }
 
     pub fn threadgroupBytes(l: Layout) usize {
+        if (l.tm > 1) return blockBytes(l.sk, l.tm);
         return l.sk * 32 * l.format.group + @max(l.sk -| 1, 1) * 16 * 32 * @sizeOf(f32);
     }
 
@@ -129,7 +134,9 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
     if (l.inline_sums) try text.appendSlice(a, "#define TF_INLINE_SUMS 1\n");
     if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
+    if (l.tm > 1) try text.print(a, "#define TF_TM {d}\n", .{l.tm});
     try text.appendSlice(a, ks.core_lane_projection);
+    if (l.tm > 1) try text.appendSlice(a, ks.core_lane_block);
     return text.toOwnedSlice(a);
 }
 
@@ -271,6 +278,8 @@ pub const Projection = struct {
     inline_sums: bool = false,
     /// Capacity is the reg or opted-in row count on tensor units, otherwise 16.
     max_rows: u32 = reg_rows,
+    /// 16-row blocks in one threadgroup: the grid's y counts these.
+    tm: u32 = 1,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
@@ -285,7 +294,7 @@ pub const Projection = struct {
         defer a.free(adapted);
         const lib = try mtl.Library.fromSource(device, adapted, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        const p = try mtl.Pipeline.init(device, lib, if (l.reg) "tf_lane_reg" else if (l.cooperative) "tf_lane_pair" else "tf_lane", false);
+        const p = try mtl.Pipeline.init(device, lib, if (l.tm > 1) "tf_lane_block" else if (l.reg) "tf_lane_reg" else if (l.cooperative) "tf_lane_pair" else "tf_lane", false);
         errdefer p.deinit();
         if (p.simdWidth() != 32 or p.maxThreads() < l.sk * (if (l.cooperative) @as(usize, 64) else 32)) return error.UnsupportedPipelineShape;
         var sums_pipe: ?mtl.Pipeline = null;
@@ -295,7 +304,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(capacity * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .external_sums = l.precompute_sums and l.format.bits == 8 and l.format.group == 64 and !l.cooperative, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .cooperative = l.cooperative, .inline_sums = l.reg and l.inline_sums, .max_rows = @intCast(capacity) };
+        return .{ .pipe = p, .external_sums = l.tm > 1 or (l.precompute_sums and l.format.bits == 8 and l.format.group == 64 and !l.cooperative), .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .cooperative = l.cooperative, .inline_sums = l.reg and l.inline_sums, .max_rows = @intCast(capacity), .tm = l.tm };
     }
 
     pub fn deinit(p: Projection) void {
@@ -341,7 +350,7 @@ pub const Projection = struct {
         e.setValue([2]i32{ @intCast(rows), @intCast(stride) }, 3);
         e.setBuffer(y.buf, y.off, 4);
         if (given) |g| e.setBuffer(g.ref.buf, g.ref.off, 5) else if (p.sums_buffer) |buffer| e.setBuffer(buffer, 0, 5);
-        e.dispatchGroups(mtl.Size.of(p.tile_count, if (p.cooperative) 1 else blocks, 1), mtl.Size.of(p.threads_per_slice * p.sk, 1, 1));
+        e.dispatchGroups(mtl.Size.of(p.tile_count, if (p.cooperative) 1 else (blocks + p.tm - 1) / p.tm, 1), mtl.Size.of(p.threads_per_slice * p.sk, 1, 1));
         if (given == null and p.sums_buffer != null and !p.inline_sums) e.barrier();
     }
 };
@@ -350,6 +359,18 @@ pub const Projection = struct {
 pub const reg_rows = 128;
 /// Rows one reg encode may take when its layout says so (`Layout.rows`): a whole prompt chunk in one dispatch.
 pub const max_reg_rows = 2048;
+
+/// A block kernel's declared threadgroup bytes: its split-K partials for every row of the threadgroup.
+pub fn blockBytes(sk: usize, tm: usize) usize {
+    return @max(sk -| 1, 1) * 16 * tm * 32 * @sizeOf(f32);
+}
+
+/// The widest block count up to `want` whose partials fit Metal's 32 KiB; the split itself never changes.
+pub fn blockTm(sk: usize, want: u8) u8 {
+    var tm = want;
+    while (tm > 1 and blockBytes(sk, tm) > 32768) tm /= 2;
+    return tm;
+}
 
 /// Group sums of a projection's input: XS[group * stride + row], fp32, each group's values added in order from zero.
 pub const Sums = struct { ref: Ref, stride: u32 };

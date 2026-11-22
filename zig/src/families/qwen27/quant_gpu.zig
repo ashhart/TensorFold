@@ -10,7 +10,7 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, tm: u8 = 1 };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -38,6 +38,11 @@ test "only prompt chunks past 128 rows take the long key" {
     try std.testing.expect(!longKey(false, true, 2048));
 }
 
+/// TF_Q27_PROMPT_TM's word index (1, 2 or 4 blocks) on a `longPrompt` chip; every other chip keeps one block.
+pub fn promptTm(long_prompt: bool, index: u64) u8 {
+    return if (long_prompt) @as(u8, 1) << @intCast(index) else 1;
+}
+
 pub const Kernels = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
@@ -58,6 +63,8 @@ pub const Kernels = struct {
     prompt: bool = false,
     /// Set on `longPrompt` chips: chunks past a short entry's capacity take one dispatch on a separate long key.
     long_prompt: bool = false,
+    /// Long prompt rows per weight read, in 16-row blocks: 1 unless TF_Q27_PROMPT_TM opts in.
+    prompt_tm: u8 = 1,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
     /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
@@ -157,6 +164,9 @@ pub const Kernels = struct {
         long: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
         const reg = p.bits == 4 and p.group == 64;
+        // A block keeps the split this width takes today: 6/8-bit stay on p.slices, whose fp32 tree fixes their bits.
+        const blockable = long and k.prompt_tm > 1 and p.group == 64 and p.n % 32 == 0 and (p.bits == 4 or p.bits == 6 or p.bits == 8);
+        const tm = if (blockable) lane.blockTm(if (reg) sk else p.slices, k.prompt_tm) else 1;
         const key = Key{
             .kind = .projection,
             .n = p.n,
@@ -167,6 +177,7 @@ pub const Kernels = struct {
             .bits = p.bits,
             .group = p.group,
             .long = long,
+            .tm = tm,
         };
         const half = p.n / 64;
         const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
@@ -181,10 +192,11 @@ pub const Kernels = struct {
                 .ranges = if (skip > 0) &ranges else &.{},
                 .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null,
                 .output = if (cut[1] > 0) .f32 else .bf16,
-                .precompute_sums = reg or (p.bits == 8 and p.group == 64),
+                .precompute_sums = reg or (p.bits == 8 and p.group == 64) or tm > 1,
                 .reg = reg,
                 .row_blocks = long and !reg,
                 .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
+                .tm = tm,
             });
             k.joined(entry.value_ptr);
         }
@@ -272,8 +284,8 @@ pub const Kernels = struct {
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.long_prompt and k.prompt and rows > 16;
-        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
+        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64) or entry.value_ptr.tm > 1) xs else null;
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;
         while (first < rows) : (first += step) {

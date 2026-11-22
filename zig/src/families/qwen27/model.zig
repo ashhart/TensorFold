@@ -135,6 +135,7 @@ pub const Model = struct {
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
+        m.kernels.prompt_tm = quant.promptTm(m.kernels.long_prompt, try @import("sys").environment.read(u64, "TF_Q27_PROMPT_TM", 0));
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
