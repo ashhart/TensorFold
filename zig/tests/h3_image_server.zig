@@ -484,6 +484,7 @@ test "a failed bind releases every Metal object it made" {
 
 /// An io whose `nth` exclusive tryLock (a stage's speech probe) first takes speech for `ms` on the real io: speech
 /// arrives mid-stage, after the passes probed before it were submitted. One at a time; `join` after the stage.
+/// With `watched` set, the speech records whether that buffer was still all zero when it ended.
 const Arrival = struct {
     var base: std.Io = undefined;
     var vtable: std.Io.VTable = undefined;
@@ -491,6 +492,8 @@ const Arrival = struct {
     var nth: usize = 0;
     var hold_ms: i64 = 0;
     var speech: ?std.Thread = null;
+    var watched: []const f32 = &.{};
+    var untouched = false;
 
     fn at(io: std.Io, path: []const u8, probe: usize, ms: i64) h3.gpu_turn.Turn {
         base = io;
@@ -500,32 +503,34 @@ const Arrival = struct {
         nth = probe;
         hold_ms = ms;
         speech = null;
+        watched = &.{};
         return .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .at = path };
     }
 
     fn tryLock(userdata: ?*anyopaque, file: std.Io.File, kind: std.Io.File.Lock) std.Io.File.LockError!bool {
         if (kind == .exclusive and nth > 0) {
             nth -= 1;
-            if (nth == 0) speech = speakFor(base, lock, hold_ms) catch null;
+            if (nth == 0) speech = speak() catch null;
         }
         return base.vtable.fileTryLock(userdata, file, kind);
+    }
+
+    /// Speech holding `lock` for `hold_ms` from now, released from its own thread.
+    fn speak() !std.Thread {
+        const held = h3.gpu_turn.speak(base, lock) orelse return error.NoSpeechHold;
+        return std.Thread.spawn(.{}, release, .{held});
+    }
+
+    fn release(held: std.Io.File) void {
+        base.sleep(.fromMilliseconds(hold_ms), .awake) catch {};
+        untouched = std.mem.allEqual(f32, watched, 0);
+        h3.gpu_turn.done(base, held);
     }
 
     fn join() !void {
         (speech orelse return error.NoSpeechArrived).join();
     }
 };
-
-/// Speech holding `lock` for `ms` from now, released from its own thread.
-fn speakFor(io: std.Io, lock: []const u8, ms: i64) !std.Thread {
-    const held = h3.gpu_turn.speak(io, lock) orelse return error.NoSpeechHold;
-    return std.Thread.spawn(.{}, struct {
-        fn release(i: std.Io, file: std.Io.File, wait: i64) void {
-            i.sleep(.fromMilliseconds(wait), .awake) catch {};
-            h3.gpu_turn.done(i, file);
-        }
-    }.release, .{ io, held, ms });
-}
 
 test "speech arriving during the prompt encoder, denoising or the decoder holds its next pass, output unchanged" {
     const io = testing.io;
@@ -620,6 +625,16 @@ test "speech arriving during the prompt encoder, denoising or the decoder holds 
     const step = try b.model.forward(case.noise, &.{}, 0, held_velocity, &.{});
     try Arrival.join();
     try testing.expect(step.paused >= least and !step.timing_valid);
+    try testing.expectEqualSlices(f32, velocity, held_velocity);
+    // the probe after the last block's: speech arrives as the last blocks finish draining, and the output heads
+    // wait until it ends
+    const out = b.model.video_velocity.slice(f32, b.model.video * b.model.video_in);
+    @memset(out, 0);
+    b.model.give_way = Arrival.at(io, lock, 3 + b.model.blocks.len, hold_ms);
+    Arrival.watched = out;
+    const last = try b.model.forward(case.noise, &.{}, 0, held_velocity, &.{});
+    try Arrival.join();
+    try testing.expect(Arrival.untouched and last.paused >= least and !last.timing_valid);
     try testing.expectEqualSlices(f32, velocity, held_velocity);
 }
 

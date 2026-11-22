@@ -412,6 +412,8 @@ pub const Model = struct {
             pass.enc = pass.cb.compute(.concurrent);
         }
         try queued.drain();
+        // speech that began while the last blocks drained goes before the final norm and output heads are committed
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         const last = self.blocks[self.blocks.len - 1].tables;
         enc.setPipeline(self.pipeline("h3_gate_add"));
         enc.setBuffer(self.x, 0, 0);
