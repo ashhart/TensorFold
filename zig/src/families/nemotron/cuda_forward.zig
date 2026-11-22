@@ -194,7 +194,7 @@ pub const Forward = struct {
         const D: u64 = c.hidden;
         var rows: usize = 0;
         for (segs) |s| rows += s.rows;
-        if (rows > ms.rmax) return error.WindowTooWide;
+        if (!@import("cuda_wide.zig").windowFits(c, rows)) return error.WindowTooWide; // each stream keeps rmax rows
         for (segs) |s| try f.embed(s.b.ids, b.emb + s.row0 * D * 2, s.rows);
         try f.mark(.embed);
         var x = b.emb;

@@ -16,6 +16,11 @@ pub fn allowed(c: Config, gb10: bool) bool {
     return gb10 and c.latent == 0 and !c.bolt and !c.ck and !c.salm and c.world == 1;
 }
 
+/// Whether a shared window of `rows` rows fits (its streams' Mamba rows stay at windowRows each, the scan's stride).
+pub fn windowFits(c: Config, rows: usize) bool {
+    return rows <= @import("cuda_state.zig").sharedRows(c);
+}
+
 /// A shared round's streams at most.
 pub fn streams(c: Config) usize {
     return if (c.wide_rounds) wide_streams else narrow_streams;
