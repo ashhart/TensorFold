@@ -7,7 +7,7 @@ description: Inspect work, contributors, collisions and help opportunities on an
 
 Start with `atc board --repo owner/name --json`, or `atc --json` inside a clone, before choosing work. The board needs no maintainer setup and includes ordinary GitHub assignments and pull requests alongside ATC claims. Always pass `--json`: it returns validated numbers and fixed words, while the readable text view is for humans. ATC has no bot to wait for and does not grant permission to work on an issue.
 
-Honor the human's existing authorization for this session. A request to work on an issue can authorize the necessary ATC claim and renewal; do not ask for the same permission again. Ask before posting or accepting an agreement only when the human has not authorized that action or its scope.
+Honor the human's existing authorization for this session. A request to work on an issue can authorize the necessary ATC claim and renewal with `--local`; do not ask for the same permission again. A public check-in is a separate permission: pass `--local` unless the human has agreed to public check-ins. Ask before posting or accepting an agreement only when the human has not authorized that action or its scope.
 
 ## Inspect a repository
 
