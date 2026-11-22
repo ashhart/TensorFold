@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM at TP=2 on CUDA: with `TF_GLM_PAIR_EXPERTS=1` (opt-in), paired prompt chunks pass each rank's own FFN partial under the default split reduction, so their hidden states and tokens match the unpaired path; off, nothing changes (#4619, fixes #4493).
+
 - Tests: the Nemotron HIP page-fault suite compiles again (its fixture builds ids through `hip_serve.pages`), and the Flash Next recipe says the scale index runs on every Mac since #4547 (#4605). Thanks to @AIFlowML.
 
 - Server: tool-call arguments whose text contains `NaN` or `Infinity` (Qwen XML, GLM, Gemma, MiniMax string values, LFM2 Python strings) parse again; only values read as JSON refuse the non-finite literals. LFM2 tools with parameters named like schema keywords (`pattern`, `format`, `not`, `if`) are supported again (#4604, follows #4378).
