@@ -76,6 +76,8 @@ const valid = [_]Case{
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN_PDL", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_PDL", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_COST_KEY_TRACE", .raw = "0", .n = 0 },
