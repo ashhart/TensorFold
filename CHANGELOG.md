@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: the tokenizer memo now has its own allocator, so requests that add memo segments no longer leave allocator buckets behind on aarch64 Linux (#4455, thanks @bikepresentball).
+
 - GLM on Metal: masked sparse attention, its padding entries and the DFlash2 head's q4 matmul give the float64 reference's NaN and Inf instead of dropping or inventing them, which clears nine known kernel-contract failures; finite outputs are unchanged (#4396).
 
 - GLM on CUDA: with `TF_GLM_PROF=1`, the four profiling traces are created at startup before the server reports ready, so the first prompt no longer pays their setup; profiling-off behaviour is unchanged (#4511).
