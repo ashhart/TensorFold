@@ -1,5 +1,4 @@
 //! Checkpoint bytes for one drafts-off prompt: the safetensors reader and the quantized linears.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");

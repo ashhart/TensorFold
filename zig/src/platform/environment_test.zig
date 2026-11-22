@@ -14,7 +14,6 @@ const Env = struct {
         return null;
     }
 };
-
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));

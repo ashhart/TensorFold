@@ -381,3 +381,5 @@ per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test fla
   `TF_FLASHNEXT_BATCH_DRAWS=0` restores per-stream reductions for an A/B.
 - Our glue's sums are not the captured kernels' bit for bit, so replies part from the Python engine's teacher path
   after a while, as that engine's own served path does (10 to 36 tokens, from its routed-experts kernel's rounding).
+
+See the [Flash Next EXL3 kernel contract](../flashnext-exl3-kernel-contract.md) for its CUDA checks.

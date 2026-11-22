@@ -104,5 +104,4 @@ test "CUDA startup: Flash Next cache cuts use the loaded cold pass size, and its
     try std.testing.expect(!rules.chunk_starts and rules.lookahead == 1);
     try std.testing.expect(rules.warm == .waits and !rules.planned); // a mark one token short of the pass's end
     try std.testing.expectEqual(nemo.warm_quiet, flash.native.warm_quiet);
-d);
 }

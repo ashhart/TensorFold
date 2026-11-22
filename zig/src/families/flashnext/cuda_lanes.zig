@@ -324,14 +324,14 @@ pub fn Namespace(comptime Tri: type) type {
                 if (l.draft) |*d| d.label = s.id;
                 s.cached = 0;
                 // one rank restores first so a kept state's images skip the tower; ranks send every image's rows unfed
-                if (self.ranks == null) try snaps.resumeKept(self, s, l, ids.len);
+                if (self.ranks == null) try copies.resumeKept(self, s, l, ids.len);
                 if (s.images.len != 0) {
                     const v = self.vision orelse return error.VisionNotEnabled;
                     l.seq.media = try v.state(ids, s.images, if (self.ranks == null) l.filled.? else 0);
                     if (self.ranks) |r| try r.setMedia(&l.seq);
                 }
                 if (l.draft) |*d| d.media = if (l.seq.media) |*m| m.view() else null;
-                if (self.ranks != null) try snaps.resumeKept(self, s, l, ids.len);
+                if (self.ranks != null) try copies.resumeKept(self, s, l, ids.len);
                 return l;
             }
             /// One prompt chunk, rows picked as it starts (busy for a warm pass), cut at an unkept mark; true at last.

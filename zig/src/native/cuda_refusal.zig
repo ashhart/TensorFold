@@ -197,7 +197,9 @@ test "the Qwen3.5 options carry the rank flags, and an unset master stays null" 
 
 test "--tp is served on CUDA for two ranks of a ranked family (Flash Next) only; 4 and 8 stay refused" {
     const flashnext = @import("flashnext").native;
-    for ([_]u32{ 4, 8 }) |tp| try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) orelse "", "--tp: the CUDA engine runs one or two ranks");
+    for ([_]u32{ 4, 8 }) |tp| {
+        try std.testing.expectEqualStrings(flashnext.worlds.refusal, (try place(flashnext, std.testing.allocator, .{ .dir = "d", .model_type = flashnext.model_type, .tp = tp })).?);
+    }
     for ([_]u32{ 1, 2 }) |tp| try std.testing.expect(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) == null);
     try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .rank = 1, .drafts = false }) == null);
     // a family without rank options (Nemotron) still refuses --tp 2 at its admission

@@ -5,7 +5,6 @@ const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
-const gather_lanes = @import("cuda_ple_gather_lanes.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const load = @import("cuda_prompt_load.zig");
 const shared = @import("cuda_batch_side.zig");
