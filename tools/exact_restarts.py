@@ -55,12 +55,18 @@ def request_ids(base, item, tokens, api_key=None, timeout=600):
 
 
 def collect(base, prompts, tokens, busy=0, api_key=None):
-    """Every prompt's ids; `busy` extra copies of each request in flight beside it."""
+    """Every prompt's ids; `busy` extra copies of each request in flight beside it, each checked."""
     out = {}
     def one(item):
         with ThreadPoolExecutor(max_workers=busy + 1) as pool:
             runs = [pool.submit(request_ids, base, item, tokens, api_key) for _ in range(busy + 1)]
-            return runs[0].result()
+            ids = [f.result() for f in runs]  # a peer's error fails the run too
+        head = ids[0]
+        for peer in ids[1:]:
+            pos = first_diff(head, peer)
+            if pos is not None:
+                raise RuntimeError(f"{item['name']}: a busy peer's reply differed at token {pos}")
+        return head
     for item in prompts:
         out[item["name"]] = one(item)
     return out
@@ -158,7 +164,7 @@ def main():
         ap.error("--model is required without --base")
 
     named = [p["name"] for p in load_prompts(Path(args.prompts))]
-    report = {"scenarios": [], "rows": [], "flips": 0, "total": 0}
+    report = {"scenarios": [], "not_run": [], "rows": [], "flips": 0, "total": 0}
 
     def fold(part):
         report["rows"] += part["rows"]
@@ -166,18 +172,24 @@ def main():
         report["total"] += part["total"]
 
     if "restart" not in args.skip:
-        runs = {}
-        for i in (1, 2):
-            runs.update(scenario(args, f"restart-{i}"))
-        report["scenarios"].append("restart")
-        fold(compare(named, runs))
+        if args.base:
+            report["not_run"].append("restart")
+        else:
+            runs = {}
+            for i in (1, 2):
+                runs.update(scenario(args, f"restart-{i}"))
+            report["scenarios"].append("restart")
+            fold(compare(named, runs))
 
     if "parallel" not in args.skip:
-        runs = {}
-        runs.update(scenario(args, "parallel-1", parallel=1))
-        runs.update(scenario(args, "parallel-4", parallel=4))
-        report["scenarios"].append("parallel")
-        fold(compare(named, runs))
+        if args.base:
+            report["not_run"].append("parallel")
+        else:
+            runs = {}
+            runs.update(scenario(args, "parallel-1", parallel=1))
+            runs.update(scenario(args, "parallel-4", parallel=4))
+            report["scenarios"].append("parallel")
+            fold(compare(named, runs))
 
     if "busy" not in args.skip:
         runs = {}
@@ -187,11 +199,14 @@ def main():
         fold(compare(named, runs))
 
     if args.drafter and "draft" not in args.skip:
-        runs = {}
-        runs.update(scenario(args, "draft-off"))
-        runs.update(scenario(args, "draft-on", drafter=args.drafter))
-        report["scenarios"].append("draft")
-        fold(compare(named, runs))
+        if args.base:
+            report["not_run"].append("draft")
+        else:
+            runs = {}
+            runs.update(scenario(args, "draft-off"))
+            runs.update(scenario(args, "draft-on", drafter=args.drafter))
+            report["scenarios"].append("draft")
+            fold(compare(named, runs))
 
     text = json.dumps(report, indent=2)
     if args.output:
@@ -199,7 +214,8 @@ def main():
     for row in report["rows"]:
         mark = "identical" if row["first_diff"] is None else f"FLIP at {row['first_diff']}"
         print(f"{row['prompt']:28s} {row['pair']:24s} {mark}")
-    print(f"flips {report['flips']}/{report['total']} across {report['scenarios']}")
+    tail = f"; not run (attached server): {report['not_run']}" if report["not_run"] else ""
+    print(f"flips {report['flips']}/{report['total']} across {report['scenarios']}{tail}")
     return 1 if report["flips"] else 0
 
 
