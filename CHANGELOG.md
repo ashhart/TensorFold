@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM at TP=2 on CUDA: `TF_GLM_KEEP_FOLD=1` carries the commit count in the next step's control message instead of a separate keep message, so the follower runs keep then verify/draft/block from one header (one fewer broadcast and follower sync a round); off by default (#N).
+
 - Tests: a lane-core conformance suite pins fresh = resumed cache state, tree windows = plain decode, run-to-run reproducibility, stop reasons and malformed-parent refusal on the host, with a ledger of seven decode invariants in docs/conformance-ledger.md (#N).
 
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
