@@ -32,6 +32,7 @@ pub fn run(a: std.mem.Allocator, _: std.Io, profile: Profile) anyerror!g.Tally {
 /// The launches as the forward makes them: prep, the bias table, then the chunks and their merge.
 pub const Set = struct {
     attns: [12]rows.Attn = undefined,
+    exacts: [2]rows.Attn = undefined,
     preps: [5]prep.Prep = undefined,
     tables: [2]prep.Table = undefined,
     made: bool = false,
@@ -49,10 +50,12 @@ pub const Set = struct {
         for (&set.attns, forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .path = f[0], .apart = f[1], .plant = f[2], .profile = profile };
         for (&set.preps, prep_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .global = f[0], .apart = f[1], .fault = f[2] };
         for (&set.tables, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .late = i == 1 };
+        for (&set.exacts, [_]rows.Path{ .sliding, .fold }) |*x, p| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .path = p, .exact_p = true, .profile = profile };
         set.made = true;
         for (set.preps[0..3]) |*x| try list.append(a, x.kernel());
         try list.append(a, set.tables[0].kernel());
         for (set.attns[0..7]) |*x| try list.append(a, x.kernel());
+        for (&set.exacts) |*x| try list.append(a, x.kernel());
         for (set.preps[3..]) |*x| try list.append(a, x.kernel());
         try list.append(a, set.tables[1].kernel());
         for (set.attns[7..]) |*x| try list.append(a, x.kernel());
@@ -61,6 +64,7 @@ pub const Set = struct {
     pub fn deinit(set: *Set) void {
         if (!set.made) return;
         for (&set.attns) |*x| x.deinit();
+        for (&set.exacts) |*x| x.deinit();
         for (&set.preps) |*x| x.deinit();
         for (&set.tables) |*x| x.deinit();
         set.made = false;

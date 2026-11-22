@@ -69,6 +69,8 @@ pub const Data = struct {
     pos: []usize = &.{},
     stream: []usize = &.{},
 
+    pub const makeExactP = fillExactP;
+
     pub fn free(d: *Data, a: std.mem.Allocator) void {
         inline for (.{ "q", "kc", "vc", "tab", "sink", "gate", "pos", "stream" }) |f| a.free(@field(d, f));
         d.* = .{};
@@ -159,6 +161,55 @@ pub const Data = struct {
     }
 };
 
+/// The device's score of a bias with q = 0: (0 scale + bias) log2e, rounded once in fp32 (tile.hpp's score).
+fn score(b: u16) f32 {
+    const log2e: f32 = 1.4426950408889634;
+    return @as(f32, @floatCast(ref.bf(b))) * log2e;
+}
+
+/// bf16(exp2f(d)) when certain: the exact power sits over 2^-21 (4 fp32 ulp, past exp2f's error) from a tie.
+fn roundedP(d: f32) ?f64 {
+    const e = std.math.exp2(@as(f64, d));
+    const lo = ref.rn(e * (1 - 0x1p-21));
+    return if (lo == ref.rn(e * (1 + 0x1p-21))) lo else null;
+}
+
+/// Exact-P rows (one 64-key tile, pos < 64): bias 2 at distance 0 (the max), the rest drawn where bf16 P is certain.
+fn fillExactP(d: *Data, a: std.mem.Allocator, lay: Layout, seed: u64) !void {
+    try d.make(a, lay, .random, seed);
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x9e3779b97f4a7c15);
+    const rng = prng.random();
+    @memset(d.q, 0); // every score is its bias: q.k = 0
+    @memset(d.sink, 0xff80); // no sink, so the merge's rescale is exp2(0) = 1
+    @memset(d.gate, ref.bits(32)); // sigmoid(32) is 1 in fp32
+    for (d.vc) |*o| o.* = ref.bits(@floatFromInt(rng.intRangeAtMost(i32, -16, 16)));
+    const top = ref.bits(2);
+    for (0..d.sink.len) |rh| {
+        const t = d.tab[rh * ref.extent ..][0..ref.extent];
+        t[0] = top;
+        for (t[1..]) |*o| { // biases in [-1, 1.75]: every P in [2^-5, 1), its bf16 lsb at least 2^-12
+            o.* = ref.bits(-1 + 2.75 * rng.float(f64));
+            while (roundedP(score(o.*) - score(top)) == null) o.* = ref.bits(-1 + 2.75 * rng.float(f64));
+        }
+    }
+}
+
+/// An exact-P row's outputs: sum bf16(P) v and sum bf16(P) are exact in fp32 (23 bits), so out = bf16(fp32(o / l)).
+pub fn exactP(call: *const ref.Call, r: usize, h: usize, out: []f64) void {
+    const pos = call.pos[r];
+    const lo = if (call.window > 0) (pos + 1) -| call.window else 0;
+    const t = call.tab[(r * heads + h) * ref.extent ..][0..ref.extent];
+    const base = (call.stream[r] * kv + h / group) * call.ring;
+    var o: [D]f64 = @splat(0);
+    var l: f64 = 0;
+    for (lo..pos + 1) |p| {
+        const w = roundedP(score(t[pos - p]) - score(t[0])).?;
+        l += w;
+        for (&o, call.v[(base + p % call.ring) * D ..][0..D]) |*x, v| x.* += w * ref.bf(v);
+    }
+    for (out, o) |*y, x| y.* = c.fromBf16(c.toBf16(@as(f32, @floatCast(x)) / @as(f32, @floatCast(l))));
+}
+
 /// The reference's (row, head) pairs (gate 4: (row, key head) pairs) over up to six threads, each its own buffers.
 pub const Pool = struct {
     call: *const ref.Call,
@@ -223,4 +274,32 @@ test "HIP inkling2 layout: three streams' rows, positions and cache offsets" {
     const one = Layout.of(K.Layer.sliding(1024, 2048), 5, 300, 1);
     try std.testing.expectEqual(@as(i32, 5), one.segs[0].n);
     try std.testing.expectEqual(@as(usize, 0), one.streamOf(4));
+}
+
+test "HIP inkling2 exact P: the outputs follow bf16 P's bits, and an unrounded P moves over a quarter of them" {
+    const a = std.testing.allocator;
+    const lay = Layout.of(K.Layer.sliding(1024, 2048), 16, 64, 2);
+    var d: Data = .{};
+    defer d.free(a);
+    try d.makeExactP(a, lay, 7);
+    const call: ref.Call = .{ .q = d.q, .k = d.kc, .v = d.vc, .tab = d.tab, .sink = d.sink, .gate = d.gate, .pos = d.pos, .stream = d.stream, .ring = lay.layer.ring, .window = lay.layer.window, .heads = heads, .kv = kv, .chain = .hip };
+    var want: [D]f64 = undefined;
+    var moved: usize = 0;
+    for (0..16 * heads) |rh| {
+        const r = rh / heads;
+        const h = rh % heads;
+        exactP(&call, r, h, &want);
+        const pos = d.pos[r];
+        const t = d.tab[rh * ref.extent ..][0..ref.extent];
+        const base = (d.stream[r] * kv + h / group) * lay.layer.ring;
+        var o: [D]f64 = @splat(0);
+        var l: f64 = 0;
+        for (0..pos + 1) |p| { // the same rows with P left unrounded
+            const w = std.math.exp2(@as(f64, score(t[pos - p]) - score(t[0])));
+            l += w;
+            for (&o, d.vc[(base + p % lay.layer.ring) * D ..][0..D]) |*x, v| x.* += w * ref.bf(v);
+        }
+        for (want, o) |x, y| moved += @intFromBool(x != c.fromBf16(c.toBf16(@floatCast(y / l))));
+    }
+    try std.testing.expect(moved * 4 > 16 * heads * D); // 19,232 of 49,152 at this seed
 }
