@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hardening: tool-call parsing, streaming parsers and grammar compiles bound their work and validate arguments before emitting them (#4378).
+
 - GLM-5.3-Flash on Metal: every resident kept state is staged to disk while its borrowed rows can still be read, whatever `--spill-gib` is set to, so a long conversation's disk copy no longer stays at an older depth and later turns resume from the newest state (#2755, refs #2669).
 - GLM on CUDA: programmatic dependent launches follow one policy: the compute capability is known before GLM's lane, KDA and matmul modules choose, so below 9.0 they stay off even when asked for, and `TF_GLM_PDL=0` now also makes the Q4 draft-head matmul a plain launch; the default on GB10 (on) is unchanged (#4321).
 
