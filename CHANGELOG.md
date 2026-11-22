@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `response_format: json_object` with `grammar_budget: true` works again on large vocabularies: the server's fixed `json_object` rule gets budget limits sized to it (computed once per tokenizer), while every client-supplied grammar keeps the limits from #4378; a budget refusal now names what it hit (work, edges, bytes, timeout or busy slots) (#4615, follows #4378).
+
 - Pull: `tensorfold pull` no longer stops with "detecting network configuration failed" after 64 distinct resolved addresses on a long pull; a full address table replaces its oldest entry (#4621, follows #4140).
 
 - Metal: a checkpoint file span of 16 GiB or more loads; each `pread` asks for at most 1 GiB, since macOS refuses a count above INT_MAX (#4435). Thanks to @sethforprivacy, and to @markyu0401 for the first fix (#4433).
