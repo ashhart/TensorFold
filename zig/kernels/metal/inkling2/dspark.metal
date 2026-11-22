@@ -125,7 +125,7 @@ static inline float dspark_attention_score(const device bfloat* q, const device 
   return dot * DSP_SCALE;
 }
 
-// A threadgroup a (row, head). Thread t scores keys t, t + 128, ...; the denominator and each value sum stay in key order.
+// A threadgroup a (row, head): thread t scores keys t, t + 128, ...; the denominator and value sums stay in key order.
 [[max_total_threads_per_threadgroup(128)]]
 kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const device bfloat* block_k [[buffer(1)]], const device bfloat* block_v [[buffer(2)]], const device bfloat* context_k [[buffer(3)]], const device bfloat* context_v [[buffer(4)]], device float* scores [[buffer(5)]], device bfloat* out [[buffer(6)]], constant DsparkAttentionArgs& a [[buffer(7)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 24, h = group % 24, kv = h / 3;
