@@ -79,7 +79,7 @@ llama.cpp's `llama-tokenize` on the same file.
   `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` are the fast ones.
 
 - **More threads than cores.** Because workers spin, a thread count above the cores they run on is much slower, not a
-  little: 8 threads held to 4 cores decoded at 0.7 tokens a second, against 5.3 with 4 threads.
+  little: 8 threads held to 4 cores decoded at 0.7 tokens a second, against 5.1 with 4 threads.
 
 ## Measured
 
@@ -91,12 +91,12 @@ One run each; every run below generated the same 32 IDs:
 
 | Build | Threads | Decode tokens/s | First token s |
 | --- | --- | --- | --- |
-| baseline | 1 | 1.73 | 26.6 |
-| baseline | 4 | 4.93 | 5.7 |
-| baseline | 8 | 0.68 | 14.6 |
+| baseline | 1 | 1.68 | 34.8 |
+| baseline | 4 | 5.01 | 5.3 |
+| baseline | 8 | 0.71 | 14.6 |
 | `+dotprod` | 1 | 1.95 | 11.5 |
-| `+dotprod` | 4 | 5.29 | 5.6 |
-| `+dotprod` | 8 | 0.69 | 14.7 |
+| `+dotprod` | 4 | 5.08 | 5.8 |
+| `+dotprod` | 8 | 0.73 | 14.5 |
 
 ## Checks
 
