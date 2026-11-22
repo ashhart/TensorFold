@@ -259,6 +259,12 @@ reads a solo pass's taps whole and keeps the prompt's last 2,048 rows as before;
 more on each rank. Solo passes take the place of `TF_GLM_PROMPT_PAIR`'s paired steps, whose second set of buffers they
 do not hold.
 
+`TF_GLM_PAIR_EXPERTS=1` is an exactness experiment for these paired steps. Both chunks share one grouped route
+and 128-pair block-16 NVFP4 expert items per MoE layer; their activations, slot rows and shared-expert combines stay
+separate and in the original order. The default-off allocation and 64-pair path are unchanged. At full size, TP=2
+uses 324.30 MiB more scratch on each rank. EXL3 and block-32/CSF0 use the original two-pass path. Device timing
+and token hashes are still required; no speedup is claimed.
+
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
 - A request that arrives during a solo pass waits for that pass to end before its own prompt runs. After that, the

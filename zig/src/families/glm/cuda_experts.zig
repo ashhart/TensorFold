@@ -8,6 +8,7 @@ const core = @import("core");
 pub const tile = 16;
 /// Pairs an item holds on a prompt plan (experts.py STAGED_TILE, experts.promptTile).
 pub const staged_tile = 64;
+pub const pair_tile = 128;
 pub const maxItems = cuda.grouped.maxItems;
 
 pub const Which = enum(u2) { gate_up, down_f32, down };
@@ -77,6 +78,21 @@ pub fn run(ks: *const Kernels, stream: cuda.Stream, which: Which, l: cuda.expert
     return g.decode(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), pairs, tile, skip);
 }
 
+/// Two prompt chunks on one grouped plan: separate routers' picks, 128-pair items, separate activations and slot rows.
+pub fn runPair(ks: *const Kernels, stream: cuda.Stream, l: cuda.experts.Layer, plan: Plan, picks: u64, x_a: u64, x_b: u64, x_stride: usize, rows_a: usize, rows_b: usize, eact_a: u64, eact_b: u64, ey_a: u64, ey_b: u64, skip: i32) !void {
+    if (!plan.prompt or plan.fact or l.format != .nvfp4) return error.BadPair;
+    const split = rows_a * plan.slots;
+    const pairs = split + rows_b * plan.slots;
+    try ks.router.route(stream, picks, pairs, plan.experts, pair_tile, plan.route);
+    const items = maxItems(pairs, plan.experts, pair_tile);
+    const up_a: cuda.experts.Rows = .{ .x = x_a, .stride = x_stride, .slots = plan.slots };
+    const up_b: cuda.experts.Rows = .{ .x = x_b, .stride = x_stride, .slots = plan.slots };
+    try cuda.pair_experts.run(&ks.nvfp4, stream, .up, up_a, up_b, l, plan.route, eact_a, eact_b, split, items, skip);
+    const down_a: cuda.experts.Rows = .{ .x = eact_a, .stride = l.width };
+    const down_b: cuda.experts.Rows = .{ .x = eact_b, .stride = l.width };
+    try cuda.pair_experts.run(&ks.nvfp4, stream, .down_bf16, down_a, down_b, l, plan.route, ey_a, ey_b, split, items, skip);
+}
+
 test "block 32's kernels are wanted for a csf0_v1 module alone, not for block 16's recipes or a single-format NVFP4" {
     const gpa = std.testing.allocator;
     try std.testing.expectEqual(@as(?cuda.experts32.Values, .e2m1), try wantsBlock32(gpa,
@@ -116,4 +132,5 @@ test "plan sizes as the Python family's" {
     try std.testing.expectEqual(@as(usize, 1 + 0), maxItems(1, 257, tile));
     try std.testing.expectEqual(@as(usize, 9 + 2), maxItems(45, 9, tile)); // 9 experts used, 45 pairs: two more items of 16
     try std.testing.expectEqual(@as(usize, staged_tile), cuda.experts.promptTile(.nvfp4));
+    try std.testing.expectEqual(@as(usize, 128), pair_tile);
 }
