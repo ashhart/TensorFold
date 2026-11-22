@@ -1,7 +1,4 @@
-//! The NVFP4 weight map against the published build's own safetensors headers (atakans/Hy4-flash-NVFP4):
-//! nvfp4_header.txt keeps 344 of its 254,168 entries, every kind of tensor at the first, second, third and
-//! last layers, two experts of two layers and the whole drafter. The full build holds 253,728 tensors outside
-//! the vision tower's blocks, the same count check() asks for.
+//! The NVFP4 weight map against 344 of the 254,168 header entries of the published build (atakans/Hy4-flash-NVFP4).
 const std = @import("std");
 const config = @import("config.zig");
 const nvfp4 = @import("nvfp4_weights.zig");
