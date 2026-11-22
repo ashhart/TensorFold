@@ -61,7 +61,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
-| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
+| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864]; paired C experiment (REV25 E1) | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562]; yes C [#2485] (dense) | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
@@ -415,6 +415,12 @@ below; these are estimates for planning a port, not results.
     same fma chain a logit: Nemotron's past 32 rows, and qwen3_5's from 257 rows since [#2499].
     Flash Next on Metal before tensor units groups a decode window's 4-bit experts from five rows up, each
     (row, expert) pair keeping the per-row kernels' sums ([#2784], plan in [#2764]); its shared rounds do not yet.
+
+    REV25 E1 adds an opt-in GLM CUDA experiment: two paired prompt chunks share one grouped route and 128-pair
+    block-16 NVFP4 items, with separate per-chunk activations and slot rows (`TF_GLM_PAIR_EXPERTS=1`). Each pair
+    keeps its own K loop and epilogue; shared prefixes and slot combines retain the original piece and slot order.
+    Default-off allocations and the existing 64-pair kernels are unchanged. Device timing and token hashes are not
+    yet run, so no speedup is claimed; EXL3 and block-32/CSF0 keep the original two-pass path.
 
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
