@@ -13,6 +13,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 - Tests: a lane-host case checks that a third short request queued behind two long ones at two slots starts within two rounds of a slot freeing and then gets its fair share of rounds, with full outputs for every request (#N).
+- GLM at TP=2 on CUDA prefill: dense attention runs only on the rows sparse attention leaves untouched when a chunk crosses the dense limit, and prefill skips projections nothing reads (MTP proposal and query-side work); outputs are unchanged (#N).
 
 - Tests: a reusable lane-core gate checks that a request's tokens, stop reason and RNG positions never depend on which other requests share its batch, when they arrive or when they leave (cohorts of 2, 4 and 8, drafts on and off, greedy and keyed, fresh and restored prefixes) (#N).
 
