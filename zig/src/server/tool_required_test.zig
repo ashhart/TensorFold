@@ -489,7 +489,7 @@ test "grammar_budget: a boolean that marks a covered grammar, refused when malfo
         if (c.budget) |want| try std.testing.expectEqual(want, request.structure.?.budget) else try std.testing.expect(request.structure == null);
     }
     // a grammar past the library's work limit (2) is refused by name, never served with a partial mask
-    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "passes the fixed work limit" }) |ready, why| {
+    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "exceeded its work limit" }) |ready, why| {
         compiler.f.budget_ready = ready;
         var cx: errors.Cx = .{ .a = g };
         var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
