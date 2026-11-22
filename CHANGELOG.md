@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: a DFlash2 hold runs only the rows its drafts need (a frame takes its deepest stream's drafts plus the pending row, within the block), and a draft's marginal cost is measured at load to price holds (0.56 ms a draft on gfx1151 against the full block's 1.73 ms), so the depth rule prices shared rounds at what a hold costs; the 27B recipe's DFlash2 figures are refreshed on current main, and nothing changes without `--drafter` (#3918, fixes #1563). Thanks to @AbrahamCete.
+
 - GLM at TP=2 on CUDA: with `TF_GLM_PAIR_EXPERTS=1` (opt-in), paired prompt chunks pass each rank's own FFN partial under the default split reduction, so their hidden states and tokens match the unpaired path; off, nothing changes (#4619, fixes #4493).
 
 - Tests: requests with `n` from 2 to 16 give back every `--max-inflight` and per-key place on each way they can end (done, disconnect, a failing choice, 429, 400, cancel, shutdown), plus a seeded concurrent disconnect case (#4602).
