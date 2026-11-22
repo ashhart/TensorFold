@@ -34,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const target = try target_graph.createLayers(a, 5);
     defer target.deinit();
+    try @import("dflash_ring.zig").run(a, target);
     try @import("tree_commit.zig").run(target.device, target.queue);
     try @import("dflash_head.zig").run(a, target.device, target.queue);
     try @import("dflash_conv.zig").run(target.device, target.queue);

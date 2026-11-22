@@ -1,7 +1,7 @@
 //! Opt-in, thread-local pass receipts; scopes partition host time without splitting GPU command buffers.
 const std = @import("std");
 pub const Phase = enum { planning, drafter, selector, verify, sampling, keep };
-pub const Bucket = struct { ms: f64 = 0, wait_ms: f64 = 0, gpu_ms: f64 = 0, waits: u64 = 0, commits: u64 = 0, allocations: u64 = 0, bytes: u64 = 0, buffers: u64 = 0 };
+pub const Bucket = struct { ms: f64 = 0, wait_ms: f64 = 0, gpu_ms: f64 = 0, waits: u64 = 0, commits: u64 = 0, allocations: u64 = 0, bytes: u64 = 0, buffers: u64 = 0, draft_ring_reads: u64 = 0 };
 threadlocal var active: bool = false;
 threadlocal var clock: ?*const fn () f64 = null;
 threadlocal var buckets: [6]Bucket = @splat(.{});
@@ -69,6 +69,9 @@ pub fn commit() void {
 pub fn buffer() void {
     if (active) buckets[@backingInt(current)].buffers += 1;
 }
+pub fn draftRingRead() void {
+    if (active) buckets[@backingInt(current)].draft_ring_reads += 1;
+}
 pub fn allocation(bytes: usize) void {
     if (active) {
         const b = &buckets[@backingInt(current)];
@@ -81,7 +84,7 @@ pub fn end() void {
     charge();
     const total = (time() - started) * 1000;
     active = false;
-    for (buckets, 0..) |b, i| std.log.info("q27_pass loop={s} width={d} rows={d} phase={s} ms={d:.6} wait_ms={d:.6} gpu_ms={d:.6} waits={d} commits={d} allocations={d} bytes={d} buffers={d} total_ms={d:.6}", .{ mode, width, verified_rows, @tagName(@as(Phase, @fromBackingInt(@intCast(i)))), b.ms, b.wait_ms, b.gpu_ms, b.waits, b.commits, b.allocations, b.bytes, b.buffers, total });
+    for (buckets, 0..) |b, i| std.log.info("q27_pass loop={s} width={d} rows={d} phase={s} ms={d:.6} wait_ms={d:.6} gpu_ms={d:.6} waits={d} commits={d} allocations={d} bytes={d} buffers={d} total_ms={d:.6} draft_ring_reads={d}", .{ mode, width, verified_rows, @tagName(@as(Phase, @fromBackingInt(@intCast(i)))), b.ms, b.wait_ms, b.gpu_ms, b.waits, b.commits, b.allocations, b.bytes, b.buffers, total, b.draft_ring_reads });
 }
 /// The host owns this forwarding allocator for the whole serving lifetime, including escaped round plans.
 pub const Counting = struct {
@@ -124,6 +127,7 @@ test "pass metrics: nested scopes count actual allocations and partition waits w
     const scope = phase(.verify);
     commit();
     buffer();
+    draftRingRead();
     const start = time();
     test_time += 0.003;
     wait(start, 0.002);
@@ -136,6 +140,7 @@ test "pass metrics: nested scopes count actual allocations and partition waits w
     try std.testing.expectEqual(@as(u64, 1), verify.waits);
     try std.testing.expectEqual(@as(u64, 1), verify.commits);
     try std.testing.expectEqual(@as(u64, 1), verify.buffers);
+    try std.testing.expectEqual(@as(u64, 1), verify.draft_ring_reads);
     try std.testing.expectApproxEqAbs(@as(f64, 3), verify.wait_ms, 1e-8);
     try std.testing.expectApproxEqAbs(@as(f64, 2), verify.gpu_ms, 1e-8);
     try std.testing.expectApproxEqAbs(@as(f64, 2), buckets[0].ms, 1e-8);

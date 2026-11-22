@@ -2,15 +2,24 @@
 using namespace metal;
 
 // bf16 token-major Q/K/V; each row and head runs a fixed-order online fp32 softmax; the mask decides visibility.
-struct tf_context_args { uint rows, keys, mask_stride, heads, scale_bits; };
+struct tf_context_ring { uint window, begin, cached; };
+struct tf_context_args { uint rows, keys, mask_stride, heads, scale_bits; tf_context_ring ring; };
+
+template <bool ring_indexed>
+inline size_t tf_context_key(uint key, tf_context_ring ring) {
+  if (!ring_indexed) return key;
+  if (key >= ring.cached) return (size_t)ring.window + (key - ring.cached);
+  const size_t slot = (size_t)ring.begin + key;
+  return slot < ring.window ? slot : slot - ring.window;
+}
 
 // Keys per tile: a tile's scores and values load together, then its weights and sums apply in key order.
 #define TF_TILE 4
 
-template <bool masked>
+template <bool masked, bool ring_indexed>
 inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const device bfloat* V,
     const device uchar* mask, device TF_OUT* O, uint row, uint head, uint keys, uint mask_stride,
-    float scale, uint lane) {
+    float scale, uint lane, tf_context_ring ring) {
   const uint kh = head / (TF_QH / TF_KVH);
   const size_t qi = ((size_t)row * TF_QH + head) * TF_D;
   float q[TF_D / 32];
@@ -28,7 +37,7 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
       if (masked && live[t]) live[t] = mask[(size_t)row * mask_stride + key] != 0;
       score[t] = 0.0f;
       if (live[t]) {
-        const size_t ki = ((size_t)key * TF_KVH + kh) * TF_D;
+        const size_t ki = (tf_context_key<ring_indexed>(key, ring) * TF_KVH + kh) * TF_D;
         float dot = 0.0f;
         for (uint d = 0; d < TF_D / 32; ++d) dot = fma(q[d], float(K[ki + lane + d*32]), dot);
         score[t] = simd_sum(dot) * scale;
@@ -66,19 +75,21 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     const device uchar* mask [[buffer(3)]], constant tf_context_args& args [[buffer(4)]],
     device TF_OUT* O [[buffer(5)]], uint lane [[thread_index_in_simdgroup]],
     uint3 tg [[threadgroup_position_in_grid]]) {
-  if (tg.y < args.rows && tg.x < TF_QH)
-    tf_context_row<true>(Q, K, V, mask, O, tg.y, tg.x, args.keys, args.mask_stride, as_type<float>(args.scale_bits), lane);
+  if (tg.y >= args.rows || tg.x >= TF_QH) return;
+  const float scale = as_type<float>(args.scale_bits);
+  if (args.ring.window == 0)
+    tf_context_row<true, false>(Q, K, V, mask, O, tg.y, tg.x, args.keys, args.mask_stride, scale, lane, args.ring);
+  else
+    tf_context_row<true, true>(Q, K, V, mask, O, tg.y, tg.x, args.keys, args.mask_stride, scale, lane, args.ring);
 }
 
 #define TF_CHUNK 256
 #define TF_G (TF_QH / TF_KVH)
 
 // Split over 256-key chunks: one simdgroup takes a KV head's query heads for one row, reading each key once for them.
-[[kernel]] void tf_shared_lane_attention_split(const device bfloat* Q [[buffer(0)]],
-    const device bfloat* K [[buffer(1)]], const device bfloat* V [[buffer(2)]],
-    const device uchar* mask [[buffer(3)]], constant tf_context_args& args [[buffer(4)]],
-    device float* part [[buffer(5)]], uint lane [[thread_index_in_simdgroup]],
-    uint3 tg [[threadgroup_position_in_grid]]) {
+template <bool ring_indexed>
+inline void tf_context_split(const device bfloat* Q, const device bfloat* K, const device bfloat* V,
+    const device uchar* mask, constant tf_context_args& args, device float* part, uint lane, uint3 tg) {
   const uint kh = tg.x, row = tg.y, chunk = tg.z, chunks = (args.keys + TF_CHUNK - 1) / TF_CHUNK;
   if (kh >= TF_KVH || row >= args.rows || chunk >= chunks) return;
   const float scale = as_type<float>(args.scale_bits);
@@ -92,7 +103,7 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
   const uint last = min(args.keys, (chunk + 1) * TF_CHUNK);
   for (uint key = chunk * TF_CHUNK; key < last; ++key) {
     if (mask[(size_t)row * args.mask_stride + key] == 0) continue;
-    const size_t ki = ((size_t)key * TF_KVH + kh) * TF_D;
+    const size_t ki = (tf_context_key<ring_indexed>(key, args.ring) * TF_KVH + kh) * TF_D;
     float k[TF_D / 32], v[TF_D / 32];
     for (uint d = 0; d < TF_D / 32; ++d) { k[d] = float(K[ki + lane + d * 32]); v[d] = float(V[ki + lane + d * 32]); }
     for (uint g = 0; g < TF_G; ++g) {
@@ -113,6 +124,17 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     for (uint d = 0; d < TF_D / 32; ++d) p[lane + d * 32] = out[g][d];
     if (lane == 0) { p[TF_D] = maximum[g]; p[TF_D + 1] = total[g]; }
   }
+}
+
+[[kernel]] void tf_shared_lane_attention_split(const device bfloat* Q [[buffer(0)]],
+    const device bfloat* K [[buffer(1)]], const device bfloat* V [[buffer(2)]],
+    const device uchar* mask [[buffer(3)]], constant tf_context_args& args [[buffer(4)]],
+    device float* part [[buffer(5)]], uint lane [[thread_index_in_simdgroup]],
+    uint3 tg [[threadgroup_position_in_grid]]) {
+  if (args.ring.window == 0)
+    tf_context_split<false>(Q, K, V, mask, args, part, lane, tg);
+  else
+    tf_context_split<true>(Q, K, V, mask, args, part, lane, tg);
 }
 
 // One query head and row: its chunks' partials rescaled to the largest maximum and added in chunk order.
@@ -146,7 +168,7 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     constant tf_context_args& args [[buffer(3)]], device TF_OUT* O [[buffer(4)]],
     uint lane [[thread_index_in_simdgroup]], uint head [[threadgroup_position_in_grid]]) {
   if (head < TF_QH)
-    tf_context_row<false>(Q, K, V, (const device uchar*)nullptr, O, 0, head, args.keys, 0, as_type<float>(args.scale_bits), lane);
+    tf_context_row<false, false>(Q, K, V, (const device uchar*)nullptr, O, 0, head, args.keys, 0, as_type<float>(args.scale_bits), lane, tf_context_ring{0, 0, 0});
 }
 
 // Only newly produced rows are written. Prompt and previous-round cache slots are never copied or rewritten.

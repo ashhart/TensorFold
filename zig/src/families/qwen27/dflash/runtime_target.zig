@@ -11,9 +11,10 @@ pub const Target = struct {
     kernels: *@import("../quant_gpu.zig").Kernels,
     glue: *@import("../glue_gpu.zig").Kernels,
     dims: projection.Ref,
+    is_qwen: bool = false,
 
     pub fn qwen(m: *@import("../model.zig").Model) Target {
-        return .{ .device = m.device, .queue = m.queue, .checkpoint = &m.checkpoint, .config = .{ .hidden = m.config.hidden, .vocab = m.config.vocab, .layers = m.config.layers }, .weights = .{ .embed = m.weights.embed, .head = m.weights.head }, .kernels = &m.kernels, .glue = &m.glue, .dims = m.frame.get(.dims) };
+        return .{ .device = m.device, .queue = m.queue, .checkpoint = &m.checkpoint, .config = .{ .hidden = m.config.hidden, .vocab = m.config.vocab, .layers = m.config.layers }, .weights = .{ .embed = m.weights.embed, .head = m.weights.head }, .kernels = &m.kernels, .glue = &m.glue, .dims = m.frame.get(.dims), .is_qwen = true };
     }
 };
 

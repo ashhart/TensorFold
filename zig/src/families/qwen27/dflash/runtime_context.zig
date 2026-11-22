@@ -113,11 +113,15 @@ fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, 
     // An unwrapped context is contiguous in the cache: the query rows go behind it and attention reads in place.
     const at: u32 = @intCast(context.begin % b.config.window);
     const in_place = at + context_rows <= b.config.window and at + keys <= b.config.window + 16;
+    const ring: @import("core").shared_attention.Ring = if (b.ring_read and !in_place) .{ .window = b.config.window, .begin = at, .cached = context_rows } else .{};
     var k: Ref = undefined;
     var v: Ref = undefined;
     if (in_place) {
         k = .{ .buf = caches[p.layer].keys, .off = @as(usize, at) * b.config.kvWidth() * 2 };
         v = .{ .buf = caches[p.layer].values, .off = @as(usize, at) * b.config.kvWidth() * 2 };
+    } else if (ring.window != 0) {
+        k = .{ .buf = caches[p.layer].keys };
+        v = .{ .buf = caches[p.layer].values };
     } else {
         const merged_k = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
         const merged_v = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
@@ -126,7 +130,7 @@ fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, 
         try gather(b, e, context, caches[p.layer].keys, k);
         try gather(b, e, context, caches[p.layer].values, v);
     }
-    const off = @as(usize, context_rows) * b.config.kvWidth() * 2;
+    const off = @as(usize, if (ring.window != 0) ring.window else context_rows) * b.config.kvWidth() * 2;
     const own_k = try b.frame.ref(p.keys);
     const own_v = try b.frame.ref(p.values);
     try b.copy(e, .{ .buf = own_k.buf, .off = own_k.off + @as(usize, first) * p.keys.stride * 2 }, .{ .buf = k.buf, .off = k.off + off }, rows, p.keys.width);
@@ -140,7 +144,8 @@ fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, 
     const R = @import("core").shared_attention.Ref;
     const views = [_]R{ .{ .buf = q.buf, .off = q.off + @as(usize, first) * p.query.stride * 2 }, .{ .buf = k.buf, .off = k.off }, .{ .buf = v.buf, .off = v.off }, .{ .buf = mask_ref.buf, .off = mask_ref.off }, .{ .buf = y.buf, .off = y.off + @as(usize, first) * result.stride * 2 } };
     // Long contexts share each 256-key chunk across the query heads of one KV head.
-    if (keys > 1024) try b.attention.encodeSplit(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]) else try b.attention.encode(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]);
+    if (keys > 1024) try b.attention.encodeSplitRing(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4], ring) else try b.attention.encodeRing(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4], ring);
+    if (ring.window != 0) @import("metal").pass_metrics.draftRingRead();
 }
 
 /// Slots before `trained` cannot see later slots, retaining their trained-block mask.

@@ -122,6 +122,8 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen27-facts-host", "Actual native window and copy facts with initialized recording fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = facts, .filters = &.{ "qwen27 window:", "draft sources: Metal Qwen27" } })).step);
     const grants = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_shared_policy_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
     b.step("test-qwen27-grants-host", "Native shared draft policy counts granted and proposed nodes without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = grants })).step);
+    const ring = b.addTest(.{ .root_module = engine, .filters = &.{"shared attention: ring indices"} });
+    b.step("test-qwen27-draft-ring-host", "DFlash2 ring indices and proposal tails without a GPU").dependOn(&b.addRunArtifact(ring).step);
     const tree_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 window:"} });
     b.step("test-qwen27-draft-tree-host", "Real selector 31-node tree and verify parents without a GPU").dependOn(&b.addRunArtifact(tree_host).step);
     const object = b.addObject(.{ .name = "qwen27-speed-compile", .root_module = b.createModule(.{

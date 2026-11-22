@@ -23,7 +23,20 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 fn chunksOf(keys: usize) usize {
     return (keys + 255) / 256;
 }
-const Args = extern struct { rows: u32, keys: u32 = 0, mask_stride: u32 = 0, heads: u32 = 0, scale_bits: u32 = 0 };
+pub const Ring = extern struct {
+    window: u32 = 0,
+    begin: u32 = 0,
+    cached: u32 = 0,
+
+    fn storageRows(r: Ring, keys: usize, capacity: usize) !usize {
+        if (r.window == 0) return keys;
+        if (r.begin >= r.window or r.cached > r.window or r.cached >= keys) return error.InvalidAttentionView;
+        const physical = try std.math.add(usize, r.window, keys - r.cached);
+        if (physical > capacity) return error.InvalidAttentionView;
+        return physical;
+    }
+};
+const Args = extern struct { rows: u32, keys: u32 = 0, mask_stride: u32 = 0, heads: u32 = 0, scale_bits: u32 = 0, ring: Ring = .{} };
 
 pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
     try s.validate();
@@ -72,18 +85,23 @@ pub const Attention = struct {
 
     /// Encode 256-key chunks and merge their fp32 partials in chunk order.
     pub fn encodeSplit(p: Attention, e: mtl.ComputeEncoder, rows: usize, keys: usize, stride: usize, scale: f32, q: Ref, k: Ref, v: Ref, mask: Ref, out: Ref) !void {
+        return p.encodeSplitRing(e, rows, keys, stride, scale, q, k, v, mask, out, .{});
+    }
+
+    pub fn encodeSplitRing(p: Attention, e: mtl.ComputeEncoder, rows: usize, keys: usize, stride: usize, scale: f32, q: Ref, k: Ref, v: Ref, mask: Ref, out: Ref, ring: Ring) !void {
         if (rows == 0 or rows > 16 or keys == 0 or keys > p.shape.capacity or stride < keys or stride > std.math.maxInt(u32) or
             !std.math.isFinite(scale)) return error.InvalidAttentionView;
         try check(q, rows * p.shape.query_heads * p.shape.head_dim * 2, 2);
         try check(out, rows * p.shape.query_heads * p.shape.head_dim * p.outputBytes(), p.outputBytes());
-        try check(k, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
-        try check(v, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        const storage = try ring.storageRows(keys, p.shape.capacity);
+        try check(k, storage * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        try check(v, storage * p.shape.kv_heads * p.shape.head_dim * 2, 2);
         try check(mask, try std.math.mul(usize, rows, stride), 1);
         try disjoint(out, q);
         try disjoint(out, k);
         try disjoint(out, v);
         try disjoint(out, mask);
-        const args = Args{ .rows = @intCast(rows), .keys = @intCast(keys), .mask_stride = @intCast(stride), .scale_bits = @bitCast(scale) };
+        const args = Args{ .rows = @intCast(rows), .keys = @intCast(keys), .mask_stride = @intCast(stride), .scale_bits = @bitCast(scale), .ring = ring };
         e.setPipeline(p.split);
         for ([_]Ref{ q, k, v, mask }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setValue(args, 4);
@@ -99,12 +117,17 @@ pub const Attention = struct {
 
     /// Q is rotated, cached K was rotated at append; no causal mask is inferred: mask[row*stride+key] decides.
     pub fn encode(p: Attention, e: mtl.ComputeEncoder, rows: usize, keys: usize, stride: usize, scale: f32, q: Ref, k: Ref, v: Ref, mask: Ref, out: Ref) !void {
+        return p.encodeRing(e, rows, keys, stride, scale, q, k, v, mask, out, .{});
+    }
+
+    pub fn encodeRing(p: Attention, e: mtl.ComputeEncoder, rows: usize, keys: usize, stride: usize, scale: f32, q: Ref, k: Ref, v: Ref, mask: Ref, out: Ref, ring: Ring) !void {
         if (rows == 0 or rows > 16 or keys == 0 or keys > p.shape.capacity or stride < keys or stride > std.math.maxInt(u32) or
             !std.math.isFinite(scale)) return error.InvalidAttentionView;
         try check(q, rows * p.shape.query_heads * p.shape.head_dim * 2, 2);
         try check(out, rows * p.shape.query_heads * p.shape.head_dim * p.outputBytes(), p.outputBytes());
-        try check(k, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
-        try check(v, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        const storage = try ring.storageRows(keys, p.shape.capacity);
+        try check(k, storage * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        try check(v, storage * p.shape.kv_heads * p.shape.head_dim * 2, 2);
         try check(mask, try std.math.mul(usize, rows, stride), 1);
         try disjoint(out, q);
         try disjoint(out, k);
@@ -112,7 +135,7 @@ pub const Attention = struct {
         try disjoint(out, mask);
         e.setPipeline(p.attend);
         for ([_]Ref{ q, k, v, mask }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-        e.setValue(Args{ .rows = @intCast(rows), .keys = @intCast(keys), .mask_stride = @intCast(stride), .scale_bits = @bitCast(scale) }, 4);
+        e.setValue(Args{ .rows = @intCast(rows), .keys = @intCast(keys), .mask_stride = @intCast(stride), .scale_bits = @bitCast(scale), .ring = ring }, 4);
         e.setBuffer(out.buf, out.off, 5);
         e.dispatchGroups(mtl.Size.of(p.shape.query_heads, rows, 1), mtl.Size.of(32, 1, 1));
     }
@@ -188,4 +211,29 @@ test "attention shapes keep grouped-query dimensions explicit" {
     bad = good;
     bad.head_dim = 31;
     try std.testing.expectError(error.InvalidAttentionShape, bad.validate());
+}
+
+test "shared attention: ring indices match the two gathered spans and the proposal tail" {
+    const window: u32 = 2048;
+    for ([_]u32{ 0, 1, window - 2, window - 1 }) |begin| {
+        for ([_]u32{ 0, 1, window - 1, window }) |cached| {
+            const ring = Ring{ .window = window, .begin = begin, .cached = cached };
+            const first = @min(cached, window - begin);
+            const keys = cached + 16;
+            const storage = try ring.storageRows(keys, window + 16);
+            try std.testing.expectEqual(@as(usize, window + 16), storage);
+            for (0..keys) |key| {
+                const gathered = if (key < first) begin + key else if (key < cached) key - first else window + key - cached;
+                const slot = ring.begin + key;
+                const direct = if (key < ring.cached)
+                    (if (slot < ring.window) slot else slot - ring.window)
+                else
+                    ring.window + key - ring.cached;
+                if (key < ring.cached) try std.testing.expectEqual(slot % ring.window, direct);
+                try std.testing.expectEqual(gathered, direct);
+                try std.testing.expect(direct < storage);
+            }
+        }
+    }
+    try std.testing.expectError(error.InvalidAttentionView, (Ring{ .window = window, .begin = window, .cached = 1 }).storageRows(2, window + 16));
 }

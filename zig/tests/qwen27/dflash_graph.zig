@@ -65,6 +65,12 @@ pub fn createQ4(a: std.mem.Allocator, target: *q.model.Model) !*Model {
 }
 
 pub fn create(a: std.mem.Allocator, target: *q.model.Model) !*Model {
+    return createWindow(a, target, config.window);
+}
+
+pub fn createWindow(a: std.mem.Allocator, target: *q.model.Model, window: u32) !*Model {
+    var draft_config = config;
+    draft_config.window = window;
     const m = try a.create(Model);
     errdefer a.destroy(m);
     m.allocator = a;
@@ -72,7 +78,7 @@ pub fn create(a: std.mem.Allocator, target: *q.model.Model) !*Model {
     m.committed_end = 0;
     m.checkpoint = tf.checkpoint_metal.Checkpoint.init(a);
     errdefer m.checkpoint.deinit();
-    const names = try df.weights.names(a, config);
+    const names = try df.weights.names(a, draft_config);
     defer df.weights.freeNames(a, names);
     var random: std.Random.DefaultPrng = .init(5051);
     const rng = random.random();
@@ -90,12 +96,12 @@ pub fn create(a: std.mem.Allocator, target: *q.model.Model) !*Model {
         @memcpy(tensor.shape[0..shape.len], shape);
         try m.checkpoint.tensors.put(a, try a.dupe(u8, name), tensor);
     }
-    m.backend = try Backend.init(a, target, &m.checkpoint, config);
+    m.backend = try Backend.init(a, target, &m.checkpoint, draft_config);
     errdefer m.backend.deinit();
     m.graph = try df.runtime_model.loadGraph(a, &m.backend);
-    m.pending = try target.device.buffer(@as(usize, config.window) * config.tapWidth() * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    m.pending = try target.device.buffer(@as(usize, draft_config.window) * draft_config.tapWidth() * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer m.pending.deinit();
-    m.session = try df.session.Session.init(config, 1, 0);
+    m.session = try df.session.Session.init(draft_config, 1, 0);
     m.preparation = .{ .mode = .bf16_reference };
     return m;
 }

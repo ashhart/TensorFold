@@ -59,6 +59,7 @@ pub const Backend = struct {
     config: cfg.Config,
     primitives: core.draft_ops.Ops,
     attention: core.shared_attention.Attention,
+    ring_read: bool = false,
     topk: core.bf16_topk_gpu.Ops,
     head: @import("runtime_head.zig").Head,
     frame: Frame,
@@ -78,6 +79,7 @@ pub const Backend = struct {
     }
     pub fn initBound(a: std.mem.Allocator, target: Target, checkpoint: *core.checkpoint_metal.Checkpoint, c: cfg.Config) !Backend {
         try c.check();
+        const ring_read = target.is_qwen and try @import("sys").environment.read(bool, "TF_Q27_DRAFT_RING_READ", false);
         const primitives = try core.draft_ops.Ops.init(target.device);
         errdefer primitives.deinit();
         const attention = try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = c.window + 16, .output = .bf16 });
@@ -89,7 +91,7 @@ pub const Backend = struct {
         // the trimmed head's shape is the drafter's own: compile its pipeline here, not in the first draft round
         try target.kernels.prepareDecode(head.linear);
         const caches = try newCaches(a, target.device, c, c.layers);
-        return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
+        return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .ring_read = ring_read, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
     }
     pub fn setResident(b: *Backend, hook: ?mtl.ResidencySet.Follow) void {
         @import("../residency.zig").setDraft(b, hook);
