@@ -382,7 +382,7 @@ const Rig = struct {
     fn setStale(r: *Rig, on: bool) void {
         r.host.lock();
         defer r.host.unlock();
-        r.host.stale = on;
+        r.host.stale.store(on, .release);
     }
 
     fn setFailRound(r: *Rig, on: bool) void {

@@ -46,8 +46,18 @@ pub const LaneHost = struct {
     admitted: std.ArrayList(*Job) = .empty,
     filling: std.ArrayList(*Job) = .empty, // admitted jobs whose prompt is still going in, a chunk a round, oldest first
     cancels: std.ArrayList(Id) = .empty,
-    closing: bool = false,
-    stale: bool = false, // the learner's last step: a put-back has not reached the device, so replies are refused
+    closing: std.atomic.Value(bool) = .init(false),
+    stale: std.atomic.Value(bool) = .init(false), // the learner's last step: a put-back has not reached the device, so replies are refused
+    /// A status read's snapshot (issue 3200): the engine thread publishes it inside the seqlock, a
+    /// reader copies it without the mutex. Live stream lengths sit in the double-buffered slots.
+    snap: @import("lane_host_status.zig").Snapshot = .{},
+    snap_seq: std.atomic.Value(u32) = .init(0), // odd while the engine thread publishes
+    live_slots: [2]?[]u32 = .{ null, null },
+    /// The engine thread's lock acquisitions that found the mutex held (issue 3200's round-wait counter).
+    round_waits: std.atomic.Value(u64) = .init(0),
+    /// The engine thread's id, so its lock acquisitions can be told from the others'.
+    engine_id: std.Thread.Id = 0,
+    engine_running: std.atomic.Value(bool) = .init(false),
     /// `halt`'s reason: what is left finishes failed with it (null: a stop cancels what is left)
     halt_reason: ?[]const u8 = null,
     thread: ?std.Thread = null,
@@ -145,6 +155,7 @@ pub const LaneHost = struct {
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
         h.live_tokens.deinit(h.gpa);
+        for (&h.live_slots) |slot| if (slot) |buf| h.gpa.free(buf);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
         lane_trace.drop(&h.trace);
@@ -215,10 +226,10 @@ pub const LaneHost = struct {
         if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
-        const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale or pressure.refuses(h)) {
+        const unavailable = h.closing.load(.acquire) or (if (h.health) |source| !source.read(source.ctx) else false);
+        if (unavailable or h.stale.load(.acquire) or pressure.refuses(h)) {
             h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
+            return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
@@ -228,6 +239,7 @@ pub const LaneHost = struct {
             return error.Busy;
         };
         h.load.started += 1;
+        @import("lane_host_status.zig").publish(h); // a reader sees the queue at once
         h.wake.signal(h.io);
     }
 
@@ -253,7 +265,7 @@ pub const LaneHost = struct {
         const job: *Job = @ptrCast(@alignCast(ctx));
         job.host.lock();
         defer job.host.unlock();
-        return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
+        return job.host.closing.load(.acquire) or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
     /// A background pass's yield hook: a foreground request waits, a prompt fills or a stream decodes (under the lock).
@@ -274,10 +286,10 @@ pub const LaneHost = struct {
         const until: std.Io.Timeout = .{ .deadline = .fromNow(h.io, .{ .raw = .fromNanoseconds(h.warm_quiet), .clock = .awake }) };
         h.lock();
         defer h.unlock();
-        while (!h.closing and !@import("lane_host_warm.zig").otherWork(h, job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
+        while (!h.closing.load(.acquire) and !@import("lane_host_warm.zig").otherWork(h, job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
             h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
         }
-        h.load.yields += @intFromBool(!h.closing and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
+        h.load.yields += @intFromBool(!h.closing.load(.acquire) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
         return false;
     }
 
@@ -334,6 +346,10 @@ pub const LaneHost = struct {
     }
 
     pub fn lock(h: *LaneHost) void {
+        if (h.engine_running.load(.acquire) and std.Thread.getCurrentId() == h.engine_id) {
+            if (h.mutex.tryLock()) return; // free: taken
+            _ = h.round_waits.fetchAdd(1, .monotonic); // the engine thread waited: someone held the lock
+        }
         h.mutex.lockUncancelable(h.io);
     }
 
@@ -515,6 +531,8 @@ pub const LaneHost = struct {
     }
 
     fn run(h: *LaneHost) void {
+        h.engine_id = std.Thread.getCurrentId();
+        h.engine_running.store(true, .release);
         defer scoring.close(h);
         if (!@import("lane_thread.zig").start(h)) return;
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
@@ -537,7 +555,7 @@ pub const LaneHost = struct {
             ends.deliverPending(h);
             status.noteLive(h);
             h.lock();
-            if (h.closing) {
+            if (h.closing.load(.acquire)) {
                 const left = h.queued.items.len + h.admitted.items.len;
                 h.unlock();
                 if (h.lesson_open) {

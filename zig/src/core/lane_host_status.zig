@@ -8,31 +8,93 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 pub const Mark = struct { at: i96, tokens: u64 };
 const window_ns: i96 = 2 * std.time.ns_per_s;
 
-/// Engine.status: the counts, read under the host's lock.
+/// Engine.status: the counts, copied from the engine thread's published snapshot without the host's lock (issue 3200).
 pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
-    h.mutex.lockUncancelable(h.io);
-    defer h.mutex.unlock(h.io);
+    var s: Snapshot = undefined;
+    var n: usize = 0;
+    while (true) {
+        const v1 = h.snap_seq.load(.acquire);
+        if (v1 % 2 == 0) {
+            s = h.snap;
+            if (s.live_len > 0) if (h.live_slots[s.live_slot]) |buf| {
+                n = @min(stream_tokens.len, s.live_len);
+                @memcpy(stream_tokens[0..n], buf[0..n]);
+            };
+            if (h.snap_seq.load(.acquire) == v1) break;
+        }
+    }
+    const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+    out.* = .{
+        .healthy = !h.closing.load(.acquire) and !h.stale.load(.acquire) and (if (h.health) |source| source.read(source.ctx) else true),
+        .running = @intCast(s.running),
+        .waiting = @intCast(s.waiting),
+        .decode_tokens_per_second = @as(f64, @floatFromInt(s.decode_tokens)) / 2.0,
+        .prefill_tokens_per_second = if (now - s.prefill_at <= window_ns) s.prefill_rate else 0,
+        .streams = n,
+        .generation_tokens = s.generation_tokens,
+        .prompt_cache = s.cache_status,
+        .disk = s.disk_status,
+        .fsr = if (h.fsr) |source| source.read(source.ctx) else null,
+        .fill_prompt_tokens = s.fill_prompt_tokens,
+        .fill_tokens_left = s.fill_tokens_left,
+        .fill_unknown = s.fill_unknown,
+        .fill_run = s.fill_run,
+    };
+}
+
+/// The host-owned status values a read needs, published by the engine thread; a plain copy a reader retries over.
+pub const Snapshot = struct {
+    live_slot: usize = 0,
+    live_len: usize = 0,
+    running: usize = 0,
+    waiting: usize = 0,
+    decode_tokens: u64 = 0,
+    prefill_rate: f64 = 0,
+    prefill_at: i96 = 0,
+    generation_tokens: u64 = 0,
+    cache_status: ?api.Status.PromptCache = null,
+    disk_status: ?api.Status.DiskCache = null,
+    fill_prompt_tokens: ?u32 = null,
+    fill_tokens_left: ?u32 = null,
+    fill_unknown: bool = false,
+    fill_run: u64 = 0,
+};
+
+/// Publishes the snapshot for the next read; the caller holds the host's lock (issue 3200).
+pub fn publish(h: *LaneHost) void {
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
     var tokens: u64 = 0;
     for (h.decoded.items) |m| {
         if (m.at >= now - window_ns) tokens += m.tokens;
     }
-    const n = @min(stream_tokens.len, h.live_tokens.items.len);
-    @memcpy(stream_tokens[0..n], h.live_tokens.items[0..n]);
-    out.* = .{
-        .healthy = !h.closing and !h.stale and (if (h.health) |source| source.read(source.ctx) else true),
-        .running = @intCast(h.admitted.items.len),
-        .waiting = @intCast(h.queued.items.len),
-        .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
-        .prefill_tokens_per_second = if (now - h.prefill_at <= window_ns) h.prefill_rate else 0,
-        .streams = n,
+    var tmp: api.Status = .{};
+    fillTotals(h, &tmp);
+    const slot = (h.snap.live_slot + 1) % 2;
+    if (h.live_slots[slot] == null) h.live_slots[slot] = h.gpa.alloc(u32, @max(1, h.info_.lanes)) catch null;
+    h.snap_seq.store(h.snap_seq.load(.monotonic) | 1, .release); // odd: a reader retries
+    var len: usize = 0;
+    if (h.live_slots[slot]) |buf| {
+        len = @min(buf.len, h.live_tokens.items.len);
+        @memcpy(buf[0..len], h.live_tokens.items[0..len]);
+    }
+    h.snap = .{
+        .live_slot = slot,
+        .live_len = len,
+        .running = h.admitted.items.len,
+        .waiting = h.queued.items.len,
+        .decode_tokens = tokens,
+        .prefill_rate = h.prefill_rate,
+        .prefill_at = h.prefill_at,
         .generation_tokens = h.live_generated,
-        .prompt_cache = h.cache_status,
-        .disk = h.disk_status,
-        .fsr = if (h.fsr) |source| source.read(source.ctx) else null,
+        .cache_status = h.cache_status,
+        .disk_status = h.disk_status,
+        .fill_prompt_tokens = tmp.fill_prompt_tokens,
+        .fill_tokens_left = tmp.fill_tokens_left,
+        .fill_unknown = tmp.fill_unknown,
+        .fill_run = tmp.fill_run,
     };
-    fillTotals(h, out);
+    h.snap_seq.store(h.snap_seq.load(.monotonic) +% 1, .release); // even: the copy is stable
 }
 
 /// A job whose prompt pass has not reported yet is filling; the engine thread publishes that with `fill_on`.
@@ -77,6 +139,7 @@ pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
     h.decoded.shrinkRetainingCapacity(keep);
     h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
     @import("lane_host_load.zig").decoded(h, n, first);
+    publish(h);
 }
 
 /// Each started stream's context and generated tokens, for the next status read.
@@ -103,4 +166,5 @@ pub fn noteLive(h: *LaneHost) void {
         h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
         h.live_generated += @intCast(job.stream.emitted().len);
     };
+    publish(h);
 }

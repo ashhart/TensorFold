@@ -73,7 +73,7 @@ const Closer = struct {
         calls += 1;
         const h = host.?;
         h.lock();
-        h.closing = true;
+        h.closing.store(true, .release);
         h.unlock();
         @memset(logits, 1);
         return 0;

@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/tokenizer_host.zig").steps(b);
     @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
+    @import("zig/build/lane_status_host.zig").steps(b);
     @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);

@@ -2,7 +2,7 @@
 pub fn start(h: anytype) bool {
     if (h.on_thread) |t| t.run(t.ctx) catch |e| {
         h.lock();
-        h.closing = true;
+        h.closing.store(true, .release);
         h.halt_reason = @errorName(e);
         h.wake.broadcast(h.io);
         h.unlock();

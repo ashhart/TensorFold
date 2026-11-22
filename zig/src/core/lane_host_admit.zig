@@ -12,9 +12,9 @@ const Wait = @import("wait_reason.zig").Wait;
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return hold(h, .memory_pressure); // under memory pressure nothing starts or is read ahead
     if (h.disk.holding()) return null; // a flush waits for the requests in flight: nothing starts or is read ahead
-    if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    if (!h.stale.load(.acquire)) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
-    if (h.stale) return hold(h, .engine_unavailable);
+    if (h.stale.load(.acquire)) return hold(h, .engine_unavailable);
     if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return hold(h, .engine_busy);
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
     while (true) { // a request that waits for a cut another prompt is filling stays queued, passed over

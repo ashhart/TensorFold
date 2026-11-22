@@ -72,7 +72,7 @@ const Seen = struct {
 fn waitStale(host: *LaneHost, want: bool) !void {
     for (0..5000) |_| {
         host.mutex.lockUncancelable(std.testing.io);
-        const s = host.stale;
+        const s = host.stale.load(.acquire);
         host.mutex.unlock(std.testing.io);
         if (s == want) return;
         std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};

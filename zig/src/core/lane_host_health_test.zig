@@ -35,11 +35,11 @@ test "an unhealthy backend fails health and refuses a request before queue admis
     engine.status(&status, &.{});
     try std.testing.expect(status.healthy);
     const request: Request = .{ .prompt = &.{1}, .max_tokens = 1 };
-    host.stale = true;
+    host.stale.store(true, .release);
     engine.status(&status, &.{});
     try std.testing.expect(!status.healthy);
     try std.testing.expectError(error.Stale, engine.submit(1, &request, .{ .ctx = &health, .event = Health.event }));
-    host.stale = false;
+    host.stale.store(false, .release);
     health.available = false;
     engine.status(&status, &.{});
     try std.testing.expect(!status.healthy);

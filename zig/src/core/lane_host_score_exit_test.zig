@@ -9,7 +9,7 @@ fn failAfterAsk(ptr: *anyopaque) anyerror!void {
     const h: *LaneHost = @ptrCast(@alignCast(ptr));
     h.lock();
     defer h.unlock();
-    while (h.scores.asks.items.len == 0 and !h.closing) h.wake.waitUncancelable(h.io, &h.mutex);
+    while (h.scores.asks.items.len == 0 and !h.closing.load(.acquire)) h.wake.waitUncancelable(h.io, &h.mutex);
     return error.InjectedInitializationFailure;
 }
 fn neverScore(_: *anyopaque, _: []const u32, _: []const u32, _: []f64, _: bool) anyerror!f64 {
