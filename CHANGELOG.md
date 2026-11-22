@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once; outputs are unchanged, +4.8% at 8K and +5.4% at 32K prompts on two GB10s, off by default (#4493).
+
 - Server: the tokenizer memo now has its own allocator, so requests that add memo segments no longer leave allocator buckets behind on aarch64 Linux (#4455, thanks @bikepresentball).
 
 - Pull: `tensorfold pull` honours the proxy environment on every hop of a redirect (`https_proxy`/`HTTPS_PROXY`, `http_proxy`/`HTTP_PROXY`, `all_proxy`/`ALL_PROXY`, lower case first, and `NO_PROXY` for exact hosts, domain suffixes and ports), tunnels https names through a real `CONNECT` under std's HTTP and TLS (only `http://` proxies, others refused naming the variable), and bounds every connect with `TENSORFOLD_PULL_CONNECT_SECONDS` (default 30) and every read with `TENSORFOLD_PULL_STALL_SECONDS` (default 60), where a stalled file resumes from its `.incomplete` bytes with a Range request up to three times and a failure names the proxy's scheme, host and port, never its credentials (#4140, part of #3692).
