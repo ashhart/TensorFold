@@ -15,27 +15,69 @@ const Fake = struct {
     var eager: usize = 0;
     var destroyed: usize = 0;
     var verdict: abi.ExecUpdateResult = .success;
+    var current: [2]u64 = .{ 0, 0 };
+    var graphs: [16][2]u64 = @splat(.{ 0, 0 });
+    var execs: [16][2]u64 = @splat(.{ 0, 0 });
+    var out: [16][2]u64 = undefined;
+    var emitted: usize = 0;
+
+    fn reset() void {
+        capturing = false;
+        records = 0;
+        instantiates = 0;
+        updates = 0;
+        launches = 0;
+        eager = 0;
+        destroyed = 0;
+        verdict = .success;
+        current = .{ 0, 0 };
+        graphs = @splat(.{ 0, 0 });
+        execs = @splat(.{ 0, 0 });
+        emitted = 0;
+    }
+
+    fn install(d: *cuda.Driver) void {
+        d.api.cuStreamBeginCapture_v2 = begin;
+        d.api.cuStreamEndCapture = end;
+        d.api.cuStreamIsCapturing = status;
+        d.api.cuGraphInstantiateWithFlags = instantiate;
+        d.api.cuGraphExecUpdate_v2 = update;
+        d.api.cuGraphDestroy = graphDestroy;
+        d.api.cuGraphUpload = upload;
+        d.api.cuGraphLaunch = launch;
+        d.api.cuGraphExecDestroy = execDestroy;
+    }
+
+    fn emit(payload: [2]u64) void {
+        std.debug.assert(emitted < out.len);
+        out[emitted] = payload;
+        emitted += 1;
+    }
+
     fn begin(_: abi.Stream, _: abi.CaptureMode) callconv(.c) abi.Result {
         capturing = true;
         return 0;
     }
-    fn end(_: abi.Stream, out: *abi.Graph) callconv(.c) abi.Result {
+    fn end(_: abi.Stream, out_graph: *abi.Graph) callconv(.c) abi.Result {
         capturing = false;
         records += 1;
-        out.* = @ptrFromInt(1);
+        out_graph.* = @ptrFromInt(1);
+        graphs[@intFromPtr(out_graph.*)] = current;
         return 0;
     }
     fn status(_: abi.Stream, s: *abi.CaptureStatus) callconv(.c) abi.Result {
         s.* = if (capturing) .active else .none;
         return 0;
     }
-    fn instantiate(e: *abi.GraphExec, _: abi.Graph, _: u64) callconv(.c) abi.Result {
+    fn instantiate(e: *abi.GraphExec, graph: abi.Graph, _: u64) callconv(.c) abi.Result {
         instantiates += 1;
         e.* = @ptrFromInt(instantiates);
+        execs[@intFromPtr(e.*)] = graphs[@intFromPtr(graph)];
         return 0;
     }
-    fn update(_: abi.GraphExec, _: abi.Graph, info: *abi.ExecUpdateResultInfo) callconv(.c) abi.Result {
+    fn update(exec: abi.GraphExec, graph: abi.Graph, info: *abi.ExecUpdateResultInfo) callconv(.c) abi.Result {
         updates += 1;
+        execs[@intFromPtr(exec)] = graphs[@intFromPtr(graph)];
         info.result = verdict;
         return if (verdict == .success) 0 else 910; // CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE
     }
@@ -45,8 +87,9 @@ const Fake = struct {
     fn upload(_: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
         return 0;
     }
-    fn launch(_: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
+    fn launch(exec: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
         launches += 1;
+        emit(execs[@intFromPtr(exec)]);
         return 0;
     }
     fn execDestroy(_: abi.GraphExec) callconv(.c) abi.Result {
@@ -55,10 +98,15 @@ const Fake = struct {
     }
 };
 
-/// A pass whose kernels the fake counts: run outside a capture, it ran eagerly.
+/// A pass whose argument pair is kept in its graph; eager runs emit it directly.
 const Pass = struct {
-    pub fn run(_: Pass) !void {
-        if (!Fake.capturing) Fake.eager += 1;
+    payload: [2]u64 = .{ 0, 0 },
+    pub fn run(p: Pass) !void {
+        Fake.current = p.payload;
+        if (!Fake.capturing) {
+            Fake.eager += 1;
+            Fake.emit(p.payload);
+        }
     }
 };
 
@@ -74,16 +122,9 @@ fn expectAfter(c: *wg.Cache(wg.Key), stream: cuda.Stream, k: wg.Key, counts: [5]
 }
 
 test "window graphs: a held graph takes a new length or sequence in place; new launches get a new executable" {
+    Fake.reset();
     var d: cuda.Driver = undefined;
-    d.api.cuStreamBeginCapture_v2 = Fake.begin;
-    d.api.cuStreamEndCapture = Fake.end;
-    d.api.cuStreamIsCapturing = Fake.status;
-    d.api.cuGraphInstantiateWithFlags = Fake.instantiate;
-    d.api.cuGraphExecUpdate_v2 = Fake.update;
-    d.api.cuGraphDestroy = Fake.graphDestroy;
-    d.api.cuGraphUpload = Fake.upload;
-    d.api.cuGraphLaunch = Fake.launch;
-    d.api.cuGraphExecDestroy = Fake.execDestroy;
+    Fake.install(&d);
     const previous = cuda.copy_source.current();
     cuda.copy_source.setCurrent(@ptrFromInt(0x3254));
     defer cuda.copy_source.setCurrent(previous);
@@ -214,6 +255,95 @@ test "window graph keys: equal tables give equal keys; a kept window's swapped s
     try t.expect(!std.meta.eql(windowKey(a, 9000, 3, hooks0), swapped));
     for (&b.state, &spare) |*x, *y| std.mem.swap(Buf, x, y);
     try t.expectEqual(windowKey(a, 9000, 3, hooks0), windowKey(b, 9000, 3, hooks0));
+}
+
+const SettleOutcome = struct {
+    args: [6][2]u64,
+    tokens: [18]u32,
+    kept: [6]usize,
+    counts: [4]u64, // calls, captures, replays, updates
+    fake: [5]usize,
+    held: usize,
+};
+
+/// Six whole-window accepts: each direction repeats after one intervening settle of the other direction.
+fn runSettles() !SettleOutcome {
+    const accept = @import("lanes").accept;
+    Fake.reset();
+    var d: cuda.Driver = undefined;
+    Fake.install(&d);
+    const previous = cuda.copy_source.current();
+    cuda.copy_source.setCurrent(@ptrFromInt(0x3254));
+    defer cuda.copy_source.setCurrent(previous);
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    var c: wg.Cache(wg.Key) = .{};
+    defer c.clear(t.allocator);
+    var q: Seq = .at(7, 0x1000_0000);
+    var spare: [linear_n]Buf = undefined;
+    for (&spare, 0..) |*x, i| x.ptr = 0x3000_0000 + i * 0x10000;
+    var out: SettleOutcome = undefined;
+    var keys: [2]?wg.Key = .{ null, null };
+    for (0..6) |round| {
+        var keep: parts.Keep = .{};
+        keep.layers[0].state_out = spare[0].ptr;
+        const hooks: parts.Hooks = .{ .logits = .all, .logits_out = 0x6000, .keep = &keep, .host_logits = false };
+        const k = windowKey(q, 9000, 3, hooks);
+        const parity = round % 2;
+        if (keys[parity]) |old| try t.expectEqual(old, k) else keys[parity] = k;
+        const payload = [2]u64{ q.state[0].ptr, spare[0].ptr };
+        try c.run(t.allocator, stream, k, Pass{ .payload = payload });
+        const base: u32 = @intCast(40 + 3 * round);
+        const drafts = [3]u32{ base, base + 1, base + 2 };
+        const picks = [3]u32{ base + 1, base + 2, base + 3 };
+        const parents = try accept.rowParents(t.allocator, 3, null);
+        defer t.allocator.free(parents);
+        const path = try accept.acceptPath(t.allocator, &drafts, parents, &picks);
+        defer t.allocator.free(path);
+        out.kept[round] = path.len;
+        var emitted: usize = 0;
+        for (path[1..]) |row| {
+            out.tokens[3 * round + emitted] = accept.targetPick(&picks, parents, row);
+            emitted += 1;
+        }
+        out.tokens[3 * round + emitted] = picks[path[path.len - 1]];
+        out.args[round] = Fake.out[round];
+        for (&q.state, &spare) |*a, *b| std.mem.swap(Buf, a, b);
+    }
+    out.counts = .{ c.calls, c.captures, c.replays, c.updates };
+    out.fake = .{ Fake.records, Fake.instantiates, Fake.updates, Fake.eager, Fake.launches };
+    out.held = c.map.count();
+    return out;
+}
+
+test "window graph parity: both settle directions replay identical payload bytes, tokens and full accepts" {
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_WINDOW_GRAPH_PARITY";
+    _ = env.unsetenv(name);
+    defer _ = env.unsetenv(name);
+    try t.expect(!wg.retainSettleGraphs());
+    const off = try runSettles();
+    try t.expectEqual([4]u64{ 6, 1, 0, 4 }, off.counts);
+    try t.expectEqual([5]usize{ 5, 1, 4, 1, 5 }, off.fake);
+    try t.expectEqual(@as(usize, 1), off.held);
+
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, "1", 1));
+    try t.expect(wg.retainSettleGraphs());
+    const on = try runSettles();
+    try t.expectEqual([4]u64{ 6, 2, 2, 0 }, on.counts);
+    try t.expectEqual([5]usize{ 2, 2, 0, 2, 4 }, on.fake);
+    try t.expectEqual(@as(usize, 2), on.held);
+
+    try t.expectEqualSlices(u8, std.mem.asBytes(&off.args), std.mem.asBytes(&on.args));
+    try t.expectEqualSlices(u32, &off.tokens, &on.tokens);
+    try t.expectEqualSlices(usize, &off.kept, &on.kept);
+    for (off.tokens, 0..) |token, i| try t.expectEqual(@as(u32, @intCast(41 + i)), token);
+    for (off.kept) |kept| try t.expectEqual(@as(usize, 3), kept);
+    for (1..6) |i| try t.expect(!std.meta.eql(off.args[i - 1], off.args[i]));
+    var off_hash: [32]u8 = undefined;
+    var on_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(std.mem.asBytes(&off.tokens), &off_hash, .{});
+    std.crypto.hash.sha2.Sha256.hash(std.mem.asBytes(&on.tokens), &on_hash, .{});
+    try t.expectEqualSlices(u8, &off_hash, &on_hash);
 }
 
 var history: [2]i64 = .{ 0, 0 };

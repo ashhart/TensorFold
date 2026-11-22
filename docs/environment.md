@@ -174,13 +174,14 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 37 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 38 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
 | --- | --- |
 | `TF_FLASHNEXT_PROMPT_BF16` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_WINDOW_GRAPH` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | Exactly `0` or `1`; default off. `1` keeps CUDA graphs for both sequence-state/draft-spare pointer orientations, avoiding recapture after whole-window accepts |
 | `TF_FLASHNEXT_LANE_PARTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_KEEP_INPASS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_FIRST_EARLY` | Exactly `0` or `1`; default on |
