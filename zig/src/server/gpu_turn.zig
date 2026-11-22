@@ -40,21 +40,26 @@ pub fn yield(io: std.Io, at: []const u8) f64 {
     return @as(f64, @floatFromInt(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e9;
 }
 
-/// Whether no speech holds the turn; an error counts as free, as speech never depends on batch work seeing it.
+/// Whether no speech holds the turn. Speech only shares it, so a hold that also refuses a shared probe is no voice
+/// and is not waited for; an error counts as free, as speech never depends on batch work seeing it.
 fn free(io: std.Io, file: std.Io.File) bool {
-    const got = file.tryLock(io, .exclusive) catch return true;
-    if (got) file.unlock(io);
-    return got;
+    if (file.tryLock(io, .exclusive) catch return true) {
+        file.unlock(io);
+        return true;
+    }
+    if (!(file.tryLock(io, .shared) catch return true)) return true;
+    file.unlock(io);
+    return false;
 }
 
 /// Read-only so the speech server's and a render's users can share one file; flock needs no write access.
-/// Never through a symlink, created only when absent: a name planted in the shared directory stays inert.
+/// Created only when absent, else `existing`: a name planted in the shared directory stays inert.
 fn open(io: std.Io, at: []const u8) !std.Io.File {
     const dir = std.Io.Dir.cwd();
-    return dir.openFile(io, at, .{ .follow_symlinks = false }) catch |e| switch (e) {
+    return existing(io, at, .read_only) catch |e| switch (e) {
         error.FileNotFound => {
             const file = dir.createFile(io, at, .{ .read = true, .exclusive = true }) catch |create_err| {
-                if (create_err == error.PathAlreadyExists) return dir.openFile(io, at, .{ .follow_symlinks = false });
+                if (create_err == error.PathAlreadyExists) return existing(io, at, .read_only);
                 return create_err;
             };
             errdefer file.close(io);
@@ -72,7 +77,7 @@ pub fn mark(io: std.Io, at: []const u8) ?Mark {
     const file = marker(io, at) catch return null;
     defer file.close(io);
     const stat = file.stat(io) catch return null;
-    if (stat.kind != .file or stat.permissions.toMode() & 0o666 != 0o666) return null;
+    if (stat.permissions.toMode() & 0o666 != 0o666) return null;
     var result: Mark = .{ .inode = stat.inode, .bytes = undefined };
     if ((file.readPositionalAll(io, &result.bytes, 0) catch return null) != result.bytes.len) return null;
     const lock = open(io, at) catch return null;
@@ -104,10 +109,10 @@ fn marker(io: std.Io, at: []const u8) !std.Io.File {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{s}.stamp", .{at});
     const dir = std.Io.Dir.cwd();
-    return dir.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false }) catch |e| switch (e) {
+    return existing(io, name, .read_write) catch |e| switch (e) {
         error.FileNotFound => {
             const file = dir.createFile(io, name, .{ .read = true, .exclusive = true }) catch |create_err| {
-                if (create_err == error.PathAlreadyExists) return dir.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false });
+                if (create_err == error.PathAlreadyExists) return existing(io, name, .read_write);
                 return create_err;
             };
             errdefer file.close(io);
@@ -119,6 +124,24 @@ fn marker(io: std.Io, at: []const u8) !std.Io.File {
         },
         else => e,
     };
+}
+
+/// A file already at `name`, only when it is one regular file with no other name: never through a symlink, and
+/// nonblocking, so a planted FIFO cannot stall the open and a planted hard link cannot redirect the stamp's writes.
+fn existing(io: std.Io, name: []const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !std.Io.File {
+    const file: std.Io.File = if (@import("builtin").os.tag == .windows)
+        try std.Io.Dir.cwd().openFile(io, name, .{ .mode = mode, .follow_symlinks = false })
+    else
+        .{ .handle = try std.posix.openat(std.posix.AT.FDCWD, name, .{
+            .ACCMODE = if (mode == .read_write) .RDWR else .RDONLY,
+            .NOFOLLOW = true,
+            .NONBLOCK = true,
+            .CLOEXEC = true,
+        }, 0), .flags = .{ .nonblocking = false } };
+    errdefer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.nlink != 1) return error.NotRegularFile;
+    return file;
 }
 
 /// Committed command buffers, waited in commit order. No error returns before every one has completed, so a
@@ -238,15 +261,35 @@ test "a planted lock path neither redirects the files speech makes nor holds spe
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "victim", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "victim.stamp", .{}));
 
-    // a real lock someone else holds exclusively and never lets go: speech still starts, without the turn
+    // a FIFO for the lock and a hard link for the stamp: neither stalls speech, and the link's target keeps its bytes
     try tmp.dir.deleteFile(io, "speech.lock");
+    try tmp.dir.deleteFile(io, "speech.lock.stamp");
+    var fifo_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), mkfifo(try std.fmt.bufPrintSentinel(&fifo_buf, "{s}", .{lock}, 0), 0o666));
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "kept" });
+    try tmp.dir.hardLink("victim", tmp.dir, "speech.lock.stamp", io, .{});
+    const planted = std.Io.Clock.awake.now(io);
+    try std.testing.expect(speak(io, lock) == null);
+    try std.testing.expectEqual(@as(f64, 0), yield(io, lock));
+    try std.testing.expect(mark(io, lock) == null);
+    try std.testing.expect(planted.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds() < std.time.ns_per_s);
+    var kept: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("kept", try tmp.dir.readFile(io, "victim", &kept));
+
+    // a real lock someone else holds exclusively and never lets go: speech still starts, without the turn, and
+    // batch work does not wait for a holder that is no voice
+    try tmp.dir.deleteFile(io, "speech.lock");
+    try tmp.dir.deleteFile(io, "speech.lock.stamp");
     const squatter = try open(io, lock);
     defer squatter.close(io);
     try squatter.lock(io, .exclusive);
     const started = std.Io.Clock.awake.now(io);
     try std.testing.expect(speak(io, lock) == null);
     try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds() < 3 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(f64, 0), yield(io, lock));
 }
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 test "timed work excludes speech completed entirely between polls and preexisting speech" {
     const io = std.testing.io;
