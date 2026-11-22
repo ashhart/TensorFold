@@ -101,3 +101,36 @@ test "inkling2 hip: the dispatcher picks split, fold or prompt by rows, streams 
     try t.expectEqual([3]u32{ 98, 8, 6 }, Mock.grids[0]);
     try t.expectEqual(@as(usize, 3), Mock.which[0]);
 }
+
+const ring_rows: k.Rows = .{ .rows = 4, .heads = 24, .kv_heads = 8, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 1, .last_pos = 5000 };
+
+test "inkling2 hip: attend refuses a ring that is not whole 64-key tiles, and launches nothing" {
+    var r: hip.Runtime = undefined;
+    r.api.hipModuleLaunchKernel = Mock.launch;
+    const kern = mocked(&r);
+    const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
+    var g = k.Layer.global(8192);
+    g.ring = 8191;
+    Mock.count = 0;
+    try t.expectError(error.Inkling2RingTiles, k.attend(&kern, s, ring_rows, g, 1, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    g.ring = 8192;
+    try k.attend(&kern, s, ring_rows, g, 1, 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try t.expectEqual(@as(usize, 2), Mock.count);
+}
+
+test "inkling2 hip: attend refuses a sliding ring shorter than the window plus the call's rows less one" {
+    var r: hip.Runtime = undefined;
+    r.api.hipModuleLaunchKernel = Mock.launch;
+    const kern = mocked(&r);
+    const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
+    var l = k.Layer.sliding(1024, 4);
+    try t.expectEqual(@as(u32, 1088), l.ring);
+    l.ring = 1024; // whole tiles, but four rows' new keys overwrite keys the first row still reads
+    Mock.count = 0;
+    try t.expectError(error.Inkling2RingShort, k.attend(&kern, s, ring_rows, l, k.slotsFor(l, 1), 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0));
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    l.ring = 1088;
+    try k.attend(&kern, s, ring_rows, l, k.slotsFor(l, 1), 0, 0, .{ .k = 0, .v = 0 }, 0, 0, 0, 0, 0, 0);
+    try t.expectEqual(@as(usize, 2), Mock.count);
+}
