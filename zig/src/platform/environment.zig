@@ -124,6 +124,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_CALIB_CYCLE", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 600000, .forms = "whole milliseconds from 0 to 600000 (0: no limit)" },
+    .{ .name = "TF_INKLING2_MINI_SMOKE", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding a released Inkling 2 Mini checkpoint" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
     .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },

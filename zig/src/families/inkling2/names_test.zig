@@ -251,3 +251,149 @@ test "the real checkpoint's 24 shard headers and mtp.safetensors match the map (
     try t.expectEqual(@as(usize, 84), mtp.expected);
     try t.expect(mtp.clean());
 }
+
+test "original Mini main and MTP header digests and tensor layout" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: config.Why = .{};
+    const c = try config.parse(a, config_test.mini, &why);
+    const header = try unfold(a, @embedFile("fixtures/loop_model_header.txt"), "inkling2-loop-model");
+    const mtp = try unfold(a, @embedFile("fixtures/loop_mtp_header.txt"), "inkling2-loop-mtp");
+    const model_report = try names.check(a, &c, header, .model);
+    try t.expectEqual(@as(usize, 1244), model_report.expected);
+    try t.expect(model_report.clean());
+    const mtp_report = try names.check(a, &c, mtp, .mtp);
+    try t.expectEqual(@as(usize, 54), mtp_report.expected);
+    try t.expect(mtp_report.clean());
+    var prec: [config.max_layers]plan.Precision = undefined;
+    try names.precisions(header, c.text.layers, &prec);
+    for (prec[0..24], 0..) |p, i| try t.expectEqual(if (i < 20) plan.Precision.nvfp4 else .mxfp8, p);
+
+    const p = try plan.build(&c.text, prec[0..24]);
+    try t.expectEqual(@as(u32, 48), p.n_visits);
+    try t.expectEqual(@as(u32, 5), p.final_sources);
+    try t.expectEqual(@as(u32, 2), p.messageSources());
+    try t.expectEqual(@as(u32, 1), p.pre_blocks);
+    for (0..48) |k| {
+        const i: u32 = @intCast(k);
+        const expected: u32 = if (i < 6) i else if (i < 42) 6 + (i - 6) % 12 else i - 24;
+        const v = p.visit(i);
+        try t.expectEqual(expected, v.layer);
+        try t.expectEqual(i >= 18 and i < 42, v.messages);
+        try t.expectEqual(i == 18 or i == 30, p.restarts(i));
+        try t.expectEqual(@as(u32, if (i >= 6 and i < 42) (i - 6) / 12 else 0), v.pass);
+        try t.expectEqual(@as(u32, if (i >= 6 and i < 42) (i - 6) % 12 else 0), v.core_index);
+    }
+}
+
+test "Mini refuses a malformed cross-pass query table and missing controller" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: config.Why = .{};
+    const c = try config.parse(a, config_test.mini, &why);
+    var header = try unfold(a, @embedFile("fixtures/loop_model_header.txt"), "inkling2-loop-model");
+    const queries = "model.llm.middle_cycle_cross_pass_kv_queries";
+    const gain = "model.llm.layers.17.controllers.v.gain_weight";
+    header.getPtr(queries).?.shape[0] -= 1;
+    try t.expect(header.swapRemove(gain));
+    const report = try names.check(a, &c, header, .model);
+    try t.expectEqual(@as(usize, 1), report.wrong.items.len);
+    try t.expectEqual(@as(usize, 1), report.missing.items.len);
+    try t.expectEqualStrings(queries, report.wrong.items[0]);
+    try t.expectEqualStrings(gain, report.missing.items[0]);
+}
+
+test "expert precision follows a trellis group: EXL3 layers sit beside packed ones" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var entries: st.Header = .empty;
+    for (0..12) |i| {
+        var b: [96]u8 = undefined;
+        if (i == 1 or i == 7) {
+            const trellis = try std.fmt.bufPrint(&b, "model.llm.layers.{d}.mlp.experts.0.gate_proj.trellis", .{i});
+            try entries.put(a, try a.dupe(u8, trellis), .{ .dtype = .i16, .rank = 3, .shape = .{ 8, 8, 64, 1, 1 }, .begin = 0, .end = 0 });
+        } else {
+            const w13 = try std.fmt.bufPrint(&b, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
+            try entries.put(a, try a.dupe(u8, w13), .{ .dtype = .u8, .rank = 3, .shape = .{ 96, 256, 128, 1, 1 }, .begin = 0, .end = 0 });
+        }
+    }
+    var prec: [12]plan.Precision = undefined;
+    try names.precisions(entries, 12, &prec);
+    for (prec, 0..) |p, i| try t.expectEqual(if (i == 1 or i == 7) plan.Precision.exl3 else plan.Precision.nvfp4, p);
+}
+
+/// The map's puts collected as a header, so a test can ask what an all-EXL3 plan names.
+const Collect = struct {
+    arena: std.mem.Allocator,
+    names: st.Header = .empty,
+
+    pub fn put(s: *Collect, name: []const u8, dtype: st.DType, dims: []const u64) !void {
+        var e: st.Entry = .{ .dtype = dtype, .rank = @intCast(dims.len), .shape = @splat(1), .begin = 0, .end = 0 };
+        for (dims, 0..) |d, i| e.shape[i] = @intCast(d);
+        try s.names.put(s.arena, try s.arena.dupe(u8, name), e);
+    }
+};
+
+test "an all-EXL3 plan names each expert's trellis group with fp16 scales and the codebook marker" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try load(a);
+    var prec: [12]plan.Precision = @splat(.exl3);
+    var sink: Collect = .{ .arena = a };
+    try names.all(&c, &prec, .model, &sink);
+    const report = try names.check(a, &c, sink.names, .model);
+    try t.expect(report.clean());
+    // gate/up read hidden x inter, down reads inter x hidden; the trellis keeps its 8*halves tail free.
+    const trellis = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.trellis").?;
+    try t.expectEqual(st.DType.i16, trellis.dtype);
+    try t.expectEqual(@as(u8, 3), trellis.rank);
+    try t.expectEqual(@as(usize, 128 / 16), trellis.shape[0]);
+    try t.expectEqual(@as(usize, 128 / 16), trellis.shape[1]);
+    try t.expectEqual(@as(usize, names.any), trellis.shape[2]);
+    const suh = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.suh").?;
+    try t.expectEqual(st.DType.f16, suh.dtype);
+    try t.expectEqual(@as(usize, 128), suh.dim(0));
+    const svh = sink.names.get("model.llm.layers.0.mlp.experts.0.gate_proj.svh").?;
+    try t.expectEqual(@as(usize, 128), svh.dim(0));
+    const down = sink.names.get("model.llm.layers.0.mlp.experts.95.down_proj.trellis").?;
+    try t.expectEqual(@as(usize, 128 / 16), down.shape[0]);
+    try t.expectEqual(@as(usize, 128 / 16), down.shape[1]);
+    const mcg = sink.names.get("model.llm.layers.11.mlp.experts.95.up_proj.mcg").?;
+    try t.expectEqual(st.DType.i32, mcg.dtype);
+    try t.expectEqual(@as(u8, 0), mcg.rank);
+    // packed names must not leak into an EXL3 plan
+    try t.expect(sink.names.get("model.llm.layers.0.mlp.experts.w13_weight") == null);
+}
+
+test "the EXL3 pack's shard headers match the map (TF_INKLING2_EXL3=<dir>)" {
+    const dir = std.mem.span(std.c.getenv("TF_INKLING2_EXL3") orelse return error.SkipZigTest);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg_path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
+    const cfg_json = try std.Io.Dir.cwd().readFileAlloc(t.io, cfg_path, a, .limited(1 << 20));
+    var why: config.Why = .{};
+    const c = try config.parse(a, cfg_json, &why);
+    var all: st.Header = .empty;
+    var d = try std.Io.Dir.cwd().openDir(t.io, dir, .{ .iterate = true });
+    defer d.close(t.io);
+    var it = d.iterate();
+    while (try it.next(t.io)) |f| {
+        if (f.kind != .file) continue;
+        const shard = (std.mem.startsWith(u8, f.name, "dense-") or std.mem.startsWith(u8, f.name, "exl3-layer-")) and
+            std.mem.endsWith(u8, f.name, ".safetensors");
+        if (!shard) continue;
+        try names.merge(a, &all, try headerOf(a, dir, f.name));
+    }
+    const model = try names.check(a, &c, all, .model);
+    try t.expect(model.clean());
+    var prec: [config.max_layers]plan.Precision = undefined;
+    try names.precisions(all, c.text.layers, &prec);
+    for (prec[0..c.text.layers]) |p| try t.expectEqual(plan.Precision.exl3, p);
+    const mtp = try names.check(a, &c, try headerOf(a, dir, "mtp.safetensors"), .mtp);
+    try t.expect(mtp.clean());
+}

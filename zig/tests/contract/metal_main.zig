@@ -155,9 +155,7 @@ pub fn main(init: std.process.Init) !u8 {
     var receipt: ?std.json.Parsed(tf.flashnext_vision_contract.rotary_accuracy.Receipt) = null;
     defer if (receipt) |*value| value.deinit();
     var needs_receipt = false;
-    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| {
-        if (w != .mask and (wanted(o, tf.flashnext_vision_contract.name(w, false)) or wanted(o, tf.flashnext_vision_contract.name(w, true)))) needs_receipt = true;
-    }
+    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| needs_receipt = needs_receipt or (w != .mask and (wanted(o, tf.flashnext_vision_contract.name(w, false)) or wanted(o, tf.flashnext_vision_contract.name(w, true))));
     if (o.gates and needs_receipt) {
         const deployment = @import("rotary_deployment.zig");
         receipt = deployment.load(a, init.io, o.rotary_accuracy, try deployment.current(a, init.io, device)) catch |err| {
@@ -188,6 +186,8 @@ pub fn main(init: std.process.Init) !u8 {
     var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);
+    const inkling2 = try @import("metal_inkling2_main.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer inkling2.destroy();
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;

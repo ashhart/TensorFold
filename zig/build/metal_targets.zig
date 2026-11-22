@@ -232,6 +232,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
         .{ .name = "tf-lfm3-forward", .path = "zig/tests/lfm3_forward.zig", .about = "LFM3 native teacher-forced BF16 logits" },
+        .{ .name = "tf-inkling2-forward", .path = "zig/tests/inkling2_forward.zig", .about = "Inkling 2 Mini native teacher-forced FP32 logits" },
         .{ .name = "tf-lfm3-exact", .path = "zig/tests/lfm3_exact.zig", .about = "LFM3 prompt, window, snapshot and concurrent cache equality" },
         .{ .name = "tf-lfm3-profile", .path = "zig/tests/lfm3_profile.zig", .about = "LFM3 calibrated GPU class costs with final-logit byte identity" },
         .{ .name = "tf-lfm3-dual-project", .path = "zig/tests/lfm3_dual_project.zig", .about = "Actual checkpoint paired projection byte comparison" },
@@ -320,6 +321,15 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     core_checks.kvPages(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);
+    // Decode expert-store timing on a real pack: whole encode() and, for EXL3, per-projection stages.
+    const exl3_profile = b.addExecutable(.{ .name = "tf-inkling2-exl3-profile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/inkling2_exl3_profile.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = mods.sources } },
+    }) });
+    b.step("tf-inkling2-exl3-profile", "Inkling-2 expert-store decode timing on a real checkpoint pack").dependOn(&b.addInstallArtifact(exl3_profile, .{}).step);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
@@ -341,6 +351,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
     glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);
     flashnext_checks.targets(b, target, optimize, metal, engine);
+    @import("inkling2_metal.zig").steps(b, mods);
 
     _ = metal_server.nativeServer(b, target, optimize, metal, engine, mods.living, api, engines, build_options, test_step, no_compiler);
 

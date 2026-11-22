@@ -5,6 +5,7 @@ const config = @import("config.zig");
 const t = std.testing;
 pub const real = @embedFile("fixtures/config.json");
 pub const tiny = @embedFile("fixtures/tiny_config.json");
+pub const mini = @embedFile("fixtures/loop_config.json");
 
 fn refused(json: []const u8, from: []const u8, to: []const u8, want: anyerror, says: []const u8) !void {
     if (std.mem.count(u8, json, from) != 1) return error.EditAnchor;
@@ -120,4 +121,26 @@ test "a scoring function, a layer count, a quantization_config and a root that t
     try t.expectEqualStrings("config.json is not an object", why.text());
     try t.expectError(error.BadConfig, config.parse(t.allocator, "{", &why));
     try t.expectEqualStrings("config.json is not JSON", why.text());
+}
+
+test "original Mini config separates 24 physical layers from 48 visits and names DSpark taps" {
+    var why: config.Why = .{};
+    const c = try config.parse(t.allocator, mini, &why);
+    try t.expectEqual(@as(u32, 2304), c.text.hidden);
+    try t.expectEqual(@as(u32, 24), c.text.layers);
+    try t.expectEqual(@as(u32, 48), c.text.executionLayers());
+    try t.expectEqual(config.Loop{ .start = 6, .end = 18, .passes = 3, .rank = 64 }, c.text.loop.?);
+    try t.expectEqualSlices(u32, &.{ 5, 23, 41, 48 }, c.mtp.?.taps[0..c.mtp.?.taps_n]);
+}
+
+test "Mini refuses variable and invalid fixed loops and taps outside logical visit topology" {
+    try refused(mini, "\"is_varloop\": false", "\"is_varloop\": true", error.Unsupported, "is_varloop must be false");
+    try refused(mini, "\"core_start\": 6", "\"core_start\": 7", error.Layout, "must be multiples");
+    try refused(mini, "\"core_end\": 18", "\"core_end\": 6", error.Layout, "non-empty range");
+    try refused(mini, "\"gate_rank\": 64", "\"gate_rank\": 129", error.Layout, "gate_rank 129");
+    try refused(mini, "\"num_passes\": 3", "\"num_passes\": 4294967295", error.Layout, "layer visits");
+    try refused(mini, "      48\n    ]", "      49\n    ]", error.Layout, "names a layer");
+    try refused(mini, "      48\n    ]", "      47\n    ]", error.Layout, "final norm visit");
+    try refused(mini, "      41,", "      23,", error.Layout, "sorted and unique");
+    try refused(tiny, "\"text_config\": {", "\"text_config\": {\"loop_config\": {},", error.Unsupported, "loop_config needs");
 }

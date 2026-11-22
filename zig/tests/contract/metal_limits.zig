@@ -60,6 +60,22 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "inkling2 ops ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.inkling2_ops, .pre_m5 = sources.inkling2_ops };
+    }
+    if (std.mem.startsWith(u8, d.name, "inkling2 loop ") or std.mem.startsWith(u8, d.name, "inkling2 experts ")) {
+        if (!assemble) return undefined;
+        const src = if (std.mem.startsWith(u8, d.name, "inkling2 loop ")) sources.inkling2_loop_ops else sources.inkling2_experts;
+        return .{ .decl = d, .function = fun, .here = src, .pre_m5 = src };
+    }
+    if (std.mem.startsWith(u8, d.name, "inkling2 vision ") or
+        std.mem.startsWith(u8, d.name, "inkling2 draft ") or std.mem.startsWith(u8, d.name, "inkling2 media "))
+    {
+        if (!assemble) return undefined;
+        const raw = if (std.mem.startsWith(u8, d.name, "inkling2 draft ")) sources.inkling2_draft else sources.inkling2_vision;
+        return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen3 heads ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.qwen3_heads, .pre_m5 = sources.qwen3_heads };

@@ -53,6 +53,15 @@ inline ushort tf_exl3_mapped_state(const device ushort* tile, uint map) {
   return ushort(((lo << off) | carry) >> 16);
 }
 
+// Same window decode with each 32-bit stream word as one aligned uint load (tile base must be 4B-aligned).
+inline ushort tf_exl3_mapped_state_u32(const device uint* tile, uint map) {
+  const uint wi = map & 63u, off = (map >> 6) & 31u;
+  const uint lo = tile[wi];
+  const uint hi = tile[map >> 11];
+  const uint carry = (hi >> ((32 - off) & 31u)) & (0u - uint(off != 0));
+  return ushort(((lo << off) | carry) >> 16);
+}
+
 // Both operations are exact in FP32 before the single FP16 round; do not split the mul1 FMA.
 inline half tf_exl3_value(ushort state, uint codebook) {
   uint x = uint(state) * (codebook == 2 ? 0x83DCD12Du : codebook == 1 ? 0xCBAC1FEDu : 89226354u);
@@ -190,6 +199,62 @@ kernel void tf_exl3_matmul_hoisted(const device half* x [[buffer(0)]],
                                   uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup float wx[256], xx[128];
   tf_exl3_matmul_impl<true>(x, trellis, sums, a, routes, descriptors, lane, tg, wx, xx);
+}
+
+// Decode-path projection: one row and 32 columns per threadgroup. Each lane owns one output
+// column and decodes only the sixteen trellis states feeding it, so the k-loop needs no
+// threadgroup memory and no barriers. Per-output k order and TwoSum sequence match
+// tf_exl3_matmul_impl exactly.
+kernel void tf_exl3_matmul_route32(const device half* x [[buffer(0)]],
+                                  const device uchar* trellis [[buffer(1)]],
+                                  device float* sums [[buffer(2)]],
+                                  constant TfExl3Args& a [[buffer(3)]],
+                                  const device uint* routes [[buffer(4)]],
+                                  const device TfExl3Expert* descriptors [[buffer(5)]],
+                                  const device half* lut [[buffer(6)]],
+                                  uint lane [[thread_index_in_simdgroup]],
+                                  uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y, nb = tg.x * 32;
+  if (!tf_exl3_active(routes, a, row)) return;
+  const uint id = routes[row];
+  const device uchar* data = descriptors[id].trellis;
+  const ulong ks = descriptors[id].tile_k_stride;
+  const ulong ns = descriptors[id].tile_n_stride;
+  const uint halves = descriptors[id].halves;
+  const uint codebook = descriptors[id].codebook;
+  const uint cc = lane & 15, tile_sel = lane >> 4;
+  const uint ring = 128 * halves;
+  // Stream positions feeding this column, already sorted by output row: step i feeds k-in-tile i.
+  // Position p = (4*(cc&7)+m)*8 + 4*(cc>>3)+n maps to tile row 2m+(n&1)+8*((n>>1)&1) and column cc.
+  uint maps[16];
+  #pragma unroll
+  for (uint i = 0; i < 16; ++i) {
+    const uint m = (i & 7) >> 1, n = (i & 1) + 2 * ((i >> 3) & 1);
+    const uint p = (4 * (cc & 7) + m) * 8 + 4 * (cc >> 3) + n;
+    const uint end = ((p + 1) * halves - ((halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
+    const uint start = (end + ring - 16) % ring;
+    const uint wi = start / 32, off = start % 32, next = wi + 1 == 4 * halves ? 0 : wi + 1;
+    maps[i] = wi | (off << 6) | (next << 11);
+  }
+  float high = 0.0f, low = 0.0f;
+  const ulong tile_col = nb / 16 + tile_sel;
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    const device uint* tile = reinterpret_cast<const device uint*>(
+        data + ulong(kb / 16) * ks + tile_col * ns);
+    #pragma unroll
+    for (uint i = 0; i < 16; ++i) {
+      const ushort state = tf_exl3_mapped_state_u32(tile, maps[i]);
+      const float weight = float(lut[codebook * 65536u + state]);
+      const float xv = float(x[ulong(row) * a.k + kb + i]);
+      // FP16 products are exact in FP32. TwoSum retains each addition's rounding error.
+      const float product = xv * weight;
+      const float next = high + product;
+      const float borrowed = next - high;
+      low += (high - (next - borrowed)) + (product - borrowed);
+      high = next;
+    }
+  }
+  sums[ulong(row) * a.n + nb + lane] = high + low;
 }
 
 // Qualification only: compare every arithmetic state against the independent CPU-generated FP16 table.
