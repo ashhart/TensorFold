@@ -88,6 +88,8 @@ const valid = [_]Case{
     .{ .name = "TF_TIMING", .raw = "1", .n = 1 },
     .{ .name = "TF_NO_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_NO_TREES", .raw = "1", .n = 1 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "0", .n = 0 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_TREES", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_BATCH", .raw = "0", .n = 0 },
