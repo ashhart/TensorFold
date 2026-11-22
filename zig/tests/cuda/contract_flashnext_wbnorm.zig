@@ -17,6 +17,12 @@ const nc = dims / 256;
 const slots = 11; // the routed experts' slots and the shared one, as the pass binds them
 const eps: f32 = 1e-6;
 
+const decode_shapes = blk: {
+    var shapes: [48]c.Shape = undefined;
+    for (&shapes, 0..) |*shape, i| shape.* = .{ .rows = i % 16 + 1, .n = dims, .k = i / 16 + 1 };
+    break :blk shapes;
+};
+
 fn noSums(_: c.Shape) usize {
     return 0;
 }
@@ -34,13 +40,14 @@ pub fn spec(mode: Mode) c.Spec {
         .out = .raw,
         .nan = .{ .stated = rule },
         .replaces = "fn_hc_writeback0 / _moe / _slices, then fn_hc_normalize",
-        .served = &.{ .{ .rows = 1, .n = dims, .k = 1 }, .{ .rows = 17, .n = dims, .k = 2 }, .{ .rows = 300, .n = dims, .k = 3 } },
+        .served = &(decode_shapes ++ [_]c.Shape{ .{ .rows = 17, .n = dims, .k = 2 }, .{ .rows = 300, .n = dims, .k = 3 } }),
     };
 }
 
 pub const WbNorm = struct {
     rig: rig_.Rig,
     mode: Mode,
+    in_place: bool = false,
     glue: *const flash.Glue,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     ins: [6]u64 = @splat(0),
@@ -59,7 +66,12 @@ pub const WbNorm = struct {
     const vt = g.hooks(WbNorm);
 
     pub fn kernel(self: *WbNorm) g.Kernel {
-        return .{ .spec = spec(self.mode), .ctx = self, .vt = &vt };
+        var contract = spec(self.mode);
+        if (self.in_place) {
+            contract.name = if (self.mode == .moe) "cuda flashnext decode HC MoE writeback norm in place" else "cuda flashnext decode HC slices writeback norm in place";
+            contract.in_place = true;
+        }
+        return .{ .spec = contract, .ctx = self, .vt = &vt };
     }
 
     fn modeNumber(self: *const WbNorm) usize {
@@ -126,16 +138,22 @@ pub const WbNorm = struct {
         return if (self.mode == .sums) .{ .hout = 0, .pss = o[0], .norm = o[1] } else .{ .hout = o[0], .pss = o[1], .norm = o[2] };
     }
 
+    fn inputH(self: *WbNorm, hout: u64) !u64 {
+        if (!self.in_place) return self.ins[0];
+        try self.rig.gpu.d.check(self.rig.gpu.d.api.cuMemcpyDtoDAsync_v2(hout, self.ins[0], self.shape.rows * wide * 2, self.rig.s.handle), "cuMemcpyDtoDAsync");
+        return hout;
+    }
+
     fn ours(self: *WbNorm, o: []const u64) !void {
         const p = self.split(o);
         const m = self.shape.rows;
-        try self.glue.hcWritebackNorm(self.rig.s, self.ins[0], p.hout, p.pss, self.ins[4], self.ins[1], self.ins[2], self.ins[3], self.ins[5], p.norm, eps, m * dims, m, dims, streams, self.modeNumber(), slots - 1, slots, self.shape.k);
+        try self.glue.hcWritebackNorm(self.rig.s, try self.inputH(p.hout), p.hout, p.pss, self.ins[4], self.ins[1], self.ins[2], self.ins[3], self.ins[5], p.norm, eps, m * dims, m, dims, streams, self.modeNumber(), slots - 1, slots, self.shape.k);
     }
 
     fn theirs(self: *WbNorm, o: []const u64) !void {
         const p = self.split(o);
         const m = self.shape.rows;
-        try self.glue.hcWriteback(self.rig.s, self.ins[0], p.hout, p.pss, self.ins[4], self.ins[1], self.ins[2], self.ins[3], m * dims, m, dims, streams, self.modeNumber(), slots - 1, slots, self.shape.k);
+        try self.glue.hcWriteback(self.rig.s, try self.inputH(p.hout), p.hout, p.pss, self.ins[4], self.ins[1], self.ins[2], self.ins[3], m * dims, m, dims, streams, self.modeNumber(), slots - 1, slots, self.shape.k);
         try self.glue.hcNormalize(self.rig.s, if (self.mode == .sums) self.ins[0] else p.hout, p.pss, self.ins[5], p.norm, eps, m, dims, streams);
     }
 

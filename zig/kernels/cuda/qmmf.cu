@@ -85,6 +85,18 @@ TF_SHARED_DOWN(tf_qmmf_shared32, 32, 64)
 TF_SHARED_DOWN(tf_qmmf_shared64, 64, 64)
 #undef TF_SHARED_DOWN
 
+// MXFP8 shared-down decode: the unsplit lane body, with only the final output row stride supplied by the caller.
+#define TF_SHARED_DOWN8(NAME, BN) \
+extern "C" __global__ void __launch_bounds__(128) NAME( \
+        const __nv_bfloat16* x, const unsigned char* w, const uint8_t* bs, float scale, float* out, \
+        int M, int N, int K, int npad, int ldx, int group, int ldy) { \
+    qmmf_body<MXFP8, 16, BN, 1, 4, 4, true, false, false>( \
+        x, w, bs, scale, out, nullptr, M, N, K, 1, npad, ldx, group, ldy); \
+}
+TF_SHARED_DOWN8(tf_qmmf_shared8_16_half, 32)
+TF_SHARED_DOWN8(tf_qmmf_shared8_16, 64)
+#undef TF_SHARED_DOWN8
+
 template <bool F32>
 __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__ out, long long total, int SK,
                               float scale) {

@@ -11,6 +11,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("flashnext_tile_records.zig").cuda ++
     @import("window_rows_records.zig").cuda ++
     @import("modelopt_lane_records.zig").cuda ++
+    @import("qmmf_shared8_records.zig").records ++
     @import("nvfp4_fact_records.zig").cuda ++
     @import("nvfp4_experts32_records.zig").cuda ++
     @import("experts_bf16_records.zig").cuda ++

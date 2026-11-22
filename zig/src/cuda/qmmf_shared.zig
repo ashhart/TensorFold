@@ -32,6 +32,41 @@ pub fn matmulF32Strided(l: q.Lane, s: Stream, x: u64, ldx: usize, m: usize, w: q
     }, s, &a);
 }
 
+/// MXFP8 decode entries share the original half/full tile and K16 MMA sequence; only the FP32 row store is strided.
+pub const symbols8 = [2][:0]const u8{ "tf_qmmf_shared8_16_half", "tf_qmmf_shared8_16" };
+pub fn loadMxfp8(l: *q.Lane) !void {
+    var fns: [2]@import("module.zig").Function = undefined;
+    for (symbols8, &fns) |name, *f| {
+        f.* = try l.mod.function(name);
+        try f.allowDynamicShared(q.sharedBytes(.mxfp8, 16));
+    }
+    l.shared_down8 = fns;
+}
+
+pub fn eligibleMxfp8(l: q.Lane, m: usize, w: q.Weight, ldx: usize, ldy: usize) bool {
+    var geometry = w;
+    geometry.mode = .bf16;
+    return w.mode == .mxfp8 and l.shared_down8 != null and m <= 16 and eligible(l, m, geometry, ldx, ldy);
+}
+
+pub fn matmulMxfp8(l: q.Lane, s: Stream, x: u64, ldx: usize, m: usize, w: q.Weight, y: u64, ldy: usize) !void {
+    if (!eligibleMxfp8(l, m, w, ldx, ldy)) return error.StridedLaneNotSupported;
+    const half = ((w.n + 63) / 64) < l.half_below;
+    const cols: usize = if (half) 32 else 64;
+    var a: launch.Args = .{};
+    a.add(x);
+    a.add(w.codes);
+    a.add(w.scales);
+    a.add(w.scale);
+    a.add(y);
+    for ([_]usize{ m, w.n, w.k, w.npad, if (m == 1) w.k else ldx, 1, ldy }) |v| a.add(@as(i32, @intCast(v)));
+    try launch.launch(l.shared_down8.?[@intFromBool(!half)], .{
+        .grid = .{ .x = @intCast((w.n + cols - 1) / cols) },
+        .block = .{ .x = 128 },
+        .shared = if (half) q.halfShared(.mxfp8) else q.sharedBytes(.mxfp8, 16),
+    }, s, &a);
+}
+
 test "shared down stride: geometry, output address and stride match the contiguous launcher" {
     const std = @import("std");
     const abi = @import("abi.zig");
