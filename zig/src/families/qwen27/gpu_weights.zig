@@ -397,7 +397,11 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
+    const stored_head = try std.mem.concat(allocator, u8, &.{ prefix, "lm_head.weight" });
+    defer allocator.free(stored_head);
+    // a tied head repacks the embedding's bytes into its own lane buffers; the embedding keeps its file layout
+    const head_module = try @import("tied_head.zig").module(g.tied_head, checkpoint.has(stored_head));
+    const head = try b.linear(&.{.{ .module = head_module, .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }
@@ -406,6 +410,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
 pub fn loadMtp(w: *Weights, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard) !void {
     if (s.ranks != 1) return error.MtpNeedsOneRank;
     if (s.local.moe()) return error.MtpNeedsDenseModel;
+    if (s.global.tied_head) return error.MtpNeedsUntiedHead;
     const c = s.local;
     const prefix: []const u8 = if (checkpoint.has("language_model.mtp.norm.weight")) "language_model." else if (checkpoint.has("mtp.norm.weight")) "" else return error.MissingMtpHead;
     var stage = cp.Stage{ .device = device };
