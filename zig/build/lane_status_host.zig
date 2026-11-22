@@ -1,5 +1,4 @@
-//! CPU check for issue 3200: a status read holds no lane-host lock, so a monitoring
-//! client parked in a slow source read cannot stall a decode round or an admission.
+//! CPU check for issue 3200: a status read holds no lane-host lock, so a monitoring client cannot stall a decode round.
 const std = @import("std");
 
 pub fn steps(b: *std.Build) void {

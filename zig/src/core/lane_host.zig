@@ -48,30 +48,15 @@ pub const LaneHost = struct {
     cancels: std.ArrayList(Id) = .empty,
     closing: std.atomic.Value(bool) = .init(false),
     stale: std.atomic.Value(bool) = .init(false), // the learner's last step: a put-back has not reached the device, so replies are refused
-    /// A status read's snapshot (issue 3200): the engine thread publishes it inside the seqlock, a
-    /// reader copies it without the mutex. Live stream lengths sit in the double-buffered slots.
-    snap: @import("lane_host_status.zig").Snapshot = .{},
-    snap_seq: std.atomic.Value(u32) = .init(0), // odd while the engine thread publishes
-    live_slots: [2]?[]u32 = .{ null, null },
-    /// The engine thread's lock acquisitions that found the mutex held (issue 3200's round-wait counter).
-    round_waits: std.atomic.Value(u64) = .init(0),
-    /// The engine thread's id, so its lock acquisitions can be told from the others'.
-    engine_id: std.Thread.Id = 0,
-    engine_running: std.atomic.Value(bool) = .init(false),
+    st: @import("lane_host_status.zig").State = .{},
     /// `halt`'s reason: what is left finishes failed with it (null: a stop cancels what is left)
     halt_reason: ?[]const u8 = null,
     thread: ?std.Thread = null,
     decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
-    prefill_rate: f64 = 0,
-    prefill_at: i96 = 0,
-    live_tokens: std.ArrayList(u32) = .empty,
     /// A Metal engine's keepalive target, set by the family that owns the queue; null keeps the ticker off.
     keepalive_target: ?api.keepalive.Target = null,
-    live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
-    cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
-    disk_status: ?api.Status.DiskCache = null, // published under mutex beside it
     cache_at: i64 = 0, // wall-clock ms of the last full cache and disk copy (republished at 1 Hz at most)
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
@@ -154,8 +139,8 @@ pub const LaneHost = struct {
         h.filling.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
-        h.live_tokens.deinit(h.gpa);
-        for (&h.live_slots) |slot| if (slot) |buf| h.gpa.free(buf);
+        h.st.live_tokens.deinit(h.gpa);
+        @import("lane_host_status.zig").freeSlots(h);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
         lane_trace.drop(&h.trace);
@@ -346,10 +331,7 @@ pub const LaneHost = struct {
     }
 
     pub fn lock(h: *LaneHost) void {
-        if (h.engine_running.load(.acquire) and std.Thread.getCurrentId() == h.engine_id) {
-            if (h.mutex.tryLock()) return; // free: taken
-            _ = h.round_waits.fetchAdd(1, .monotonic); // the engine thread waited: someone held the lock
-        }
+        if (@import("lane_host_status.zig").takeEngineLock(h)) return;
         h.mutex.lockUncancelable(h.io);
     }
 
@@ -471,8 +453,8 @@ pub const LaneHost = struct {
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
         h.lock();
-        if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
-        h.prefill_at = done;
+        if (done > began) h.st.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
+        h.st.prefill_at = done;
         job.prefilled = done;
         load.credit(h, job);
         h.unlock();
@@ -531,8 +513,7 @@ pub const LaneHost = struct {
     }
 
     fn run(h: *LaneHost) void {
-        h.engine_id = std.Thread.getCurrentId();
-        h.engine_running.store(true, .release);
+        @import("lane_host_status.zig").engineStart(h);
         defer scoring.close(h);
         if (!@import("lane_thread.zig").start(h)) return;
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
