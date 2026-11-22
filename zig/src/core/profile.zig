@@ -145,8 +145,10 @@ const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
 const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
+/// GLM-5.3-Flash and full GLM-5.3 on the one GLM CUDA engine.
+const glm: []const []const u8 = &.{ "glm5_next", "glm_moe_dsa" };
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop", "lfm3" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop", "lfm3" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CUDA_POOL_AFTER_WARMUP, .families = &.{"qwen3_5"}, .class = .experimental, .syntax = .one, .report_values = &.{"1"}, .effect = "Size an idle device KV pool after Qwen DFlash2 warm-up", .evidence = "Default off; host sizing checks; device capacity and token checks required" },
@@ -158,21 +160,21 @@ pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_HOST, .families = qwen, .class = .identical, .syntax = .one, .effect = "Keep KV pages in mapped host memory; one stream, state runs on the device", .evidence = "#2637" },
-    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next", "dory" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
+    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next", "glm_moe_dsa", "dory" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; no profile qualifies it yet", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
-    .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
+    .{ .id = .TF_KV_PAGES, .families = glm, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
     .{ .id = .TF_KV_PAGES, .families = &.{ "nemotron_h", "nemotron_h_omni" }, .class = .identical, .report_values = &.{ "0", "all" }, .effect = "Nemotron KV pool pages by default; exact 0 disables, exact all pages every stream", .evidence = "#781" },
-    .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
-    .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
-    .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
-    .{ .id = .TF_GLM_HOST_CACHE, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep kept prompt states in pinned host memory instead of on the device", .evidence = "#2370" },
+    .{ .id = .TF_GLM_KV_HOST, .families = glm, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
+    .{ .id = .TF_GLM_KV_HOST_SHARED, .families = glm, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
+    .{ .id = .TF_GLM_PROMPT_TAIL, .families = glm, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
+    .{ .id = .TF_GLM_HOST_CACHE, .families = glm, .class = .identical, .syntax = .one, .effect = "Keep kept prompt states in pinned host memory instead of on the device", .evidence = "#2370" },
     .{ .id = .TF_GLM_VISION_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the vision tower's weights in pinned host memory, staged a unit at a time", .evidence = "#2370" },
     .{ .id = .TF_GLM_PAIR_EXPERTS, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Route two paired CUDA prompt chunks through 128-pair NVFP4 expert items", .evidence = "REV25 E1; default-off; host gates; device A/B required" },
     .{ .id = .TF_GLM_VISION_FUSED, .families = &.{"glm5_next"}, .class = .arithmetic, .syntax = .one, .effect = "Run the vision tower's attention as vit's full-attention kernel; its sums run in another order than cuBLASLt's", .evidence = "#3614" },
-    .{ .id = .TF_GLM_PDL, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the forward's dependent launches", .evidence = "#2370" },
-    .{ .id = .TF_GLM_PROMPT_STEPS, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
-    .{ .id = .TF_GLM_SHARED, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },
+    .{ .id = .TF_GLM_PDL, .families = glm, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the forward's dependent launches", .evidence = "#2370" },
+    .{ .id = .TF_GLM_PROMPT_STEPS, .families = glm, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
+    .{ .id = .TF_GLM_SHARED, .families = glm, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },
     .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },
     .{ .id = .TENSORFOLD_KOLIBRI_KV_PAGES, .families = &.{"kolibri1"}, .class = .arithmetic, .report_values = &.{"0"}, .effect = "Exact 0 disables requested pool pages; other text keeps the option", .evidence = "#2370" },
     .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .on_with = .TF_KV_SHARE, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },

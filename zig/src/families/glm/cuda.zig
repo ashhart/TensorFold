@@ -42,6 +42,7 @@ pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const lane_costs = @import("cuda_lane_costs.zig");
 pub const native = @import("cuda_native.zig");
+pub const native_dsa = @import("cuda_native_dsa.zig"); // full GLM-5.3 (glm_moe_dsa)
 pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");
 pub const pdl = @import("cuda_pdl.zig");
@@ -112,6 +113,7 @@ test {
     _ = lanes;
     _ = @import("cuda_zero_budget_test.zig");
     _ = native;
+    _ = native_dsa;
     _ = @import("cuda_qpack.zig");
     _ = share;
     _ = @import("cuda_mtp_chance.zig");
