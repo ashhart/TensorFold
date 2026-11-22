@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: a lane-core conformance suite pins fresh = resumed cache state, tree windows = plain decode, run-to-run reproducibility, stop reasons and malformed-parent refusal on the host, with a ledger of seven decode invariants in docs/conformance-ledger.md (#N).
+
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#N).
