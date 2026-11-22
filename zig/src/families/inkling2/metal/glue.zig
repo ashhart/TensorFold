@@ -144,7 +144,7 @@ pub fn logits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, 
     e.setPipeline(p.logits);
     inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
-    e.dispatchThreads(mtl.Size.of(vocab, rows, 1), unit);
+    e.dispatchGroups(mtl.Size.of((vocab + 7) / 8, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ExpertArgs = extern struct { rows: u32, channels: u32 };
