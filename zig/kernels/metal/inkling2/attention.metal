@@ -5,6 +5,8 @@ constant constexpr uint I2_DREL = 16;
 constant constexpr uint I2_CHUNK = 2048;
 constant constexpr uint I2_PART = 132; // floats of a chunk's partial: m, l, two unused, acc[128]
 constant constexpr uint I2_ATTN_SGS = 4;
+constant constexpr uint I2_BLOCK = 32;  // keys a simdgroup scores at once, a lane a key
+constant constexpr uint I2_V_BATCH = 4; // value rows a lane loads before the fmas that use them
 
 struct I2AttnArgs {
   uint rows, pos0, heads, kv_heads;
@@ -16,6 +18,18 @@ struct I2AttnArgs {
 inline ulong i2_attn_lo(constant I2AttnArgs& a, ulong p) { return (a.window != 0 && p + 1 > a.window) ? p + 1 - a.window : 0; }
 
 inline ulong i2_attn_slot(constant I2AttnArgs& a, ulong key) { return a.ring == 0 ? key : key % a.ring; }
+
+// The slot of the key `step` < I2_BLOCK past one in slot0: a wrap, not a 64-bit division. Needs ring >= I2_BLOCK.
+inline ulong i2_attn_step(constant I2AttnArgs& a, ulong slot0, uint step) {
+  const ulong s = slot0 + step;
+  return (a.ring != 0 && s >= a.ring) ? s - a.ring : s;
+}
+
+// Four bf16 held in two words, widened to fp32 (a bf16 is the top half of its fp32): float4(bfloat4)'s values.
+inline float4 i2_bf4(uint2 w) {
+  return float4(as_type<float>(w.x << 16), as_type<float>(w.x & 0xffff0000u), as_type<float>(w.y << 16),
+                as_type<float>(w.y & 0xffff0000u));
+}
 
 // m, l, A of one (row, head) over its chunks to the bf16 gated output.
 inline bfloat i2_attn_finish(float M, float L, float A, float gate) {
@@ -62,18 +76,24 @@ inline void i2_attn_chunk(const device bfloat* q, const device bfloat* rel, cons
     const uint nvalid = uint(min(ulong(32), ke - kk0));
     const bool valid = lane < nvalid;
     const ulong key = kk0 + lane;
+    const bool wide = a.ring == 0 || a.ring >= I2_BLOCK;
+    const ulong slot0 = i2_attn_slot(a, kk0);
     float score[G];
     for (uint h = 0; h < G; ++h) score[h] = 0.0f;
     if (valid) {
-      const device bfloat4* kp = (const device bfloat4*)(kcache + i2_attn_slot(a, key) * kv_row + ulong(g) * I2_DIM);
-      for (uint d4 = 0; d4 < I2_DIM / 4; ++d4) {
-        const float4 kf = float4(kp[d4]);
-        for (uint h = 0; h < G; ++h) {
-          const threadgroup float* qh = q_tg + h * I2_DIM + d4 * 4;
-          score[h] = fma(qh[0], kf.x, score[h]);
-          score[h] = fma(qh[1], kf.y, score[h]);
-          score[h] = fma(qh[2], kf.z, score[h]);
-          score[h] = fma(qh[3], kf.w, score[h]);
+      const device uint4* kp = (const device uint4*)(kcache + i2_attn_slot(a, key) * kv_row + ulong(g) * I2_DIM);
+      for (uint d8 = 0; d8 < I2_DIM / 8; ++d8) {
+        const uint4 kw = kp[d8];
+        const float4 kf2[2] = {i2_bf4(kw.xy), i2_bf4(kw.zw)};
+        for (uint half4 = 0; half4 < 2; ++half4) {
+          const float4 kf = kf2[half4];
+          for (uint h = 0; h < G; ++h) {
+            const threadgroup float* qh = q_tg + h * I2_DIM + d8 * 8 + half4 * 4;
+            score[h] = fma(qh[0], kf.x, score[h]);
+            score[h] = fma(qh[1], kf.y, score[h]);
+            score[h] = fma(qh[2], kf.z, score[h]);
+            score[h] = fma(qh[3], kf.w, score[h]);
+          }
         }
       }
       const ulong dist = p - key;
@@ -101,10 +121,27 @@ inline void i2_attn_chunk(const device bfloat* q, const device bfloat* rel, cons
       acc[h] = acc[h] * alpha;
       m[h] = m_new;
     }
-    for (uint j = 0; j < nvalid; ++j) {
-      const device bfloat4* vp = (const device bfloat4*)(vcache + i2_attn_slot(a, kk0 + j) * kv_row + ulong(g) * I2_DIM);
-      const float4 vf = float4(vp[lane]);
-      for (uint h = 0; h < G; ++h) acc[h] = fma(float4(simd_shuffle(pw[h], ushort(j))), vf, acc[h]);
+    if (nvalid == I2_BLOCK && wide) {
+      // A full block: no branch between a batch's loads, so they are all in flight before its first fma.
+      _Pragma("unroll")
+      for (uint j0 = 0; j0 < I2_BLOCK; j0 += I2_V_BATCH) {
+        float4 vf[I2_V_BATCH];
+        _Pragma("unroll")
+        for (uint jj = 0; jj < I2_V_BATCH; ++jj) {
+          const device bfloat4* vp = (const device bfloat4*)(vcache + i2_attn_step(a, slot0, j0 + jj) * kv_row + ulong(g) * I2_DIM);
+          vf[jj] = float4(vp[lane]);
+        }
+        _Pragma("unroll")
+        for (uint jj = 0; jj < I2_V_BATCH; ++jj) {
+          for (uint h = 0; h < G; ++h) acc[h] = fma(float4(simd_shuffle(pw[h], ushort(j0 + jj))), vf[jj], acc[h]);
+        }
+      }
+    } else {
+      for (uint j = 0; j < nvalid; ++j) {
+        const device bfloat4* vp = (const device bfloat4*)(vcache + i2_attn_slot(a, kk0 + j) * kv_row + ulong(g) * I2_DIM);
+        const float4 vf = float4(vp[lane]);
+        for (uint h = 0; h < G; ++h) acc[h] = fma(float4(simd_shuffle(pw[h], ushort(j))), vf, acc[h]);
+      }
     }
   }
 
