@@ -26,6 +26,8 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
             rows += w.rows();
         }
         if (n == 1 or cap <= 1) {
+            // TF_FLASHNEXT_GRAPH_TAIL: draws' own condition for its row best, known before the pass
+            for (drafted[at..][0..n], ds[0..n]) |wi, d| d.best_ahead = @import("cuda_mtp_draw.zig").bestFirst(wins[wi].stream.sampling, wins[wi].masks);
             for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| try self.ops().verify(q, d, ids);
         } else if (self.ranks) |r| {
             try r.verifyMany(@TypeOf(self.tri()), self.tri(), seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
