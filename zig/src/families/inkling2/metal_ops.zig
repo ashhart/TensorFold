@@ -27,6 +27,9 @@ const stats_bytes = 8192;
 /// Keys a row's attention chunk covers (kernels/metal/inkling2/attention.metal's I2_CHUNK) and floats of its partial.
 pub const attn_chunk = 2048;
 pub const attn_partial_floats = 132;
+/// The dense MMA tile (kernels/metal/inkling2/dense_mma.metal): outputs a side, and the K step a staging round covers.
+const dense_tile = 16;
+const dense_chunk = 256;
 
 pub const Options = struct {
     /// Scratch for attention partials and router logits; one buffer, reused by consecutive dispatches.
@@ -52,6 +55,8 @@ const Kernel = enum {
     attn_res_stats,
     attn_res_mix,
     attn_res_norm,
+    dense_mma_bf16,
+    dense_mma_f32,
 };
 const kernel_count = @typeInfo(Kernel).@"enum".field_names.len;
 
@@ -164,6 +169,7 @@ pub const AttnResArgs = struct {
 pub const LinearArgs = struct { x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool = false };
 /// One existing weight and its existing output. The fused launch writes `y` and allocates nothing.
 pub const Fused = struct { w: View, y: View, n: u32 };
+const DenseArgs = extern struct { k: u32, n: u32, rows: u32 };
 const FuseArgs = extern struct { k: u32, count: u32, n0: u32, n1: u32, n2: u32, n3: u32, n4: u32, n5: u32, n6: u32, n7: u32 };
 /// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32, weights f32 per row.
 pub const RouteArgs = struct {
@@ -351,7 +357,7 @@ pub const Ops = struct {
         e.dispatchGroups(mtl.Size.of(a.rows, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// x [rows][k] bf16 times w [n][k] bf16: the shared bf16 matvec (rows < 16) or its bit-equal MMA tile.
+    /// x [rows][k] bf16 times w [n][k] bf16: the shared bf16 matvec (rows < 16) or a bit-equal MMA tile.
     pub fn linear(o: *const Ops, e: mtl.ComputeEncoder, a: LinearArgs) !void {
         try o.denseRows(e, a.x, a.w, a.y, a.rows, a.n, a.k, a.f32_out);
     }
@@ -391,7 +397,12 @@ pub const Ops = struct {
 
     fn denseRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool) !void {
         if (rows == 0 or n == 0 or k == 0) return error.InvalidInkling2Op;
-        if (rows >= mv_mma.row_tile and k >= 32) {
+        if (rows >= mv_mma.row_tile and k % dense_chunk == 0 and (x.offset | w.offset) % 16 == 0) {
+            e.setPipeline(o.pipe(if (f32_out) .dense_mma_f32 else .dense_mma_bf16));
+            bind(e, &.{ x, w, y });
+            e.setValue(DenseArgs{ .k = k, .n = n, .rows = rows }, 3);
+            e.dispatchGroups(mtl.Size.of((n + dense_tile - 1) / dense_tile, (rows + dense_tile - 1) / dense_tile, 1), mtl.Size.of(128, 1, 1));
+        } else if (rows >= mv_mma.row_tile and k >= 32) {
             const xr = mv_mma.Ref{ .buf = x.buffer, .off = x.offset };
             const wr = mv_mma.Ref{ .buf = w.buffer, .off = w.offset };
             const yr = mv_mma.Ref{ .buf = y.buffer, .off = y.offset };

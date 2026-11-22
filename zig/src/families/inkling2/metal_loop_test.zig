@@ -61,7 +61,7 @@ test "original Mini's four trained core controllers agree with FP64 scalar math"
     var c = ck.Checkpoint.init(t.allocator);
     defer c.deinit();
     try c.addFileSelected(device, path, "", prefix);
-    var ops = try op.Ops.load(device);
+    var ops = try op.Ops.load(device, .{});
     defer ops.deinit();
     const shared = mtl.ResourceOptions.shared;
     const x = try device.buffer(h * 4, shared);
