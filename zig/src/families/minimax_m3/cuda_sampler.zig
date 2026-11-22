@@ -177,6 +177,7 @@ test "MiniMax sampler PROB output is absent from storage and launch" {
         sampler.appendDrawArgs(&args);
         const expected = [_]u64{ 0x1000, 17, 0x2000, 0x3000, 0, 0x4000, 0 };
         try std.testing.expectEqual(expected.len, args.count);
+        try std.testing.expectEqual(@as(u16, 8), args.sizes[6]);
         for (expected, 0..) |value, i| try std.testing.expectEqual(@as(?u64, value), args.integer(i));
     }
 }
