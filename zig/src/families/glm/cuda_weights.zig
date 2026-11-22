@@ -314,7 +314,7 @@ const Loader = struct {
         const qk = L.tools.quant orelse return error.NoQuantizer;
         const c = &L.w.config;
         const d: usize = c.hidden;
-        const cut = L.w.share.moe;
+        const cut = try L.w.share.moeAt(c, i);
         const ni = cut.len();
         const up_len = X.bytes(1, ni, d, 2) / 4;
         const down_len = X.bytes(1, d, ni, 1) / 4;
@@ -374,7 +374,7 @@ const Loader = struct {
     pub fn moeLayer(L: *Loader, i: u32) !moe.Layer {
         const c = &L.w.config;
         const d: usize = c.hidden;
-        const cut = L.w.share.moe;
+        const cut = try L.w.share.moeAt(c, i);
         const ni = cut.len();
         try L.whole(try L.get("layers.{d}.mlp.gate.weight", .{i}), .bf16);
         const router = try L.put("layers.{d}.moe.router", .{i});
@@ -410,7 +410,7 @@ const Loader = struct {
     fn nvfp4Experts(L: *Loader, i: u32) !cuda.experts.Layer {
         const c = &L.w.config;
         const d: usize = c.hidden;
-        const cut = L.w.share.moe;
+        const cut = try L.w.share.moeAt(c, i);
         const ni = cut.len();
         const count: usize = c.experts;
         const packing = @import("cuda_load_pack.zig");

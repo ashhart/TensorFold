@@ -15,9 +15,9 @@ pub fn of(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
     return cfg.parse(gpa, json);
 }
 
-fn flag(o: std.json.ObjectMap, key: []const u8, default: bool) bool {
+fn flag(o: std.json.ObjectMap, key: []const u8, default: bool) !bool {
     const v = o.get(key) orelse return default;
-    return v != .bool or v.bool;
+    return if (v == .bool) v.bool else error.UnsupportedGlmShape;
 }
 
 /// config.json of a glm_moe_dsa checkpoint; glm_dsa refuses another shape, smaller counts pass (synthetic checkpoints).
@@ -28,8 +28,10 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
     const t = parsed.value.object;
     try cfg.activation(t, t);
     // interleaved rope pairs in the latent's and the indexer's roped dims are what the kernels take
-    if (!flag(t, "rope_interleave", true) or !flag(t, "indexer_rope_interleave", true)) return error.UnsupportedRope;
-    if (flag(t, "tie_word_embeddings", false)) return error.UnsupportedGlmShape;
+    if (!try flag(t, "rope_interleave", true) or !try flag(t, "indexer_rope_interleave", true)) return error.UnsupportedRope;
+    if (try flag(t, "tie_word_embeddings", false)) return error.UnsupportedGlmShape;
+    const shared_n = t.get("n_shared_experts") orelse std.json.Value{ .integer = 1 };
+    if (shared_n != .integer or shared_n.integer < 1 or shared_n.integer > 8) return error.UnsupportedGlmShape;
     var c: cfg.Config = .{
         .dsa = true,
         .shares = 3, // TP=1 runs the three shares TP=3 runs, in one process (cuda_engine_shares)
@@ -45,9 +47,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
         .inter = .{ 0, d.moe_inter },
         .topk = d.topk,
         .moe_inter = d.moe_inter,
-        .shared_inter = d.moe_inter * @as(u32, @intCast(if (t.get("n_shared_experts")) |v| v.integer else 1)),
+        .shared_inter = d.moe_inter * @as(u32, @intCast(shared_n.integer)),
         .routed_scale = d.routed_scale,
-        .norm_topk = flag(t, "norm_topk_prob", true),
+        .norm_topk = try flag(t, "norm_topk_prob", true),
         .swiglu_limit = std.math.inf(f32), // no clamp: min(g, inf) and [-inf, inf] keep every finite value
         .kda_heads = 0,
         .mla_heads = d.heads,
@@ -171,12 +173,34 @@ test "full GLM-5.3 at TP=3: no KDA heads, 22/21/21 DSA heads, 768/640/640 EXL3 e
         const s = try shard.Share.of(&c, r, 3);
         try testing.expectEqual(@as(usize, 0), s.kda.len());
         try testing.expectEqual(@as(usize, 4096), s.dense.len());
-        try testing.expectEqual(@as(usize, if (r == 0) 768 else 640), s.moe.len());
+        try testing.expectEqual(@as(usize, if (r == 0) 768 else 640), s.moe.len()); // layer 0's
         try testing.expectEqual(@as(usize, if (r == 2) 640 else 704), s.shared.len());
         try testing.expectEqual(@as(usize, if (r == 0) 404 else 403) * 128, s.vocab.len());
         heads += s.mla.len();
     }
     try testing.expectEqual(@as(usize, 64), heads);
     try testing.expectEqual(shard.Span{ .lo = 0, .hi = 22 }, (try shard.Share.of(&c, 0, 3)).mla);
-    try testing.expectEqual([2]u64{ 768, 2048 }, (try shard.Share.of(&c, 0, 3)).part(&c));
+    try testing.expectEqual([2]u64{ 22, 64 }, (try shard.Share.of(&c, 0, 3)).part(&c)); // its heads: experts take turns
+}
+
+test "full GLM-5.3 at TP=3: each layer's expert rows tile 2048 once; the 768-row part moves a rank a layer" {
+    const json = try dsaConfig(testing.allocator, 78, 3, 256, 154880);
+    defer testing.allocator.free(json);
+    const c = try parse(testing.allocator, json);
+    var rows: [3]usize = @splat(0);
+    for (c.dense_layers..c.layers + c.mtp) |i| {
+        var lo: usize = 0;
+        for (0..3) |p| { // the parts in order: the rank at position p holds [lo, lo + its rows)
+            const r = (p + 3 - i % 3) % 3;
+            const cut = try (try shard.Share.of(&c, r, 3)).moeAt(&c, i);
+            try testing.expectEqual(lo, cut.lo);
+            lo = cut.hi;
+            rows[r] += cut.len();
+        }
+        try testing.expectEqual(@as(usize, 2048), lo);
+    }
+    try testing.expectEqual([3]usize{ 26 * 768 + 50 * 640, 25 * 768 + 51 * 640, 25 * 768 + 51 * 640 }, rows);
+    try testing.expectEqual(@as(usize, 768), (try shard.Share.of(&c, 2, 3)).moeMost(&c));
+    const flash = cfg.Config{};
+    try testing.expectEqual((try shard.Share.of(&flash, 0, 3)).moe, try (try shard.Share.of(&flash, 0, 3)).moeAt(&flash, 7));
 }
