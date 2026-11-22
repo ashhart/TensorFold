@@ -4,16 +4,29 @@ const platform = @import("sys");
 const file = @import("rows_file.zig");
 const chain = @import("rows_chain.zig");
 const Span = @import("cache_modes.zig").Span;
+const image = @import("rows_image.zig");
+
+pub const chunk_bytes = 4 << 20;
+
 const Want = @import("rows_write_sync.zig").Want;
 pub const allocator = std.heap.page_allocator;
 pub const max_jobs = 8;
 
 pub const File = struct {
     trailer: file.Trailer,
-    payload: []u8,
+    payload_len: u64,
+    ranges: []const image.Range = &.{},
     meta: []const []const u8 = &.{},
     writer: ?file.Writer = null,
     bytes: u64 = 0,
+};
+
+const Chunk = struct {
+    bytes: []u8,
+    len: usize = 0,
+    file: usize = 0,
+    offset: u64 = 0,
+    state: std.atomic.Value(u8) = .init(0), // 0: producer owns it; 1: worker owns it
 };
 
 pub const Job = struct {
@@ -30,6 +43,11 @@ pub const Job = struct {
     files: []File,
     bytes: u64,
     staged: u64,
+    chunks: [2]Chunk,
+    put: usize = 0, // producer's next slot, protected by the engine's single-threaded staging
+    get: usize = 0, // worker's next slot, after submitting but before streaming
+    failed: std.atomic.Value(bool) = .init(false),
+    failure_mutex: std.atomic.Mutex = .unlocked,
     verify: bool = false,
     began: i128 = 0,
     done: std.atomic.Value(bool) = .init(false),
@@ -45,6 +63,27 @@ pub const Job = struct {
         for (j.files) |*f| if (f.writer) |*w| w.abort();
         j.arena.deinit();
         allocator.destroy(j);
+    }
+
+    /// Either side's first failure wakes the other; only the worker publishes `done` and releases ownership.
+    pub fn fail(j: *Job, err: anyerror) void {
+        while (!j.failure_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer j.failure_mutex.unlock();
+        if (j.failure == null) j.failure = err;
+        j.failed.store(true, .release);
+    }
+
+    fn failedError(j: *Job) ?anyerror {
+        return if (j.failed.load(.acquire)) j.failure else null;
+    }
+    /// Publish only completely gathered bytes, then advance the producer sequence.
+    pub fn sendChunk(j: *Job, c: *Chunk, index: usize, offset: u64, len: usize) void {
+        std.debug.assert(c == &j.chunks[j.put % j.chunks.len] and len <= c.bytes.len);
+        c.file = index;
+        c.offset = offset;
+        c.len = len;
+        c.state.store(1, .release);
+        j.put += 1;
     }
 };
 
@@ -106,6 +145,27 @@ pub const Worker = struct {
         };
         unreachable;
     }
+
+    /// The producer waits for a free fixed slot; neither side can overtake the other or reuse live bytes.
+    pub fn freeChunk(w: *Worker, j: *Job) !*Chunk {
+        const c = &j.chunks[j.put % j.chunks.len];
+        var spins: u8 = 0;
+        while (c.state.load(.acquire) != 0) {
+            if (j.failedError()) |err| return err;
+            if (!w.valid(j)) return error.Cancelled;
+            if (spins == 32) {
+                std.Thread.yield() catch nap();
+                spins = 0;
+            } else {
+                std.atomic.spinLoopHint();
+                spins += 1;
+            }
+        }
+        if (j.failedError()) |err| return err;
+        if (!w.valid(j)) return error.Cancelled;
+        return c;
+    }
+
 
     /// Completed jobs stay owned here until the engine takes them, oldest first, retaining their permits meanwhile.
     pub fn take(w: *Worker) ?*Job {
@@ -230,9 +290,7 @@ pub const Worker = struct {
                 nap();
                 continue;
             };
-            w.write(j) catch |err| {
-                j.failure = err;
-            };
+            w.write(j) catch |err| j.fail(err);
             j.done.store(true, .release);
         }
         for (w.slots) |s| if (s) |j| j.destroy();
@@ -241,24 +299,48 @@ pub const Worker = struct {
     }
 
     fn write(w: *Worker, j: *Job) !void {
-        for (j.files) |*f| {
+        if (j.failedError()) |err| return err;
+        for (j.files, 0..) |*f, index| {
+            if (j.failedError()) |err| return err;
             if (!w.valid(j)) return error.Cancelled;
             const ext: []const u8 = if (f.trailer.kind == @backingInt(file.Kind.state)) ".st" else ".blk";
             f.writer = try file.Writer.openUnique(w.dir, &chain.hex(f.trailer.name), ext, j.id);
             const out = &f.writer.?;
             out.io = w.io;
-            var off: usize = 0;
-            while (off < f.payload.len) {
-                if (!w.valid(j)) return error.Cancelled;
-                const end = @min(f.payload.len, off + (4 << 20));
-                try out.append(f.payload[off..end]);
-                off = end;
+            var off: u64 = 0;
+            while (off < f.payload_len) {
+                const c = try w.takeChunk(j, index, off);
+                const payload = c.bytes[0..c.len];
+                try out.append(payload);
+                if (j.verify) try verifyChunk(f, payload, off);
+                off += c.len;
+                c.state.store(0, .release);
+                j.get += 1;
             }
             if (!w.valid(j)) return error.Cancelled;
             f.bytes = try out.seal(f.trailer, f.meta, true);
             if (j.verify) try verifyFile(f);
         }
         if (!w.valid(j)) return error.Cancelled;
+    }
+
+    fn takeChunk(w: *Worker, j: *Job, index: usize, offset: u64) !*Chunk {
+        const c = &j.chunks[j.get % j.chunks.len];
+        var spins: u8 = 0;
+        while (c.state.load(.acquire) != 1) {
+            if (j.failedError()) |err| return err;
+            if (!w.valid(j)) return error.Cancelled;
+            if (spins == 32) {
+                std.Thread.yield() catch nap();
+                spins = 0;
+            } else {
+                std.atomic.spinLoopHint();
+                spins += 1;
+            }
+        }
+        if (j.failedError()) |err| return err;
+        std.debug.assert(c.file == index and c.offset == offset and c.len > 0);
+        return c;
     }
 
     /// A blocked syscall may outlive the deadline; only private allocations and temporary files outlive the owner.
@@ -295,14 +377,24 @@ pub fn wallMs() i64 {
     return @as(i64, @intCast(t.sec)) * 1000 + @divTrunc(@as(i64, @intCast(t.nsec)), 1_000_000);
 }
 
-fn verifyFile(f: *const File) !void {
+fn verifyChunk(f: *const File, bytes: []const u8, offset: u64) !void {
+    const w = &f.writer.?;
+    const path = w.tmp[0..w.tmp_len :0];
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
+    if (fd < 0) return error.VerifyFailed;
+    defer _ = platform.c.close(fd);
+    var at = offset;
+    try compare(fd, bytes, &at);
+}
+
+fn verifyFile(f: *File) !void {
     const w = &f.writer.?;
     const path = w.tmp[0..w.tmp_len :0];
     var o = file.open(path, if (f.trailer.kind == @backingInt(file.Kind.state)) .state else .block, f.trailer.name) catch return error.VerifyFailed;
     defer o.close();
     var expected = f.trailer;
-    expected.payload = f.payload.len;
-    expected.payload_hash = std.hash.Wyhash.hash(0, f.payload);
+    expected.payload = f.payload_len;
+    expected.payload_hash = w.hash.final();
     var hash = std.hash.Wyhash.init(1);
     for (f.meta) |m| {
         expected.meta += m.len;
@@ -313,8 +405,7 @@ fn verifyFile(f: *const File) !void {
     const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.VerifyFailed;
     defer _ = platform.c.close(fd);
-    var offset: u64 = 0;
-    try compare(fd, f.payload, &offset);
+    var offset = f.payload_len;
     for (f.meta) |m| try compare(fd, m, &offset);
 }
 
@@ -339,12 +430,12 @@ fn named(b: u8) chain.Name {
 }
 
 fn fileOf(b: u8, kind: file.Kind) File {
-    return .{ .trailer = .{ .kind = @backingInt(kind), .payload = 0, .payload_hash = 0, .name = named(b) }, .payload = &.{} };
+    return .{ .trailer = .{ .kind = @backingInt(kind), .payload = 0, .payload_hash = 0, .name = named(b) }, .payload_len = 0 };
 }
 
 /// A job as the worker's slots see it: an id, the blocks its state names and the files it writes (the last is its own).
 fn job(id: u64, wants: []Want, files: []File) Job {
-    return .{ .arena = undefined, .id = id, .generation = 1, .name = undefined, .at = 0, .shared = false, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .wants = wants, .files = files, .bytes = 0, .staged = 1 };
+    return .{ .arena = undefined, .id = id, .generation = 1, .name = undefined, .at = 0, .shared = false, .tokens = &.{}, .spans = &.{}, .starts = &.{}, .wants = wants, .files = files, .bytes = 0, .staged = 1, .chunks = .{ .{ .bytes = &.{} }, .{ .bytes = &.{} } } };
 }
 
 fn threadless() Worker {
@@ -386,4 +477,108 @@ test "rows io: only the blocks a job that can still publish writes are promised"
     w.fence();
     try w.promised(testing.allocator, &set);
     try testing.expectEqual(@as(u32, 0), set.count());
+}
+
+fn testJob() !Job {
+    var j = job(1, &.{}, &.{});
+    for (&j.chunks) |*c| c.bytes = try testing.allocator.alloc(u8, chunk_bytes);
+    return j;
+}
+
+fn freeChunks(j: *Job) void {
+    for (j.chunks) |c| testing.allocator.free(c.bytes);
+}
+
+test "rows io: two fixed slots preserve every byte over multiple chunks" {
+    const source = try testing.allocator.alloc(u8, 2 * chunk_bytes + 317);
+    defer testing.allocator.free(source);
+    for (source, 0..) |*b, i| b.* = @truncate(i *% 31 +% i / 251);
+    const before = std.hash.Wyhash.hash(7, source);
+    var j = try testJob();
+    defer freeChunks(&j);
+    var w = threadless();
+    var hash = std.hash.Wyhash.init(0);
+    var off: u64 = 0;
+    while (off < source.len) {
+        const c = &j.chunks[j.put % 2];
+        const n: usize = @min(c.bytes.len, source.len - @as(usize, @intCast(off)));
+        @memcpy(c.bytes[0..n], source[@intCast(off)..][0..n]);
+        j.sendChunk(c, 0, off, n);
+        off += n;
+        if (j.put != 3) continue;
+        const got = try w.takeChunk(&j, 0, 0);
+        hash.update(got.bytes[0..got.len]);
+        got.state.store(0, .release);
+        j.get += 1;
+    }
+    while (j.get < j.put) {
+        const at = j.get * chunk_bytes;
+        const got = try w.takeChunk(&j, 0, at);
+        hash.update(got.bytes[0..got.len]);
+        got.state.store(0, .release);
+        j.get += 1;
+    }
+    try testing.expectEqual(before, std.hash.Wyhash.hash(7, source)); // no source mutation
+    try testing.expectEqual(hash.final(), std.hash.Wyhash.hash(0, source));
+    for (j.chunks) |c| try testing.expectEqual(@as(usize, chunk_bytes), c.bytes.len);
+}
+
+test "rows io: mid-stream failure and cancellation wake both sides without consuming the source" {
+    var j = try testJob();
+    defer freeChunks(&j);
+    var w = threadless();
+    @memset(j.chunks[0].bytes[0..1], 42);
+    j.sendChunk(&j.chunks[0], 0, 0, 1);
+    j.fail(error.GatherFailed);
+    try testing.expectError(error.GatherFailed, w.takeChunk(&j, 0, 0));
+    try testing.expectError(error.GatherFailed, w.freeChunk(&j));
+    try testing.expectEqual(@as(u8, 42), j.chunks[0].bytes[0]);
+    var cancelled = try testJob();
+    defer freeChunks(&cancelled);
+    w.fence();
+    try testing.expectError(error.Cancelled, w.freeChunk(&cancelled));
+    try testing.expectError(error.Cancelled, w.takeChunk(&cancelled, 0, 0));
+}
+
+test "rows io: the real worker seals exact bytes after more than two tiny chunks" {
+    var root_buf: [96]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&root_buf, "/tmp/tf-rows-io-stream-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
+    const source = try testing.allocator.alloc(u8, 5 * 64 + 17);
+    defer testing.allocator.free(source);
+    for (source, 0..) |*b, i| b.* = @truncate(i *% 73 +% 19);
+    const files = try testing.allocator.alloc(File, 1);
+    defer testing.allocator.free(files);
+    files[0] = .{ .trailer = .{ .kind = @backingInt(file.Kind.state), .payload = 0, .payload_hash = 0, .name = named(9), .at = 1 }, .payload_len = source.len };
+    var j = job(1, &.{}, files);
+    for (&j.chunks) |*c| c.bytes = try testing.allocator.alloc(u8, 64);
+    defer freeChunks(&j);
+    var w = threadless();
+    w.dir = dir;
+    const Producer = struct {
+        fn write(worker: *Worker, job_: *Job, bytes: []const u8) void {
+            var off: u64 = 0;
+            while (off < bytes.len) {
+                const c = worker.freeChunk(job_) catch |err| return job_.fail(err);
+                const n = @min(c.bytes.len, bytes.len - @as(usize, @intCast(off)));
+                @memcpy(c.bytes[0..n], bytes[@intCast(off)..][0..n]);
+                job_.sendChunk(c, 0, off, n);
+                off += n;
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Producer.write, .{ &w, &j, source });
+    w.write(&j) catch |err| j.fail(err);
+    thread.join();
+    if (j.failedError()) |err| return err;
+    try testing.expectEqual(j.put, j.get);
+    try testing.expect(j.put > 2);
+    const sealed = j.files[0].writer.?.tmp[0..j.files[0].writer.?.tmp_len :0];
+    defer _ = platform.c.unlink(sealed);
+    var o = try file.open(sealed, .state, files[0].trailer.name);
+    defer o.close();
+    const stage = try file.stage(testing.allocator, source.len);
+    defer testing.allocator.free(stage);
+    try testing.expectEqualSlices(u8, source, try file.payload(&o, stage));
 }

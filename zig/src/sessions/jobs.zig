@@ -16,7 +16,7 @@ pub const Job = struct {
     err: ?anyerror = null,
     started_ns: i96 = 0,
     elapsed_ns: u64 = 0,
-    /// park: the file to write (owned buffers below) and its size once written
+    /// park: the file to write (the buffers and borrowed views below) and its size once written
     src: disk_mod.WriteSrc = undefined,
     size: u64 = 0,
     /// restore: files base first, the sink, the bounded state read
@@ -27,7 +27,7 @@ pub const Job = struct {
     slot: u32 = 0,
     /// pool pages the job holds until settled
     held: []u32 = &.{},
-    /// owned buffers
+    /// owned buffers; the blob descriptor array is owned and each payload follows Blob.owned
     ids: []i32 = &.{},
     lists: [][]u32 = &.{},
     blobs: []disk_mod.Blob = &.{},
@@ -42,10 +42,7 @@ pub const Job = struct {
         gpa.free(j.ids);
         for (j.lists) |l| gpa.free(l);
         gpa.free(j.lists);
-        for (j.blobs) |b| {
-            gpa.free(b.name);
-            gpa.free(b.bytes);
-        }
+        for (j.blobs) |b| b.deinit(gpa);
         gpa.free(j.blobs);
         gpa.free(j.extents);
         if (j.restored) |*r| r.deinit(gpa);

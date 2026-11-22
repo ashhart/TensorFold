@@ -43,14 +43,14 @@ fn whole(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, t, 10) catch null;
 }
 
-/// One file a state's read takes: name, kind, position, payload, its image ranges and its place in a read's buffer.
+/// One file a state's read takes: name, kind, position, payload, its image ranges and logical offset.
 pub const Piece = struct { name: Name, kind: file.Kind, at: u32, len: u64, first: usize, end: usize, off: u64 };
 
 /// Every file a disk state's read takes, in the order `read` scatters them, with their ranges of its image.
 pub const Plan = struct {
     pieces: []Piece = &.{},
     ranges: []image.Range = &.{},
-    bytes: u64 = 0, // a read-ahead buffer's: each payload at an aligned offset
+    bytes: u64 = 0, // logical layout: each payload at an aligned offset
 
     /// The files of state `s`: its blocks, then its own file.
     pub fn of(r: *const Rows, a: Allocator, s: *const rows_store.State) !Plan {
@@ -107,29 +107,37 @@ pub fn ext(kind: file.Kind) []const u8 {
 
 pub const Phase = enum { queued, reading, ready, failed };
 
-/// One state read ahead: its files, the buffer the I/O thread filled, and what the read found.
+/// A filled file fragment: its plan piece, logical payload offset and bytes valid until `recycle`.
+pub const Chunk = struct { piece: usize, off: u64, bytes: []const u8, slot: u8 };
+
+pub const chunk_bytes: usize = 4 << 20;
+const buffers_bytes: u64 = 2 * chunk_bytes;
+const SlotState = enum { empty, filling, full, using };
+const Slot = struct { buf: file.Stage = &.{}, piece: usize = 0, off: u64 = 0, len: usize = 0, state: SlotState = .empty };
+
+/// One state read ahead: its files, two bounded stream slots, and what the read found.
 pub const Read = struct {
     name: Name,
     plan: Plan,
-    buf: file.Stage = &.{},
+    slots: [2]Slot = .{ .{}, .{} },
+    produce: u1 = 0,
+    consume: u1 = 0,
     phase: Phase = .queued,
-    cancel: std.atomic.Value(bool) = .init(false), // set once it left the list while reading: the I/O thread frees it
+    cancel: std.atomic.Value(bool) = .init(false),
+    detached: bool = false, // the engine owns and finishes it; never freed by the worker, sweep or stop
+    producer_active: bool = false,
+    announced: bool = false, // first available fragment woke the request
     since: i128,
     disk: u64 = 0, // its files' bytes on disk
     ns: i128 = 0,
     err: ?anyerror = null,
     used: bool = false,
     late: bool = false, // a request stopped waiting for it at the bound
-
-    /// Piece `p`'s checked payload in the buffer.
-    pub fn payload(rd: *const Read, p: Piece) []const u8 {
-        return rd.buf[@intCast(p.off)..][0..@intCast(p.len)];
-    }
 };
 
 pub const Counts = struct { made: u64 = 0, freed: u64 = 0, used: u64 = 0, failed: u64 = 0, cancelled: u64 = 0, timeouts: u64 = 0 };
 
-/// Called by the I/O thread, holding no lock of its own, when a read has finished or failed.
+/// Called by the I/O thread, holding no lock of its own, when a fragment is available or a read settles.
 pub const Notify = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque) void };
 
 /// A store's reads ahead and the one I/O thread that runs them, oldest first; everything here under `mutex`.
@@ -188,21 +196,38 @@ pub const Prefetch = struct {
         if (f.stopping) return null;
         if (f.find(s.name) != null) return s.name;
         if (f.held_reads >= f.limits.reads) return null;
+        if (buffers_bytes > f.limits.bytes -| f.held_bytes) return null;
         var plan = Plan.of(r, f.gpa, s) catch return null;
-        const rd = f.gpa.create(Read) catch null;
-        if (plan.bytes > f.limits.bytes -| f.held_bytes or rd == null or !f.spawn()) {
+        const rd = f.gpa.create(Read) catch {
             plan.deinit(f.gpa);
-            if (rd) |x| f.gpa.destroy(x);
+            return null;
+        };
+        const first = f.gpa.alignedAlloc(u8, .fromByteUnits(file.alignment), chunk_bytes) catch {
+            plan.deinit(f.gpa);
+            f.gpa.destroy(rd);
+            return null;
+        };
+        const second = f.gpa.alignedAlloc(u8, .fromByteUnits(file.alignment), chunk_bytes) catch {
+            f.gpa.free(first);
+            plan.deinit(f.gpa);
+            f.gpa.destroy(rd);
+            return null;
+        };
+        rd.* = .{ .name = s.name, .plan = plan, .since = write.nowNs(), .slots = .{ .{ .buf = first }, .{ .buf = second } } };
+        if (!f.spawn()) {
+            f.freeSlots(rd);
+            plan.deinit(f.gpa);
+            f.gpa.destroy(rd);
             return null;
         }
-        rd.?.* = .{ .name = s.name, .plan = plan, .since = write.nowNs() };
-        f.reads.append(f.gpa, rd.?) catch {
+        f.reads.append(f.gpa, rd) catch {
+            f.freeSlots(rd);
             plan.deinit(f.gpa);
-            f.gpa.destroy(rd.?);
+            f.gpa.destroy(rd);
             return null;
         };
         f.held_reads += 1;
-        f.held_bytes += plan.bytes;
+        f.held_bytes += buffers_bytes;
         f.counts.made += 1;
         f.cond.signal(f.io);
         return s.name;
@@ -232,6 +257,7 @@ pub const Prefetch = struct {
         f.lock();
         defer f.unlock();
         const rd = f.reads.items[f.find(name) orelse return false];
+        if (rd.slots[rd.consume].state == .full) return false; // admission can now detach and drain while disk continues
         if (rd.phase != .queued and rd.phase != .reading) return false;
         if (write.nowNs() - (since orelse rd.since) < f.limits.wait_ns) return true;
         if (!rd.late) f.counts.timeouts += 1;
@@ -239,19 +265,65 @@ pub const Prefetch = struct {
         return false;
     }
 
-    /// `name`'s finished read when it reads `plan`'s files (engine thread); else null, and a read still going goes.
+    /// `name`'s compatible active read, detached for the engine; queued or failed reads use the synchronous fallback.
     pub fn take(f: *Prefetch, name: Name, plan: *const Plan) ?*Read {
         f.lock();
         defer f.unlock();
         const i = f.find(name) orelse return null;
         const rd = f.reads.items[i];
-        if (rd.phase == .ready and rd.plan.same(plan)) {
+        if (rd.phase != .queued and rd.phase != .failed and rd.plan.same(plan)) {
+            _ = f.reads.orderedRemove(i);
             if (!rd.used) f.counts.used += 1;
             rd.used = true;
+            rd.detached = true;
             return rd;
         }
         f.drop(f.reads.orderedRemove(i));
         return null;
+    }
+
+    /// The next immutable fragment, waiting for disk production; null after a complete file stream.
+    pub fn next(f: *Prefetch, rd: *Read) anyerror!?Chunk {
+        f.lock();
+        defer f.unlock();
+        std.debug.assert(rd.detached);
+        while (true) {
+            const slot = &rd.slots[rd.consume];
+            if (slot.state == .full) {
+                slot.state = .using;
+                const index = rd.consume;
+                rd.consume +%= 1;
+                return .{ .piece = slot.piece, .off = slot.off, .bytes = slot.buf[0..slot.len], .slot = index };
+            }
+            if (!rd.producer_active and (rd.phase == .ready or rd.phase == .failed)) {
+                if (rd.err) |err| return err;
+                return null;
+            }
+            f.cond.waitUncancelable(f.io, &f.mutex);
+        }
+    }
+
+    /// Release a consumed fragment's slot; its bytes must not be used afterward.
+    pub fn recycle(f: *Prefetch, rd: *Read, chunk: Chunk) void {
+        f.lock();
+        defer f.unlock();
+        std.debug.assert(rd.detached);
+        const slot = &rd.slots[chunk.slot];
+        std.debug.assert(slot.state == .using and slot.buf.ptr == chunk.bytes.ptr);
+        slot.state = .empty;
+        slot.len = 0;
+        f.cond.signal(f.io);
+    }
+
+    /// Cancel and join the producer if needed, then free this detached read exactly once.
+    pub fn finish(f: *Prefetch, rd: *Read) void {
+        f.lock();
+        defer f.unlock();
+        std.debug.assert(rd.detached);
+        rd.cancel.store(true, .release);
+        f.cond.broadcast(f.io);
+        while (rd.producer_active) f.cond.waitUncancelable(f.io, &f.mutex);
+        f.release(rd);
     }
 
     /// Reads no queued request names any more go (engine thread): `named(ctx, name)` says which still wait.
@@ -278,18 +350,26 @@ pub const Prefetch = struct {
     /// A read out of the list freed now, or by the I/O thread when it is reading it (the lock held).
     fn drop(f: *Prefetch, rd: *Read) void {
         if (!rd.used) f.counts.cancelled += 1;
-        if (rd.phase == .reading) return rd.cancel.store(true, .release);
+        if (rd.producer_active) {
+            rd.cancel.store(true, .release);
+            f.cond.broadcast(f.io);
+            return;
+        }
         f.release(rd);
     }
 
     /// A read's memory freed: exactly once, by whoever holds it last (the lock held).
     fn release(f: *Prefetch, rd: *Read) void {
         f.held_reads -= 1;
-        f.held_bytes -= rd.plan.bytes;
-        if (rd.buf.len > 0) f.gpa.free(rd.buf);
+        f.held_bytes -= buffers_bytes;
+        f.freeSlots(rd);
         rd.plan.deinit(f.gpa);
         f.gpa.destroy(rd);
         f.counts.freed += 1;
+    }
+
+    fn freeSlots(f: *Prefetch, rd: *Read) void {
+        for (&rd.slots) |*slot| if (slot.buf.len > 0) f.gpa.free(slot.buf);
     }
 
     /// Cancel all reads and join within the normal stop budget.
@@ -326,7 +406,7 @@ pub const Prefetch = struct {
         f.gpa.destroy(f);
     }
 
-    /// The I/O thread: the oldest queued read, read outside the lock, then published (or freed, if it went meanwhile).
+    /// The I/O thread: oldest queued read first, disk outside the lock, terminal publication under it.
     fn run(f: *Prefetch) void {
         defer {
             f.exited.store(true, .release);
@@ -335,24 +415,28 @@ pub const Prefetch = struct {
         f.lock();
         defer f.unlock();
         while (!f.stopping) {
-            const rd = f.next() orelse {
+            const rd = f.queuedNext() orelse {
                 f.cond.waitUncancelable(f.io, &f.mutex);
                 continue;
             };
             rd.phase = .reading;
+            rd.producer_active = true;
             f.unlock();
             const t0 = write.nowNs();
             const err = fill(f, rd);
             const ns = write.nowNs() - t0;
             f.lock();
-            if (rd.cancel.load(.acquire)) {
-                f.release(rd);
-                continue;
-            }
             rd.ns = ns;
             rd.err = err;
             rd.phase = if (err == null) .ready else .failed;
-            if (err != null) f.counts.failed += 1;
+            rd.producer_active = false;
+            f.cond.broadcast(f.io);
+            if (err != null and !rd.cancel.load(.acquire)) f.counts.failed += 1;
+            if (rd.cancel.load(.acquire) and !rd.detached) {
+                f.release(rd);
+                continue;
+            }
+            if (rd.detached) continue; // engine `finish` owns it and no host notification refers to it
             const n = f.notify orelse continue;
             f.notifying.store(true, .release);
             f.unlock();
@@ -362,13 +446,64 @@ pub const Prefetch = struct {
         }
     }
 
-    fn next(f: *const Prefetch) ?*Read {
+    fn claim(f: *Prefetch, rd: *Read) !u1 {
+        f.lock();
+        defer f.unlock();
+        while (true) {
+            if (rd.cancel.load(.acquire)) return error.Cancelled;
+            const index = rd.produce;
+            const slot = &rd.slots[index];
+            if (slot.state == .empty) {
+                slot.state = .filling;
+                return index;
+            }
+            f.cond.waitUncancelable(f.io, &f.mutex);
+        }
+    }
+
+    fn abandon(f: *Prefetch, rd: *Read, index: u1) void {
+        f.lock();
+        defer f.unlock();
+        rd.slots[index].state = .empty;
+        f.cond.broadcast(f.io);
+    }
+
+    fn publish(f: *Prefetch, rd: *Read, index: u1, piece: usize, off: u64, len: usize) void {
+        f.lock();
+        defer f.unlock();
+        const slot = &rd.slots[index];
+        std.debug.assert(slot.state == .filling);
+        slot.piece = piece;
+        slot.off = off;
+        slot.len = len;
+        slot.state = .full;
+        rd.produce +%= 1;
+        f.cond.signal(f.io);
+    }
+
+    fn announce(f: *Prefetch, rd: *Read) void {
+        f.lock();
+        if (rd.detached or rd.announced) {
+            f.unlock();
+            return;
+        }
+        const n = f.notify orelse {
+            f.unlock();
+            return;
+        };
+        rd.announced = true;
+        f.notifying.store(true, .release);
+        f.unlock();
+        n.call(n.ctx);
+        f.notifying.store(false, .release);
+    }
+
+    fn queuedNext(f: *const Prefetch) ?*Read {
         for (f.reads.items) |x| if (x.phase == .queued) return x;
         return null;
     }
 
     fn fill(f: *Prefetch, rd: *Read) ?anyerror {
-        rd.buf = file.stage(f.gpa, rd.plan.bytes) catch |err| return err;
         f.reader(f, rd) catch |err| return err;
         return null;
     }
@@ -423,21 +558,37 @@ pub fn choose(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []c
     return i;
 }
 
-/// Every file of `rd`, checked as a synchronous read checks it, its payload into the buffer (the I/O thread).
+/// Every file of `rd`, checked incrementally and published as ordered bounded fragments (the I/O thread).
 pub fn readFiles(f: *Prefetch, rd: *Read) anyerror!void {
-    for (rd.plan.pieces) |p| {
+    for (rd.plan.pieces, 0..) |p, piece| {
         if (rd.cancel.load(.acquire)) return error.Cancelled;
         var buf: [1200]u8 = undefined;
         const path = try file.path(&buf, f.dir, &chain.hex(p.name), ext(p.kind), false);
         var o = try file.open(path, p.kind, p.name);
         defer o.close();
         if (o.trailer.payload != p.len or o.trailer.block != f.block or o.trailer.at != p.at) return error.RowsRead;
-        const span = std.mem.alignForward(u64, p.len, file.alignment);
-        _ = try file.payload(&o, @alignCast(rd.buf[@intCast(p.off)..][0..@intCast(span)]));
+        var hash: std.hash.Wyhash = .init(0);
+        var off: u64 = 0;
+        while (off < p.len) {
+            const index = try f.claim(rd);
+            const logical = p.off + off;
+            const got = file.payloadChunk(&o, rd.slots[index].buf, &off, &hash) catch |err| {
+                f.abandon(rd, index);
+                return err;
+            };
+            if (got.len == 0) {
+                f.abandon(rd, index);
+                return error.RowsRead;
+            }
+            f.publish(rd, index, piece, logical, got.len);
+            f.announce(rd);
+        }
+        if (hash.final() != o.trailer.payload_hash) return error.RowsHash;
         rd.disk += o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
     }
 }
 
 test {
     _ = @import("rows_prefetch_test.zig");
+    _ = @import("rows_prefetch_stream_test.zig");
 }

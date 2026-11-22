@@ -24,7 +24,7 @@ pub const Bounded = struct {
 
     pub const VTable = struct {
         nbytes: *const fn (ptr: *anyopaque) u64,
-        /// host copies of its pieces for a park (owned by the caller: name and bytes allocated with gpa)
+        /// blobs for a park; borrowed slices stay valid until settlement, and RAM release waits for its job
         blobs: *const fn (ptr: *anyopaque, gpa: std.mem.Allocator) anyerror![]disk_mod.Blob,
         release: *const fn (ptr: *anyopaque) void,
     };
@@ -363,6 +363,8 @@ pub const Store = struct {
     /// A RAM entry lets go of its pages and bounded state; it stays indexed if a file holds it.
     pub fn leaveRam(s: *Store, id: u32) !void {
         const e = s.index.get(id);
+        // A park may borrow bounded bytes; never free them while its disk thread still reads.
+        if (e.extra.job != null) return error.Busy;
         if (!e.ram) return;
         try s.pool.drop(e.extra.pages);
         s.gpa.free(e.extra.pages);

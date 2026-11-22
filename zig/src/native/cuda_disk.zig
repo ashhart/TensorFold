@@ -5,6 +5,7 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const disk_identity = @import("disk_identity.zig");
+const probe_hash = @import("probe_hash.zig");
 const persistence_policy = @import("persistence_policy.zig");
 const kept = nemotron.native.kept_states;
 const rows = api.prompt_cache.rows;
@@ -218,11 +219,9 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
     const saved = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
     if (!whole(t, saved)) return error.ProbeUnmarked;
     const sh = kept.shape(t, 4136);
-    const bytes = try a.alloc(u8, words + sh.kv + sh.mamba);
-    try gather(t, saved, &.{ .{ .off = 0, .len = words }, .{ .off = words, .len = sh.kv }, .{ .off = words + sh.kv, .len = sh.mamba } }, bytes);
-    // the row count: the last window's, from whatever ran first (a new build measures its windows)
-    @memset(bytes[8..words], 0);
-    return .{ .hash = std.hash.Wyhash.hash(0x6375, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    const digest = try probe_hash.hash(a, 0x6375, &image, t, saved, &.{ words, sh.kv, sh.mamba }, .{ .off = 8, .len = words - 8 });
+    const seconds = @as(f64, @floatFromInt(@max(ns, 1))) / 1e9;
+    return .{ .hash = digest, .rate = @as(f64, @floatFromInt(toks.len)) / seconds };
 }
 
 /// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.

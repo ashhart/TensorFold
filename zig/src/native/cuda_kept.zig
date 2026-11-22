@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const disk_identity = @import("disk_identity.zig");
+const probe_hash = @import("probe_hash.zig");
 const rows = api.prompt_cache.rows;
 const Allocator = std.mem.Allocator;
 
@@ -169,13 +170,12 @@ pub fn Kept(comptime V: type) type {
             const st = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
             if (!probed(t, st)) return error.ProbeUnmarked;
             const bufs = V.buffers(st);
-            const held = (if (bufs[0]) |b| b.len else 0) + (if (bufs[1]) |b| b.len else 0);
-            const bytes = try a.alloc(u8, words + held);
-            defer a.free(bytes);
-            try copy(t, st, &.{.{ .off = 0, .len = bytes.len }}, bytes, true);
+            const first = if (bufs[0]) |b| b.len else 0;
+            const second = if (bufs[1]) |b| b.len else 0;
+            const digest = try probe_hash.hash(a, V.probe_seed, &image, t, st, &.{ words, first, second }, null);
             const seconds = @as(f64, @floatFromInt(@max(ns, 1))) / 1e9;
             const rate = @as(f64, @floatFromInt(count)) / seconds;
-            return .{ .hash = std.hash.Wyhash.hash(V.probe_seed, bytes), .rate = rate };
+            return .{ .hash = digest, .rate = rate };
         }
 
         /// What the states depend on past the image and the probe: the family's KV form (keptKey).
@@ -202,4 +202,5 @@ pub fn Kept(comptime V: type) type {
 
 test {
     _ = @import("cuda_kept_test.zig");
+    _ = @import("probe_hash.zig");
 }
