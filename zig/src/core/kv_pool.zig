@@ -495,7 +495,7 @@ pub const Pool = struct {
         if (l.ids.items.len > 0 or n == 0 or l.promised < n or p.classes > 1) return p.cover(l, n, table);
         try l.ids.ensureTotalCapacity(p.gpa, n);
         const start = p.findAligned(n, step) orelse return p.cover(l, n, table);
-        p.claimAt(l, start, n);
+        owners.claimAt(p, l, start, n);
         for (0..n) |i| l.ids.appendAssumeCapacity(@intCast(start + i)); // held as `take` holds a page: `finish` frees them
         errdefer p.shrink(l, 0);
         if (table) |t| try t.write(t.ctx, l.ids.items, 0);
@@ -550,26 +550,8 @@ pub const Pool = struct {
         defer p.leave();
         if (l.promised < k or p.classes > 1) return null; // a run spans every class
         const start = p.findRun(k) orelse return null;
-        p.claimAt(l, start, k);
+        owners.claimAt(p, l, start, k);
         return start;
-    }
-
-    /// Free pages [start, start + k) held by `l`, from its promise.
-    fn claimAt(p: *Pool, l: *Lease, start: u32, k: usize) void {
-        var n: usize = 0;
-        for (p.free[0..p.nfree]) |id| if (id < start or id >= start + k) {
-            p.free[n] = id;
-            n += 1;
-        };
-        std.debug.assert(n + k == p.nfree);
-        p.nfree = n;
-        p.cfree[0] = n; // one class: runs are refused above it
-        @memset(p.refs[start..][0..k], 1);
-        @memset(p.leased[start..][0..k], 1); // held as a lease holds its pages: never the store's to reclaim
-        p.nleased += k; // every page in this free run gained its first lease and no other holder
-        l.promised -= k;
-        p.promised -= k;
-        p.cpromised[0] -= k;
     }
 
     /// A run claimed at `start` goes back to the free pages.
