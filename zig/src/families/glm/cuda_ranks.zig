@@ -237,7 +237,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 23, // this struct's version (22, plus pair_experts)
+    layout: u32 = 24, // this struct's version (23, pair_experts', plus TF_GLM_KV_SPLIT)
     world: u32,
     rank: u32,
     kv8: u32 = 0,

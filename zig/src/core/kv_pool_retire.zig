@@ -1,6 +1,7 @@
 //! A lease's page leaving mid-stream (C5, #2444 P4): a logical free now, the page reused only after its readers.
 const std = @import("std");
 const kv = @import("kv_pool.zig");
+const owners = @import("kv_pool_classes.zig");
 const Pool = kv.Pool;
 const Lease = kv.Lease;
 
@@ -83,8 +84,7 @@ pub fn freeOrPend(p: *Pool, id: u32) void {
     const r = &p.retired;
     if (r.token(id) > r.settled) return r.pending.appendAssumeCapacity(id); // reserved before its mark
     clear(p, id);
-    p.free[p.nfree] = id;
-    p.nfree += 1;
+    owners.push(p, id); // its class's stack: one class is the one stack, id for id
 }
 
 /// The forwards up to `token` are done: pages they read become free, then each retired page's promise goes back.
@@ -100,8 +100,7 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
             keep += 1;
         } else {
             clear(p, id);
-            p.free[p.nfree] = id;
-            p.nfree += 1;
+            owners.push(p, id);
         }
     }
     r.pending.shrinkRetainingCapacity(keep);
