@@ -113,7 +113,6 @@ pub const LaneHost = struct {
     pub fn countPool(h: *LaneHost, pool: anytype) error{ PoolHasHost, NoClassHook }!void {
         return ledger.count(h, pool);
     }
-
     /// The pool counts on its own pages again (a host that never started).
     pub fn uncountPool(h: *LaneHost) void {
         ledger.uncount(h);
