@@ -11,6 +11,23 @@ const h3p_k = @import("contract_h3_image_prompt.zig");
 
 const g = core.contract.gates;
 
+const h3d_which = std.enums.values(h3d_k.Which);
+const h3p_which = std.enums.values(h3p_k.Which);
+const h3d_planted = firstPerSymbol(h3d_k);
+const h3p_planted = firstPerSymbol(h3p_k);
+
+/// The first form of each distinct kernel symbol, so every kernel gets exactly one planted control.
+fn firstPerSymbol(comptime K: type) []const K.Which {
+    comptime {
+        var out: []const K.Which = &.{};
+        outer: for (std.enums.values(K.Which)) |w| {
+            for (out) |o| if (std.mem.eql(u8, K.symbol(o), K.symbol(w))) continue :outer;
+            out = out ++ .{w};
+        }
+        return out;
+    }
+}
+
 const images = struct {
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
     pub const decoder align(16) = @embedFile("fatbin_h3_image_decoder").*;
@@ -24,9 +41,9 @@ pub const Loaded = struct {
     h3p_mod: cuda.Module,
     h3_list: [std.enums.values(h3_k.Which).len]h3_k.H3,
     h3_topk: h3_topk_k.TopK,
-    /// Each decoder and prompt kernel twice: served, then its planted control.
-    h3d_list: [2 * std.enums.values(h3d_k.Which).len]h3d_k.Dec,
-    h3p_list: [2 * std.enums.values(h3p_k.Which).len]h3p_k.Prm,
+    /// Each decoder and prompt form served, then one planted control per kernel symbol.
+    h3d_list: [h3d_which.len + h3d_planted.len]h3d_k.Dec,
+    h3p_list: [h3p_which.len + h3p_planted.len]h3p_k.Prm,
 
     /// Frees every rig's arena and unloads the three images; call once the gates are done.
     pub fn deinit(l: *Loaded) void {
@@ -53,17 +70,17 @@ pub fn append(l: *Loaded, a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, 
     l.h3_topk = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try l.h3_mod.function("h3_topk") };
     try kernels.append(a, l.h3_topk.kernel());
     l.h3d_mod = try cuda.Module.load(gpu.d, &images.decoder);
-    const h3d_which = comptime std.enums.values(h3d_k.Which);
     for (&l.h3d_list, 0..) |*m, i| {
-        const w = h3d_which[i % h3d_which.len];
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3d_mod.function(h3d_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = i >= h3d_which.len };
+        const planted = i >= h3d_which.len;
+        const w = if (planted) h3d_planted[i - h3d_which.len] else h3d_which[i];
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3d_mod.function(h3d_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = planted };
     }
     for (&l.h3d_list) |*m| try kernels.append(a, m.kernel());
     l.h3p_mod = try cuda.Module.load(gpu.d, &images.prompt);
-    const h3p_which = comptime std.enums.values(h3p_k.Which);
     for (&l.h3p_list, 0..) |*m, i| {
-        const w = h3p_which[i % h3p_which.len];
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3p_mod.function(h3p_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = i >= h3p_which.len };
+        const planted = i >= h3p_which.len;
+        const w = if (planted) h3p_planted[i - h3p_which.len] else h3p_which[i];
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3p_mod.function(h3p_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = planted };
     }
     for (&l.h3p_list) |*m| try kernels.append(a, m.kernel());
 }
