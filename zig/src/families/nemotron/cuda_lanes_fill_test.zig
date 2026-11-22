@@ -7,6 +7,7 @@ const vision = @import("cuda_vision.zig");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const Cuda = @import("cuda_lanes.zig").Cuda;
+const fill = @import("cuda_lanes_fill.zig");
 const a = std.testing.allocator;
 
 const Count = struct {
@@ -225,4 +226,22 @@ test "nemotron cuda steps: a step failing other than by a cancel releases its la
     try std.testing.expect(syncs > before); // freed after the stream's queued work
     try std.testing.expectError(error.ContextFull, r.step(&s)); // a retry opens afresh
     try std.testing.expectEqual(@as(usize, 0), r.b.lanes.count());
+}
+
+test "nemotron cuda steps: an unfinished chunk waits for its GPU work when the host bills its time (REV59 7)" {
+    var r: Rig = .{};
+    r.init();
+    defer r.deinit();
+    const prompt: [12]u32 = @splat(3);
+    var s = try lanes.Stream.init(a, .{ .id = "settle", .prompt = &prompt, .max_new = 4 });
+    defer s.deinit(a);
+    const before = syncs;
+    try std.testing.expect(!try fill.unfinished(&r.e, &s, 4));
+    try std.testing.expectEqual(before, syncs); // unbilled: the chunk's kernels stay queued
+    try std.testing.expectEqual(@as(u32, 4), s.fill_at.load(.monotonic));
+    s.settle_step = true;
+    try std.testing.expect(!try fill.unfinished(&r.e, &s, 8));
+    try std.testing.expectEqual(before + 1, syncs);
+    try std.testing.expectEqual(@as(u32, 8), s.fill_at.load(.monotonic));
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_lanes_fill.zig"), "if (!done) return unfinished(e, s, p.s);") != null);
 }

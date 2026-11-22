@@ -161,16 +161,20 @@ fn stepOnce(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         return err;
     };
     if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
-    if (!done) {
-        s.fill_at.store(@intCast(p.s), .monotonic);
-        return false;
-    }
+    if (!done) return unfinished(e, s, p.s);
     const from = p.from;
     _ = self.fills.remove(s);
     const first = try pass.firstToken(e);
     if (e.last_chunk == from) lanes.prefill_widths.completed(e.gpa, s, s.prompt().len - from);
     try finish(self, s, first);
     return true;
+}
+
+/// A chunk that left its pass unfinished: its rows reported and, with settle_step, its queued GPU work waited for.
+pub fn unfinished(e: *engine.Engine, s: *lanes.Stream, at: usize) !bool {
+    s.fill_at.store(@intCast(at), .monotonic);
+    if (s.settle_step) try e.stream.synchronize(); // the lane host bills this call's time against decode's share
+    return false;
 }
 
 /// cancel_prefill: a pass cancelled between chunks keeps its prefix where its last chunk ended, on its own sequence.
