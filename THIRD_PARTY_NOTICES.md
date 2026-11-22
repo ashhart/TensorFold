@@ -607,3 +607,12 @@ arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2
 vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
 `Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
 in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
+
+## Hy4-flash NVFP4 tensor table and build scripts
+
+`zig/src/families/hy4_flash/nvfp4_header.txt` lists names, types and shapes from the safetensors headers of the NVFP4
+build [atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) at revision
+`30f201acf0b4f9ba178817bcbc04ccfa3ec473f9`, made from Tencent's Hy4-flash release
+([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
+under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)); no weights are included.
+`tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild that checkpoint (`docs/receipts/hy4-flash-nvfp4/`).
