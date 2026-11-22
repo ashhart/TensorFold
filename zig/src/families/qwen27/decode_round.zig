@@ -522,11 +522,9 @@ pub const Runner = struct {
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
-
     pub fn decodeRows(r: *const Runner) u32 {
         return if (r.geometry.shared_prefix) r.model.frame.capacity else attn.planning.max_rows;
     }
-
     pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
