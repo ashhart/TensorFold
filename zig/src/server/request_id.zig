@@ -1,6 +1,7 @@
 //! X-Request-Id: the client's own id when it sent one valid value, else the id the server holds the request by.
 const std = @import("std");
 const ids = @import("ids.zig");
+const log = @import("log.zig");
 const Conn = @import("http_conn.zig").Conn;
 
 pub const header = "X-Request-Id";
@@ -20,6 +21,13 @@ pub fn client(c: *const Conn) ?[]const u8 {
     if (c.headerCount(header) != 1) return null;
     const value = c.header(header).?;
     return if (valid(value)) value else null;
+}
+
+/// Takes the client's valid id as this request's, so its reply and its log lines carry it.
+pub fn adopt(c: *Conn) void {
+    const id = client(c) orelse return;
+    c.request_id = id;
+    log.requestId(id);
 }
 
 /// An id for a request the server names no other way: ``req_`` then 32 random lowercase hex digits, kept in ``buf``.

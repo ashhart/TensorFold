@@ -269,11 +269,7 @@ pub const Conn = struct {
             return .closed;
         }
         const outcome = try c.parseRequest(a, raw);
-        const client_id = if (outcome == .ready) request_ids.client(c) else null;
-        if (client_id) |id| {
-            c.request_id = id;
-            log.requestId(id); // the request's log lines carry the client's id
-        }
+        if (outcome == .ready) request_ids.adopt(c);
         return outcome;
     }
 
