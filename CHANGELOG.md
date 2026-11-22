@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ADAPTIVE_BLOCK=1` (opt-in) lets a lone stream draft 8 or 16 DFlash2 block rows by how deep its recent rounds landed; one-stream chat about 2.5% faster on M3 Ultra, tokens unchanged.
+
 - Metal on M5 and later: row projections take the wide kernel from 8 rows instead of 4 (a per-generation cutover table), for #3396's sampled 2- and 4-stream slowdown; replies keep their tokens, and a `tf-row-cutover` bench measures the cutover per chip (#4617, refs #3396).
 
 - Desktop: Discover shows a model as installed again once its selected revision matches the one it would download (#4313 compared the snapshot path, not its sha), and the room worker test lists the ticket bot's reviewed imports (#4606).
