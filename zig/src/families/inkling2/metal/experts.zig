@@ -27,7 +27,7 @@ pub const function_names = [_][:0]const u8{
 /// The columns the units kernels read a row: experts_units.metal's INK2_GU_K and INK2_DOWN_K.
 const units_gu_k = 2304;
 const units_down_k = 1152;
-const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units" };
+const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units" };
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
@@ -38,7 +38,7 @@ pub const Pipelines = struct {
     /// Each expert's count, then its route pairs: launches in one encoder run in order, so they share it.
     groups: mtl.Buffer,
     /// The gate-up and down products on the tensor units (NVFP4 then MXFP8), where the GPU has them.
-    units: ?[4]mtl.Pipeline = null,
+    units: ?[units_names.len]mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         var out = try loadSource(device, src.experts);
@@ -51,7 +51,7 @@ pub const Pipelines = struct {
     pub fn loadUnits(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [4]mtl.Pipeline = undefined;
+        var pipes: [units_names.len]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for (units_names, &pipes) |name, *pipe| {
@@ -229,6 +229,16 @@ pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: 
         },
     }
     e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
+}
+
+const LogitArgs = extern struct { rows: u32, vocab: u32 };
+/// Rows of h against the vocabulary on the tensor units: fp32 out[row][v], bf16-rounded and capped as the glue's.
+pub fn logitsUnits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, rows: u32, vocab: u32) !void {
+    const pipes = p.units orelse return error.NoTensorUnits;
+    for ([_]Ref{ h, unembed, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
+    e.setPipeline(pipes[4]);
+    e.dispatchGroups(mtl.Size.of((vocab + 31) / 32, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// The down products after group, as guGrouped.
