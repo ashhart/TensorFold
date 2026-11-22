@@ -503,12 +503,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
     const flash_grouped = @import("metal_flashnext_grouped.zig");
-    var grouped_probes: [4]flash_grouped.Probe = undefined;
+    var grouped_probes: [8]flash_grouped.Probe = undefined;
     var grouped_made: usize = 0;
     defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
-    for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, flash_grouped.Probe.name(control, indexed))) continue;
-        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed };
+    for ([_]bool{ false, true }) |mb2| for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control, indexed, mb2))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed, .mb2 = mb2 };
         grouped_made += 1;
         try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
     };
