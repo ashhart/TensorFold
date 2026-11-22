@@ -25,9 +25,9 @@ const Mock = struct {
     }
 };
 test "GDN chain port: off binds only the old symbol; on binds the fused kernel" {
-    try std.testing.expect(chain.Chain.enabledValue(null));
-    try std.testing.expect(chain.Chain.enabledValue("1"));
-    try std.testing.expect(!chain.Chain.enabledValue("0"));
+    try std.testing.expect(try chain.Chain.enabledValue(null));
+    try std.testing.expect(try chain.Chain.enabledValue("1"));
+    try std.testing.expect(!try chain.Chain.enabledValue("0"));
     var d: cuda.Driver = undefined;
     d.api.cuModuleGetFunction = Mock.bind;
     const mod: cuda.Module = .{ .d = &d, .handle = null };

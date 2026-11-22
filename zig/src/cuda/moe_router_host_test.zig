@@ -24,9 +24,9 @@ const Mock = struct {
     }
 };
 test "MoE router port: off avoids the new symbol and restores the row-first grid" {
-    try std.testing.expect(cuda.moe.Fns.expertFirst(null));
-    try std.testing.expect(cuda.moe.Fns.expertFirst("1"));
-    try std.testing.expect(!cuda.moe.Fns.expertFirst("0"));
+    try std.testing.expect(try cuda.moe.Fns.expertFirst(null));
+    try std.testing.expect(try cuda.moe.Fns.expertFirst("1"));
+    try std.testing.expect(!try cuda.moe.Fns.expertFirst("0"));
     var d: cuda.Driver = undefined;
     d.api.cuModuleGetFunction = Mock.bind;
     d.api.cuLaunchKernel = Mock.launch;

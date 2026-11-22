@@ -21,12 +21,11 @@ pub const Fns = struct {
 
     /// From the loaded moe module (kernels.moe).
     pub fn resolve(mod: Module) !Fns {
-        const value = std.c.getenv("TF_CUDA_MOE_EXPERT_FIRST");
-        return resolveMode(mod, expertFirst(if (value) |v| std.mem.span(v) else null));
+        return resolveMode(mod, try @import("sys").environment.read(bool, "TF_CUDA_MOE_EXPERT_FIRST", true));
     }
 
-    pub fn expertFirst(value: ?[]const u8) bool {
-        return value == null or !std.mem.eql(u8, value.?, "0");
+    pub fn expertFirst(value: ?[]const u8) !bool {
+        return (try @import("sys").environment.parse("TF_CUDA_MOE_EXPERT_FIRST", value) orelse 1) != 0;
     }
 
     pub fn resolveMode(mod: Module, on: bool) !Fns {
