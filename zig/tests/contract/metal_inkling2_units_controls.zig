@@ -1,4 +1,4 @@
-//! Count-checked mutations of the tensor-unit expert kernels: every entry has a genuine arithmetic control.
+//! Count-checked mutations of the tensor-unit kernels: every entry has a genuine arithmetic control.
 const std = @import("std");
 const src = @import("inkling2_metal");
 const g = @import("contract").gates;
@@ -9,6 +9,7 @@ pub const Mutation = enum {
     nv_down_phi,
     mx_gu_scale,
     mx_down_scale,
+    logits_cap,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -17,6 +18,7 @@ pub const Mutation = enum {
             .nv_down_phi => "control: metal inkling2 units tf_ink2_nvfp4_down_units phi",
             .mx_gu_scale => "control: metal inkling2 units tf_ink2_mxfp8_gu_units scale",
             .mx_down_scale => "control: metal inkling2 units tf_ink2_mxfp8_down_units scale",
+            .logits_cap => "control: metal inkling2 units tf_ink2_logits_units cap",
         };
     }
 
@@ -32,6 +34,7 @@ pub const Mutation = enum {
             .nv_down_phi => .{ .from = "ink2_units<false, false>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_units<false, false>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
             // Both MXFP8 entries decode through one helper; a control compiles only its selected entry.
             .mx_gu_scale, .mx_down_scale => .{ .from = "const int shift = int(scales[b / 2u]) - 127;", .to = "const int shift = int(scales[b / 2u]) - 126;" },
+            .logits_cap => .{ .from = "precise::divide(float(bfloat(dot)), 30.0f)", .to = "precise::divide(float(bfloat(dot)), 15.0f)" },
         };
     }
 };
