@@ -78,7 +78,7 @@ pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
     } else {
         e.setPipeline(k.prompt);
         bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml }, 0);
-        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
+        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
 }
@@ -86,9 +86,17 @@ pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
 /// The partials of `partials` merged, with the sink and gate, into each row's attention output.
 pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
     const launch = try planning.attend(r, l, stride, slots);
+    const single_sliding = launch.path == .prompt and l.window > 0;
     e.setPipeline(k.merge);
     bind(e, &.{ part_o, part_ml, sink, gate, meta.pos, out }, 0);
-    e.setValue(planning.MergeArgs{ .heads = r.heads, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .subs = launch.subs }, 6);
+    e.setValue(planning.MergeArgs{
+        .heads = r.heads,
+        .window = if (single_sliding) 0 else l.window,
+        .chunk = if (single_sliding) r.last_pos + 1 else l.chunk,
+        .c0 = 0,
+        .chunks = launch.partials_rh,
+        .subs = launch.subs,
+    }, 6);
     e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
 }
 

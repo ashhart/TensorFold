@@ -11,7 +11,7 @@ test "inkling2 metal ABI matches the shaders" {
     try t.expectEqual(@as(usize, 24), @sizeOf(p.Seg));
     try t.expectEqual(@as(usize, 36), @sizeOf(p.PrepArgs));
     try t.expectEqual(@as(usize, 24), @sizeOf(p.MergeArgs));
-    try t.expectEqual(@as(usize, 28), @sizeOf(p.PromptArgs));
+    try t.expectEqual(@as(usize, 32), @sizeOf(p.PromptArgs));
     try t.expectEqual(@as(u32, 24), (p.Rows{ .rows = 1, .last_pos = 0 }).heads);
     try t.expectEqual(@as(u32, 8), (p.Rows{ .rows = 1, .last_pos = 0 }).kv_heads);
     try t.expectEqual(@as(f32, 8192), (p.Prep{}).floor);
@@ -63,4 +63,10 @@ test "inkling2 metal decode and prompt dispatch geometry" {
     const prompt = try p.attend(.{ .rows = 130, .last_pos = 20000 }, gl, 2, 130 * 24 * 2);
     try t.expectEqual(p.Path.prompt, prompt.path);
     try t.expectEqual([3]u32{ 4, 8, 2 }, prompt.grid); // ceil(130 * 3 / 128)
+    const sl_prompt = try p.attend(.{ .rows = 512, .last_pos = 20000 }, p.Layer.sliding(1024, 512), 64, 0);
+    try t.expectEqual(p.Path.prompt, sl_prompt.path);
+    try t.expectEqual([3]u32{ 12, 8, 1 }, sl_prompt.grid);
+    try t.expectEqual(@as(u32, 1), sl_prompt.partials_rh);
+    const sl_decode = try p.attend(.{ .rows = 1, .last_pos = 20000 }, p.Layer.sliding(1024, 1), 64, 0);
+    try t.expectEqual(p.Path.decode, sl_decode.path);
 }
