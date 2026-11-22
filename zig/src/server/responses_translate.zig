@@ -181,7 +181,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             try m.put(a, "role", .{ .string = role });
             try m.put(a, "content", try content(cx, item.get("content")));
             if (std.mem.eql(u8, role, "assistant") and thought.items.len > 0) {
-                try m.put(a, "reasoning_content", .{ .string = thought.items });
+                try m.put(a, "reasoning_content", .{ .string = try a.dupe(u8, thought.items) }); // its own bytes: thought is reused
                 thought.clearRetainingCapacity();
             }
             try out.append(a, m);
