@@ -307,7 +307,10 @@ pub const Metal = struct {
         const cache = self.caches.get(stream) orelse try self.opening(stream);
         errdefer self.drop(stream);
         const ids = stream.prompt();
-        _ = try self.feedChunk(cache, ids[cache.len..], stream, max_rows);
+        // Beside other streams a chunk is at most `busy_rows`, so their rounds wait no longer than a short chunk.
+        const busy: u32 = if (self.caches.count() > 1) busy_rows else 0;
+        const cap = if (max_rows > 0 and busy > 0) @min(max_rows, busy) else @max(max_rows, busy);
+        _ = try self.feedChunk(cache, ids[cache.len..], stream, cap);
         return cache.len == ids.len;
     }
 
@@ -507,6 +510,9 @@ test "a window's masks step by the padded vocabulary's words" {
     try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
     try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
 }
+
+/// A stepped prompt chunk's rows while another stream holds state.
+const busy_rows: u32 = 256;
 
 fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
