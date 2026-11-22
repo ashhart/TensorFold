@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/audio/speech` adds `wav24`, `wav32f` and `flac`, with an optional `sample_rate` and `channels: 2`; the default `wav` and `pcm` replies stay byte-identical and `mp3`, `opus` and `aac` are refused by name (#3138).
+
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#N).
