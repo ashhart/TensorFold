@@ -108,11 +108,13 @@ fn refused(slide: bool, kv_pages: ?[:0]const u8, share: ?[:0]const u8) !void {
     _ = try native.open(t.allocator, t.io, &ctx, "/nonexistent", null, o);
 }
 
-/// A set switch's refusal needs no model: it stops before the weights load, as the other switch checks do.
+/// Early switch refusals need no model; a non-divisible page size proceeds to the ordinary model load.
 pub fn refusals() !void {
     try t.expectError(error.QwenPagesNoLearner, refused(true, "256", null));
     try t.expectError(error.QwenShareNeedsPages, refused(false, null, "16"));
-    try t.expectError(error.QwenShareNeedsPages, refused(false, "100", "16"));
+    if (refused(false, "100", "16")) |_| return error.UnexpectedNonexistentModel else |err| {
+        try t.expect(err != error.QwenShareNeedsPages);
+    }
 }
 
 test "Qwen share faults: --parallel N admits N streams at once with every stream on pages" {

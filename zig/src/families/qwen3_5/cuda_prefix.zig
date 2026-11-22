@@ -145,16 +145,28 @@ pub const Prefix = struct {
         return .{ .cache = owner.cache.?, .plan = plan };
     }
 
-    /// The plan's marks down to the cold pass's chunk grid, where a pass cuts and so can keep; the plan's freed.
+    /// The plan's page-edge marks become real cold-pass cuts, independent of the compute chunk grid; the plan's freed.
     fn onGrid(x: *Prefix, plan: radix.Plan) ![]const u32 {
         defer x.gpa.free(plan.marks);
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(x.gpa);
         for (plan.marks) |m| {
-            const g = m - m % engine.grid_rows;
+            const g = m - m % x.pages.layout.page_tokens;
             if (g > plan.from and (out.items.len == 0 or out.items[out.items.len - 1] != g)) try out.append(x.gpa, g);
         }
         return out.toOwnedSlice(x.gpa);
+    }
+    test "Qwen share faults: save marks use the page grid, not the compute grid" {
+        const t = std.testing;
+        var p: pages_mod.Pages = undefined;
+        p.layout.page_tokens = 256;
+        var x: Prefix = undefined;
+        x.gpa = t.allocator;
+        x.pages = &p;
+        const plan: radix.Plan = .{ .from = 256, .marks = try t.allocator.dupe(u32, &.{ 512, 768, 1024, 4096 }) };
+        const marks = try x.onGrid(plan);
+        defer t.allocator.free(marks);
+        try t.expectEqualSlices(u32, &.{ 512, 768, 1024, 4096 }, marks);
     }
 
     fn of(ptr: *anyopaque) *Prefix {
