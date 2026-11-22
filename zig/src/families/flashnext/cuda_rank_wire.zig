@@ -347,6 +347,8 @@ test "a link wait polls briefly, then blocks, and still ends at its data, its de
     const t = try std.Thread.spawn(.{}, sendLater, .{ pair[1], 5, true });
     defer t.join();
     try std.testing.expectError(error.RankDisconnected, l.receive(&byte, deadline(1000)));
+}
+
 /// A port nothing listens on yet: bound once at 0 and released.
 fn testPort() !u16 {
     const fd = try socket(p.AF.INET);

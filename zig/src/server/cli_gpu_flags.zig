@@ -102,6 +102,8 @@ test "--tp takes 1 to 64 and marks itself given; --pp takes 1 until stages serve
     const o = try cli.request(a, "d", "t", args);
     try std.testing.expect(o.given.tp and o.given.rank);
     try std.testing.expect(!(try cli.request(a, "d", "t", .{})).given.tp);
+}
+
 test "security: --rank-secret takes only a key file its owner alone can read, and names it for every rank link" {
     if (sys.windows) return error.SkipZigTest; // refusal by mode bits
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
