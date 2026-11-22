@@ -58,7 +58,7 @@ pub const Checkpoint = struct {
             return error.UnexpectedTensor;
         }
         if (bf16) if (mixed(&main, names)) |key| {
-            std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
+            std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (main.peek(key) orelse unreachable).dtype });
             return error.UnexpectedTensor;
         };
         return .{ .gpa = gpa, .io = io, .config = cfg, .files = files, .main = main, .names = names };
@@ -192,7 +192,21 @@ pub const Checkpoint = struct {
         m.arena = arena;
         m.owned = opened;
         m.io = c.io;
+        // the head read through `opened`: the main table's own `mtp` names and a side file's leftovers
+        if (opened != null) {
+            c.main.skip("mtp.");
+            c.main.skip("language_model.mtp.");
+        }
+        if (side.len > 0 and opened.?.unused() != 0) return error.UnusedQwen35Tensors;
         return m;
+    }
+
+    /// Leftover main-table tensors once the vision tower, a tied head and a side-file MTP are scoped out.
+    pub fn unused(c: *const Checkpoint) usize {
+        if (c.config.tied) c.main.skip(c.names.head);
+        c.main.skip("model.visual."); // the image tower's own reader (openModelPrefix) takes these
+        c.main.skip("vision_tower.");
+        return c.main.unused();
     }
 };
 
@@ -223,7 +237,7 @@ pub fn mixed(t: *const Table, names: Names) ?[]const u8 {
         const key = k.*;
         const head = std.mem.startsWith(u8, key, names.head) and key.len > names.head.len and key[names.head.len] == '.';
         if (!std.mem.startsWith(u8, key, names.text) and !head) continue;
-        const w = t.get(key) catch return key;
+        const w = t.peek(key) orelse return key;
         if (w.dtype != .bf16) return key;
     }
     return null;

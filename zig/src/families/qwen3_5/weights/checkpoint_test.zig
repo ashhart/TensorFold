@@ -255,6 +255,121 @@ fn denseFiles(img: *Image, side: *Image, dir: std.Io.Dir) !void {
     try dir.writeFile(io, .{ .sub_path = "config.json", .data = dense_config });
 }
 
+/// A full pass over the opened checkpoint: embedding, norm, head, every layer and the MTP head.
+fn fullRead(ck: *checkpoint.Checkpoint, a: std.mem.Allocator) !void {
+    var embed = try ck.embed(a);
+    _ = &embed;
+    _ = try ck.finalNorm(a);
+    if (try ck.head(a)) |h| {
+        var head = h;
+        _ = &head;
+    }
+    for (0..ck.spec().n_layers) |i| {
+        var layer = try ck.layer(i);
+        defer layer.deinit();
+    }
+    if (try ck.mtp()) |m| {
+        var head = m;
+        defer head.deinit();
+    }
+}
+
+test "a full read leaves no unused tensor; a stray or shadowed one is counted" {
+    for ([_]?[]const u8{ null, "language_model.model.stray.weight", "language_model.mtp.extra.weight" }) |extra| {
+        var img = Image.init();
+        defer img.deinit();
+        var side = Image.init();
+        defer side.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try denseFiles(&img, &side, tmp.dir);
+        if (extra) |name| {
+            try img.put(name, "BF16", &.{4});
+            try img.write(tmp.dir, "model.safetensors");
+        }
+        const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        try fullRead(&ck, scratch.allocator());
+        const want: usize = if (extra != null and std.mem.indexOf(u8, extra.?, "stray") != null) 1 else 0;
+        try std.testing.expectEqual(want, ck.unused());
+    }
+}
+
+test "an MTP head kept in the model's own shards is read and leaves nothing" {
+    var img = Image.init();
+    defer img.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var side = Image.init();
+    defer side.deinit();
+    try denseFiles(&img, &side, tmp.dir);
+    // the same head among the model's tensors, in the Flash Next shape (no language_model. prefix)
+    try img.put("mtp.norm_e.weight", "BF16", &.{64});
+    try img.put("mtp.norm_h.weight", "BF16", &.{64});
+    try img.put("mtp.q_norm.weight", "BF16", &.{32});
+    try img.put("mtp.k_norm.weight", "BF16", &.{32});
+    try img.put("mtp.final_norm.weight", "BF16", &.{64});
+    try img.affine("mtp.fc_e", 64, 64, 4, 32);
+    try img.affine("mtp.fc_h", 64, 64, 4, 32);
+    for ([_][]const u8{ "q_proj", "k_proj", "v_proj", "o_proj" }) |p| try img.affine(try std.fmt.allocPrint(img.arena.allocator(), "mtp.{s}", .{p}), 64, 64, 4, 32);
+    try img.write(tmp.dir, "model.safetensors");
+    // the side file stays away: a second write without it leaves only the model's
+    try tmp.dir.deleteFile(io, "mtp.safetensors");
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+    defer ck.close();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    try fullRead(&ck, scratch.allocator());
+    try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "a stray tensor in the MTP side file refuses by name" {
+    var img = Image.init();
+    defer img.deinit();
+    var side = Image.init();
+    defer side.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try denseFiles(&img, &side, tmp.dir);
+    try side.put("mtp.stray.weight", "BF16", &.{4});
+    try side.write(tmp.dir, "mtp.safetensors");
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+    var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+    defer ck.close();
+    try std.testing.expectError(error.UnusedQwen35Tensors, ck.mtp());
+}
+
+test "a tied bf16 checkpoint's stored head is scoped out; a stray text tensor is counted" {
+    for ([_]?[]const u8{ null, "lm_head.weight", "model.language_model.stray.weight" }) |extra| {
+        var img = Image.init();
+        defer img.deinit();
+        img.norm = 0x3b80;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try hfFiles(&img, tmp.dir, true);
+        if (extra) |name| {
+            try img.put(name, "BF16", &.{4});
+            try img.write(tmp.dir, "model.safetensors");
+        }
+        const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        try fullRead(&ck, scratch.allocator());
+        const want: usize = if (extra != null and std.mem.indexOf(u8, extra.?, "stray") != null) 1 else 0;
+        try std.testing.expectEqual(want, ck.unused());
+    }
+}
+
 test "a dense model: layers, embedding, tied head and the MTP side file" {
     var img = Image.init();
     defer img.deinit();

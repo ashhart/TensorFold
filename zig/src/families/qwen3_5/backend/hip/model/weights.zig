@@ -236,13 +236,21 @@ pub const Model = struct {
         m.layers = try list.toOwnedSlice(gpa);
         // under tp only rank 0 drafts: its head is whole, logits rows included (its own or the model's whole head)
         const drafts = if (rank) |r| r.rank == 0 else true;
-        if (drafts and m.layers.len == m.spec.n_layers) if (try ck.mtp()) |head_layer| {
+        const full = m.layers.len == m.spec.n_layers;
+        if (drafts and full) if (try ck.mtp()) |head_layer| {
             var h = head_layer;
             defer h.deinit();
             if (rank != null and h.head == null) h.head = head orelse embed;
             m.mtp = try u.mtp(h);
             ck.main.release("mtp.");
         };
+        if (full) {
+            if (!drafts) {
+                ck.main.skip("mtp."); // a rank that does not draft never opens the head
+                ck.main.skip("language_model.mtp.");
+            }
+            if (ck.unused() != 0) return error.UnusedQwen35Tensors;
+        }
         return m;
     }
 
