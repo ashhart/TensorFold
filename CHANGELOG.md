@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM at TP=2 on CUDA: `TF_GLM_HOST_CONTROL=1` sends the per-step control header and token ids over a host socket on the same link instead of a GPU-stream broadcast, so the follower no longer drains its stream before each step; off by default (#N).
+
 - Tests: a lane-core conformance suite pins fresh = resumed cache state, tree windows = plain decode, run-to-run reproducibility, stop reasons and malformed-parent refusal on the host, with a ledger of seven decode invariants in docs/conformance-ledger.md (#N).
 
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
