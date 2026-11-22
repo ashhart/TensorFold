@@ -470,7 +470,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .benchmark_ranks = if (eng.r.tp != null) 2 else 1, .benchmark_group = if (eng.r.tp) |t| t.benchmark_group else null, .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .benchmark_ranks = if (eng.r.tp != null) 2 else 1, .benchmark_group = if (eng.r.tp) |t| t.benchmark_group else null, .name = "flashnext-zig", .draft_kv = .{ .bytes = eng.m.mtp.keys.b.length() + eng.m.mtp.vals.b.length(), .dtype = .bf16, .scope = .rank }, .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.shared_gdn_pipe = eng.r.gdn_pipe;
     h.fsr = eng.r.fsr;
     h.warm = .{ .queue = eng.r.queue };

@@ -339,6 +339,7 @@ pub const Draft = struct {
             .step_ms = d.step_ms,
             .prior = &draft_prior.prior,
             .batched = d.frame_streams > 1,
+            .draft_kv = .{ .bytes = d.c.ringBytes(), .dtype = if (d.e.model().act == .bf16) .bf16 else .f16 },
             .stream_bytes = d.streamBytes(),
             .window_costs = costs,
             .lane_costs = costs,

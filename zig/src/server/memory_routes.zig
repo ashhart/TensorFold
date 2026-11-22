@@ -33,6 +33,7 @@ fn snapshotWithCache(a: Allocator, info: api.Info, proc: ?process.Snapshot, devi
     try o.put(a, "schema_version", try json.intValue(a, 1));
     if (info.context_window > 0) try o.put(a, "context_window", try json.intValue(a, info.context_window));
     try o.put(a, "context_fitted", .{ .bool = info.context_fitted });
+    try @import("draft_kv.zig").put(a, o, info.draft_kv);
     if (proc) |p| {
         const m = try json.newObject(a);
         try m.put(a, "source", .{ .string = "darwin_rusage_info_v4" });
@@ -81,7 +82,7 @@ test "unknown scopes are omitted and known zero budget remains visible" {
     defer arena.deinit();
     const a = arena.allocator();
     const unknown = try snapshot(a, .{}, null, null);
-    for ([_][]const u8{ "process", "device", "prompt_cache_plan", "context_window" }) |field|
+    for ([_][]const u8{ "process", "device", "prompt_cache_plan", "context_window", "draft_kv" }) |field|
         try std.testing.expect(unknown.get(field) == null);
     const zero = try snapshot(a, .{ .prompt_cache_plan = .{ .source = .explicit, .budget_bytes = 0, .explicit_budget = true } }, null, null);
     const plan = zero.get("prompt_cache_plan").?;
@@ -172,4 +173,14 @@ test "memory pressure: /memory says whether new prompt states are kept and why n
     const absent = try snapshot(a, .{}, null, null);
     try std.testing.expect(absent.get("prompt_cache_keeping_new_states") == null);
     try std.testing.expect(absent.get("prompt_cache_hold_reason") == null);
+}
+
+test "memory report gives the draft KV capacity and type independently of device totals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try snapshot(arena.allocator(), .{ .draft_kv = .{ .bytes = 4096, .dtype = .f16, .scope = .rank } }, null, null);
+    const kv = value.get("draft_kv").?;
+    try std.testing.expectEqual(@as(i64, 4096), kv.get("bytes").?.int64().?);
+    try std.testing.expectEqualStrings("f16", kv.get("dtype").?.string);
+    try std.testing.expectEqualStrings("rank", kv.get("scope").?.string);
 }

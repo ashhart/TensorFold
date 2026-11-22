@@ -143,7 +143,11 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         }
     }
     // sampled draws on one Mac (the pair refuses them per request)
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .draft_sources = .{ .drafter = if (drafter) |d| .{ .kind = "DFlash2", .name = drafter_name orelse d } else null }, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
+    const draft_kv: ?api.DraftKv = if (eng.dflash) |d| blk: {
+        const c = d.model.backend.config;
+        break :blk .{ .bytes = @as(usize, c.layers) * (c.window + 16) * c.kvWidth() * 4, .dtype = .bf16 };
+    } else if (eng.hasMtp()) .{ .bytes = @as(usize, eng.s.cap) * eng.c.kv_lora * 2, .dtype = .bf16, .scope = .stream_limit } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .draft_kv = draft_kv, .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .draft_sources = .{ .drafter = if (drafter) |d| .{ .kind = "DFlash2", .name = drafter_name orelse d } else null }, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     // a reply that ends soon goes first beside a long prompt; the pair and a share someone set keep main's order
     if (order.srptByDefault(eng.ep != null, decode_share, h.host.share.p)) h.host.srpt = @TypeOf(h.host.srpt).withDefault(true);

@@ -71,6 +71,10 @@ pub fn get(srv: anytype, conn: anytype, a: Allocator) void {
     const snap = srv.load.read();
     const now_s = @as(f64, @floatFromInt(std.Io.Clock.real.now(srv.io).toNanoseconds())) / 1e9;
     const body = object(a, snap, now_s, srv.config.served_name) catch return;
+    if (!snap.parked) {
+        const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+        @import("draft_kv.zig").put(a, body.object, info.draft_kv) catch return;
+    }
     conn.quiet_log = true;
     @import("routes.zig").sendValue(conn, a, 200, body);
 }

@@ -282,6 +282,8 @@ pub fn stats(srv: *Server, conn: *Conn, a: Allocator) void {
         work = snap.work;
     }
     const body = stats_snapshot.statsSnapshot(a, status, memory, prompt, generation, drafted, accepted, rounds, cached, preemptions, requeued, work, srv.config.served_name, srv.config.identity.version, srv.config.identity.backend, srv.config.identity.device, median_latency_ms, median_ttft_ms) catch return;
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+    @import("draft_kv.zig").put(a, body.object, info.draft_kv) catch return;
     conn.quiet_log = true;
     routes.sendValue(conn, a, 200, body);
 }

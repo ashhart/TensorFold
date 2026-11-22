@@ -199,7 +199,9 @@ pub const Hip = struct {
     pub fn facts(h: *const Hip) lanes.Model {
         const e = h.e;
         const drafting = h.head != null and e.o.policy.mtp.drafts > 0;
-        return factsFor(.{ .window = e.window, .rows = e.plan.rows, .slots = e.plan.slots }, drafting, e.o.policy.mtp.drafts, &h.costs);
+        var facts_ = factsFor(.{ .window = e.window, .rows = e.plan.rows, .slots = e.plan.slots }, drafting, e.o.policy.mtp.drafts, &h.costs);
+        if (drafting) facts_.draft_kv = .{ .bytes = e.pool.keys[e.mtp_slot].len + e.pool.values[e.mtp_slot].len, .dtype = if (e.act == .bf16) .bf16 else .f16, .scope = .rank };
+        return facts_;
     }
 
     pub fn drawer(h: *Hip) *draw.Drawer {

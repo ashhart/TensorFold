@@ -104,6 +104,7 @@ pub const Drafted = struct {
         const d = x.drafter.facts();
         var m = target;
         m.mtp = true;
+        m.draft_kv = d.draft_kv;
         m.speculate = true;
         m.speculate_early = false;
         m.allocate_shared_drafts = true;

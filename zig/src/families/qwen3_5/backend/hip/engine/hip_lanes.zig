@@ -190,6 +190,7 @@ pub const Hip = struct {
             .exact_width = max_window,
             .gpu_tokens = false,
             .mtp = drafting,
+            .draft_kv = if (h.head) |head| .{ .bytes = head.k.len + head.v.len, .dtype = if (h.e.model().act == .bf16) .bf16 else .f16, .scope = .rank } else null,
             .speculate = drafting,
             .speculate_early = false,
             .drafts = @min(mtp.max_depth, h.e.o.policy.mtp.drafts),

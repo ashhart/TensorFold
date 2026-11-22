@@ -104,6 +104,7 @@ pub const Lanes = struct {
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
             .mtp = drafting,
+            .draft_kv = if (block) .{ .bytes = @import("dflash.zig").ring_bytes, .dtype = .bf16 } else if (drafting) @import("cuda_state.zig").mtpKv(self.x.e.capacity, self.x.e.w.config.latentRow(), self.x.e.settings.kv8) else null,
             .speculate = drafting,
             .speculate_early = false,
             .drafts = if (block) max_held else engine.max_drafts,

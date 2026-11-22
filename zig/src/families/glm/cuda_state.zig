@@ -91,6 +91,14 @@ fn onPages(x: *dsa_block.Caches, s: Shape, p: Paged, table: u64, j: usize) void 
     x.ps = p.page_bytes;
 }
 
+pub fn mtpKv(capacity: usize, width: usize, kv8: bool) @import("lanes").config.DraftKv {
+    return .{
+        .bytes = latent.cacheBytes(capacity, width, kv8) catch unreachable,
+        .dtype = if (kv8) .fp8 else .bf16,
+        .scope = .stream_limit,
+    };
+}
+
 /// A State's fields in order; on pages (a table of `table` entries) no latent or pooled rows, and the table last.
 fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize, kv8: bool, table: ?usize) ![]usize {
     const c = &w.config;

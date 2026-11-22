@@ -155,6 +155,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         d.options.copy_enter_match = h.config.enter_match;
         h.host.proposers = .{ .ctx = d, .make = fl.drafter.Drafter.make, .free = fl.drafter.Drafter.free };
         // the serving line's sources: the drafter, beside its requests' own copies, which ofLanes does not name
+        const c = &d.model.config;
+        h.host.info_.draft_kv = .{ .bytes = c.layers * fl.state.slots(d.options.capacity) * fl.state.kvBytes(c), .dtype = .bf16, .scope = .stream_limit };
         h.host.info_.draft_sources.drafter = .{ .kind = "Llama drafter", .name = o.drafter_name orelse o.drafter.? };
     }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };

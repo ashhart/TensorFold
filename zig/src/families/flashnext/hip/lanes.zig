@@ -164,7 +164,14 @@ pub const Fx = struct {
     }
 
     pub fn facts(f: *const Fx) lanes.Model {
-        return facts_mod.factsFor(cache.max_window, f.streams, f.e.weights.model.mtp != null and f.drafts > 0, f.drafts);
+        const e = f.e;
+        const drafting = e.weights.model.mtp != null and f.drafts > 0;
+        var facts_ = facts_mod.factsFor(cache.max_window, f.streams, drafting, f.drafts);
+        if (drafting) {
+            const layout = cache.Layout.of(e.weights.model.mtp.?.dims, &.{false}, e.o.capacity, e.act);
+            facts_.draft_kv = .{ .bytes = 2 * layout.kv_bytes, .dtype = if (e.act == .bf16) .bf16 else .f16, .scope = .stream_limit };
+        }
+        return facts_;
     }
 
     /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.

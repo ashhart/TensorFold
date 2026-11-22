@@ -80,6 +80,7 @@ pub const Lanes = struct {
             .exact_width = 8, // windows are row-invariant (tf-muse m1: 8 x 2 and 32 x 4 windows give one-row bits)
             .gpu_tokens = false,
             .mtp = drafting,
+            .draft_kv = if (l.e.dr) |d| .{ .bytes = 2 * d.kc.len * d.m.slots * d.ring * d.c.kv_heads * 128 * 2, .dtype = .f16, .scope = .rank } else null,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = if (drafting) &draft_prior else &.{},

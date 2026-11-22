@@ -135,6 +135,7 @@ pub const Metal = struct {
             .shape = dshape,
             .target = targetFn,
             .pass = passFn,
+            .draft_kv = if (m.dp) |d| .{ .bytes = d.rings.len * d.rings[0].length(), .dtype = .bf16, .scope = .rank } else null,
             .calibrate = calibrate,
             .spec_default = m.early != null,
             .memory = .{ .ctx = m, .read = memory },

@@ -221,7 +221,7 @@ pub const Head = struct {
         h.pos = s.head_pos;
     }
 
-    fn kvBytes(h: *const Head) usize {
+    pub fn kvBytes(h: *const Head) usize {
         return @as(usize, h.e.max_len) * h.e.c.kv_heads * h.e.c.head_dim * 2;
     }
 
