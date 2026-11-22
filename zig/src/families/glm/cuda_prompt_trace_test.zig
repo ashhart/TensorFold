@@ -9,8 +9,8 @@ const Fake = struct {
     var live: usize = 0;
     var fail: usize = std.math.maxInt(usize);
     var bad_elapsed = false;
-    var times: [2048]f32 = undefined;
-    var streams: [2048]usize = undefined;
+    var times: [4096]f32 = undefined;
+    var streams: [4096]usize = undefined;
     var clocks: [3]f32 = .{ 0, 0, 0 };
     var records: usize = 0;
     var syncs: usize = 0;
@@ -183,6 +183,39 @@ test "GLM prompt profile: incomplete overflow failed chunks and nonfinite elapse
     try t.expectError(error.InvalidPromptProfile, p.collect());
 }
 
+test "GLM prompt profile: four startup traces create no events for prompts after readiness" {
+    Fake.reset();
+    var d = Fake.driver();
+    var profs: [4]?*prof.Prof = @splat(null);
+    var made: usize = 0;
+    defer {
+        for (profs[0..made]) |p| p.?.deinit();
+    }
+    for (&profs) |*p| {
+        p.* = try prof.Prof.init(&d, t.io);
+        try p.*.?.initPrompt(0, 0);
+        try t.expectEqual(@as(usize, 64), p.*.?.prompt.?.events.len);
+        made += 1;
+    }
+    try t.expectEqual(@as(usize, 5104), prof.Prof.promptCapacity(45, 3));
+    try t.expectEqual(@as(usize, 10208), 2 * prof.Prof.promptCapacity(45, 3));
+    try t.expectEqual(@as(usize, 4 * (513 + 2 * 64)), Fake.count);
+    const created = Fake.count;
+    Fake.fail = created;
+    const widths = [_]usize{ 64, 256, 1024, 2048 };
+    const main: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(1) };
+    for (profs, widths, 0..) |opt, rows, i| {
+        const p = opt.?;
+        try p.beginPrompt(main, "fixture", .{ .rank = 0, .slot = @intCast(i), .start = 0, .rows = rows }, 0, 0);
+        const next = prof.span(p, main, .head);
+        next.end();
+        p.end();
+    }
+    try t.expectEqual(created, Fake.count);
+    for (profs) |p| p.?.deinit();
+    made = 0;
+    try t.expectEqual(@as(usize, 0), Fake.live);
+}
 test "GLM prompt profile: the real profiler opens prompt-only trace storage and reuses it on the next chunk" {
     Fake.reset();
     var d = Fake.driver();

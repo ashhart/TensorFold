@@ -303,7 +303,19 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
     return compact(k, stream, w, sc, x, x_stride, picks, slots, rows, count, dims, width, limit, ey);
 }
 
-/// Compact routed picks and output for prompt layers without the whole-pass kernel.
+/// TF_GLM_MOE_DIRECT: compact's one chunk on picks top-k wrote flat at sc.picks; the slot rows stay at `directOut`.
+pub fn runDirect(k: *const Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, x: u64, x_stride: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32) !void {
+    if (dims % 256 != 0 or width % 128 != 0 or rows == 0 or rows > chunk_rows) return error.NotExl3Mcg4;
+    const l = layer(w, count, dims, width, limit);
+    try k.runSlots(stream, l, x, x_stride, .bf16, sc.picks, rows, try common.scratch(sc.picks + picksBytes(rows), l, rows, top_k));
+}
+
+/// Where runDirect leaves the routed slot rows of its `rows` rows: fp32 [rows][top_k][dims], compact's copy source.
+pub fn directOut(w: Experts, sc: Scratch, rows: usize, count: usize, dims: usize, width: usize, limit: f32) !u64 {
+    return (try common.scratch(sc.picks + picksBytes(rows), layer(w, count, dims, width, limit), rows, top_k)).y;
+}
+
+/// Compact routed picks and output for decode or prompt layers without the whole-pass kernel.
 fn compact(k: *const Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, ey: u64) !void {
     const l = layer(w, count, dims, width, limit);
     const cap: usize = @min(rows, chunk_rows);

@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const server = @import("server.zig");
 const auth = @import("auth.zig");
 const admission = @import("request_admission.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const listener = @import("listener.zig");
 const posix = @import("sys").posix;
 const ByteText = @import("embedding_protocol_test.zig").ByteText;
@@ -14,7 +15,14 @@ const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     active: std.atomic.Value(u32) = .init(0),
     hold: std.atomic.Value(bool) = .init(false),
-    cancelled: std.atomic.Value(api.Id) = .init(0),
+    // how many engine.cancel calls landed, and their ids (multi-choice requests cancel every submission).
+    cancelled: std.atomic.Value(u32) = .init(0),
+    cancelled_ids: [64]std.atomic.Value(api.Id) = @splat(.init(0)),
+    // Submits past this count end .failed instead of .stop; maxInt means never.
+    fail_after: std.atomic.Value(u32) = .init(std.math.maxInt(u32)),
+    // A per-call stall so a client disconnect lands while the request runs.
+    delay_ms: std.atomic.Value(u32) = .init(0),
+    logprobs: bool = false,
 
     fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -22,12 +30,18 @@ const Engine = struct {
     fn cast(ptr: *anyopaque) *Engine {
         return @ptrCast(@alignCast(ptr));
     }
-    fn info(_: *anyopaque) api.Info {
-        return .{ .context_window = 4096 };
+    fn info(ptr: *anyopaque) api.Info {
+        return .{ .context_window = 4096, .logprobs = cast(ptr).logprobs };
     }
     fn submit(ptr: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e = cast(ptr);
-        _ = e.calls.fetchAdd(1, .monotonic);
+        if (e.calls.fetchAdd(1, .monotonic) >= e.fail_after.load(.monotonic)) {
+            sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+            sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .failed, .message = "synthetic choice failure" } });
+            return;
+        }
+        const delay = e.delay_ms.load(.monotonic);
+        if (delay != 0) std.Io.sleep(t.io, .fromMilliseconds(delay), .awake) catch {};
         if (!e.hold.load(.acquire)) return finish(id, sink);
         _ = e.active.fetchAdd(1, .release);
         const thread = std.Thread.spawn(.{}, wait, .{ e, id, sink }) catch {
@@ -39,11 +53,16 @@ const Engine = struct {
     fn wait(e: *Engine, id: api.Id, sink: api.Sink) void {
         defer _ = e.active.fetchSub(1, .release);
         while (e.hold.load(.acquire)) {
-            if (e.cancelled.load(.acquire) == id)
+            if (e.isCancelled(id))
                 return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .cancelled } });
             std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
         }
         finish(id, sink);
+    }
+    fn isCancelled(e: *Engine, id: api.Id) bool {
+        const n = @min(e.cancelled.load(.acquire), e.cancelled_ids.len);
+        for (e.cancelled_ids[0..n]) |*slot| if (slot.load(.acquire) == id) return true;
+        return false;
     }
     fn finish(id: api.Id, sink: api.Sink) void {
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
@@ -51,7 +70,9 @@ const Engine = struct {
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(ptr: *anyopaque, id: api.Id) void {
-        cast(ptr).cancelled.store(id, .release);
+        const e = cast(ptr);
+        const i = e.cancelled.fetchAdd(1, .acq_rel);
+        if (i < e.cancelled_ids.len) e.cancelled_ids[i].store(id, .release);
     }
     fn status(ptr: *anyopaque, out: *api.Status, _: []u32) void {
         out.* = .{ .running = cast(ptr).active.load(.acquire) };
@@ -315,6 +336,39 @@ test "admission HTTP: a spent rate refuses after the request ends and the metric
         try t.expect(std.mem.startsWith(u8, line, "tensorfold:admission_rejected_total{reason=\"")); // no key, label or digest
 }
 
+test "admission HTTP: n choices take n in-flight places, all or none, until the reply ends" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try h.start(&engine, null, .{ .max_inflight = 2 });
+    defer h.deinit();
+    const three = "{\"model\":\"m\",\"prompt\":\"x\",\"max_tokens\":1,\"temperature\":0,\"n\":3}";
+    const refused = try h.request(a, try requestText(a, "/v1/completions", "", three));
+    try expectStatus(refused, "HTTP/1.1 429 Too Many Requests\r\n");
+    try t.expect(contains(refused, "Retry-After: 1\r\n") and contains(refused, "\"code\": \"max_inflight_exceeded\"}}"));
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire)); // no choice started
+    engine.hold.store(true, .release);
+    const two = "{\"model\":\"m\",\"prompt\":\"x\",\"max_tokens\":1,\"temperature\":0,\"n\":2}";
+    const fd = try h.begin(try requestText(a, "/v1/completions", "", two));
+    defer _ = posix.system.close(fd);
+    var waited: usize = 0;
+    while (engine.active.load(.acquire) < 2) : (waited += 1) {
+        if (waited == 5000) return error.SubmitTimeout;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try t.expectEqual(@as(u32, 2), h.srv.admission.snapshot(t.io).inflight);
+    try expectStatus(try h.request(a, try requestText(a, "/v1/completions", "", completion)), "HTTP/1.1 429 ");
+    engine.hold.store(false, .release);
+    const reply = try receive(a, fd);
+    try expectStatus(reply, "HTTP/1.1 200 ");
+    try t.expect(contains(reply, "\"index\": 1"));
+    try t.expectEqual(@as(u32, 0), h.srv.admission.snapshot(t.io).inflight);
+    try t.expectEqual(@as(u64, 2), h.srv.admission.snapshot(t.io).rejected_global);
+    try expectStatus(try h.request(a, try requestText(a, "/v1/completions", "", completion)), "HTTP/1.1 200 ");
+}
+
 test "admission HTTP: with no admission flag nothing is reserved, refused or added to the metrics" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -346,4 +400,181 @@ test "admission HTTP: with no admission flag nothing is reserved, refused or add
     try t.expectEqual(@as(u64, 0), snap.admitted);
     engine.hold.store(false, .release);
     for (held[0..opened]) |fd| try expectStatus(try receive(a, fd), "HTTP/1.1 200 ");
+}
+
+fn choiceBody(a: Allocator, n: u32, extra: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{{\"model\":\"m\",\"prompt\":\"x\",\"max_tokens\":1,\"temperature\":0,\"n\":{d}{s}}}", .{ n, extra });
+}
+
+// inflight and every occupied principal slot back at zero; polled since a reply can precede the release by a beat.
+fn waitFreed(h: *Harness) !void {
+    var waited: usize = 0;
+    while (true) : (waited += 1) {
+        const snap = h.srv.admission.snapshot(t.io);
+        if (snap.inflight == 0 and snap.principals == 0) return;
+        if (waited == 5000) {
+            std.debug.print("places never returned: {any}\n", .{snap});
+            return error.PlacesLeaked;
+        }
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+}
+
+fn waitInflight(h: *Harness, want: u32) !void {
+    var waited: usize = 0;
+    while (h.srv.admission.snapshot(t.io).inflight != want) : (waited += 1) {
+        if (waited == 5000) return error.AdmitTimeout;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+}
+
+test "admission HTTP: every way an n-choices request ends returns its places" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    const limits: admission.Limits = .{ .max_inflight = 16, .max_inflight_per_key = 4 };
+    try h.start(&engine, null, limits);
+    defer h.deinit();
+    const completions = "/v1/completions";
+
+    // whole replies for n = 2 and n = 4, each followed by a full-n request that must still fit.
+    for ([_]u32{ 2, 4 }) |n| {
+        const body = try choiceBody(a, n, "");
+        for (0..2) |_| {
+            try expectStatus(try h.request(a, try requestText(a, completions, "", body)), "HTTP/1.1 200 ");
+            try waitFreed(&h);
+        }
+    }
+    // n = 16 cannot fit one principal under max_inflight_per_key = 4: widen refuses all or none.
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 16, ""))), "HTTP/1.1 429 ");
+    try waitFreed(&h);
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 4, ""))), "HTTP/1.1 200 ");
+    try waitFreed(&h);
+
+    // streamed replies for n = 2, 4, and the refused 16.
+    for ([_]u32{ 2, 4 }) |n| {
+        const reply = try h.request(a, try requestText(a, completions, "", try choiceBody(a, n, ",\"stream\":true")));
+        try expectStatus(reply, "HTTP/1.1 200 ");
+        try t.expect(std.mem.indexOf(u8, reply, "[DONE]") != null);
+        try waitFreed(&h);
+    }
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 16, ",\"stream\":true"))), "HTTP/1.1 429 ");
+    try waitFreed(&h);
+
+    // a refused body still releases the place the gate already took.
+    engine.logprobs = true;
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 2, ",\"logprobs\":5"))), "HTTP/1.1 400 ");
+    try waitFreed(&h);
+
+    // a failed choice still returns all four places.
+    engine.fail_after.store(1, .monotonic);
+    _ = try h.request(a, try requestText(a, completions, "", try choiceBody(a, 4, "")));
+    try waitFreed(&h);
+    engine.fail_after.store(std.math.maxInt(u32), .monotonic);
+
+    // a global refusal while every place is externally held: four principals at four places each.
+    var leases: [16]admission.Lease = undefined;
+    for (&leases, 0..) |*lease, i| {
+        var digest: [32]u8 = @splat(0);
+        digest[0] = @intCast(i / 4);
+        lease.* = h.srv.admission.acquire(t.io, limits, digest).accepted;
+    }
+    try expectStatus(try h.request(a, try requestText(a, completions, "", completion)), "HTTP/1.1 429 ");
+    for (&leases) |*lease| lease.release();
+    try waitFreed(&h);
+
+    // a key refusal while one principal holds all four of its places; then the holder walks away mid-request.
+    engine.hold.store(true, .release);
+    const occupied = try h.begin(try requestText(a, completions, "", try choiceBody(a, 4, "")));
+    try waitInflight(&h, 4);
+    try expectStatus(try h.request(a, try requestText(a, completions, "", completion)), "HTTP/1.1 429 ");
+    _ = posix.system.close(occupied);
+    try waitFreed(&h);
+    try t.expect(engine.cancelled.load(.acquire) != 0);
+
+    // a streaming request whose client walks away.
+    engine.cancelled.store(0, .release);
+    const streamed = try h.begin(try requestText(a, completions, "", try choiceBody(a, 4, ",\"stream\":true")));
+    try waitInflight(&h, 4);
+    _ = posix.system.close(streamed);
+    try waitFreed(&h);
+    try t.expect(engine.cancelled.load(.acquire) != 0);
+
+    // an admin cancel: the running request's id sits in the registry.
+    const cancelled = try h.begin(try requestText(a, completions, "", try choiceBody(a, 4, "")));
+    defer _ = posix.system.close(cancelled);
+    try waitInflight(&h, 4);
+    var rid: []const u8 = "";
+    var waited: usize = 0;
+    while (rid.len == 0) : (waited += 1) {
+        if (waited == 5000) return error.RegistryTimeout;
+        for (cancel_ids.registry.held(t.io, a) catch return error.RegistryTimeout) |id| {
+            if (std.mem.startsWith(u8, id, "cmpl-")) rid = id;
+        }
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    const cancel_req = try std.fmt.allocPrint(a, "POST /v1/requests/{s}/cancel HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{rid});
+    try expectStatus(try h.request(a, cancel_req), "HTTP/1.1 200 ");
+    try waitFreed(&h);
+    engine.hold.store(false, .release);
+
+    // draining is what shutdown sets: the routes refuse 503 without a place, and a full-n request fits after.
+    h.srv.draining.store(true, .release);
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 4, ""))), "HTTP/1.1 503 ");
+    try waitFreed(&h);
+    h.srv.draining.store(false, .release);
+    try expectStatus(try h.request(a, try requestText(a, completions, "", try choiceBody(a, 4, ""))), "HTTP/1.1 200 ");
+    try waitFreed(&h);
+}
+
+fn stressWorker(h: *Harness, key: []const u8, seed: u64, rounds: usize, done: *std.atomic.Value(u32)) void {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rng = std.Random.DefaultPrng.init(seed);
+    const random = rng.random();
+    const cred = std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{key}) catch return;
+    var i: usize = 0;
+    while (i < rounds) : (i += 1) {
+        // n = 2 or 4 fit a key's places; n = 5's widen must refuse without leaking.
+        const n: u32 = switch (random.uintLessThan(u32, 8)) {
+            0 => 5,
+            1...3 => 4,
+            else => 2,
+        };
+        const raw = requestText(a, "/v1/completions", cred, choiceBody(a, n, "") catch return) catch return;
+        if (random.uintLessThan(u32, 3) == 0) {
+            if (h.begin(raw)) |fd| _ = posix.system.close(fd) else |_| {}
+        } else _ = h.request(a, raw) catch {};
+        _ = done.fetchAdd(1, .monotonic);
+    }
+}
+
+test "admission HTTP: keyed n-choices under a seeded mix of replies and disconnects return every place" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(t.allocator, &.{ "one", "two", "three", "four" }, "", null, false, &problem);
+    defer keys.deinit();
+    var engine: Engine = .{};
+    engine.delay_ms.store(10, .monotonic);
+    var h: Harness = .{};
+    try h.start(&engine, &keys, .{ .max_inflight = 16, .max_inflight_per_key = 4 });
+    defer h.deinit();
+
+    // four keys at once, 50 requests each, fixed seeds: a third of the clients close mid-flight.
+    var done: std.atomic.Value(u32) = .init(0);
+    const names = [_][]const u8{ "one", "two", "three", "four" };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, names, 0..) |*th, name, i|
+        th.* = try std.Thread.spawn(.{}, stressWorker, .{ &h, name, 0x5eed * (i + 1), 50, &done });
+    for (threads) |th| th.join();
+    try t.expectEqual(@as(u32, 200), done.load(.monotonic));
+
+    try waitFreed(&h);
+    try expectStatus(try h.request(a, try requestText(a, "/v1/completions", "Authorization: Bearer one\r\n", try choiceBody(a, 4, ""))), "HTTP/1.1 200 ");
+    try waitFreed(&h);
 }

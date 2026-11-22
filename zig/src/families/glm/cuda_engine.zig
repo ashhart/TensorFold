@@ -160,6 +160,7 @@ pub const Engine = struct {
         var m = try fw.Modules.load(d, ctx, block32, c.rope != 0);
         errdefer m.deinit();
         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+        const joint_experts = pair and o.settings.pair_experts;
         var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
@@ -199,11 +200,11 @@ pub const Engine = struct {
             e.free(0);
             e.seqs.deinit(gpa);
         }
-        e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
+        e.bp = if (joint_experts) try fw.Buffers.initPairExperts(d, &e.w, prompt_solo.bufferRows(o.settings.solo), o.capacity) else try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
         errdefer e.bp.deinit();
         if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
         if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
-        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity, joint_experts);
         errdefer if (e.pair) |*p| p.deinit();
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
@@ -221,9 +222,20 @@ pub const Engine = struct {
         if (profiled) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
         };
-        if (profiled) for (&e.prompt_profs) |*p| {
+        if (profiled) for (&e.prompt_profs, 0..) |*p, bucket| {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
+            const started = std.Io.Clock.awake.now(io).toNanoseconds();
+            try p.*.?.initPrompt(layers.len, e.pieces.count);
+            const create_ms = prof_mod.Prof.elapsedMs(io, started);
+            const pairs = prof_mod.Prof.promptCapacity(layers.len, e.pieces.count);
+            const bucket_rows = ([_]usize{ 64, 256, 1024, 2048 })[bucket];
+            std.log.info("glm prof startup rank={d} bucket_rows={d} layers={d} pieces={d} pairs={d} events={d} create_ms={d:.4}", .{ e.share.rank, bucket_rows, layers.len, e.pieces.count, pairs, 2 * pairs, create_ms });
+        };
+        if (profiled) if (e.heat_gate.bands) |bands| {
+            std.log.info("glm prof startup rank={d} heat=on high_c={d:.1} low_c={d:.1} root={s}", .{ e.share.rank, bands.high_c, bands.low_c, e.heat_gate.root });
+        } else {
+            std.log.info("glm prof startup rank={d} heat=off", .{e.share.rank});
         };
         e.prompt_out = try prompt_lp.Output.init(d);
         errdefer e.prompt_out.free();
@@ -285,7 +297,7 @@ pub const Engine = struct {
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -401,6 +413,8 @@ pub const Engine = struct {
         errdefer if (f.prof) |p| {
             p.prompt.?.invalid = true;
         };
+        const gate_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
+        const heat_before = if (f.prof != null) e.heat_gate.waited_s else 0;
         var stamp = prof_mod.span(f.prof, e.stream, .gate);
         e.gate(cancel) catch |err| {
             if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
@@ -408,7 +422,9 @@ pub const Engine = struct {
         };
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
-        try f.run(as_i32[0..rows]);
+        if (f.prof != null) std.log.info("glm prof gate rank={d} slot={d} start={d} rows={d} wall_ms={d:.4} heat_wait_s={d:.3}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, gate_started), e.heat_gate.waited_s - heat_before });
+        const last = start + rows == len;
+        try f.runMode(as_i32[0..rows], last);
         e.index_splits += @intFromBool(split);
         stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
         if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
@@ -417,7 +433,7 @@ pub const Engine = struct {
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         stamp.end();
         stamp = prof_mod.span(f.prof, e.stream, .draw);
-        const last = start + rows == len;
+        const draw_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
@@ -426,6 +442,7 @@ pub const Engine = struct {
         }
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last and f.prof != null) std.log.info("glm prof draw rank={d} slot={d} start={d} rows={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, draw_started) });
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
         if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);

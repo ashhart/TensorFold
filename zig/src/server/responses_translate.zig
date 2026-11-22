@@ -8,7 +8,6 @@ const tool_specs = @import("tool_specs.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// Fields a chat completion reads as they are: OpenAI's and this server's own.
 const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget", "cache_salt" };
 const refused = [_][2][]const u8{
@@ -17,7 +16,6 @@ const refused = [_][2][]const u8{
     .{ "context_management", "context management is not supported" },
     .{ "execution_witness", "execution_witness is supported on /v1/chat/completions and /v1/completions only" },
 };
-
 pub const Request = struct {
     chat: Value,
     echo: *json.Object,
@@ -31,7 +29,6 @@ pub const Request = struct {
     /// Only ``include`` asked for logprobs: an engine without rows answers without them, as before it had any.
     rows_if_offered: bool = false,
 };
-
 fn kindOf(v: Value) ?Value {
     return if (v == .object) v.get("type") else null;
 }
@@ -168,7 +165,7 @@ pub fn writeCallName(a: Allocator, item: *json.Object, declared: ?Value, name: [
 pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
     const a = cx.a;
     var out: std.ArrayList(*json.Object) = .empty;
-    var thought: ?[]const u8 = null;
+    var thought: std.ArrayList(u8) = .empty;
     for (items) |item| {
         if (item != .object) return cx.refuse("each input item must be an object");
         var kind: ?Value = item.get("type");
@@ -183,10 +180,10 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             const m = try json.newObject(a);
             try m.put(a, "role", .{ .string = role });
             try m.put(a, "content", try content(cx, item.get("content")));
-            if (std.mem.eql(u8, role, "assistant")) if (thought) |t| {
-                try m.put(a, "reasoning_content", .{ .string = t });
-                thought = null;
-            };
+            if (std.mem.eql(u8, role, "assistant") and thought.items.len > 0) {
+                try m.put(a, "reasoning_content", .{ .string = try a.dupe(u8, thought.items) }); // its own bytes: thought is reused
+                thought.clearRetainingCapacity();
+            }
             try out.append(a, m);
         } else if (std.mem.eql(u8, k, "function_call")) {
             const call_id = item.strField("call_id");
@@ -208,9 +205,10 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
                 try out.append(a, m);
             }
             const last = out.items[out.items.len - 1];
-            if (thought) |t| {
-                try last.put(a, "reasoning_content", .{ .string = t });
-                thought = null;
+            if (thought.items.len > 0) {
+                const prior = if (last.get("reasoning_content")) |v| v.string else "";
+                try last.put(a, "reasoning_content", .{ .string = try std.mem.concat(a, u8, &.{ prior, thought.items }) });
+                thought.clearRetainingCapacity();
             }
             const existing = last.get("tool_calls");
             const before: []const Value = if (existing != null and existing.? == .array) existing.?.array else &.{};
@@ -224,14 +222,33 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             try out.append(a, m);
         } else if (std.mem.eql(u8, k, "reasoning")) {
             var texts: std.ArrayList(u8) = .empty;
-            var any = false;
-            if (item.get("content")) |c| if (c == .array) for (c.array) |p| if (p == .object) {
-                any = true;
-                if (p.strField("text")) |t| try texts.appendSlice(a, t);
-            };
-            if (json.truthyField(item, "encrypted_content") and !any) return cx.refuse("encrypted reasoning is not supported: send the reasoning item's content");
-            thought = if (texts.items.len > 0) texts.items else null;
+            if (item.get("content")) |c| {
+                if (c != .array) return cx.refuse("reasoning content must be an array of text parts");
+                for (c.array) |p| {
+                    if (p != .object) return cx.refuse("each reasoning content part must be an object");
+                    const part_kind = p.get("type");
+                    if (part_kind != null and (part_kind.? != .string or !(std.mem.eql(u8, part_kind.?.string, "text") or std.mem.eql(u8, part_kind.?.string, "reasoning_text"))))
+                        return cx.refuse("reasoning content parts must be text or reasoning_text");
+                    const text = p.get("text") orelse return cx.refuse("each reasoning content part needs text");
+                    if (text != .string) return cx.refuse("reasoning content text must be a string");
+                    try texts.appendSlice(a, text.string);
+                }
+            }
+            if (json.truthyField(item, "encrypted_content") and texts.items.len == 0) return cx.refuse("encrypted reasoning is not supported: send the reasoning item's content");
+            try thought.appendSlice(a, texts.items);
         } else return cx.fail(.request, "input items of type {s} are not supported: send messages, function_call, function_call_output and reasoning items", .{try pyrepr.repr(a, kind)});
+    }
+    if (thought.items.len > 0) {
+        const role = if (out.items.len > 0) (Value{ .object = out.items[out.items.len - 1] }).strField("role") orelse "" else "";
+        if (out.items.len == 0 or !std.mem.eql(u8, role, "assistant")) {
+            const m = try json.newObject(a);
+            try m.put(a, "role", .{ .string = "assistant" });
+            try m.put(a, "content", .{ .string = "" });
+            try out.append(a, m);
+        }
+        const last = out.items[out.items.len - 1];
+        const prior = if (last.get("reasoning_content")) |v| v.string else "";
+        try last.put(a, "reasoning_content", .{ .string = try std.mem.concat(a, u8, &.{ prior, thought.items }) });
     }
     const result = try a.alloc(Value, out.items.len);
     for (out.items, result) |m, *slot| slot.* = .{ .object = m };
@@ -479,6 +496,7 @@ pub fn include(cx: *Cx, given: Value) errors.Refused!void {
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
+    try fields.singleChoice(cx, body); // n choices come on /v1/chat/completions and /v1/completions only
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
     if (body.get("include")) |inc| try include(cx, inc);
     if (body.field("truncation")) |t| if (!(t == .string and std.mem.eql(u8, t.string, "disabled"))) return cx.refuse("truncation must be \"disabled\": a prompt too long for the context is refused");
@@ -548,6 +566,7 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try r.put(a, "summary", reasoning.get("summary") orelse .null);
     try echo.put(a, "reasoning", .{ .object = r });
     const store_field = body.get("store");
+    if (store_field != null and store_field.? != .null and store_field.? != .bool) return cx.refuse("store must be a boolean or null");
     const store = !(store_field != null and store_field.? == .bool and !store_field.?.bool);
     try echo.put(a, "store", .{ .bool = store });
     try echo.put(a, "temperature", body.get("temperature") orelse .null);
@@ -568,25 +587,11 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "truncation", .{ .string = "disabled" });
     try echo.put(a, "user", body.get("user") orelse .null);
     const background = json.truthyField(body, "background");
-    if (background) try backgroundAsked(cx, body, store);
+    if (background) try @import("responses_background_request.zig").validate(cx, body, store);
     try echo.put(a, "background", .{ .bool = background });
     return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .background = background, .format = if (rf != null) "text.format" else null, .rows_if_offered = listed and !asked };
 }
 
-/// What a background request needs: a boolean, a stored response to poll, and no stream on the POST.
-fn backgroundAsked(cx: *Cx, body: Value, store: bool) errors.Refused!void {
-    if (body.get("background").? != .bool) return cx.refuse("background must be a boolean");
-    if (!store) return cx.refuse("background: true needs store: true (the default): GET /v1/responses/{id} polls the stored response");
-    if (json.truthyField(body, "stream")) return cx.refuse("background: true with stream: true is not supported: send stream: false and poll GET /v1/responses/{id}");
-}
-
-test "input_file refuses remote file_url" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var cx: Cx = .{ .a = arena.allocator() };
-    const items = (try json.parse(cx.a,
-        \\[{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/doc.pdf"}]}]
-    )).ok.array;
-    try std.testing.expectError(error.Refused, messages(&cx, items));
-    try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
+test {
+    _ = @import("responses_translate_test.zig");
 }

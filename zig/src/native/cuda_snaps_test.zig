@@ -189,3 +189,37 @@ test "request starts: snap_cut_invariant: message starts are on by default for i
     const marks = try store.marks(a, prompt, 0, 10000, &.{}, &.{6000}, &.{});
     try std.testing.expectEqualSlices(u32, &.{6000}, marks);
 }
+
+test "Qwen prompt rows: changing reported chunk cannot change planned cache marks, interior lookup or warm usability" {
+    const F = @import("qwen35").native;
+    const snaps = @import("cuda_snaps.zig");
+    const pc = api.prompt_cache;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try a.alloc(u32, 32768);
+    for (prompt, 0..) |*value, i| value.* = @intCast(i);
+    const old = snaps.passRules(F, 8192);
+    const corrected = snaps.passRules(F, 4096);
+    try std.testing.expect(old.planned and corrected.planned and old.grid == 4096 and old.min_prompt == 0);
+    var same = corrected;
+    same.chunk = old.chunk;
+    try std.testing.expectEqualDeep(old, same);
+    var before = pc.Store.init(a, .{ .ptr = &Held.one, .vtable = &Held.vtable }, old, 1 << 30);
+    defer before.deinit();
+    var after = pc.Store.init(a, .{ .ptr = &Held.one, .vtable = &Held.vtable }, corrected, 1 << 30);
+    defer after.deinit();
+    const named = [_]u32{ 4096, 12288, 16384, 28672 };
+    for ([_][]const u32{ &.{}, &named }) |starts| {
+        for ([_]u32{ 0, 4095, 4096, 15000, 32768 }) |history| {
+            try std.testing.expectEqualSlices(u32, try before.marks(a, prompt, 0, history, &.{}, starts, &.{}), try after.marks(a, prompt, 0, history, &.{}, starts, &.{}));
+            const left = try before.lookupUser(a, prompt, @intCast(prompt.len), history, 0, 30000, &.{}, starts, &.{});
+            const right = try after.lookupUser(a, prompt, @intCast(prompt.len), history, 0, 30000, &.{}, starts, &.{});
+            try std.testing.expect(left.entry == null and right.entry == null);
+            try std.testing.expectEqualDeep(left.miss, right.miss);
+            try std.testing.expectEqualSlices(u32, left.marks, right.marks);
+        }
+        for ([_]u32{ 1, 4095, 4096, 6000, 8192, 12288, 32768 }) |at|
+            try std.testing.expectEqual(before.usable(at, starts), after.usable(at, starts));
+    }
+}

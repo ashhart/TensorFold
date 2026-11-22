@@ -15,6 +15,8 @@ pub const Format = struct {
     out_f32: bool = false,
     glu: Glu = .clipped,
     glm_m3_fast: bool = false,
+    /// Use raw-code MMAs only for groups with non-finite x; finite groups keep the +128 path bit-for-bit.
+    exact_nonfinite: bool = false,
     /// Scatter and GLU gathers read this batch's active-to-global expert map.
     mapped_experts: bool = false,
 };
@@ -23,7 +25,9 @@ pub const Format = struct {
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     const group_ok = f.group == 32 or f.group == 64 or f.group == 128;
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
-    const body = try frags.source(device, a, ks.core_affine_mm);
+    const with_nonfinite = try std.mem.replaceOwned(u8, a, ks.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", ks.core_affine_nonfinite);
+    defer a.free(with_nonfinite);
+    const body = try frags.source(device, a, with_nonfinite);
     defer a.free(body);
     const glu = switch (f.glu) {
         .plain => "#define TF_GLU_PLAIN 1\n",
@@ -32,9 +36,10 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     };
     const m3 = if (f.glm_m3_fast and !device.tensorUnits()) "#define TF_GLM_M3_FAST 1\n" else "";
     const map = if (f.mapped_experts) "#define TF_AM_MAPPED_EXPERTS 1\n" else "";
+    const nonfinite = if (f.exact_nonfinite) "#define TF_AM_EXACT_NONFINITE 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";
-    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}{s}";
-    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, m3, body });
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, m3, nonfinite, body });
 }
 
 /// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.

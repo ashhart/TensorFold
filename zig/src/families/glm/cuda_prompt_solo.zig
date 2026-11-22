@@ -54,7 +54,7 @@ pub fn mtpRows(e: *Engine, f: *fw.Forward, ids: []const i32) !void {
     var done: usize = 0;
     while (done + 1 < ids.len) {
         const nxt = ids[done + 1 .. @min(ids.len, done + 1 + fw.prefill_rows)];
-        try f.mtp(nxt, &.{e.bp.fnormed + done * e.c.hidden * 2});
+        try f.mtpMode(nxt, &.{e.bp.fnormed + done * e.c.hidden * 2}, false);
         try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
         done += nxt.len;
     }

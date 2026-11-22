@@ -212,6 +212,7 @@ pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal") ++ @embedFile("core/affine_mm_glu.metal");
+pub const core_affine_nonfinite = @embedFile("core/affine_mm_nonfinite.h");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
 /// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
@@ -270,6 +271,13 @@ pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/
 pub const llama_attention_nax = "#define TF_PROMPT_ATTENTION ll_prompt_attention\n" ++ prompt_attention_nax;
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const llama_gemm = gemm_nax ++ @embedFile("llama/gemm.metal");
+/// Ripple's glue at the release's rounding points: embedding, four norms a layer, q/k norm, RoPE, gate, clamp.
+pub const ricursive_glue = @embedFile("ricursive/glue.metal");
+/// The NVFP4 release's MLP row kernels and dequantization; its tensor-unit GEMM after gemm_nax.metal.
+pub const ricursive_fp4 = @embedFile("ricursive/fp4.metal");
+pub const ricursive_fp4_gemm = gemm_nax ++ @embedFile("ricursive/fp4_gemm.metal");
+/// Ripple's prompt attention on the tensor units (llama's kernel over a window, keys in a ring; nax.h inlined at load).
+pub const ricursive_attention_nax = @embedFile("ricursive/attention_nax.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 

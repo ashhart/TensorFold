@@ -73,7 +73,7 @@ jobs:
       - name: pytest from the root, as an outside evaluator runs it
         run: |
           python3 -m venv "$RUNNER_TEMP/pytest"
-          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest pyyaml
           "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
   zig:
     if: ${{ !(startsWith(github.head_ref, 'lead/train-') && github.event.pull_request.head.repo.full_name == github.repository) }}  # a landing train's tip: see the note above jobs

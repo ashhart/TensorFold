@@ -1,4 +1,4 @@
-//! `check <model dir> [--tp N --rank R] [--truth T --ids IDS] [--only invariants|accuracy|speed]`: a line a check.
+//! `check <model dir> [--tp N --rank R] [--truth T --ids IDS] [--only ...] [--drafter DIR]`: a line a check.
 
 const std = @import("std");
 const qwen35 = @import("qwen3_5");
@@ -20,6 +20,8 @@ const Options = struct {
     prompts: ?[]const u8 = null,
     truth: ?[]const u8 = null,
     ids: ?[]const u8 = null,
+    /// A DFlash2 drafter's directory: the lane checks then draft with it in front of the target.
+    drafter: ?[]const u8 = null,
     speed: bool = false,
     explain: bool = false,
     only: ?Phase = null,
@@ -53,9 +55,10 @@ fn parse(args: []const [:0]const u8) !Options {
         }
         i += 1;
         if (i >= args.len) return error.MissingArgument;
-        if (std.mem.eql(u8, a, "--prompts")) o.prompts = args[i] else if (std.mem.eql(u8, a, "--truth")) o.truth = args[i] else if (std.mem.eql(u8, a, "--ids")) o.ids = args[i] else if (std.mem.eql(u8, a, "--only")) o.only = std.meta.stringToEnum(Phase, args[i]) orelse return error.UnknownPhase else if (std.mem.eql(u8, a, "--tokens")) o.tokens = try std.fmt.parseInt(u32, args[i], 10) else if (std.mem.eql(u8, a, "--kl")) o.bar.kl_mean = try std.fmt.parseFloat(f64, args[i]) else if (std.mem.eql(u8, a, "--top1")) o.bar.top1 = try std.fmt.parseFloat(f64, args[i]) else return error.UnknownOption;
+        if (std.mem.eql(u8, a, "--prompts")) o.prompts = args[i] else if (std.mem.eql(u8, a, "--truth")) o.truth = args[i] else if (std.mem.eql(u8, a, "--ids")) o.ids = args[i] else if (std.mem.eql(u8, a, "--drafter")) o.drafter = args[i] else if (std.mem.eql(u8, a, "--only")) o.only = std.meta.stringToEnum(Phase, args[i]) orelse return error.UnknownPhase else if (std.mem.eql(u8, a, "--tokens")) o.tokens = try std.fmt.parseInt(u32, args[i], 10) else if (std.mem.eql(u8, a, "--kl")) o.bar.kl_mean = try std.fmt.parseFloat(f64, args[i]) else if (std.mem.eql(u8, a, "--top1")) o.bar.top1 = try std.fmt.parseFloat(f64, args[i]) else return error.UnknownOption;
     }
     if (o.runs(.accuracy) and o.truth == null and !o.explain) return error.NoTruth;
+    if (o.drafter != null and o.group.world > 1) return error.DrafterOnOneRank;
     return o;
 }
 
@@ -108,13 +111,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !u8 {
         return 0;
     }
     var session: lanes_session.Session = undefined;
-    try session.init(gpa, io, e, joined.link());
+    try session.initDrafted(gpa, io, e, joined.link(), o.drafter, check_radix.most_streams);
     defer session.deinit();
 
     var report: check_report.Report = .{};
     var c: check_ctx.Ctx = .{ .gpa = gpa, .io = io, .arena = arena, .e = e, .session = &session, .report = &report, .group = o.group, .ids = ids, .short = short, .long = long, .tokens = o.tokens, .pages_at_start = e.pool.ids.used() };
     const t0 = std.Io.Clock.awake.now(io);
-    std.debug.print("check {s}, tp {d}\n", .{ o.model, o.group.world });
+    std.debug.print("check {s}, tp {d}{s}{s}\n", .{ o.model, o.group.world, if (o.drafter != null) ", drafter " else "", o.drafter orelse "" });
     if (o.runs(.invariants)) check_invariants.run(&c);
     if (o.runs(.accuracy)) check_accuracy.run(&c, o.truth.?, o.bar);
     if (o.runs(.speed)) check_speed.run(&c);
