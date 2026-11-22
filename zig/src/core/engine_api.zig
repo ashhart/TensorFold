@@ -35,7 +35,6 @@ pub const grammar = lanes.grammar;
 pub const Request = @import("engine_request.zig").Request;
 pub const Stop = @import("engine_request.zig").Stop;
 
-
 /// Image and video input an engine serves, and --vision's limits (engine_vision.zig).
 const vision_types = @import("engine_vision.zig");
 pub const PreparedImage = vision_types.PreparedImage;
