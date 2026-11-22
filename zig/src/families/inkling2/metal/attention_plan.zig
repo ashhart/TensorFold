@@ -53,7 +53,7 @@ pub const Layer = struct {
 pub const Prep = struct { qk_clip: f32 = 22.627416997969522, rel_clip: f32 = 8, floor: f32 = 8192, alpha: f32 = 0.1, eps: f32 = 1e-6 };
 pub const Rows = struct { rows: u32, heads: u32 = 24, kv_heads: u32 = 8, last_pos: u32, streams: u32 = 1 };
 
-/// The fewest keys a launch slot that fits `capacity` in 64 slots; any whole number of 1,024-key folds gives the same bits.
+/// The fewest keys a slot that fit `capacity` in 64 slots; any whole number of 1,024-key folds gives the same bits.
 pub fn globalChunk(capacity: u32) u32 {
     var chunk: u32 = global_sub;
     while (@as(u64, chunk) * 64 < capacity and chunk < global_chunk) chunk *= 2;
