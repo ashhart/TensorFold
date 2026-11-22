@@ -1,5 +1,4 @@
-// H3's products at 64 rows x 128 columns a threadgroup, each warp 32 x 64: every loaded fragment feeds two MMAs
-// instead of one. Each output's K chain is MLX's, 32-deep steps in order.
+// H3's products, 64 x 128 a threadgroup and 32 x 64 a warp; each output's K chain is MLX's, 32-deep steps in order.
 namespace tfp {
 
 template <bool BOUND>

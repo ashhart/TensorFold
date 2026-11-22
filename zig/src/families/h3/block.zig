@@ -1,4 +1,4 @@
-//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, tested against MLX's gemm_nax), FastH3's routed attention in bf16.
+//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), routed attention in bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
@@ -8,8 +8,7 @@ const kernels = @import("h3_kernels");
 const Model = h3.Model;
 const Ref = h3.Ref;
 
-/// Threadgroups walk 2^swizzle row tiles under one weight tile before the next, so 64 row tiles (4,096 rows) read a
-/// weight tile while it is still cached; MLX's 2 read every weight 16 times a product at 2048 x 2048. Sums unchanged.
+/// Threadgroups walk 2^swizzle row tiles under each weight tile: 64 keep it cached, where MLX's swizzle 2 walks 4.
 const swizzle = 6;
 
 /// d (rows, n) = x (rows, k) w^T for w (n, k) in bf16.
