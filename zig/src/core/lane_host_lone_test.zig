@@ -242,7 +242,7 @@ test "halt fails a request in the lone driver's prompt pass with the reason" {
     held.entered.waitUncancelable(std.testing.io);
     const halter = try std.Thread.spawn(.{}, LaneHost.halt, .{ &host, "server restarting: retry shortly" });
     host.mutex.lockUncancelable(std.testing.io);
-    while (host.halt_reason == null) host.wake.waitUncancelable(std.testing.io, &host.mutex);
+    while (host.halt_reason == null) host.wake.waitTimeout(std.testing.io, &host.mutex, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {}; // timed: the lane thread also waits on wake
     host.mutex.unlock(std.testing.io);
     held.go.set(std.testing.io);
     halter.join();
