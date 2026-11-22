@@ -8,30 +8,17 @@ pub fn appendId(a: Allocator, out: *std.ArrayList(u32), id: u32, vocab: usize) !
     if (std.mem.indexOfScalar(u32, out.items, id) == null) try out.append(a, id);
 }
 
-/// Where a family takes config.json's ids from; generation_config.json's are added after them in every order.
-pub const Order = enum {
-    /// The root's ids; text_config's only when the root gave none.
-    text_if_root_empty,
-    /// The root's, text_config's and generation_config.json's, all of them.
-    every_source,
-    /// The root's key whenever it exists (a root `null` or `[]` hides text_config's), else text_config's.
-    root_key_else_text,
-};
-
-/// One family's EOS rule: the order, whether nested arrays hold more ids, the most ids, and whether none is refused.
+/// One family's EOS rule: whether nested arrays hold more ids, the most ids, and whether none is refused.
 pub const Policy = struct {
-    order: Order,
     nested: bool,
     max: ?usize,
     required: bool,
 };
 
 /// `resolve`'s rule: the served stop set (server/hf_text.zig), dots_mocr, dory and kolibri1.
-pub const served: Policy = .{ .order = .text_if_root_empty, .nested = false, .max = null, .required = false };
-/// Qwen3.5's HIP loader (families/qwen3_5/config_checks.zig): every source, at most 8 ids.
-pub const qwen35_hip: Policy = .{ .order = .every_source, .nested = true, .max = 8, .required = true };
-/// qwen27 on Metal (families/qwen27/config.zig): root key else text_config, then generation, at most 8 ids.
-pub const qwen27_metal: Policy = .{ .order = .root_key_else_text, .nested = true, .max = 8, .required = true };
+pub const served: Policy = .{ .nested = false, .max = null, .required = false };
+/// Qwen 3.5's readers (qwen3_5/config_checks.zig, qwen27/config.zig): nested ids, at most 8, at least one.
+pub const qwen35: Policy = .{ .nested = true, .max = 8, .required = true };
 
 /// BadEosValue: not a null, an id or an id array (a family names it); BadEos: an id at or past the vocabulary.
 pub const BufferError = error{ BadEos, BadEosValue, TooManyEos, MissingEos };
@@ -81,21 +68,10 @@ const Ids = struct {
         if (doc.object.get("eos_token_id")) |v| try s.add(v, false);
     }
 
+    /// One rule for every family: the root's ids, text_config's only when the root gave none, then generation's.
     fn gather(s: *Ids, root: Value, text: Value, generation: Value) Error!void {
-        switch (s.policy.order) {
-            .text_if_root_empty => {
-                try s.field(root);
-                if (s.list.items.len == 0) try s.field(text);
-            },
-            .every_source => {
-                try s.field(root);
-                try s.field(text);
-            },
-            .root_key_else_text => if (root == .object and root.object.contains("eos_token_id"))
-                try s.field(root)
-            else
-                try s.field(text),
-        }
+        try s.field(root);
+        if (s.list.items.len == 0) try s.field(text);
         try s.field(generation);
         if (s.policy.required and s.list.items.len == 0) return error.MissingEos;
     }
