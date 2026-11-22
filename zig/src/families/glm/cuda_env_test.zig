@@ -17,6 +17,8 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_SHARED", .default = true },
     .{ .name = "TF_GLM_DSEL", .default = true },
     .{ .name = "TF_GLM_DSCORES", .default = true },
+    .{ .name = "TF_GLM_EXPERT_NATIVE_FP" },
+    .{ .name = "TF_GLM_EXPERT_STAGES3" },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
@@ -115,6 +117,8 @@ test "GLM strict env: the actual readers and the open's check keep defaults, 0 a
         .{ .name = "TF_GLM_HOST_CACHE", .read = @import("cuda_snapshot_pages.zig").onHost },
         .{ .name = "TF_GLM_VISION_HOST", .read = @import("cuda_vision_weights.zig").onHost },
         .{ .name = "TF_GLM_PROF", .read = @import("cuda_prof.zig").Prof.wanted },
+        .{ .name = "TF_GLM_EXPERT_NATIVE_FP", .read = @import("cuda_experts.zig").nativeFp },
+        .{ .name = "TF_GLM_EXPERT_STAGES3", .read = @import("cuda_experts.zig").stages3 },
     };
     const startup = @import("cuda_env.zig").startup;
     for (cases) |c| {
