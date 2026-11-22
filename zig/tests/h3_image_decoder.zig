@@ -18,8 +18,8 @@ const usage =
     \\
 ;
 
-/// Tiles a pass decodes at most.
-const batch = 16;
+/// Tiles a pass decodes at most: the decoder's scratch is sized for this many, and every tile's pixels are independent.
+const batch = dec.most_batch;
 
 fn read(init: std.process.Init, a: std.mem.Allocator, path: []const u8, most: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(most)) catch |err| {
