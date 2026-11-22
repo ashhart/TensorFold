@@ -16,6 +16,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
     const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
     const tools = b.step("test-grammar-tools", "tool_grammar's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
+    // Declared before the early returns, so every target lists it (tools/zig/build_options_test.py).
+    const real_tokenizer = b.option([]const u8, "grammar-real-tokenizer", "Real Qwen3.8 tokenizer.json for the CPU budget regression");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
         budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);
@@ -39,7 +41,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     const mask_checks = b.addRunArtifact(b.addTest(.{ .root_module = check }));
     budget.dependOn(&mask_checks.step);
     // Optional real-checkpoint CPU regression; ordinary host checks need neither tokenizer files nor xgrammar.
-    if (b.option([]const u8, "grammar-real-tokenizer", "Real Qwen3.8 tokenizer.json for the CPU budget regression")) |tokenizer| {
+    if (real_tokenizer) |tokenizer| {
         const real_options = b.addOptions();
         real_options.addOptionPath("library", host.getEmittedBin());
         real_options.addOption([]const u8, "tokenizer", tokenizer);
