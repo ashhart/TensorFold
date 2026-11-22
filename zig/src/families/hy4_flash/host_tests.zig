@@ -10,6 +10,7 @@ test {
     _ = @import("index_groups.zig");
     _ = @import("rope.zig");
     _ = @import("rank_weights.zig");
+    _ = @import("cuda_model.zig");
     _ = @import("index_recall.zig");
     _ = @import("forward.zig");
     _ = @import("exl3_weights.zig");
@@ -55,4 +56,26 @@ test "Engram gathers the selected affine rows in token and head order" {
         try std.testing.expectEqual(@as(u16, if (on) 0x4150 else 0), word); // BF16 13.0 or 0.0
     }
     try std.testing.expectError(error.BadEngramOutput, table.gather(a, &.{window0}, out[1..]));
+}
+
+test "a stray hy4 tensor refuses at the checkpoint's last read site" {
+    const fixture = @import("core").checkpoint_fixture;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data: [4]u16 = @splat(0x3f80);
+    const entries = [_]fixture.Entry{
+        .{ .name = "model.norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "model.stray.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+    };
+    try fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var ck = try core.Checkpoint.openModel(a, io, dir);
+    defer ck.close();
+    _ = try ck.expect("model.norm.weight", .bf16, &.{4});
+    try std.testing.expectError(error.UnusedHy4Tensors, @import("loader.zig").refuseLeftovers(&ck, error.UnusedHy4Tensors));
+    _ = try ck.expect("model.stray.weight", .bf16, &.{4});
+    try @import("loader.zig").refuseLeftovers(&ck, error.UnusedHy4Tensors);
 }
