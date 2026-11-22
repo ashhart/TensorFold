@@ -35,6 +35,7 @@ pub const Layer = struct {
         return .{ .window = window, .ring = ringFor(window, rows), .chunk = sliding_chunk, .tau = false };
     }
 
+    /// The engine keeps a global layer's positions inside its ring; the contract's 4,096-slot ring wraps on purpose.
     pub fn global(capacity: u32) Layer {
         return .{ .window = 0, .ring = @intCast(std.mem.alignForward(usize, capacity, tile_keys)), .chunk = global_chunk, .tau = true };
     }
@@ -131,7 +132,7 @@ pub const Rows = struct {
     tiles: u64,
     n_tiles: u32,
     last_pos: u32, // the call's latest row position (a global layer's chunks run to it)
-    streams: u32 = 1, // segments in `segs`: one stream's prompt rows take the prompt kernel
+    streams: u32, // segments in `segs`, stated by every caller: only one stream's rows take the prompt kernel
 };
 
 fn int(x: anytype) c_int {
@@ -164,10 +165,12 @@ pub fn relTable(k: *const Kernels, s: hip.Stream, r: Rows, rel: u64, proj: u64, 
     try go(k.rel_table, s, .{ .x = r.rows * r.heads }, 256, &a);
 }
 
-/// Attention into chunk partials, then the ordered merge; `sink` and `gate` RAW (no sigmoid in glue: #4387's bug).
+/// Chunk partials (`slots` of 520 bytes held), then the ordered merge; sink and gate RAW (no glue sigmoid: #4387).
 pub fn attend(k: *const Kernels, s: hip.Stream, r: Rows, l: Layer, stride: u32, slots: usize, q: u64, kv: Cache, tab: u64, part_o: u64, part_ml: u64, sink: u64, gate: u64, out: u64) !void {
     try ringFits(l, r.rows);
+    if (r.streams == 0) return error.Inkling2Streams;
     if (slotsFor(l, r.last_pos + 1) > stride) return error.Inkling2Partials;
+    if (slots < @as(usize, r.rows) * r.heads * stride) return error.Inkling2PartialRoom;
     const scale: f32 = 1.0 / @sqrt(@as(f32, head_dim));
     const threads = tile_pairs * 32;
     var a: hip.launch.Args = .{};
