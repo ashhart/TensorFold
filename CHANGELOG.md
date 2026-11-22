@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 and Qwen3.8 on CUDA: `TF_Q35_ATTN_SKIP_EMPTY=1` skips attention launches whose every block would return before writing, while the context is shorter than the attention group length, with captured graphs keyed by that class; outputs unchanged, off by default (#N).
+
 - GLM on CUDA: with `TF_GLM_PROF=1`, the four profiling traces are created at startup before the server reports ready, so the first prompt no longer pays their setup; profiling-off behaviour is unchanged (#4511).
 
 - Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#4504).
