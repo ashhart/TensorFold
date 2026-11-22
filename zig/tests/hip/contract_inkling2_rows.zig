@@ -57,6 +57,18 @@ fn served(path: Path, apart: bool, profile: Profile) []const c.Shape {
     };
 }
 
+// exact P: rows below position 64, one tile each; the outputs equal float64 bit for bit
+const exact_shapes = [_]c.Shape{ sh(16, 64), sh(1, 64), sh(64, 64), sh(3, 40) };
+
+/// The exact-P registrations: bf16 P's own bits decide every output, so an unrounded P goes red at shapes.
+fn exactSpec(path: Path) c.Spec {
+    const why = "64 keys of gate 4's values: neither fp16 nor bf16 provably misses here; the 1M-key registrations prove fp32";
+    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = &exact_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = why } };
+    x.tiles = .{ .{ .size = 4 }, .{}, .{} };
+    x.name = if (path == .sliding) "inkling2 hip attn sliding rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)" else "inkling2 hip attn global fold rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)";
+    return x;
+}
+
 /// rows x 24 heads x 128 outputs; k: the first stream's context (its last row's position + 1).
 pub fn spec(path: Path, apart: bool, profile: Profile) c.Spec {
     const no: c.Tile = .{};
@@ -100,6 +112,7 @@ pub const Attn = struct {
     path: Path,
     plant: Plant = .none,
     apart: bool = false,
+    exact_p: bool = false, // q 0, no sink, gate 1, integer v: each output bf16(fp32(sum bf16(P) v / sum bf16(P)))
     profile: Profile = .full,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
@@ -125,7 +138,7 @@ pub const Attn = struct {
     }
 
     pub fn kernel(self: *Attn) g.Kernel {
-        var s = spec(self.path, self.apart, self.profile);
+        var s = if (self.exact_p) exactSpec(self.path) else spec(self.path, self.apart, self.profile);
         s.name = switch (self.plant) {
             .none => s.name,
             .late_bias => "control: inkling2 hip attn sliding rows read each distance's bias one distance late",
@@ -162,7 +175,7 @@ pub const Attn = struct {
         const layer: K.Layer = if (self.path == .sliding) K.Layer.sliding(1024, 2048) else .{ .window = 0, .ring = fill_.global_ring, .chunk = K.global_chunk, .tau = true };
         const streams: usize = if (self.apart) 3 else if (self.path != .prompt and rows >= 2 and rows <= 128) 2 else 1;
         self.lay = fill_.Layout.of(layer, rows, shape.k, streams);
-        try self.data.make(a, self.lay, fill, seed);
+        if (self.exact_p and fill == .random) try self.data.makeExactP(a, self.lay, seed) else try self.data.make(a, self.lay, fill, seed);
         const d = &self.dev;
         const td = &self.data;
         d.q = try self.rig.input(std.mem.sliceAsBytes(td.q));
@@ -297,7 +310,10 @@ pub const Attn = struct {
         a.free(self.tol);
         self.tol = try a.alloc(f64, want.len);
         const cl = self.call();
-        try fill_.Pool.run(a, .{ .call = &cl, .want = want, .tol = self.tol }, self.shape.rows * heads);
+        if (self.exact_p and self.fill == .random) {
+            for (0..self.shape.rows * heads) |rh| fill_.exactP(&cl, rh / heads, rh % heads, want[rh * D ..][0..D]);
+            @memset(self.tol, 0); // bit for bit
+        } else try fill_.Pool.run(a, .{ .call = &cl, .want = want, .tol = self.tol }, self.shape.rows * heads);
         for (mag, want) |*m, w| m.* = @abs(w);
     }
 
