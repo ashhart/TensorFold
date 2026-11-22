@@ -20,6 +20,19 @@ const Count = struct {
     }
 };
 
+var syncs: usize = 0; // the fake driver's stream waits
+
+/// A driver whose stream waits and host frees only count: the backend's release and end run without a device.
+const Fake = struct {
+    fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        syncs += 1;
+        return cuda.abi.success;
+    }
+    fn freeHost(_: ?*anyopaque) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
+};
+
 const Flag = struct {
     on: bool = false,
     fn check(ptr: *anyopaque) bool {
@@ -30,18 +43,25 @@ const Flag = struct {
 /// The vision lanes test's engine: its own sequence (no device memory) too short for any prompt (cap 1).
 const Rig = struct {
     count: Count = .{},
+    d: cuda.Driver = undefined,
     v: vision.Vision = undefined,
     e: Engine = undefined,
     b: Cuda = undefined,
 
     fn init(r: *Rig) void {
+        r.d = .{ .lib = undefined, .api = undefined };
+        r.d.api.cuStreamSynchronize = Fake.sync;
+        r.d.api.cuMemFreeHost = Fake.freeHost;
+        const none: []align(16) u8 = &.{};
         r.v = .{ .gpa = a, .io = undefined, .cfg = undefined, .tower = undefined, .rows = .{ .d = undefined, .buf = undefined, .hidden = 1, .limit = 64 }, .marks = undefined, .limits = undefined, .mark_ids = undefined, .encoder = .{ .ctx = &r.count, .encode = Count.encode } };
         r.e = .{ .gpa = a, .io = undefined, .ctx = undefined, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 4096, .pinned = undefined, .history = undefined };
         r.e.serial = .{ .d = undefined, .handle = null };
         r.e.own = .{ .arena = null, .ptr = @splat(0), .cap = 1 };
         r.e.bound = &r.e.own;
         r.e.vision = &r.v;
-        r.b = .{ .gpa = a, .e = &r.e, .head = null, .pinned = undefined, .rows_out = undefined, .rows_dev = 0, .prompt_out = undefined, .prompt_dev = 0 };
+        r.e.stream = .{ .d = &r.d, .handle = null };
+        const host: cuda.HostBuffer = .{ .d = &r.d, .bytes = none };
+        r.b = .{ .gpa = a, .e = &r.e, .head = null, .pinned = host, .rows_out = host, .rows_dev = 0, .prompt_out = host, .prompt_dev = 0 };
     }
 
     fn deinit(r: *Rig) void {
@@ -180,4 +200,15 @@ test "nemotron cuda steps: a stream cancelled while it waited opens nothing and 
     try std.testing.expectError(error.Cancelled, r.b.backend().prefill(&s));
     try std.testing.expectEqual(@as(usize, 0), r.count.passes);
     try std.testing.expectEqual(@as(usize, 0), r.b.lanes.count());
+}
+
+test "nemotron cuda steps: the backend's end frees a pass still between its chunks (REV59 5)" {
+    var r: Rig = .{};
+    r.init();
+    r.e.vision = null;
+    const prompt: [12]u32 = @splat(3);
+    var s = try lanes.Stream.init(a, .{ .id = "left", .prompt = &prompt, .max_new = 4 });
+    defer s.deinit(a);
+    try between(&r, &s, &prompt, 8);
+    r.b.deinit(); // the testing allocator reports a pass left behind
 }
