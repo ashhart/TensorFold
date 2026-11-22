@@ -300,7 +300,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     }
     const pool_room = try memory.available(free, reserve, future);
     const world: usize = if (all[0].tp) |t| t.world else 1;
-    const fit = pool_.linesFor(free, try std.math.add(u64, serverReserve(total), b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
+    const fit = pool_.linesFor(free, try std.math.add(u64, try serverReserve(total), b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
     const uniform = try uniformLines();
     const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try pool_.linesFor(free, reserve, try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines);
     if (b.lines) |explicit| if (lines != explicit) std.log.info("flashnext exl3: this rank holds {d} lines a layer, {d} more than the {d} asked for: it has the room (residency never changes output bytes)", .{ lines, lines - explicit, explicit });
