@@ -294,7 +294,7 @@ test "bound: where exp(L) overflows the bound is infinite, never NaN" {
 }
 
 test "bound: a table rounded up at the weak key and down at the dominant one" {
-    // two keys, the second dominant: the table sums 64.2539 and 64.2461 round up at one and down at the other
+    // the first key dominates; the weak second key's table sum 64.2539 rounds up, the dominant one's 64.2461 down
     const a = t.allocator;
     const s: attn.Shape = .{ .rows = 1, .pos0 = 1, .heads = 1, .kv_heads = 1, .hd = 1, .drel = 2, .rext = 2, .window = 0 };
     var best0: f64 = 0;
