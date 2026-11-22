@@ -39,6 +39,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |
 | `TF_MTP_BATCH` | Exactly `0` or `1`; default on. `0` keeps one stream at a time |
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
+| `TF_Q35_GROUP_PROJ` | Exactly `0` or `1`, read when a ModelOpt checkpoint loads on CUDA (sm_90 or newer); default off. `1` runs Qwen 3.5 same-input decode projections (MLP gate and up, GDN `in_proj_qkv` and `in_proj_z`, `in_proj_a` and `in_proj_b`, attention q, k and v) as one launch per group, each projection with its own tile and K slices, so outputs keep their bits |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |
