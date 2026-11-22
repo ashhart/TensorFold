@@ -182,6 +182,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         return true;
     }
     job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    @import("lane_host_status.zig").publish(h); // the fill ends here
     job.reported();
     if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
     job.stream.deinit(h.gpa);

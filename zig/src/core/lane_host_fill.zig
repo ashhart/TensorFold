@@ -232,6 +232,7 @@ fn fillAt(h: *LaneHost, at: usize) void {
     // a backend restores a kept state in its pass's first call: the store gets it back now, not at the pass's end
     if (first and restoreSettled(&job.stream)) job.reported();
     load.progress(h, job);
+    @import("lane_host_status.zig").publish(h); // a reader sees the rows this chunk added
     if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
     if (!done) return;
     _ = h.filling.orderedRemove(at);
