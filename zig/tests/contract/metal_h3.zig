@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
+const sources = @import("kernel_sources");
 const h3k = @import("h3_kernels");
 const rig_ = @import("rig.zig");
 const ref = @import("metal_h3_ref.zig");
@@ -9,7 +10,7 @@ const ref = @import("metal_h3_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, swiglu_gate_first, heads, pool, tile_scores, coarse, attention, modulation };
+pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, swiglu_gate_first, heads, pool, tile_scores, coarse, attention, modulation, product, product_ragged };
 
 /// The geometry the test kernels are compiled for: two heads, up to 16 tiles of 64 slots.
 const heads = 2;
@@ -42,6 +43,7 @@ fn none(_: c.Shape) usize {
 }
 
 const soft_why = "softmax weights in [0, 1], rounded to bf16 before the value product: the bf16 output hides the sums' error";
+const mlx_gemm = "MLX's gemm_nax (32 x 32 a warp, swizzle 2)";
 const norm_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
 
 pub fn spec(w: Which) c.Spec {
@@ -61,6 +63,9 @@ pub fn spec(w: Which) c.Spec {
         .coarse => .{ .name = "metal h3 pooled branch h3_coarse", .accum = .f32, .depth = tileChain, .ops = 6, .out = .f32, .tiles = .{ .{ .size = 4 }, .{}, .{} }, .served = &.{.{ .rows = tiles, .n = 128, .k = tiles }}, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = soft_why } },
         .modulation => .{ .name = "metal h3 AdaLN tables h3_modulation", .accum = .f32, .depth = laneChain, .ops = 1, .out = .bf16, .tiles = .{ .{}, .{ .size = 18 * 32, .step = 18, .min = 18 }, .{ .size = 32 } }, .served = &.{ .{ .rows = 16, .n = 18 * 64, .k = 2688 }, .{ .rows = 3, .n = 18 * 16, .k = 2688 } } },
         .attention => .{ .name = "metal h3 routed attention h3_attention", .accum = .f32, .depth = attnChain, .ops = 8, .mids = 1, .out = .bf16, .tiles = .{ .{}, .{}, .{ .size = 256, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = tiles, .n = 128, .k = tiles * 64 }, .{ .rows = tiles, .n = 128, .k = 6 * 64 } }, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = soft_why } },
+        // q at 65 row tiles, one past a band of 64; attention out at one tile (FastH3 and MiniMax-H3-Image alike)
+        .product => .{ .name = "metal h3 product h3_gemm_32x64", .accum = .f32, .depth = kChain, .out = .bf16, .replaces = mlx_gemm, .served = &.{ .{ .rows = 4160, .n = 7168, .k = 5376 }, .{ .rows = 64, .n = 5376, .k = 7168 } } },
+        .product_ragged => .{ .name = "metal h3 product ragged h3_gemm_32x64_ragged", .accum = .f32, .depth = kChain, .out = .bf16, .replaces = mlx_gemm, .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 4184, .n = 7168, .k = 5376 }, .{ .rows = 24, .n = 5376, .k = 7168 } } },
     };
 }
 
@@ -80,6 +85,17 @@ fn function(w: Which) []const u8 {
         .coarse => "h3_coarse",
         .attention => "h3_attention",
         .modulation => "h3_modulation",
+        .product => h3k.gemm_32x64,
+        .product_ragged => h3k.gemm_32x64_ragged,
+    };
+}
+
+/// The MLX entry point a product replaced, launched beside it on the same inputs.
+fn baseline(w: Which) ?[]const u8 {
+    return switch (w) {
+        .product => h3k.gemm_whole,
+        .product_ragged => h3k.gemm_ragged,
+        else => null,
     };
 }
 
@@ -90,6 +106,8 @@ pub const H3 = struct {
     rig: rig_.Rig,
     which: Which,
     pipe: mtl.Pipeline,
+    /// A product's replaced MLX kernel.
+    base: ?mtl.Pipeline = null,
     shape: c.Shape = undefined,
     arena: std.heap.ArenaAllocator,
     in: ref.In = .{ .rows = 0, .n = 0, .k = 0 },
@@ -100,14 +118,31 @@ pub const H3 = struct {
     outs: usize = 0,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, which: Which) !H3 {
-        const src = try std.mem.concat(a, u8, &.{ defines, h3k.source });
+        const rig: rig_.Rig = .{ .a = a, .device = device, .queue = queue };
+        const mlx = baseline(which) orelse {
+            const src = try std.mem.concat(a, u8, &.{ defines, h3k.source });
+            defer a.free(src);
+            return .{ .a = a, .rig = rig, .which = which, .pipe = try rig_.pipeline(device, src, function(which)), .arena = std.heap.ArenaAllocator.init(a) };
+        };
+        // the products' library as source.zig builds it: gemm_nax with nax.h inlined, then h3_gemm
+        const gemm = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
+        } else return error.UnknownSource;
+        const nax = try std.mem.replaceOwned(u8, a, gemm, "#include \"../nax.h\"", sources.nax);
+        defer a.free(nax);
+        const src = try std.mem.concat(a, u8, &.{ nax, h3k.gemm_source });
         defer a.free(src);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = which, .pipe = try rig_.pipeline(device, src, function(which)), .arena = std.heap.ArenaAllocator.init(a) };
+        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        const pipe = try mtl.Pipeline.init(device, lib, function(which), false);
+        errdefer pipe.deinit();
+        return .{ .a = a, .rig = rig, .which = which, .pipe = pipe, .base = try mtl.Pipeline.init(device, lib, mlx, false), .arena = std.heap.ArenaAllocator.init(a) };
     }
 
     pub fn deinit(self: *H3) void {
         self.rig.deinit();
         self.pipe.deinit();
+        if (self.base) |b| b.deinit();
         self.arena.deinit();
     }
 
@@ -163,6 +198,12 @@ pub const H3 = struct {
         self.nbufs += 1;
     }
 
+    /// The replaced kernel's output: device memory the gates neither feed nor read.
+    pub fn baseOutput(self: *H3, bytes: usize) !void {
+        self.bufs[self.nbufs] = try self.rig.scratch(bytes);
+        self.nbufs += 1;
+    }
+
     pub fn prepare(self: *H3, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         self.rig.reset();
         _ = self.arena.reset(.retain_capacity);
@@ -188,7 +229,7 @@ pub const H3 = struct {
         const scratch = try self.a.alloc(f64, @max(2 * self.in.n, 1024) + self.in.k);
         defer self.a.free(scratch);
         switch (self.which) {
-            .rows_in, .rows_out => ref.dot(self.in, s, scratch, want, mag),
+            .rows_in, .rows_out, .product, .product_ragged => ref.dot(self.in, s, scratch, want, mag),
             .norm => ref.norm(self.in, s, scratch, want, mag),
             .final_norm => ref.finalNorm(self.in, s, scratch, want, mag),
             .gate_add => ref.gated(self.in, false, want, mag),
@@ -212,6 +253,10 @@ pub const H3 = struct {
         const mag = try self.a.alloc(f64, out.len);
         defer self.a.free(mag);
         return self.compute(.{ .acc = acc, .order = order }, out, mag);
+    }
+
+    pub fn replaced(self: *H3) ![]const u8 {
+        return @import("metal_h3_prep.zig").replaced(self);
     }
 };
 
