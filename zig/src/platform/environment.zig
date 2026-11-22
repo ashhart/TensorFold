@@ -362,8 +362,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_REPEAT", .scope = .flashnext, .kind = .size, .forms = "a whole decode repeat count (default 1)" },
     .{ .name = "TF_FLASHNEXT_SEED", .scope = .flashnext, .kind = .u64, .blank_default = false, .forms = "a whole unsigned 64-bit sampling seed (unset keeps sampling off)" },
     .{ .name = "TF_FLASHNEXT_PLE_IO", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "mmap", "pread" }, .forms = "mmap or pread (unset picks by platform)" },
-    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .scope = .common, .kind = .path, .forms = "64 hex digits of the checkpoint digest" },
-    .{ .name = "TENSORFOLD_PREFILL_SHARE", .scope = .common, .kind = .positive_real, .max = 1, .forms = "a finite share greater than 0 and at most 1 (lane host takes 0.01 to 1)" },
+    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .scope = .flashnext, .kind = .path, .forms = "64 hex digits of the checkpoint digest" },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .scope = .flashnext, .kind = .positive_real, .max = 1, .forms = "a finite share greater than 0 and at most 1 (lane host takes 0.01 to 1)" },
 };
 
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;

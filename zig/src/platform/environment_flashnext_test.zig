@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 55 settings: 35 switches, 13 integers, 3 reals, 4 structured" {
+test "Flash Next strict env: the table holds all 57 settings: 35 switches, 13 integers, 4 reals, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.startsWith(u8, r.name, "FZ_"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.startsWith(u8, r.name, "FZ_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256") or std.mem.eql(u8, r.name, "TENSORFOLD_PREFILL_SHARE"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 35, 13, 3, 4 }, counts);
+    try t.expectEqual([4]usize{ 35, 13, 4, 5 }, counts);
 }
 
 test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
@@ -60,13 +60,7 @@ test "Flash Next strict env: unset reads the caller default and every row keeps 
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            .structured => {
-                if (r.kind == .path) {
-                    try t.expect(try e.parse(r.name, raw) == null);
-                } else {
-                    try t.expect(try e.value(?u64, r.name, raw, null) == null);
-                }
-            },
+            .structured => if (r.kind == .path) try t.expect(try e.path(r.name, raw) == null) else try t.expect(try e.value(?u64, r.name, raw, null) == null),
             .integers => try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
@@ -239,5 +233,19 @@ test "Flash Next migrated settings: unset, one valid value and one malformed val
                 try check(m.name, m.bad, false);
             },
         }
+    }
+}
+
+test "Flash Next migrated shared names stay outside other families' startup validation" {
+    for ([_][2][]const u8{
+        .{ "TENSORFOLD_CHECKPOINT_SHA256", "bad\npath" },
+        .{ "TENSORFOLD_PREFILL_SHARE", "0" },
+    }) |c| {
+        const fx: Fixture = .{ .name = c[0], .raw = c[1] };
+        const other: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .dsv41 = true, .glm = true };
+        try t.expect(try e.refusal(t.allocator, fx, other) == null);
+        const why = (try e.refusal(t.allocator, fx, .{ .flashnext = true })).?;
+        defer t.allocator.free(why);
+        try t.expect(std.mem.startsWith(u8, why, c[0]));
     }
 }
