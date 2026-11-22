@@ -131,6 +131,7 @@ pub const Read = struct {
     disk: u64 = 0, // its files' bytes on disk
     ns: i128 = 0,
     err: ?anyerror = null,
+    failed_piece: ?usize = null, // the file its producer's check rejected, for the consumer to forget
     used: bool = false,
     late: bool = false, // a request stopped waiting for it at the bound
 };
@@ -562,6 +563,7 @@ pub fn choose(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []c
 pub fn readFiles(f: *Prefetch, rd: *Read) anyerror!void {
     for (rd.plan.pieces, 0..) |p, piece| {
         if (rd.cancel.load(.acquire)) return error.Cancelled;
+        rd.failed_piece = piece; // still this one if anything in its read fails; the engine forgets it
         var buf: [1200]u8 = undefined;
         const path = try file.path(&buf, f.dir, &chain.hex(p.name), ext(p.kind), false);
         var o = try file.open(path, p.kind, p.name);

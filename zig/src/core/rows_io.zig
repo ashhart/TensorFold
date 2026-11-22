@@ -166,7 +166,6 @@ pub const Worker = struct {
         return c;
     }
 
-
     /// Completed jobs stay owned here until the engine takes them, oldest first, retaining their permits meanwhile.
     pub fn take(w: *Worker) ?*Job {
         w.lock();
