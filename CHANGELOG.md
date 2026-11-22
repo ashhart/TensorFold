@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: with `TF_GLM_PROF=1`, the four profiling traces are created at startup before the server reports ready, so the first prompt no longer pays their setup; profiling-off behaviour is unchanged (#4511).
+
 - Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#4504).
 
 - CUDA on unified-memory Linux (GB10): the start-up budget counts the checkpoint's own cached pages as room, so a checkpoint that was just read is not refused for them, without dropping them from the page cache before the load (#4427, refs #3192, #1857).
