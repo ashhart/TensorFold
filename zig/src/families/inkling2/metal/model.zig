@@ -11,6 +11,7 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_fuse = @import("dense_fuse.zig");
+const dense_units = @import("dense_units.zig");
 const mv_mma = @import("../../deepseek_v41/metal/mv_mma.zig");
 
 pub const Tensor = ck.Tensor;
@@ -209,6 +210,7 @@ pub const Model = struct {
     dense: [6]mtl.Pipeline,
     dense_fuse: dense_fuse.Pipelines,
     dense_mma: mv_mma.Pipelines,
+    dense_units: ?dense_units.Pipelines,
     norm: mtl.Pipeline,
     runtime: [runtime_names.len]mtl.Pipeline,
 
@@ -274,6 +276,8 @@ pub const Model = struct {
         errdefer m.dense_fuse.deinit();
         m.dense_mma = try mv_mma.Pipelines.load(m.device);
         errdefer m.dense_mma.deinit();
+        m.dense_units = if (m.device.tensorUnits()) try dense_units.Pipelines.load(m.device) else null;
+        errdefer if (m.dense_units) |*du| du.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, runtime_source, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -290,6 +294,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         for (m.runtime) |p| p.deinit();
+        if (m.dense_units) |*du| du.deinit();
         m.dense_mma.deinit();
         m.dense_fuse.deinit();
         m.norm.deinit();
