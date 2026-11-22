@@ -47,8 +47,8 @@ the affine prompt GEMM, decode rows on the affine verify tiles. The embedding's 
 - Full-attention layers (6): keys and values in pages of the core KV pool, partial RoPE through `qk_rows`' frequency
   table, `pattn_kernel<128, 8, 4, 8>` for prompt rows and the shared paged chunk and merge kernels for decode rows.
 - Sliding-attention layers (5, window 256): a ring a stream through the shared window-attention kernels.
-- The lane backend, the kept states of the prompt cache and the native glue are shared with LFM2.5-24B-A2B
-  (`zig/src/families/liquid/`). Kept states live in pages allocated once inside the prompt-cache budget.
+- LFM3 uses the lane backend and snapshot helpers in `zig/src/families/liquid/`. Kept states live in pages
+  allocated once inside the prompt-cache budget.
 - The default window is 32,768 tokens (`--context`); the model allows 262,144.
 
 ## Receipt
