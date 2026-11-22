@@ -428,6 +428,15 @@ fn waitInflight(h: *Harness, want: u32) !void {
     }
 }
 
+// The engine has `want` submits in all: a client that walks away after this has requests the server must cancel.
+fn waitSubmitted(e: *Engine, want: u32) !void {
+    var waited: usize = 0;
+    while (e.calls.load(.monotonic) < want) : (waited += 1) {
+        if (waited == 5000) return error.SubmitTimeout;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+}
+
 test "admission HTTP: every way an n-choices request ends returns its places" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -487,8 +496,10 @@ test "admission HTTP: every way an n-choices request ends returns its places" {
 
     // a key refusal while one principal holds all four of its places; then the holder walks away mid-request.
     engine.hold.store(true, .release);
+    var submits = engine.calls.load(.monotonic);
     const occupied = try h.begin(try requestText(a, completions, "", try choiceBody(a, 4, "")));
     try waitInflight(&h, 4);
+    try waitSubmitted(&engine, submits + 4); // all four in the engine: a choice still preparing would leave uncancelled
     try expectStatus(try h.request(a, try requestText(a, completions, "", completion)), "HTTP/1.1 429 ");
     _ = posix.system.close(occupied);
     try waitFreed(&h);
@@ -496,8 +507,10 @@ test "admission HTTP: every way an n-choices request ends returns its places" {
 
     // a streaming request whose client walks away.
     engine.cancelled.store(0, .release);
+    submits = engine.calls.load(.monotonic);
     const streamed = try h.begin(try requestText(a, completions, "", try choiceBody(a, 4, ",\"stream\":true")));
     try waitInflight(&h, 4);
+    try waitSubmitted(&engine, submits + 4);
     _ = posix.system.close(streamed);
     try waitFreed(&h);
     try t.expect(engine.cancelled.load(.acquire) != 0);
