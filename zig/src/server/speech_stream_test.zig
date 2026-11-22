@@ -170,6 +170,9 @@ pub const Served = struct {
     eof: bool = false,
     client_open: bool = true,
     probe: ?*LaneProbe = null,
+    /// Each request's own speech lock, so live speech on this machine never meets the test's.
+    tmp: std.testing.TmpDir,
+    lock: []u8,
 
     pub fn start(s: *Served, script: *Script, version: []const u8, body: []const u8, write_ms: i32) !void {
         return s.open(script, .{ .served_name = "m", .model_ids = &.{"m"}, .silence_mid = script.mid_enabled }, "", version, body, write_ms);
@@ -183,8 +186,13 @@ pub const Served = struct {
     pub fn openProbed(s: *Served, script: *Script, config: server.Config, headers: []const u8, version: []const u8, body: []const u8, write_ms: i32, probe: ?*LaneProbe) !void {
         var pair: [2]std.c.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-        s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms, .probe = probe };
-        s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), config, null);
+        s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms, .probe = probe, .tmp = std.testing.tmpDir(.{}), .lock = undefined };
+        const dir = try s.tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+        defer gpa.free(dir);
+        s.lock = try std.fs.path.join(gpa, &.{ dir, "speech.lock" });
+        var isolated = config;
+        isolated.speech_lock = s.lock;
+        s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), isolated, null);
         if (probe) |p| p.srv = s.srv;
         try s.srv.voices.swap(script.voices);
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
@@ -219,6 +227,17 @@ pub const Served = struct {
         _ = std.c.close(s.route_fd);
         s.got.deinit(gpa);
         s.srv.deinit();
+        gpa.free(s.lock);
+        s.tmp.cleanup();
+    }
+
+    /// Whether no voice holds the GPU turn now; never waits.
+    pub fn turnFree(s: *Served) !bool {
+        const file = try std.Io.Dir.cwd().openFile(std.testing.io, s.lock, .{});
+        defer file.close(std.testing.io);
+        const got = try file.tryLock(std.testing.io, .exclusive);
+        if (got) file.unlock(std.testing.io);
+        return got;
     }
 
     /// Reads more of the reply; false at EOF or after `wait_ms` of silence.

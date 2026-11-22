@@ -194,8 +194,11 @@ samples. A separate 16-byte generation in `/tmp/tensorfold-speech.lock.stamp` de
 between lock polls. Missing, malformed or inaccessible signals invalidate timings; uncoordinated forwards do too.
 Both processes must use this protocol; an old speech binary cannot certify clean timings. Speech remains best-effort
 on filesystem errors: if both publishing and invalidating a generation fail, a short request can remain unobserved.
-Speech waits for its shared hold only behind a render's exclusive probe, which lasts microseconds and never spans GPU
-work, so it never synthesizes unprotected. The prompt encoder (`tf-h3-image-prompt`, the server's first stage) waits
+Speech releases its hold when the engine's work ends, before the reply goes to the client, so a slow client never
+holds a render back. It opens the lock without following symlinks and creates it only when absent; behind an
+exclusive hold longer than a second (a render's probes last microseconds) it synthesizes without the hold rather
+than wait. A command buffer that fails is reported only after every buffer committed with it has completed.
+The prompt encoder (`tf-h3-image-prompt`, the server's first stage) waits
 before each pass with three queued, and the decoder (`tf-h3-image-decoder`, its last) before each batch of tiles; both
 print the seconds they waited.
 

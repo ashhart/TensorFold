@@ -6,19 +6,24 @@ pub const path = "/tmp/tensorfold-speech.lock";
 /// Where batch work gives way: the speech lock (tests point `at` at their own).
 pub const Turn = struct { io: std.Io, at: []const u8 = path };
 
-/// How often waiting batch work looks again; one poll is the most speech's end can be missed by.
+/// How often waiting work looks again; one poll is the most speech's end can be missed by.
 const poll: std.Io.Duration = .fromMilliseconds(20);
 
-/// Shared hold; best effort only when the lock file cannot be opened. It blocks only behind batch work's exclusive
-/// probes, which `free` and `mark` take with tryLock and release at once, never across GPU work.
+/// Longest speech waits behind an exclusive hold: batch probes take microseconds, so a longer one is not a probe.
+const patience: std.Io.Duration = .fromSeconds(1);
+
+/// Shared hold; best effort, so speech goes on without one when the lock cannot be opened or stays held.
 pub fn speak(io: std.Io, at: []const u8) ?std.Io.File {
     defer stamp(io, at);
     const file = open(io, at) catch return null;
-    file.lock(io, .shared) catch {
-        file.close(io);
-        return null;
-    };
-    return file;
+    const until = std.Io.Clock.awake.now(io).addDuration(patience);
+    while (true) {
+        if (file.tryLock(io, .shared) catch break) return file;
+        if (std.Io.Clock.awake.now(io).compare(.gte, until)) break;
+        io.sleep(poll, .awake) catch break;
+    }
+    file.close(io);
+    return null;
 }
 
 pub fn done(io: std.Io, held: ?std.Io.File) void {
@@ -43,12 +48,17 @@ fn free(io: std.Io, file: std.Io.File) bool {
 }
 
 /// Read-only so the speech server's and a render's users can share one file; flock needs no write access.
+/// Never through a symlink, created only when absent: a name planted in the shared directory stays inert.
 fn open(io: std.Io, at: []const u8) !std.Io.File {
     const dir = std.Io.Dir.cwd();
-    return dir.openFile(io, at, .{}) catch |e| switch (e) {
+    return dir.openFile(io, at, .{ .follow_symlinks = false }) catch |e| switch (e) {
         error.FileNotFound => {
-            const file = try dir.createFile(io, at, .{ .read = true, .truncate = false });
-            file.setPermissions(io, .fromMode(0o644)) catch {}; // past the creator's umask, so the other user opens it
+            const file = dir.createFile(io, at, .{ .read = true, .exclusive = true }) catch |create_err| {
+                if (create_err == error.PathAlreadyExists) return dir.openFile(io, at, .{ .follow_symlinks = false });
+                return create_err;
+            };
+            errdefer file.close(io);
+            try file.setPermissions(io, .fromMode(0o644)); // past the creator's umask, so the other user opens it
             return file;
         },
         else => e,
@@ -111,6 +121,47 @@ fn marker(io: std.Io, at: []const u8) !std.Io.File {
     };
 }
 
+/// Committed command buffers, waited in commit order. No error returns before every one has completed, so a
+/// failure never frees or reuses buffers the GPU still reads. `C` has `wait`, `failure` and `gpuSeconds`.
+pub fn Queue(comptime C: type, comptime capacity: usize) type {
+    return struct {
+        ring: [capacity]C = undefined,
+        first: usize = 0,
+        n: usize = 0,
+        /// GPU seconds of the buffers waited so far.
+        gpu: f64 = 0,
+        failed: bool = false,
+
+        const Self = @This();
+
+        /// Keeps `cb`, then waits the oldest until at most `ahead` remain unwaited.
+        pub fn add(q: *Self, cb: C, ahead: usize) !void {
+            if (q.n == capacity) q.waitOldest();
+            q.ring[(q.first + q.n) % capacity] = cb;
+            q.n += 1;
+            while (q.n > ahead) q.waitOldest();
+            if (q.failed) return q.drain();
+        }
+
+        /// Waits every buffer still kept; GpuFailed if any of them, or any waited earlier, failed.
+        pub fn drain(q: *Self) !void {
+            while (q.n > 0) q.waitOldest();
+            if (q.failed) return error.GpuFailed;
+        }
+
+        fn waitOldest(q: *Self) void {
+            const cb = q.ring[q.first];
+            q.first = (q.first + 1) % capacity;
+            q.n -= 1;
+            cb.wait();
+            if (cb.failure()) |text| {
+                std.debug.print("command buffer failed: {s}\n", .{text});
+                q.failed = true;
+            } else q.gpu += cb.gpuSeconds();
+        }
+    };
+}
+
 test "batch work waits for every speech hold to end, and not at all without one" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -138,7 +189,7 @@ test "batch work waits for every speech hold to end, and not at all without one"
     try std.testing.expectEqual(@as(f64, 0), yield(io, lock));
 }
 
-test "speech waits out a batch probe however long it is held, and the file it makes is open to every user" {
+test "speech waits out a batch probe, and the file it makes is open to every user" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -166,6 +217,35 @@ test "speech waits out a batch probe however long it is held, and the file it ma
     defer done(io, held);
     try std.testing.expect(!free(io, prober));
     try std.testing.expect(!clean(io, lock, before));
+}
+
+test "a planted lock path neither redirects the files speech makes nor holds speech up for long" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const at = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(at);
+    const lock = try std.fs.path.join(std.testing.allocator, &.{ at, "speech.lock" });
+    defer std.testing.allocator.free(lock);
+
+    // dangling symlinks where the lock and its stamp go: nothing is created or chmodded at their targets
+    try tmp.dir.symLink(io, "victim", "speech.lock", .{});
+    try tmp.dir.symLink(io, "victim.stamp", "speech.lock.stamp", .{});
+    try std.testing.expect(speak(io, lock) == null);
+    try std.testing.expectEqual(@as(f64, 0), yield(io, lock));
+    try std.testing.expect(mark(io, lock) == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "victim", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "victim.stamp", .{}));
+
+    // a real lock someone else holds exclusively and never lets go: speech still starts, without the turn
+    try tmp.dir.deleteFile(io, "speech.lock");
+    const squatter = try open(io, lock);
+    defer squatter.close(io);
+    try squatter.lock(io, .exclusive);
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expect(speak(io, lock) == null);
+    try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds() < 3 * std.time.ns_per_s);
 }
 
 test "timed work excludes speech completed entirely between polls and preexisting speech" {
@@ -213,4 +293,39 @@ test "timed work excludes speech completed entirely between polls and preexistin
         try file.setPermissions(io, .fromMode(0o600));
         try std.testing.expect(!clean(io, lock, mark(io, lock)));
     }
+}
+
+test "a failed command buffer is reported only after every buffer committed with it has completed" {
+    const Fake = struct {
+        bad: bool = false,
+        waited: *usize,
+        fn wait(c: @This()) void {
+            c.waited.* += 1;
+        }
+        fn failure(c: @This()) ?[*:0]const u8 {
+            return if (c.bad) "fault" else null;
+        }
+        fn gpuSeconds(_: @This()) f64 {
+            return 1;
+        }
+    };
+    var waited: usize = 0;
+    var q: Queue(Fake, 4) = .{};
+    for (0..5) |_| try q.add(.{ .waited = &waited }, 3); // at most three left unwaited
+    try std.testing.expectEqual(@as(usize, 2), waited);
+    try std.testing.expectEqual(@as(f64, 2), q.gpu);
+    // the oldest fails while three committed after it still run: the error waits for all of them
+    try q.drain();
+    try q.add(.{ .waited = &waited, .bad = true }, 3);
+    for (0..2) |_| try q.add(.{ .waited = &waited }, 3);
+    try std.testing.expectEqual(@as(usize, 5), waited);
+    try std.testing.expectError(error.GpuFailed, q.add(.{ .waited = &waited }, 3));
+    try std.testing.expectEqual(@as(usize, 9), waited);
+    try std.testing.expectEqual(@as(usize, 0), q.n);
+
+    var late: Queue(Fake, 4) = .{};
+    try late.add(.{ .waited = &waited, .bad = true }, 3);
+    try late.add(.{ .waited = &waited }, 3);
+    try std.testing.expectError(error.GpuFailed, late.drain());
+    try std.testing.expectEqual(@as(usize, 11), waited);
 }

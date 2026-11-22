@@ -184,10 +184,15 @@ fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors
     return counted.ids;
 }
 
-/// Acquired errors, final replies and completed stream observations release the lane before client writes.
-pub fn releaseLane(srv: *Server, released: *bool) void {
-    if (released.*) return;
-    released.* = true;
+/// A synthesis' output lane and its GPU turn (renders on this GPU pause while it is held).
+pub const Lane = struct { released: bool = false, turn: ?std.Io.File = null };
+
+/// Acquired errors, final replies and completed stream observations release the lane before client writes,
+/// so neither another voice nor a render waits on a slow client.
+pub fn releaseLane(srv: *Server, lane: *Lane) void {
+    if (lane.released) return;
+    lane.released = true;
+    gpu_turn.done(srv.io, lane.turn);
     _ = srv.speech_inflight.fetchSub(1, .acq_rel);
 }
 
@@ -202,31 +207,29 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         }
         if (srv.speech_inflight.cmpxchgWeak(held, held + 1, .acq_rel, .acquire)) |now| held = now else break;
     }
-    // a render or benchmark on this GPU pauses at its next short command buffer until this voice has finished
-    const turn = gpu_turn.speak(srv.io, gpu_turn.path);
-    defer gpu_turn.done(srv.io, turn);
-    var lane_released = false;
-    defer releaseLane(srv, &lane_released);
+    // a render or benchmark on this GPU pauses at its next short command buffer until this voice's engine work ends
+    var lane: Lane = .{ .turn = gpu_turn.speak(srv.io, srv.config.speech_lock) };
+    defer releaseLane(srv, &lane);
     const pcm_len = std.math.mul(usize, sp.max_frames, sp.frame_length) catch 0;
     if (pcm_len == 0 or sp.sample_rate == 0 or sp.sample_rate > std.math.maxInt(u32) / 2) {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return fail(c, cx, id, metadata.*, .server, "the engine advertises no usable speech output");
     }
     const pcm = srv.gpa.alloc(f32, pcm_len) catch {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return fail(c, cx, id, metadata.*, .server, "out of memory");
     };
     defer srv.gpa.free(pcm);
     var result: api.SpeechResult = .{};
     const frames = plan.frames orelse drama_prompt.rows(cx.a, plan.prompt) catch |e| {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return switch (e) {
             error.OutOfMemory => fail(c, cx, id, metadata.*, .server, "out of memory"),
             error.InvalidToken => fail(c, cx, id, metadata.*, .request, "invalid speech token"),
         };
     };
     const guided = drama_cfg.guide(cx.a, srv.text, srv.config.cfg, metadata.cfg_gamma orelse 1, plan.input, plan.refs.len > 0) catch {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return fail(c, cx, id, metadata.*, .server, "the tokenizer cannot encode the unconditional prompt");
     };
     const request: api.SpeechRequest = .{
@@ -251,7 +254,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     defer if (srv.keepalive) |k| k.end();
     const started = clock.nowNs(srv.io);
     srv.engine.submitSpeech(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return switch (e) {
             error.Busy => blk: {
                 srv.load.refused(.engine_busy);
@@ -267,17 +270,17 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         };
     };
     // The engine holds request, prompt, pcm and result until finished; no path below returns before that.
-    if (plan.stream) return streaming.streamReply(srv, c, cx, id, sp, plan, received, &box, engine_id, pcm, &result, metadata.*, &lane_released);
+    if (plan.stream) return streaming.streamReply(srv, c, cx, id, sp, plan, received, &box, engine_id, pcm, &result, metadata.*, &lane);
     if (streaming.settle(srv, c, &box, engine_id, null) == null) return streaming.left(srv, c, id, plan.prompt.len, received);
     if (streaming.why(&box, result.samples, pcm.len)) |message| {
-        releaseLane(srv, &lane_released);
+        releaseLane(srv, &lane);
         return fail(c, cx, id, metadata.*, .server, message);
     }
     const take: Take = .{ .pcm = pcm[0..result.samples], .reason = box.reason, .silence_mid = result.silence_mid };
     var spare: []f32 = &.{};
     defer srv.gpa.free(spare);
     const sent = redraw(srv, c, cx, id, sp, plan, received, request, started, take, &spare, metadata) orelse return;
-    releaseLane(srv, &lane_released);
+    releaseLane(srv, &lane);
     reply(srv, c, cx, id, sp, plan, received, sent, metadata.*);
 }
 
