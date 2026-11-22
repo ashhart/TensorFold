@@ -270,7 +270,7 @@ test "the production hook is the stream's own cancel check" {
 const Kept = struct {
     lookups: usize = 0,
 
-    pub fn begin(t: *Kept, _: []const u32, _: u32, _: []const u32, _: anytype, _: *std.ArrayList(u32)) !@import("engine_api").prompt_radix.Plan {
+    pub fn begin(t: *Kept, _: []const u32, _: ?u64, _: u32, _: []const u32, _: anytype, _: *std.ArrayList(u32)) !@import("engine_api").prompt_radix.Plan {
         t.lookups += 1;
         return .{ .from = 64, .marks = try T.allocator.dupe(u32, &.{128}) };
     }
