@@ -501,6 +501,7 @@ const groups = [_]Source{
     .{ .path = "qwen_vision.hip", .strict = true },
     .{ .path = "draft/draft.hip" },
     .{ .path = "exl3/exl3.hip" },
+    .{ .path = "decode/plan_rows.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
