@@ -39,6 +39,7 @@ pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
 pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
 pub const shared_draft_check = @import("shared_draft_check.zig");
+pub const invariance = @import("invariance.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const draft_tree = @import("draft_tree.zig");
@@ -103,6 +104,7 @@ test {
     _ = @import("granted_reservation_test.zig");
     _ = @import("rollback_test.zig");
     _ = @import("conformance_test.zig");
+    _ = @import("invariance_fake.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");
