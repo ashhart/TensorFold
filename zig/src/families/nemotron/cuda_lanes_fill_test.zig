@@ -150,3 +150,19 @@ test "nemotron cuda steps: a lane-host cancel between chunks keeps the prefix it
     try std.testing.expectEqual(@as(u32, 8), kept.at);
     try std.testing.expectEqual(&r.e.own, r.e.bound); // saved from the stream's own sequence
 }
+
+test "nemotron cuda steps: a kept state refused at open leaves the fill at 0, not where it was kept (REV59 3)" {
+    var r: Rig = .{};
+    r.init();
+    r.e.vision = null;
+    defer r.deinit();
+    const prompt: [12]u32 = @splat(3);
+    var saved: u8 = 0;
+    // kept at the prompt's whole length: refused without touching the device
+    var s = try lanes.Stream.init(a, .{ .id = "refused", .prompt = &prompt, .max_new = 4, .reuse = .{ .saved = &saved, .at = 12 } });
+    defer s.deinit(a);
+    try std.testing.expectEqual(@as(u32, 12), s.fill_at.load(.monotonic));
+    try std.testing.expectError(error.ContextFull, r.step(&s)); // opened, then the pass's own error
+    try std.testing.expect(s.reuse_failed);
+    try std.testing.expectEqual(@as(u32, 0), s.fill_at.load(.monotonic));
+}

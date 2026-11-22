@@ -49,7 +49,9 @@ fn open(self: *Cuda, s: *lanes.Stream) !usize {
     e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
     try e.setSampling(s.sampling);
     s.cached = 0;
-    return if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len);
+    const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len);
+    s.fill_at.store(@intCast(from), .monotonic); // what was restored: 0 when the kept state failed or was skipped
+    return from;
 }
 
 /// The pass's kept marks, as the lane host's prompt cache asks for them.
@@ -107,6 +109,7 @@ fn finish(self: *Cuda, s: *lanes.Stream, first: u32) !void {
     const last = ids.len - 1 - e.last_chunk;
     try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
     _ = self.take(first);
+    s.fill_at.store(@intCast(ids.len), .monotonic); // the whole prompt, as a whole pass or a last chunk ends it
     if (s.logprobs) |k| {
         const at = (row_slots - 1) * row_words;
         try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, false, self.rows_dev + at * 4, 1);
