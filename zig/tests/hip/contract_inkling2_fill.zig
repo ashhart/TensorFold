@@ -134,6 +134,10 @@ pub const Data = struct {
     /// NaN q, a +inf sink, both gate infinities, +inf in a key and +inf, -inf in values every row of stream 0 sees.
     fn plantNonfinite(d: *Data, ring: usize) void {
         const nan = c.toBf16(std.math.nan(f32));
+        if (d.pos.len > 3) {
+            d.sink[3 * heads + 4] = nan;
+            d.gate[(3 * heads + 5) * D + 7] = nan;
+        }
         const inf = c.toBf16(std.math.inf(f32));
         const rows = d.pos.len;
         const p0 = d.pos[0];
