@@ -464,6 +464,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     e.barrier();
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
+    if (options.all and rows > state.batch_rows) return error.Inkling2RowsExceeded;
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
     if (m.experts.units != null) try experts.logitsUnits(&m.experts, e, x(at(s.mlp_normed, final.logits_row * state.hidden * 2)), x(r(m.weights.unembed)), x(logits), @intCast(final.logits_rows), m.config.text.unpadded_vocab) else glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
     commitFullHistories(m, e, s, segments);
