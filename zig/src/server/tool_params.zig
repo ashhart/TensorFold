@@ -114,6 +114,12 @@ pub fn finiteJson(text: []const u8) bool {
     return true;
 }
 
+/// Whether `schema` reads a value's text only as JSON (no string form): where a NaN or Infinity literal refuses it.
+pub fn jsonOnly(a: Allocator, schema: Schema) Allocator.Error!bool {
+    const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return false;
+    return !kinds.contains(.string) and tool_kinds.takesJson(kinds);
+}
+
 /// Values admitted after ``finiteJson``: overflow may decode as infinity; NaN never survives the JSON decoder path.
 pub fn finiteDecoded(v: Value) bool {
     return switch (v) {
