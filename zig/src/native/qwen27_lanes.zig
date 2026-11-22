@@ -125,7 +125,7 @@ pub const Metal = struct {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
             for (b.contexts[1..runner.ready], 1..) |*x, slot| {
-                x.* = try Context.init(gpa, d.model, slot < b.draft_slots, runner.kv_step);
+                x.* = try Context.initGrow(gpa, d.model, slot < b.draft_slots, runner.kv_step);
                 x.*.?.settle = .{ .ctx = runner, .slot = @intCast(slot), .run = q.decode_round.Runner.settleOpaque };
             }
         }

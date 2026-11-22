@@ -177,11 +177,9 @@ pub const Runner = struct {
         }
         const kv: ?KvPages = if (paged) try kv_pages.caches(a, m, na, slots, capacity, caches) else null;
         errdefer if (kv) |k| kv_pages.free(k);
-        if (!paged) for (0..na) |layer| for (0..ready) |slot| {
-            caches[layer * slots + slot] = try slotCache(a, m, &owned, capacity);
         const first = if (kv_step) |s| kv_grow.first(s, capacity) else capacity;
-        for (0..na) |layer| for (0..ready) |slot| {
-            caches[layer * slots + slot] = try slotCache(a, m, &owned, first);
+        if (!paged) for (0..na) |layer| for (0..ready) |slot| {
+            caches[layer * slots + slot] = try kv_slots.slotCache(a, m, &owned, first);
         };
         const offsets = try a.alloc(u32, slots);
         errdefer a.free(offsets);
@@ -206,74 +204,29 @@ pub const Runner = struct {
         return kv_pages.spans(r, a, slot, at, list);
     }
 
-    /// One slot's K/V rows across the attention layers.
-    pub fn slotBytes(r: *const Runner) usize {
-        return r.caches.len / r.slots * 2 * @as(usize, r.capacity) * r.model.config.kvDim() * 2;
-    }
-
-    /// Slot `slot`'s K/V rows (the next unready slot, as free slots are taken lowest first); its new buffers.
-    pub fn ensure(r: *Runner, slot: u32) ![]const mtl.Buffer {
-        if (slot < r.ready) return &.{};
-        if (slot != r.ready) return error.SlotOutOfOrder;
-        const first = r.owned.items.len;
-        errdefer {
-            for (r.owned.items[first..]) |b| b.deinit();
-            r.owned.shrinkRetainingCapacity(first);
-        }
-        const layers = r.caches.len / r.slots;
-        const rows = if (r.kv_step) |s| kv_grow.first(s, r.capacity) else r.capacity;
-        for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, rows);
-        r.ready += 1;
-        if (r.residency) |f| for (r.owned.items[first..]) |b| f.join(f.ctx, b);
-        return r.owned.items[first..];
-    }
-
-    /// The K/V rows slot `slot` holds now: the fewest any attention layer holds.
-    pub fn heldRows(r: *const Runner, slot: u32) u32 {
-        var rows: u32 = std.math.maxInt(u32);
-        for (0..r.caches.len / r.slots) |layer| rows = @min(rows, r.caches[layer * r.slots + slot].capacity);
-        return rows;
-    }
-
+    pub const slotBytes = kv_slots.slotBytes;
+    pub const ensure = kv_slots.ensure;
+    pub const heldRows = kv_slots.heldRows;
     /// Slot `slot` holds `need` K/V rows, grown layer by layer (kv_slots.zig).
     pub fn reserve(r: *Runner, slot: u32, need: u32) !void {
         return kv_slots.reserve(r, slot, need);
     }
 
-    /// Slot `slot` back to its first rows once it is free and unread (kv_slots.zig).
-    pub fn release(r: *Runner, slot: u32) !void {
-        return kv_slots.release(r, slot);
-    }
+    pub const releaseGrown = kv_slots.release;
 
     /// Emptied slot `slot` holds the rows a prompt of `need` tokens fills, without a copy (kv_slots.zig).
     pub fn admit(r: *Runner, slot: u32, need: u32) !void {
         return kv_slots.admit(r, slot, need);
     }
 
-    /// Whether a blit still reads slot `slot` (without waiting for it).
-    pub fn busy(r: *const Runner, slot: u32) bool {
-        const cb = r.reading[slot] orelse return false;
-        return switch (cb.status()) {
-            .completed, .@"error" => false,
-            else => true,
-        };
-    }
-
+    pub const busy = kv_slots.busy;
     /// settleSlot for a hook that holds the runner as an opaque pointer (a drafter context's ring).
     pub fn settleOpaque(ctx: *anyopaque, slot: u32) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
         r.settleSlot(slot);
     }
 
-    /// The K/V buffers of the ready slots (for a residency set).
-    pub fn readyBuffers(r: *const Runner, a: std.mem.Allocator, out: *std.ArrayList(mtl.Buffer)) !void {
-        if (r.kv) |k| return out.appendSlice(a, &.{ k.arena, k.tables });
-        for (0..r.caches.len / r.slots) |layer| for (0..r.ready) |slot| {
-            const c = r.caches[layer * r.slots + slot];
-            try out.appendSlice(a, &.{ c.keys.buffer, c.values.buffer });
-        };
-    }
-
+    pub const readyBuffers = kv_slots.readyBuffers;
     pub fn setResident(r: *Runner, hook: ?mtl.ResidencySet.Follow) void {
         @import("residency.zig").setRunner(r, hook);
     }
@@ -620,22 +573,6 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
-
-fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
-    const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
-    const key = try allocation(a, m.device, owned, bytes);
-    const value = try allocation(a, m.device, owned, bytes);
-    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
-}
-
-fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
-    const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-    owned.append(a, b) catch |err| {
-        b.deinit();
-        return err;
-    };
-    return b;
-}
 
 fn fingerprint(round: *const Round) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});

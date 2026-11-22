@@ -1,6 +1,7 @@
 //! Grow-as-used K/V for a runner's slots (TF_Q27_KV_GROW): grow before rows are written, give back once a slot is free.
 const std = @import("std");
 const mtl = @import("metal");
+const Model = @import("model.zig").Model;
 const Runner = @import("decode_round.zig").Runner;
 const gpuFailed = @import("decode_round.zig").gpuFailed;
 const attn = @import("attention.zig");
@@ -100,4 +101,67 @@ fn swapPair(r: *Runner, at: usize, fresh: [2]mtl.Buffer, rows: u32) void {
     }
     r.caches[at] = .{ .keys = .{ .buffer = fresh[0] }, .values = .{ .buffer = fresh[1] }, .capacity = rows };
     if (r.grown) |g| g.added(g.ctx, &fresh);
+}
+
+/// One slot's K/V rows across the attention layers.
+pub fn slotBytes(r: *const Runner) usize {
+    return r.caches.len / r.slots * 2 * @as(usize, r.capacity) * r.model.config.kvDim() * 2;
+}
+
+/// Slot `slot`'s K/V rows (the next unready slot, as free slots are taken lowest first); its new buffers.
+pub fn ensure(r: *Runner, slot: u32) ![]const mtl.Buffer {
+    if (slot < r.ready) return &.{};
+    if (slot != r.ready) return error.SlotOutOfOrder;
+    const first = r.owned.items.len;
+    errdefer {
+        for (r.owned.items[first..]) |b| b.deinit();
+        r.owned.shrinkRetainingCapacity(first);
+    }
+    const layers = r.caches.len / r.slots;
+    const rows = if (r.kv_step) |s| kv_grow.first(s, r.capacity) else r.capacity;
+    for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, rows);
+    r.ready += 1;
+    if (r.residency) |f| for (r.owned.items[first..]) |b| f.join(f.ctx, b);
+    return r.owned.items[first..];
+}
+
+/// The K/V rows slot `slot` holds now: the fewest any attention layer holds.
+pub fn heldRows(r: *const Runner, slot: u32) u32 {
+    var rows: u32 = std.math.maxInt(u32);
+    for (0..r.caches.len / r.slots) |layer| rows = @min(rows, r.caches[layer * r.slots + slot].capacity);
+    return rows;
+}
+
+/// Whether a blit still reads slot `slot` (without waiting for it).
+pub fn busy(r: *const Runner, slot: u32) bool {
+    const cb = r.reading[slot] orelse return false;
+    return switch (cb.status()) {
+        .completed, .@"error" => false,
+        else => true,
+    };
+}
+
+/// The K/V buffers of the ready slots (for a residency set).
+pub fn readyBuffers(r: *const Runner, a: std.mem.Allocator, out: *std.ArrayList(mtl.Buffer)) !void {
+    if (r.kv) |k| return out.appendSlice(a, &.{ k.arena, k.tables });
+    for (0..r.caches.len / r.slots) |layer| for (0..r.ready) |slot| {
+        const c = r.caches[layer * r.slots + slot];
+        try out.appendSlice(a, &.{ c.keys.buffer, c.values.buffer });
+    };
+}
+
+pub fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
+    const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
+    const key = try allocation(a, m.device, owned, bytes);
+    const value = try allocation(a, m.device, owned, bytes);
+    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
+}
+
+fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
+    const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    owned.append(a, b) catch |err| {
+        b.deinit();
+        return err;
+    };
+    return b;
 }
