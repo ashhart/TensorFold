@@ -89,9 +89,11 @@ pub fn arRows(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: 
     e.setPipeline(p.ar);
     inline for (.{ blocks, partial, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = rows }, 4);
-    e.dispatchGroups(mtl.Size.of(queries_, rows, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(queries_, rows, 1), mtl.Size.of(ar_threads, 1, 1));
 }
 
+/// The depth mix's threads a threadgroup: a row's 2,304 values, four a thread.
+const ar_threads = 576;
 const ConvArgs = extern struct { rows: u32, channels: u32 };
 /// taps contains three old rows followed by `rows` current BF16 inputs.
 pub fn convStatic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, weight: Ref, out: Ref, rows: u32, channels: u32) void {
