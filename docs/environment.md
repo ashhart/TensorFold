@@ -102,6 +102,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
 | `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
 | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
+| `TF_GRAMMAR_HEAD_SUBSET` | Nemotron Bolt BF16 head on Metal: `0` or `1`, default `0`. Project only allowed vocabulary rows when the grammar is within the threshold. |
+| `TF_GRAMMAR_HEAD_SUBSET_MAX` | Maximum legal tokens for the subset, default 512. Zero disables it. |
 | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 | `TF_NEMOTRON_WORLD` | Nemotron 3.5 Super on CUDA: a whole rank count from 1 through 4294967295, set with `TF_NEMOTRON_RANK`; unset with it gives one rank |
 | `TF_NEMOTRON_WIDE_ROUNDS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` lets Nemotron's shared rounds hold 16 streams and 32 rows on GB10 (one rank, non-latent, not Bolt, no `--precision checkpoint`, no bf16 experts, no Sliding Weights or saved lessons; refused with a log line naming why), each row's bits as in two 16-row rounds; a lone stream's window is unchanged |

@@ -4,6 +4,7 @@ const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
     .{ .name = "bolt gemv tf_gemv_bf16_bm4_tm4", .threads = 128, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "bolt gemv tf_gemv_bf16_bm8_tm4", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "bolt gemv tf_gemv_bf16_bm8_subset", .threads = 256, .tg_memory = 0, .reserved = 256 },
     // one threadgroup of E threads a row: Bolt's largest layer has 496 experts (the kernel's arrays hold 1,024)
     .{ .name = "bolt route tf_route_topk", .threads = 496, .tg_memory = 8448, .m1 = 1024, .m2 = 1024 },
     // a thread a latent column, 256 a group

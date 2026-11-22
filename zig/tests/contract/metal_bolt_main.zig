@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const contract = @import("contract");
 const bolt = @import("metal_bolt.zig");
 const norm = @import("metal_bolt_norm.zig");
+const subset = @import("metal_bolt_subset.zig");
 const mamba = @import("metal_bolt_mamba.zig");
 const scan = @import("metal_bolt_scan.zig");
 const g = contract.gates;
@@ -18,6 +19,7 @@ pub const Suite = struct {
     a: std.mem.Allocator,
     gemvs: [4]bolt.GemvProbe = undefined,
     gemv_made: usize = 0,
+    subset_probe: ?subset.Probe = null,
     routes: [3]bolt.RouteProbe = undefined,
     route_made: usize = 0,
     combines: [2]bolt.CombineProbe = undefined,
@@ -39,6 +41,10 @@ pub const Suite = struct {
         const bc = bolt.controls;
         const mc = mamba.controls;
         for (std.enums.values(bolt.Gemv)) |v| try s.gemv(device, queue, kernels, only, v, null);
+        if (wanted(only, subset.spec().name)) {
+            s.subset_probe = try subset.Probe.init(a, device, queue);
+            try kernels.append(a, s.subset_probe.?.kernel());
+        }
         try s.route(device, queue, kernels, only, null);
         try s.combine(device, queue, kernels, only, null);
         for (std.enums.values(norm.Norm)) |v| try s.normOf(device, queue, kernels, only, v, null);
@@ -92,6 +98,7 @@ pub const Suite = struct {
 
     pub fn destroy(s: *Suite) void {
         for (s.gemvs[0..s.gemv_made]) |*p| p.deinit();
+        if (s.subset_probe) |*p| p.deinit();
         for (s.routes[0..s.route_made]) |*p| p.deinit();
         for (s.combines[0..s.combine_made]) |*p| p.deinit();
         for (s.norms[0..s.norm_made]) |*p| p.deinit();

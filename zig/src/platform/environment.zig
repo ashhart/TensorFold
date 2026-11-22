@@ -50,6 +50,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
+    .{ .name = "TF_GRAMMAR_HEAD_SUBSET", .scope = .nemotron, .kind = .flag, .forms = "0 or 1 (default 0; Metal Bolt grammar head)" },
+    .{ .name = "TF_GRAMMAR_HEAD_SUBSET_MAX", .scope = .nemotron, .kind = .u32, .forms = "maximum legal tokens (default 512; 0 disables the subset)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
     .{ .name = "TF_Q27_FLAT_GLUE", .scope = .metal, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_Q27_QK", .scope = .metal, .kind = .flag, .forms = "0 or 1" },

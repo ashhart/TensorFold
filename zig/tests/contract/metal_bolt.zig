@@ -10,13 +10,13 @@ const g = contract.gates;
 const Dense = contract.dense.Dense;
 
 /// One of the engine's prefill op sources by name (kernels/metal/sources.zig `prefill`), compiled as the engine does.
-fn opSource(name: []const u8) []const u8 {
+pub fn opSource(name: []const u8) []const u8 {
     for (sources.prefill) |f| if (std.mem.eql(u8, f.name, name)) return f.text;
     unreachable;
 }
 
 /// MLX's bn1 gemv, BM simdgroups a threadgroup: a lane's fma chain over K/32 products, then a 5-level tree.
-fn gemvDepth(s: c.Shape) usize {
+pub fn gemvDepth(s: c.Shape) usize {
     return (s.k + 31) / 32 + 5;
 }
 
@@ -157,18 +157,21 @@ pub const GemvProbe = struct {
     }
 
     pub fn run(self: *GemvProbe) !void {
-        const d = self.d.?;
         const p = self.rig.begin();
-        const e = p.e;
+        self.encode(p.e, self.out);
+        try self.rig.finish(p);
+    }
+
+    pub fn encode(self: *GemvProbe, e: mtl.ComputeEncoder, dst: rig_.Ref) void {
+        const d = self.d.?;
         e.setPipeline(self.pipe);
         e.setBuffer(self.w.buf, self.w.off, 0);
         e.setBuffer(self.x.buf, self.x.off, 1);
         e.setValue([3]i32{ @intCast(d.shape.k), @intCast(d.shape.n), @intCast(d.shape.k) }, 2);
-        e.setBuffer(self.out.buf, self.out.off, 3);
+        e.setBuffer(dst.buf, dst.off, 3);
         // as bolt.gemv launches it: ceil(N / 4 BM) groups of BM simdgroups, one vector a threadgroup z
         const per = 4 * self.bm();
         e.dispatchGroups(mtl.Size.of((d.shape.n + per - 1) / per, 1, d.shape.rows), mtl.Size.of(32, 1, self.bm()));
-        try self.rig.finish(p);
     }
 
     pub fn count(self: *GemvProbe) usize {

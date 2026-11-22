@@ -2,6 +2,12 @@
 const tf = @import("tensorfold");
 const lanes = @import("lanes");
 
+export fn nemotronGrammarFirstCompile(b: *tf.nemotron.backend.Metal, s: *lanes.Stream, mask: [*]const u32, words: usize) u8 {
+    const backend = b.backend();
+    _ = backend.vtable.first_masked.?(backend.ptr, s, s.prompt_len, mask[0..words]) catch return 1;
+    return 0;
+}
+
 export fn nemotronPrefillWidthsCompile(b: *tf.nemotron.backend.Metal, s: *lanes.Stream) u8 {
     const backend = b.backend();
     backend.prefill(s) catch return 1;
