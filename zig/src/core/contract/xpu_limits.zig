@@ -28,6 +28,22 @@ pub const xe = [_]Xe{
     .{ .name = "bmg-g31", .ocloc_device = "bmg", .pci = 0xe223 },
 };
 
+/// Gen12LP (Iris Xe, 12 subslices of 8 EUs, 128 GRF only), outside `xe`: only Qwen3-ASR's SPIR-V images serve it.
+pub const gen12lp: Xe = .{
+    .name = "tgllp",
+    .ocloc_device = "tgllp",
+    .pci = 0x9a49,
+    .max_threads = 512,
+    .max_dims = .{ 512, 512, 512 },
+    .slm_workgroup = 65536,
+    .slm_xe_core = 65536,
+    .sub_groups = &.{ 8, 16, 32 },
+    .eus_xe_core = 8,
+    .threads_eu = 7,
+    .xe_cores = 12,
+    .grf_modes = &.{128},
+};
+
 /// The image kind the launcher loads: a native zebin (format 1), or SPIR-V IL the driver builds (format 0).
 pub const Format = enum { native, spirv };
 

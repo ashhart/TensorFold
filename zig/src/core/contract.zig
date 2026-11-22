@@ -20,6 +20,7 @@ pub const hip_records = @import("contract/hip_records.zig");
 pub const vulkan_records = @import("contract/vulkan_records.zig");
 pub const xpu_limits = @import("contract/xpu_limits.zig");
 pub const xpu_records = @import("contract/xpu_records.zig");
+pub const qwen3_asr_xpu_records = @import("contract/qwen3_asr_xpu_records.zig");
 pub const xpu_ref = @import("contract/xpu_ref.zig");
 pub const zebin = @import("contract/zebin.zig");
 pub const zeinfo = @import("contract/zeinfo.zig");
@@ -28,6 +29,7 @@ test {
 }
 test {
     _ = xpu_records;
+    _ = qwen3_asr_xpu_records;
 }
 test {
     _ = xpu_ref;
