@@ -12,6 +12,15 @@ pub const maxItems = cuda.grouped.maxItems;
 
 pub const Which = enum(u2) { gate_up, down_f32, down };
 
+/// Separate opt-ins: arithmetic and staging never imply one another.
+pub fn nativeFp() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_EXPERT_NATIVE_FP", false);
+}
+
+pub fn stages3() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_EXPERT_STAGES3", false);
+}
+
 /// Upstream's NVFP4 experts and plan kernels, and the block 32 experts of a csf0_v1 checkpoint's routed layers.
 pub const Kernels = struct {
     nvfp4: cuda.experts.Nvfp4Experts,
@@ -27,7 +36,7 @@ pub const Kernels = struct {
 
     /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too, for these values.
     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: ?cuda.experts32.Values) !Kernels {
-        var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
+        var nvfp4 = try cuda.experts.Nvfp4Experts.loadOptions(d, sms, try nativeFp(), try stages3());
         errdefer nvfp4.unload();
         var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) |v| try cuda.experts32.Nvfp4b32Experts.load(d, sms, v) else null;
         errdefer if (b32) |*x| x.unload();

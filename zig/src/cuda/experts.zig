@@ -16,6 +16,7 @@ const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
 pub const Bf16Experts = @import("experts_bf16.zig").Bf16Experts;
 
+const prompt_options = @import("nvfp4_prompt_options.zig");
 pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
@@ -346,6 +347,7 @@ pub const Nvfp4Experts = struct {
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
     warps: usize = 4,
+    stages3: bool = false,
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -367,9 +369,7 @@ pub const Nvfp4Experts = struct {
 
     /// Prompt4<M, 4, 1, WN>'s dynamic shared bytes: stages of 64 rows' 64 inputs, then WN x 2 blocks of `parts`.
     pub fn promptSmem(parts: usize, wn: usize) u32 {
-        const stage: u32 = @intCast((64 * 8 + wn * 2 * parts * 36) * 16);
-        const stages: u32 = if (stage * 4 <= 49152) 4 else if (stage * 3 <= 49152) 3 else 2;
-        return stages * stage;
+        return prompt_options.promptSmem(parts, wn);
     }
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
@@ -380,17 +380,24 @@ pub const Nvfp4Experts = struct {
     }
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
-        const value = if (std.c.getenv("TF_NVFP4_DECODE_WARPS")) |v| std.mem.span(v) else null;
-        return loadWarps(d, sms, try decodeWarps(value));
+        return loadOptions(d, sms, false, false);
     }
-
+    /// GLM's independent opt-ins; every other caller retains the original prompt symbols and arithmetic.
+    pub fn loadOptions(d: *const Driver, sms: usize, native_fp: bool, stages3: bool) !Nvfp4Experts {
+        const value = if (std.c.getenv("TF_NVFP4_DECODE_WARPS")) |v| std.mem.span(v) else null;
+        return loadVariant(d, sms, try decodeWarps(value), native_fp, stages3);
+    }
     /// Every warp owns independent tiles; changing CTA grouping preserves each tile's arithmetic.
     pub fn loadWarps(d: *const Driver, sms: usize, warps: usize) !Nvfp4Experts {
+        return loadVariant(d, sms, warps, false, false);
+    }
+
+    fn loadVariant(d: *const Driver, sms: usize, warps: usize, native_fp: bool, stages3: bool) !Nvfp4Experts {
         if (warps != 1 and warps != 4) return error.BadExpertWarps;
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .fact_fns = undefined, .warps = warps, .stages3 = stages3 };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 } ++ @import("experts_waves.zig").symbols, 0..) |name, i| {
             var narrow: [256]u8 = undefined;
             const selected = if (warps == 1) blk: {
@@ -403,9 +410,12 @@ pub const Nvfp4Experts = struct {
             e.fns[i] = try mod.function(selected);
             e.resident[i] = @max(1, try e.fns[i].occupancy(@intCast(warps * 32), 0)) * sms;
         }
-        for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
-            f.* = try mod.function(name);
-            try f.allowDynamicShared(promptSmem(parts, wn));
+        for (prompt_options.promptNames(native_fp, stages3), &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
+            f.* = mod.function(name) catch |err| {
+                if (native_fp) return error.GlmNativeFpUnavailable;
+                return err;
+            };
+            try f.allowDynamicShared(prompt_options.promptSmemOpt(parts, wn, stages3));
         }
         for (symbols.fact, &e.fact_fns, [2]usize{ 2, 1 }, fact_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
@@ -461,7 +471,7 @@ pub const Nvfp4Experts = struct {
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = prompt_options.promptSmemOpt(parts, prompt_wn[fi], e.stages3) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }
 
@@ -556,6 +566,7 @@ test "packGateUp stacks packOne's gate and up blocks per (column block, k32 grou
 }
 
 test "nvfp4 rows of either kind are refused when the format is not loaded" {
+    _ = prompt_options;
     const g: Grouped = .{};
     const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2, .relu2 = true };
     const s: Stream = undefined; // never reached: the refusal comes first

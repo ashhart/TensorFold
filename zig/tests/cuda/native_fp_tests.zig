@@ -15,6 +15,7 @@ fn nanPair(i: usize) bool {
 pub fn run(gpu: Gpu) !void {
     if (!cuda.kernels.available) return error.BuiltWithoutKernels;
     try pairs4(gpu);
+    try expertPairs(gpu);
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.prompt16);
     defer mod.unload();
     const f = mod.function("tf_native_fp_check") catch {
@@ -53,6 +54,34 @@ pub fn run(gpu: Gpu) !void {
         try check.expect(w[3 * j] == w[3 * j + 1], "native-fp: e2m1 byte {x:0>2}: {x:0>8} vs {x:0>8}", .{ b, w[3 * j], w[3 * j + 1] });
     }
     check.pass("native-fp: e2m1x2 == fp4pair on all 256 bytes; e4m3x2 == fp8pair on {d} finite pairs ({d} NaN-byte excluded)", .{ pairs - nan, nan });
+}
+
+/// The routed prompt helpers: every fp4 byte and both extracted scale selectors for every scale byte.
+fn expertPairs(gpu: Gpu) !void {
+    var mod = try cuda.Module.load(gpu.d, cuda.kernels.nvfp4_experts);
+    defer mod.unload();
+    const f = mod.function("tf_nvfp4_native_fp_check") catch {
+        check.pass("native-fp nvfp4 experts: skipped, built without -Dnative-fp-decode", .{});
+        return;
+    };
+    var stream = try cuda.Stream.init(gpu.d, false);
+    defer stream.deinit();
+    var out = try cuda.DeviceBuffer.alloc(gpu.d, 2 * bytes * 6 * 4);
+    defer out.free();
+    var a: cuda.launch.Args = .{};
+    a.add(out.ptr);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = 2 }, .block = .{ .x = 256 } }, stream, &a);
+    try stream.synchronize();
+    const raw = try check.download(gpu, out);
+    defer gpu.gpa.free(raw);
+    const w = std.mem.bytesAsSlice(u32, raw);
+    for (0..2 * bytes) |i| {
+        const n = w[6 * i ..][0..3];
+        const s = w[6 * i + 3 ..][0..3];
+        try check.expect(n[0] == s[0] and n[1] == s[1], "native-fp nvfp4 experts: fp4 byte {x:0>2} differs", .{i & 255});
+        try check.expect(n[2] == s[2], "native-fp nvfp4 experts: scale byte {x:0>2}, selector {d} differs", .{ i & 255, i >> 8 });
+    }
+    check.pass("native-fp nvfp4 experts: all 256 fp4 bytes and all 512 scale selections match, including NaN fallbacks", .{});
 }
 
 /// qmmf's FP4 decode: e2m1_pairs equals fp4pair on all 2^32 words at both nibble offsets, scales included.

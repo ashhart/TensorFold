@@ -3,6 +3,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const fp8 = @import("fp8.zig");
 
+const bf16 = @import("../root.zig").bf16_round;
 const Tensor = types.Tensor;
 
 /// Inputs one e4m3 scale covers.
@@ -74,4 +75,23 @@ test "a reference refuses mismatched expert stacks" {
     };
     var out: [32]f64 = undefined;
     try std.testing.expectError(error.UnexpectedTensor, reference(h, &out));
+}
+
+test "every NVFP4 code and scale product has exact bf16 operands, including the software NaN-byte fallback" {
+    const code = [16]u16{
+        0x0000, 0x3F00, 0x3F80, 0x3FC0, 0x4000, 0x4040, 0x4080, 0x40C0,
+        0x8000, 0xBF00, 0xBF80, 0xBFC0, 0xC000, 0xC040, 0xC080, 0xC0C0,
+    };
+    for (0..256) |byte| {
+        for (0..2) |h| {
+            const index = if (h == 0) byte & 15 else byte >> 4;
+            try std.testing.expectEqual(code[index], bf16.bits(@floatCast(e2m1(@intCast(index)))));
+        }
+    }
+    for (0..16) |n| for (0..256) |scale| {
+        const a = bf16.value(code[n]);
+        const b = bf16.value(bf16.bits(@floatCast(fp8.e4m3(@intCast(scale)))));
+        const exact = e2m1(@intCast(n)) * fp8.e4m3(@intCast(scale));
+        try std.testing.expectEqual(bf16.bits(@floatCast(exact)), bf16.bits(a * b));
+    };
 }
