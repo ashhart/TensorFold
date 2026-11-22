@@ -1,7 +1,7 @@
 //! POST /v1/responses/input_tokens: the prompt POST /v1/responses would prefill for the same body, none generated.
 const std = @import("std");
 const json = @import("json");
-const responses = @import("responses.zig");
+const incoming = @import("responses_request.zig");
 const prepare = @import("openai_prepare.zig").prepare;
 const compact = @import("compact.zig");
 const cortheon = @import("cortheon/cortheon.zig");
@@ -19,8 +19,8 @@ pub fn route(path: []const u8) bool {
 /// The count, or the refusal POST /v1/responses would send for the same body before its run.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     var cx: Cx = .{ .a = a };
-    const r = responses.request(srv, conn, a, &cx) orelse return;
-    if (responses.unofferedLogprobs(srv, a, r.t) catch return) |payload| return routes.sendValue(conn, a, 400, payload);
+    const r = incoming.request(srv, conn, a, &cx) orelse return;
+    if (incoming.unofferedLogprobs(srv, a, r.t) catch return) |payload| return routes.sendValue(conn, a, 400, payload);
     switch (prepare(srv, a, .{ .conn = conn }, r.t.chat, r.t.format, true, true)) {
         .cancelled => {},
         .refused => |x| {
