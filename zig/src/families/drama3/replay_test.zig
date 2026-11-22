@@ -9,6 +9,8 @@ const Fake = struct {
     pub const Engine = struct {
         a: std.mem.Allocator,
         forced: usize = 17,
+        frame: i32 = 1,
+        fork_frame: i32 = 1,
         frames_out: u64 = 0,
         c: struct { ids: struct { eos: i32 = -1 } = .{} } = .{},
         pub fn generate(e: *@This(), _: std.Io, _: []const model.Frame, _: Sampling, limit: usize, _: bool, _: usize) !struct { frames: []model.Frame } {
@@ -22,6 +24,7 @@ const Fake = struct {
         pub fn fork(e: *@This()) !*@This() {
             const f = try e.a.create(@This());
             f.* = e.*;
+            f.frame = e.fork_frame;
             return f;
         }
         pub fn destroy(e: *@This()) void {
@@ -29,8 +32,8 @@ const Fake = struct {
         }
         pub fn prefill(_: *@This(), _: []const model.Frame, _: ?*anyopaque) !void {}
         pub fn frameStep(_: *@This(), _: Sampling, _: bool, _: ?*anyopaque) !void {}
-        pub fn download(_: *@This(), _: u64, out: []u8) !void {
-            const f: model.Frame = @splat(1);
+        pub fn download(e: *@This(), _: u64, out: []u8) !void {
+            const f: model.Frame = @splat(e.frame);
             @memcpy(out, std.mem.asBytes(&f));
         }
     };
@@ -45,14 +48,16 @@ const Fake = struct {
             max_chunk: usize = 16,
             saw16: bool = false,
             saw_tail: bool = false,
+            /// The sample a sixteen-frame decode writes; chunk 1 and 4 decodes write 0.
+            pcm16: f32 = 0,
             pub fn flush(t: *@This(), from: usize, to: usize, sink: anytype) !void {
-                const zero: [16 * 2048]f32 = @splat(0);
                 var at = from;
                 while (at < to) {
                     const n = @min(t.max_chunk, to - at);
                     t.saw16 = t.saw16 or n == 16;
                     t.saw_tail = t.saw_tail or (from == 16 and n == 1);
-                    try sink.audio(sink.ctx, zero[0 .. n * 2048]);
+                    const pcm: [16 * 2048]f32 = @splat(if (n == 16) t.pcm16 else 0);
+                    try sink.audio(sink.ctx, pcm[0 .. n * 2048]);
                     at += n;
                 }
             }
@@ -82,4 +87,14 @@ test "drama replay: actually decodes a sixteen-frame chunk and its one-frame tai
     var t: Fake.tts.Tts = .{ .a = std.testing.allocator };
     try Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}, false);
     try std.testing.expect(t.saw16 and t.saw_tail);
+}
+test "drama replay: a codec chunk 16 PCM difference is PCM-only once every exact check passed" {
+    var e: Fake.Engine = .{ .a = std.testing.allocator };
+    var t: Fake.tts.Tts = .{ .a = std.testing.allocator, .pcm16 = 0.25 };
+    try std.testing.expectError(error.ReplayPcmOnly, Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}, false));
+}
+test "drama replay: a forked frame mismatch fails behind a codec chunk 16 PCM difference" {
+    var e: Fake.Engine = .{ .a = std.testing.allocator, .fork_frame = 2 };
+    var t: Fake.tts.Tts = .{ .a = std.testing.allocator, .pcm16 = 0.25 };
+    try std.testing.expectError(error.ReplayMismatch, Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}, false));
 }

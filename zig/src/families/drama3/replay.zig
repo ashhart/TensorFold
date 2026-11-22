@@ -29,6 +29,21 @@ pub fn Replay(comptime d3: type) type {
             if (!std.mem.eql(u8, a, b)) return error.ReplayMismatch;
         }
 
+        /// A codec chunk's PCM against chunk 1's, kept while the exact checks run on.
+        const PcmDiff = struct { chunk: usize, max_abs: f64, rms: f64 };
+
+        fn pcmDiff(chunk: usize, want: []const f32, got: []const f32) ?PcmDiff {
+            if (std.mem.eql(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got))) return null;
+            var max_abs: f64 = 0;
+            var sum: f64 = 0;
+            for (want, got) |w, g| {
+                const d: f64 = w - g;
+                max_abs = @max(max_abs, @abs(d));
+                sum += d * d;
+            }
+            return .{ .chunk = chunk, .max_abs = max_abs, .rms = @sqrt(sum / @as(f64, @floatFromInt(want.len))) };
+        }
+
         fn audio(t: *d3.tts.Tts, out: []f32, n: usize, chunk: usize, report: bool) !void {
             try reset(t);
             var sink: Audio = .{ .out = out };
@@ -51,7 +66,8 @@ pub fn Replay(comptime d3: type) type {
             std.debug.print("codec requested {d}, actual sizes {any}\n", .{ chunk, sink.sizes[0..sink.calls] });
         }
 
-        /// Fails on the first mismatch; ``report`` prints each chunk's codec sizes and the pass line (CLI receipt).
+        /// Fails on the first exact mismatch; a codec chunk 4 or 16 PCM difference is ReplayPcmOnly once every exact
+        /// check has passed. ``report`` prints each chunk's codec sizes and the outcome line (CLI receipt).
         pub fn verify(
             gpa: std.mem.Allocator,
             io: std.Io,
@@ -76,9 +92,12 @@ pub fn Replay(comptime d3: type) type {
             const replay = try e.generate(io, rows, smp, 17, true, 1);
             defer gpa.free(replay.frames);
             try equal(std.mem.sliceAsBytes(baseline.frames), std.mem.sliceAsBytes(replay.frames));
-            for ([_]usize{ 1, 4, 16 }) |chunk| {
+            try audio(t, other, replay.frames.len, 1, report);
+            try equal(std.mem.sliceAsBytes(pcm), std.mem.sliceAsBytes(other));
+            var diffs: [2]?PcmDiff = undefined;
+            for ([_]usize{ 4, 16 }, &diffs) |chunk, *diff| {
                 try audio(t, other, replay.frames.len, chunk, report);
-                try equal(std.mem.sliceAsBytes(pcm), std.mem.sliceAsBytes(other));
+                diff.* = pcmDiff(chunk, pcm, other);
             }
             const second = try e.fork();
             defer second.destroy();
@@ -96,6 +115,12 @@ pub fn Replay(comptime d3: type) type {
             }
             try audio(second_tts, other, baseline.frames.len, 1, report);
             try equal(std.mem.sliceAsBytes(pcm), std.mem.sliceAsBytes(other));
+            var pcm_only = false;
+            for (diffs) |diff| if (diff) |d| {
+                pcm_only = true;
+                if (report) std.debug.print("Drama replay PCM only: codec chunk {d} against 1, max abs {e:.3}, RMS {e:.3}; every exact check passed\n", .{ d.chunk, d.max_abs, d.rms });
+            };
+            if (pcm_only) return error.ReplayPcmOnly;
             if (!report) return;
             std.debug.print("Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state\n", .{});
         }
