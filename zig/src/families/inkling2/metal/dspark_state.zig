@@ -27,7 +27,7 @@ fn sizes() [fields.len]usize {
         r * query * b,        r * kv * b,         r * kv * b,           r * query * b,        r * kv * b,
         r * kv * b,           r * query * b,      r * intermediate * b, r * intermediate * b, r * intermediate * b,
         (r - 1) * 201024 * b, 4 * a * hidden * b, a * kv * b,           a * kv * b,           (r - 1) * 3 * rank * 4,
-        rank * b,             rank * b,           rank * b,             rank * b,             vocabulary * b,
+        rank * b,             rank * b,           3 * rank * b,         rank * b,             vocabulary * b,
     };
 }
 
