@@ -72,16 +72,16 @@ pub const Mark = struct { inode: std.Io.File.INode, bytes: [16]u8 };
 
 /// Snapshot before a timed region; missing instrumentation or active speech cannot certify a clean sample.
 pub fn mark(io: std.Io, at: []const u8) ?Mark {
+    const lock = open(io, at) catch return null;
+    defer lock.close(io);
+    if (!(lock.tryLock(io, .exclusive) catch return null)) return null;
+    defer lock.unlock(io); // held through the read, so no speech can stamp behind it
     const file = marker(io, at) catch return null;
     defer file.close(io);
     const stat = file.stat(io) catch return null;
     if (stat.permissions.toMode() & 0o666 != 0o666) return null;
     var result: Mark = .{ .inode = stat.inode, .bytes = undefined };
     if ((file.readPositionalAll(io, &result.bytes, 0) catch return null) != result.bytes.len) return null;
-    const lock = open(io, at) catch return null;
-    defer lock.close(io);
-    if (!(lock.tryLock(io, .exclusive) catch return null)) return null;
-    lock.unlock(io);
     return result;
 }
 
@@ -331,6 +331,40 @@ test "timed work excludes speech completed entirely between polls and preexistin
         try file.setPermissions(io, .fromMode(0o600));
         try std.testing.expect(!clean(io, lock, mark(io, lock)));
     }
+}
+
+test "speech that stamps and ends while the stamp is read cannot certify a timed step" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const at = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(at);
+    const lock = try std.fs.path.join(std.testing.allocator, &.{ at, "speech.lock" });
+    defer std.testing.allocator.free(lock);
+
+    const before = mark(io, lock);
+    // speech took its hold mid-step but has not stamped; it stamps and lets go during the next stamp read
+    const Late = struct {
+        var voice: ?std.Io.File = null;
+        var name: []const u8 = "";
+        fn read(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            const n = try std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+            if (voice) |held| {
+                voice = null;
+                stamp(std.testing.io, name);
+                done(std.testing.io, held);
+            }
+            return n;
+        }
+    };
+    const held = try open(io, lock);
+    try held.lock(io, .shared);
+    Late.voice = held;
+    Late.name = lock;
+    defer if (Late.voice) |still| done(io, still);
+    var vtable = io.vtable.*;
+    vtable.fileReadPositional = Late.read;
+    try std.testing.expect(!clean(.{ .userdata = io.userdata, .vtable = &vtable }, lock, before));
 }
 
 test "a failed command buffer is reported only after every buffer committed with it has completed" {
