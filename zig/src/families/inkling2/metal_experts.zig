@@ -58,9 +58,9 @@ const DotArgs = extern struct {
 const CombineArgs = extern struct { rows: u32, topk: u32, hidden: u32, experts: u32 };
 const PlanArgs = extern struct { pairs: u32, experts: u32, tile: u32, gate_up_groups: u32, down_groups: u32, swap: u32, pad: [2]u32 = @splat(0) };
 
-/// Pairs per grouped tile, and the outputs one tile's threadgroup covers: 32 weight rows (16 gate/up columns).
-const group_tile = 16;
-const group_rows = 32;
+/// Pairs per grouped tile, and the outputs one tile's threadgroup covers: 64 weight rows (32 gate/up columns).
+const group_tile = 32;
+const group_rows = 64;
 
 comptime {
     std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16 and @sizeOf(PlanArgs) == 32);
