@@ -171,6 +171,9 @@ test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expe
         try changed.append(t.allocator, try flashKey(&x, &c));
         @field(k.forms, field) = true;
     }
+    k.forms.gdn_chain_tpr = true;
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.forms.gdn_chain_tpr = false;
     inline for (.{ "readout_rows", "fact_rows" }) |field| {
         @field(k.forms, field) = std.math.maxInt(usize); // 0 set: never the tiles
         try changed.append(t.allocator, try flashKey(&x, &c));
@@ -219,7 +222,7 @@ test "disk identity: Flash Next CUDA prompt forms take each setting's value at l
     const env = @import("sys").env;
     const Engine = @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child;
     const Forms = @FieldType(@FieldType(Engine, "batch_k"), "forms");
-    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS", "TF_FLASHNEXT_READOUT_FUSED" };
+    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_GDN_CHAIN_TPR", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS", "TF_FLASHNEXT_READOUT_FUSED" };
     for (names) |n| _ = env.unsetenv(n);
     defer for (names) |n| {
         _ = env.unsetenv(n);
@@ -234,6 +237,8 @@ test "disk identity: Flash Next CUDA prompt forms take each setting's value at l
     try t.expectEqual(@as(usize, 32), Forms.resolve().fact_rows);
     _ = env.setenv("TF_FLASHNEXT_READOUT_FUSED", "1", 1);
     try t.expect(Forms.resolve().readout_fused);
+    _ = env.setenv("TF_FLASHNEXT_GDN_CHAIN_TPR", "1", 1);
+    try t.expect(Forms.resolve().gdn_chain_tpr);
 }
 
 const nemotron = @import("nemotron");
