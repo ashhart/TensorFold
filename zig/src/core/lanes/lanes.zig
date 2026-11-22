@@ -113,6 +113,10 @@ pub const learned_dirs = @import("learned_dirs.zig");
 
 test {
     _ = @import("context_copy_price_test.zig");
+    _ = @import("lone_copy_price_test.zig");
+    _ = @import("lone_copy_sampled_test.zig");
+    _ = @import("copy_price_test.zig");
+    _ = @import("copy_scope_test.zig");
     _ = @import("sampling_row.zig");
     _ = @import("sampling_row_test.zig");
     _ = @import("penalty_rows.zig");
