@@ -13,11 +13,11 @@ assert.equal(benchmarkCells(parsed)[0].successful, 5)
 assert.equal(benchmarkCells(parsed)[0].deliveryTokensPerSecond?.median, 100)
 assert.equal(benchmarkCells(parsed)[0].firstTextSeconds?.median, 0.30000000000000004)
 assert.equal(parsed.samples[0].server_decode_seconds, null, 'missing engine duration stays unknown')
-const current = structuredClone(receipt); current.runtime.tensorfold_version = '1.1.0'
-assert.equal(parseBenchmarkReceipt(JSON.stringify(current), { model: current.model.repo_id, serial: false, engineVersion: '1.1.0' }).runtime.tensorfold_version, '1.1.0')
+const current = structuredClone(receipt); current.runtime.tensorfold_version = BENCHMARK_ENGINE_VERSION
+assert.equal(parseBenchmarkReceipt(JSON.stringify(current), { model: current.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }).runtime.tensorfold_version, BENCHMARK_ENGINE_VERSION)
 const historical = structuredClone(receipt); historical.runtime.tensorfold_version = '1.0.12'
 assert.equal(parseBenchmarkReceipt(JSON.stringify(historical)).runtime.tensorfold_version, '1.0.12', 'reviewed historical receipts remain readable after the engine update')
-assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: '1.1.0' }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
+assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
 for (const mutate of [
   (value: any) => { value.prompt = 'SYNTHETIC_PRIVATE_PROMPT' },
   (value: any) => { value.model.repo_id = '/private/operator/model' },
