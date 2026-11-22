@@ -21,6 +21,7 @@ pub const Sets = struct {
     flashnext: *@import("contract_flashnext_more.zig").Set,
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
+    shared_down8: *@import("contract_qmmf_shared8.zig").Set,
     prompt: *Prompt,
     muse: *@import("contract_muse.zig").Group,
     a: std.mem.Allocator,
@@ -60,6 +61,8 @@ pub const Sets = struct {
         try exl3.add(gpu, s, list);
         const shared_down = try SharedDown.create(gpu, s, &modelopt.lane, a, list);
         errdefer shared_down.deinit();
+        const shared_down8 = try @import("contract_qmmf_shared8.zig").Set.create(gpu, s, modelopt.lane, a, list);
+        errdefer shared_down8.deinit();
         const prompt = try gpu.gpa.create(Prompt);
         errdefer gpu.gpa.destroy(prompt);
         var prompt_lane = modelopt.lane; // the tile in this set's copy only, as Flash Next loads it
@@ -87,6 +90,7 @@ pub const Sets = struct {
             .flashnext = flashnext,
             .exl3 = exl3,
             .shared_down = shared_down,
+            .shared_down8 = shared_down8,
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
@@ -103,6 +107,7 @@ pub const Sets = struct {
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
+        sets.shared_down8.deinit();
         sets.shared_down.deinit();
         sets.exl3.deinit();
         sets.gpa.destroy(sets.exl3);

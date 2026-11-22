@@ -185,6 +185,7 @@ pub const Lane = struct {
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
+    shared_down8: ?[2]Function = null,
     /// Output columns from which this lane fuses a split-K cluster call; 0 keeps its original schedule.
     fuse_split_n: usize = 0,
     fuse_s: [2][2][2]Function = undefined, // by halfModeIndex, Out, row tile 16 then 32: the fused form at decode rows

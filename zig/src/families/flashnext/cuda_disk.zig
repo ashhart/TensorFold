@@ -121,8 +121,9 @@ pub fn policyOf(c: anytype) [13]u64 {
         e.chunk,
         e.busy_chunk,
         @intFromBool(f.gdn_fused),
-        // TF_FLASHNEXT_HC_FUSE, and TF_FLASHNEXT_READOUT_FUSED in bit 1 (unset leaves the key as it was)
-        @intFromBool(f.hc_fuse) | @as(u64, @intFromBool(f.readout_fused)) << 1,
+        // HC fuse, readout fuse, decode HC fuse and MXFP8 shared down; unset new bits preserve the old key.
+        @intFromBool(f.hc_fuse) | @as(u64, @intFromBool(f.readout_fused)) << 1 |
+            @as(u64, @intFromBool(f.hc_decode_fuse)) << 2 | @as(u64, @intFromBool(f.shared_down8)) << 3,
         @intFromBool(f.in_pass),
         f.readout_rows,
         f.fact_rows,

@@ -25,6 +25,7 @@ pub const Set = struct {
     lanes: [4]lanes_k.Lanes,
     glue: flash.Glue,
     wbnorm: [3]wbnorm_k.WbNorm,
+    wbnorm_in_place: [2]wbnorm_k.WbNorm,
     mtp: cuda.Module,
     hcn: *hcn_k.Set,
     topk: topk_k.TopK,
@@ -49,6 +50,8 @@ pub const Set = struct {
         errdefer self.glue.deinit();
         for (std.enums.values(wbnorm_k.Mode), &self.wbnorm) |mode, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = mode, .glue = &self.glue };
         for (&self.wbnorm) |*x| try kernels.append(a, x.kernel());
+        for ([_]wbnorm_k.Mode{ .moe, .slices }, &self.wbnorm_in_place) |mode, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = mode, .glue = &self.glue, .in_place = true };
+        for (&self.wbnorm_in_place) |*x| try kernels.append(a, x.kernel());
         self.hcn = try hcn_k.Set.init(gpu, s, a, kernels);
         errdefer self.hcn.deinit();
         self.mtp = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_mtp);
@@ -62,6 +65,7 @@ pub const Set = struct {
         for (&self.late) |*x| x.deinit();
         self.roll.deinit();
         for (&self.lanes) |*x| x.deinit();
+        for (&self.wbnorm_in_place) |*x| x.deinit();
         for (&self.wbnorm) |*x| x.deinit();
         self.hcn.deinit();
         self.topk.deinit();

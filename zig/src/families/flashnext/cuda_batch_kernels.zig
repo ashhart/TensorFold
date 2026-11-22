@@ -38,6 +38,8 @@ pub const Gdn = struct {
 pub const Forms = struct {
     gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
     hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
+    hc_decode_fuse: bool = false, // TF_FLASHNEXT_HC_DECODE_FUSE
+    shared_down8: bool = false, // TF_FLASHNEXT_SHARED_DOWN8
     in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
     readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
     fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
@@ -47,6 +49,8 @@ pub const Forms = struct {
         return .{
             .gdn_fused = @import("cuda_gdn_fused.zig").on(),
             .hc_fuse = @import("cuda_batch_hc.zig").on(),
+            .hc_decode_fuse = @import("sys").environment.read(bool, "TF_FLASHNEXT_HC_DECODE_FUSE", false) catch false,
+            .shared_down8 = @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARED_DOWN8", false) catch false,
             .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
             .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
             .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
@@ -117,6 +121,7 @@ pub const Kernels = struct {
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();
+        if (k.forms.shared_down8) try cuda.qmmf_shared.loadMxfp8(&k.native_lane);
         const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
         if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
         var device: c_int = 0;

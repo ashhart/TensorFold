@@ -484,6 +484,7 @@ test {
     _ = @import("glm_l2pf_pending.zig");
     _ = @import("exl3_prompt_pending.zig");
     _ = @import("registry_pending_test.zig");
+    _ = @import("qmmf_shared8_records.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");
 }

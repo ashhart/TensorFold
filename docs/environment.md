@@ -143,7 +143,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 36 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 39 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -161,6 +161,8 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_SHARED_DRAFTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_HC_DECODE_FUSE` | Exactly `0` or `1`; default off. CUDA: existing fused HC writeback and normalize at 1–63 rows, retaining the master HC fuse and ownership gates |
+| `TF_FLASHNEXT_SHARED_DOWN8` | Exactly `0` or `1`; default off. CUDA: unsplit MXFP8 shared-expert down writes its slot directly at 1–16 rows |
 | `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_KEEP_LATE` | Exactly `0` or `1`; unset or blank leaves the choice to the loader |
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |

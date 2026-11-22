@@ -99,6 +99,7 @@ const Rig = struct {
             }
         }.of;
         r.k = undefined;
+        r.k.forms = .{};
         r.k.copy_cols = f(&r.d, copy_id);
         r.k.lane = f(&r.d, legacy_id);
         r.k.tiles.fact = f(&r.d, legacy_id + 1);
