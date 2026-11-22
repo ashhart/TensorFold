@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on Metal: every resident kept state is staged to disk while its borrowed rows can still be read, whatever `--spill-gib` is set to, so a long conversation's disk copy no longer stays at an older depth and later turns resume from the newest state (#2755, refs #2669).
+
 - Flash Next on Metal: the 4-bit expert scale and bias index is now built on Macs with tensor units (M5) too; same tokens, 2-5% faster one-stream decode on an M5 Ultra (#4547).
 
 - Tests: the lane host's lone-driver test no longer fails under CI load; its fake driver now hands streams back with their cache settled, as the lane core requires, and its scheduling check no longer depends on timing (#4568).
