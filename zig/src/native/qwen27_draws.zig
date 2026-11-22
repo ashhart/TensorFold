@@ -21,6 +21,80 @@ pub fn each(job: anytype, rows: usize) anyerror!void {
     for (errors[0..rows]) |e| if (e) |err| return err;
 }
 
+/// `threads - 1` helpers kept alive between calls: TF_Q27_DRAW_POOL, the engine's own. `each` unchanged beside it.
+pub fn Pool(comptime Job: type) type {
+    return struct {
+        helpers: [threads - 1]?std.Thread = @splat(null),
+        mutex: std.Io.Mutex = .init,
+        work: std.Io.Condition = .init,
+        idle: std.Io.Condition = .init,
+        job: ?Job = null,
+        rows: usize = 0,
+        next: std.atomic.Value(usize) = .init(0),
+        errors: [max_rows]?anyerror = @splat(null),
+        epoch: u64 = 0,
+        pending: usize = 0,
+        quit: bool = false,
+
+        /// Started here; a spawn that fails leaves its rows to the others, as `each`'s `catch null` does.
+        pub fn start(p: *@This()) void {
+            for (&p.helpers) |*t| t.* = std.Thread.spawn(.{ .stack_size = 1 << 20 }, loop, .{p}) catch null;
+        }
+
+        /// The engine's teardown: every started helper joined, whichever started.
+        pub fn deinit(p: *@This()) void {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            p.mutex.lockUncancelable(io);
+            p.quit = true;
+            p.work.broadcast(io);
+            p.mutex.unlock(io);
+            for (p.helpers) |t| if (t) |h| h.join();
+        }
+
+        /// `each`'s contract on the kept helpers: the caller draws beside them, the first failing row's error back.
+        pub fn each(p: *@This(), job: Job, rows: usize) anyerror!void {
+            if (rows > max_rows) return error.TooManyDrawRows;
+            const io = std.Io.Threaded.global_single_threaded.io();
+            p.mutex.lockUncancelable(io);
+            p.job = job;
+            p.rows = rows;
+            p.next.store(0, .monotonic);
+            p.errors = @splat(null);
+            p.pending = 0;
+            for (p.helpers) |t| p.pending += @intFromBool(t != null);
+            p.epoch += 1;
+            p.work.broadcast(io);
+            p.mutex.unlock(io);
+            Worker(Job).run(job, rows, &p.next, &p.errors);
+            p.mutex.lockUncancelable(io);
+            while (p.pending != 0) p.idle.waitUncancelable(io, &p.mutex);
+            p.mutex.unlock(io);
+            for (p.errors[0..rows]) |e| if (e) |err| return err;
+        }
+
+        fn loop(p: *@This()) void {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            p.mutex.lockUncancelable(io);
+            var seen: u64 = 0;
+            while (true) {
+                while (!p.quit and p.epoch == seen) p.work.waitUncancelable(io, &p.mutex);
+                if (p.quit) {
+                    p.mutex.unlock(io);
+                    return;
+                }
+                seen = p.epoch;
+                const job = p.job.?;
+                const rows = p.rows;
+                p.mutex.unlock(io);
+                Worker(Job).run(job, rows, &p.next, &p.errors);
+                p.mutex.lockUncancelable(io);
+                p.pending -= 1;
+                if (p.pending == 0) p.idle.signal(io);
+            }
+        }
+    };
+}
+
 /// What a penalized row takes from a copy of its logits first: lanes.penalty_rows.Entries.applyRow by frame row.
 pub const Lower = struct { ctx: *const anyopaque, apply: *const fn (ctx: *const anyopaque, row: u32, logits: []u16) void };
 
@@ -110,6 +184,25 @@ fn greatest(_: std.mem.Allocator, logits: []const u16, _: ?u8, _: u64, _: []cons
 /// Frame row 5 loses 1.5 on token 1 (Entries.applyRow's rounding is lanes.penalty_rows' own test).
 fn lowerFive(_: *const anyopaque, row: u32, logits: []u16) void {
     if (row == 5) logits[1] = 0x3fc0; // 3 - 1.5
+}
+
+test "qwen27 draws: a kept pool draws the same rows as the walk, errors alike, helpers reused" {
+    var pool: Pool(Squares) = .{};
+    pool.start();
+    defer pool.deinit(); // teardown joins the started helpers
+    for ([_]usize{ 0, 1, 2, 7, max_rows }) |rows| {
+        var out: [max_rows]u64 = @splat(std.math.maxInt(u64));
+        const fail: [max_rows]bool = @splat(false);
+        try pool.each(Squares{ .out = out[0..rows], .fail = &fail }, rows);
+        for (out[0..rows], 0..) |v, i| try std.testing.expectEqual(@as(u64, i) * i, v);
+        for (out[rows..]) |v| try std.testing.expectEqual(std.math.maxInt(u64), v);
+    }
+    var out: [16]u64 = undefined;
+    var fail: [16]bool = @splat(false);
+    fail[6] = true;
+    fail[3] = true;
+    try std.testing.expectError(error.OddRow, pool.each(Squares{ .out = &out, .fail = &fail }, 16));
+    try std.testing.expectError(error.TooManyDrawRows, pool.each(Squares{ .out = &out, .fail = &fail }, max_rows + 1));
 }
 
 test "qwen27 draws: a penalized row draws from its lowered copy, and the frame's rows stay the forward's" {
