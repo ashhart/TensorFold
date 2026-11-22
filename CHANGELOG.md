@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH=1` (opt-in) captures the greedy verify round's argmax in the target graph, skips the token download greedy rounds never read and uploads per-forward metadata from pinned memory; same kernel and inputs, so tokens are unchanged (#4616).
+
 - Caches: KV and state block copies stage through bounded chunks instead of a temporary as large as the whole block set, with the same bytes; a failed allocation mid-copy leaves the source intact, and a read that fails its checks is counted and named.
 
 - Lanes: lone-stream copy pricing refuses an empty chance list by name, keeps the unpriced width for a zero or non-finite measured cost, and does nothing when copies are off; tokens unchanged.
