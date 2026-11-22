@@ -103,3 +103,36 @@ test "copy edges: finite prices still select the hand-priced prefix and preserve
     try std.testing.expectEqual(@as(?u64, 0), state.?.copy_plain);
     try std.testing.expectEqual(@as(?u64, r.k.depth_probe_every), state.?.copy_wait);
 }
+
+test "copy edges: copies-off performs no pricing clock read, allocation, trail or retention" {
+    const cfgs = @import("config.zig");
+    const Engine = @import("engine.zig").Engine;
+    const sm = @import("stream.zig");
+    const fake = @import("fake.zig");
+    const lone = @import("lone_copy.zig");
+    const ev = @import("events.zig");
+    const forwards = [_]cfgs.Cost{ .{ .width = 1, .ms = 10 }, .{ .width = 2, .ms = 11 } };
+    var cfg = try cfgs.Config.init(gpa, .{ .exact_width = 16, .copy_guard = true, .copy_drafts = false, .window_costs = &forwards }, 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var log = ev.Log.init(gpa);
+    defer log.deinit();
+    engine.log = &log;
+    var stream = try sm.Stream.init(gpa, .{ .id = "copies-off", .prompt = &.{ 1, 2, 3 }, .max_new = 16 });
+    defer stream.deinit(gpa);
+    stream.rounds = 2;
+    try std.testing.expect(cfg.copy_guard and cfg.max_copy == 0);
+    try std.testing.expect(!lone.enabled(&engine, &stream));
+    try lone.time(&engine, &stream, .none, 1, null);
+    lone.keep(&engine, &stream);
+    try std.testing.expectEqual(@as(u64, 0), clock.calls);
+    try std.testing.expect(stream.depth == null and !stream.prices_seeded);
+    try std.testing.expectEqual(@as(usize, 0), log.events.items.len);
+    for (engine.lone_kept) |mode| for (mode) |kept| try std.testing.expect(kept == null);
+    cfg.max_copy = 1;
+    try std.testing.expect(lone.enabled(&engine, &stream));
+}
