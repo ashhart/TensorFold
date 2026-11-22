@@ -55,3 +55,15 @@ test "cache capacity: 256K context, four streams, 0.3 GiB cannot retain one plan
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(struct {}, loaded, kept, 262144));
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(Fake, loaded, kept, 2048));
 }
+
+test "CUDA cache default leaves no copies when unpaged windows use all room" {
+    const GiB: u64 = 1 << 30;
+    const l: @import("core").kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8 };
+    const b = pool.budgetOf(struct {}, l, 56 * GiB, o, 8192, false, false, 0, null);
+    const p = try @import("core").kv_pool.plan(l, b);
+    try std.testing.expectEqual(@as(u64, 0), b.cache);
+    try std.testing.expectEqual(@as(u32, 8), p.lanes);
+    try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
+    try std.testing.expectEqual(@as(u64, 0), p.copied);
+}

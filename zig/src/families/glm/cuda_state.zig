@@ -29,29 +29,8 @@ pub const index_ring = 2 * prefill_rows;
 /// A solo prompt pass's rows (TF_GLM_CHUNK_SOLO): a whole ring, which a rebase at a grid point leaves it.
 pub const solo_rows = index_ring;
 
-/// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
-const Arena = struct {
-    buf: cuda.DeviceBuffer,
-    used: usize = 0,
-
-    fn take(a: *Arena, bytes: usize) u64 {
-        const at = std.mem.alignForward(usize, a.used, 256);
-        a.used = at + bytes;
-        std.debug.assert(a.used <= a.buf.len);
-        return a.buf.ptr + at;
-    }
-};
-
-/// Allocates `sizes` (bytes) in one zeroed device buffer and hands out each field's address in order.
-fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
-    var total: usize = 0;
-    for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
-    var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, @max(total, 256)) };
-    errdefer a.buf.free();
-    try a.buf.fill8(0, null);
-    for (sizes, out) |n, *p| p.* = a.take(n);
-    return a;
-}
+const Arena = @import("cuda_state_arena.zig").Arena;
+const arena = @import("cuda_state_arena.zig").arena;
 
 /// Rows a KV page holds: one dense latent chunk (latent.chunk), and the keys of its 128 pools.
 pub const page_rows = latent.chunk;
