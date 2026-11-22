@@ -70,7 +70,7 @@ pub fn run(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) 
     defer r.tail_from = null;
     if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
     const keys = prompt_tail.keysOnly(tail_facts);
-    var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = decode_round.gdnForward, .attention = decode_round.attentionForward, .tap = if (r.capture_taps) decode_round.tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
+    var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = Runner.gdnForward, .attention = Runner.attentionForward, .tap = if (r.capture_taps) Runner.tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
     r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, decode_round.commit_every) catch |err| {
         r.failed = true;
         return err;
