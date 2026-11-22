@@ -105,7 +105,7 @@ fn exchangeCombined(f: *const Forward, p: *const Pieces, j: usize, m: moe.Layer,
         if (split) {
             for (f.ranks) |r| {
                 const mine = share(n, world, r.w.share.rank);
-                try side.glueRows(r, j, .ffn, lo + mine[0], lo + mine[1], room(r, lo), 0);
+                try side.glueRows(r, j, .ffn, lo + mine[0], lo + mine[1], room(r, lo), r.b.part + (lo + mine[0]) * D * 4); // split sends peers only (#4510)
             }
             try pieces.shareGlued(f, p, lo, n, last);
         } else for (f.ranks) |r| try side.glueRows(r, j, .ffn, lo, piece[1], room(r, lo), 0);
