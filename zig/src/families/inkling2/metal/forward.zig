@@ -97,16 +97,9 @@ pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: R
     var base: usize = 0;
     while (base < rows) {
         const left = rows - base;
-        const take: usize = if (left >= 32) 32 else if (left >= 16) 16 else if (left >= 8) 8 else if (left >= 4) 4 else if (left >= 2) 2 else 1;
-        const variant: usize = switch (take) {
-            1 => 0,
-            2 => 1,
-            4 => 2,
-            8 => 3,
-            16 => 4,
-            32 => 5,
-            else => unreachable,
-        };
+        // One launch of the next size up: the kernel stores only `take` rows, and reads one pass of the weights.
+        const take: usize = @min(left, 32);
+        const variant: usize = if (take > 16) 5 else if (take > 8) 4 else if (take > 4) 3 else if (take > 2) 2 else if (take > 1) 1 else 0;
         e.setPipeline(m.dense[variant]);
         e.setBuffer(input.buf, input.off + base * k * 2, 0);
         e.setBuffer(weight.buffer, weight.offset, 1);
