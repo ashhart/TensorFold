@@ -259,13 +259,15 @@ fn slots(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, span: usize, cou
             slot[row + i] = @intCast(s);
         }
         row += n;
-        // the slot's own cache: a NaN key only its last row sees, an infinite one past its rows, an infinite value
+        // its own cache: a NaN key and value only its last row sees, infinite ones past its rows, an infinite value
         const c = try Cache.make(t, rng, kv_heads, span, d);
         defer c.free();
         for (0..kv_heads) |h| {
             c.k[(h * span + end - 1) * d + 3 + h] = nan;
             if (end < span) c.k[(h * span + end) * d + 7] = inf;
             c.v[(h * span + end - n) * d + 11] = inf;
+            c.v[(h * span + end - 1) * d + 13 + h] = nan;
+            if (end < span) c.v[(h * span + end) * d + 17] = inf;
         }
         for ([_][]const u16{ c.k, c.v }) |src| {
             const pooled = try c.pool(src, kv_heads, span, d);
@@ -318,7 +320,7 @@ fn slots(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, span: usize, cou
     }
 }
 
-test "a round's slots in one planned walk write each row's bits walked alone, a slot's rows sharing a read of its keys" {
+test "a round's slots in one planned walk write each row's bits walked alone, a slot's rows sharing its key and value reads" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x5107 };
@@ -328,6 +330,8 @@ test "a round's slots in one planned walk write each row's bits walked alone, a 
     // every slot one row (streams with no drafts), and slots of 1, 2, 3 and 4 rows together
     try slots(t, &rng, 16, 2, 32768, &.{ 1, 1, 1, 1 }, &.{ 32768, 9001, 16385, 1 });
     try slots(t, &rng, 24, 4, 32768, &.{ 2, 1, 1, 3, 1, 4 }, &.{ 32768, 20000, 16385, 9001, 128, 4 });
+    // slots of more than four rows: the values' chunks of four, then the rest of the slot
+    try slots(t, &rng, 16, 2, 32768, &.{ 6, 1, 5 }, &.{ 32768, 9001, 16385 });
 }
 
 /// A prompt of `qlen` queries from `q_pos0` over `span` positions: the paged 64-row tile writes the flat tile's bits.
