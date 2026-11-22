@@ -6,6 +6,7 @@ const sources = @import("kernel_sources");
 const h3k = @import("h3_kernels");
 const rig_ = @import("rig.zig");
 const ref = @import("metal_h3_ref.zig");
+const bolt = @import("metal_bolt.zig");
 
 const c = contract.spec;
 const g = contract.gates;
@@ -99,6 +100,17 @@ fn baseline(w: Which) ?[]const u8 {
     };
 }
 
+/// A product's planted control: its 32-deep K steps reversed, so its bytes must leave MLX's at the shapes gate.
+fn control(w: Which) ?bolt.Mut {
+    const ks = "for (int kk = 0; kk < 256; kk += 32) h3_step<";
+    const back = "for (int kk = 224; kk >= 0; kk -= 32) h3_step<";
+    return switch (w) {
+        .product => .{ .name = "control: metal h3 product h3_gemm_32x64, whole tiles' K steps reversed", .find = ks ++ "false>", .with = back ++ "false>", .gate = .shapes },
+        .product_ragged => .{ .name = "control: metal h3 product ragged h3_gemm_32x64_ragged, edge tile's K steps reversed", .find = ks ++ "true>", .with = back ++ "true>", .gate = .shapes },
+        else => null,
+    };
+}
+
 const Slot = struct { ref: rig_.Ref, len: usize };
 
 pub const H3 = struct {
@@ -106,6 +118,7 @@ pub const H3 = struct {
     rig: rig_.Rig,
     which: Which,
     pipe: mtl.Pipeline,
+    mut: ?bolt.Mut = null,
     /// A product's replaced MLX kernel.
     base: ?mtl.Pipeline = null,
     shape: c.Shape = undefined,
@@ -117,7 +130,7 @@ pub const H3 = struct {
     fresh: []const u8 = &.{},
     outs: usize = 0,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, which: Which) !H3 {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, which: Which, mut: ?bolt.Mut) !H3 {
         const rig: rig_.Rig = .{ .a = a, .device = device, .queue = queue };
         const mlx = baseline(which) orelse {
             const src = try std.mem.concat(a, u8, &.{ defines, h3k.source });
@@ -130,13 +143,15 @@ pub const H3 = struct {
         } else return error.UnknownSource;
         const nax = try std.mem.replaceOwned(u8, a, gemm, "#include \"../nax.h\"", sources.nax);
         defer a.free(nax);
-        const src = try std.mem.concat(a, u8, &.{ nax, h3k.gemm_source });
-        defer a.free(src);
+        const both = try std.mem.concat(a, u8, &.{ nax, h3k.gemm_source });
+        defer a.free(both);
+        const src = if (mut) |m| try bolt.mutated(a, both, m) else both;
+        defer if (mut != null) a.free(src);
         const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const pipe = try mtl.Pipeline.init(device, lib, function(which), false);
         errdefer pipe.deinit();
-        return .{ .a = a, .rig = rig, .which = which, .pipe = pipe, .base = try mtl.Pipeline.init(device, lib, mlx, false), .arena = std.heap.ArenaAllocator.init(a) };
+        return .{ .a = a, .rig = rig, .which = which, .pipe = pipe, .mut = mut, .base = try mtl.Pipeline.init(device, lib, mlx, false), .arena = std.heap.ArenaAllocator.init(a) };
     }
 
     pub fn deinit(self: *H3) void {
@@ -147,7 +162,7 @@ pub const H3 = struct {
     }
 
     pub fn kernel(self: *H3) g.Kernel {
-        return .{ .spec = spec(self.which), .ctx = self, .vt = &vt };
+        return .{ .spec = bolt.under(spec(self.which), self.mut), .ctx = self, .vt = &vt, .control = if (self.mut) |m| m.gate else null };
     }
 
     const vt = g.hooks(H3);
@@ -272,12 +287,17 @@ pub const Suite = struct {
         if (!s.device.tensorUnits()) return;
         for (std.enums.values(Which)) |w| {
             if (only) |o| if (std.mem.indexOf(u8, spec(w).name, o) == null) continue;
-            const x = try s.a.create(H3);
-            errdefer s.a.destroy(x);
-            x.* = try H3.init(s.a, s.device, s.queue, w);
-            try s.list.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            try s.add(w, null);
+            if (control(w)) |m| try s.add(w, m);
         }
+    }
+
+    fn add(s: *Suite, w: Which, mut: ?bolt.Mut) !void {
+        const x = try s.a.create(H3);
+        errdefer s.a.destroy(x);
+        x.* = try H3.init(s.a, s.device, s.queue, w, mut);
+        try s.list.append(s.a, x);
+        try s.kernels.append(s.a, x.kernel());
     }
 
     pub fn deinit(s: *Suite) void {
