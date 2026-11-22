@@ -1,4 +1,4 @@
-CUDA decoder: 24 synthetic blocks made in 1.7 s
+CUDA decoder: 24 synthetic blocks made in 1.9 s
 6 x 10 cells: 1 tiles of 6 x 10 cells, 65 tokens each
   embedding: 66560 values, 99.997% identical, worst 1.00 ULP, relative 1.91e-5 (pass)
   block 0: 66560 values, 96.946% identical, worst 2.00 ULP, relative 5.73e-4 (pass)
