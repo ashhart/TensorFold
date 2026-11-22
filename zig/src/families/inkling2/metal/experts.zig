@@ -24,6 +24,11 @@ pub const function_names = [_][:0]const u8{
     "tf_ink2_mxfp8_down_grouped",
 };
 
+/// The columns the units kernels read a row: experts_units.metal's INK2_GU_K and INK2_DOWN_K.
+const units_gu_k = 2304;
+const units_down_k = 1152;
+const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units" };
+
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
 const group_cap: u32 = 64;
@@ -32,9 +37,28 @@ pub const Pipelines = struct {
     entries: [function_names.len]mtl.Pipeline,
     /// Each expert's count, then its route pairs: launches in one encoder run in order, so they share it.
     groups: mtl.Buffer,
+    /// The gate-up and down products on the tensor units (NVFP4 then MXFP8), where the GPU has them.
+    units: ?[4]mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
-        return loadSource(device, src.experts);
+        var out = try loadSource(device, src.experts);
+        errdefer out.deinit();
+        if (device.tensorUnits()) try out.loadUnits(device, src.experts_units);
+        return out;
+    }
+
+    /// The tensor-unit kernels from `text`; the contract's controls pass an edited one. The GPU must have the units.
+    pub fn loadUnits(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        var pipes: [4]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |pipe| pipe.deinit();
+        for (units_names, &pipes) |name, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+            made += 1;
+        }
+        p.units = pipes;
     }
 
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
@@ -50,10 +74,12 @@ pub const Pipelines = struct {
             if (out.entries[i].maxThreads() < @as(usize, if (scalar) 32 else 256)) return error.ExpertThreads;
         }
         out.groups = try device.buffer((plan.expert_count + plan.expert_count * group_cap) * @sizeOf(u32), mtl.ResourceOptions.shared);
+        out.units = null;
         return out;
     }
 
     pub fn deinit(p: *Pipelines) void {
+        if (p.units) |pipes| for (pipes) |pipe| pipe.deinit();
         p.groups.deinit();
         for (p.entries) |pipe| pipe.deinit();
     }
@@ -180,6 +206,29 @@ pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, sca
             launchGrouped(p, e, .mxfp8_gu_grouped, c);
         },
     }
+}
+
+/// gu, or the down products (`down`), after group on the tensor units: an op is 16 of an expert's pairs by 32 rows.
+pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, out: Ref, c: Call) !void {
+    try plan.check(c);
+    const pipes = p.units orelse return error.NoTensorUnits;
+    // Gate and up rows interleave, so gu has two weight rows an output; the kernels fix the columns of each product.
+    const weight_rows = if (down) c.n else 2 * c.n;
+    if (c.k != @as(u32, if (down) units_down_k else units_gu_k) or weight_rows % 32 != 0) return error.BadExpertShape;
+    switch (c.format) {
+        .nvfp4 => {
+            const g = nv_globals orelse return error.MissingNvfp4Globals;
+            for ([_]Ref{ x, w, scales, g.amax, g.denominator, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+            e.setValue(groupedArgs(c), 8);
+            e.setPipeline(pipes[@intFromBool(down)]);
+        },
+        .mxfp8 => {
+            for ([_]Ref{ x, w, scales, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+            e.setValue(groupedArgs(c), 6);
+            e.setPipeline(pipes[2 + @as(usize, @intFromBool(down))]);
+        },
+    }
+    e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// The down products after group, as guGrouped.
