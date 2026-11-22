@@ -306,7 +306,7 @@ pub const Hip = struct {
         if (adopt.items.len > 0) {
             // the tree held them once more for this stream already
             errdefer for (adopt.items) |id| e.pool.release(id);
-            try l.s.adopt(&e.pool, adopt.items, false);
+            try l.s.adoptRollback(&e.pool, &adopt);
         }
         if (plan.from > 0) {
             l.s.len = plan.from;
