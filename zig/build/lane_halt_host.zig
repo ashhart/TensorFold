@@ -18,6 +18,7 @@ pub fn steps(b: *std.Build) void {
     const safe_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true });
     const strand = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_strand_test.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = safe_lanes }} });
     b.step("test-lane-strand-host", "Refused, cancelled and failed requests give back every lane, page and slot without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = strand, .filters = &.{"lane strand:"} })).step);
+    b.step("test-lane-condition-stress-host", "A held score asker's wake is not taken by the lane thread's timed idle waits, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lane condition stress:"} })).step);
     const halt = b.addTest(.{ .root_module = api, .filters = &.{ "halt (", "halt fails" } });
     b.step("test-lane-halt-host", "Halt ordering with a fake backend and no GPU dependencies").dependOn(&b.addRunArtifact(halt).step);
     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);
