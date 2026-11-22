@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
+
 - Flash Next on CUDA: after a chat reply a quiet background pass keeps its state so the next turn resumes past the reply instead of prefilling it; the pass runs on one rank and yields when a request arrives (#3219).
 
 - XPU: Qwen3.8-27B decode attention merges its slices with 16 subgroups a head instead of one, adding them in the same order, so every output byte is unchanged (token hashes equal to main, drafted and plain, bf16 and int8 KV). On an Arc Pro B70 plain decode gains 1.8 to 2.0 % at about 8,000 prompt tokens, 14.7 to 16.0 % at about 30,000 and 39.8 to 42.2 % at 121,022; drafted decode is level. The kernel contract registers it as a bit-equal replacement with two planted controls (#2799).
