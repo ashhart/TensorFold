@@ -27,7 +27,7 @@ pub const function_names = [_][:0]const u8{
 /// The columns the units kernels read a row: experts_units.metal's INK2_GU_K and INK2_DOWN_K.
 const units_gu_k = 2304;
 const units_down_k = 1152;
-const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units" };
+const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units", "tf_ink2_dense_units" };
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
@@ -239,6 +239,17 @@ pub fn logitsUnits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: 
     e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
     e.setPipeline(pipes[4]);
     e.dispatchGroups(mtl.Size.of((vocab + 31) / 32, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
+}
+
+const DenseArgs = extern struct { rows: u32, n: u32, k: u32 };
+/// A prompt's rows of x [rows][k] against a bf16 weight [n][k] on the tensor units; k is 2,304 or 3,072.
+pub fn denseUnits(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, out: Ref, rows: u32, n: u32, k: u32) !void {
+    const pipes = p.units orelse return error.NoTensorUnits;
+    if ((k != 2304 and k != 3072) or rows == 0 or n == 0) return error.BadExpertShape;
+    for ([_]Ref{ x, w, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(DenseArgs{ .rows = rows, .n = n, .k = k }, 3);
+    e.setPipeline(pipes[5]);
+    e.dispatchGroups(mtl.Size.of((n + 31) / 32, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// The down products after group, as guGrouped.
