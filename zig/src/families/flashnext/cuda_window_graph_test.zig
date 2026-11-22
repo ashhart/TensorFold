@@ -103,7 +103,7 @@ test "window graphs: a held graph takes a new length or sequence in place; new l
     try expectAfter(&c, stream, key(4, 3, 7), .{ 4, 2, 3, 1, 7 });
     try expectAfter(&c, stream, key(4, 4, 7), .{ 4, 2, 3, 2, 7 }); // another row count is another slot
     try expectAfter(&c, stream, key(4, 3, 8), .{ 4, 2, 3, 3, 7 }); // and another shape
-    try t.expectEqual([3]u64{ 1, 3, 3 }, [3]u64{ c.captures, c.updates, c.replays });
+    try t.expectEqual([4]u64{ 10, 1, 3, 3 }, [4]u64{ c.calls, c.captures, c.updates, c.replays });
     c.clear(t.allocator);
     try t.expectEqual(@as(usize, 2), Fake.destroyed);
 }
