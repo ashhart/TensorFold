@@ -315,14 +315,15 @@ pub const Forward = struct {
 
     const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
 
-    /// hc_post of rows lo..hi from partials `g` [world][hi - lo][D] (a gathered room or a split one's own rows).
-    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64) !void {
+    /// hc_post of rows lo..hi from ranked partials g; nonzero own replaces only rank me's gathered slot.
+    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64, own: u64) !void {
         const c = &r.w.config;
         const b = r.b;
         const S: usize = c.hc;
         const D: usize = c.hidden;
         const x = b.x + lo * S * D * 2;
-        try glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
+        if (own != 0) return glue.hcPostOwn(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world, own, r.w.share.rank);
+        return glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
     }
 
     /// forward._pre of rows lo..hi.
@@ -335,12 +336,12 @@ pub const Forward = struct {
     }
 
     /// One piece's glue after a site: hc_post, then the next layer's hc_pre or (after the last layer) the stream mean.
-    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64) !void {
+    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64, own: u64) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
         const layers = r.w.layers;
-        try f.postRows(r, lo, hi, g);
+        try f.postRows(r, lo, hi, g, own);
         if (site == .mixer) return f.preRows(r, layers[j].ffn_hc, layers[j].post_norm, lo, hi);
         if (j + 1 < layers.len) return f.preRows(r, layers[j + 1].attn_hc, layers[j + 1].in_norm, lo, hi);
         try glue.streamMean(f.set(), f.stream, r.b.x + lo * c.hc * c.hidden * 2, r.b.hidden + lo * c.hidden * 2, hi - lo, c.hidden, c.hc);
