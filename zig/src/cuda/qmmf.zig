@@ -190,6 +190,7 @@ pub const Lane = struct {
     fuse_s: [2][2][2]Function = undefined, // by halfModeIndex, Out, row tile 16 then 32: the fused form at decode rows
     prompt: ?[2][2]Function = null, // Out, then plain / fused; loadPrompt() fills it on sm_12x
     prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls, loadPrompt() fills it on sm_12x
+    up_act: ?Function = null, // qmmf_act.zig: the NVFP4 up projection writing the MLP act (TF_Q35_MLP_ACT_FUSED)
     prompt_sms: usize = 0, // the device's SMs: the tile runs when its blocks fill more than half of them
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
     pdl: bool = false, // decode launches dependent (qmmf_kernel waits after its weight loads); weights fixed after load
@@ -211,6 +212,7 @@ pub const Lane = struct {
             l.f32_fns[mi] = try loadTiles(mod, mode, true);
         }
         for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
+        l.up_act = try @import("qmmf_act.zig").load(mod);
         inline for (.{ Mode.mxfp8, Mode.bf16 }, 0..) |mode, mi| inline for (.{ false, true }, 0..) |wide, oi| inline for (.{ false, true }, 0..) |cl, ci| {
             const f = try mod.function(halfSymbol(mode, cl, wide));
             try f.allowDynamicShared(halfShared(mode));
@@ -397,6 +399,10 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
     try std.testing.expect(!q.fused and q.cluster and q.bm == 16 and q.sk == 8);
     const r = plan(3, 2560, 6144, false);
     try std.testing.expect(r.reduce and !r.cluster);
+}
+
+test {
+    _ = @import("qmmf_act.zig");
 }
 
 test "instance names are qmmf.cu's" {

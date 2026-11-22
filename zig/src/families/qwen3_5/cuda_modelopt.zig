@@ -245,6 +245,7 @@ pub const Kernels = struct {
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
+    act_fused: bool = false, // TF_Q35_MLP_ACT_FUSED=1: decode up projections write the MLP act (upAct)
 
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
@@ -256,7 +257,8 @@ pub const Kernels = struct {
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
+        const act_fused = try @import("sys").environment.read(bool, "TF_Q35_MLP_ACT_FUSED", false);
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .act_fused = act_fused };
     }
 
     pub fn unload(k: *Kernels) void {
@@ -315,6 +317,22 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
     if (rows >= cuda.qmmf.fused_rows) return error.WindowTooWide; // the fused tile sums its slices in another order
     return l.decode(e.stream, w, in, out, rows);
+}
+
+/// TF_Q35_MLP_ACT_FUSED decode rows: up writes `act` from the gate's rows, mlp_act's bytes; false: not taken.
+pub fn upAct(e: *Engine, gate: Proj, up: Proj, down: Proj, x: u64, gate_rows: u64, act: u64, rows: usize, prompt: bool, rows_at: u64) !bool {
+    const k = if (e.mo) |*m| m else return false;
+    if (!k.act_fused or prompt or e.learning != null) return false;
+    if (gate != .ql or up != .ql or down != .ql or gate.ql != .nvfp4 or up.ql != .nvfp4 or down.ql != .nvfp4) return false;
+    const f = k.lane.up_act orelse return false;
+    const u = up.ql.nvfp4;
+    if (gate.ql.nvfp4.n != u.n or gate.ql.nvfp4.k != u.k or !cuda.qmmf_act.eligible(k.lane, rows, u)) return false;
+    if (@import("cuda_launch_trace.zig").active) |t| {
+        try t.note(.o); // the one launch that replaces up's projection and mlp_act
+        return true;
+    }
+    try cuda.qmmf_act.launch(f, k.lane, e.stream, x, u.k, rows, u, gate_rows, act, rows_at);
+    return true;
 }
 
 /// NVFP4 prompt gate and up in one lean pair launch into `act`, the bytes of main's path; false: not taken.

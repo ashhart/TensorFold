@@ -33,6 +33,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |
 | `TF_MTP_BATCH` | Exactly `0` or `1`; default on. `0` keeps one stream at a time |
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
+| `TF_Q35_MLP_ACT_FUSED` | Exactly `0` or `1`; default off. Qwen3.8-27B on CUDA with NVFP4 gate, up and down: at decode rows (1 to 16) the up projection writes the MLP activation itself (`silu(gate) * up`, the separate `tf_q35_mlp_act` launch's arithmetic on the same rounded values), one launch fewer a layer. Opt-in until the device check shows every bit equal |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |
