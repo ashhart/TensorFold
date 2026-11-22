@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview on Metal: the native engine serves ricursiveAI's NVFP4 and bf16 releases as published, on M5 or later Macs (M1 to M4 are refused by name), with bf16 caches; `--context` defaults to and stops at 262,144 tokens, and a `thinking_budget` is refused for this model. Every model's `/v1/models` capabilities gain a `reasoning_optional` field, false for all but Ripple (#2231, fixes #2171). Thanks to @BobClawblaw.
+
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#N).
