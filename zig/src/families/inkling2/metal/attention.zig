@@ -78,7 +78,7 @@ pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
     } else {
         e.setPipeline(k.prompt);
         bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml }, 0);
-        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
+        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = launch.c0, .chunks = launch.partials_rh, .scale = scale, .window = l.window }, 7);
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
 }
