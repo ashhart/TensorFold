@@ -33,6 +33,9 @@ pub const Engine = struct {
     image_rows: ?xpu.rt.Buffer = null,
     image_tokens: u32 = 0,
     spans: [max_pictures]model.Image = undefined,
+    n_spans: usize = 0,
+    /// The stream whose pictures image_rows holds; null after another stream's prompt opens.
+    pictured: ?*const anyopaque = null,
 
     /// Pictures one prompt holds at most.
     pub const max_pictures = 16;
@@ -92,12 +95,21 @@ pub const Engine = struct {
         e.image_tokens = tokens;
     }
 
-    /// The bound stream's pictures past prompt row `from` through the tower; the next prompt windows read their rows.
-    pub fn pictures(e: *Engine, imgs: anytype, from: usize) !void {
+    /// `owner`'s pictures past prompt row `from` for the next prompt window; the tower runs once a stream.
+    pub fn pictures(e: *Engine, owner: *const anyopaque, imgs: anytype, from: usize) !void {
+        if (e.pictured == owner) {
+            e.m.images = e.spans[0..e.n_spans];
+            return;
+        }
         e.m.images = &.{};
+        e.pictured = null;
+        e.n_spans = 0;
         var placed: [max_pictures]spec.Span = undefined;
         const spans = try spec.place(&placed, imgs, from, std.math.maxInt(usize), e.image_tokens);
-        if (spans.len == 0) return;
+        if (spans.len == 0) {
+            e.pictured = owner;
+            return;
+        }
         const t = e.tower orelse return error.NoVisionTower;
         var n: usize = 0;
         for (imgs) |im| { // the placed spans in picture order: each picture's rows from its span's source row
@@ -108,7 +120,14 @@ pub const Engine = struct {
             e.spans[n] = .{ .rows = rows, .at = im.at, .n = im.tokens };
             n += 1;
         }
+        e.n_spans = n;
+        e.pictured = owner;
         e.m.images = e.spans[0..n];
+    }
+
+    /// A new prompt opens: image_rows belongs to no stream (a later stream may reuse a freed one's address).
+    pub fn forgetPictures(e: *Engine) void {
+        e.pictured = null;
     }
 
     /// Prompt windows read no pictures again.
