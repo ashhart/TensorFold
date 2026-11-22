@@ -55,8 +55,23 @@ pub const Link = struct {
     gpa: std.mem.Allocator,
     wait: bool, // TF_GLM_LINK_WAIT=1: every step uploaded and waited for, as before the put
     asleep: bool = false, // rank 0: the other ranks sleep on their lines (cuda.tp_watch) until its next step
+    control: ?cuda.tp_control.Channel = null, // opt-in host TCP control (TP=2); null keeps NCCL
+    wire: []u64 = &.{}, // complete host frame staging; copy_source owns the pinned upload source
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
+        return initImpl(gpa, d, lib, comm, stream, asked_ids, null);
+    }
+
+    /// Native serving opened the channel before NCCL setup; device harnesses keep init's default transport.
+    pub fn initHost(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize, control: *?cuda.tp_control.Channel) !Link {
+        const max_ids = @max(asked_ids, prompt_wire.words);
+        if (control.*) |*c| c.max_bytes = 64 + max_ids * 4;
+        const link = try initImpl(gpa, d, lib, comm, stream, max_ids, control.*);
+        control.* = null;
+        return link;
+    }
+
+    fn initImpl(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize, control: ?cuda.tp_control.Channel) !Link {
         const max_ids = @max(asked_ids, prompt_wire.words);
         const buf = try cuda.DeviceBuffer.alloc(d, 64 + max_ids * 4);
         errdefer {
@@ -64,10 +79,15 @@ pub const Link = struct {
             owned.free();
         }
         const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
-        return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
+        const ids = try gpa.alloc(u32, max_ids);
+        errdefer gpa.free(ids);
+        const wire: []u64 = if (control != null) try gpa.alloc(u64, 8 + (max_ids + 1) / 2) else &.{};
+        return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = ids, .wire = wire, .gpa = gpa, .wait = wait, .control = control };
     }
 
     pub fn deinit(l: *Link) void {
+        if (l.control) |*c| c.deinit();
+        if (l.wire.len > 0) l.gpa.free(l.wire);
         l.gpa.free(l.ids);
         l.buf.free();
     }
@@ -86,6 +106,7 @@ pub const Link = struct {
         if (ids.len > l.ids.len) return error.TooManyIds;
         var hh = h;
         hh.n = @intCast(ids.len);
+        if (l.control) |*c| return c.send(std.mem.asBytes(&hh), std.mem.sliceAsBytes(ids));
         if (!l.wait and ids.len <= put_ids) {
             var w: Words = undefined;
             @memcpy(w.w[0..16], std.mem.bytesAsSlice(u32, std.mem.asBytes(&hh)));
@@ -116,6 +137,16 @@ pub const Link = struct {
 
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
+        if (l.control) |*c| {
+            const bytes = std.mem.sliceAsBytes(l.wire);
+            const n = try c.receive(bytes);
+            errdefer c.deinit();
+            const h = std.mem.bytesAsValue(Header, bytes[0..@sizeOf(Header)]).*;
+            if (h.n > l.ids.len or n != 64 + h.n * 4) return error.GlmControlFrame;
+            @memcpy(l.ids[0..h.n], std.mem.bytesAsSlice(u32, bytes[64..][0 .. h.n * 4]));
+            try l.buf.uploadAsync(0, bytes[0..n], l.stream.handle);
+            return .{ .h = h, .ids = l.ids[0..h.n] };
+        }
         try l.bcast(first_bytes);
         var first: [first_bytes]u8 align(8) = undefined;
         try l.buf.download(0, &first);
@@ -147,7 +178,10 @@ pub const Leader = struct {
             cuda.tp_watch.wake();
             x.link.asleep = false;
         }
-        try x.link.send(x.e.m.glue.put_words, hh, ids);
+        x.link.send(x.e.m.glue.put_words, hh, ids) catch |err| {
+            if (x.link.control != null) cuda.tp_watch.fail(@errorName(err));
+            return err;
+        };
     }
 
     /// A prompt step's flags: 1 when its rows go through the head (the other ranks join each pass's broadcasts).
