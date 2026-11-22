@@ -117,6 +117,50 @@ pub const Drafter = struct {
         return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
+    pub fn saveSnap(d: *Drafter, stream: *Stream, at_pos: u32, last_tap: ?mtl.Buffer, last_tap_start: u64, last_tap_rows: usize) !?state.Snap {
+        const lane = d.contexts.getPtr(stream) orelse return null;
+        if (lane.end == at_pos) return try state.Snap.save(d.target.device, d.target.queue, lane, null);
+        if (lane.end + 1 == at_pos) {
+            const tap = last_tap orelse return error.SnapshotOutOfStep;
+            if (last_tap_rows != 1 or last_tap_start != lane.end) return error.SnapshotOutOfStep;
+            return try state.Snap.save(d.target.device, d.target.queue, lane, tap);
+        }
+        return error.SnapshotOutOfStep;
+    }
+
+    pub fn restoreSnap(d: *Drafter, stream: *Stream, snap: ?*const state.Snap, at_pos: usize) !void {
+        const lane = d.contexts.getPtr(stream) orelse return;
+        const s = snap orelse return error.DSparkSnapshotMissing;
+        const expected_end = s.end + @as(u64, if (s.tail_off != null) 1 else 0);
+        if (expected_end != at_pos) return error.DSparkSnapshotGeometry;
+        try state.Snap.restore(lane, d.target.queue, s);
+        if (s.tail_off) |tail_off| {
+            errdefer {
+                lane.from = 0;
+                lane.end = 0;
+                lane.held_len = 0;
+            }
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            d.absorbRows(e, lane, at(s.buf, tail_off), s.end, 1);
+            e.end();
+            cb.commit();
+            try failed(cb, "restore tail");
+            lane.end = s.end + 1;
+            lane.held_len = 0;
+        }
+    }
+
+    pub fn resetLane(d: *Drafter, stream: *Stream) void {
+        if (d.contexts.getPtr(stream)) |lane| {
+            lane.from = 0;
+            lane.end = 0;
+            lane.held_len = 0;
+        }
+    }
+
     fn cast(ptr: *anyopaque) *Drafter {
         return @ptrCast(@alignCast(ptr));
     }
