@@ -27,7 +27,7 @@ const Plan = struct {
     }
     fn write(p: *Plan, kind: Kind, rows: u32, width: u32) op.View {
         p.handle += 1;
-        p.counts[@intFromEnum(kind)] += 1;
+        p.counts[@backingInt(kind)] += 1;
         p.open[p.handle] = true;
         p.pending[p.pending_count] = p.handle;
         p.pending_count += 1;

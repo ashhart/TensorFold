@@ -17,7 +17,7 @@ fn overlaps(ops: op.Ops) bool {
 /// Linears of one input into their own outputs; overlapped only with distinct weights, the last closes the group.
 fn projectAll(comptime n: usize, ops: op.Ops, frame: u64, x: op.View, weights: [n]w.Tensor, mode: op.Mode) ![n]op.View {
     var apart = overlaps(ops);
-    for (weights, 0..) |a, i| for (weights[i + 1..]) |b| {
+    for (weights, 0..) |a, i| for (weights[i + 1 ..]) |b| {
         if (a.bytes.ptr == b.bytes.ptr) apart = false;
     };
     var out: [n]op.View = undefined;

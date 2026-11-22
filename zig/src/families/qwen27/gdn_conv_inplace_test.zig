@@ -25,7 +25,7 @@ fn commitTwice(conv: []u16, next: []u16, projection: []const u16, kept_rows: []c
             break :blk if (source < kept) conv[(keep.slot * kept + source) * channels + item % channels] else projection[(source - kept) * channels + item % channels];
         };
     };
-    for (keeps) |keep| @memcpy(conv[keep.slot * width..][0..width], next[keep.slot * width..][0..width]);
+    for (keeps) |keep| @memcpy(conv[keep.slot * width ..][0..width], next[keep.slot * width ..][0..width]);
 }
 
 /// tf_delta_gdn_conv_commit_in_place, one thread a channel and keep; returns false if a thread touches another's word.
