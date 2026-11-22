@@ -165,7 +165,7 @@ __device__ void messages(const uint16_t* __restrict__ bank0, const uint16_t* __r
     }
 }
 
-// One gate a block. A shared BF16 zeta is the sole bottleneck output; forget/gain stay FP32 through tanh (A7(a)).
+// One gate a block: the frozen baseline the down/up halves are gated bit-equal against in the contract (not served).
 __device__ void gate(const float* __restrict__ h, const float* __restrict__ m,
                                             const uint16_t* __restrict__ down, const uint16_t* __restrict__ forget,
                                             const uint16_t* __restrict__ gain, float* __restrict__ out,
@@ -225,6 +225,76 @@ __device__ void gate(const float* __restrict__ h, const float* __restrict__ m,
     }
 }
 
+// A gate's down half, a block a row and rank pair: the one-block kernel's 256-thread chains and tree, so zeta is equal.
+__device__ void gateDown(const float* __restrict__ h, const float* __restrict__ m, const uint16_t* __restrict__ down,
+                         uint16_t* __restrict__ zeta, int c, float eps) {
+    __shared__ float sh[2 * 32];
+    __shared__ float inv_h, inv_m;
+    const size_t row = blockIdx.x;
+    const int r = 2 * static_cast<int>(blockIdx.y);
+    const float* hr = h + row * c;
+    const float* mr = m + row * c;
+    float ss[2] = {0.0f, 0.0f};
+    for (int i = threadIdx.x; i < c; i += blockDim.x) {
+        ss[0] = __fmaf_rn(hr[i], hr[i], ss[0]);
+        ss[1] = __fmaf_rn(mr[i], mr[i], ss[1]);
+    }
+    blockSums<2>(ss, sh);
+    if (threadIdx.x == 0) {
+        inv_h = rsqrtf(__fadd_rn(__fdiv_rn(ss[0], static_cast<float>(c)), eps));
+        inv_m = rsqrtf(__fadd_rn(__fdiv_rn(ss[1], static_cast<float>(c)), eps));
+    }
+    __syncthreads();
+    float acc[2] = {0.0f, 0.0f};
+    const uint16_t* d0 = down + static_cast<size_t>(r) * (2 * c);
+    const uint16_t* d1 = d0 + 2 * c;
+    for (int i = threadIdx.x; i < 2 * c; i += blockDim.x) {
+        const bool message = i >= c;
+        const float x = message ? mr[i - c] : hr[i];
+        const float n = bfr(__fmul_rn(x, message ? inv_m : inv_h));
+        acc[0] = __fmaf_rn(bf(d0[i]), n, acc[0]);
+        acc[1] = __fmaf_rn(bf(d1[i]), n, acc[1]);
+    }
+    blockSums<2>(acc, sh);
+    if (threadIdx.x == 0) {
+        zeta[row * kRank + r] = tobf(acc[0]);
+        zeta[row * kRank + r + 1] = tobf(acc[1]);
+    }
+}
+
+// A gate's up half: a thread an output column, forget/gain FP32 through tanh (A7(a)), the same ascending rank chains.
+__device__ void gateUp(const float* h, const float* __restrict__ m, const uint16_t* __restrict__ zeta,
+                       const uint16_t* __restrict__ forget, const uint16_t* __restrict__ gain, float* out, int c) {
+    __shared__ float z[kRank];
+    const size_t row = blockIdx.x;
+    if (threadIdx.x < kRank) z[threadIdx.x] = bf(zeta[row * kRank + threadIdx.x]);
+    __syncthreads();
+    const int i = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
+    if (i >= c) return;
+    const uint4* f = reinterpret_cast<const uint4*>(forget + static_cast<size_t>(i) * kRank);
+    const uint4* g = reinterpret_cast<const uint4*>(gain + static_cast<size_t>(i) * kRank);
+    float sf = 0.0f, sg = 0.0f;
+#pragma unroll
+    for (int q = 0; q < kRank / 8; ++q) {
+        const uint4 fq = __ldg(f + q), gq = __ldg(g + q);
+        const uint32_t fw[4] = {fq.x, fq.y, fq.z, fq.w}, gw[4] = {gq.x, gq.y, gq.z, gq.w};
+#pragma unroll
+        for (int t = 0; t < 8; ++t) {
+            const float zr = z[8 * q + t];
+            const uint16_t fb = static_cast<uint16_t>(fw[t >> 1] >> (16 * (t & 1)));
+            const uint16_t gb = static_cast<uint16_t>(gw[t >> 1] >> (16 * (t & 1)));
+            sf = __fmaf_rn(bf(fb), zr, sf);
+            sg = __fmaf_rn(bf(gb), zr, sg);
+        }
+    }
+    const float fg = tanhf(sf), gg = tanhf(sg);
+    // The reference's four FP32 rounding steps, kept explicit so contraction cannot erase any of them.
+    const float keep = __fsub_rn(1.0f, fg);
+    const float old = __fmul_rn(keep, h[row * c + i]);
+    const float added = __fmul_rn(gg, m[row * c + i]);
+    out[row * c + i] = __fadd_rn(old, added);
+}
+
 }  // namespace ink2l
 
 extern "C" __global__ void __launch_bounds__(256)
@@ -240,6 +310,19 @@ extern "C" __global__ void __launch_bounds__(256)
                       int rows, int c, float eps) {
     (void)rows;
     ink2l::gate(h, m, down, forget, gain, out, c, eps);
+}
+
+// Gate down: grid (rows, 32 rank pairs). Gate up: grid (rows, c / 64); it may write `out` in place of h.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ink2_loop_gate_down(const float* __restrict__ h, const float* __restrict__ m, const uint16_t* __restrict__ down,
+                           uint16_t* __restrict__ zeta, int c, float eps) {
+    ink2l::gateDown(h, m, down, zeta, c, eps);
+}
+
+extern "C" __global__ void __launch_bounds__(64)
+    tf_ink2_loop_gate_up(const float* h, const float* __restrict__ m, const uint16_t* __restrict__ zeta,
+                         const uint16_t* __restrict__ forget, const uint16_t* __restrict__ gain, float* out, int c) {
+    ink2l::gateUp(h, m, zeta, forget, gain, out, c);
 }
 
 // Mini QKV launch uses three independently normalized inputs; other kernels and cache/partial layouts are unchanged.
