@@ -25,6 +25,11 @@ fn mirror(x: []f64, w: []f64, k: usize, rows: usize, n: usize) void {
     };
 }
 
+/// A product's launched rows: the whole kernel runs whole 64-row tiles, past the rows a gate checks.
+fn launched(self: *const H3) usize {
+    return if (self.which == .product) (self.shape.rows + 63) / 64 * 64 else self.shape.rows;
+}
+
 /// Tile sizes: most whole, some short (the last rows of a segment), never empty.
 fn sizes(self: *H3, n: usize, rng: std.Random) ![]i32 {
     const v = try self.arena.allocator().alloc(i32, n);
@@ -211,9 +216,26 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
             self.outs = rows * heads * 128;
             return true;
         },
+        .product, .product_ragged => {
+            // gate 4's mirror stays exact in fp32 (|terms| <= 32^2, k / 2 of one sign) and passes fp16's range
+            const lo: f64 = if (stress) -4 else -1;
+            const x = try self.values(s.rows * s.k, lo, -lo, fill, rng, true, true);
+            const w = try self.values(s.n * s.k, lo, -lo, fill, rng, true, false);
+            if (stress) mirror(x, w, s.k, s.rows, s.n);
+            const pad = try self.values((launched(self) - s.rows) * s.k, lo, -lo, .random, rng, true, false);
+            const bias = try al.alloc(f64, s.n);
+            @memset(bias, 0);
+            self.in.a = x;
+            self.in.b = w;
+            self.in.d = bias;
+            try self.upload(try std.mem.concat(al, f64, &.{ x, pad }), true);
+            try self.upload(w, true);
+            try self.output(launched(self) * s.n * 2);
+            try self.baseOutput(launched(self) * s.n * 2);
+        },
     }
     self.outs = switch (self.which) {
-        .rows_in, .rows_out, .swiglu, .swiglu_gate_first, .modulation => s.rows * s.n,
+        .rows_in, .rows_out, .swiglu, .swiglu_gate_first, .modulation, .product, .product_ragged => s.rows * s.n,
         .norm => 2 * s.rows * s.n,
         .final_norm, .gate_add, .gate_mix => s.rows * s.n,
         .heads => 3 * heads * slots * 128,
@@ -314,5 +336,33 @@ pub fn launch(self: *H3, e: mtl.ComputeEncoder) !void {
             bind(self, e, 6, 8);
             e.dispatchGroups(mtl.Size.of(s.rows, heads, 1), mtl.Size.of(256, 1, 1));
         },
+        .product, .product_ragged => product(self, e, self.pipe, 2, 6, 128),
     }
+}
+
+/// block.zig's product launch: x, w, the sizes, d into buffer `out`; `swizzle` and `threads` as the kernel runs them.
+fn product(self: *H3, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, out: usize, swizzle: u5, threads: usize) void {
+    const s = self.shape;
+    const band = @as(usize, 1) << swizzle;
+    const tn = s.n / 128;
+    const tm = (launched(self) + 63) / 64;
+    var p: [16]i32 = @splat(0);
+    for ([_]usize{ launched(self), s.n, s.k, s.k, s.k, s.n, tn, tm, swizzle, s.k / 256 }, 0..) |v, i| p[i] = @intCast(v);
+    e.setPipeline(pipe);
+    bind(self, e, 0, 0);
+    bind(self, e, 1, 1);
+    e.setBytes(std.mem.asBytes(&p), 2);
+    bind(self, e, out, 3);
+    e.dispatchGroups(mtl.Size.of(tn * band, (tm + band - 1) / band, 1), mtl.Size.of(32, 4, threads / 128));
+}
+
+/// The replaced MLX kernel's bytes on the prepared inputs, written to the scratch buffer.
+pub fn replaced(self: *H3) ![]const u8 {
+    const len = launched(self) * self.shape.n * 2;
+    const out = self.rig.bytes(self.bufs[3], len);
+    @memset(out, 0xff);
+    const p = self.rig.begin();
+    product(self, p.e, self.base.?, 3, 2, 256);
+    try self.rig.finish(p);
+    return out;
 }
