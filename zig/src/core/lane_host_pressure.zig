@@ -26,8 +26,8 @@ pub fn refuses(h: *const LaneHost) bool {
     return g.level == .critical;
 }
 
-/// Whether admission holds: under pressure a stream already runs, so no other starts beside it (lock held).
+/// Whether admission holds: at the governor's hold level a stream runs, so no other starts beside it (lock held).
 pub fn holds(h: *const LaneHost) bool {
     const g = h.pressure orelse return false;
-    return g.level != .normal and h.admitted.items.len > 0;
+    return g.holds() and h.admitted.items.len > 0;
 }

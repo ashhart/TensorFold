@@ -67,9 +67,7 @@ pub const Target = struct {
     }
 
     pub fn laneBytes(model: *const fl.Model, drafts: bool) u64 {
-        const vocab_size: u64 = model.config.text.unpadded_vocab;
-        const taps: u64 = if (drafts) @as(u64, model.config.mtp.?.taps_n) * model.config.text.hidden * @sizeOf(u16) else 0;
-        return fl.state.bytes(&model.config, model.geometry()) + vocab_size * @sizeOf(f32) + window_rows * taps;
+        return fl.layout.laneBytes(&model.config, model.geometry(), drafts, window_rows);
     }
 
     pub fn init(gpa: Allocator, model: *fl.Model, options: Options) !*Target {

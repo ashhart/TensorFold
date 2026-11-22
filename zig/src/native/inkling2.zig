@@ -191,8 +191,16 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const tower_bytes = if (h.vision) |v| v.bytes() else 0;
     const draft_bytes = if (h.draft) |d| d.bytes() else 0;
     const fixed_bytes = model.fixedBytes() + tower_bytes + draft_bytes;
-    const left = @min(admit.room(model.device), room -| fixed_bytes) -| sampling_bytes;
-    const count = try admit.streams(a, "Inkling 2 Mini", stream_bytes, left, o, window, problem) orelse return null;
+    const demand: fl.admit.Demand = .{ .fixed = fixed_bytes, .sampling = sampling_bytes, .stream = stream_bytes };
+    const left = fl.admit.left(room, admit.room(model.device), demand);
+    const count = switch (fl.admit.verdict(left, demand, o.lanes, o.lanes_fixed)) {
+        .serve => |n| n,
+        else => |v| {
+            problem.* = try fl.admit.refusal(a, v, demand, left, o.lanes, window);
+            return null;
+        },
+    };
+    if (count < o.lanes) std.log.info("inkling2 mini: {d} streams at a {d}-token window fit the {d:.2} GiB left under the load limit ({d:.2} GiB a stream), not {d}", .{ count, window, @as(f64, @floatFromInt(left)) / (1 << 30), @as(f64, @floatFromInt(stream_bytes)) / (1 << 30), o.lanes });
     // The adapter's lanes are lazy; cap them to the count that actually fits.
     if (h.draft) |d| d.opts.streams = count;
     const cache_left = left -| (stream_bytes * count) -| cache_fit.MARGIN;
@@ -214,6 +222,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.core = lanes.Engine.init(gpa, &h.config, backend, h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "inkling2-mini-metal", .lanes = count, .context_window = window, .prefill_step = target.max_rows, .structures = true, .logprobs = true, .plain_only = h.draft == null, .decode_share = o.decode_share });
+    if (h.host.pressure) |*g| g.streamsFit(); // the streams admitted above fit the load limit: only critical holds them to one
     if (h.draft != null) h.host.info_.draft_sources = .{ .drafter = .{ .name = "DSpark", .kind = "DSpark" } };
     if (o.vision) |v| h.host.info_.vision = .{ .ctx = h, .prepare = Host.prepare, .image_token = model.config.image_token, .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images };
     if (budget > 0) {
@@ -235,7 +244,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.warm = r.target();
     } else h.warm = .{ .queue = model.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
-    std.log.info("inkling2 mini: {d} streams, {d}-token context, {d} logical layers over {d} physical; weights {d:.2} GiB resident, dense+scratch {d:.2} GiB; DSpark {s}, images {s}, prompt cache {d:.2} GiB", .{ count, window, model.config.text.executionLayers(), model.config.text.layers, @as(f64, @floatFromInt(model.weightBytes())) / (1 << 30), @as(f64, @floatFromInt(model.fixedBytes())) / (1 << 30), if (h.draft != null) "on" else "off", if (h.vision != null) "on" else "off", @as(f64, @floatFromInt(budget)) / (1 << 30) });
+    std.log.info("inkling2 mini: {d} streams, {d}-token context, {d} logical layers over {d} physical; weights {d:.2} GiB resident, dense+scratch {d:.2} GiB; DSpark {s}, images {s}, prompt cache {d:.2} GiB; demand {d:.2} GiB ({d:.2} GiB fixed, {d} x {d:.2} GiB a stream)", .{ count, window, model.config.text.executionLayers(), model.config.text.layers, @as(f64, @floatFromInt(model.weightBytes())) / (1 << 30), @as(f64, @floatFromInt(model.fixedBytes())) / (1 << 30), if (h.draft != null) "on" else "off", if (h.vision != null) "on" else "off", @as(f64, @floatFromInt(budget)) / (1 << 30), @as(f64, @floatFromInt(demand.of(count))) / (1 << 30), @as(f64, @floatFromInt(fixed_bytes + sampling_bytes)) / (1 << 30), count, @as(f64, @floatFromInt(stream_bytes)) / (1 << 30) });
     try h.host.start();
     started = true;
     transfer = true;

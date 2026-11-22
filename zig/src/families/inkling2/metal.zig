@@ -2,6 +2,8 @@
 pub const config = @import("config.zig");
 pub const Model = @import("metal_model.zig").Model;
 pub const state = @import("metal_state.zig");
+pub const layout = @import("state_layout.zig");
+pub const admit = @import("admit.zig");
 pub const Item = @import("metal_forward.zig").Item;
 pub const ImageRows = @import("metal_forward.zig").ImageRows;
 pub const experts = @import("metal_experts.zig");

@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const st = @import("metal_state.zig");
+const layout = @import("state_layout.zig");
 const layer = @import("metal_forward_layer.zig");
 const snapshot = @import("metal_snapshot.zig");
 const Model = @import("metal_model.zig").Model;
@@ -90,7 +91,7 @@ pub fn forward(m: *Model, items: []const Item) !void {
     for (items) |it| {
         const before = it.state.len;
         it.state.len += @intCast(it.ids.len);
-        it.state.floor = @max(before, it.state.len -| st.max_rollback);
+        it.state.floor = @max(before, it.state.len -| layout.max_rollback);
     }
 }
 
@@ -114,7 +115,7 @@ fn view(b: mtl.Buffer) View {
     return .{ .buffer = b, .offset = 0 };
 }
 
-/// Drop the rows past `new_len`: valid within the last forward and `st.max_rollback` rows back, nothing is copied.
+/// Drop the rows past `new_len`: valid within the last forward and `layout.max_rollback` rows back, nothing is copied.
 pub fn keep(m: *Model, state: *st.State, new_len: u32) !void {
     _ = m;
     if (state.failed) return Error.StateFailed;
@@ -150,7 +151,7 @@ test "inkling2 keep: a rollback stays inside the last forward and the window" {
     try std.testing.expectError(Error.RollbackTooFar, keep(&m, &s, 24));
     // a prompt chunk of 100 rows still only gives back its last 16
     s.len = 100;
-    s.floor = @max(0, 100 - st.max_rollback);
+    s.floor = @max(0, 100 - layout.max_rollback);
     try std.testing.expectError(Error.RollbackTooFar, keep(&m, &s, 83));
     try keep(&m, &s, 84);
     s.failed = true;

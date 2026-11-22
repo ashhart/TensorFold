@@ -4,12 +4,13 @@ const mtl = @import("metal");
 const View = @import("../../core/exl3_projection.zig").View;
 const config = @import("config.zig");
 const st = @import("metal_state.zig");
+const layout = @import("state_layout.zig");
 const wts = @import("metal_weights.zig");
 const ops_mod = @import("metal_ops.zig");
 const Model = @import("metal_model.zig").Model;
 
 comptime {
-    std.debug.assert(st.hist_ring == ops_mod.conv_ring);
+    std.debug.assert(layout.hist_ring == ops_mod.conv_ring);
 }
 
 /// Items one pass takes at most (streams sharing a forward).
@@ -369,15 +370,15 @@ pub const Run = struct {
             }
         }
 
-        const hl = st.hist(t, i);
+        const hl = layout.hist(t, i);
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
             const rows: u32 = @intCast(it.ids.len);
             const pos0 = it.state.len;
             const hist = it.state.hist[k];
             const kv = it.state.kv[k];
-            const kb = st.kvBytes(t, i, it.state.geometry);
-            const ring = st.ring(t, i, it.state.geometry);
+            const kb = layout.kvBytes(t, i, it.state.geometry);
+            const ring = layout.ring(t, i, it.state.geometry);
             const log: ?ops_mod.Tau = if (global) .{ .pos0 = pos0, .alpha = t.log_alpha, .floor = t.log_floor } else null;
             inline for (.{ .{ s.kraw, s.dynk, s.kc, a.k_conv, hl.k }, .{ s.vraw, s.dynv, s.vc, a.v_conv, hl.v } }) |side| {
                 const raw = rows16(side[0], b, kvw);
@@ -480,7 +481,7 @@ pub const Run = struct {
         const s = &m.scratch;
         const i = m.plan.visit(k).layer;
         const h: u32 = t.hidden;
-        const hl = st.hist(t, i);
+        const hl = layout.hist(t, i);
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
             const rows: u32 = @intCast(it.ids.len);

@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
 const config = @import("config.zig");
 const state = @import("metal_state.zig");
+const layout = @import("state_layout.zig");
 const wts = @import("metal_weights.zig");
 const ops_mod = @import("metal_ops.zig");
 const ex = @import("metal_experts.zig");
@@ -237,7 +238,7 @@ pub const Model = struct {
         return m.checkpoint.residentBytes();
     }
 
-    pub fn geometry(m: *const Model) state.Geometry {
+    pub fn geometry(m: *const Model) layout.Geometry {
         return .{ .capacity = m.options.capacity, .rows = m.options.rows };
     }
 

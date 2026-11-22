@@ -22,8 +22,8 @@ pub const Source = struct {
     }
 };
 
-/// A change of the governed level, reported once.
-pub const Change = struct { from: Level, to: Level };
+/// A change of the governed level, reported once, with the level from which admission holds to one stream.
+pub const Change = struct { from: Level, to: Level, hold_from: Level = .warning };
 
 /// Where a change's one log line goes; tests record it instead.
 pub const Log = struct {
@@ -66,6 +66,7 @@ pub const Governor = struct {
     level: Level = .normal,
     read_at: ?i96 = null,
     calm_since: ?i96 = null, // the first reading below `level` in the current calm spell
+    hold_from: Level = .warning, // the governed level from which a stream runs alone; `streamsFit` raises it
 
     /// The shared governor where kernel metrics are available; Linux requires explicit enablement.
     pub fn fromEnv() ?Governor {
@@ -73,6 +74,16 @@ pub const Governor = struct {
         const s = Settings.forOs(builtin.os.tag, platform.getenv("TENSORFOLD_MEMORY_PRESSURE"), platform.getenv("TENSORFOLD_PRESSURE_CACHE_PERCENT")) orelse return null;
         if (Source.kernel.read(null) == null) return null;
         return .{ .source = Source.kernel, .percent = s.percent };
+    }
+
+    /// The family's admitted streams fit its memory by their own count: only critical holds admission to one stream.
+    pub fn streamsFit(g: *Governor) void {
+        g.hold_from = .critical;
+    }
+
+    /// Whether admission holds to one stream at the governed level.
+    pub fn holds(g: *const Governor) bool {
+        return @backingInt(g.level) >= @backingInt(g.hold_from);
     }
 
     /// The soft watermark the prompt cache sheds toward under pressure, in bytes of its budget.
@@ -100,7 +111,7 @@ pub const Governor = struct {
             g.calm_since = null;
         }
         g.level = raw;
-        return .{ .from = from, .to = raw };
+        return .{ .from = from, .to = raw, .hold_from = g.hold_from };
     }
 };
 
@@ -110,7 +121,12 @@ fn write(_: ?*anyopaque, c: Change, mark: ?u64) void {
     const cache = if (mark) |m| m >> 20 else 0;
     switch (c.to) {
         .normal => std.log.info("memory pressure: normal again: streams are admitted and prompt states kept as before", .{}),
-        .warning => if (c.from == .critical)
+        .warning => if (c.hold_from != .warning) {
+            if (c.from == .critical)
+                std.log.warn("memory pressure: eased to warning: new requests are queued again, admitted streams run together", .{})
+            else
+                std.log.warn("memory pressure: warning: admitted streams run together, no new kept prompt states, the prompt cache sheds toward {d} MiB", .{cache});
+        } else if (c.from == .critical)
             std.log.warn("memory pressure: eased to warning: new requests are queued again, one more stream only when none runs", .{})
         else
             std.log.warn("memory pressure: warning: one more stream only when none runs, no new kept prompt states, the prompt cache sheds toward {d} MiB", .{cache}),

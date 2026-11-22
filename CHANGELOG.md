@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Inkling 2 Mini admits its streams by what they need, and the OS memory pressure level no longer serializes streams that fit. `--parallel N` is checked at load as the weights, dense layers and scratch plus N streams' state (a cache slot per visit of the 48 over 24 layers, at the configured `--context`) against the load limit (70% of RAM, at most the GPU working set), and the startup line names that demand; a `warning` level leaves the admitted streams running together (prompt states still shed and none kept), and only `critical` holds admission to one stream and refuses new requests. Other engines keep the warning-level rule (#4337).
+
 - Pull: `tensorfold pull` no longer stops with "detecting network configuration failed" after 64 distinct resolved addresses on a long pull; a full address table replaces its oldest entry (#4621, follows #4140).
 
 - Metal: a checkpoint file span of 16 GiB or more loads; each `pread` asks for at most 1 GiB, since macOS refuses a count above INT_MAX (#4435). Thanks to @sethforprivacy, and to @markyu0401 for the first fix (#4433).

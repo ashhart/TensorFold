@@ -312,3 +312,38 @@ test "memory pressure: under warning a request still runs when none does, one at
     try std.testing.expectEqual(@as(usize, 0), r.snaps.live.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), r.store.counts.kept);
 }
+
+test "memory pressure: with hold_from critical, warning leaves streams running together and critical still refuses" {
+    var dial: Dial = .{};
+    var lines: Lines = .{};
+    var r: Rig = undefined;
+    try r.init(3, &dial, &lines, 50);
+    defer r.deinit();
+    r.host.lock();
+    r.host.pressure.?.hold_from = .critical;
+    r.host.unlock();
+    var running: Box = .{};
+    const long: Request = .{ .prompt = &short, .max_tokens = 100000 };
+    try r.submit(1, &long, &running);
+    for (0..2000) |_| if (running.count() == 0) std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    try std.testing.expect(running.count() > 0);
+    dial.set(.warning);
+    try r.reach(.warning);
+    var beside: Box = .{};
+    const later: Request = .{ .prompt = &t2, .max_tokens = 6 };
+    try r.submit(2, &later, &beside);
+    try std.testing.expectEqual(Reason.length, try beside.wait()); // began and ended beside the stream that runs
+    try std.testing.expect(running.done == null);
+    var want: [6]u32 = undefined;
+    try std.testing.expectEqualSlices(u32, solo(&t2, 6, &want), beside.got());
+    dial.set(.critical);
+    try r.reach(.critical);
+    var refused: Box = .{};
+    try std.testing.expectError(error.MemoryPressure, r.submit(3, &later, &refused));
+    r.host.engine().cancel(1);
+    try std.testing.expectEqual(Reason.cancelled, try running.wait());
+    lines.mutex.lockUncancelable(io);
+    defer lines.mutex.unlock(io);
+    const expected = [_]mp.Change{ .{ .from = .normal, .to = .warning, .hold_from = .critical }, .{ .from = .warning, .to = .critical, .hold_from = .critical } };
+    try std.testing.expectEqualSlices(mp.Change, &expected, lines.seen[0..lines.n]);
+}

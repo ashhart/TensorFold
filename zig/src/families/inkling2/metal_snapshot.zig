@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const config = @import("config.zig");
 const st = @import("metal_state.zig");
+const layout = @import("state_layout.zig");
 const Model = @import("metal_model.zig").Model;
 
 /// Positions of layer `i` a snapshot at `len` keeps: the first of them and their count.
@@ -22,7 +23,7 @@ fn runs(start: u32, count: u32, ring: u32) [2]struct { slot: u32, count: u32 } {
 
 pub const Snapshot = struct {
     gpa: std.mem.Allocator,
-    geometry: st.Geometry,
+    geometry: layout.Geometry,
     len: u32,
     /// Per layer: its live keys then its live values, in position order.
     kv: []mtl.Buffer,
@@ -40,7 +41,7 @@ pub const Snapshot = struct {
         var total: u64 = 0;
         for (0..cfg.text.executionLayers()) |l| {
             const i = cfg.text.physicalLayer(@intCast(l));
-            total += 2 * @as(u64, live(&cfg.text, i, len).count) * st.kvWidth(&cfg.text, i) * 2 + st.hist(&cfg.text, i).bytes;
+            total += 2 * @as(u64, live(&cfg.text, i, len).count) * layout.kvWidth(&cfg.text, i) * 2 + layout.hist(&cfg.text, i).bytes;
         }
         return total;
     }
@@ -66,7 +67,7 @@ pub fn save(m: *Model, state: *const st.State) !Snapshot {
     var hist_bytes: usize = 0;
     for (0..state.layers) |l| {
         const i = t.physicalLayer(@intCast(l));
-        const kvw = st.kvWidth(t, i);
+        const kvw = layout.kvWidth(t, i);
         s.kv[l] = try m.device.buffer(@max(2 * @as(usize, live(t, i, state.len).count) * kvw * 2, 16), mtl.ResourceOptions.private);
         made += 1;
         hist_bytes += state.hist[l].length();
@@ -80,12 +81,12 @@ pub fn save(m: *Model, state: *const st.State) !Snapshot {
     var at: usize = 0;
     for (0..state.layers) |l| {
         const i = t.physicalLayer(@intCast(l));
-        const kvw: usize = st.kvWidth(t, i) * 2;
+        const kvw: usize = layout.kvWidth(t, i) * 2;
         const lv = live(t, i, state.len);
-        const slot_bytes = st.kvBytes(t, i, g);
+        const slot_bytes = layout.kvBytes(t, i, g);
         var packed_at: usize = 0;
         for ([_]usize{ 0, slot_bytes }) |side| {
-            for (runs(lv.start, lv.count, st.ring(t, i, g))) |run| {
+            for (runs(lv.start, lv.count, layout.ring(t, i, g))) |run| {
                 if (run.count == 0) continue;
                 blit.copy(state.kv[l], side + run.slot * kvw, s.kv[l], packed_at, run.count * kvw);
                 packed_at += run.count * kvw;
@@ -113,12 +114,12 @@ pub fn restore(m: *Model, state: *st.State, snap: *const Snapshot) !void {
     var at: usize = 0;
     for (0..state.layers) |l| {
         const i = t.physicalLayer(@intCast(l));
-        const kvw: usize = st.kvWidth(t, i) * 2;
+        const kvw: usize = layout.kvWidth(t, i) * 2;
         const lv = live(t, i, snap.len);
-        const slot_bytes = st.kvBytes(t, i, g);
+        const slot_bytes = layout.kvBytes(t, i, g);
         var packed_at: usize = 0;
         for ([_]usize{ 0, slot_bytes }) |side| {
-            for (runs(lv.start, lv.count, st.ring(t, i, g))) |run| {
+            for (runs(lv.start, lv.count, layout.ring(t, i, g))) |run| {
                 if (run.count == 0) continue;
                 blit.copy(snap.kv[l], packed_at, state.kv[l], side + run.slot * kvw, run.count * kvw);
                 packed_at += run.count * kvw;
