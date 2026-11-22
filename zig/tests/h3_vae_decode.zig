@@ -135,7 +135,62 @@ pub fn main(init: std.process.Init) !void {
             e4u.end();
             cb4u.commit(); cb4u.wait();
             const yvu = ybu2.slice(f32, 2 * 2048);
-            std.debug.print("RMSNORM-UNIT y[0]={d:.4} y[1]={d:.4} y[2048]={d:.4} (expect 1.0)", .{ yvu[0], yvu[1], yvu[2048] });
+            
+        {
+            // ATTENTION ISOLATION TEST: same qkv for all heads.
+            const qkvb = try device.buffer(rows_n * 6144 * 4, mtl.ResourceOptions.shared);
+            defer qkvb.deinit();
+            const qkv_h = qkvb.slice(f32, rows_n * 6144);
+            // head 0 pattern: q = sin(i*0.1), k = cos(i*0.05), v = sin(i*0.03)
+            for (0..rows_n) |r| {
+                for (0..32) |head| {
+                    for (0..3) |part| {
+                        for (0..64) |i| {
+                            const gi = part * 64 + i;
+                            const val: f32 = switch (part) {
+                                0 => @sin(@as(f32, @floatFromInt(i)) * 0.1 + @as(f32, @floatFromInt(r)) * 0.01),
+                                1 => @cos(@as(f32, @floatFromInt(i)) * 0.05 + @as(f32, @floatFromInt(r)) * 0.02),
+                                else => @sin(@as(f32, @floatFromInt(i)) * 0.03),
+                            };
+                            qkv_h[r * 6144 + head * 192 + gi] = val;
+                        }
+                    }
+                }
+            }
+            const attb = try device.buffer(rows_n * 2048 * 4, mtl.ResourceOptions.shared);
+            defer attb.deinit();
+            const ropeb = try device.buffer(rows_n * 96 * 4, mtl.ResourceOptions.shared);
+            defer ropeb.deinit();
+            const rope_h = ropeb.slice(f32, rows_n * 48);
+            const rope_s = ropeb.slice(f32, rows_n * 48)[rows_n * 48 ..];
+            for (0..rows_n) |r| {
+                for (0..48) |k2| {
+                    rope_h[r * 48 + k2] = @cos(@as(f32, @floatFromInt(r)) * 0.1);
+                    rope_s[r * 48 + k2] = @sin(@as(f32, @floatFromInt(r)) * 0.1);
+                }
+            }
+            const q5 = try device.queue();
+            const cb5 = q5.commandBuffer();
+            const e5 = cb5.compute(.concurrent);
+            e5.setPipeline(decoder.p[7]);
+            e5.setBuffer(qkvb, 0, 0);
+            e5.setBuffer(attb, 0, 1);
+            e5.setBuffer(ropeb, 0, 2);
+            e5.setValue([2]u32{ @intCast(rows_n), 0 }, 3);
+            e5.dispatchThreads(mtl.Size.of(rows_n * 32, 1, 1), mtl.Size.of(1, 1, 1));
+            e5.end();
+            cb5.commit(); cb5.wait();
+            const ah = attb.slice(f32, rows_n * 2048);
+            // compare head0 vs head3 outputs for row 0
+            var max_diff: f32 = 0;
+            for (0..64) |i| {
+                const d = @abs(ah[i] - ah[3 * 64 + i]);
+                if (d > max_diff) max_diff = d;
+            }
+            std.debug.print("ATTTEST head0 vs head3 max diff: {d:.6} (expect ~0)", .{max_diff});
+        }
+
+std.debug.print("RMSNORM-UNIT y[0]={d:.4} y[1]={d:.4} y[2048]={d:.4} (expect 1.0)", .{ yvu[0], yvu[1], yvu[2048] });
         }
         }
     }

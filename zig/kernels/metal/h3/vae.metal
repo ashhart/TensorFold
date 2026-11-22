@@ -94,11 +94,9 @@
       q_rot[i] = q_normed[i];
     }
   }
-  float run_max = -1e30f;
-  float run_sum = 0.0f;
-  float acc[64];
-  for (uint i = 0; i < hd; i++) acc[i] = 0.0f;
-  // online softmax over all keys, with RoPE applied to each key
+  // three-pass softmax (no large per-thread arrays):
+  // pass 1: global max of dots
+  float gmax = -1e30f;
   for (uint k = 0; k < rows; k++) {
     float dot = 0.0f;
     const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
@@ -120,22 +118,136 @@
           kv = kk_raw[i] * k_rstd * c + kk_raw[i - half_dim] * k_rstd * sn;
         }
       } else {
-        kv = kk_raw[i];
+        kv = kk_raw[i] * k_rstd;
       }
       dot += q_rot[i] * kv;
     }
     dot *= rsqrt(float(hd));
-    const float bm = max(dot, run_max);
-    const float rescale = exp(run_max - bm);
-    const float wgt = exp(dot - bm);
-    run_sum = run_sum * rescale + wgt;
+    if (dot > gmax) gmax = dot;
+  }
+  // pass 2: exp weights sum
+  float run_sum = 0.0f;
+  for (uint k = 0; k < rows; k++) {
+    float dot = 0.0f;
+    const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
+    float k_sq = 0.0f;
+    for (uint i = 0; i < hd; i++) k_sq += kk_raw[i] * kk_raw[i];
+    const float k_rstd = rsqrt(k_sq / float(hd) + 1e-5f);
+    const device float* KCOS = ROPE + k * 48;
+    const device float* KSIN = ROPE + rows * 48 + k * 48;
+    for (uint i = 0; i < hd; i++) {
+      float kv;
+      if (i < 48) {
+        const uint half_dim = 24;
+        const uint fi = i % half_dim;
+        const float c = KCOS[fi];
+        const float sn = KSIN[fi];
+        if (i < half_dim) {
+          kv = kk_raw[i] * k_rstd * c - kk_raw[i + half_dim] * k_rstd * sn;
+        } else {
+          kv = kk_raw[i] * k_rstd * c + kk_raw[i - half_dim] * k_rstd * sn;
+        }
+      } else {
+        kv = kk_raw[i] * k_rstd;
+      }
+      dot += q_rot[i] * kv;
+    }
+    run_sum += exp(dot * rsqrt(float(hd)) - gmax);
+  }
+  // pass 3: weighted value accumulation
+  float acc[64];
+  for (uint i = 0; i < hd; i++) acc[i] = 0.0f;
+  for (uint k = 0; k < rows; k++) {
+    float dot = 0.0f;
+    const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
+    float k_sq = 0.0f;
+    for (uint i = 0; i < hd; i++) k_sq += kk_raw[i] * kk_raw[i];
+    const float k_rstd = rsqrt(k_sq / float(hd) + 1e-5f);
+    const device float* KCOS = ROPE + k * 48;
+    const device float* KSIN = ROPE + rows * 48 + k * 48;
+    for (uint i = 0; i < hd; i++) {
+      float kv;
+      if (i < 48) {
+        const uint half_dim = 24;
+        const uint fi = i % half_dim;
+        const float c = KCOS[fi];
+        const float sn = KSIN[fi];
+        if (i < half_dim) {
+          kv = kk_raw[i] * k_rstd * c - kk_raw[i + half_dim] * k_rstd * sn;
+        } else {
+          kv = kk_raw[i] * k_rstd * c + kk_raw[i - half_dim] * k_rstd * sn;
+        }
+      } else {
+        kv = kk_raw[i] * k_rstd;
+      }
+      dot += q_rot[i] * kv;
+    }
+    const float wgt = exp(dot * rsqrt(float(hd)) - gmax);
     const device float* vv = QKV + k * 3 * dim + head * 3 * hd + 2 * hd;
-    for (uint i = 0; i < hd; i++) acc[i] = acc[i] * rescale + wgt * vv[i];
-    run_max = bm;
+    for (uint i = 0; i < hd; i++) acc[i] += wgt * vv[i];
   }
   if (P[1] == 1) {
     // debug mode: write q_rot directly
     for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = q_rot[i];
+    return;
+  }
+  if (P[1] == 2) {
+    // debug: write first 64 dots for this (r, head)
+    float dots_dbg[64];
+    for (uint i = 0; i < 64; i++) dots_dbg[i] = 0.0f;
+    for (uint k = 0; k < rows && k < 64; k++) {
+      float dot = 0.0f;
+      const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
+      float k_sq = 0.0f;
+      for (uint i = 0; i < hd; i++) k_sq += kk_raw[i] * kk_raw[i];
+      const float k_rstd = rsqrt(k_sq / float(hd) + 1e-5f);
+      const device float* KCOS = ROPE + k * 48;
+      const device float* KSIN = ROPE + rows * 48 + k * 48;
+      for (uint i = 0; i < hd; i++) {
+        float kv;
+        if (i < 48) {
+          const uint fi = i % 24;
+          const float c = KCOS[fi];
+          const float sn = KSIN[fi];
+          if (i < 24) kv = kk_raw[i] * k_rstd * c - kk_raw[i + 24] * k_rstd * sn;
+          else kv = kk_raw[i] * k_rstd * c + kk_raw[i - 24] * k_rstd * sn;
+        } else kv = kk_raw[i] * k_rstd;
+        dot += q_rot[i] * kv;
+      }
+      dots_dbg[k] = dot * rsqrt(float(hd));
+    }
+    for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = dots_dbg[i];
+    return;
+  }
+  if (P[1] == 4) {
+    // debug: write rotated key k = (r % 64) for this head
+    const uint kdbg = r % 64;
+    const device float* kk_raw = QKV + kdbg * 3 * dim + head * 3 * hd + hd;
+    float k_sq = 0.0f;
+    for (uint i = 0; i < hd; i++) k_sq += kk_raw[i] * kk_raw[i];
+    const float k_rstd = rsqrt(k_sq / float(hd) + 1e-5f);
+    const device float* KCOS = ROPE + kdbg * 48;
+    const device float* KSIN = ROPE + rows * 48 + kdbg * 48;
+    for (uint i = 0; i < hd; i++) {
+      float kv;
+      if (i < 48) {
+        const uint fi = i % 24;
+        const float c = KCOS[fi];
+        const float sn = KSIN[fi];
+        if (i < 24) kv = kk_raw[i] * k_rstd * c - kk_raw[i + 24] * k_rstd * sn;
+        else kv = kk_raw[i] * k_rstd * c + kk_raw[i - 24] * k_rstd * sn;
+      } else kv = kk_raw[i] * k_rstd;
+      Y[r * dim + head * hd + i] = kv;
+    }
+    return;
+  }
+  if (P[1] == 3) {
+    // debug mode: read back RoPE tables as seen by this thread
+    const device float* COSD = ROPE + r * 48;
+    const device float* SIND = ROPE + rows * 48 + r * 48;
+    for (uint i = 0; i < hd; i++) {
+      Y[r * dim + head * hd + i] = (i < 24) ? COSD[i] : SIND[i % 24];
+    }
     return;
   }
   for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = run_sum > 0.0f ? acc[i] / run_sum : 0.0f;

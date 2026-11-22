@@ -638,7 +638,8 @@ pub const Decoder = struct {
             _ = fclose(fnn);
         }
         e.barrier();
-        if (getenv("DUMP_QKV_BLK") != null and (bi == 0 or bi == 1)) {
+        
+if (getenv("DUMP_QKV_BLK") != null and (bi == 0 or bi == 1)) {
             const qzp2 = try std.fmt.allocPrintSentinel(gpa, "zig-qkv-blk{d}.f32", .{bi}, 0);
             defer gpa.free(qzp2);
             const fq2 = fopen(qzp2, "wb") orelse return error.CannotWrite;
@@ -683,14 +684,42 @@ pub const Decoder = struct {
                 rope_sin[rr * 48 + k2] = 0.0;
             }
         }
+        if (getenv("DUMP_ROPE") != null and bi == 0) {
+            const rp = try std.fmt.allocPrintSentinel(gpa, "zig-rope.f32", .{}, 0);
+            defer gpa.free(rp);
+            const fr = fopen(rp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(rope_buf.slice(f32, rows * 96).ptr, 4, rows * 96, fr);
+            _ = fclose(fr);
+        }
         e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
         e.setBuffer(attended, 0, 1);
         e.setBuffer(rope_buf, 0, 2);
-        e.setValue([1]u32{ @intCast(rows) }, 3);
+        if (getenv("DEBUG_KV") != null) {
+            e.setValue([2]u32{ @intCast(rows), 4 }, 3);
+        } else if (getenv("DEBUG_DOTS") != null) {
+            e.setValue([2]u32{ @intCast(rows), 2 }, 3);
+        } else if (getenv("DEBUG_ROPE_READ") != null) {
+            e.setValue([2]u32{ @intCast(rows), 3 }, 3);
+        } else if (getenv("DEBUG_QROT") != null) {
+            e.setValue([2]u32{ @intCast(rows), 1 }, 3);
+        } else {
+            e.setValue([2]u32{ @intCast(rows), 0 }, 3);
+        }
         e.dispatchThreads(mtl.Size.of(rows * 32, 1, 1), mtl.Size.of(1, 1, 1));
         e.barrier();
+        e.end();
+        cb.commit(); cb.wait();
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
 
+        if (getenv("DUMP_ATTN") != null) {
+            const ap = try std.fmt.allocPrintSentinel(gpa, "attn{d}-dump.f32", .{bi}, 0);
+            defer gpa.free(ap);
+            const fa = fopen(ap, "wb") orelse return error.CannotWrite;
+            _ = fwrite(attended.slice(f32, rows * dim).ptr, 4, rows * dim, fa);
+            _ = fclose(fa);
+        }
         const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
         @memcpy(out_w.slice(f32, b.attn_out_w.len), b.attn_out_w);
         const out_b = try self.device.buffer(b.attn_out_b.len * 4, mtl.ResourceOptions.shared);
@@ -804,13 +833,7 @@ pub const Decoder = struct {
             _ = fwrite(qkv.slice(f32, rows * 3 * dim).ptr, 4, rows * 3 * dim, fq);
             _ = fclose(fq);
         }
-        if (getenv("DUMP_ATTN") != null) {
-            const ap = try std.fmt.allocPrintSentinel(gpa, "attn{d}-dump.f32", .{bi}, 0);
-            defer gpa.free(ap);
-            const fa = fopen(ap, "wb") orelse return error.CannotWrite;
-            _ = fwrite(attended.slice(f32, rows * dim).ptr, 4, rows * dim, fa);
-            _ = fclose(fa);
-        }
+
         if (getenv("DUMP_B2") != null) {
             const pzb: [*:0]const u8 = "block2-dump.f32";
             const fhb = fopen(pzb, "wb") orelse return error.CannotWrite;
