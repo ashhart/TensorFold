@@ -14,7 +14,7 @@ fn edit(kind: Kind) Edit {
         .swiglu => .{ .from = "out[i] = bfloat((gate / (1.0f + exp(-gate))) * float(u[i]));", .to = "out[i] = bfloat(gate * float(u[i]));" },
         .kappa => .{ .from = "sum += float(y[row * DSP_H + d]) * float(weight[channel * 5120 + 512 + d]);", .to = "sum += float(y[row * DSP_H + d]) * float(weight[channel * 5120 + d]);" },
         .recurrent => .{ .from = "const bfloat left = bfloat(float(gamma) * float(state[i]));", .to = "const float left = float(gamma) * float(state[i]);" },
-        .base => .{ .from = "out[i] = bfloat(dot);", .to = "out[i] = bfloat(30.0f * tanh(dot / 30.0f));" },
+        .base => .{ .from = "out[size_t(row) * a.vocab + id] = bfloat(sum);", .to = "out[size_t(row) * a.vocab + id] = bfloat(30.0f * tanh(sum / 30.0f));" },
         .logits => .{ .from = "const bfloat bias = bfloat(float(beta[i]) + dot);", .to = "const float bias = float(beta[i]) + dot;" },
     };
 }
