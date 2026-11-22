@@ -9,7 +9,7 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 experts tf_ink2_mxfp8_down", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "metal inkling2 experts tf_ink2_nvfp4_quantize", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 experts tf_ink2_mxfp8_quantize", .threads = 32, .tg_memory = 0, .reserved = 32 },
-    .{ .name = "metal inkling2 experts tf_ink2_combine", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "metal inkling2 experts tf_ink2_combine", .threads = 256, .tg_memory = 128, .reserved = 256 },
 };
 
 test "Inkling2 expert launches carry no fabricated M1/M2 compile receipts" {
