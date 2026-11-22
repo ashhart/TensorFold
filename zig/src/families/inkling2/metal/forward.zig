@@ -281,6 +281,22 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     };
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
     const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
+    if (m.experts.units != null) {
+        // On the tensor units a row's sums are the same at every width, so every chunk and window takes this path.
+        try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
+        e.barrier();
+        if (precision == .nvfp4) {
+            try experts.units(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.gu, 0)), gu_call);
+            e.barrier();
+            try experts.units(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) }, x(at(s.down, 0)), down_call);
+        } else {
+            try experts.units(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.gu, 0)), gu_call);
+            e.barrier();
+            try experts.units(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), null, x(at(s.down, 0)), down_call);
+        }
+        e.barrier();
+        return experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
+    }
     if (rows >= experts.grouped_rows) {
         try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
         e.barrier();
