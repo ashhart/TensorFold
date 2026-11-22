@@ -229,13 +229,27 @@ kernel void tf_inkling2_logits(
     const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
     device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
     uint2 at [[thread_position_in_grid]]) {
-  const uint v = at.x, r = at.y;
-  if (v >= a.vocab || r >= a.rows) return;
-  float dot = 0.0f;
-  for (uint d = 0; d < 2304; ++d)
-    dot += float(unembed[size_t(v) * 2304 + d]) * float(h[size_t(r) * 2304 + d]);
-  // A9(a): unembedding rounds to bf16 before it widens for softcap30.
-  out[size_t(r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
+  // A thread takes vocabulary row v for up to eight rows of h, so a window reads the row once; a dot adds in d order.
+  const uint v = at.x, r0 = 8u * at.y;
+  if (v >= a.vocab || r0 >= a.rows) return;
+  const uint n = min(8u, a.rows - r0);
+  const device bfloat* w = unembed + size_t(v) * 2304;
+  const device bfloat* x = h + size_t(r0) * 2304;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint d = 0; d < 2304; d += 4) {
+    const float4 wv = float4(*(const device bfloat4*)(w + d));
+    for (uint r = 0; r < n; ++r) {
+      const float4 xv = float4(*(const device bfloat4*)(x + size_t(r) * 2304 + d));
+      float sum = acc[r];
+      sum += wv.x * xv.x; sum += wv.y * xv.y; sum += wv.z * xv.z; sum += wv.w * xv.w;
+      acc[r] = sum;
+    }
+  }
+  for (uint r = 0; r < n; ++r) {
+    const float dot = acc[r];
+    // A9(a): unembedding rounds to bf16 before it widens for softcap30.
+    out[size_t(r0 + r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
+  }
 }
 
 struct InkExpertArgs { uint rows, channels; };
