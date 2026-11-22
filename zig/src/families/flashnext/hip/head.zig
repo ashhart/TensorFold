@@ -105,6 +105,14 @@ pub fn draws(
     probs: []f32,
     window: bool,
 ) !void {
+    const got = try drawQueued(ops, m, host, s, mixed, rows, window);
+    return finishDraws(s, got, ids, out, probs);
+}
+
+pub const Drawn = struct { bytes: []u8, rows: usize };
+
+/// The original draw kernels and download queued together; the caller owns the staging until finishDraws.
+pub fn drawQueued(ops: Ops, m: *const model.Model, host: *forward.Host, s: hip.Stream, mixed: Tensor, rows: usize, window: bool) !Drawn {
     var o = ops;
     o.window = window;
     const w = &m.mtp.?;
@@ -115,7 +123,13 @@ pub fn draws(
     const at = std.mem.alignForward(usize, host.used, 16);
     const bytes = host.staging.bytes[at..][0 .. 2 * rows * 4];
     try hip.runtime.check(host.d.api.hipMemcpyDtoHAsync(bytes.ptr, @ptrFromInt(arg), 2 * rows * 4, s.handle));
+    return .{ .bytes = bytes, .rows = rows };
+}
+
+pub fn finishDraws(s: hip.Stream, got: Drawn, ids: []const u32, out: []u32, probs: []f32) !void {
     try s.synchronize();
+    const bytes = got.bytes;
+    const rows = got.rows;
     const words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(bytes)));
     for (out[0..rows], probs[0..rows], words[0..rows], words[rows..]) |*t, *p, i, f| {
         t.* = ids[i];

@@ -301,6 +301,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DSV41_IMAGES", .scope = .dsv41, .kind = .word, .trim = " ", .words = &.{ "0", "native" }, .forms = "native or 0" },
     .{ .name = "TF_DSV41_LAYERS", .scope = .dsv41, .kind = .range, .forms = "lo-hi: two whole layer numbers from 0 to 4294967295 with lo <= hi" },
     .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
+    .{ .name = "TF_FLASHNEXT_HIP_TAIL_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0; HIP one stream and rank with graphs enabled)" },
     .{ .name = "TF_FLASHNEXT_PROMPT_BF16", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_GRAPH_PARITY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },

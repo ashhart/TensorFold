@@ -39,6 +39,7 @@ test {
     @import("std").testing.refAllDecls(snapshot);
     _ = native;
     _ = @import("hip/state_test.zig");
+    _ = @import("hip/tail_test.zig");
     _ = @import("hip/fused_prep_test.zig");
     _ = @import("hip/mtp_drafts_test.zig");
 }

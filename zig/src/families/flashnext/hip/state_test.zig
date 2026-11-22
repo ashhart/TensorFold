@@ -320,6 +320,7 @@ test "a round's graph is chosen for the pool's caches only: caches made elsewher
     var r = Host.runtime();
     const s: hip.Stream = .{ .r = &r, .handle = null };
     var e: engine.Engine = undefined;
+    e.tail = null;
     e.o.capacity = cap;
     e.graphed = true;
     e.chosen = null;

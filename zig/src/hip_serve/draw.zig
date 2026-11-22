@@ -46,6 +46,12 @@ fn view(comptime T: type, bytes: []u8) []T {
     return std.mem.bytesAsSlice(T, @as([]align(@alignOf(T)) u8, @alignCast(bytes)));
 }
 
+/// The same rows draw() submits to argmax; whole-row processors retain their host path.
+pub fn needsArgmax(reqs: []const Request) bool {
+    for (reqs) |r| if (!whole(r) and greedy(r.sampling)) return true;
+    return false;
+}
+
 pub const Drawer = struct {
     gpa: std.mem.Allocator,
     d: *const hip.Runtime,

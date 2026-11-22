@@ -52,12 +52,12 @@ fn serial(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
             break :blk follow_buf[0..1];
         };
         const start = lane.caches.len - follow.len;
-        try e.stream.synchronize();
+        try @import("tail.zig").beforeDraft(e);
         e.host.used = 0;
         e.arena.reset();
         const o = e.ops(&e.arena);
         const seg = [_]forward.Seg{.{ .c = hc, .tokens = follow, .pos = start }};
-        var out = try head_mod.run(o, false, m, &e.host, &seg, .{ .ptr = lane.streams.base(), .kind = m.act }, f.ones);
+        var out = try @import("tail.zig").run(e, o, &seg, .{ .ptr = lane.streams.base(), .kind = m.act }, f.ones);
         var mixed = forward.at(out.mixed, (follow.len - 1) * m.dims.hidden);
         var streams = out.streams.ptr + (follow.len - 1) * row_bytes;
         const depth = @min(r.depth, lanes_mod.max_depth);
@@ -68,12 +68,12 @@ fn serial(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
         while (d < depth) : (d += 1) {
             var tok: [1]u32 = undefined;
             var prob: [1]f32 = undefined;
-            try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob, false);
+            try @import("tail.zig").draws(e, o, mixed, f.draft_ids, &tok, &prob);
             lane.held[d] = tok[0];
             chained = d + 1;
             if (d + 1 == depth or prob[0] < stop_under) break;
             const step = [_]forward.Seg{.{ .c = hc, .tokens = &tok, .pos = lane.caches.len + d }};
-            out = try head_mod.run(o, false, m, &e.host, &step, .{ .ptr = streams, .kind = m.act }, f.ones);
+            out = try @import("tail.zig").run(e, o, &step, .{ .ptr = streams, .kind = m.act }, f.ones);
             mixed = out.mixed;
             streams = out.streams.ptr;
         }
