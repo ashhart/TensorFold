@@ -202,8 +202,10 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
             }
             const norm = if (config.isGlobal(i))
                 try A.put(&l, ck, "model.llm.layers.{d}." ++ kind ++ "_input_norm.weight", L, &.{h})
+            else if (j == 0)
+                try A.put(&l, ck, "model.llm.layers.{d}.attn_norm.weight", L, &.{h})
             else
-                try A.put(&l, ck, "model.llm.layers.{d}.attn_norm.weight", L, &.{h});
+                layer.attn.norms[1]; // a sliding layer's k and v share one attn_norm upload
             layer.attn.norms[j + 1] = norm;
         }
         layer.attn.norms[0] = if (config.isGlobal(i))
