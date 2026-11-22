@@ -118,7 +118,7 @@ pub fn attn(pass: anytype, lw: anytype, ai: usize, pa: u64) !void {
     if (max_blocks > 0) try g.qsaScoresLanes(pass.stream, s.iq, lp, li, scores, nb, pass.lanes.len, max_rows, max_blocks);
     var a: cuda.Args = .{};
     inline for (.{ scores, li, s.qids, s.qnk, s.qspr, cint(nb), cint(wt.index_idw), cint(wt.index_top), cint(wt.index_ratio) }) |v| a.add(v);
-    try cuda.launch.launch(pass.k.select_lanes, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 1024 } }, pass.stream, &a);
+    try cuda.launch.launch(pass.k.select_lanes, .{ .pdl = pass.k.pdl, .grid = .{ .x = @intCast(n) }, .block = .{ .x = 1024 } }, pass.stream, &a);
     try g.attnChunksLanes(pass.stream, s.q, lp, li, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, n, wt.kv_heads, chunks);
     try g.attnMergeLanes(pass.stream, s.po, s.pm, s.pl, li, s.ao, s.qnk, s.qspr, n, wt.kv_heads);
 }

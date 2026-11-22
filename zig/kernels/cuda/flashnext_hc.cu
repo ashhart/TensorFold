@@ -3,6 +3,7 @@
 // glue.py and qmm.py's arithmetic and bf16 rounding points, the 4-bit dots on mma tiles with K in ascending order.
 
 #include <cuda_bf16.h>
+#include "flashnext_pdl.cuh"
 #include <stdint.h>
 
 #include "common/fold.cuh"
@@ -58,9 +59,9 @@ using namespace fn_hc;
 
 // glue._hc_writeback, program (row, 256 columns): MODE 0 sums only, 2 MoE slots (fp32 y and weights), 4 K slices.
 template <int MODE>
-__device__ __forceinline__ void hc_writeback(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* __restrict__ PSS,
-                                             const float* __restrict__ BR, const __nv_bfloat16* __restrict__ INJ,
-                                             const float* __restrict__ Y, const float* __restrict__ WTS, long long RS, int D,
+__device__ __forceinline__ void hc_writeback(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS,
+                                             const float* BR, const __nv_bfloat16* INJ,
+                                             const float* Y, const float* WTS, long long RS, int D,
                                              int S, int TOPK, int SLOTS, int WORLD) {
     constexpr int MAXS = 8;
     __shared__ float red[8][MAXS];
@@ -98,28 +99,28 @@ __device__ __forceinline__ void hc_writeback(const __nv_bfloat16* H, __nv_bfloat
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback0(const __nv_bfloat16* H, float* PSS, int D, int S) {
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback0(const __nv_bfloat16* H, float* PSS, int D, int S) { flashnext_pdl::enter();
     hc_writeback<0>(H, nullptr, PSS, nullptr, nullptr, nullptr, nullptr, 0, D, S, 0, 1, 1);
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_moe(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS,
                                                                       const __nv_bfloat16* INJ, const float* Y,
-                                                                      const float* WTS, int D, int S, int TOPK, int SLOTS) {
+                                                                      const float* WTS, int D, int S, int TOPK, int SLOTS) { flashnext_pdl::enter();
     hc_writeback<2>(H, HOUT, PSS, nullptr, INJ, Y, WTS, 0, D, S, TOPK, SLOTS, 1);
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_slices(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS,
                                                                          const float* BR, const __nv_bfloat16* INJ,
-                                                                         long long RS, int D, int S, int WORLD) {
+                                                                         long long RS, int D, int S, int WORLD) { flashnext_pdl::enter();
     hc_writeback<4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, RS, D, S, 0, 1, WORLD);
 }
 
 // hc_writeback<MODE> then fn_hc_normalize in one block a row, slices summed and added in their order: the same bits.
 template <int MODE, int NC, int S>
-__device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* __restrict__ PSS,
-                                                  const float* __restrict__ BR, const __nv_bfloat16* __restrict__ INJ,
-                                                  const float* __restrict__ Y, const float* __restrict__ WTS,
-                                                  const float* __restrict__ SCALE, __nv_bfloat16* __restrict__ NORM,
+__device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS,
+                                                  const float* BR, const __nv_bfloat16* INJ,
+                                                  const float* Y, const float* WTS,
+                                                  const float* SCALE, __nv_bfloat16* NORM,
                                                   long long RS, float eps, int TOPK, int SLOTS, int WORLD) {
     constexpr int D = NC * 256;
     __shared__ float red[NC][8][S];
@@ -178,26 +179,26 @@ __device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_b
 }
 
 // Flash Next's shape: 2560 columns (10 slices), 4 streams.
-extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm0(const __nv_bfloat16* H, float* PSS, const float* SCALE, __nv_bfloat16* NORM, float eps) {
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm0(const __nv_bfloat16* H, float* PSS, const float* SCALE, __nv_bfloat16* NORM, float eps) { flashnext_pdl::enter();
     hc_writeback_norm<0, 10, 4>(H, nullptr, PSS, nullptr, nullptr, nullptr, nullptr, SCALE, NORM, 0, eps, 0, 1, 1);
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_moe(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const __nv_bfloat16* INJ,
-    const float* Y, const float* WTS, const float* SCALE, __nv_bfloat16* NORM, float eps, int TOPK, int SLOTS) {
+    const float* Y, const float* WTS, const float* SCALE, __nv_bfloat16* NORM, float eps, int TOPK, int SLOTS) { flashnext_pdl::enter();
     hc_writeback_norm<2, 10, 4>(H, HOUT, PSS, nullptr, INJ, Y, WTS, SCALE, NORM, 0, eps, TOPK, SLOTS, 1);
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_slices(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const float* BR,
-    const __nv_bfloat16* INJ, long long RS, const float* SCALE, __nv_bfloat16* NORM, float eps, int WORLD) {
+    const __nv_bfloat16* INJ, long long RS, const float* SCALE, __nv_bfloat16* NORM, float eps, int WORLD) { flashnext_pdl::enter();
     hc_writeback_norm<4, 10, 4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, SCALE, NORM, RS, eps, 0, 1, WORLD);
 }
 
 // qmm._qmm_hcdown, block (16 rows, 64 columns, K slice): the slice's normed rows times the down rows, fp32 to PART.
-extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16* __restrict__ H, const float* __restrict__ PSS,
-                                                             const float* __restrict__ SCALE, __nv_bfloat16* __restrict__ NORMED,
-                                                             const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ S,
-                                                             const __nv_bfloat16* __restrict__ B, float* __restrict__ PART,
-                                                             int M, float eps, int N, int K, int D, int NC, int SS, int SK) {
+extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16* H, const float* PSS,
+                                                             const float* SCALE, __nv_bfloat16* NORMED,
+                                                             const uint4* W, const __nv_bfloat16* S,
+                                                             const __nv_bfloat16* B, float* PART,
+                                                             int M, float eps, int N, int K, int D, int NC, int SS, int SK) { flashnext_pdl::enter();
     extern __shared__ __align__(16) unsigned char smem_raw[];
     __shared__ float rinv[16];
     const int kg = K / 32, per = kg / SK, width = per * 32, ld = width + 8;
@@ -275,9 +276,9 @@ extern "C" __global__ void __launch_bounds__(128) fn_hc_down(const __nv_bfloat16
 }
 
 // glue._hc_reduce_act, a thread a column: SK (<= 32) slices in order, bf16 SiLU and its sums, the inject gates.
-extern "C" __global__ void __launch_bounds__(1024) fn_hc_reduce_act(const float* __restrict__ PART, __nv_bfloat16* __restrict__ ACT,
-                                                                    float* __restrict__ XS, __nv_bfloat16* __restrict__ INJ,
-                                                                    int SK, int M, int S, int LOW, int HAS_INJ, int NDN) {
+extern "C" __global__ void __launch_bounds__(1024) fn_hc_reduce_act(const float* PART, __nv_bfloat16* ACT,
+                                                                    float* XS, __nv_bfloat16* INJ,
+                                                                    int SK, int M, int S, int LOW, int HAS_INJ, int NDN) { flashnext_pdl::enter();
     __shared__ float a_s[1024];
     const int r = blockIdx.x, i = threadIdx.x;
     if (i < LOW + (HAS_INJ ? S : 0)) {
@@ -306,8 +307,8 @@ extern "C" __global__ void __launch_bounds__(1024) fn_hc_reduce_act(const float*
 }
 
 // fn_hc_norm's 1 / rms of each row's streams [M, SS], a thread each: the column blocks' sums in order.
-extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __restrict__ RINV, int M, float eps, int D,
-                                      int NC, int SS) {
+extern "C" __global__ void fn_hc_rinv(const float* PSS, float* RINV, int M, float eps, int D,
+                                      int NC, int SS) { flashnext_pdl::enter();
     const int i = blockIdx.x * blockDim.x + threadIdx.x, r = i / SS, st = i % SS;
     if (r >= M) return;
     const float total = tf_common::sum_rn(NC, [&](int c) { return PSS[(static_cast<long long>(r) * NC + c) * SS + st]; });
@@ -315,10 +316,10 @@ extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __re
 }
 
 // fn_hc_mix with each normed value recomputed from the streams as fn_hc_norm rounds it (no normed rows read).
-extern "C" __global__ void __launch_bounds__(256) fn_hc_mix_h(const __nv_bfloat16* __restrict__ UP, const __nv_bfloat16* __restrict__ H,
-                                                              const float* __restrict__ RINV, const float* __restrict__ SCALE,
-                                                              __nv_bfloat16* __restrict__ MIXED, float* __restrict__ XSM,
-                                                              int D, int SS) {
+extern "C" __global__ void __launch_bounds__(256) fn_hc_mix_h(const __nv_bfloat16* UP, const __nv_bfloat16* H,
+                                                              const float* RINV, const float* SCALE,
+                                                              __nv_bfloat16* MIXED, float* XSM,
+                                                              int D, int SS) { flashnext_pdl::enter();
     __shared__ float ms[256];
     const int r = blockIdx.x, d = blockIdx.y * 256 + threadIdx.x;
     const long long row = static_cast<long long>(r) * SS * D;
@@ -344,11 +345,11 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_mix_h(const __nv_bfloat1
 }
 
 // qmm._qmm_upmix, block (16 rows, 32 dims), two warps a stream (SS 4): the up rows, then the streams mixed in order.
-extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix(const __nv_bfloat16* __restrict__ X, const float* __restrict__ XS,
-                                                              const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ S,
-                                                              const __nv_bfloat16* __restrict__ B, const __nv_bfloat16* __restrict__ NORMED,
-                                                              __nv_bfloat16* __restrict__ MIXED, float* __restrict__ XSM,
-                                                              int M, int N, int K, int D, int SS) {
+extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix(const __nv_bfloat16* X, const float* XS,
+                                                              const uint4* W, const __nv_bfloat16* S,
+                                                              const __nv_bfloat16* B, const __nv_bfloat16* NORMED,
+                                                              __nv_bfloat16* MIXED, float* XSM,
+                                                              int M, int N, int K, int D, int SS) { flashnext_pdl::enter();
     extern __shared__ __align__(16) unsigned char smem_raw[];
     const int kg = K / 32;
     const int ld = K + 8;
@@ -412,10 +413,10 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix(const __nv_bfloat1
 }
 
 // glue._ple_gate, a block a row: per stream normed keys and queries, their dot's signed root gating the values.
-extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat16* __restrict__ KEYS, const __nv_bfloat16* __restrict__ VALS,
-                                                              const __nv_bfloat16* __restrict__ H, const float* __restrict__ NK,
-                                                              const float* __restrict__ NQ, __nv_bfloat16* __restrict__ GATED,
-                                                              float* __restrict__ PSS, float eps, int D, int S) {
+extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat16* KEYS, const __nv_bfloat16* VALS,
+                                                              const __nv_bfloat16* H, const float* NK,
+                                                              const float* NQ, __nv_bfloat16* GATED,
+                                                              float* PSS, float eps, int D, int S) { flashnext_pdl::enter();
     __shared__ float scratch[32];
     const int r = blockIdx.x;
     const float fd = static_cast<float>(D);
@@ -454,11 +455,11 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
 }
 
 // glue._ple_conv, program (row, 512 columns): the dilated conv over [TAIL; rows], bf16 SiLU, the adds, NROW kept.
-extern "C" __global__ void __launch_bounds__(512) fn_ple_conv(const __nv_bfloat16* __restrict__ GATED, const float* __restrict__ PSS,
-                                                              const float* __restrict__ NC, const __nv_bfloat16* __restrict__ TAIL,
-                                                              const __nv_bfloat16* __restrict__ CW, const __nv_bfloat16* H,
-                                                              __nv_bfloat16* HOUT, __nv_bfloat16* __restrict__ NROW, float eps,
-                                                              int D, int S, int TAPS, int DIL) {
+extern "C" __global__ void __launch_bounds__(512) fn_ple_conv(const __nv_bfloat16* GATED, const float* PSS,
+                                                              const float* NC, const __nv_bfloat16* TAIL,
+                                                              const __nv_bfloat16* CW, const __nv_bfloat16* H,
+                                                              __nv_bfloat16* HOUT, __nv_bfloat16* NROW, float eps,
+                                                              int D, int S, int TAPS, int DIL) { flashnext_pdl::enter();
     const int r = blockIdx.x;
     const int w = S * D, nt = (TAPS - 1) * DIL;
     const int e = blockIdx.y * blockDim.x + threadIdx.x;
@@ -488,8 +489,8 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_conv(const __nv_bfloat1
 }
 
 // glue._add_streams: out[r, s] = bf16(e[r] + hs[r, s]), the MTP head's input streams.
-extern "C" __global__ void fn_add_streams(const __nv_bfloat16* __restrict__ E, const __nv_bfloat16* __restrict__ HS,
-                                          __nv_bfloat16* __restrict__ OUT, int D, int S) {
+extern "C" __global__ void fn_add_streams(const __nv_bfloat16* E, const __nv_bfloat16* HS,
+                                          __nv_bfloat16* OUT, int D, int S) { flashnext_pdl::enter();
     const int r = blockIdx.x, d = blockIdx.y * blockDim.x + threadIdx.x;
     if (d >= D) return;
     const float e = bf(E[static_cast<long long>(r) * D + d]);
@@ -503,7 +504,7 @@ extern "C" __global__ void fn_add_streams(const __nv_bfloat16* __restrict__ E, c
 
 // Shared expert uses its own BF16 projection outputs and rounding boundaries.
 extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,
-                                             __nv_bfloat16* ACT, int W) {
+                                             __nv_bfloat16* ACT, int W) { flashnext_pdl::enter();
     const int r = blockIdx.x, j = blockIdx.y * blockDim.x + threadIdx.x;
     if (j >= W) return;
     const long long at = static_cast<long long>(r) * W + j;
@@ -511,17 +512,17 @@ extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __n
 }
 
 // Write only the final reserved slot; routed slots retain their FP32 partial sums.
-extern "C" __global__ void fn_shared_scatter(const float* SHARED, float* Y, int D, int SLOTS) {
+extern "C" __global__ void fn_shared_scatter(const float* SHARED, float* Y, int D, int SLOTS) { flashnext_pdl::enter();
     const int r = blockIdx.x, j = blockIdx.y * blockDim.x + threadIdx.x;
     if (j < D) Y[(static_cast<long long>(r) * SLOTS + SLOTS - 1) * D + j] = SHARED[static_cast<long long>(r) * D + j];
 }
 
 // Training alone keeps the up rows; the existing serving functions above stay byte-identical.
-extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix_up(const __nv_bfloat16* __restrict__ X, const float* __restrict__ XS,
-                                                                 const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ S,
-                                                                 const __nv_bfloat16* __restrict__ B, const __nv_bfloat16* __restrict__ NORMED,
-                                                                 __nv_bfloat16* __restrict__ MIXED, float* __restrict__ XSM,
-                                                                 __nv_bfloat16* __restrict__ UP, int M, int N, int K, int D, int SS) {
+extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix_up(const __nv_bfloat16* X, const float* XS,
+                                                                 const uint4* W, const __nv_bfloat16* S,
+                                                                 const __nv_bfloat16* B, const __nv_bfloat16* NORMED,
+                                                                 __nv_bfloat16* MIXED, float* XSM,
+                                                                 __nv_bfloat16* UP, int M, int N, int K, int D, int SS) { flashnext_pdl::enter();
     extern __shared__ __align__(16) unsigned char smem_raw[];
     const int kg = K / 32;
     const int ld = K + 8;

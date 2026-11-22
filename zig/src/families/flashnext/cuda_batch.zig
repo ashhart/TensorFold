@@ -266,7 +266,7 @@ pub fn Pass(comptime Tri: type) type {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
                 const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr, .heads = h, .cuts = cuts };
-                try gdn_fused.launch(g.fused, self.stream, in, n, s.gout, s.gxs);
+                try gdn_fused.launch(g.fused, self.k.pdl, self.stream, in, n, s.gout, s.gxs);
             } else if (self.lanes.len == 0 and keep.log != 0) {
                 // pending rows (one GPU, whole heads: --tp refuses them): the window goes into the log after them
                 try late.front(self.k, self.stream, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, keep);
@@ -297,7 +297,7 @@ pub fn Pass(comptime Tri: type) type {
                     row0 += l.rows;
                 }
             }
-            if (!fused) try gdn_fused.norm(g.norm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n, h);
+            if (!fused) try gdn_fused.norm(g.norm, self.k.pdl, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n, h);
             if (self.lanes.len == 0) try self.shiftWindow(self.seq.conv[li].ptr, s.proj, pw, n, gdn.taps - 1, cd);
             self.out_slices = try split_lane.out(self, s.gout, s.gxs, lw);
         }
@@ -314,7 +314,7 @@ pub fn Pass(comptime Tri: type) type {
             f.add(gk);
             f.add(gv);
             f.add(ggb);
-            try cuda.launch.launch(g.front, .{ .grid = .{ .x = @intCast(rows), .y = lw.heads.nk + lw.heads.nv }, .block = .{ .x = 256 } }, self.stream, &f);
+            try cuda.launch.launch(g.front, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast(rows), .y = lw.heads.nk + lw.heads.nv }, .block = .{ .x = 256 } }, self.stream, &f);
         }
 
         /// fn_gdn_rows over `rows` rows from `state`, in place or (state_out) to fn_gdn_rows_to's; readouts into ys.
@@ -330,12 +330,12 @@ pub fn Pass(comptime Tri: type) type {
                 a.add(if (state_out != 0) state_out else state);
                 a.add(cint(rows));
                 a.add(ys);
-                return cuda.launch.launch(g.chain_tpr, .{ .grid = .{ .x = h.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
+                return cuda.launch.launch(g.chain_tpr, .{ .pdl = self.k.pdl, .grid = .{ .x = h.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
             }
             if (state_out != 0) a.add(state_out);
             a.add(cint(rows));
             a.add(ys);
-            try cuda.launch.launch(if (state_out != 0) g.chain_to else g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
+            try cuda.launch.launch(if (state_out != 0) g.chain_to else g.chain, .{ .pdl = self.k.pdl, .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
         }
 
         pub fn attnBlock(self: *Self, lw: *const Layer, ai: usize) !void {
@@ -421,7 +421,7 @@ pub fn Pass(comptime Tri: type) type {
                     a.add(cint(idw));
                     a.add(cint(top));
                     a.add(cint(ratio));
-                    try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
+                    try cuda.launch.launch(self.k.select, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
                     if (!fused) {
                         const chunks = cdiv(@min(ends, wt.dense_keys), 512);
                         try self.tri.attnChunks(at.q + r0 * qr, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, h, chunks, true, pg);

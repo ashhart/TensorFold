@@ -94,6 +94,7 @@ test "paged grouped prompts: every current attention route receives the sequence
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = C.launch;
     var k: B.Kernels = undefined;
+    k.pdl = false;
     k.tiles.fact = fun(&driver, 1);
     k.tiles.fact_fold = fun(&driver, 2);
     k.lane = fun(&driver, 3);

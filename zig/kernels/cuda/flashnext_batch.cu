@@ -1,13 +1,14 @@
 // The small device steps of Flash Next's batched prompt pass (cuda_batch.zig), built without FMA contraction.
 
 #include <cuda_bf16.h>
+#include "flashnext_pdl.cuh"
 #include <stdint.h>
 #include "common/reduce.cuh"
 #include "common/act.cuh"
 
 // out[i] = the sum of the sk slices' part[s][i] in order, rounded once (qmm.cu's reduce_kernel): bf16 if out_bf16.
-extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* __restrict__ out, int out_bf16,
-                                         long long n, int sk) {
+extern "C" __global__ void fn_sum_slices(const float* part, void* out, int out_bf16,
+                                         long long n, int sk) { flashnext_pdl::enter();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float acc = part[i];
@@ -17,7 +18,7 @@ extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* _
 }
 
 // Shifts the last-`taps`-rows window [taps, c] in place past `rows`, n rows `stride` apart (conv history, n-gram tail).
-static __device__ __forceinline__ void shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
+static __device__ __forceinline__ void shift_window(__nv_bfloat16* win, const __nv_bfloat16* rows,
                                                    long long stride, int n, int taps, int c) {
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= c) return;
@@ -30,8 +31,8 @@ static __device__ __forceinline__ void shift_window(__nv_bfloat16* __restrict__ 
     for (int j = 0; j < taps; ++j) win[static_cast<long long>(j) * c + ch] = next[j];
 }
 
-extern "C" __global__ void fn_shift_window(__nv_bfloat16* __restrict__ win, const __nv_bfloat16* __restrict__ rows,
-                                           long long stride, int n, int taps, int c) {
+extern "C" __global__ void fn_shift_window(__nv_bfloat16* win, const __nv_bfloat16* rows,
+                                           long long stride, int n, int taps, int c) { flashnext_pdl::enter();
     shift_window(win, rows, stride, n, taps, c);
 }
 
@@ -57,8 +58,8 @@ using tf_common::sigmoidf_;
 using tf_common::softplusf_;
 
 template <int NK, int NV>
-static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
-                                                 const __nv_bfloat16* __restrict__ cw, int r, int c) {
+static __device__ __forceinline__ float conv_act(const __nv_bfloat16* P, const __nv_bfloat16* cs,
+                                                 const __nv_bfloat16* cw, int r, int c) {
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     float acc = 0.0f;
 #pragma unroll
@@ -82,9 +83,9 @@ static __device__ __forceinline__ const float* gbs(const float* log, int log_row
 // Program (row, unit), 256 threads: key head u's normed q and k (u < NK), else a value head's v, decay g and beta.
 template <int NK, int NV, bool LOG>  // LOG: k, v and the gates go into the log's row after the pending ones
 static __device__ __forceinline__ void gdn_front(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, const unsigned* __restrict__ ctl, int log_rows) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, float* qn,
+        float* kn, float* v, float* gb, const unsigned* ctl, int log_rows) {
     using namespace fn_gdn;
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int r = blockIdx.x, u = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
@@ -121,17 +122,17 @@ static __device__ __forceinline__ void gdn_front(
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_front(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, float* qn,
+        float* kn, float* v, float* gb) { flashnext_pdl::enter();
     gdn_front<16, 48, false>(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, nullptr, 1);
 }
 
 // fn_gdn_front (whole heads) with the window's k, v and gates into the log after its pending rows (q as there).
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_log(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, float* qn,
+        float* log, const unsigned* ctl, int log_rows) { flashnext_pdl::enter();
     using namespace fn_gdn;
     float* vl = log + (size_t)log_rows * NK * DK;
     gdn_front<NK, NV, true>(P, cs, cw, a_log, dt_bias, qn, log, vl, vl + (size_t)log_rows * NV * DV, ctl, log_rows);
@@ -139,17 +140,17 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_log(
 
 // fn_gdn_front on one rank's 8 key and 24 value heads (a projection row 8,240 wide, 5,120 conv channels).
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_front_h8(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, float* __restrict__ qn,
-        float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, float* qn,
+        float* kn, float* v, float* gb) { flashnext_pdl::enter();
     gdn_front<8, 24, false>(P, cs, cw, a_log, dt_bias, qn, kn, v, gb, nullptr, 1);
 }
 
 // The chain through the chunk from state_in to state_out (in place, or apart for a rollback): a warp 4 state rows.
 template <int NK, int NV>
 static __device__ __forceinline__ void gdn_rows(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* kn, const float* v,
+        const float* gb, const float* state_in, float* state_out, int rows, float* ys_out) {
     using namespace fn_gdn;
     const int hv = blockIdx.x, hk = hv / (NV / NK), warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row0 = blockIdx.y * 16 + warp * 4;
@@ -214,21 +215,21 @@ static __device__ __forceinline__ void gdn_rows(
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* kn, const float* v,
+        const float* gb, float* state, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_rows<16, 48>(qn, kn, v, gb, state, state, rows, ys_out);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* kn, const float* v,
+        const float* gb, const float* state_in, float* state_out, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_rows<16, 48>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
 
 // A window's chain after its stream's pending rows: those first (state only), then its rows read out; fn_gdn_rows' sums
 static __device__ __forceinline__ void gdn_rows_late(
-        const float* __restrict__ qn, const float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows,
-        int store_above, float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* log, const unsigned* ctl, int log_rows,
+        int store_above, float* state_in, float* state_out, int rows, float* ys_out) {
     using namespace fn_gdn;
     const int hv = blockIdx.x, hk = hv / (NV / NK), warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row0 = blockIdx.y * 16 + warp * 4;
@@ -288,8 +289,8 @@ static __device__ __forceinline__ void gdn_rows_late(
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_late(
-        const float* __restrict__ qn, const float* __restrict__ log, const unsigned* __restrict__ ctl, int log_rows,
-        int store_above, float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* log, const unsigned* ctl, int log_rows,
+        int store_above, float* state_in, float* state_out, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_rows_late(qn, log, ctl, log_rows, store_above, state_in, state_out, rows, ys_out);
 }
 
@@ -309,7 +310,7 @@ struct Jobs {
 };
 }  // namespace fn_roll
 
-extern "C" __global__ void fn_late_roll(const fn_roll::Jobs t, int keep) {
+extern "C" __global__ void fn_late_roll(const fn_roll::Jobs t, int keep) { flashnext_pdl::enter();
     const fn_roll::Job& j = t.j[blockIdx.y];
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= j.c) return;
@@ -324,21 +325,21 @@ extern "C" __global__ void fn_late_roll(const fn_roll::Jobs t, int keep) {
 
 // fn_gdn_rows and fn_gdn_rows_to on one rank's 8 key and 24 value heads.
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_h8(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, float* state, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* kn, const float* v,
+        const float* gb, float* state, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_rows<8, 24>(qn, kn, v, gb, state, state, rows, ys_out);
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_to_h8(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-        const float* __restrict__ gb, const float* state_in, float* state_out, int rows, float* __restrict__ ys_out) {
+        const float* qn, const float* kn, const float* v,
+        const float* gb, const float* state_in, float* state_out, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_rows<8, 24>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
 
 template <int NK, int NV>
 static __device__ __forceinline__ void gdn_norm(
-        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
-        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+        const float* ys_in, const __nv_bfloat16* P, const __nv_bfloat16* norm_w,
+        float eps, __nv_bfloat16* out, float* xs) {
     using namespace fn_gdn;
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int r = blockIdx.x, hv = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
@@ -366,15 +367,15 @@ static __device__ __forceinline__ void gdn_norm(
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm(
-        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
-        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+        const float* ys_in, const __nv_bfloat16* P, const __nv_bfloat16* norm_w,
+        float eps, __nv_bfloat16* out, float* xs) { flashnext_pdl::enter();
     gdn_norm<16, 48>(ys_in, P, norm_w, eps, out, xs);
 }
 
 // fn_gdn_norm on one rank's 24 value heads (z read from its 8,240-wide projection rows).
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_norm_h8(
-        const float* __restrict__ ys_in, const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ norm_w,
-        float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs) {
+        const float* ys_in, const __nv_bfloat16* P, const __nv_bfloat16* norm_w,
+        float eps, __nv_bfloat16* out, float* xs) { flashnext_pdl::enter();
     gdn_norm<8, 24>(ys_in, P, norm_w, eps, out, xs);
 }
 
@@ -452,8 +453,8 @@ __device__ __forceinline__ void fn_qsa_bin_cut(const int* hist, int need, uint32
 }
 
 // attention._select and _select_tiles, a row a block: a row past `top` complete blocks lists the best, then its tail.
-__device__ __forceinline__ void fn_qsa_select_body(const float* __restrict__ sc, const int* __restrict__ pos0,
-                                                   int* __restrict__ ids, int* __restrict__ nkr, int* __restrict__ spr,
+__device__ __forceinline__ void fn_qsa_select_body(const float* sc, const int* pos0,
+                                                   int* ids, int* nkr, int* spr,
                                                    int nb, int idw, int top, int ratio) {
     __shared__ int hist[256];
     __shared__ int warp_sums[32];
@@ -541,25 +542,25 @@ __device__ __forceinline__ void fn_qsa_select_body(const float* __restrict__ sc,
     }
 }
 
-extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __restrict__ sc,
-                                                                 const int* __restrict__ pos0, int* __restrict__ ids,
-                                                                 int* __restrict__ nkr, int* __restrict__ spr, int nb,
-                                                                 int idw, int top, int ratio) {
+extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* sc,
+                                                                 const int* pos0, int* ids,
+                                                                 int* nkr, int* spr, int nb,
+                                                                 int idw, int top, int ratio) { flashnext_pdl::enter();
     fn_qsa_select_body(sc, pos0, ids, nkr, spr, nb, idw, top, ratio);
 }
 
 // fn_qsa_select over a shared round's rows in one launch: each row reads its lane's position from LI.
-extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select_lanes(const float* __restrict__ sc,
-                                                                       const int* __restrict__ LI, int* __restrict__ ids,
-                                                                       int* __restrict__ nkr, int* __restrict__ spr, int nb,
-                                                                       int idw, int top, int ratio) {
+extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select_lanes(const float* sc,
+                                                                       const int* LI, int* ids,
+                                                                       int* nkr, int* spr, int nb,
+                                                                       int idw, int top, int ratio) { flashnext_pdl::enter();
     constexpr int MAX = 32;
     fn_qsa_select_body(sc, LI + LI[4 * MAX + blockIdx.x], ids, nkr, spr, nb, idw, top, ratio);
 }
 
 // Training or a live pocket requests the ordered FP32 expert sum.
-extern "C" __global__ void fn_moe_sum(const float* __restrict__ y, const float* __restrict__ wts, float* __restrict__ out,
-                                      int d, int slots) {
+extern "C" __global__ void fn_moe_sum(const float* y, const float* wts, float* out,
+                                      int d, int slots) { flashnext_pdl::enter();
     const int r = blockIdx.x, col = blockIdx.y * blockDim.x + threadIdx.x;
     if (col >= d) return;
     float acc = 0.0f;
@@ -569,14 +570,14 @@ extern "C" __global__ void fn_moe_sum(const float* __restrict__ y, const float* 
 }
 
 // dst [rows, width] (rows dst_pitch apart) = the columns src [rows, width] (src_pitch apart), 16-bit values.
-extern "C" __global__ void fn_copy_cols(const uint16_t* __restrict__ src, long long src_pitch, uint16_t* __restrict__ dst,
-                                        long long dst_pitch, int width) {
+extern "C" __global__ void fn_copy_cols(const uint16_t* src, long long src_pitch, uint16_t* dst,
+                                        long long dst_pitch, int width) { flashnext_pdl::enter();
     const int col = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
     if (col < width) dst[r * dst_pitch + col] = src[r * src_pitch + col];
 }
 
 // A rank's picks as its experts' ids: first..first+local-1 become 0..local-1, any other id (the shared slot too) local.
-extern "C" __global__ void fn_ep_picks(const int* __restrict__ picks, int* __restrict__ out, int n, int first, int local) {
+extern "C" __global__ void fn_ep_picks(const int* picks, int* out, int n, int first, int local) { flashnext_pdl::enter();
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const int p = picks[i];
