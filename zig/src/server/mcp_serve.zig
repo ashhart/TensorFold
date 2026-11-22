@@ -212,7 +212,7 @@ pub fn start(c: *mcp.Call, w: Wanted) !*json.Object {
         else => |x| return x,
     };
     // the parent's variables a serve reads, less its own key and the benchmark's upload token, as the router has them
-    const env = try server.environWithout(a, ctx.environ, &.{ "TENSORFOLD_API_KEY", "TENSORFOLD_BENCHMARK_TOKEN" });
+    const env = try server.environWithout(a, ctx.environ, &.{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_BENCHMARK_TOKEN" });
     const logs = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "mcp" });
     _ = std.Io.Dir.cwd().createDirPathStatus(ctx.io, logs, .fromMode(0o700)) catch {};
     var failure: server.Failure = .none;

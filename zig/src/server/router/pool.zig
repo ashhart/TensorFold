@@ -258,7 +258,7 @@ pub const Pool = struct {
     fn spawn(p: *Pool, sa: Allocator, e: catalog.Entry, key: *const [64]u8, failure: *benchmark_server.Failure, tail: *[]const []const u8) ?Managed {
         failure.* = .setup;
         // the parent's variables a serve would read, less the router's own keys; spawn adds the child's key
-        const env = benchmark_server.environWithout(sa, p.env, &.{ "TENSORFOLD_API_KEY", "TENSORFOLD_BENCHMARK_TOKEN" }) catch return null;
+        const env = benchmark_server.environWithout(sa, p.env, &.{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_BENCHMARK_TOKEN" }) catch return null;
         _ = std.Io.Dir.cwd().createDirPathStatus(p.io, p.options.log_dir, .fromMode(0o700)) catch {};
         var problem: []const u8 = "";
         return Managed.spawn(sa, p.io, p.env, e.argv, .{
