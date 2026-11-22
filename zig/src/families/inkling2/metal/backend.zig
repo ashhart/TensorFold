@@ -127,7 +127,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .keep_full_lone = true, .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .keep_full_lone = true, .chunk_invariant = self.model.experts.units != null, .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -207,13 +207,13 @@ pub const Metal = struct {
 
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !void {
         var at: usize = 0;
-        while (at < ids.len) at += try self.feedChunk(cache, ids[at..], stream);
+        while (at < ids.len) at += try self.feedChunk(cache, ids[at..], stream, 0);
     }
 
-    /// One chunk of `ids` from the cache's length, cut at the stream's planned chunks and kept marks: its rows.
-    fn feedChunk(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !usize {
+    /// One chunk of `ids` from the cache's length, of at most `cap` rows when set, cut at planned chunks and marks.
+    fn feedChunk(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, cap: u32) !usize {
         const base = cache.len;
-        var end: usize = @min(ids.len, st.prompt_rows);
+        var end: usize = @min(ids.len, if (cap > 0) @min(st.prompt_rows, cap) else st.prompt_rows);
         if (stream) |sm| {
             if (sm.isCancelled()) return error.Cancelled;
             for (sm.chunks) |x| if (x > base and x < base + end) {
@@ -301,13 +301,13 @@ pub const Metal = struct {
         try self.feed(cache, stream.prompt()[cache.len..], stream);
     }
 
-    /// One chunk a call at the whole pass's cuts, other streams' rounds between them; `max_rows` is never set.
-    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+    /// One chunk a call, other streams' rounds between; the host's `max_rows` caps a chunk while replies decode.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         const self = cast(ptr);
         const cache = self.caches.get(stream) orelse try self.opening(stream);
         errdefer self.drop(stream);
         const ids = stream.prompt();
-        _ = try self.feedChunk(cache, ids[cache.len..], stream);
+        _ = try self.feedChunk(cache, ids[cache.len..], stream, max_rows);
         return cache.len == ids.len;
     }
 

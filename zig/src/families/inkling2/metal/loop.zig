@@ -18,7 +18,7 @@ pub const Pipelines = struct {
     gates: mtl.Pipeline,
     zeta: mtl.Pipeline,
     blend: mtl.Pipeline,
-    /// The gates' intermediates for up to 256 rows of each of `max_gates` tuples.
+    /// The gates' intermediates for up to 1,024 rows of each of `max_gates` tuples.
     scratch: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -35,7 +35,7 @@ pub const Pipelines = struct {
         errdefer zeta.deinit();
         const blend = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_blend", false);
         errdefer blend.deinit();
-        const scratch = try device.buffer(max_gates * 256 * gate_row_bytes, mtl.ResourceOptions.shared);
+        const scratch = try device.buffer(max_gates * 1024 * gate_row_bytes, mtl.ResourceOptions.shared);
         return .{ .messages = messages, .gates = gate_pipeline, .zeta = zeta, .blend = blend, .scratch = scratch };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -54,7 +54,7 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 
 /// Output layout is [token][12 core layers][q,k,v,mlp][H], all binary32.
 pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, bank0: Ref, bank1: Ref, q_mlp: Ref, kv: Ref, out: Ref, rows: u32) void {
-    std.debug.assert(rows > 0 and rows <= 256);
+    std.debug.assert(rows > 0 and rows <= 1024);
     e.setPipeline(p.messages);
     bind(e, &.{ bank0, bank1, q_mlp, kv, out });
     e.setValue(GateArgs{ .rows = rows, .stride = hidden }, 5);
@@ -79,7 +79,7 @@ pub const Gate = struct { h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out
 
 /// gatesStrided for each tuple a step at a time, a barrier between steps; the tuples' outputs must be distinct.
 pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate, rows: u32, m_stride: u32) void {
-    std.debug.assert(rows > 0 and rows <= 256 and items.len > 0 and items.len <= max_gates);
+    std.debug.assert(rows > 0 and rows <= 1024 and items.len > 0 and items.len <= max_gates);
     const args = GateArgs{ .rows = rows, .stride = m_stride };
     for (items, 0..) |g, i| {
         e.setPipeline(p.gates);
@@ -104,8 +104,8 @@ pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate
 }
 
 fn normalizedOf(p: *const Pipelines, tuple: usize) Ref {
-    return .{ .buf = p.scratch, .off = tuple * 256 * gate_row_bytes };
+    return .{ .buf = p.scratch, .off = tuple * 1024 * gate_row_bytes };
 }
 fn zetaOf(p: *const Pipelines, tuple: usize) Ref {
-    return .{ .buf = p.scratch, .off = tuple * 256 * gate_row_bytes + 256 * 2 * hidden * 2 };
+    return .{ .buf = p.scratch, .off = tuple * 1024 * gate_row_bytes + 1024 * 2 * hidden * 2 };
 }
