@@ -32,6 +32,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !cfg.Config {
     if (flag(t, "tie_word_embeddings", false)) return error.UnsupportedGlmShape;
     var c: cfg.Config = .{
         .dsa = true,
+        .shares = 3, // TP=1 runs the three shares TP=3 runs, in one process (cuda_engine_shares)
         .hidden = d.hidden,
         .layers = d.layers,
         .run = d.layers,

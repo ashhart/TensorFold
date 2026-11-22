@@ -488,7 +488,8 @@ pub const Forward = struct {
         const last_row = propose and f.ranks[0].b.prefill and n > 1;
         const tail = if (last_row) (n - 1) * D * 2 else 0; // b.mx's last row, or its front
         const rows: usize = if (last_row) 1 else n; // the pass past the caches works on that row alone
-        for (f.ranks, hidden) |r, h| {
+        for (f.ranks, 0..) |r, i| {
+            const h = hidden[if (hidden.len == 1) 0 else i]; // one row set for every in-process share: the same bits
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
             try r.st.readyMtp(f.stream, n);
