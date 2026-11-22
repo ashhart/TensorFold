@@ -134,3 +134,47 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
   threadgroup float part[4096];
   ink2_units<true, false>(X, W, S, 1.0f, counts, members, Y, a, tg, sg, lane, part);
 }
+
+struct Ink2LogitArgs { uint rows, vocab; };
+
+// Threadgroup (x, y): vocabulary rows 32x .. + 31 by rows 16y .. + 15 of h, summed as the expert products are.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_logits_units(
+    device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]],
+    device float* Y [[buffer(2)]], constant Ink2LogitArgs& a [[buffer(3)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[4096];
+  const uint n0 = 32u * tg.x, r0 = 16u * tg.y, K = INK2_GU_K;
+  const short2 home = tfp::frag_home(ushort(lane));
+  const uint hx = uint(home.x), hy = uint(home.y);
+  const bool live0 = r0 + hy < a.rows, live1 = r0 + hy + 8u < a.rows;
+  device const bfloat* x0 = X + ulong(r0 + hy) * K + hx;
+  // A vocabulary row past the end reads the last one: its sums are not stored.
+  const uint last = a.vocab - 1u;
+  device const bfloat* w0 = W + ulong(min(n0 + hy, last)) * K + hx;
+  device const bfloat* w1 = W + ulong(min(n0 + hy + 8u, last)) * K + hx;
+  device const bfloat* w2 = W + ulong(min(n0 + hy + 16u, last)) * K + hx;
+  device const bfloat* w3 = W + ulong(min(n0 + hy + 24u, last)) * K + hx;
+  tfp::frag<float> lo = tfp::frag<float>(0.0f), hi = tfp::frag<float>(0.0f);
+  for (uint b = sg * (K / 128u); b < (sg + 1u) * (K / 128u); ++b) {
+    const tfp::frag<bfloat> fa = ink2_units_x(x0, x0 + 8u * K, live0, live1, 16u * b);
+    const tfp::frag<bfloat> b0 = tfp::frag<bfloat>(*(device const bfloat4*)(w0 + 16u * b), *(device const bfloat4*)(w1 + 16u * b));
+    const tfp::frag<bfloat> b1 = tfp::frag<bfloat>(*(device const bfloat4*)(w2 + 16u * b), *(device const bfloat4*)(w3 + 16u * b));
+    ink2_mma(lo, hi, fa, b0, b1);
+  }
+  ink2_part_put(part, lo, hi, sg, lane);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0u) return;
+  ink2_part_sum(part, lo, hi, lane);
+  // Element e of lo is row r0 + hy + 8 (e >> 2), vocabulary row n0 + hx + (e & 3); hi is 16 vocabulary rows on.
+  for (uint q = 0u; q < 2u; ++q) {
+    if (!(q == 0u ? live0 : live1)) continue;
+    const ulong row = r0 + hy + 8u * q;
+    for (uint side = 0u; side < 2u; ++side)
+      for (uint j = 0u; j < 4u; ++j) {
+        const uint v = n0 + 16u * side + hx + j;
+        const float dot = side == 0u ? lo[4u * q + j] : hi[4u * q + j];
+        if (v < a.vocab) Y[row * a.vocab + v] = 30.0f * precise::tanh(precise::divide(float(bfloat(dot)), 30.0f));
+      }
+  }
+}
