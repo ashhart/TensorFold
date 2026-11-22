@@ -156,11 +156,9 @@ const FakeRunner = struct {
         r.seen_cohorts |= @as(u16, 1) << @intCast(plan.cohort);
         var recorder = Recorder.init();
         defer recorder.deinit();
-        var strict: fixtures.Strict = .{ .inner = recorder.backend() };
-        defer strict.deinit();
         var head: fixtures.FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = true } };
         defer head.deinit();
-        var wrapped = try lanes.drafted.Drafted.init(gpa, strict.backend(), head.drafter());
+        var wrapped = try lanes.drafted.Drafted.init(gpa, recorder.backend(), head.drafter());
         defer wrapped.deinit();
         var model = fixtures.base();
         model.gpu_tokens = false;
@@ -170,7 +168,8 @@ const FakeRunner = struct {
         defer cfg.deinit(gpa);
         cfg.timed = false;
         var clock: lanes.fake.FixedClock = .{};
-        const backend = if (plan.drafts) wrapped.backend() else recorder.backend();
+        // Native fake drafts use restored target history, not the external fixture's unseen-prefix placeholders.
+        const backend = recorder.backend();
         var streams: [inv.max_streams]Stream = undefined;
         var proposers: [inv.max_streams]lanes.SuffixLookup = undefined;
         var saved: [inv.max_streams]?*anyopaque = @splat(null);
