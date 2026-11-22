@@ -107,9 +107,20 @@ test "direct-normalized MTP keeps the target's original stepped chunk boundary" 
     try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, 6143, false, false));
 }
 
+/// The shared prefix's page-edge marks join the cold pass's cuts; ordinary reuse keeps its old schedule.
+fn keptCut(len: usize, chunks: []const u32, f: *const Fill, at: usize) usize {
+    var end = nextCut(len, chunks, at, 0);
+    const marks = if (f.kept) |k| k.marks else &.{};
+    for (marks) |mark| if (mark > at) {
+        end = @min(end, mark);
+        break;
+    };
+    return end;
+}
+
 /// The end of `f`'s next step under `max_rows` (0: the cold cut), its cold cut renewed once the last one landed.
 fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
-    if (f.cold <= f.at) f.cold = nextCut(len, chunks, f.at, 0);
+    if (f.cold <= f.at) f.cold = keptCut(len, chunks, f, f.at);
     return lanes.step_cap.end(f.at, f.cold, max_rows, cap_grid);
 }
 
@@ -218,7 +229,7 @@ fn soloEnd(len: usize, chunks: []const u32, f: *Fill, rows: usize, marks: []cons
     var end = capped(len, chunks, f, 0);
     if (end - f.at < solo_min_rows) return end; // a short chunk runs alone, as in a cold pass
     while (end < len and std.mem.indexOfScalar(u32, marks, @intCast(end)) == null) {
-        const next = nextCut(len, chunks, end, 0);
+        const next = keptCut(len, chunks, f, end);
         if (next - end < solo_min_rows or next - f.at > rows) break;
         end = next;
     }
@@ -429,8 +440,8 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     lanes.prefill_widths.completed(self.gpa, stream, forward_end - f.at);
     f.at = forward_end;
     stream.fill_at.store(@intCast(forward_end), .monotonic);
-    // a mark the store asked for, where the cold pass cuts (a resume's only place): the lane host copies the state here
-    const cold = forward_end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
+    // shared page-edge marks are cold cuts too, so their lane-host state is exactly resumable
+    const cold = forward_end == f.cold; // a capped step's end inside a cold chunk keeps nothing
     if (f.kept) |k| {
         if (cold and forward_end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(forward_end)) != null)
             self.prefix.?.keep(cache, if (stream.key.len != 0) stream.key else ids, stream.cache_salt, forward_end) catch |err| {
