@@ -294,3 +294,37 @@ test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back e
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
 }
+
+test "Mini Metal fills a prompt a chunk a call to the whole pass's first row and features" {
+    const dir = try checkpoint();
+    const ids = prompt(64, 5);
+    const cuts = [_]u32{ 20, 41 };
+    const model = try Model.load(gpa, io, dir);
+    defer model.deinit();
+    const target = try backend.Metal.init(gpa, model, .{ .capacity = context, .streams = 2, .budget = 2 * st.cacheBytes(context) });
+    defer target.deinit();
+    const b = target.backend();
+    try b.vtable.prepare_features.?(b.ptr, &taps);
+    var whole = try lanes.Stream.init(gpa, .{ .id = "whole", .prompt = &ids, .max_new = made, .drafts = false, .logprobs = 3, .chunks = &cuts });
+    defer whole.deinit(gpa);
+    try b.prefill(&whole);
+    defer b.release(&whole);
+    try std.testing.expectEqual(@as(u32, ids.len), whole.fill_at.load(.monotonic));
+    var stepped = try lanes.Stream.init(gpa, .{ .id = "stepped", .prompt = &ids, .max_new = made, .drafts = false, .logprobs = 3, .chunks = &cuts });
+    defer stepped.deinit(gpa);
+    defer b.release(&stepped);
+    var from: u32 = 0;
+    for ([_]u32{ 20, 41, ids.len }) |end| {
+        try std.testing.expectEqual(end == ids.len, try b.vtable.prefill_step.?(b.ptr, &stepped, 0));
+        try std.testing.expectEqual(end, stepped.fill_at.load(.monotonic));
+        // A chunk's rows are held until the next forward, and an earlier chunk's are not.
+        try std.testing.expectEqual(end - from, (try b.features(&stepped, &taps, from, end - from)).rows);
+        if (from > 0) try std.testing.expectError(error.Inkling2TapsNotHeld, b.features(&stepped, &taps, 0, from));
+        from = end;
+    }
+    try std.testing.expectEqualSlices(u8, &(try featureRow(b, &whole, ids.len - 1)), &(try featureRow(b, &stepped, ids.len - 1)));
+    const whole_first = try b.read(try b.first(&whole, ids.len));
+    const whole_row = try b.firstRow(&whole);
+    try std.testing.expectEqual(whole_first, try b.read(try b.first(&stepped, ids.len)));
+    try expectFirstRow(whole_row, try b.firstRow(&stepped));
+}

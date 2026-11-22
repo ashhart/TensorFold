@@ -91,6 +91,8 @@ pub const Cache = struct {
     backup: mtl.Buffer,
     logits: mtl.Buffer,
     tap: Tap = .{},
+    /// A stepped prompt chunk's rows, good until the next forward.
+    fill_tap: Tap = .{},
     last_tap: ?mtl.Buffer = null,
     key_at: [visit_slots]usize,
     value_at: [visit_slots]usize,
