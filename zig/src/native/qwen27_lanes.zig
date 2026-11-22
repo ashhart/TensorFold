@@ -95,6 +95,7 @@ pub const Metal = struct {
     standing: @import("qwen27_resume.zig").Standing = .{}, // what slot 0 stands at once its stream left (#1197)
     rewind: ?mtl.Buffer = null, // slot 0's DeltaNet states and taps at its last pass's history end
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
+    draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -116,7 +117,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv(), .draft_block = .{ .enabled = try slots.adaptiveBlockEnv() } };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -530,6 +531,7 @@ pub const Metal = struct {
         const t = b.trees[0] orelse return;
         if (b.from_tree == 0) return;
         const stream = b.owners[0] orelse return;
+        if (!stream.shared_round) b.draft_block.observe(@intFromPtr(stream), @import("qwen27_draft_block.zig").landed(path, b.from_tree));
         var kept: [max_rows]bool = @splat(false);
         for (path) |r| kept[r] = true;
         for (t.tokens, t.parents, 0..) |token, parent, i| {
