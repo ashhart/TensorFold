@@ -160,12 +160,13 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     const t, const tk = try tables(l, c);
     const scale = l.scale();
     if (host_pos < l.dense_limit) {
+        const dense_rows = @min(rows, l.dense_limit - host_pos);
         const stamp = prof.span(k.prof, stream, .mla);
         var dc = c;
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: the visible ones, in order, into the slots
             dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
         };
-        try denseAttention(k, stream, l, dc, v, pos, rows, nch, part_rows, scale);
+        try denseAttention(k, stream, l, dc, v, pos, dense_rows, nch, part_rows, scale, latent.headBlockFor(rows, l.row()));
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
@@ -236,8 +237,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
 }
 
 /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
-fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
-    const hb = latent.headBlockFor(rows, l.row());
+fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32, hb: usize) !void {
     var r0: usize = 0;
     while (r0 < rows) : (r0 += part_rows) {
         const n = @min(part_rows, rows - r0);
