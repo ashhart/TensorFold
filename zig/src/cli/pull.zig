@@ -215,6 +215,7 @@ pub fn routes(a: Allocator, io: std.Io, err_out: *std.Io.Writer, env: ?*const st
         try err_out.writeAll("\n");
         return false;
     };
+    if (route.settings.skipped.len > 0) try err_out.print("tensorfold pull: {s} names a socks or https:// proxy, which pull cannot use; connecting directly\n", .{route.settings.skipped});
     return true;
 }
 

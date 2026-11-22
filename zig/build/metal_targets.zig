@@ -317,7 +317,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     core_checks.rowWidths(b, target, optimize, metal, row_mod);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    const row_tests = b.addRunArtifact(b.addTest(.{ .root_module = row_mod }));
+    test_step.dependOn(&row_tests.step);
+    b.step("test-row-projection-host", "Row projection shapes and the kernel chosen at each window width").dependOn(&row_tests.step);
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     core_checks.kvPages(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);

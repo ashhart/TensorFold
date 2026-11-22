@@ -33,3 +33,7 @@ test "grammar compile: compile threads have the request threads' 8 MiB stack" {
 test "grammar compile: four abandoned workers cancel, clean up, and admit a fifth caller" {
     try run(8);
 }
+
+test "grammar compile: only the fixed-grammar category can extend the bounded wait" {
+    try run(9);
+}

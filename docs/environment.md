@@ -29,6 +29,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
 | `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. Under `--mtp-drafts` the MTP head drafts every stream and this does nothing. |
+| `TF_Q27_DFLASH_ADAPTIVE_BLOCK` | Qwen3.8-27B on Metal: exactly `0` or `1`; default 0. `1` lets a lone stream's DFlash2 block narrow from 16 to 8 rows after 8 consecutive rounds landing at most 4 tree drafts, and return to 16 after a round landing 6 or more. Only the drafter's proposal changes. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
 | `TF_TIMING` | Exactly `0` or `1`; default off (each call's wall time on stderr while set) |
 | `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
@@ -49,6 +50,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
+| `TF_Q35_DFLASH_ABSORB_BATCH` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` runs a shared round's live DFlash2 absorbs (two or more streams) as one pass over every stream's kept rows, each row's arithmetic unchanged |
 | `TENSORFOLD_LFM2_KV_PAGES` | Exactly `0` or `1`, checked when the CUDA backend starts; unset leases pool pages ([profiles](profiles.md)) |
 | `TENSORFOLD_UNIFIED_HOST_COUNTS` | Exactly `0` or `1`, checked when the CUDA backend starts. An integrated GPU on Linux admits against `/proc/meminfo` with `1` and against the CUDA pool with `0`; unset, it reads the pool under WSL2 (`WSL_DISTRO_NAME` set) and `/proc/meminfo` otherwise ([Windows](WINDOWS.md)) |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |

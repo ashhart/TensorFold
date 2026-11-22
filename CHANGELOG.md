@@ -6,15 +6,44 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal: Inkling 2 Mini admits its streams by what they need, and the OS memory pressure level no longer serializes streams that fit. `--parallel N` is checked at load as the weights, dense layers and scratch plus N streams' state (a cache slot per visit of the 48 over 24 layers, at the configured `--context`) against the load limit (70% of RAM, at most the GPU working set), and the startup line names that demand; a `warning` level leaves the admitted streams running together (prompt states still shed and none kept), and only `critical` holds admission to one stream and refuses new requests. Other engines keep the warning-level rule (#4337).
 
+- Experimental Inkling 2 Mini on native Metal: the original checkpoint keeps its packed NVFP4/MXFP8 experts with BF16 activations and FP32 sums. Text, vision, and the bundled DSpark head were exercised on an M4 Pro. Prompt chunks of 64 rows or more group routed-expert pairs by expert and decode each expert's weights once per tile of 16 pairs, summing on simdgroup matrix multiplies in the one-row kernels' order; outputs are byte-equal to the one-row kernels. The prompt chunks' dense projections and the loop gates' states and down projections run on simdgroup MMA with the one-row kernels' chains, byte for byte. Kept prompt states need `--no-drafts`: the DSpark head keeps per-stream state a kept state does not hold, so `--prompt-cache-gib` is refused while drafts are on and the served default resumes nothing. Raw Inkling reply delimiters remain visible; this is not release qualification (#4337).
+
+- Inkling 2 Mini on Metal: drafted decode rounds of 2 to 63 rows plan routed-expert pairs by expert in tiles of four, so an expert that several rows pick decodes its weights once, with the one-row kernels' per-pair chains (byte-equal); dense projections of 3 or more rows take the MMA tiles; without tensor units the DSpark head's small GEMMs use 8x8 MMAs with the tile GEMM's bits and its Markov steps stop at the round's draft depth. Decode windows of 2, 4 and 8 rows drop from 45, 74 and 124 ms to 42, 58 and 81 ms and the draft head from 17 to 9 ms; greedy output is unchanged, and the kernel contract registers the new kernels with launch records and planted controls (#4337).
+
+- Inkling 2 Mini on Metal: decode attention loads each block's value rows four at a time and its keys 16 bytes at a time, so the inter-token latency grows less with context (about 39.5 ms at 2,000 tokens before, 35.6 to 37.9 ms after); every query keeps its key order and the outputs are byte-equal (#4337).
+
+- Lanes: #3728's lone-stream copy pricing applies only to a family that opts in and serves without a model drafter (Qwen3.5/3.8 on HIP with copies only), so copies-only decode on AMD Strix Halo keeps 1.3.3's speed, while streams with a model drafter price their drafts as before; tokens are unchanged.
+
+- Tests: the DeepSeek-V4.1 chat and fixture host tests set the schema-prompt and tool-grammar settings they assume, so a value in the shell's environment can't move their goldens.
+
+- Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ADAPTIVE_BLOCK=1` (opt-in) lets a lone stream draft 8 or 16 DFlash2 block rows by how deep its recent rounds landed; one-stream chat about 2.5% faster on M3 Ultra, tokens unchanged.
+
+- Metal on M5 and later: row projections take the wide kernel from 8 rows instead of 4 (a per-generation cutover table), for #3396's sampled 2- and 4-stream slowdown; replies keep their tokens, and a `tf-row-cutover` bench measures the cutover per chip (#4617, refs #3396).
+
+- Desktop: Discover shows a model as installed again once its selected revision matches the one it would download (#4313 compared the snapshot path, not its sha), and the room worker test lists the ticket bot's reviewed imports (#4606).
+
+- Tests: the admission HTTP stress test waits for its choices to submit before a client walks away, so it no longer fails on loaded hosts.
+
+- Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on).
+
+- Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
+
+- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
+
+## 1.3.4
+
+- `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
+- Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
+
+- Server: `response_format: json_object` with `grammar_budget: true` works again on large vocabularies: the server's fixed `json_object` rule gets budget limits sized to it (computed once per tokenizer), while every client-supplied grammar keeps the limits from #4378; a budget refusal now names what it hit (work, edges, bytes, timeout or busy slots) (#4615, follows #4378).
+
 - Pull: `tensorfold pull` no longer stops with "detecting network configuration failed" after 64 distinct resolved addresses on a long pull; a full address table replaces its oldest entry (#4621, follows #4140).
 
 - Metal: a checkpoint file span of 16 GiB or more loads; each `pread` asks for at most 1 GiB, since macOS refuses a count above INT_MAX (#4435). Thanks to @sethforprivacy, and to @markyu0401 for the first fix (#4433).
 
-
-
 - HIP: a DFlash2 hold runs only the rows its drafts need (a frame takes its deepest stream's drafts plus the pending row, within the block), and a draft's marginal cost is measured at load to price holds (0.56 ms a draft on gfx1151 against the full block's 1.73 ms), so the depth rule prices shared rounds at what a hold costs; the 27B recipe's DFlash2 figures are refreshed on current main, and nothing changes without `--drafter` (#3918, fixes #1563). Thanks to @AbrahamCete.
 
-- GLM at TP=2 on CUDA: with `TF_GLM_PAIR_EXPERTS=1` (opt-in), paired prompt chunks pass each rank's own FFN partial under the default split reduction, so their hidden states and tokens match the unpaired path; off, nothing changes (#4619, fixes #4493).
+- GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` (opt-in) runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once, and each rank passes its own FFN partial under the default split reduction, so tokens match the unpaired path; prompts +15% at 2K and about +5% at 8K and 32K on two GB10s; off, nothing changes (#4493, #4619).
 
 - Tests: requests with `n` from 2 to 16 give back every `--max-inflight` and per-key place on each way they can end (done, disconnect, a failing choice, 429, 400, cancel, shutdown), plus a seeded concurrent disconnect case (#4602).
 
@@ -22,25 +51,17 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: tool-call arguments whose text contains `NaN` or `Infinity` (Qwen XML, GLM, Gemma, MiniMax string values, LFM2 Python strings) parse again; only values read as JSON refuse the non-finite literals. LFM2 tools with parameters named like schema keywords (`pattern`, `format`, `not`, `if`) are supported again (#4604, follows #4378).
 
-
-
-- GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once; outputs are unchanged, +4.8% at 8K and +5.4% at 32K prompts on two GB10s, off by default (#4493).
-
 - MiniMax-H3-Image on Metal: `tf-h3-image-server` loads the prompt encoder, transformer and decoder once and serves one text-to-image request per input line, keeping the weights resident between pictures (#3718). Thanks to @plotarmordev.
 
 - Prompt cache: the fork rule picks its extra resume mark only from kept prompts with the request's `cache_salt`, as every other lookup does since #4504; unsalted requests are unchanged (#4601).
 
 - Qwen3.5 on CUDA: the start-up line and the prompt cache's recorded pass size say the rows the engine actually passes, 4096 by default and 8192 with `TF_QWEN35_CHUNK_SOLO=8192`, instead of 8192 always; nothing else reads the value, so tokens and behaviour are unchanged (#4600).
 
-
-
 - Server: the tokenizer memo now has its own allocator, so requests that add memo segments no longer leave allocator buckets behind on aarch64 Linux (#4455, thanks @bikepresentball).
 
 - Pull: `tensorfold pull` honours the proxy environment on every hop of a redirect (`https_proxy`/`HTTPS_PROXY`, `http_proxy`/`HTTP_PROXY`, `all_proxy`/`ALL_PROXY`, lower case first, and `NO_PROXY` for exact hosts, domain suffixes and ports), tunnels https names through a real `CONNECT` under std's HTTP and TLS (only `http://` proxies, others refused naming the variable), and bounds every connect with `TENSORFOLD_PULL_CONNECT_SECONDS` (default 30) and every read with `TENSORFOLD_PULL_STALL_SECONDS` (default 60), where a stalled file resumes from its `.incomplete` bytes with a Range request up to three times and a failure names the proxy's scheme, host and port, never its credentials (#4140, part of #3692).
 
 - Server: `/v1/audio/speech` adds `wav24`, `wav32f` and `flac`, with an optional `sample_rate` and `channels: 2`; the default `wav` and `pcm` replies stay byte-identical and `mp3`, `opus` and `aac` are refused by name (#3138).
-
-- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - GLM-5.3-Flash on CUDA: `TF_GLM_MOE_DIRECT=1` (off by default) runs a decode window's EXL3 experts without their two row copies and the shared expert's slot write, summing the slot rows bit-equal to the default path, so replies are unchanged (#3659, for #3570). Thanks to @ultradaoto.
 
@@ -83,15 +104,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: a lane-core conformance suite pins fresh = resumed cache state, tree windows = plain decode, run-to-run reproducibility, stop reasons and malformed-parent refusal on the host, with a ledger of seven decode invariants in docs/conformance-ledger.md (#4472).
 
-- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#4469).
+- CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#4469). Thanks to @joshuaswarren (#4454).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#4467).
 
 - Flash Next on CUDA: after a chat reply a quiet background pass keeps its state so the next turn resumes past the reply instead of prefilling it; the pass runs on one rank and yields when a request arrives (#3219).
-
-- Experimental Inkling 2 Mini on native Metal: the original checkpoint keeps its packed NVFP4/MXFP8 experts with BF16 activations and FP32 sums. Text, vision, and the bundled DSpark head were exercised on an M4 Pro. Prompt chunks of 64 rows or more group routed-expert pairs by expert and decode each expert's weights once per tile of 16 pairs, summing on simdgroup matrix multiplies in the one-row kernels' order; outputs are byte-equal to the one-row kernels. The prompt chunks' dense projections and the loop gates' states and down projections run on simdgroup MMA with the one-row kernels' chains, byte for byte. Kept prompt states need `--no-drafts`: the DSpark head keeps per-stream state a kept state does not hold, so `--prompt-cache-gib` is refused while drafts are on and the served default resumes nothing. Raw Inkling reply delimiters remain visible; this is not release qualification (#4337).
-
-- Inkling 2 Mini on Metal: drafted decode rounds of 2 to 63 rows plan routed-expert pairs by expert in tiles of four, so an expert that several rows pick decodes its weights once, with the one-row kernels' per-pair chains (byte-equal); dense projections of 3 or more rows take the MMA tiles; without tensor units the DSpark head's small GEMMs use 8x8 MMAs with the tile GEMM's bits and its Markov steps stop at the round's draft depth. Decode windows of 2, 4 and 8 rows drop from 45, 74 and 124 ms to 42, 58 and 81 ms and the draft head from 17 to 9 ms; greedy output is unchanged, and the kernel contract registers the new kernels with launch records and planted controls (#4337).
 
 - XPU: Qwen3.8-27B decode attention merges its slices with 16 subgroups a head instead of one, adding them in the same order, so every output byte is unchanged (token hashes equal to main, drafted and plain, bf16 and int8 KV). On an Arc Pro B70 plain decode gains 1.8 to 2.0 % at about 8,000 prompt tokens, 14.7 to 16.0 % at about 30,000 and 39.8 to 42.2 % at 121,022; drafted decode is level. The kernel contract registers it as a bit-equal replacement with two planted controls (#3960, lands #2799). Thanks to @Mirrdhyn.
 
@@ -111,8 +128,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the lane host explore test's replay check no longer depends on thread timing; the test thread's idle send waits until no engine yield point is mid-decision, so a seed replays its schedule the same on a loaded runner (#4414).
 
 - Kernel contract: the GLM Metal contract runs to the end on M1 to M4 Macs again (its KDA and index texts carry the pre-M5 define the loader adds), and gate 5 resolves GLM's routed-expert row launches on every Mac instead of stopping with `UnknownLaunch` (#4397).
-
-- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
 - Docs: the first world-4 Flash Next receipt on HIP, oQ2-MTP at `--tp 4` on four Radeon AI PRO R9700s, with a same-binary world-2 control run that separates the world effect from engine changes (#4210, refs #2401). Thanks to @timmyit.
 
