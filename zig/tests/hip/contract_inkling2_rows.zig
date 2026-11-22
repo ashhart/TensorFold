@@ -33,8 +33,8 @@ fn sh(rows: usize, k: usize) c.Shape {
 }
 
 // served shapes: decode windows, long global spans to 1M keys on a 4,096-slot ring that wraps, and prompt chunks
-const sliding_full = [_]c.Shape{ sh(16, 4096), sh(1, 1048576), sh(2048, 2048), sh(2048, 1048576), sh(128, 300000), sh(7, 1030) };
-const fold_full = [_]c.Shape{ sh(16, 20000), sh(1, 1048576), sh(128, 300000), sh(70, 16390), sh(2, 1048576) };
+const sliding_full = [_]c.Shape{ sh(16, 4096), sh(1, 1048576), sh(2048, 2048), sh(2048, 1048576), sh(128, 300000), sh(7, 1030), sh(1, 1), sh(3, 3) };
+const fold_full = [_]c.Shape{ sh(16, 20000), sh(1, 1048576), sh(128, 300000), sh(70, 16390), sh(2, 1048576), sh(16, 16), sh(5, 1024), sh(5, 1025), sh(3, 3) };
 const split_full = [_]c.Shape{ sh(16, 20000), sh(1, 1048576), sh(8, 1048576), sh(64, 70000), sh(33, 1030) };
 const prompt_full = [_]c.Shape{ sh(130, 20000), sh(1, 1048576), sh(2048, 2048), sh(2048, 18432), sh(256, 1048576) };
 const sliding_smoke = [_]c.Shape{ sh(16, 4096), sh(7, 1030), sh(2048, 2048) };
