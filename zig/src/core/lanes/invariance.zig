@@ -141,7 +141,7 @@ fn requireEvidence(plan: Plan, solo: *const Observation, batch: *const Observati
     if (!solo.finished or !batch.finished) return error.ReplyNotFinished;
     if (solo.reason != expected or batch.reason != expected) return error.UnexpectedStopOutcome;
     if (plan.drafts and (solo.accepted == 0 or batch.accepted == 0)) return error.MissingDraftAcceptance;
-    if (solo.rng_count == 0 or batch.rng_count == 0) return error.MissingRngPositions;
+    if (solo.rng_count != solo.token_count or batch.rng_count != batch.token_count) return error.MissingRngPositions;
     if (plan.restore_at > 0 and (solo.cached != plan.restore_at or batch.cached != plan.restore_at)) {
         return error.MissingPrefixRestoration;
     }
