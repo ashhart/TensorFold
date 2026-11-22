@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Pull: `tensorfold pull` honours the proxy environment on every hop of a redirect (`https_proxy`/`HTTPS_PROXY`, `http_proxy`/`HTTP_PROXY`, `all_proxy`/`ALL_PROXY`, lower case first, and `NO_PROXY` for exact hosts, domain suffixes and ports), tunnels https names through a real `CONNECT` under std's HTTP and TLS (only `http://` proxies, others refused naming the variable), and bounds every connect with `TENSORFOLD_PULL_CONNECT_SECONDS` (default 30) and every read with `TENSORFOLD_PULL_STALL_SECONDS` (default 60), where a stalled file resumes from its `.incomplete` bytes with a Range request up to three times and a failure names the proxy's scheme, host and port, never its credentials (#4140, part of #3692).
+
 - XPU: Qwen3.8-27B decode attention merges its slices with 16 subgroups a head instead of one, adding them in the same order, so every output byte is unchanged (token hashes equal to main, drafted and plain, bf16 and int8 KV). On an Arc Pro B70 plain decode gains 1.8 to 2.0 % at about 8,000 prompt tokens, 14.7 to 16.0 % at about 30,000 and 39.8 to 42.2 % at 121,022; drafted decode is level. The kernel contract registers it as a bit-equal replacement with two planted controls (#2799).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_FUSED_SPLIT=1` (opt-in) runs decode projections that split K over a cluster, at 2,048 output columns or more, on the fused form, adding the K slices in the cluster's order so the bits are unchanged; unset, blank or `0` keeps the current kernels, and Metal and HIP refuse `1` at startup (#3475). Thanks to @BadAd84.
