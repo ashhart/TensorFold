@@ -307,7 +307,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.has_bias = @intFromBool(m.bias != null);
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
-    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r, false);
 }
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).
@@ -323,7 +323,19 @@ pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Expert
     try readonly(experts.descriptors, experts.count * @sizeOf(ExpertDescriptor), y, ybytes, scratch, try scratchBytes(experts.k, experts.n, r.count));
     a.indexed = if (r.grouped) 2 else 1;
     a.experts = @intCast(experts.count);
-    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r);
+    // route32 decodes trellis tiles through aligned 32-bit word loads; every reachable
+    // descriptor must have a 4-byte-aligned tile base and strides or the ushort path is kept.
+    var aligned4 = true;
+    {
+        const descs: [*]const ExpertDescriptor = @ptrCast(@alignCast(experts.descriptors.buffer.contents() + experts.descriptors.offset));
+        for (descs[0..experts.count]) |d| {
+            if ((d.trellis & 3) != 0 or d.tile_k_stride % 4 != 0 or d.tile_n_stride % 4 != 0) {
+                aligned4 = false;
+                break;
+            }
+        }
+    }
+    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r, aligned4);
 }
 
 fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows) !void {
@@ -336,7 +348,7 @@ fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows
     if (m.bias) |b| try readonly(b, m.n * 2, y, ybytes, scratch, scratch_bytes);
 }
 
-fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows, aligned4: bool) void {
     const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + ((@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15)) };
     const routes = if (r.routes) |v| v.ids else scratch;
     e.setPipeline(p.rotate_in);
@@ -350,7 +362,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
     e.barrier();
     const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
-    const wide = !shared and a.indexed == 1 and p.route32 != null;
+    const wide = !shared and a.indexed == 1 and p.route32 != null and aligned4;
     e.setPipeline(if (shared) p.prefill.? else if (wide) p.route32.? else p.matmul);
     bind(e, scratch, 0);
     bind(e, trellis, 1);

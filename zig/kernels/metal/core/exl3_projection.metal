@@ -53,6 +53,15 @@ inline ushort tf_exl3_mapped_state(const device ushort* tile, uint map) {
   return ushort(((lo << off) | carry) >> 16);
 }
 
+// Same window decode with each 32-bit stream word as one aligned uint load (tile base must be 4B-aligned).
+inline ushort tf_exl3_mapped_state_u32(const device uint* tile, uint map) {
+  const uint wi = map & 63u, off = (map >> 6) & 31u;
+  const uint lo = tile[wi];
+  const uint hi = tile[map >> 11];
+  const uint carry = (hi >> ((32 - off) & 31u)) & (0u - uint(off != 0));
+  return ushort(((lo << off) | carry) >> 16);
+}
+
 // Both operations are exact in FP32 before the single FP16 round; do not split the mul1 FMA.
 inline half tf_exl3_value(ushort state, uint codebook) {
   uint x = uint(state) * (codebook == 2 ? 0x83DCD12Du : codebook == 1 ? 0xCBAC1FEDu : 89226354u);
@@ -230,11 +239,11 @@ kernel void tf_exl3_matmul_route32(const device half* x [[buffer(0)]],
   float high = 0.0f, low = 0.0f;
   const ulong tile_col = nb / 16 + tile_sel;
   for (uint kb = 0; kb < a.k; kb += 16) {
-    const device ushort* tile = reinterpret_cast<const device ushort*>(
+    const device uint* tile = reinterpret_cast<const device uint*>(
         data + ulong(kb / 16) * ks + tile_col * ns);
     #pragma unroll
     for (uint i = 0; i < 16; ++i) {
-      const ushort state = tf_exl3_mapped_state(tile, maps[i]);
+      const ushort state = tf_exl3_mapped_state_u32(tile, maps[i]);
       const float weight = float(lut[codebook * 65536u + state]);
       const float xv = float(x[ulong(row) * a.k + kb + i]);
       // FP16 products are exact in FP32. TwoSum retains each addition's rounding error.
