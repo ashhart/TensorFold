@@ -7,6 +7,7 @@ const q = tf.qwen35;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
+const metal_witness = @import("metal_witness.zig");
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -24,10 +25,12 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null,
+    witness: ?*metal_witness.Witness = null, // --execution-witness on its path, closed before the model
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.witness) |w| w.close();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.metal.pages) |p| {
@@ -133,6 +136,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const chunk_u32: u32 = @intCast(chunk);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    const witness = if (metal_witness.wanted(o)) try metal_witness.openOrFailed(gpa, io, o.dir) else null; // before the load
+    defer metal_witness.release(witness);
     const model = q.Model.load(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot load this checkpoint ({s})", .{@errorName(err)});
         return null;
@@ -143,6 +148,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
+    h.witness = null;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk_u32, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     // TF_QWEN35_METAL_KV_PAGES: the page plan sets the streams; otherwise each stream's whole cache is admitted at load
@@ -161,12 +167,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     if (!paged) h.metal.options.streams = @max(served, 2);
+    const bound = metal_witness.bound(witness, model.device, .{ @intCast(window), served, chunk, h.metal.width, @intFromBool(paged) });
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk_u32, .decode_share = o.decode_share, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk_u32, .decode_share = o.decode_share, .structures = true, .witness = metal_witness.source(bound) });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     if (o.prompt_cache_gib) |budget_gib| {
@@ -195,5 +202,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
+    h.witness = bound;
+    if (bound) |w| w.adopted = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
