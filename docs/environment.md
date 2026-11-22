@@ -76,6 +76,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
+| `TF_GLM_STARTUP_WARMUP` | GLM on Metal: exactly `0` or `1`; default off. Set to `1` to drain residency through one waited probe and, when the checkpoint's MTP head is the drafter, exercise the served draft/ahead/verify path before readiness; startup only, with no request output |
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
 | `TF_GLM_VISION_FUSED` | Exactly `0` or `1`; default off (the GLM vision tower's attention as cuBLASLt products around a softmax kernel) |
 | `TF_GLM_PAIR_EXPERTS` | Exactly `0` or `1`; default off. On, GLM paired CUDA prompt chunks share 128-pair routed NVFP4 expert items, with separate per-chunk outputs and unchanged slot combines |
@@ -183,7 +184,7 @@ An explicit `--device` or `--segments` wins over its environment value, even if 
 The carveout size is checked only when the carveout is enabled, and still rounds to framebuffer rows.
 `TF_NO_TREES` retains precedence over `TF_DRAFT_NODES`.
 Backend-specific settings are checked when that backend starts; slide settings require learning to be enabled.
-The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family; on Metal `TF_GLM_DRAFT_CONFIDENCE` is read and validated when GLM loads `--drafter`.
+The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family; on Metal `TF_GLM_STARTUP_WARMUP` is read and validated when GLM opens, and `TF_GLM_DRAFT_CONFIDENCE` is read and validated when GLM loads `--drafter`.
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
 

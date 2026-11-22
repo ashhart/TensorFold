@@ -46,14 +46,29 @@ pub fn TargetFor(comptime Metal: type) type {
             cmd.commit();
             return cmd;
         }
+
+        /// Startup: staged set changes, then one probe waited to completion before readiness.
+        pub fn drain(t: *const Self) !void {
+            const pool = Metal.objc.Pool.push();
+            defer pool.pop();
+            if (t.flush) |f| f.run(f.ctx);
+            const cmd = t.probe();
+            cmd.wait();
+            if (cmd.failure()) |msg| {
+                if (@import("builtin").is_test) return error.GpuFailed; // the runner fails planted error logs
+                std.log.err("metal: startup residency probe failed: {s}", .{msg});
+                return error.GpuFailed;
+            }
+        }
     };
 }
 
 /// A Metal that records what one target asks of it, in order: the CPU tests' stand-in.
 const Recorded = struct {
-    const Step = enum { flush, lock, unlock, use, copy, commit };
+    const Step = enum { flush, lock, unlock, use, copy, commit, wait };
     var steps: [16]Step = undefined;
     var count: usize = 0;
+    var failed: ?[]const u8 = null;
 
     fn note(step: Step) void {
         steps[count] = step;
@@ -98,6 +113,12 @@ const Recorded = struct {
         pub fn commit(_: CommandBuffer) void {
             note(.commit);
         }
+        pub fn wait(_: CommandBuffer) void {
+            note(.wait);
+        }
+        pub fn failure(_: CommandBuffer) ?[]const u8 {
+            return Recorded.failed;
+        }
     };
     pub const Queue = struct {
         pub fn commandBuffer(_: Queue) CommandBuffer {
@@ -121,4 +142,20 @@ test "residency keepalive: the busy probe commits under the owner's hold and nev
     Recorded.count = 0;
     T.busy(&t);
     try std.testing.expectEqualSlices(Recorded.Step, &.{ .use, .copy, .commit }, Recorded.steps[0..Recorded.count]);
+}
+
+test "startup drain flushes residency joins and waits before readiness, including on GPU failure" {
+    const T = TargetFor(Recorded);
+    var owner: u8 = 0;
+    const sets = [1]Recorded.ResidencySet{.{}};
+    var t: T = .{ .queue = .{}, .sets = &sets, .scratch = .{}, .flush = .{ .ctx = &owner, .run = Recorded.noteFlush } };
+    Recorded.failed = null;
+    Recorded.count = 0;
+    try t.drain();
+    try std.testing.expectEqualSlices(Recorded.Step, &.{ .flush, .use, .copy, .commit, .wait }, Recorded.steps[0..Recorded.count]);
+    Recorded.failed = "planted GPU failure";
+    Recorded.count = 0;
+    try std.testing.expectError(error.GpuFailed, t.drain());
+    try std.testing.expectEqualSlices(Recorded.Step, &.{ .flush, .use, .copy, .commit, .wait }, Recorded.steps[0..Recorded.count]);
+    Recorded.failed = null;
 }
