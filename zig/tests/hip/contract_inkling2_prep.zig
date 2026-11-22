@@ -19,7 +19,7 @@ fn sh(rows: usize, k: usize) c.Shape {
     return .{ .rows = rows, .n = heads * D, .k = k };
 }
 
-const prep_shapes = [_]c.Shape{ sh(16, 300000), sh(2048, 2048), sh(1, 1048576), sh(128, 1048576), sh(2048, 1048576), sh(7, 8192) };
+const prep_shapes = [_]c.Shape{ sh(16, 300000), sh(2048, 2048), sh(1, 1048576), sh(128, 1048576), sh(2048, 1048576), sh(7, 8192), sh(4, 8193), sh(2, 8194) };
 const apart_shapes = [_]c.Shape{ sh(16, 300000), sh(128, 1048576), sh(9, 20000) };
 const nan_rule = "a NaN in a q, k or rel head stays NaN and leaves the head's other values unclipped (fminf drops the NaN " ++
     "norm, where transformers' clamp gives NaN); an infinity makes its head 0 and itself NaN; v rows propagate";
