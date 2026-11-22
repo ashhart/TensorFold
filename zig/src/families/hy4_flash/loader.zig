@@ -81,3 +81,14 @@ const Validation = struct {
         _ = try self.checkpoint.expect(name, dtype, shape);
     }
 };
+
+/// `ck` names `get` never took, refused with up to five named.
+pub fn refuseLeftovers(ck: *const core.Checkpoint, comptime err: anyerror) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return err;
+}
