@@ -155,6 +155,7 @@ test {
     _ = @import("tool_id_key.zig");
     _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
+    _ = @import("tool_nonfinite_text_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_args_close.zig");
     _ = @import("tool_json_cut.zig");
