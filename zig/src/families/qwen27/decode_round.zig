@@ -7,8 +7,6 @@ const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
 const commit_every = 4;
-/// Passes past this many rows are prompt chunks (128 rows and up), 3.5% slower on Metal 4 with qk: Metal 3 takes them.
-const metal4_rows = 64;
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -336,7 +334,7 @@ pub const Runner = struct {
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
         const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.passQueue(round.ids.len)}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{@import("pass_queue.zig").queue(r, round.ids.len)}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
         };
@@ -365,13 +363,6 @@ pub const Runner = struct {
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
         return @import("mtp.zig").pass(r, round, sc, hidden, head);
-    }
-
-    /// The model's Metal 4 queue, unless the pass is a prompt chunk or needs Metal 3: a trace, the Neural Engine, seams
-    fn passQueue(r: *const Runner, rows: usize) mtl.Queue {
-        const q = r.model.metal4 orelse return r.model.queue;
-        if (!r.metal4 or rows > metal4_rows or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
-        return q;
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {

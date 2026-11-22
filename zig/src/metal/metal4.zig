@@ -14,7 +14,7 @@ const Lock = if (darwin) std.c.os_unfair_lock else struct {};
 fn hold(lock: *Lock) void {
     if (darwin) std.c.os_unfair_lock_lock(lock);
 }
-fn drop(lock: *Lock) void {
+fn releaseLock(lock: *Lock) void {
     if (darwin) std.c.os_unfair_lock_unlock(lock);
 }
 
@@ -387,7 +387,7 @@ pub const State = struct {
     }
 
     fn unlock(q: *State) void {
-        drop(&q.lock_word);
+        releaseLock(&q.lock_word);
     }
 
     /// The next slot, begun: its previous use has completed (it is waited for if not) and its allocator is reset.

@@ -7,6 +7,8 @@ const contract = tf.tree_round;
 const Round = q.round_plan.Round;
 const help = "tf-qwen27-metal4-ab --model DIR --tokens IDS.json [--rounds 90] [--chunk 128]";
 
+pub const tf_metal4 = true;
+
 /// Two trees from real DFlash2 rounds: a width takes their leading rows.
 const trees = [2][16]i32{
     .{ -1, 0, 1, 2, 3, 4, 3, 6, 5, 8, 7, 5, 9, 10, 12, 13 },
