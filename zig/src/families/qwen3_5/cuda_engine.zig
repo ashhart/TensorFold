@@ -534,7 +534,7 @@ pub const Engine = struct {
         shape.unread = keep == .none;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         shape.join = shape.paged and caches.anyShares(parts);
-        shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
+        @import("cuda_attn_skip.zig").attention(&shape, e, parts, record, total); // MT2 as before, then the skip
         if (e.learning != null or e.pockets.any()) {
             shape.total = @intCast(total);
             shape.nseg = @intCast(parts.len); // the exact path: uncaptured at the live counts

@@ -33,6 +33,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |
 | `TF_MTP_BATCH` | Exactly `0` or `1`; default on. `0` keeps one stream at a time |
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
+| `TF_Q35_ATTN_SKIP_EMPTY` | Exactly `0` or `1`; default off. `1` makes a Qwen 3.5 CUDA decode forward leave out the attention launch none of its streams reaches: `attn_rows` when every stream holds fewer than 8,192 cached tokens, the partials kernel when every stream holds 8,192 or more. Those launches return without writing, so tokens keep their bits; captured graphs key the choice |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |

@@ -16,6 +16,7 @@ pub const Shape = struct {
     mt2: bool = false,
     join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
     unread: bool = false, // a prompt chunk nothing reads: its last layer stops at the state writes
+    skip: Skip = .none, // TF_Q35_ATTN_SKIP_EMPTY: the decode attention launch left out (cuda_attn_skip.zig)
     /// In a MTP prompt cut, rows before this local index are not consumed by the drafter.
     tap_from: ?usize = null,
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
@@ -30,9 +31,12 @@ pub const Shape = struct {
 
     pub fn key(s: Shape) u64 {
         // Captured shapes only: prompt tap_from is live; a window bucket's rows fit the low byte.
-        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32;
+        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32 | @as(u64, @backingInt(s.skip)) << 33;
     }
 };
+
+/// The decode attention launch a forward leaves out: none (always when off), attn_rows or attn_partial.
+pub const Skip = enum(u2) { none = 0, rows = 1, partial = 2 };
 
 /// The measured FP8 row-tile envelope: 8,192+ cached tokens; 2-16 rows through 131,071 cached; prompt tiles unchanged.
 pub fn useMt2(qualified: bool, fp8: bool, prompt: bool, rows: usize, segments: usize, cached: usize) bool {
