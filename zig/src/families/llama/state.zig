@@ -88,16 +88,18 @@ fn sizes(c: *const cfg.Config, rows: usize) [fields.len]usize {
     const qw = r * c.queryWidth() * 2;
     const partials = @as(usize, @min(r, window_rows)) * c.heads * max_blocks * 4; // decode attention's maxima, sums, outputs (fp32)
     return .{
-        r * 4,                                       r * h * 2,                                                      r * h * 2,                    r * c.qkvWidth() * 2,
-        qw,                                          qw,                                                             r * h * 2,                    r * 2 * c.intermediate * 2,
-        r * c.intermediate * 2,                      @as(usize, @min(r, batch_rows)) * c.vocab * 2,                  if (prompt) 16 else partials, if (prompt) 16 else partials,
-        if (prompt) 16 else partials * cfg.head_dim, if (prompt and c.weights == .int4_g32) dequantBytes(c) else 16,
+        r * 4,                                       r * h * 2,                                     r * h * 2,                    r * c.qkvWidth() * 2,
+        qw,                                          qw,                                            r * h * 2,                    r * 2 * c.intermediate * 2,
+        r * c.intermediate * 2,                      @as(usize, @min(r, batch_rows)) * c.vocab * 2, if (prompt) 16 else partials, if (prompt) 16 else partials,
+        if (prompt) 16 else partials * cfg.head_dim, if (prompt) projectionBytes(c, r) else 16,
     };
 }
 
-/// Bytes of the widest int4 projection as bf16: a prompt chunk's GEMM reads each one from there.
-fn dequantBytes(c: *const cfg.Config) usize {
-    return @max(c.queryWidth(), c.intermediate) * c.hidden * 2;
+/// A prompt chunk's projection scratch: the widest int4 projection as bf16, or an MLX input's fp32 group sums.
+fn projectionBytes(c: *const cfg.Config, rows: usize) usize {
+    if (c.weights == .int4_g32) return @max(c.queryWidth(), c.intermediate) * c.hidden * 2;
+    const w = c.weights.mlx() orelse return 16;
+    return rows * @max(c.hidden, c.intermediate, c.queryWidth()) / w.group * 4;
 }
 
 /// Bytes a Scratch for `rows` rows holds.
@@ -121,7 +123,7 @@ pub const Scratch = struct {
     pm: mtl.Buffer, // decode attention's partials by block: maxima, sums, outputs
     pl: mtl.Buffer,
     po: mtl.Buffer,
-    wq: mtl.Buffer, // an int4 projection as bf16 for a prompt chunk's GEMM
+    wq: mtl.Buffer, // a prompt chunk's projection scratch: an int4 projection as bf16, or MLX's input group sums
     rows: usize,
 
     /// Buffers for `rows` rows at once (batch_rows for decode, prompt_rows for prompt chunks).
@@ -152,4 +154,15 @@ test "llama state: a stream's caches on Nanbeige4.3-33B's geometry, and the deco
     try std.testing.expectEqual(@as(usize, 32), chunk(4096));
     try std.testing.expectEqual(@as(usize, 1024), chunk(524288));
     try std.testing.expect(scratchBytes(&c, prompt_rows) > scratchBytes(&c, batch_rows));
+}
+
+test "llama state: the bf16 and int4 releases' scratches keep their bytes; an MLX prompt chunk's holds its group sums" {
+    var c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/config.json"));
+    try std.testing.expectEqual(@as(usize, 465772608), scratchBytes(&c, prompt_rows));
+    try std.testing.expectEqual(@as(usize, 271253648), scratchBytes(&c, batch_rows));
+    c.weights = .int4_g32; // the widest projection as bf16 for the GEMM
+    try std.testing.expectEqual(@as(usize, 465772608 - 16 + 22016 * 7168 * 2), scratchBytes(&c, prompt_rows));
+    c.weights = .mlx_q4_g64; // fp32 sums a group of 64 of the widest input row (the MLP's 22,016)
+    try std.testing.expectEqual(@as(usize, 465772608 - 16 + prompt_rows * 22016 / 64 * 4), scratchBytes(&c, prompt_rows));
+    try std.testing.expectEqual(@as(usize, 271253648), scratchBytes(&c, batch_rows));
 }

@@ -318,3 +318,19 @@ LL_Q4_MATVEC(32)
   device bfloat* out = W + (size_t)j * a.k + 8 * c;
   for (uint e = 0; e < 8; ++e) out[e] = bfloat(ll_q4(word, e, z, s));
 }
+
+// An MLX affine embedding (layout in core/quant/mlx_affine.zig): codes of a.bits (4 or 8, whole codes a word).
+struct ll_affine_args { uint rows, width, bits, group; };
+
+// Row r of residual R = MLX's dequantize of table row ids[r], bf16 tables: bf16(bf16(scale * q) + bias).
+[[kernel]] void ll_embed_affine(const device uint* ids [[buffer(0)]], const device uint* W [[buffer(1)]],
+    const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], constant ll_affine_args& a [[buffer(4)]],
+    device bfloat* R [[buffer(5)]], uint2 p [[thread_position_in_grid]]) {
+  if (p.x >= a.width || p.y >= a.rows) return;
+  const size_t row = ids[p.y];
+  const uint per = 32 / a.bits;
+  const uint word = W[row * (a.width / per) + p.x / per];
+  const float q = float((word >> ((p.x % per) * a.bits)) & ((1u << a.bits) - 1u));
+  const size_t g = row * (a.width / a.group) + p.x / a.group;
+  R[(size_t)p.y * a.width + p.x] = bfloat(float(bfloat(float(S[g]) * q)) + float(B[g]));
+}

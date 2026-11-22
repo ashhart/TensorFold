@@ -40,11 +40,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = fl.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = switch (err) {
-            error.LlamaNeedsTensorUnits => "the native Llama engine needs Metal 4 tensor units (an M5 or later) for its prompt GEMM and attention: this Mac's GPU (M1 to M4) has none",
-            error.UnqualifiedLlamaCheckpoint => try std.fmt.allocPrint(a, "the native Llama engine serves only the checkpoints checked against Hugging Face ({s}): this llama checkpoint's geometry is not one of them", .{qualifiedNames(.served)}),
-            else => try std.fmt.allocPrint(a, "the native Llama engine cannot load this checkpoint ({s})", .{@errorName(err)}),
-        };
+        problem.* = try loadRefusal(a, err);
         return null;
     };
     errdefer model.deinit();
@@ -65,7 +61,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         }
         // a smaller Llama on the model's tokens, its commands on the model's queue (one residency set for both)
         const dm = fl.Model.loadOn(gpa, io, dir, model.queue) catch |err| {
-            problem.* = if (err == error.UnsupportedLlamaPrecision)
+            problem.* = if (err == error.UnsupportedLlamaPrecision or quantized(gpa, io, dir))
                 try std.fmt.allocPrint(a, "--drafter: {s} is a quantized checkpoint; a Llama drafter is served from its bf16 release as published", .{dir})
             else
                 try std.fmt.allocPrint(a, "--drafter: the native Llama engine cannot load {s} ({s}); it takes a smaller Llama checkpoint on the served model's tokenizer", .{ dir, @errorName(err) });
@@ -159,6 +155,18 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
+/// Why the served model did not load, by name: the GPU, an unqualified geometry, or a layout the family does not run.
+fn loadRefusal(a: std.mem.Allocator, err: anyerror) ![]const u8 {
+    return switch (err) {
+        error.LlamaNeedsTensorUnits => "the native Llama engine needs Metal 4 tensor units (an M5 or later) for its prompt GEMM and attention: this Mac's GPU (M1 to M4) has none",
+        error.UnqualifiedLlamaCheckpoint => try std.fmt.allocPrint(a, "the native Llama engine serves only the checkpoints checked against Hugging Face ({s}): this llama checkpoint's geometry is not one of them", .{qualifiedNames(.served)}),
+        error.UnsupportedLlamaSlidingWindow => "this Mistral checkpoint attends through a sliding window (config.json's sliding_window): the native Llama engine attends to every key, so it serves Mistral checkpoints whose sliding_window is null",
+        error.UnsupportedLlamaTables => "this MLX conversion stores float16 scales and biases: the native Llama engine reads MLX affine weights with bf16 tables as stored, and float16 ones do not narrow to bf16 without loss; serve the bf16 release, or an MLX conversion made in bfloat16",
+        error.LlamaHeadNotTied => "config.json ties the head to the embedding table (tie_word_embeddings), but the checkpoint also stores lm_head.weight: one of them is wrong",
+        else => try std.fmt.allocPrint(a, "the native Llama engine cannot load this checkpoint ({s})", .{@errorName(err)}),
+    };
+}
+
 /// The names of the checkpoints qualified for `role`, comma-separated.
 fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
     comptime var names: []const u8 = "";
@@ -172,6 +180,12 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
 fn undrafted(a: std.mem.Allocator, q: *const fl.config.Qualified) !?[]const u8 {
     if (q.drafted) return null;
     return try std.fmt.allocPrint(a, "--drafter: {s} is served without a drafter: its drafts were measured slower than decoding without them; serve it without --drafter", .{q.name});
+}
+
+/// Whether `dir`'s config.json names quantized weights (MLX's or compressed-tensors'); an unreadable one does not.
+fn quantized(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const c = fl.config.Config.load(gpa, io, dir) catch return false;
+    return c.weights != .bf16;
 }
 
 /// --drafter's directory when drafts are on; one width (bf16 as published), so --drafter-bits is unread, as in Gemma 4.
@@ -249,6 +263,23 @@ test "llama host: --drafter is refused by name for Nanbeige4.3-33B-INT4 and serv
             try std.testing.expect(std.mem.indexOf(u8, why.?, "--drafter: Nanbeige4.3-33B-INT4 is served without a drafter") != null);
         } else try std.testing.expectEqual(@as(?[]const u8, null), why);
     }
+}
+
+test "llama host: a sliding window, float16 MLX tables and a stored head beside a tied one are refused by name" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ error.UnsupportedLlamaSlidingWindow, "sliding_window is null" },
+        .{ error.UnsupportedLlamaTables, "float16 scales and biases" },
+        .{ error.LlamaHeadNotTied, "also stores lm_head.weight" },
+        .{ error.LlamaNeedsTensorUnits, "Metal 4 tensor units" },
+    };
+    inline for (cases) |c| try std.testing.expect(std.mem.indexOf(u8, try loadRefusal(a, c[0]), c[1]) != null);
+    const unqualified = try loadRefusal(a, error.UnqualifiedLlamaCheckpoint);
+    defer a.free(unqualified);
+    try std.testing.expect(std.mem.indexOf(u8, unqualified, "(Nanbeige4.3-33B, Nanbeige4.3-33B-INT4)") != null);
+    const other = try loadRefusal(a, error.UnsupportedLlamaRotary);
+    defer a.free(other);
+    try std.testing.expectEqualStrings("the native Llama engine cannot load this checkpoint (UnsupportedLlamaRotary)", other);
 }
 
 test "llama host: cache callback updates the owned store rather than a temporary value" {
