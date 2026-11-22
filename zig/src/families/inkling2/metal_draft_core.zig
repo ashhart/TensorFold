@@ -46,6 +46,38 @@ pub const Lane = struct {
     held_len: u32 = 0,
 };
 
+/// A draft lane's exact committed state at `end`, device-copied: live keys/values per layer and `f_rnn`.
+pub const LaneSnapshot = struct {
+    gpa: std.mem.Allocator,
+    layers: u32,
+    end: u64,
+    from: u64,
+    lfrom: u64,
+    /// Per layer: live keys then live values, in position order.
+    kv: [wt.max_layers]mtl.Buffer,
+    /// `f_rnn` (bf16 [hidden]) copied to host memory.
+    f: []u8,
+
+    pub fn deinit(s: *LaneSnapshot) void {
+        for (0..s.layers) |i| s.kv[i].deinit();
+        s.gpa.free(s.f);
+    }
+};
+
+fn liveSpan(m: config.Mtp, li: usize, end: u64, from: u64, lfrom: u64) struct { start: u64, count: u64 } {
+    const floor: u64 = if (m.local[li]) @max(lfrom, end -| m.window) else from;
+    const lo: u64 = @min(floor, end);
+    return .{ .start = lo, .count = end - lo };
+}
+
+fn ringRuns(start: u64, count: u64, ring_slots: u32) [2]struct { slot: u64, count: u64 } {
+    if (ring_slots == 0 or count == 0) return .{ .{ .slot = start, .count = count }, .{ .slot = 0, .count = 0 } };
+    const r: u64 = ring_slots;
+    const first = start % r;
+    const head = @min(count, r - first);
+    return .{ .{ .slot = first, .count = head }, .{ .slot = 0, .count = count - head } };
+}
+
 pub const Core = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -256,6 +288,108 @@ pub const Core = struct {
         l.f.deinit();
         l.seq.deinit();
         k.gpa.destroy(l);
+    }
+
+    /// Bytes a draft lane snapshot at `len` positions holds (device KV + host `f_rnn`).
+    pub fn snapshotBytes(m: config.Mtp, hidden: u32, len: u32) u64 {
+        const kvw: u64 = @as(u64, m.kv_heads) * head_dim * 2;
+        var total: u64 = @as(u64, hidden) * 2;
+        for (0..m.layers) |li| {
+            const count: u64 = if (m.local[li]) @min(len, m.window) else len;
+            total += @max(2 * count * kvw, 16);
+        }
+        return total;
+    }
+
+    pub fn resetLane(k: *const Core, l: *Lane) void {
+        @memset(l.f.slice(u8, @as(usize, k.hidden) * 2), 0);
+        l.end = 0;
+        l.from = 0;
+        l.lfrom = 0;
+        l.held_len = 0;
+    }
+
+    /// Copy `l`'s exact committed KV caches and `f_rnn` (no draft pass in flight).
+    pub fn saveLane(k: *const Core, l: *const Lane) !LaneSnapshot {
+        const kvw: usize = @as(usize, k.m.kv_heads) * head_dim * 2;
+        const f_bytes: usize = @as(usize, k.hidden) * 2;
+        var s: LaneSnapshot = .{
+            .gpa = k.gpa,
+            .layers = k.m.layers,
+            .end = l.end,
+            .from = l.from,
+            .lfrom = l.lfrom,
+            .kv = undefined,
+            .f = undefined,
+        };
+        var made: usize = 0;
+        errdefer for (0..made) |i| s.kv[i].deinit();
+        for (0..k.m.layers) |li| {
+            const span = liveSpan(k.m, li, l.end, l.from, l.lfrom);
+            s.kv[li] = try k.device.buffer(@max(2 * @as(usize, @intCast(span.count)) * kvw, 16), mtl.ResourceOptions.private);
+            made += 1;
+        }
+        s.f = try k.gpa.alloc(u8, f_bytes);
+        errdefer k.gpa.free(s.f);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = k.queue.commandBuffer();
+        const blit = cb.blit();
+        for (0..k.m.layers) |li| {
+            const span = liveSpan(k.m, li, l.end, l.from, l.lfrom);
+            const r_slots: u32 = if (k.m.local[li]) ring(k.m) else 0;
+            const rs = ringRuns(span.start, span.count, r_slots);
+            var packed_at: usize = 0;
+            for ([_]mtl.Buffer{ l.k[li], l.v[li] }) |src| {
+                for (rs) |run| {
+                    if (run.count == 0) continue;
+                    const len: usize = @intCast(run.count * kvw);
+                    blit.copy(src, @intCast(run.slot * kvw), s.kv[li], packed_at, len);
+                    packed_at += len;
+                }
+            }
+        }
+        @memcpy(s.f, l.f.slice(u8, f_bytes));
+        blit.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| return failed(msg);
+        return s;
+    }
+
+    /// Write `snap` back into `l`: its live keys, values, `f_rnn`, and span bounds exactly as saved.
+    pub fn restoreLane(k: *const Core, l: *Lane, snap: *const LaneSnapshot) !void {
+        const f_bytes: usize = @as(usize, k.hidden) * 2;
+        if (snap.layers != k.m.layers or snap.end > k.capacity or snap.f.len != f_bytes) return error.DraftSnapshotGeometry;
+        errdefer k.resetLane(l);
+        const kvw: usize = @as(usize, k.m.kv_heads) * head_dim * 2;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = k.queue.commandBuffer();
+        const blit = cb.blit();
+        for (0..k.m.layers) |li| {
+            const span = liveSpan(k.m, li, snap.end, snap.from, snap.lfrom);
+            const r_slots: u32 = if (k.m.local[li]) ring(k.m) else 0;
+            const rs = ringRuns(span.start, span.count, r_slots);
+            var packed_at: usize = 0;
+            for ([_]mtl.Buffer{ l.k[li], l.v[li] }) |dst| {
+                for (rs) |run| {
+                    if (run.count == 0) continue;
+                    const len: usize = @intCast(run.count * kvw);
+                    blit.copy(snap.kv[li], packed_at, dst, @intCast(run.slot * kvw), len);
+                    packed_at += len;
+                }
+            }
+        }
+        @memcpy(l.f.slice(u8, f_bytes), snap.f);
+        blit.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| return failed(msg);
+        l.end = snap.end;
+        l.from = snap.from;
+        l.lfrom = snap.lfrom;
+        l.held_len = 0;
     }
 
     /// Taps of `n` committed rows (bf16 [n, taps * hidden] at `feats`) become context positions [start, start + n).

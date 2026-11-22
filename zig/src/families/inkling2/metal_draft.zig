@@ -12,6 +12,7 @@ const Lane = core_mod.Lane;
 const Ref = gm.Ref;
 
 pub const Target = core_mod.Target;
+pub const Snapshot = core_mod.LaneSnapshot;
 
 pub const Options = struct {
     /// Streams the adapter keeps lanes for at once (`open` refuses more).
@@ -66,6 +67,30 @@ pub const Adapter = struct {
     /// One stream's caches (also `Facts.stream_bytes`).
     pub fn laneBytes(a: *const Adapter) u64 {
         return Core.laneBytes(a.core.m, a.core.hidden, a.opts.capacity);
+    }
+
+    /// Bytes a kept prompt snapshot of one stream's draft lane takes at `at` positions.
+    pub fn snapshotBytes(a: *const Adapter, at: u32) u64 {
+        return Core.snapshotBytes(a.core.m, a.core.hidden, at);
+    }
+
+    /// Copy `s`'s draft lane at `at` positions if the stream is drafting and has absorbed through `at`.
+    pub fn save(a: *const Adapter, s: *lanes.Stream, at: u32) !?Snapshot {
+        const l = a.lanes.get(s) orelse return null;
+        if (l.end != at) return null;
+        return try a.core.saveLane(l);
+    }
+
+    /// Restore `s`'s draft lane from `snap` (called before absorbing the uncached suffix).
+    pub fn restore(a: *Adapter, s: *lanes.Stream, snap: *const Snapshot) !void {
+        const l = a.lanes.get(s) orelse return error.DraftStreamUnknown;
+        try a.core.restoreLane(l, snap);
+    }
+
+    /// Clear `s`'s draft lane back to an empty context (e.g. after a failed restore).
+    pub fn resetStream(a: *Adapter, s: *lanes.Stream) void {
+        const l = a.lanes.get(s) orelse return;
+        a.core.resetLane(l);
     }
 
     pub fn drafter(a: *Adapter) dr.Drafter {

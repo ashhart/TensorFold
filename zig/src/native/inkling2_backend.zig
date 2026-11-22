@@ -6,23 +6,24 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const fl = tf.inkling2_metal;
 const be = lanes.backend;
+const inkling2_warm = @import("inkling2_warm.zig");
 const Allocator = std.mem.Allocator;
 
 pub const window_rows = 16;
-pub const max_rows = 512;
+pub const max_rows = 1024;
 const max_items = 64;
 const ring_size = 4096;
 
 /// What `Model.save` returns: one stream's exact state at a length (3 loop passes of KV and convolution history).
 const Snap = @typeInfo(@typeInfo(@TypeOf(fl.Model.save)).@"fn".return_type.?).error_union.payload;
-const Kept = struct { target: *const Target, snap: Snap };
+const Kept = struct { target: *const Target, snap: Snap, draft: ?fl.draft.Snapshot = null };
 
 pub const Images = struct {
     ctx: *anyopaque,
     encode: *const fn (*anyopaque, lanes.stream.Image) anyerror!mtl.Buffer,
 };
 
-pub const Options = struct { capacity: u32, streams: u32, rows: u32, drafts: bool = true, images: ?Images = null };
+pub const Options = struct { capacity: u32, streams: u32, rows: u32, drafts: bool = true, draft: ?*fl.draft.Adapter = null, images: ?Images = null };
 
 /// A stream's state, first-draw logits, and draft taps that outlive the shared forward buffers.
 const Lane = struct {
@@ -60,6 +61,8 @@ pub const Target = struct {
     tokens: [ring_size]u32 = undefined,
     next: u64 = 0,
     sampling_scratch: []u8,
+    costs: [window_rows]lanes.config.Cost = undefined,
+    timed_n: usize = 0,
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn samplingBytes(model: *const fl.Model) usize {
@@ -93,6 +96,7 @@ pub const Target = struct {
             idle[out.idle_n] = lane;
             out.idle_n += 1;
         }
+        out.timed_n = try inkling2_warm.warm(model, &out.pool[0].state, options.capacity, options.drafts, &out.costs);
         return out;
     }
 
@@ -106,7 +110,7 @@ pub const Target = struct {
     }
 
     pub fn facts(self: *const Target) lanes.Model {
-        return .{ .exact_width = window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = self.options.rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = self.options.rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed_n] };
     }
 
     pub fn backend(self: *Target) be.Backend {
@@ -201,7 +205,7 @@ pub const Target = struct {
     }
 
     /// A kept prompt state of this prompt's prefix: the lane starts there, or the pass runs from 0.
-    fn restoreKept(self: *Target, lane: *Lane, stream: *lanes.Stream, prompt_len: usize) void {
+    fn restoreKept(self: *Target, lane: *Lane, stream: *lanes.Stream, prompt_len: usize, drafted: bool) void {
         const saved = stream.reuse.saved orelse return;
         const kept: *const Kept = @ptrCast(@alignCast(saved));
         const snap = &kept.snap;
@@ -215,6 +219,15 @@ pub const Target = struct {
             self.model.reset(&lane.state); // a failed copy may have written part of the state
             return;
         };
+        if (drafted) if (self.options.draft) |d| if (kept.draft) |*dsnap| {
+            d.restore(stream, dsnap) catch |err| {
+                stream.reuse_failed = true;
+                stream.reuse_error = err;
+                self.model.reset(&lane.state);
+                d.resetStream(stream);
+                return;
+            };
+        };
         stream.cached = snap.len;
     }
 
@@ -222,8 +235,7 @@ pub const Target = struct {
         const lane = try self.newLane(stream);
         errdefer release(self, stream);
         const ids = stream.prompt();
-        if (sink != null and stream.reuse.saved != null) return error.InklingDraftsNeedFullPrompt;
-        self.restoreKept(lane, stream, ids.len);
+        self.restoreKept(lane, stream, ids.len, sink != null);
         const hidden: usize = self.model.config.text.hidden;
         const first_row = lane.state.len;
         const image_rows = try self.gpa.alloc(fl.ImageRows, stream.images.len);
@@ -449,7 +461,8 @@ pub const Target = struct {
     }
 
     fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        return Snap.bytes(&of(ptr).model.config, at);
+        const self = of(ptr);
+        return Snap.bytes(&self.model.config, at) + (if (self.options.draft) |d| d.snapshotBytes(at) else 0);
     }
 
     fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -459,7 +472,10 @@ pub const Target = struct {
         if (lane.state.len != at) return error.SnapshotOutOfStep;
         const kept = try self.gpa.create(Kept);
         errdefer self.gpa.destroy(kept);
-        kept.* = .{ .target = self, .snap = try self.model.save(&lane.state) };
+        var snap = try self.model.save(&lane.state);
+        errdefer snap.deinit();
+        const draft_snap = if (self.options.draft) |d| try d.save(stream, at) else null;
+        kept.* = .{ .target = self, .snap = snap, .draft = draft_snap };
         return kept;
     }
 
@@ -469,6 +485,7 @@ pub const Target = struct {
 
     fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         const kept: *Kept = @ptrCast(@alignCast(saved));
+        if (kept.draft) |*d| d.deinit();
         kept.snap.deinit();
         of(ptr).gpa.destroy(kept);
     }

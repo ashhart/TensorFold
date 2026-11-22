@@ -145,18 +145,23 @@ pub const Rule = struct {
         return r.roundCostIn(try r.costs(who), drafts, r.plain_guard);
     }
 
+    fn draftHeadMs(r: *const Rule, drafts: i64) f64 {
+        const steps: i64 = if (r.k.fixed_draft_block) (if (drafts > 0) r.most_drafts else 0) else drafts;
+        return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
+    }
+
     /// roundCost on `table`; `with_floor`: an untimed depth also pays the least excess a timed round's row showed.
     pub fn roundCostIn(r: *const Rule, table: *const Table, drafts: i64, with_floor: bool) ?f64 {
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
-        var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
+        var modeled = forward + r.draftHeadMs(drafts);
         if (with_floor) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
             for (table.slots, 0..) |slot, d| {
                 const ms = slot orelse continue;
                 const fc = r.family_costs.get(@intCast(d + 1)) orelse continue;
-                const beyond = (ms - fc - r.mtp_step_ms * @as(f64, @floatFromInt(d))) / @as(f64, @floatFromInt(d + 1));
+                const beyond = (ms - fc - r.draftHeadMs(@intCast(d))) / @as(f64, @floatFromInt(d + 1));
                 least = if (least) |l| (if (beyond < l) beyond else l) else beyond;
             }
             const floor = least orelse 0.0;
@@ -587,8 +592,5 @@ test {
     _ = @import("shared_price_learning_test.zig");
     _ = @import("shared_price_8_test.zig");
     _ = @import("shared_price_modes_test.zig");
-}
-
-test {
     _ = @import("shared_step_test.zig");
 }
