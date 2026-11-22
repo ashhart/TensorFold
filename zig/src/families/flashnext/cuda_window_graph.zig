@@ -209,6 +209,8 @@ pub fn Cache(comptime K: type) type {
         map: std.AutoHashMapUnmanaged(K, Held) = .empty,
         /// Slots run once eagerly and are captured the second time (a one-off pass would never pay its capture back).
         seen: std.AutoHashMapUnmanaged(K, void) = .empty,
+        /// Every run, including eager warm-ups and disabled-graph fallbacks; updates and replays split graph launches.
+        calls: u64 = 0,
         captures: u64 = 0,
         replays: u64 = 0,
         /// Held graphs re-recorded at a new length, for a new sequence or on other buffers and updated in place.
@@ -225,6 +227,7 @@ pub fn Cache(comptime K: type) type {
 
         /// `pass.run()` (kernels only: its uploads already queued) as `key`'s graph, captured first when new.
         pub fn run(c: *Self, gpa: std.mem.Allocator, stream: cuda.Stream, key: K, pass: anytype) !void {
+            c.calls += 1;
             if (c.off) return pass.run();
             const slot = slotOf(key);
             if (c.map.getPtr(slot)) |h| {
@@ -247,7 +250,7 @@ pub fn Cache(comptime K: type) type {
             errdefer exec.deinit();
             try c.map.put(gpa, slot, .{ .key = key, .exec = exec });
             c.captures += 1;
-            if (c.captures % 64 == 1) std.log.info("{s} graphs: {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.captures, c.updates, c.replays, c.map.count() });
+            if (c.captures % 64 == 1) std.log.info("{s} graphs: {d} calls, {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.calls, c.captures, c.updates, c.replays, c.map.count() });
             try exec.launchOn(stream);
         }
 
