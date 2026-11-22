@@ -47,6 +47,22 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: tf-h3-vae-encode weights_dir [T H W]", .{});
         return;
     }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "conv3d3")) {
+        var w3: [81]f32 = undefined;
+        for (0..81) |i| w3[i] = 1.0;
+        const b3 = [_]f32{0.0};
+        var inp = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+        const out = try enc.conv3d(gpa, &inp, &w3, &b3, 3, 1, 1, 2, 2, 3, 3, 3, 1, 1, 1, true, 1, 0, 0);
+        defer gpa.free(out);
+        std.debug.print("CONV3D3 out[0]={d} (expect 78)", .{out[0]});
+        // channel indexing test: kernel (1,1,1) weights = [1, 10, 100] per channel
+        const w1 = [_]f32{ 1, 10, 100 };
+        const b1 = [_]f32{0.0};
+        const out2 = try enc.conv3d(gpa, &inp, &w1, &b1, 3, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, false, 0, 0, 0);
+        defer gpa.free(out2);
+        std.debug.print("CHANIDX outs: {d} {d} {d} {d} (expect 951 1062 973 1284)", .{ out2[0], out2[1], out2[2], out2[3] });
+        return;
+    }
     const wdir = args[1];
     var t_in: usize = 3;
     var h_in: usize = 64;

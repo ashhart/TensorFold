@@ -2,6 +2,12 @@
 //! Spec: video_vae/vae_cnn.py EncoderFCN3D + conv.py causal Conv3d.
 const std = @import("std");
 
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fwrite(ptr: [*]const u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
+extern "c" fn fclose(stream: *anyopaque) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+var gn_call_count: usize = 0;
+
 pub const Config = struct {
     ch: usize = 128,
     ch_mult: [6]usize = .{ 1, 2, 2, 4, 4, 8 },
@@ -32,14 +38,16 @@ pub fn conv3d(
     sw: usize,
     causal_t: bool,
     spatial_pad: usize,
+    pad_right: usize,
+    pad_bottom: usize,
 ) ![]f32 {
     // temporal causal padding: 2*pt frames prepended when causal
     const pt = kt / 2; // padding per side for non-causal
     const t_pad_pre: usize = if (causal_t) pt * 2 else pt;
     const t_pad_post: usize = if (causal_t) 0 else pt;
     const tp = t + t_pad_pre + t_pad_post;
-    const hp = h + 2 * spatial_pad;
-    const wp = w + 2 * spatial_pad;
+    const hp = h + spatial_pad + pad_bottom;
+    const wp = w + spatial_pad + pad_right;
 
     const padded = try gpa.alloc(f32, c_in * tp * hp * wp);
     defer gpa.free(padded);
@@ -47,9 +55,11 @@ pub fn conv3d(
     // copy input into padded (temporal offset t_pad_pre, spatial offset pad)
     for (0..c_in) |c| {
         for (0..t) |tt| {
-            const src = ((c * t) + tt) * h * w;
-            const dst = ((c * tp) + (tt + t_pad_pre)) * hp * wp + spatial_pad * wp + spatial_pad;
-            @memcpy(padded[dst .. dst + w], input[src .. src + w]);
+            for (0..h) |hh| {
+                const src = ((c * t) + tt) * h * w + hh * w;
+                const dst = ((c * tp) + (tt + t_pad_pre)) * hp * wp + (hh + spatial_pad) * wp + spatial_pad;
+                @memcpy(padded[dst .. dst + w], input[src .. src + w]);
+            }
         }
     }
 
@@ -87,32 +97,45 @@ pub fn conv3d(
 pub fn groupNormSilu(gpa: std.mem.Allocator, x: []f32, c: usize, t: usize, h: usize, w: usize, weight: []const f32, bias: []const f32, groups: usize, eps: f32) !void {
     const spatial = t * h * w;
     const per_group = c / groups;
+    const group_size = per_group * spatial;
     var y = try gpa.alloc(f32, x.len);
     defer gpa.free(y);
     for (0..groups) |g| {
-        for (0..spatial) |s| {
-            var mean: f64 = 0;
-            var m2: f64 = 0;
-            for (0..per_group) |ci| {
-                const ch = g * per_group + ci;
+        // GroupNorm normalises over (C/G, T, H, W) per sample
+        var mean: f64 = 0;
+        var m2: f64 = 0;
+        for (0..per_group) |ci| {
+            const ch = g * per_group + ci;
+            for (0..spatial) |s| {
                 const v: f64 = x[ch * spatial + s];
                 mean += v;
                 m2 += v * v;
             }
-            mean /= @floatFromInt(per_group);
-            m2 /= @floatFromInt(per_group);
-            const rstd: f32 = @floatCast(1.0 / @sqrt(m2 - mean * mean + eps));
-            for (0..per_group) |ci| {
-                const ch = g * per_group + ci;
+        }
+        mean /= @floatFromInt(group_size);
+        m2 /= @floatFromInt(group_size);
+        const rstd: f32 = @floatCast(1.0 / @sqrt(m2 - mean * mean + eps));
+        for (0..per_group) |ci| {
+            const ch = g * per_group + ci;
+            for (0..spatial) |s| {
                 var v = (x[ch * spatial + s] - @as(f32, @floatCast(mean))) * rstd;
                 v = v * weight[ch] + bias[ch];
-                // SiLU
-                v = v / (1.0 + @exp(-v)) * v;
+                v = v / (1.0 + @exp(-v)); // SiLU: v * sigmoid(v)
                 y[ch * spatial + s] = v;
             }
         }
     }
     @memcpy(x, y);
+    if (getenv("DUMP_GN1") != null and c == 128 and t == 3 and h == 16) {
+        gn_call_count += 1;
+        if (gn_call_count > 2) return; // only first two calls (norm1, norm2 of L0 b0)
+        var pz_buf: [512]u8 = undefined;
+        const formatted = try std.fmt.bufPrint(&pz_buf, "zig-gn1-{d}.f32", .{gn_call_count});
+        pz_buf[formatted.len] = 0;
+        const file = fopen(@ptrCast(&pz_buf), "wb") orelse return error.CannotWrite;
+        _ = fwrite(@ptrCast(x.ptr), 4, x.len, file);
+        _ = fclose(file);
+    }
 }
 
 test "conv3d identity smoke" {
@@ -157,12 +180,12 @@ pub fn resnetBlock(
     // norm1 + silu
     try groupNormSilu(gpa, h_buf, c_in, t, h, wd, w.norm1_w, w.norm1_b, config.groups, config.gn_eps);
     // conv1
-    const h1 = try conv3d(gpa, h_buf, w.conv1_w, w.conv1_b, c_in, c_out, t, h, wd, 3, 3, 3, 1, 1, 1, true, 1);
+    const h1 = try conv3d(gpa, h_buf, w.conv1_w, w.conv1_b, c_in, c_out, t, h, wd, 3, 3, 3, 1, 1, 1, true, 1, 1, 1);
     gpa.free(h_buf);
     // norm2 + silu
     try groupNormSilu(gpa, h1, c_out, t, h, wd, w.norm2_w, w.norm2_b, config.groups, config.gn_eps);
     // conv2
-    const h2 = try conv3d(gpa, h1, w.conv2_w, w.conv2_b, c_out, c_out, t, h, wd, 3, 3, 3, 1, 1, 1, true, 1);
+    const h2 = try conv3d(gpa, h1, w.conv2_w, w.conv2_b, c_out, c_out, t, h, wd, 3, 3, 3, 1, 1, 1, true, 1, 1, 1);
     gpa.free(h1);
     // shortcut
     var shortcut: []f32 = undefined;
@@ -215,7 +238,7 @@ pub fn downsample(
     h: usize,
     wd: usize,
 ) ![]f32 {
-    return conv3d(gpa, x, weight, bias, c, c, t, h, wd, 3, 3, 3, 1, 2, 2, true, 1);
+    return conv3d(gpa, x, weight, bias, c, c, t, h, wd, 3, 3, 3, 1, 2, 2, true, 0, 1, 1);
 }
 
 
@@ -244,7 +267,15 @@ pub const Encoder = struct {
 
         // conv_in
         std.debug.print("ENC: conv_in {d}x{d}x{d}", .{ t, h, w });
-        var act = try conv3d(gpa, x, weights.conv_in_w, weights.conv_in_b, cfg.in_channels, channels, t, h, w, 3, 3, 3, 1, 1, 1, true, 1);
+        var act = try conv3d(gpa, x, weights.conv_in_w, weights.conv_in_b, cfg.in_channels, channels, t, h, w, 3, 3, 3, 1, 1, 1, true, 1, 1, 1);
+        if (getenv("DUMP_CONV_IN") != null) {
+            var pz_buf: [512]u8 = undefined;
+            const formatted = try std.fmt.bufPrint(&pz_buf, "zig-conv-in.f32", .{});
+            pz_buf[formatted.len] = 0;
+            const file = fopen(@ptrCast(&pz_buf), "wb") orelse return error.CannotWrite;
+            _ = fwrite(@ptrCast(act.ptr), 4, act.len, file);
+            _ = fclose(file);
+        }
 
         // levels
         for (0..6) |level| {
@@ -253,13 +284,25 @@ pub const Encoder = struct {
             for (0..cfg.num_res_blocks) |bi| {
                 const c_in_block = if (bi == 0) channels else c_out_level;
                 const rw = weights.levels[level].blocks[bi];
+                std.debug.print("ENC: L{d} block {d} c_in={d} c_out={d}", .{ level, bi, c_in_block, c_out_level });
                 const next = try resnetBlock(gpa, act, rw, c_in_block, c_out_level, t, h, w, cfg);
+                std.debug.print(" done", .{});
+                if (getenv("DUMP_L0B0") != null and level == 0 and bi == 0) {
+                    var pz_buf: [512]u8 = undefined;
+                    const formatted = try std.fmt.bufPrint(&pz_buf, "zig-l0b0.f32", .{});
+                    pz_buf[formatted.len] = 0;
+                    const file = fopen(@ptrCast(&pz_buf), "wb") orelse return error.CannotWrite;
+                    _ = fwrite(@ptrCast(next.ptr), 4, next.len, file);
+                    _ = fclose(file);
+                }
                 gpa.free(act);
                 act = next;
             }
             channels = c_out_level;
             if (weights.levels[level].down_w) |dw| {
+                std.debug.print("ENC: L{d} down", .{level});
                 const downed = try downsample(gpa, act, dw, weights.levels[level].down_b.?, channels, t, h, w);
+                std.debug.print(" done", .{});
                 gpa.free(act);
                 act = downed;
                 h = (h - 1) / 2 + 1;
@@ -272,7 +315,7 @@ pub const Encoder = struct {
 
         // conv_out
         const out_ch = 2 * cfg.z_channels; // 48
-        const moments = try conv3d(gpa, act, weights.conv_out_w, weights.conv_out_b, channels, out_ch, t, h, w, 3, 3, 3, 1, 1, 1, true, 1);
+        const moments = try conv3d(gpa, act, weights.conv_out_w, weights.conv_out_b, channels, out_ch, t, h, w, 3, 3, 3, 1, 1, 1, true, 1, 1, 1);
         gpa.free(act);
 
         // quant_conv 1x1x1 48→48
