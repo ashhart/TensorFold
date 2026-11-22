@@ -42,7 +42,7 @@ pub const Scratch = struct {
 };
 
 /// The kernels the block runs: the captured Triton set, the grouped NVFP4 experts, the plan, and glm_ops.
-pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, prof: ?*prof_mod.Prof = null };
+pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, prof: ?*prof_mod.Prof = null, shared_first: bool = false }; // TF_GLM_SHARED_FIRST
 
 /// forward.moe_block: out [rows][dims] fp32 partial; `prompt`: 64-pair items, the prompt kernels, bf16 slot rows.
 pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool, out: u64) !void {
@@ -66,12 +66,14 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     if (l.exl3) |w| return exl3.run(k.exl3, k.experts, stream, w, s.x3, s.plan, x, x_stride, s.pick, slots, rows, l.count, d, l.routed.width, l.routed.limit, prompt, s.ey, s.eact);
     const plan: experts.Plan = .{ .route = s.plan, .slots = slots, .experts = l.count + 1, .prompt = prompt, .fact = !prompt and k.experts.factored(rows) and l.routed.format == .nvfp4 };
     try experts.route(k.experts, stream, s.pick, rows * slots, plan);
+    // TF_GLM_SHARED_FIRST: the shared expert's reads stay hot in L2 beside the router's instead of prefetching twice
+    if (sharedInBody(k, l, prompt)) try shared(k, stream, l, s, x, x_stride, 0, rows, prompt);
     try experts.run(k.experts, stream, .gate_up, l.routed, plan, x, x_stride, rows, s.eact, shared_id);
     try experts.run(k.experts, stream, if (prompt) .down else .down_f32, l.routed, plan, s.eact, l.routed.width, rows, s.ey, shared_id);
 }
 
-/// moe_block's fill of rows lo..hi: shared expert into the last slot, slot sum into out fp32 (any range, same bits).
-pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, lo: usize, hi: usize, prompt: bool, out: u64) !void {
+/// The shared expert's chain into slot `top_k` of `s.ey`: `sgu`/`sact`/`sxs`/`sy`/`mm_part` are its alone.
+fn shared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, lo: usize, hi: usize, prompt: bool) !void {
     const stamp = prof_mod.span(k.prof, stream, .shared_expert);
     defer stamp.end();
     const d = l.routed.dims;
@@ -87,5 +89,36 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     a.add(s.ey + lo * slots * d * eb);
     for ([_]usize{ n, d, slots, l.top_k, @intFromBool(bf16_slots) }) |v| a.add(@as(c_int, @intCast(v)));
     try cuda_pdl.launch(k.put_slot, .{ .grid = .{ .x = @intCast((n * d + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+}
+
+/// `body` runs the shared chain before the routed experts only for a decode window's non-EXL3 layer under the switch.
+fn sharedInBody(k: Kernels, l: Layer, prompt: bool) bool {
+    return k.shared_first and !prompt and l.exl3 == null;
+}
+
+/// moe_block's fill of rows lo..hi: shared expert into the last slot, slot sum into out fp32 (any range, same bits).
+pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, lo: usize, hi: usize, prompt: bool, out: u64) !void {
+    const d = l.routed.dims;
+    const slots = l.top_k + 1;
+    const n = hi - lo;
+    const bf16_slots = prompt and l.exl3 == null;
+    const eb: usize = if (bf16_slots) 2 else 4;
+    if (!sharedInBody(k, l, prompt)) try shared(k, stream, l, s, x, x_stride, lo, hi, prompt);
     try glue.combine(k.set, stream, s.ey + lo * slots * d * eb, !bf16_slots, s.wts + lo * slots * 4, out, n, d, slots);
+}
+
+test "the shared-first switch moves only a decode window's shared chain into the body" {
+    const t = std.testing;
+    var l: Layer = undefined; // sharedInBody reads only `exl3`
+    l.exl3 = null;
+    const off: Kernels = .{ .set = undefined, .experts = undefined, .exl3 = undefined, .put_slot = undefined };
+    const on: Kernels = .{ .set = undefined, .experts = undefined, .exl3 = undefined, .put_slot = undefined, .shared_first = true };
+    // decode + switch on: router, select, shared chain, routed experts in body; fill keeps only combine
+    try t.expect(sharedInBody(on, l, false));
+    // a prompt chunk, an EXL3 layer, or the switch off keep today's order: fill runs the shared chain
+    try t.expect(!sharedInBody(on, l, true));
+    try t.expect(!sharedInBody(off, l, false));
+    const e: exl3.Experts = undefined;
+    l.exl3 = e;
+    try t.expect(!sharedInBody(on, l, false));
 }

@@ -15,6 +15,7 @@ pub const Settings = struct {
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
+    shared_first: bool = false, // TF_GLM_SHARED_FIRST: 1 runs a decode window's shared expert before the routed
     kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (an uneven fused KDA input, padded at load, tiled for glm_mm) or 0
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
@@ -87,6 +88,12 @@ pub const Settings = struct {
         if (get("TF_GLM_KDA_DECODE_WIDE")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kda_wide = true else if (std.mem.eql(u8, v, "0")) s.kda_wide = false else {
                 problem.* = "TF_GLM_KDA_DECODE_WIDE: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_SHARED_FIRST")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.shared_first = true else if (std.mem.eql(u8, v, "0")) s.shared_first = false else {
+                problem.* = "TF_GLM_SHARED_FIRST: 0 or 1";
                 return error.BadSetting;
             }
         }
