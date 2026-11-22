@@ -464,7 +464,6 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
 }
-
 /// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
 fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = o.speed_up orelse {
@@ -487,7 +486,6 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     };
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
 }
-
 test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -504,7 +502,6 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
     for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
 }
-
 test "--spill-gib with --checkpoint-slots opens the four families with a disk store, and the others refuse it by name" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
