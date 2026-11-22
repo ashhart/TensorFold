@@ -55,13 +55,14 @@ pub const Readout = struct {
 /// Where a stream's pass starts and the cuts it keeps: a readout at row 0 with none, the prefix tree not asked.
 pub fn startPlan(tree: anytype, s: *const lanes.Stream, owner: anytype, matched: *std.ArrayList(u32)) !radix.Plan {
     if (s.readout != null) return .{};
-    return tree.begin(if (s.key.len != 0) s.key else s.prompt(), s.history_len, s.shared_prefixes, owner, matched);
+    return tree.begin(if (s.key.len != 0) s.key else s.prompt(), s.cache_salt, s.history_len, s.shared_prefixes, owner, matched);
 }
 
 pub const Lane = struct {
     caches: state.Caches,
     vision: ?vision.Request = null,
     key: []const u32 = &.{},
+    cache_salt: ?u64 = null,
     /// The last kept row's final hidden row: the draft head's input.
     hidden: hip.DeviceBuffer,
     /// Drafts the head holds for the next window.
@@ -287,6 +288,7 @@ pub const Hip = struct {
         if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec, prompt);
         lane.id = try h.streams.idOf(s);
         lane.key = if (s.key.len != 0) s.key else prompt;
+        lane.cache_salt = s.cache_salt;
         if (h.e.vision) |v| {
             lane.vision = try vision.Request.initCancelable(v, s.images, prompt, h.e.o.capacity, h.cancelOf(s));
         } else if (s.images.len != 0) return error.VisionNotLoaded;
@@ -379,7 +381,7 @@ pub const Hip = struct {
         var owner: hip_prefix.Side.Owner = .{ .caches = &lane.caches, .id = lane.id };
         _ = prompt;
         if (lane.vision) |v| if (v.layout.count != 0) return;
-        try h.prefix.keep(&owner, lane.key, at);
+        try h.prefix.keep(&owner, lane.key, lane.cache_salt, at);
     }
 
     /// Each stream's window from its kept length: the pending token, then the host's drafts; one forward for all.
