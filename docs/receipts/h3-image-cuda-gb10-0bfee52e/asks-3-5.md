@@ -7,11 +7,11 @@ from a checkpoint. `tf-h3-dit` handles FastH3 clip cases and `tf-h3-image` handl
 Both run only on Metal. CUDA's H3 on main is `libtf_h3.so` (`zig build tf-h3`). That library runs the transformer blocks
 on rows the caller prepares. It has no case reader, no input and output projections, and no velocity output. The
 clip case exporter, `tools/zig/h3_case.py`, lives on the `drowzeys/TensorFold` fork (`docs/recipes/minimax-h3-metal.md:47-49`).
-It is in neither tree. The GB10 job `docs/recipes/minimax-h3-cuda/plant-203.sh` (side branch `gpu/203-plant`, `ba8ada1c7`) also lists every FastH3 checkpoint and H3 case file on that host.
+It is in neither tree. The GB10 job `docs/recipes/minimax-h3-cuda/plant-203.sh` (side branch `gpu/203-plant`, `ba8ada1c7`) also searches that host for FastH3 checkpoints and H3 case files.
 
-On the clip path, this head differs from main only in `checkpoint.zig`. There, `Checkpoint.open` maps the same bytes with the
-same flags and keeps the fd until `deinit`. `git diff a6cde902d HEAD -- zig/src/families/h3/h3.zig
-zig/src/families/h3/geometry.zig zig/src/families/h3/block.zig zig/src/families/h3/cuda*.zig` is empty.
+The transformer diff against Ash's main is empty for `h3.zig`, `geometry.zig`, `block.zig` and the CUDA block sources.
+The shared Metal loader does change: `tensors.zig` now uses the span-based `read_ahead.zig`, and `checkpoint.zig` is the
+CUDA-side checkpoint reader. Static inspection is therefore not a substitute for the unavailable velocity comparison.
 
 ## CI on #3733
 
