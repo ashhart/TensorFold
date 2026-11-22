@@ -269,11 +269,11 @@ pub const Attn = struct {
         var layer = self.lay.layer;
         if (self.plant == .window_one) layer.window = 1;
         const stride = K.slotsFor(self.lay.layer, self.shape.k);
-        var slots: usize = 0; // no partial room for sub-chunks: global calls take the fold or the prompt kernel
+        var slots: usize = @as(usize, r.rows) * heads * stride; // a partial a chunk: no room to split
         switch (path) {
             .sliding, .prompt => {},
             .fold => r.streams = @max(r.streams, 2), // the dispatcher's multi-stream branch
-            .split => slots = @as(usize, r.rows) * heads * stride * K.subs,
+            .split => slots *= K.subs,
         }
         const b = x.row0 * heads;
         try K.attend(self.k, self.rig.s, r, layer, stride, slots, x.q + b * D * 2, .{ .k = d.kc, .v = d.vc }, x.tab + b * ref.extent * 2, d.po, d.pml, x.sink + b * 2, x.gate + b * D * 2, x.out + b * D * 2);
@@ -299,7 +299,7 @@ pub const Attn = struct {
         }
         for (self.lay.segs[0..3], self.alone) |s, x| {
             const row0: usize = @intCast(s.row0);
-            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = d.pos + row0 * 4, .seg_of = 0, .segs = x.segs, .tiles = x.tiles, .n_tiles = x.n_tiles, .last_pos = @intCast(s.p0 + s.n - 1) };
+            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = d.pos + row0 * 4, .seg_of = 0, .segs = x.segs, .tiles = x.tiles, .n_tiles = x.n_tiles, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
             try self.launch(self.path, .{ .r = r, .row0 = row0, .q = d.q, .tab = d.tab, .sink = d.sink, .gate = d.gate, .out = d.base });
         }
         return self.rig.bytes(d.base, self.count() * 2);
