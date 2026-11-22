@@ -21,6 +21,7 @@ fn edit(kind: p.Kind) Edit {
         .stage_conv_segs => .{ .from = "const uint seg_idx = tid.y;", .to = "const uint seg_idx = 0u;" },
         .stage_conv_static => .{ .from = "sum += w0 * float(t0);", .to = "sum += w0 * float(t2);" },
         .commit_histories => .{ .from = "(size_t)(a.offset + row) * w + c;", .to = "(size_t)a.offset * w + c;" },
+        .bank_and_reset => .{ .from = "const size_t blk = (size_t(row) * 4u + a.boundary) * 576u + q;", .to = "const size_t blk = (size_t(row) * 4u + ((a.boundary + 1u) & 3u)) * 576u + q;" },
     };
 }
 
@@ -42,6 +43,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .stage_conv_segs => "control: metal inkling2 runtime stage_conv_segs tf_ink2_stage_conv_segs",
         .stage_conv_static => "control: metal inkling2 runtime stage_conv_static tf_ink2_stage_conv_static",
         .commit_histories => "control: metal inkling2 runtime commit_histories tf_ink2_commit_histories",
+        .bank_and_reset => "control: metal inkling2 runtime bank_and_reset tf_ink2_bank_and_reset",
     };
 }
 

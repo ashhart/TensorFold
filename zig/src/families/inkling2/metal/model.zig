@@ -67,7 +67,7 @@ pub const Weights = struct {
 /// Scalar copies and residuals around dispatch stay on Metal; forward never reads tensors back to the host.
 pub const runtime_source = sources.inkling2_runtime;
 
-pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap, stage_conv, stage_conv_segs, stage_conv_static, commit_histories };
+pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap, stage_conv, stage_conv_segs, stage_conv_static, commit_histories, bank_and_reset };
 pub const runtime_names = [_][:0]const u8{
     "tf_ink2_copy_bf16",
     "tf_ink2_copy_f32",
@@ -79,6 +79,7 @@ pub const runtime_names = [_][:0]const u8{
     "tf_ink2_stage_conv_segs",
     "tf_ink2_stage_conv_static",
     "tf_ink2_commit_histories",
+    "tf_ink2_bank_and_reset",
 };
 
 pub fn admitConfig(c: *const cfg.Config) !void {

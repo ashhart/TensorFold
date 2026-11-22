@@ -40,6 +40,7 @@ pub const Kind = enum {
     stage_conv_segs,
     stage_conv_static,
     commit_histories,
+    bank_and_reset,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
@@ -53,6 +54,7 @@ pub const Kind = enum {
             .stage_conv_segs => "tf_ink2_stage_conv_segs",
             .stage_conv_static => "tf_ink2_stage_conv_static",
             .commit_histories => "tf_ink2_commit_histories",
+            .bank_and_reset => "tf_ink2_bank_and_reset",
         };
     }
     pub fn label(k: Kind) []const u8 {
@@ -67,6 +69,7 @@ pub const Kind = enum {
             .stage_conv_segs => "metal inkling2 runtime stage_conv_segs tf_ink2_stage_conv_segs",
             .stage_conv_static => "metal inkling2 runtime stage_conv_static tf_ink2_stage_conv_static",
             .commit_histories => "metal inkling2 runtime commit_histories tf_ink2_commit_histories",
+            .bank_and_reset => "metal inkling2 runtime bank_and_reset tf_ink2_bank_and_reset",
         };
     }
 };
@@ -96,6 +99,7 @@ pub fn valid(kind: Kind, c: Call) bool {
         .stage_conv => c.rows <= max_stage_rows and c.k <= 3 and c.rows + 3 <= std.math.maxInt(u32) / c.n and stagePairs(c.k) <= std.math.maxInt(u32) / c.n,
         .stage_conv_segs, .stage_conv_static => c.rows <= max_stage_rows and c.k <= 3 and c.n <= hidden and c.rows + 3 <= std.math.maxInt(u32) / c.n and stagePairs(c.k) <= std.math.maxInt(u32) / c.n,
         .commit_histories => c.rows <= visit_slots and c.n >= 3 and c.n <= 3 + window_rows and c.k + 3 <= c.n,
+        .bank_and_reset => c.rows <= max_stage_rows and c.n == hidden and c.k < block_slots,
         else => blk: {
             if (c.rows > max_rows or c.rows > std.math.maxInt(u32) / c.n) break :blk false;
             break :blk switch (kind) {
@@ -119,6 +123,7 @@ pub fn dispatchCount(kind: Kind, c: Call) usize {
     return switch (kind) {
         .stage_conv, .stage_conv_segs, .stage_conv_static => stagePairs(c.k) * c.n,
         .commit_histories => c.rows * 3 * conv_row_values,
+        .bank_and_reset => c.rows * (hidden / 4),
         else => c.rows * c.n,
     };
 }
@@ -131,13 +136,17 @@ pub fn outputCount(kind: Kind, c: Call) usize {
         .stage_conv_segs => stagePairs(c.k) * (6 * segCount(c.rows) + c.rows) * c.n,
         .stage_conv_static => stagePairs(c.k) * (6 * segCount(c.rows) + 2 * c.rows) * c.n,
         .commit_histories => c.rows * 3 * conv_row_values,
+        .bank_and_reset => 3 * c.rows * c.n,
         else => c.rows * c.n,
     };
 }
 
 pub fn args(kind: Kind, c: Call) RuntimeArgs {
     std.debug.assert(valid(kind, c));
-    return .{ .count = @intCast(c.rows * c.n), .boundary = if (kind == .attention_partial or kind == .capture_tap) @intCast(c.k) else 0 };
+    return .{
+        .count = @intCast(if (kind == .bank_and_reset) c.rows else c.rows * c.n),
+        .boundary = if (kind == .attention_partial or kind == .capture_tap or kind == .bank_and_reset) @intCast(c.k) else 0,
+    };
 }
 
 pub fn stageConvArgs(c: Call) StageConvArgs {

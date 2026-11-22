@@ -11,7 +11,7 @@ fn edit(kind: p.Kind) Edit {
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
         .conv_dynamic => .{ .from = "static_w[lag * channels + c]", .to = "static_w[(3 - lag) * channels + c]" },
         .conv_dynamic_segs => .{ .from = "const uint r = global_r - seg.row0;", .to = "const uint r = 0u;" },
-        .router => .{ .from = "keys[t] = scores[t] + bias[t];", .to = "keys[t] = scores[t];" },
+        .router => .{ .from = "key[k] = sc[k] + bias[e];", .to = "key[k] = sc[k];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
         .argmax => .{ .from = "return a > b || (a == b && ia < ib);", .to = "return a > b || (a == b && ia > ib);" },

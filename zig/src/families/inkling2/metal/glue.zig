@@ -25,9 +25,6 @@ pub const Pipelines = struct {
     argmax: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
-    route_scores: mtl.Pipeline,
-    /// The router's dots for up to 512 rows; launches in one encoder run in order, so they share it.
-    route_dots: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.glue);
@@ -35,7 +32,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [13]mtl.Pipeline = undefined;
+        var pipes: [12]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -51,7 +48,6 @@ pub const Pipelines = struct {
             "tf_inkling2_reduce_argmax",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
-            "tf_inkling2_route_scores",
         }, &pipes) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -69,8 +65,6 @@ pub const Pipelines = struct {
             .argmax = pipes[9],
             .expert_pick = pipes[10],
             .expert_combine = pipes[11],
-            .route_scores = pipes[12],
-            .route_dots = try device.buffer(@as(usize, max_rows) * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -130,7 +124,7 @@ pub fn convDynamic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, input:
     e.setPipeline(p.conv_dynamic);
     inline for (.{ taps, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 5);
-    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), unit);
 }
 
 pub const InkConvDynSeg = extern struct { taps: u64, input: u64, out: u64, row0: u32, rows: u32 };
@@ -142,23 +136,16 @@ pub fn convDynamicSegs(p: *const Pipelines, e: mtl.ComputeEncoder, segs: Ref, st
     e.setPipeline(p.conv_dynamic_segs);
     inline for (.{ segs, static_w, projection }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ConvDynSegsArgs{ .n_segs = n_segs, .total_rows = total_rows, .channels = channels }, 3);
-    e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), unit);
 }
 
 const RouteArgs = extern struct { rows: u32 };
 /// Router IDs and weights are sorted by ascending expert index for the deterministic expert sum.
 pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
     std.debug.assert(rows > 0 and rows <= max_rows);
-    e.setPipeline(p.route_scores);
-    inline for (.{ x, weight }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setBuffer(p.route_dots, 0, 2);
-    e.setValue(RouteArgs{ .rows = rows }, 3);
-    e.dispatchGroups(mtl.Size.of(experts / 8, rows, 1), mtl.Size.of(256, 1, 1));
-    e.barrier();
     e.setPipeline(p.router);
-    e.setBuffer(p.route_dots, 0, 0);
-    inline for (.{ bias, ids, weights }, 1..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(RouteArgs{ .rows = rows }, 4);
+    inline for (.{ x, weight, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 5);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
@@ -176,8 +163,8 @@ pub fn logits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, 
     std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
     e.setPipeline(p.logits);
     inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setBuffer(p.route_dots, 0, 3);
-    e.setBuffer(p.route_dots, 0, 4);
+    e.setBuffer(out.buf, out.off, 3);
+    e.setBuffer(out.buf, out.off, 4);
     e.setValue(LogitArgs{ .rows = rows, .vocab = vocab, .flags = 1, .part_stride = 0 }, 5);
     e.dispatchGroups(mtl.Size.of((vocab + 7) / 8, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
 }

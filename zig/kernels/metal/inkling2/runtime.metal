@@ -164,3 +164,19 @@ kernel void tf_ink2_commit_histories(
   const size_t src = (size_t)slot * a.tap_rows * 6656u + (size_t)a.tap_rows * prefix + (size_t)(a.offset + row) * w + c;
   conv[i] = taps[src];
 }
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_bank_and_reset(
+    const device bfloat* blocks [[buffer(0)]], device bfloat* p [[buffer(1)]],
+    const device bfloat* prelude [[buffer(2)]], device bfloat* bank0 [[buffer(3)]],
+    device bfloat* bank1 [[buffer(4)]], constant InkRuntimeArgs& a [[buffer(5)]],
+    uint2 at [[thread_position_in_grid]]) {
+  const uint q = at.x, row = at.y;
+  if (q >= 576u || row >= a.count) return;
+  const size_t idx = size_t(row) * 576u + q;
+  const size_t blk = (size_t(row) * 4u + a.boundary) * 576u + q;
+  const bfloat4 prev = ((const device bfloat4*)p)[idx];
+  ((device bfloat4*)bank0)[idx] = ((const device bfloat4*)blocks)[blk];
+  ((device bfloat4*)bank1)[idx] = prev;
+  ((device bfloat4*)p)[idx] = ((const device bfloat4*)prelude)[idx];
+}

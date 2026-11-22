@@ -53,6 +53,11 @@ pub const Probe = struct {
     res_ids: [40]mtl.objc.Id = undefined,
     res_len: usize = 0,
     taps_u16: []u16 = &.{},
+    bank_blocks: []u16 = &.{},
+    bank_p_before: []u16 = &.{},
+    bank_prelude: []u16 = &.{},
+    bank0_out: rig_.Ref = undefined,
+    bank1_out: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
@@ -111,6 +116,13 @@ pub const Probe = struct {
                 .{ .rows = 2, .n = 19, .k = 0 },
                 .{ .rows = 1, .n = 7, .k = 4 },
             },
+            .bank_and_reset => .{
+                .{ .rows = 1, .n = p.hidden, .k = 2 },
+                .{ .rows = 5, .n = p.hidden, .k = 2 },
+                .{ .rows = 7, .n = p.hidden, .k = 1 },
+                .{ .rows = 16, .n = p.hidden, .k = 2 },
+                .{ .rows = 32, .n = p.hidden, .k = 3 },
+            },
             else => .{
                 .{ .rows = 1, .n = p.hidden, .k = 1 },
                 .{ .rows = 5, .n = p.hidden, .k = 1 },
@@ -134,17 +146,16 @@ pub const Probe = struct {
     };
     const vt_checked = g.hooks(Probe);
     pub fn kernel(self: *Probe) g.Kernel {
-        const staged = self.kind == .stage_conv or self.kind == .stage_conv_segs or self.kind == .stage_conv_static;
         return .{ .ctx = self, .vt = if (self.kind == .attention_partial) &vt_checked else &vt_plain, .spec = .{
             .name = self.kind.label(),
             .accum = if (self.kind == .stage_conv_static) .f32 else .none,
             .depth = depth,
             .ops = if (self.kind == .stage_conv_static) 96 else if (self.kind == .attention_partial or self.kind == .mlp_partial) 1 else 0,
             .out = switch (self.kind) {
-                .copy_bf16, .mlp_partial, .capture_tap, .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories => .bf16,
+                .copy_bf16, .mlp_partial, .capture_tap, .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories, .bank_and_reset => .bf16,
                 .copy_f32, .widen, .attention_partial => .f32,
             },
-            .in_place = staged,
+            .in_place = self.kind == .stage_conv or self.kind == .stage_conv_segs or self.kind == .stage_conv_static or self.kind == .bank_and_reset,
             .served = &self.served,
             .sums = if (self.kind == .stage_conv_static)
                 .{ .f16 = 0, .bf16 = 0, .exact = false, .why = "short convolution rounds to BF16 after a four-tap dot" }
@@ -187,6 +198,9 @@ pub const Probe = struct {
         self.seg_weight = @splat(&.{});
         self.res_len = 0;
         self.taps_u16 = &.{};
+        self.bank_blocks = &.{};
+        self.bank_p_before = &.{};
+        self.bank_prelude = &.{};
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         if (self.kind == .stage_conv) {
@@ -254,6 +268,22 @@ pub const Probe = struct {
             self.out = try self.rig.output(self.count() * 2);
             return true;
         }
+        if (self.kind == .bank_and_reset) {
+            self.bank_blocks = try self.u16s(shape.rows * p.block_slots * p.hidden, rng);
+            self.bank_p_before = try self.u16s(shape.rows * p.hidden, rng);
+            self.bank_prelude = try self.u16s(shape.rows * p.hidden, rng);
+            if (fill == .nonfinite) {
+                self.bank_blocks[shape.k * p.hidden] = c.toBf16(std.math.nan(f32));
+                self.bank_p_before[0] = c.toBf16(std.math.nan(f32));
+                self.bank_prelude[1] = c.toBf16(std.math.nan(f32));
+            }
+            self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(self.bank_blocks));
+            self.refs[1] = try self.rig.input(std.mem.sliceAsBytes(self.bank_prelude));
+            self.bank0_out = try self.rig.output(shape.rows * p.hidden * 2);
+            self.bank1_out = try self.rig.output(shape.rows * p.hidden * 2);
+            self.out = try self.rig.output(shape.rows * p.hidden * 2);
+            return true;
+        }
         const n = shape.rows * shape.n;
         self.f[0] = try self.floats(n, rng);
         switch (self.kind) {
@@ -275,14 +305,14 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], true);
             },
             .copy_f32 => {},
-            .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories => unreachable,
+            .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories, .bank_and_reset => unreachable,
         }
         if (fill == .nonfinite) self.f[0][0] = std.math.nan(f32);
         self.refs[0] = try self.input(self.f[0], self.kind == .copy_bf16 or self.kind == .widen or self.kind == .attention_partial or self.kind == .capture_tap);
         const elem: c.Elem = switch (self.kind) {
             .copy_bf16, .mlp_partial, .capture_tap => .bf16,
             .copy_f32, .widen, .attention_partial => .f32,
-            .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories => unreachable,
+            .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories, .bank_and_reset => unreachable,
         };
         self.out = try self.rig.output(self.count() * c.size(elem));
         if (self.kind == .capture_tap) {
@@ -294,24 +324,20 @@ pub const Probe = struct {
 
     pub fn run(self: *Probe) !void {
         const call = p.Call{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k };
+        const n_segs: usize = if (self.kind == .stage_conv_segs or self.kind == .stage_conv_static) p.segCount(self.shape.rows) else 1;
         if (self.kind == .stage_conv) {
-            const pairs = p.stagePairs(self.shape.k);
-            for (0..pairs) |pair| {
-                @memcpy(self.rig.bytes(self.stage_hist[pair], 3 * self.shape.n * 2), std.mem.sliceAsBytes(self.stage_hist_before[pair]));
-            }
+            for (0..p.stagePairs(self.shape.k)) |pair| @memcpy(self.rig.bytes(self.stage_hist[pair], 3 * self.shape.n * 2), std.mem.sliceAsBytes(self.stage_hist_before[pair]));
         }
         if (self.kind == .stage_conv_segs or self.kind == .stage_conv_static) {
-            const n_segs = p.segCount(self.shape.rows);
-            const pairs = p.stagePairs(self.shape.k);
-            for (0..n_segs) |si| for (0..pairs) |pair| {
+            for (0..n_segs) |si| for (0..p.stagePairs(self.shape.k)) |pair| {
                 const idx = si * 2 + pair;
                 @memcpy(self.rig.bytes(self.seg_hist_refs[idx], 3 * self.shape.n * 2), std.mem.sliceAsBytes(self.seg_hist_before[idx]));
             };
         }
+        if (self.kind == .bank_and_reset) @memcpy(self.rig.bytes(self.out, self.shape.rows * p.hidden * 2), std.mem.sliceAsBytes(self.bank_p_before));
         const pass = self.rig.begin();
         const e = pass.e;
         e.setPipeline(self.pipe);
-        const n_segs: usize = if (self.kind == .stage_conv_segs or self.kind == .stage_conv_static) p.segCount(self.shape.rows) else 1;
         switch (self.kind) {
             .stage_conv => {
                 const second: usize = if (p.stagePairs(self.shape.k) == 2) 1 else 0;
@@ -341,6 +367,14 @@ pub const Probe = struct {
                 e.setBuffer(self.out.buf, self.out.off, 1);
                 e.setValue(p.commitHistoriesArgs(call), 2);
             },
+            .bank_and_reset => {
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
+                e.setBuffer(self.out.buf, self.out.off, 1);
+                e.setBuffer(self.refs[1].buf, self.refs[1].off, 2);
+                e.setBuffer(self.bank0_out.buf, self.bank0_out.off, 3);
+                e.setBuffer(self.bank1_out.buf, self.bank1_out.off, 4);
+                e.setValue(p.args(.bank_and_reset, call), 5);
+            },
             .copy_bf16, .copy_f32, .widen, .capture_tap => {
                 e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
                 e.setBuffer(self.out.buf, self.out.off, 1);
@@ -360,8 +394,17 @@ pub const Probe = struct {
                 e.setValue(p.args(self.kind, call), 3);
             },
         }
-        e.dispatchThreads(mtl.Size.of(p.dispatchCount(self.kind, call), n_segs, 1), mtl.Size.of(p.threads, 1, 1));
+        const grid = if (self.kind == .bank_and_reset) mtl.Size.of(p.hidden / 4, self.shape.rows, 1) else mtl.Size.of(p.dispatchCount(self.kind, call), n_segs, 1);
+        e.dispatchThreads(grid, mtl.Size.of(p.threads, 1, 1));
         try self.rig.finish(pass);
+    }
+
+    fn writeBf16Ref(values: []const u16, want: []f64, mag: []f64, at: *usize) void {
+        for (values) |v| {
+            want[at.*] = c.fromBf16(v);
+            mag[at.*] = @abs(want[at.*]);
+            at.* += 1;
+        }
     }
 
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
@@ -387,16 +430,8 @@ pub const Probe = struct {
                     } else {
                         p.stageConvRef(self.seg_hist_before[idx], self.seg_raw[idx], w, sr, commit, h_buf, s_buf);
                     }
-                    for (h_buf) |v| {
-                        want[at] = c.fromBf16(v);
-                        mag[at] = @abs(want[at]);
-                        at += 1;
-                    }
-                    for (s_buf) |v| {
-                        want[at] = c.fromBf16(v);
-                        mag[at] = @abs(want[at]);
-                        at += 1;
-                    }
+                    writeBf16Ref(h_buf, want, mag, &at);
+                    writeBf16Ref(s_buf, want, mag, &at);
                     if (is_static) for (c_buf) |v| {
                         want[at] = v;
                         mag[at] = 10 * @abs(v) + 1e-5;
@@ -418,16 +453,8 @@ pub const Probe = struct {
             var at: usize = 0;
             for (0..pairs) |pair| {
                 p.stageConvRef(self.stage_hist_before[pair], self.stage_raw[pair], w, r, commit, h_buf, s_buf);
-                for (h_buf) |v| {
-                    want[at] = c.fromBf16(v);
-                    mag[at] = @abs(want[at]);
-                    at += 1;
-                }
-                for (s_buf) |v| {
-                    want[at] = c.fromBf16(v);
-                    mag[at] = @abs(want[at]);
-                    at += 1;
-                }
+                writeBf16Ref(h_buf, want, mag, &at);
+                writeBf16Ref(s_buf, want, mag, &at);
             }
             return;
         }
@@ -439,6 +466,18 @@ pub const Probe = struct {
                 w.* = c.fromBf16(v);
                 m.* = @abs(w.*);
             }
+            return;
+        }
+        if (self.kind == .bank_and_reset) {
+            const n = self.shape.rows * p.hidden;
+            for (0..self.shape.rows) |row| for (0..p.hidden) |d| {
+                const dst = row * p.hidden + d;
+                const src = (row * p.block_slots + self.shape.k) * p.hidden + d;
+                want[dst] = c.fromBf16(self.bank_blocks[src]);
+                want[n + dst] = c.fromBf16(self.bank_p_before[dst]);
+                want[2 * n + dst] = c.fromBf16(self.bank_prelude[dst]);
+            };
+            for (want, mag) |w, *m| m.* = @abs(w);
             return;
         }
         if (self.kind == .capture_tap) {
@@ -458,7 +497,7 @@ pub const Probe = struct {
                 .copy_bf16, .copy_f32, .widen, .capture_tap => x,
                 .attention_partial => p.attentionPartial(x, y, self.shape.k),
                 .mlp_partial => p.mlpPartial(x, y),
-                .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories => unreachable,
+                .stage_conv, .stage_conv_segs, .stage_conv_static, .commit_histories, .bank_and_reset => unreachable,
             };
             m.* = @abs(@as(f64, x)) + @abs(@as(f64, y));
         }

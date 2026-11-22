@@ -11,4 +11,5 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 runtime stage_conv_segs tf_ink2_stage_conv_segs", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "metal inkling2 runtime stage_conv_static tf_ink2_stage_conv_static", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "metal inkling2 runtime commit_histories tf_ink2_commit_histories", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "metal inkling2 runtime bank_and_reset tf_ink2_bank_and_reset", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };

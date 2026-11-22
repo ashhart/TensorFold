@@ -67,7 +67,7 @@ pub const Probe = struct {
             .conv_static => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
             .conv_dynamic => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
             .conv_dynamic_segs => .{ .{ .rows = 2, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
-            .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
+            .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 512, .n = 8, .k = p.hidden } },
             .swiglu => .{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
             .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
             .argmax => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 2, .n = 2057, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
@@ -253,6 +253,10 @@ pub const Probe = struct {
                 self.f[0] = try self.floats(r * p.hidden, rng);
                 self.f[1] = try self.floats(p.expert_count * p.hidden, rng);
                 self.f[2] = try self.floats(p.expert_count, rng);
+                if (!nf and r == 5) {
+                    @memset(self.f[0][4 * p.hidden .. 5 * p.hidden], 0);
+                    @memset(self.f[2][0..16], 10.0);
+                }
                 if (nf) self.f[0][0] = std.math.nan(f32);
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], true);
