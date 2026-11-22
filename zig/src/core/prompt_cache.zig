@@ -436,7 +436,7 @@ pub const Store = struct {
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
-        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
+        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt, s.salt);
         const part: u32 = if (kept.len == 0 or short) 0 else @intCast(std.mem.indexOfDiff(u32, kept, prompt) orelse @min(kept.len, prompt.len));
         // the fork rule keeps one before the part, however near: a state at `at` is keyed with the token at `at`
         const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
