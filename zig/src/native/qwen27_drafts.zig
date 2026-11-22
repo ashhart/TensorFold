@@ -40,6 +40,7 @@ pub fn observe(b: *Metal, path: []const u32) void {
     const t = b.trees[0] orelse return;
     if (b.from_tree == 0) return;
     const stream = b.owners[0] orelse return;
+    if (!stream.shared_round) b.draft_block.observe(@intFromPtr(stream), draft_block.landed(path, b.from_tree));
     var kept: [lb.max_rows]bool = @splat(false);
     for (path) |r| kept[r] = true;
     for (t.tokens, t.parents, 0..) |token, parent, i| {
