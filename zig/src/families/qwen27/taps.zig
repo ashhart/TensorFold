@@ -122,7 +122,7 @@ pub const Taps = struct {
     }
 
     pub fn complete(t: Taps) !void {
-        if (t.count == 0 or t.count > t.planes or t.seen != (@as(u16, 1) << @intCast(t.count)) - 1) return error.IncompleteTaps;
+        if (t.count == 0 or t.count > t.planes or t.seen != fullMask(t.count)) return error.IncompleteTaps;
     }
 
     pub fn accepted(t: Taps, glue: Glue, e: mtl.ComputeEncoder, path: []const u32, kept: Ref, out: Ref) !void {
@@ -135,6 +135,15 @@ pub const Taps = struct {
         e.barrier();
     }
 };
+
+fn fullMask(count: usize) u16 {
+    return @intCast((@as(u16, 1) << @intCast(count)) - 1);
+}
+
+test "eight tap planes complete when all eight are seen" {
+    try std.testing.expectEqual(@as(u16, 0xff), fullMask(8));
+    try std.testing.expectEqual(@as(u16, 0x1f), fullMask(5));
+}
 
 test "DFlash tap ids name completed target blocks" {
     try std.testing.expectEqualSlices(usize, &.{ 5, 19, 33, 47, 61 }, &layers);
