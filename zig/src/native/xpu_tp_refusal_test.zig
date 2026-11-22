@@ -1,4 +1,4 @@
-//! XPU startup refusal checks for --vision and unsupported --tp values before device access.
+//! XPU startup refusal checks for --vision (text-only families) and unsupported --tp values before device access.
 const std = @import("std");
 const native = @import("xpu.zig");
 
@@ -8,10 +8,20 @@ test "draft sources: XPU refuses --vision and unsupported --tp before device acc
         defer arena.deinit();
         const a = arena.allocator();
         for (native.families) |f| {
+            if (std.mem.eql(u8, f.model_type, "lfm3")) continue; // LFM3 reads pictures: checked below
             var problem: []const u8 = "";
             try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = f.model_type, .vision = .{} }, &problem) == null);
             try std.testing.expect(std.mem.indexOf(u8, problem, "--vision") != null);
         }
+        // the text-only families' refusal fires before their own open, and names the one family that reads pictures
+        for ([_][]const u8{ "nemotron_h", "gemma4", "qwen3_5", "qwen4_exp", "llama" }) |mt| {
+            var problem: []const u8 = "";
+            try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = mt, .vision = .{} }, &problem) == null);
+            try std.testing.expectStringStartsWith(problem, "--vision: the native Intel GPU engine reads pictures for LFM3-VL");
+        }
+        const nem = @import("xpu_nem.zig");
+        try std.testing.expect(nem.readsPictures("lfm3_vl") and nem.readsPictures("lfm3"));
+        try std.testing.expect(!nem.readsPictures("nemotron_h") and !nem.readsPictures("gemma4") and !nem.readsPictures("qwen3_5"));
         if (@import("xpu_engine_options").qwen27) {
             for ([_][]const u8{ "qwen3_5", "qwen4_exp" }) |mt| {
                 var problem: []const u8 = "";

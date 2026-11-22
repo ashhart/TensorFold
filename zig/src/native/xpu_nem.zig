@@ -115,6 +115,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 
+/// Whether the family that reads `model_type` takes pictures (declares `vision`, as LFM3-VL does).
+pub fn readsPictures(model_type: []const u8) bool {
+    inline for (specs) |S| if (reads(S, model_type)) return @hasDecl(S, "vision");
+    return false;
+}
+
 /// Whether family S reads `model_type` (its own, or its vision-language checkpoints').
 fn reads(comptime S: type, model_type: []const u8) bool {
     if (@hasDecl(S, "vl_model_type") and std.mem.eql(u8, model_type, S.vl_model_type)) return true;
