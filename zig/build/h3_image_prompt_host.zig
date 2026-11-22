@@ -1,6 +1,5 @@
 //! tf-h3-image-prompt-host: the prompt stage on the CPU, Mac or the Spark alike — no Metal.
 const std = @import("std");
-const prompt = @import("h3_image_prompt.zig");
 
 /// `zig build tf-h3-image-prompt-host` (any -Dtarget, among them aarch64-linux-gnu for the Spark) and
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
@@ -13,9 +12,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "checkpoint_fixture", .module = fixture(b, target, optimize) },
+            .{ .name = "core", .module = @import("h3_host.zig").coreModule(b, target) },
             .{ .name = "moss_noise", .module = noise(b, target, optimize) },
-            .{ .name = "qwen_vl_rope", .module = prompt.rope(b, target) },
         },
     }) }));
     const tests = b.step("test-h3-image-prompt-host", "The prompt stage's case writer: byte for byte the Metal tool's layout, and torch's CPU randn");
@@ -31,10 +29,7 @@ fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{
-            .{ .name = "qwen_vl_rope", .module = prompt.rope(b, target) },
-            .{ .name = "checkpoint_fixture", .module = @import("h3_host.zig").fixture(b, core) },
-        },
+        .imports = &.{.{ .name = "core", .module = core }},
     });
     const checkpoint = b.createModule(.{
         .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"),
@@ -55,10 +50,6 @@ fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
             .{ .name = "moss_noise", .module = noise(b, target, optimize) },
         },
     });
-}
-
-fn fixture(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target, .optimize = optimize });
 }
 
 fn noise(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {

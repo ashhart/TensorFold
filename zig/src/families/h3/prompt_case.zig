@@ -2,7 +2,7 @@
 const std = @import("std");
 const picture = @import("picture.zig");
 const rules = @import("picture_prompt.zig");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 
 /// A text-to-image request: the size asked for, the seed and the smallest area drawn.
 pub const Request = struct { size: picture.Size, seed: u64, min_area: u64 };

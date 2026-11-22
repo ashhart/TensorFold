@@ -1,6 +1,6 @@
 //! The prompt stage's case writer against the layout tf-h3-image-prompt wrote before it moved to the host.
 const std = @import("std");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 const noise = @import("moss_noise");
 const picture = @import("picture.zig");
 const rules = @import("picture_prompt.zig");

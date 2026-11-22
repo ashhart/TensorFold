@@ -2,7 +2,7 @@
 const std = @import("std");
 const hp = @import("h3_prompt_cuda");
 const tokenizer = @import("tokenizer");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 const bf16_round = @import("bf16_round");
 const noise = @import("moss_noise");
 

@@ -1,6 +1,6 @@
 //! The H3-Image tools' safetensors files: aligned images, a one-shard checkpoint and index, the selftests' scratch dir.
 const std = @import("std");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 
 /// A safetensors image whose data starts on 16 bytes: the fixture's aligned writer.
 pub fn image(a: std.mem.Allocator, entries: []const fixture.Entry) ![]u8 {
