@@ -358,7 +358,7 @@ pub const Metal = struct {
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
-            if (g.stride != r.taps.width * r.taps.count * 2) return error.BadTapGather;
+            if (g.stride != @as(usize, src.width) * src.planes * 2) return error.BadTapGather; // a v1 ring: one fused plane
             if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;
