@@ -8,7 +8,8 @@ const rig_ = @import("rig.zig");
 const fixture = @import("inkling2_expert_fixture.zig");
 const math = @import("inkling2_expert_math.zig");
 const ck = tf.checkpoint_metal;
-const Store = tf.inkling2_metal.experts.Store;
+const experts = tf.inkling2_metal.experts;
+const Store = experts.Store;
 const c = u.c;
 const g = u.g;
 const Format = math.Format;
@@ -21,6 +22,9 @@ const served = [_]c.Shape{
     .{ .rows = 1, .n = fixture.inter, .k = fixture.hidden },
     .{ .rows = 17, .n = fixture.inter, .k = fixture.hidden },
 };
+
+// A batch past the grouped threshold, so one dispatch takes the grouped path while its rows replay one at a time.
+const big_rows = experts.group_min_rows + 8;
 
 const rule = "dense zero weights propagate nonfinite inputs; a nonfinite active route poisons the sum; inactive slots are ignored";
 
@@ -90,7 +94,7 @@ const Probe = struct {
         defer cp.deinit();
         try fixture.tensors(p.rig.a, &p.rig, &cp, p.format, fill, shape);
         const cfg = fixture.configuration(shape);
-        p.store = try Store.loadWith(p.rig.a, p.rig.device, &cp, &cfg, @intCast(shape.rows), .{
+        p.store = try Store.loadWith(p.rig.a, p.rig.device, &cp, &cfg, @intCast(@max(shape.rows, big_rows)), .{
             .source = p.source orelse sources.inkling2_experts,
         });
         return true;
@@ -216,6 +220,80 @@ const Probe = struct {
         return null;
     }
 
+    /// One grouped dispatch of `big_rows` rows against the same rows dispatched one at a time: their bytes are equal.
+    fn agree(p: *Probe, s: *const Store, x: []const u16, ids: []const u32, weights: []const f32, what: []const u8) !?[]const u8 {
+        const row_bytes = p.shape.k * @sizeOf(u16);
+        const input = try p.rig.input(std.mem.sliceAsBytes(x));
+        const route_ids = try p.rig.input(std.mem.sliceAsBytes(ids));
+        const route_weights = try p.rig.input(std.mem.sliceAsBytes(weights));
+        const batch = try p.rig.scratch(big_rows * row_bytes);
+        const split = try p.rig.scratch(big_rows * row_bytes);
+        @memset(p.rig.bytes(batch, big_rows * row_bytes), 0xff);
+        @memset(p.rig.bytes(split, big_rows * row_bytes), 0xff);
+        try s.run(p.rig.queue, 0, u.view(input), u.view(route_ids), u.view(route_weights), u.view(batch), big_rows);
+        const pass = p.rig.begin();
+        for (0..big_rows) |i| {
+            s.encode(pass.e, 0, shifted(input, i * row_bytes), shifted(route_ids, i * topk * 4), shifted(route_weights, i * topk * 4), shifted(split, i * row_bytes), 1) catch |err| {
+                pass.e.end();
+                pass.pool.pop();
+                return err;
+            };
+        }
+        try p.rig.finish(pass);
+        const want = p.rig.bytes(split, big_rows * row_bytes);
+        const got = p.rig.bytes(batch, big_rows * row_bytes);
+        const at = std.mem.indexOfDiff(u8, want, got) orelse return null;
+        return try std.fmt.bufPrint(&p.msg, "grouped batch of {d} rows ({s}) differs from one-row dispatch at row {d}, byte {d}", .{ big_rows, what, at / row_bytes, at % row_bytes });
+    }
+
+    /// The prepared rows repeated to `big_rows` (nonfinite inputs included), or with every pair on one expert.
+    fn checkGrouped(p: *Probe, skew: bool) !?[]const u8 {
+        const a = p.arena.allocator();
+        const k = p.shape.k;
+        const x = try a.alloc(u16, big_rows * k);
+        const ids = try a.alloc(u32, big_rows * topk);
+        const weights = try a.alloc(f32, big_rows * topk);
+        for (0..big_rows) |r| {
+            const from = r % p.shape.rows;
+            @memcpy(x[r * k ..][0..k], p.x[from * k ..][0..k]);
+            @memcpy(ids[r * topk ..][0..topk], p.ids[from * topk ..][0..topk]);
+            @memcpy(weights[r * topk ..][0..topk], p.weights[from * topk ..][0..topk]);
+        }
+        if (skew) for (ids, weights, 0..) |*id, *w, i| {
+            id.* = 1;
+            w.* = @as(f32, @floatFromInt(1 + i % 7)) / 13;
+        };
+        return p.agree(&p.store.?, x, ids, weights, if (skew) "every pair on one expert" else "prepared rows repeated");
+    }
+
+    /// Dense random weights and BF16 activations make FP32 sums inexact, so the chain order shows in the bytes.
+    fn checkDense(p: *Probe, one: bool) !?[]const u8 {
+        const a = p.arena.allocator();
+        var cp = ck.Checkpoint.init(a);
+        defer cp.deinit();
+        try fixture.dense(p.rig.a, &p.rig, &cp, p.format, 0x5eed, p.shape);
+        const cfg = fixture.configuration(p.shape);
+        var dense = try Store.loadWith(p.rig.a, p.rig.device, &cp, &cfg, big_rows, .{ .source = p.source orelse sources.inkling2_experts });
+        defer dense.deinit();
+        var prng = std.Random.DefaultPrng.init(0xd0d0);
+        const rng = prng.random();
+        const k = p.shape.k;
+        const x = try a.alloc(u16, big_rows * k);
+        for (x) |*v| v.* = u.word((rng.float(f64) - 0.5) * 6);
+        const ids = try a.alloc(u32, big_rows * topk);
+        const weights = try a.alloc(f32, big_rows * topk);
+        for (0..big_rows) |r| {
+            var order: [fixture.experts]u32 = undefined;
+            for (&order, 0..) |*v, i| v.* = @intCast(i);
+            rng.shuffle(u32, &order);
+            for (0..topk) |slot| {
+                ids[r * topk + slot] = if (one) 3 else order[slot];
+                weights[r * topk + slot] = 0.1 + rng.float(f32);
+            }
+        }
+        return p.agree(&dense, x, ids, weights, if (one) "dense, every pair on one expert" else "dense random routes");
+    }
+
     pub fn check(p: *Probe, gate: g.Gate) !?[]const u8 {
         const got = p.rig.bytes(p.out, p.count() * @sizeOf(u16));
         var want: [fixture.hidden]Range = undefined;
@@ -233,6 +311,13 @@ const Probe = struct {
         }
         if (gate == .shapes and p.shape.rows > 1) {
             if (try p.checkSplit(got)) |reason| return reason;
+            if (try p.checkGrouped(false)) |reason| return reason;
+            if (try p.checkGrouped(true)) |reason| return reason;
+            if (try p.checkDense(false)) |reason| return reason;
+            if (try p.checkDense(true)) |reason| return reason;
+        }
+        if (gate == .nonfinite) {
+            if (try p.checkGrouped(false)) |reason| return reason;
         }
         if (!try p.rig.intact()) return "the batch or split dispatch wrote beyond its bound buffer views";
         return null;
@@ -313,6 +398,48 @@ const mutations = [_]Mutation{
         .label = "control: inkling2 experts combine uses route-slot order instead of expert order",
         .from = "const uint slot = (order >> (4u * rank)) & 0xfu;",
         .to = "const uint slot = rank; if (ids[routes + slot] >= a.experts) continue;",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts grouped NVFP4 decodes the high nibble for the low weight",
+        .from = "(kI2xE2m1[byte & 15u] * sc) * outer",
+        .to = "(kI2xE2m1[byte >> 4u] * sc) * outer",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts grouped tiles ignore their live pair count",
+        .from = "min(a.tile, count - at)",
+        .to = "a.tile",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts grouped plan keeps only four tiles of an expert",
+        .from = "for (uint at = 0u; at < count; at += a.tile)",
+        .to = "for (uint at = 0u; at < min(count, 4u * a.tile); at += a.tile)",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .nonfinite,
+        .label = "control: inkling2 experts grouped MXFP8 treats UE8M0 byte zero as a zero scale",
+        .from = "raw.code == 0u ? 0.5f : 1.0f",
+        .to = "1.0f",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts grouped MXFP8 down writes its first two columns swapped",
+        .from = "dst[0] = bfloat(mine.x);\n    dst[1] = bfloat(mine.y);",
+        .to = "dst[0] = bfloat(mine.y);\n    dst[1] = bfloat(mine.x);",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts grouped NVFP4 rounds lane sums to BF16",
+        .from = "total[g][r] += run[g][r];",
+        .to = "total[g][r] = i2x_bf4(total[g][r] + run[g][r]);",
     },
     .{
         .format = .nvfp4,
