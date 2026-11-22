@@ -86,7 +86,8 @@ pub const Runner = struct {
     queue: std.ArrayList(*Job) = .empty,
     head: usize = 0,
     mutex: Io.Mutex = .init,
-    cond: Io.Condition = .init,
+    work: Io.Condition = .init, // the tier thread alone waits here: a job queued, or stop
+    finished: Io.Condition = .init, // waiters for a job: broadcast after each one, never waited on with a timeout
     stop: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, io: Io, d: *Disk) Runner {
@@ -103,7 +104,7 @@ pub const Runner = struct {
         if (r.thread) |t| {
             r.mutex.lockUncancelable(r.io);
             r.stop = true;
-            r.cond.broadcast(r.io);
+            r.work.broadcast(r.io);
             r.mutex.unlock(r.io);
             t.join();
         }
@@ -119,16 +120,14 @@ pub const Runner = struct {
             r.head = 0;
         }
         try r.queue.append(r.gpa, j);
-        r.cond.signal(r.io);
+        r.work.signal(r.io);
     }
 
-    /// Waits for a job (the plan settles it next).
+    /// Waits for a job (the plan settles it next): its state is stored before the thread broadcasts under the mutex.
     pub fn wait(r: *Runner, j: *Job) void {
-        while (!j.done()) {
-            r.mutex.lockUncancelable(r.io);
-            defer r.mutex.unlock(r.io);
-            if (!j.done()) r.cond.waitTimeout(r.io, &r.mutex, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }) catch {};
-        }
+        r.mutex.lockUncancelable(r.io);
+        defer r.mutex.unlock(r.io);
+        while (!j.done()) r.finished.waitUncancelable(r.io, &r.mutex);
     }
 
     fn loop(r: *Runner) void {
@@ -136,14 +135,14 @@ pub const Runner = struct {
             const j = blk: {
                 r.mutex.lockUncancelable(r.io);
                 defer r.mutex.unlock(r.io);
-                while (r.head == r.queue.items.len and !r.stop) r.cond.waitUncancelable(r.io, &r.mutex);
+                while (r.head == r.queue.items.len and !r.stop) r.work.waitUncancelable(r.io, &r.mutex);
                 if (r.head == r.queue.items.len) return;
                 r.head += 1;
                 break :blk r.queue.items[r.head - 1];
             };
             j.run(r.disk, r.io);
             r.mutex.lockUncancelable(r.io);
-            r.cond.broadcast(r.io);
+            r.finished.broadcast(r.io);
             r.mutex.unlock(r.io);
         }
     }
