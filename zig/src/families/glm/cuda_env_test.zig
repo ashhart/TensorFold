@@ -21,6 +21,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_DSCORES", .default = true },
     .{ .name = "TF_GLM_MOE_DIRECT" },
     .{ .name = "TF_GLM_WIDE_EXPERT_TILE" },
+    .{ .name = "TF_GLM_HC_SHARED_FN" },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
@@ -134,6 +135,7 @@ test "GLM strict env: the actual readers and the open's check keep defaults, 0 a
         .{ .name = "TF_GLM_VISION_FUSED", .read = @import("cuda_vision_attn.zig").wanted },
         .{ .name = "TF_GLM_PROF", .read = @import("cuda_prof.zig").Prof.wanted },
         .{ .name = "TF_GLM_WIDE_EXPERT_TILE", .read = @import("cuda_experts.zig").wideExpertTile },
+        .{ .name = "TF_GLM_HC_SHARED_FN", .read = @import("cuda_glue.zig").hcSharedFn },
     };
     const startup = @import("cuda_env.zig").startup;
     for (cases) |c| {

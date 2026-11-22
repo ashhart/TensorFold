@@ -17,6 +17,7 @@ pub const Set = struct {
     copy_rows: ?cuda.Function = null,
     /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
     dsel: bool = false,
+    hc_shared_fn: bool = false, // TF_GLM_HC_SHARED_FN, decode only; read once at module load
     /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
     dscore: ?*const index_mod.Kernels = null,
     /// Full GLM-5.3's roped latent rows (576): cuda.mla's absorb, rope and 16-head chunk tiles; GLM-5.3-Flash: none.
@@ -57,6 +58,7 @@ pub const Kernels = struct {
     router_tile: cuda.Function,
     hc_partial: cuda.Function,
     hc_partial8: cuda.Function,
+    hc_partial8_shared: cuda.Function,
     hc_finish: cuda.Function,
     hc_finish_f32w: cuda.Function,
     absorb_q: cuda.Function,
@@ -236,7 +238,10 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
     var a: cuda.Args = .{};
     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
     // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
-    if (rows < 64) {
+    if (rows < 64 and set.hc_shared_fn) {
+        a.add(i64of(rows));
+        try cuda_pdl.launch(set.glue.hc_partial8_shared, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
+    } else if (rows < 64) {
         try cuda_pdl.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
     } else {
         a.add(i64of(rows));
@@ -329,4 +334,9 @@ test "the wrappers' shape rules as glue.py's" {
     try std.testing.expectError(error.NoSwigluBlock, swigluBlock(96));
     try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
     try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
+}
+
+/// The strict opt-in, read once by Modules.load after the shared environment admission check.
+pub fn hcSharedFn() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_HC_SHARED_FN", false);
 }

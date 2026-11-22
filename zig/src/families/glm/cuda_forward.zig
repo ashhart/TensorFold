@@ -46,6 +46,7 @@ pub const Modules = struct {
     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
+    hc_shared_fn: bool,
     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
     dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
     moe_direct: bool, // TF_GLM_MOE_DIRECT (default off): a decode window's EXL3 MoE without row copies (cuda_moe.direct)
@@ -105,6 +106,7 @@ pub const Modules = struct {
             std.log.warn("glm: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores, as with TF_GLM_INDEX_CUDA=0", .{err});
             break :blk null;
         };
+        m.hc_shared_fn = try glue.hcSharedFn();
         m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
         if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
         m.dscore = null;
@@ -199,7 +201,7 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null, .tfq3 = if (f.m.tfq3) |*x| x else null };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .hc_shared_fn = f.m.hc_shared_fn, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null, .tfq3 = if (f.m.tfq3) |*x| x else null };
     }
 
     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
