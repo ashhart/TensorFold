@@ -128,7 +128,8 @@ pub fn planCausalAs(
     act: bool,
     s: S,
 ) Error!void {
-    try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, roundRows(p.rows), s);
+    const shared = roundRows(p.rows);
+    try planScore(l, q, scores, p, layer, heads, kv_heads, d, span, scale, kind, act, shared, s);
     const rows = p.rows;
     const tiles: c_int = @intCast(cdiv(span, 128));
     var b: Args = .{};
@@ -138,7 +139,7 @@ pub fn planCausalAs(
     try b.add(@as(c_int, 0));
     try b.add(p.args.pos);
     try l.go(l.softmax_stats, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);
-    try planApply(l, scores, stats, partials, p, layer, heads, kv_heads, d, span, kind, act, .one, s);
+    try planApply(l, scores, stats, partials, p, layer, heads, kv_heads, d, span, kind, act, shared, s);
     var e: Args = .{};
     try e.add(partials);
     try e.add(out);
@@ -148,7 +149,7 @@ pub fn planCausalAs(
     try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
 }
 
-/// The score blocks of a walk's launch: one-row launches keep a block a row, wider ones share a slot's key loads.
+/// The score and values blocks of a walk's launch: one-row launches keep a block a row, wider ones share loads.
 fn roundRows(rows: usize) Rows {
     return if (rows > 1) .shared else .one;
 }
