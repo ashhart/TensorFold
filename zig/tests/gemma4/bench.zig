@@ -121,7 +121,7 @@ fn fusedCosts(m: *g4.Model) !void {
                 for (m.weights.layers[0..geo.layers]) |*ll| {
                     const lin = if (kind == 1) ll.qkv.runs[0] else if (kind == 2) ll.gate_up.runs[0] else if (kind == 3) ll.down else ll.o;
                     if (fused) {
-                        const p = try m.projections.getFused(m.gpa, m.device, lin, kind);
+                        const p = try m.projections.getFused(m.gpa, m.device, lin, kind, false);
                         const x = if (kind == 3) s.act else s.y;
                         try p.encodeFused(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = if (kind == 2) s.act else s.qkv }, .{ .a = .{ .{ .buf = s.hn }, .{ .buf = s.y }, l.post_feedforward, l.scalar, l.input_norm, l.input_norm }, .o = .{ .{ .buf = s.h[0] }, .{ .buf = s.h[1] } }, .f = .{ cfg.eps, 0, 0, 0 } }, 1);
                     } else {

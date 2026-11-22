@@ -57,6 +57,18 @@ pub const Geometry = struct {
 };
 
 /// Gemma 4 31B (model_type gemma4).
+pub fn fusedRows(available: bool, opt_in: bool, rows: usize) bool {
+    return available and (rows == 1 or (opt_in and rows >= 2 and rows <= 16));
+}
+
+test "Metal MLP fusion requires opt-in for 2 through 16 rows" {
+    for (0..18) |rows| {
+        try std.testing.expectEqual(rows == 1, fusedRows(true, false, rows));
+        try std.testing.expectEqual(rows >= 1 and rows <= 16, fusedRows(true, true, rows));
+        try std.testing.expect(!fusedRows(false, true, rows));
+    }
+}
+
 pub const dense31b: Geometry = .{ .name = "31B", .hidden = 5376, .layers = 60, .intermediate = 21504, .query_heads = 32, .sliding_kv_heads = 16, .global_kv_heads = 4 };
 /// Gemma 4 12B's text model (model_type gemma4_unified, text_config gemma4_unified_text).
 pub const unified12b: Geometry = .{ .name = "12B", .hidden = 3840, .layers = 48, .intermediate = 15360, .query_heads = 16, .sliding_kv_heads = 8, .global_kv_heads = 1 };

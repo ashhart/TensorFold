@@ -229,3 +229,14 @@ test "gemma4 widths: mixed run numerical fixture keeps every padding column guar
     p.rig.bytes(p.y, 17 * 128 * 2)[0] = 0;
     try std.testing.expect(!try k.vt.intact(k.ctx));
 }
+
+test "multi-row fused pipelines fit the threadgroup limit for every served geometry" {
+    _ = @import("tensorfold").gemma4.config;
+    for (family.entries) |v| {
+        if (v.kind == 0) continue;
+        const l = v.layoutFor(true);
+        try l.validate();
+        try std.testing.expect(l.threadgroupBytes() <= 32768);
+        try std.testing.expectEqual(if (v.kind == 3) @as(usize, 16) else 2, l.row_tile);
+    }
+}

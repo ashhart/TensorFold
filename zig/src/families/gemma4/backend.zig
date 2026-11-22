@@ -35,6 +35,7 @@ pub const Metal = struct {
     /// Wider forwards' ms by total rows (several streams' windows), timed at load; the rule interpolates between.
     shared: [shared_widths.len]lanes.config.Cost = undefined,
     shared_timed: usize = 0,
+    fused_verify_rows: u64 = 0,
     io: std.Io,
     trace: bool = false, // GEMMA_DRAFT_TRACE: each verify's rows and wall time on stderr
     /// Whether the drafter keeps a context with a kept state (DFlash does); the MTP assistant reads the target's alone.
@@ -397,7 +398,9 @@ pub const Metal = struct {
         }
         const t0 = std.Io.Clock.awake.now(self.io);
         try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total]);
-        if (self.trace) std.debug.print("verify of {d} streams, {d} rows: {d:.2} ms\n", .{ windows.len, total, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds())) / 1e6 });
+        const fused_rows = if (total > 1 and cfg.fusedRows(self.model.fuse, self.model.fuse_rows, total)) total else 0;
+        self.fused_verify_rows += fused_rows;
+        if (self.trace) std.debug.print("verify of {d} streams, {d} rows: {d:.2} ms, fused MLP rows {d} (total {d})\n", .{ windows.len, total, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds())) / 1e6, fused_rows, self.fused_verify_rows });
         self.gen += 1;
         if (self.scratch.taps) |taps| {
             var row: usize = 0;
