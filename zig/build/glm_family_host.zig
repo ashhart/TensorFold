@@ -63,6 +63,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     rev25.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM index:", "GLM strict env:", "TF_GLM_INDEX_SPLIT:", "GLM REV25 E8:" } })).step);
     const kv8_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM FP8 KV:"} }));
     b.step("test-glm-fp8-kv-host", "GLM latent cache layout, mode agreement and recorded CUDA launches without devices").dependOn(&kv8_run.step);
+    const regions_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "latent launches take the latent table", "off, every page launch takes the one table", "a pooled-key table without its own stride" } }));
+    b.step("test-glm-regions-host", "GLM KV split table and stride launches on recording CUDA").dependOn(&regions_run.step);
     step.dependOn(&kv8_run.step);
     const profile_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt profile:"} }));
     b.step("test-glm-prompt-profile-host", "Paired prompt-stage event timing, overlap, failure and disabled controls without devices").dependOn(&profile_run.step);
