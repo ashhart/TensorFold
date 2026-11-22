@@ -78,7 +78,6 @@ pub const explains_open = true;
 pub const Room = @import("cuda_mtp.zig").Room;
 /// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
 pub const Options = struct { context: usize, drafts: bool, mtp_drafts: ?u32 = null, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false, prompt_int8: bool = false, precision: ?enum { full } = null, rope_yarn: ?f64 = null, room: ?Room = null, drafter: ?[]const u8 = null, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
-
 /// The window --context may ask for: the config's, or the YaRN window its block or --rope-yarn makes.
 pub const contextCeiling = plan.contextCeiling;
 
@@ -89,6 +88,7 @@ pub const Loaded = struct {
     backend: be.Backend,
     facts: lanes.Model,
     rows: u32,
+    prompt_rows: u32, // Effective scratch rows, capped by the loaded context.
     /// Device bytes each admitted stream allocates (recurrences, convolution tails, keys and values).
     stream_bytes: usize,
     free_streams: u32 = 0,
@@ -224,6 +224,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         .backend = l.backend(),
         .facts = modelFacts(@intCast(e.window_rows), @intCast(e.verify_rows), e.g),
         .rows = @intCast(e.window_rows),
+        .prompt_rows = @intCast(e.scratch_rows),
         .stream_bytes = try cacheBytes(e, o.context, page_test),
         .ctx = l,
         .deinit = release,
@@ -260,7 +261,6 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
 const drafter_open = @import("cuda_drafter_open.zig");
 pub const Opened = drafter_open.Opened;
 pub const openDrafter = drafter_open.openDrafter;
-
 pub const finishDrafterOpen = drafter_open.finishDrafterOpen;
 pub const explain = @import("cuda_native_explain.zig").explain;
 fn release(p: *anyopaque) void {
