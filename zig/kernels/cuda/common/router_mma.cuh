@@ -6,12 +6,18 @@
 
 #include "common/qmm_frag.cuh"
 
+#ifdef TF_ROUTER_PDL
+#define TF_ROUTER_RESTRICT
+#else
+#define TF_ROUTER_RESTRICT __restrict__
+#endif
+
 namespace tf_router_mma {
 
 // OUT[m, e] = x[m] . w[e], 8 experts a warp, RT tiles of 16 rows, one mma chain over K, STAGES of KC (row sums fixed).
 template <int WARPS, int STAGES, int KC, int RT = 1, bool EFAST = false, bool SLICED = false>  // EFAST: x walks the expert blocks
-__device__ __forceinline__ void logits(const __nv_bfloat16* __restrict__ X, int x_ld, const __nv_bfloat16* __restrict__ W,
-                                       float* __restrict__ OUT, int M, int D, int E, int SK = 1) {
+__device__ __forceinline__ void logits(const __nv_bfloat16* TF_ROUTER_RESTRICT X, int x_ld, const __nv_bfloat16* TF_ROUTER_RESTRICT W,
+                                       float* TF_ROUTER_RESTRICT OUT, int M, int D, int E, int SK = 1) {
     constexpr int LD = KC + 8, EB = 8 * WARPS, XR = 16 * RT, ROWS = XR + EB;
     extern __shared__ __align__(16) unsigned char smem_raw[];
     auto tile = reinterpret_cast<__nv_bfloat16 (*)[ROWS][LD]>(smem_raw);  // [STAGES] XR input rows, then EB expert rows
@@ -79,3 +85,5 @@ __device__ __forceinline__ void logits(const __nv_bfloat16* __restrict__ X, int 
 }
 
 }  // namespace tf_router_mma
+
+#undef TF_ROUTER_RESTRICT

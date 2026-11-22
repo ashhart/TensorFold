@@ -20,7 +20,7 @@ pub fn front(k: anytype, stream: cuda.Stream, lw: *const Layer, proj: u64, conv:
     f.add(keep.log);
     f.add(keep.log_ctl);
     f.add(cint(parts.late_rows));
-    try cuda.launch.launch(k.front_log, .{ .grid = .{ .x = @intCast(rows), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, stream, &f);
+    try cuda.launch.launch(k.front_log, .{ .pdl = k.pdl, .grid = .{ .x = @intCast(rows), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, stream, &f);
 }
 
 /// fn_gdn_rows_late: the pending rows on `state`, then the window's rows into ys, the end to keep.state_out.
@@ -36,5 +36,5 @@ pub fn chain(k: anytype, stream: cuda.Stream, gq: u64, keep: parts.LayerKeep, st
     a.add(keep.state_out);
     a.add(cint(rows));
     a.add(ys);
-    try cuda.launch.launch(k.chain_late, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda.launch.launch(k.chain_late, .{ .pdl = k.pdl, .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, stream, &a);
 }

@@ -48,7 +48,7 @@ fn ownPicks(self: anytype, picks: u64, out: u64, pairs: usize, first: usize, cou
     a.add(picks);
     a.add(out);
     for ([_]usize{ pairs, first, count }) |v| a.add(@as(i32, @intCast(v)));
-    try cuda.launch.launch(self.k.ep_picks, .{ .grid = .{ .x = @intCast((pairs + 255) / 256) }, .block = .{ .x = 256 } }, self.stream, &a);
+    try cuda.launch.launch(self.k.ep_picks, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast((pairs + 255) / 256) }, .block = .{ .x = 256 } }, self.stream, &a);
     return out;
 }
 

@@ -3,7 +3,7 @@
 
 // Dense HC uses the same stored stream sums and FP32 gamma before one BF16 normalization rounding.
 extern "C" __global__ void fn_hc_normalize(const __nv_bfloat16* H, const float* PSS, const float* SCALE,
-                                            __nv_bfloat16* OUT, float eps, int D, int SS) {
+                                            __nv_bfloat16* OUT, float eps, int D, int SS) { flashnext_pdl::enter();
     __shared__ float rinv;
     const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
     if (threadIdx.x == 0) {
@@ -20,7 +20,7 @@ extern "C" __global__ void fn_hc_normalize(const __nv_bfloat16* H, const float* 
 
 // fn_hc_normalize a block a (row, stream, 256-column slice): each block sums the stream the same way, so the same bits.
 extern "C" __global__ void __launch_bounds__(256) fn_hc_normalize_cols(const __nv_bfloat16* H, const float* PSS, const float* SCALE,
-                                                                       __nv_bfloat16* OUT, float eps, int D, int SS) {
+                                                                       __nv_bfloat16* OUT, float eps, int D, int SS) { flashnext_pdl::enter();
     __shared__ float rinv;
     const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
     if (threadIdx.x == 0) {
@@ -36,7 +36,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_normalize_cols(const __n
 
 // Dense up-projection values are already BF16: sigmoid, product and stream mean keep their original rounding seams.
 extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
-                                            __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
+                                            __nv_bfloat16* MIXED, float* XSM, int D, int SS) { flashnext_pdl::enter();
     __shared__ float row[32];
     const int r = blockIdx.x, group = blockIdx.y, d = group * 32 + threadIdx.x;
     float total = 0.0f;
@@ -58,7 +58,7 @@ extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_b
 
 // fn_hc_dense_mix, a warp a 32-column group and eight a block: the same ops, lane 0 summing its group in order.
 extern "C" __global__ void __launch_bounds__(256) fn_hc_dense_mix8(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
-                                                                   __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
+                                                                   __nv_bfloat16* MIXED, float* XSM, int D, int SS) { flashnext_pdl::enter();
     __shared__ float row[8][32];
     const int r = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int group = blockIdx.y * 8 + warp, d = group * 32 + lane;

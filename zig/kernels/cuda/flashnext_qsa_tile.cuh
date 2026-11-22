@@ -17,9 +17,9 @@ struct Stack {
 };
 // PAGED: POOLED is the arena's slot in page 0, a block's row in its page (fn_attn's Pg): one lookup a thread.
 template <int R, int HI, bool PAGED>
-__device__ __forceinline__ void scores_body(const __nv_bfloat16* __restrict__ IQ,
-                                            const __nv_bfloat16* __restrict__ POOLED, const int* __restrict__ POS0,
-                                            float* __restrict__ SC, int NB, int RATIO, int TOP, int rows,
+__device__ __forceinline__ void scores_body(const __nv_bfloat16* IQ,
+                                            const __nv_bfloat16* POOLED, const int* POS0,
+                                            float* SC, int NB, int RATIO, int TOP, int rows,
                                             const Pg& pg) {
     __shared__ float4 qs[R][HI][DI / 4];
     const int r0 = blockIdx.x * R, b = blockIdx.y * 256 + threadIdx.x;
@@ -79,9 +79,9 @@ __device__ __forceinline__ void scores_body(const __nv_bfloat16* __restrict__ IQ
     }
 }
 template <int R, int HI>
-__global__ void __launch_bounds__(256) scores(const __nv_bfloat16* __restrict__ IQ,
-                                              const __nv_bfloat16* __restrict__ POOLED, const int* __restrict__ POS0,
-                                              float* __restrict__ SC, int NB, int RATIO, int TOP, int rows) {
+__global__ void __launch_bounds__(256) scores(const __nv_bfloat16* IQ,
+                                              const __nv_bfloat16* POOLED, const int* POS0,
+                                              float* SC, int NB, int RATIO, int TOP, int rows) { flashnext_pdl::enter();
     scores_body<R, HI, false>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, Pg{});
 }
 }  // namespace qsa_tile

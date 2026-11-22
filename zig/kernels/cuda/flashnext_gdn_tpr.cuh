@@ -29,9 +29,9 @@ __device__ __forceinline__ float tree(float (&x)[32 / TPR]) {
 }
 // NK key and NV value heads (a layer's 16 and 48, or one rank's 8 and 24), TPR threads a state row, STEPS rows a stage
 template <int NK, int NV, int TPR, int STEPS>
-__device__ __forceinline__ void chain(const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
-                                      const float* __restrict__ gb, const float* state_in, float* state_out, int rows,
-                                      float* __restrict__ ys_out) {
+__device__ __forceinline__ void chain(const float* qn, const float* kn, const float* v,
+                                      const float* gb, const float* state_in, float* state_out, int rows,
+                                      float* ys_out) {
     using S = Stage<STEPS>;
     constexpr int L = 32 / TPR;                           // the lanes a thread holds
     extern __shared__ __align__(16) unsigned char smem[];
@@ -117,13 +117,13 @@ __device__ __forceinline__ void chain(const float* __restrict__ qn, const float*
 // The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* qn, const float* kn, const float* v,
                                                                  const float* gb, const float* state_in, float* state_out,
-                                                                 int rows, float* ys_out) {
+                                                                 int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_tpr::chain<16, 48, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }
 
 // fn_gdn_chain_tpr on one rank's 8 key and 24 value heads.
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr_h8(const float* qn, const float* kn, const float* v,
                                                                     const float* gb, const float* state_in,
-                                                                    float* state_out, int rows, float* ys_out) {
+                                                                    float* state_out, int rows, float* ys_out) { flashnext_pdl::enter();
     gdn_tpr::chain<8, 24, 2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
 }

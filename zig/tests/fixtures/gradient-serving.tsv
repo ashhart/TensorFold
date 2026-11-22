@@ -10,10 +10,10 @@ zig/kernels/cuda/experts.cuh	017728fef063d45f06240a88002f80ec931f967edc5fa44c31b
 zig/kernels/cuda/experts_pack.cu	578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac	raw
 zig/kernels/cuda/experts_prefill.cu	5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc	raw
 zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f07168a016412df13a7	raw
-zig/kernels/cuda/flashnext_attn.cu	9731e39b67a8adb4a0a42222e9f888877932f2aa7108b1631ea61016083d3b71	raw
-zig/kernels/cuda/flashnext_batch.cu	95260b964fb633d23df28970672d87688f21cdd9073e44f92a1523b54b4ecd99	raw
+zig/kernels/cuda/flashnext_attn.cu	a35c504d0b0ce6573115c6145f2c226aa555f36109c80c341a0b750f38ad2a29	raw	E180: default-off Flash Next guarded PDL
+zig/kernels/cuda/flashnext_batch.cu	70ee01d1ffd529754159a0e0f5c7e6155390e10a0a2fa2e00a9be9b96c0a7b99	raw	E180: default-off Flash Next guarded PDL
 zig/kernels/cuda/flashnext_gdn.cu	c7b9712626778d452e18234e2dfc3b26f8112618cdc492957c4b5f5454d64126	raw
-zig/kernels/cuda/flashnext_hc.cu	54fa2cfa22e483341835f6349cf0a8f508459ed1b65804728cb1358ac82b24f1	raw	main 5c7cf5c117, d88c1ed57d (sum_rn and rms_scale shared; same SASS)
+zig/kernels/cuda/flashnext_hc.cu	2b3132ee7f7ebff095b9f62175316864f15f0f8e24ea787a68aad6f35e86a576	raw	main 5c7cf5c117, d88c1ed57d (sum_rn and rms_scale shared; same SASS); E180: default-off Flash Next guarded PDL
 zig/kernels/cuda/flashnext_mtp.cu	5d213b1b4a1d0588eea3acb4633a0c8bc4d9bdf6f27485604452a3b603677a09	raw	#2927
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228	raw
@@ -53,13 +53,13 @@ zig/kernels/cuda/prompt16.cu	2da3c4ea23de0fa9b2536db0fa66f07bb2d5b45db36c2f9cb32
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
 zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
-zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c25b004cef4e6c636e7cc1dd	raw
+zig/kernels/cuda/common/router_mma.cuh	bc0af733a0ccfde6ab3b472bee0ecdcd45670d00615694972f6fa57cb12a9fd6	raw	E180: default-off Flash Next guarded PDL
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
 zig/kernels/cuda/qmm_prefill.cu	e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6	raw	#2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel
 zig/kernels/cuda/qmmf.cu	ab4cd147437f27fa945193f5213623b76d17424b8b941bf8c314ce7e8fa314eb	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical); dependent decode launches: weights load before griddepcontrol.wait (TF_QMMF_WFIRST), Lane.pdl; TF_FLASHNEXT_FUSED_SPLIT (fused instances at row tiles 16 and 32; off keeps main's kernels)
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
-zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
+zig/kernels/cuda/route_rows.cu	d67df9d3b0cdb6db56ff601571f6a83cb960bd7bd0563f4ea9c10d1f57531d4f	raw	E180: default-off Flash Next guarded PDL
 zig/kernels/cuda/sample.cu	593e19cc5f0e5a361b444c1dd50f89f6d31f18a24a154e54ed4ed87698acc791	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #4099 (the fallback shortlist sized to top_k, same tokens)
 zig/kernels/cuda/scan_rows.cu	d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7	raw
 zig/kernels/cuda/torch_ops/argmax.cu	c87ab27188397298dce89ae80bb524b55a1d5c4f6aaa54627cba01d926da9ecf	raw
@@ -106,7 +106,7 @@ zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509
 zig/src/cuda/qmmf.zig	d95cbbce9598ee49b4677468f6672773470d9c52db5cb79ee20531963b2409fb	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name); dependent decode launches: weights load before griddepcontrol.wait (TF_QMMF_WFIRST), Lane.pdl; TF_FLASHNEXT_FUSED_SPLIT (fuse_split_n, default 0: main's kernels); threshold owned by Flash Next's lane, other families keep 0
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
 zig/src/cuda/root.zig	acf7f9d879a577622b705bfde274264ebb8ff8f4d6a4fb34b8828fff1642bcd5	raw	main 42735f94f0 (#2335: cuda.mla exported), (cuda.affine_experts exported for Hy4-flash); main 42735f94f0 (#2335: cuda.mla exported); #3518 (exports roce_pair_rule; the test block imports roce_layout, roce_pairs and roce_pair_rule); #4493 (opt-in paired prompt experts, 128-row items)
-zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
+zig/src/cuda/route_rows.zig	abf5314468a4cc7d55b47a8b5a323a640120417dfc08ace492e1ebac7a56129e	raw	E180: default-off Flash Next guarded PDL
 zig/src/cuda/sample.zig	9e3a31bd0480284ff069148b2d3c92f1e2ba24f16c18362dae9de48ec7fc65fe	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged), #3124
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
@@ -115,7 +115,7 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	0a9200b161e331cf3f5937ff5dcc5c65bcb15e3de8127c277f6a31595d2e5296	raw	#2239 (convCols, convFlatten and the head-64 full attention for Qwen3-ASR's audio tower; existing paths unchanged)
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	f1c5ab1478497ab2c0abdf77776dfed36fa9092579d4306e4320a32cfadf6910	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #XXXX: the scratch test's ceiling restated at the 3,072-row default, #3413 (TF_FLASHNEXT_READOUT_FUSED's prompt read-out; unchanged when unset)
+zig/src/families/flashnext/cuda_batch.zig	2947aab0b3556d0b05b531d3117c78cbed782ccbd63aab4261631c549ee547bd	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #XXXX: the scratch test's ceiling restated at the 3,072-row default, #3413 (TF_FLASHNEXT_READOUT_FUSED's prompt read-out; unchanged when unset); E180: default-off Flash Next guarded PDL
 zig/src/families/flashnext/cuda_batch_state.zig	493ee0dc5bc832b9344d16de92ab33f5de15574b4d9a81f283558c4d729c6db6	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged; #XXXX: the default prompt chunk is 3,072 rows; the shared pass takes the pooled n-gram gather first (TF_FLASHNEXT_GATHER_EARLY); replies unchanged
 zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
@@ -124,7 +124,7 @@ zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41dee
 zig/src/families/flashnext/cuda_embed.zig	f52cee06a9bf820554b5443e9278be7bedf3381ff6d2529902b40c6699de4518	raw
 zig/src/families/flashnext/cuda_embed_main.zig	2b596788cccd420368fe803676e8ad45a4f0bf7a115a6cd8cbde9151cbf1e597	raw
 zig/src/families/flashnext/cuda_gdn.zig	bc952357f4d6c076542b419b0ee71bbdce89715f0223ab31b4abf821fc2bee62	raw
-zig/src/families/flashnext/cuda_glue.zig	0bd837ea17d1bd0a7a0820dc0ee99c4da90113c15d62b3fac31bd7af47a0ecb1	raw
+zig/src/families/flashnext/cuda_glue.zig	824a4c676530651b39e2bc101da8042a743b678f847ed9e83d76f1ce413bb19a	raw	E180: default-off Flash Next guarded PDL
 zig/src/families/flashnext/cuda_hc.zig	01f897ac65d6edd2cd6ac76d97cb4d96619c25ffa85bd619d6d76f4f465cda9a	raw
 zig/src/families/flashnext/cuda_head.zig	734cc1ccea8e99ce9a061273a2dd3042f32e4848b622b5de616aa4b6f546bdd4	raw	#3749: TF_FLASHNEXT_SHARD_HEAD read through platform/environment.zig, blank as unset
 zig/src/families/flashnext/cuda_images.zig	ef78a0eb8403a73da2d19bd7ed2aa4b2349a191f408060da79bee3963cd56ff2	raw	#3164 (a resumed prompt sends only the images past its kept state)

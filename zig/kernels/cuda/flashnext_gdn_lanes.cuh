@@ -19,7 +19,7 @@ struct Lanes {
 }  // namespace fn_lanes
 
 // Each lane's rows and conv window into its keep (the lone pass's two copies), 16 bytes a thread.
-extern "C" __global__ void fn_gdn_lanes_keep(const fn_lanes::Lanes t) {
+extern "C" __global__ void fn_gdn_lanes_keep(const fn_lanes::Lanes t) { flashnext_pdl::enter();
     using namespace fn_gdn;
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const fn_lanes::Lane& l = t.l[blockIdx.y];
@@ -33,9 +33,9 @@ extern "C" __global__ void fn_gdn_lanes_keep(const fn_lanes::Lanes t) {
 
 // fn_gdn_front (or, with a log, fn_gdn_front_log) of every lane: grid (the widest lane's rows, NK + NV, lanes).
 extern "C" __global__ void __launch_bounds__(256) fn_gdn_lanes_front(
-        const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log, const float* __restrict__ dt_bias,
-        float* __restrict__ qn, float* __restrict__ kn, float* __restrict__ v, float* __restrict__ gb, int log_rows,
-        const fn_lanes::Lanes t) {
+        const __nv_bfloat16* cw, const float* a_log, const float* dt_bias,
+        float* qn, float* kn, float* v, float* gb, int log_rows,
+        const fn_lanes::Lanes t) { flashnext_pdl::enter();
     using namespace fn_gdn;
     const fn_lanes::Lane& l = t.l[blockIdx.z];
     if ((int)blockIdx.x >= l.rows) return;
@@ -51,8 +51,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_lanes_front(
 
 // Every lane's chain (with a log fn_gdn_rows_late, else fn_gdn_rows_to or in place): grid (NV, DV / 16, lanes).
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_lanes_chain(
-        const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v, const float* __restrict__ gb,
-        float* __restrict__ ys, int log_rows, int store_above, const fn_lanes::Lanes t) {
+        const float* qn, const float* kn, const float* v, const float* gb,
+        float* ys, int log_rows, int store_above, const fn_lanes::Lanes t) { flashnext_pdl::enter();
     using namespace fn_gdn;
     const fn_lanes::Lane& l = t.l[blockIdx.z];
     const float* q = qn + (size_t)l.row0 * NK * DK;
@@ -63,7 +63,7 @@ extern "C" __global__ void __launch_bounds__(128) fn_gdn_lanes_chain(
 }
 
 // Every lane's conv window moved on past its rows: grid (C / 256 rounded up, lanes).
-extern "C" __global__ void fn_gdn_lanes_shift(const fn_lanes::Lanes t) {
+extern "C" __global__ void fn_gdn_lanes_shift(const fn_lanes::Lanes t) { flashnext_pdl::enter();
     using namespace fn_gdn;
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const fn_lanes::Lane& l = t.l[blockIdx.y];
