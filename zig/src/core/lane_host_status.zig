@@ -17,10 +17,11 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         const v1 = h.st.seq.load(.acquire);
         if (v1 % 2 == 0) {
             s = h.st.snap;
-            if (s.live_len > 0) if (h.st.live_slots[s.live_slot]) |buf| {
+            if (s.live_len > 0) {
+                const buf = h.st.live_slots[s.live_slot].items;
                 n = @min(stream_tokens.len, s.live_len);
                 @memcpy(stream_tokens[0..n], buf[0..n]);
-            };
+            }
             if (h.st.seq.load(.acquire) == v1) break;
         }
     }
@@ -47,7 +48,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
 pub const State = struct {
     snap: Snapshot = .{},
     seq: std.atomic.Value(u32) = .init(0), // odd while the engine thread publishes
-    live_slots: [2]?[]u32 = .{ null, null },
+    live_slots: [2]std.ArrayList(u32) = .{ .empty, .empty },
     live_tokens: std.ArrayList(u32) = .empty,
     live_generated: u64 = 0,
     cache_status: ?api.Status.PromptCache = null,
@@ -74,9 +75,10 @@ pub fn takeEngineLock(h: *LaneHost) bool {
     return true;
 }
 
-/// Frees the live slots when the host stops.
+/// Frees the status state when the host stops.
 pub fn freeSlots(h: *LaneHost) void {
-    for (&h.st.live_slots) |slot| if (slot) |buf| h.gpa.free(buf);
+    h.st.live_tokens.deinit(h.gpa);
+    for (&h.st.live_slots) |*slot| slot.deinit(h.gpa);
 }
 
 /// The lane host's status state: the published snapshot, its seqlock, the live slots and the round-wait counter.
@@ -97,8 +99,10 @@ pub const Snapshot = struct {
     fill_run: u64 = 0,
 };
 
-/// Publishes the snapshot for the next read; the caller holds the host's lock (issue 3200).
+/// Publishes the snapshot for the next read; the caller holds no lock (issue 3200).
 pub fn publish(h: *LaneHost) void {
+    h.lock();
+    defer h.unlock();
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
     var tokens: u64 = 0;
     for (h.decoded.items) |m| {
@@ -107,12 +111,12 @@ pub fn publish(h: *LaneHost) void {
     var tmp: api.Status = .{};
     fillTotals(h, &tmp);
     const slot = (h.st.snap.live_slot + 1) % 2;
-    if (h.st.live_slots[slot] == null) h.st.live_slots[slot] = h.gpa.alloc(u32, @max(1, h.info_.lanes)) catch null;
     h.st.seq.store(h.st.seq.load(.monotonic) | 1, .release); // odd: a reader retries
     var len: usize = 0;
-    if (h.st.live_slots[slot]) |buf| {
-        len = @min(buf.len, h.st.live_tokens.items.len);
-        @memcpy(buf[0..len], h.st.live_tokens.items[0..len]);
+    if (h.st.live_tokens.items.len > 0) {
+        h.st.live_slots[slot].clearRetainingCapacity();
+        h.st.live_slots[slot].appendSlice(h.gpa, h.st.live_tokens.items) catch {};
+        len = h.st.live_slots[slot].items.len;
     }
     h.st.snap = .{
         .live_slot = slot,
@@ -163,44 +167,48 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
 
 /// `n` tokens delivered now; marks older than the window drop.
 pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
-    const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
-    h.mutex.lockUncancelable(h.io);
-    defer h.unlock();
-    var keep: usize = 0;
-    for (h.decoded.items) |m| {
-        if (m.at < now - window_ns) continue;
-        h.decoded.items[keep] = m;
-        keep += 1;
+    {
+        const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        h.mutex.lockUncancelable(h.io);
+        defer h.mutex.unlock(h.io);
+        var keep: usize = 0;
+        for (h.decoded.items) |m| {
+            if (m.at < now - window_ns) continue;
+            h.decoded.items[keep] = m;
+            keep += 1;
+        }
+        h.decoded.shrinkRetainingCapacity(keep);
+        h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
     }
-    h.decoded.shrinkRetainingCapacity(keep);
-    h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
     @import("lane_host_load.zig").decoded(h, n, first);
     publish(h);
 }
 
 /// Each started stream's context and generated tokens, for the next status read.
 pub fn noteLive(h: *LaneHost) void {
-    h.mutex.lockUncancelable(h.io);
-    defer h.unlock();
-    h.st.live_tokens.clearRetainingCapacity();
-    h.st.live_generated = 0;
-    const now_ms = @import("rows_io.zig").wallMs();
-    if (h.cache) |s| {
-        if (h.st.cache_status == null or now_ms - h.cache_at >= 1000) { // the full copies at 1 Hz at most
-            h.st.cache_status = snap.PromptCache(s);
-            h.st.disk_status = snap.Disk(s);
-            h.cache_at = now_ms;
+    {
+        h.mutex.lockUncancelable(h.io);
+        defer h.mutex.unlock(h.io);
+        h.st.live_tokens.clearRetainingCapacity();
+        h.st.live_generated = 0;
+        const now_ms = @import("rows_io.zig").wallMs();
+        if (h.cache) |s| {
+            if (h.st.cache_status == null or now_ms - h.cache_at >= 1000) { // the full copies at 1 Hz at most
+                h.st.cache_status = snap.PromptCache(s);
+                h.st.disk_status = snap.Disk(s);
+                h.cache_at = now_ms;
+            } else {
+                h.st.cache_status.?.states = s.entries.items.len; // /metrics reads these every round, as before
+                h.st.cache_status.?.bytes = s.held + s.spare();
+            }
         } else {
-            h.st.cache_status.?.states = s.entries.items.len; // /metrics reads these every round, as before
-            h.st.cache_status.?.bytes = s.held + s.spare();
+            h.st.cache_status = null;
+            h.st.disk_status = null;
         }
-    } else {
-        h.st.cache_status = null;
-        h.st.disk_status = null;
+        for (h.admitted.items) |job| if (job.started) {
+            h.st.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
+            h.st.live_generated += @intCast(job.stream.emitted().len);
+        };
     }
-    for (h.admitted.items) |job| if (job.started) {
-        h.st.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
-        h.st.live_generated += @intCast(job.stream.emitted().len);
-    };
     publish(h);
 }
