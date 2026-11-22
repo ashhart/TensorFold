@@ -149,10 +149,10 @@ test "the pool names the parked share it counted, for the debug log line" {
     try t.expectEqual(4 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked); // to MemTotal
     Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 100663296 kB\n";
     try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
-    Fake.card_free = 100 << 30; // CUDA's free bounds the pool: only the parked pages within it are counted
-    try t.expectEqual(4 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+    Fake.card_free = 100 << 30; // CUDA free alone no longer caps the pool: a just-read checkpoint's clean pages count as room
+    try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
     Fake.card_free = 90 << 30;
-    try t.expectEqual(@as(u64, 0), (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+    try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
     Fake.card_free = 128 << 30;
     Fake.zones = null;
     try t.expectEqual(@as(u64, 0), (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
@@ -164,7 +164,7 @@ fn unifiedCtx(driver: *cuda.Driver) cuda.Context {
     return .{ .d = driver, .device = 0, .handle = null };
 }
 
-test "a GB10 after a 60 GB checkpoint read (6 Nov): CUDA's free bounds the pool, not MemAvailable's page cache" {
+test "a GB10 after a 60 GB checkpoint read (6 Nov): clean checkpoint pages count as pool room" {
     var driver: cuda.Driver = undefined;
     const ctx = unifiedCtx(&driver);
     var problem: []const u8 = "";
@@ -180,11 +180,11 @@ test "a GB10 after a 60 GB checkpoint read (6 Nov): CUDA's free bounds the pool,
     const p = (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?;
     const host: u64 = 121477530 * 1024;
     try t.expect(p.unified);
-    try t.expectEqual(@as(u64, Fake.card_free), p.free);
+    try t.expectEqual(host, p.free);
     try t.expectApproxEqAbs(103.44, toGib(host - p.reserve), 0.005); // the grant MemAvailable alone gave
-    try t.expectApproxEqAbs(43.27, toGib(host - p.reserve - p.free), 0.005); // above CUDA's free
-    try t.expectEqual(p.free - p.reserve, p.room(0)); // now CUDA's free less the reserve: 47.76 GiB
-    try t.expectApproxEqAbs(47.76, toGib(p.room(0)), 0.005);
+    try t.expectApproxEqAbs(55.68, toGib(p.free - @as(u64, Fake.card_free)), 0.005); // clean cached pages above CUDA's free
+    try t.expectEqual(p.free - p.reserve, p.room(0)); // host free less the reserve: 103.44 GiB
+    try t.expectApproxEqAbs(103.44, toGib(p.room(0)), 0.005);
 }
 
 test "a just-read 60 GB checkpoint keeps 1.3.2's budget without a pre-load page drop" {
