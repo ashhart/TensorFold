@@ -95,8 +95,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     const streams: u64 = @max(o.lanes, 1);
-    const draft_fixed = if (drafter != null) dspark.Drafter.streamBytes(0) + 127 * (dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0)) else 0;
-    const draft_token = if (drafter) |_| dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0) else 0;
+    const draft_token = if (drafter != null) dspark.Drafter.tokenBytes() else 0;
+    const draft_fixed = if (drafter != null) dspark.Drafter.streamBytes(0) + dspark.Drafter.ring_slack * draft_token else 0;
     const draft_shared_token = if (drafter) |_| dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0) else 0;
     const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
     const window: i64 = o.context orelse @intCast(fits);
@@ -282,7 +282,15 @@ test "Inkling native longest context accounts target, streams and shared draft s
     const budget = st.cacheBytes(7) + 2 * (11 + 7 * 13) + 7 * 17;
     try std.testing.expectEqual(@as(usize, 7), longest(budget, 8, 2, 11, 13, 17));
     try std.testing.expectEqual(@as(usize, 0), longest(st.cacheBytes(1) - 1, 8, 1, 0, 0, 0));
-    const per_token = dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0);
-    const conservative = dspark.Drafter.streamBytes(0) + 127 * per_token + 129 * per_token;
-    try std.testing.expect(conservative >= dspark.Drafter.streamBytes(129));
+    // A stream's bytes are within the ring's slack of its fixed bytes and a token's bytes a token, never under.
+    const token = dspark.Drafter.tokenBytes();
+    const fixed = dspark.Drafter.streamBytes(0) + dspark.Drafter.ring_slack * token;
+    for ([_]usize{ 1, 127, 128, 129, 4096, 262144 }) |n| {
+        const bound = fixed + n * token;
+        try std.testing.expect(bound >= dspark.Drafter.streamBytes(n));
+        try std.testing.expect(bound - dspark.Drafter.streamBytes(n) <= dspark.Drafter.ring_slack * token);
+    }
+    // 36 GiB of state hold the model's whole window for eight drafted streams.
+    const shared = dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0);
+    try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fixed, token, shared));
 }

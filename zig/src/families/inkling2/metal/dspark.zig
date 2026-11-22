@@ -102,6 +102,12 @@ pub const Drafter = struct {
         return state.laneBytes(capacity);
     }
 
+    /// A stream's bytes a token of its window; its global rings round the window up by at most `ring_slack` tokens.
+    pub fn tokenBytes() u64 {
+        return state.laneTokenBytes();
+    }
+    pub const ring_slack = state.global_step - 1;
+
     /// The selected target window fixes every new lane's global ring and the shared attention score allocation.
     pub fn setContext(d: *Drafter, window: u32) !void {
         const capacity: usize = @intCast(window);
