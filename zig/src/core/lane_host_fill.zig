@@ -229,6 +229,8 @@ fn fillAt(h: *LaneHost, at: usize) void {
         };
         return;
     };
+    // a backend restores a kept state in its pass's first call: the store gets it back now, not at the pass's end
+    if (first and restoreSettled(&job.stream)) job.reported();
     load.progress(h, job);
     if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
     if (!done) return;
@@ -239,6 +241,11 @@ fn fillAt(h: *LaneHost, at: usize) void {
         return;
     }
     _ = h.deliver(job);
+}
+
+/// Whether a stream's kept state is restored or refused (or none was offered): its lookup can be reported.
+pub fn restoreSettled(s: *const @import("lanes").Stream) bool {
+    return s.reuse.saved == null or s.reuse_failed or s.cached > 0;
 }
 
 /// Fill `at`'s next call: the rows it advanced (all it had, if it left the list); no progress shown spends any budget.
