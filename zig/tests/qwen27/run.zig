@@ -1,5 +1,7 @@
 //! The real-weight gate. Help returns before any device or checkpoint access.
 const std = @import("std");
+/// --stages: the qwen27 stage recorder is built into this tool only (stage_planes.on).
+pub const qwen27_stages = true;
 const q = @import("qwen27");
 const mtl = @import("metal");
 const sources = @import("qwen_runtime_sources");
@@ -185,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
     if (stages_dir != null) {
         recorder = try core.qwen35_stages.Recorder.init(init.gpa, m.config.layers, m.config.hidden, m.config.vocab);
         planes = try q.stage_planes.Planes.init(m.device, &recorder.?, m.frame.capacity, @min(m.frame.capacity, q.gpu_frame.logit_rows));
-        runner.stages = &planes.?;
+        q.stage_planes.active = &planes.?;
     }
     const start = std.Io.Clock.awake.now(io);
     try s.prefill(ids, chunk);
@@ -196,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
     const out = generation.tokens;
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
-    runner.stages = null;
+    q.stage_planes.active = null;
     if (stages_dir) |dir| try recorder.?.write(io, dir);
     const decoded = if (compare > 0) try s.fingerprint() else digest;
     const reference_equal = if (expected) |wanted| std.mem.eql(u32, out, wanted) else false;
