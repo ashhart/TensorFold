@@ -15,6 +15,10 @@ namespace tfb {
 struct Trie;
 class Tables;
 
+// Only the fixed kind-zero OBJECT rule has server provenance; equal client text does not.
+enum class Origin { client, fixed_json };
+enum class Status { uncovered = 0, ready = 1, work = 2, edges = 3, bytes = 4, timeout = 5, slots = 6 };
+
 // What exploring one grammar may take, in counted steps (no clock): past it the grammar is refused, never part-masked.
 struct Limits {
   int64_t work = int64_t{1} << 28;  // counted parser/table steps, plus the compile-thread deadline
@@ -36,7 +40,7 @@ class Cache {
  public:
   explicit Cache(xgrammar::TokenizerInfo info) : info_(std::move(info)) {}
   size_t Active() const { return compiles_.Active(); }
-  std::shared_ptr<Tables> Get(const xgrammar::CompiledGrammar& g);
+  std::shared_ptr<Tables> Get(const xgrammar::CompiledGrammar& g, Origin origin);
   // The limits of every grammar first looked up after this.
   void Limit(Limits limits);
 
@@ -47,6 +51,8 @@ class Cache {
   std::mutex mutex_;
   std::list<std::pair<xgrammar::CompiledGrammar, std::shared_ptr<Tables>>> recent_;
   Limits limits_;
+  std::shared_ptr<Tables> fixed_json_;  // retained outside the client LRU for this tokenizer
+  std::shared_ptr<const xgrammar::CompiledGrammar> fixed_owner_;
   tfc::Cache<ReadyResult> compiles_;
 };
 
