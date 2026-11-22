@@ -23,6 +23,7 @@ pub const Settings = struct {
     no_proxy: []const u8 = "",
     connect_s: u32 = 30,
     stall_s: u32 = 60,
+    skipped: []const u8 = "", // a socks or https:// proxy pull cannot use: it connects directly, as before proxies
 };
 
 pub const connect_name = "TENSORFOLD_PULL_CONNECT_SECONDS";
@@ -47,8 +48,8 @@ pub fn fromEnv(a: std.mem.Allocator, env: ?*const std.process.Environ.Map) !Sett
         }
     }.get;
     var s: Settings = .{};
-    if (get(env, &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" })) |hit| s.https = try parse(a, hit[0], hit[1]);
-    if (get(env, &.{ "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY" })) |hit| s.http = try parse(a, hit[0], hit[1]);
+    if (get(env, &.{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" })) |hit| s.https = try usable(a, &s, hit[0], hit[1]);
+    if (get(env, &.{ "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY" })) |hit| s.http = try usable(a, &s, hit[0], hit[1]);
     if (get(env, &.{ "no_proxy", "NO_PROXY" })) |hit| s.no_proxy = hit[1];
     const raw = struct {
         fn raw(m: ?*const std.process.Environ.Map, n: []const u8) ?[]const u8 {
@@ -64,6 +65,18 @@ pub fn fromEnv(a: std.mem.Allocator, env: ?*const std.process.Environ.Map) !Sett
         return error.InvalidEnvironment;
     };
     return s;
+}
+
+/// A socks or https:// proxy is skipped, not refused: 1.3.3 and earlier ignored every proxy.
+fn usable(a: std.mem.Allocator, s: *Settings, from: []const u8, value: []const u8) !?Proxy {
+    return parse(a, from, value) catch |e| switch (e) {
+        error.ProxyScheme => {
+            refused = "";
+            s.skipped = from;
+            return null;
+        },
+        else => e,
+    };
 }
 
 /// http://[user[:password]@]host[:port] or host[:port]; port 80 when none is given, as Python's requests does.
