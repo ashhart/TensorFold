@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Pull: `tensorfold pull` no longer stops with "detecting network configuration failed" after 64 distinct resolved addresses on a long pull; a full address table replaces its oldest entry (#4621, follows #4140).
+
 - Metal: a checkpoint file span of 16 GiB or more loads; each `pread` asks for at most 1 GiB, since macOS refuses a count above INT_MAX (#4435). Thanks to @sethforprivacy, and to @markyu0401 for the first fix (#4433).
 
 - Tests: requests with `n` from 2 to 16 give back every `--max-inflight` and per-key place on each way they can end (done, disconnect, a failing choice, 429, 400, cancel, shutdown), plus a seeded concurrent disconnect case (#4602).
