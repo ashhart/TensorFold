@@ -21,6 +21,10 @@ const served = [_]c.Shape{
     .{ .rows = 1, .n = fixture.inter, .k = fixture.hidden },
     .{ .rows = 17, .n = fixture.inter, .k = fixture.hidden },
 };
+// Grouped NAX path (rows >= 17) for planted controls targeting experts_grouped_nax.metal.
+const served_grouped = [_]c.Shape{
+    .{ .rows = 17, .n = fixture.inter, .k = fixture.hidden },
+};
 
 const rule = "dense zero weights propagate nonfinite inputs; a nonfinite active route poisons the sum; inactive slots are ignored";
 
@@ -240,14 +244,14 @@ const Probe = struct {
 
     const vt = g.hooks(Probe);
 
-    fn kernel(p: *Probe, control: ?g.Gate) g.Kernel {
+    fn kernel(p: *Probe, control: ?g.Gate, grouped: bool) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = control, .spec = .{
             .name = p.label,
             .accum = .f32,
             .depth = depth,
             .out = .bf16,
             .nan = .{ .stated = rule },
-            .served = &served,
+            .served = if (grouped) &served_grouped else &served,
         } };
     }
 };
@@ -256,7 +260,7 @@ fn depth(shape: c.Shape) usize {
     return 2 * (32 + (std.math.divCeil(usize, shape.k, 16 * 32) catch unreachable) + 5) + topk;
 }
 
-const Mutation = struct { format: Format, gate: g.Gate, label: []const u8, from: []const u8, to: []const u8 };
+const Mutation = struct { format: Format, gate: g.Gate, grouped: bool = false, label: []const u8, from: []const u8, to: []const u8 };
 const mutations = [_]Mutation{
     .{
         .format = .nvfp4,
@@ -328,6 +332,38 @@ const mutations = [_]Mutation{
         .from = "    accum += part;",
         .to = "    accum = i2x_bf4(accum + part);",
     },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .grouped = true,
+        .label = "control: inkling2 experts grouped NVFP4 skips outer factor",
+        .from = "*(threadgroup bfloat4*)(dst + 0u) = i2x_to_bf4((lo0 * sc) * factor);",
+        .to = "*(threadgroup bfloat4*)(dst + 0u) = i2x_to_bf4(lo0 * sc);",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .grouped = true,
+        .label = "control: inkling2 experts grouped MXFP8 skips projection BF16 rounding before SwiGLU",
+        .from = "          const float g = float(bfloat(acc[e]));\n          const float u = float(bfloat(acc[e + 1]));",
+        .to = "          const float g = acc[e];\n          const float u = acc[e + 1];",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .grouped = true,
+        .label = "control: inkling2 experts grouped NVFP4 skips second K-substep",
+        .from = "    for (int ks = 0; ks < 32; ks += 16) {",
+        .to = "    for (int ks = 0; ks < 16; ks += 16) {",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .grouped = true,
+        .label = "control: inkling2 experts grouped MXFP8 skips second K-substep",
+        .from = "    for (int ks = 0; ks < 32; ks += 16) {",
+        .to = "    for (int ks = 0; ks < 16; ks += 16) {",
+    },
 };
 
 pub const Suite = struct {
@@ -346,7 +382,7 @@ pub const Suite = struct {
         errdefer p.deinit();
         try s.held.append(s.a, p);
         errdefer _ = s.held.pop();
-        try s.kernels.append(s.a, p.kernel(if (mutation) |m| m.gate else null));
+        try s.kernels.append(s.a, p.kernel(if (mutation) |m| m.gate else null, if (mutation) |m| m.grouped else false));
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {

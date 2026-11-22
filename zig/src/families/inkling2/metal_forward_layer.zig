@@ -6,6 +6,8 @@ const config = @import("config.zig");
 const st = @import("metal_state.zig");
 const wts = @import("metal_weights.zig");
 const ops_mod = @import("metal_ops.zig");
+const fused_ops_mod = @import("metal_fused_ops.zig");
+const layer_fused = @import("metal_forward_layer_fused.zig");
 const Model = @import("metal_model.zig").Model;
 
 comptime {
@@ -53,6 +55,7 @@ fn f32Row(t: wts.Tensor, i: usize, width: u32) View {
 /// A pass over `items`: the encoder of the command buffer being built and where each item's rows start.
 pub const Run = struct {
     m: *Model,
+    fused: *const fused_ops_mod.FusedOps,
     items: []const Item,
     base: [max_items]u32 = undefined,
     /// Rows of the pass over every item.
@@ -62,8 +65,8 @@ pub const Run = struct {
     /// A command buffer is being encoded: its encoder is not ended and nothing was committed.
     open: bool = false,
 
-    pub fn init(m: *Model, items: []const Item) Run {
-        var r: Run = .{ .m = m, .items = items };
+    pub fn init(m: *Model, items: []const Item, fused_ops: *const fused_ops_mod.FusedOps) Run {
+        var r: Run = .{ .m = m, .fused = fused_ops, .items = items };
         for (items, 0..) |it, k| {
             r.base[k] = r.n;
             r.n += @intCast(it.ids.len);
@@ -71,10 +74,17 @@ pub const Run = struct {
         return r;
     }
 
+    fn allItemsFusedConv(r: *const Run) bool {
+        for (r.items) |it| {
+            if (it.ids.len > fused_ops_mod.max_fused_conv_rows) return false;
+        }
+        return true;
+    }
+
     pub fn begin(r: *Run) void {
         std.debug.assert(!r.open);
         r.cb = r.m.queue.commandBuffer();
-        r.e = r.cb.compute(.serial);
+        r.e = r.cb.compute(.concurrent);
         r.open = true;
     }
 
@@ -144,16 +154,27 @@ pub const Run = struct {
             .hidden = h,
             .eps = m.config.text.eps,
         });
-        for (r.items, 0..) |it, k| for (it.images) |img| {
-            try m.ops.copyRows(r.e, .{
-                .src = v(img.buf, img.off),
-                .src_ld = h,
-                .dst = rows16(m.scratch.hid(0), r.base[k] + img.row, h),
-                .dst_ld = h,
-                .rows = img.rows,
-                .cols = h,
-            });
-        };
+        var has_images = false;
+        for (r.items) |it| {
+            if (it.images.len > 0) {
+                has_images = true;
+                break;
+            }
+        }
+        if (has_images) {
+            r.e.barrier();
+            for (r.items, 0..) |it, k| for (it.images) |img| {
+                try m.ops.copyRows(r.e, .{
+                    .src = v(img.buf, img.off),
+                    .src_ld = h,
+                    .dst = rows16(m.scratch.hid(0), r.base[k] + img.row, h),
+                    .dst_ld = h,
+                    .rows = img.rows,
+                    .cols = h,
+                });
+            };
+        }
+        r.e.barrier();
     }
 
     /// Bank the previous pass before resetting the partial: prefix blocks stay; the first core slot holds the entry.
@@ -164,36 +185,48 @@ pub const Run = struct {
         const s = &m.scratch;
         const h = r.hidden();
         const plane = @as(usize, r.n) * h * 2;
-        if (p.bank_blocks != 0) try r.copy(v(s.blocks, (p.pre_blocks + 1) * plane), v(s.bank, 0), p.bank_blocks * r.n);
-        try r.copy(v(s.hid(k), 0), v(s.bank_h, 0), r.n);
-        try r.copy(v(s.blocks, p.pre_blocks * plane), v(s.hid(k), 0), r.n);
+        try r.fused.enter(r.e, .{
+            .src_blocks = if (p.bank_blocks != 0) v(s.blocks, (p.pre_blocks + 1) * plane) else v(s.blocks, p.pre_blocks * plane),
+            .bank = v(s.bank, 0),
+            .entry_block = v(s.blocks, p.pre_blocks * plane),
+            .hid = v(s.hid(k), 0),
+            .bank_h = v(s.bank_h, 0),
+            .hidden = h,
+            .rows = r.n,
+            .bank_rows = p.bank_blocks * r.n,
+        });
+        r.e.barrier();
     }
 
-    fn copy(r: *Run, src: View, dst: View, rows: u32) !void {
-        const h = r.hidden();
-        try r.m.ops.copyRows(r.e, .{ .src = src, .dst = dst, .src_ld = h, .dst_ld = h, .rows = rows, .cols = h });
-    }
-
-    fn messages(r: *Run, j: u32) !void {
+    fn messagesAndGated(r: *Run, j: u32, nb: u32, partial: View, query: wts.Tensor, nq: u32, controls: []const wts.Controller, norms: [3]View, out: View) !void {
         const m = r.m;
         const s = &m.scratch;
         const h = r.hidden();
         const plane = r.n * h;
         const q = m.weights.cross.?;
         const row = @as(usize, j) * 2;
-        try m.loop_ops.mix(r.e, .{
-            .blocks = v(s.bank, 0),
+        const q1 = f32Row(query, if (nq == 3) 1 else 0, h);
+        const q2 = f32Row(query, if (nq == 3) 2 else 0, h);
+        try r.fused.dualLoopMix(r.e, .{
+            .blocks0 = v(s.bank, 0),
+            .partial0 = v(s.bank_h, 0),
+            .queries0 = .{ f32Row(q.main, row, h), f32Row(q.kv, row, h), f32Row(q.kv, row + 1, h), f32Row(q.main, row + 1, h) },
+            .nb0 = m.plan.bank_blocks,
+            .nq0 = 4,
+            .out0 = v(s.msg, 0),
+            .blocks1 = v(s.blocks, 0),
+            .partial1 = partial,
+            .queries1 = .{ tv(query), q1, q2 },
+            .nb1 = nb,
+            .nq1 = nq,
+            .out1 = v(s.mixf, 0),
             .block_stride = plane,
-            .nb = m.plan.bank_blocks,
-            .partial = v(s.bank_h, 0),
-            .partial_f32 = false,
-            .queries = .{ f32Row(q.main, row, h), f32Row(q.kv, row, h), f32Row(q.kv, row + 1, h), f32Row(q.main, row + 1, h) },
-            .nq = 4,
-            .out = v(s.msg, 0),
             .out_stride = plane,
             .rows = r.n,
             .hidden = h,
         });
+        r.e.barrier();
+        try r.gatedTail(nq, controls, norms, 0, out);
     }
 
     fn gated(r: *Run, nb: u32, partial: View, query: wts.Tensor, nq: u32, controls: []const wts.Controller, norms: [3]View, slot: u32, out: View) !void {
@@ -201,7 +234,6 @@ pub const Run = struct {
         const s = &m.scratch;
         const t = &m.config.text;
         const h = t.hidden;
-        const rank = t.loop.?.rank;
         const plane = r.n * h;
         const q1 = f32Row(query, if (nq == 3) 1 else 0, h);
         const q2 = f32Row(query, if (nq == 3) 2 else 0, h);
@@ -218,6 +250,17 @@ pub const Run = struct {
             .rows = r.n,
             .hidden = h,
         });
+        r.e.barrier();
+        try r.gatedTail(nq, controls, norms, slot, out);
+    }
+
+    fn gatedTail(r: *Run, nq: u32, controls: []const wts.Controller, norms: [3]View, slot: u32, out: View) !void {
+        const m = r.m;
+        const s = &m.scratch;
+        const t = &m.config.text;
+        const h = t.hidden;
+        const rank = t.loop.?.rank;
+        const plane = r.n * h;
         const plane_bytes = @as(usize, plane) * 4;
         const states: [3]View = .{ v(s.mixf, 0), v(s.mixf, if (nq == 3) plane_bytes else 0), v(s.mixf, if (nq == 3) 2 * plane_bytes else 0) };
         const gates: u32 = @intCast(controls.len);
@@ -246,6 +289,7 @@ pub const Run = struct {
             .rank = rank,
             .eps_unweighted = t.eps,
         });
+        r.e.barrier();
         try m.loop_ops.gateMix(r.e, .{
             .h = states,
             .msg = msg,
@@ -283,17 +327,14 @@ pub const Run = struct {
         const hin = s.hid(k);
         const blocks_in = spec.blocks_in;
         const qw: usize = @as(usize, hd.q) * hd.dim;
-        const kvw: usize = @as(usize, hd.kv) * hd.dim;
         const relw: usize = @as(usize, hd.q) * t.d_rel;
-        const taps: usize = @as(usize, hd.kv) * config.conv_taps;
         const nq: u32 = spec.attn_queries;
         const plane: usize = @as(usize, n) * h; // elements of one block / query output over the pass's rows
 
         // the attention input: layer 0 norms the embedding, later layers mix the finished blocks with the running state
         if (visit.messages) {
-            try r.messages(visit.core_index);
             const norms: [3]View = .{ tv(a.norms[0].?), tv(a.norms[1] orelse a.norms[0].?), tv(a.norms[2] orelse a.norms[0].?) };
-            try r.gated(blocks_in, v(hin, 0), L.attn_query.?, nq, L.controllers.?[0..3], norms, 0, v(s.xin, 0));
+            try r.messagesAndGated(visit.core_index, blocks_in, v(hin, 0), L.attn_query.?, nq, L.controllers.?[0..3], norms, v(s.xin, 0));
         } else if (i == 0) {
             try m.ops.rmsNorm(e, .{ .x = v(hin, 0), .w = tv(a.norms[0].?), .out = v(s.xin, 0), .rows = n, .hidden = h, .eps = t.eps });
         } else {
@@ -315,46 +356,34 @@ pub const Run = struct {
                 .eps = t.eps,
             });
         }
+        e.barrier();
         const xq = v(s.xin, 0);
         const separate_qkv = global or visit.messages;
         const xk = if (separate_qkv) v(s.xin, plane * 2) else xq;
         const xv = if (separate_qkv) v(s.xin, 2 * plane * 2) else xq;
 
-        if (n == 1 and !separate_qkv) {
-            if (global) {
-                try m.ops.linearFused(e, xq, h, &.{
-                    fused(a.wq, v(s.q, 0)),
-                    fused(a.wk, v(s.kraw, 0)),
-                    fused(a.wv, v(s.vraw, 0)),
-                    fused(a.wr, v(s.rel, 0)),
-                    fused(a.gate, v(s.gate, 0)),
-                    fused(a.sink, v(s.sink, 0)),
-                    fused(a.k_taps.?, v(s.dynk, 0)),
-                    fused(a.v_taps.?, v(s.dynv, 0)),
-                });
-            } else {
-                try m.ops.linearFused(e, xq, h, &.{
-                    fused(a.wq, v(s.q, 0)),
-                    fused(a.wk, v(s.kraw, 0)),
-                    fused(a.wv, v(s.vraw, 0)),
-                    fused(a.wr, v(s.rel, 0)),
-                    fused(a.gate, v(s.gate, 0)),
-                    fused(a.sink, v(s.sink, 0)),
-                });
-            }
-        } else if (n == 1) {
-            try m.ops.linearFused(e, xq, h, &.{
+        if (n <= 16 and !separate_qkv) {
+            try m.ops.linearFusedRows(e, xq, n, h, &.{
+                fused(a.wq, v(s.q, 0)),
+                fused(a.wk, v(s.kraw, 0)),
+                fused(a.wv, v(s.vraw, 0)),
+                fused(a.wr, v(s.rel, 0)),
+                fused(a.gate, v(s.gate, 0)),
+                fused(a.sink, v(s.sink, 0)),
+            });
+        } else if (n <= 16) {
+            try m.ops.linearFusedRows(e, xq, n, h, &.{
                 fused(a.wq, v(s.q, 0)),
                 fused(a.wr, v(s.rel, 0)),
                 fused(a.gate, v(s.gate, 0)),
                 fused(a.sink, v(s.sink, 0)),
             });
             if (global) {
-                try m.ops.linearFused(e, xk, h, &.{ fused(a.wk, v(s.kraw, 0)), fused(a.k_taps.?, v(s.dynk, 0)) });
-                try m.ops.linearFused(e, xv, h, &.{ fused(a.wv, v(s.vraw, 0)), fused(a.v_taps.?, v(s.dynv, 0)) });
+                try m.ops.linearFusedRows(e, xk, n, h, &.{ fused(a.wk, v(s.kraw, 0)), fused(a.k_taps.?, v(s.dynk, 0)) });
+                try m.ops.linearFusedRows(e, xv, n, h, &.{ fused(a.wv, v(s.vraw, 0)), fused(a.v_taps.?, v(s.dynv, 0)) });
             } else {
-                try r.lin(xk, a.wk, v(s.kraw, 0), n);
-                try r.lin(xv, a.wv, v(s.vraw, 0), n);
+                try m.ops.linearFusedRows(e, xk, n, h, &.{fused(a.wk, v(s.kraw, 0))});
+                try m.ops.linearFusedRows(e, xv, n, h, &.{fused(a.wv, v(s.vraw, 0))});
             }
         } else {
             try r.lin(xq, a.wq, v(s.q, 0), n);
@@ -368,45 +397,27 @@ pub const Run = struct {
                 try r.lin(xv, a.v_taps.?, v(s.dynv, 0), n);
             }
         }
+        e.barrier();
 
-        const hl = st.hist(t, i);
+        const fused_conv = r.allItemsFusedConv();
+        try layer_fused.qkvPrep(r, k, i, global, fused_conv);
+
+        // Wave 3: attention per item; single-chunk items overlap, multi-chunk items serialize on ops.scratch.
+        var scratch_busy = false;
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
             const rows: u32 = @intCast(it.ids.len);
             const pos0 = it.state.len;
-            const hist = it.state.hist[k];
             const kv = it.state.kv[k];
             const kb = st.kvBytes(t, i, it.state.geometry);
             const ring = st.ring(t, i, it.state.geometry);
-            const log: ?ops_mod.Tau = if (global) .{ .pos0 = pos0, .alpha = t.log_alpha, .floor = t.log_floor } else null;
-            inline for (.{ .{ s.kraw, s.dynk, s.kc, a.k_conv, hl.k }, .{ s.vraw, s.dynv, s.vc, a.v_conv, hl.v } }) |side| {
-                const raw = rows16(side[0], b, kvw);
-                if (global) {
-                    try m.ops.convDynamic(e, .{
-                        .x = raw,
-                        .dyn = rows16(side[1], b, taps),
-                        .static_w = tv(side[3]),
-                        .hist = v(hist, side[4]),
-                        .out = rows16(side[2], b, kvw),
-                        .rows = rows,
-                        .channels = @intCast(kvw),
-                        .kv_heads = hd.kv,
-                        .pos0 = pos0,
-                    });
-                } else {
-                    try m.ops.convStatic(e, .{ .x = raw, .hist = v(hist, side[4]), .w = tv(side[3]), .out = rows16(side[2], b, kvw), .rows = rows, .channels = @intCast(kvw), .pos0 = pos0 });
-                }
-                try m.ops.convStore(e, .{ .x = raw, .hist = v(hist, side[4]), .rows = rows, .channels = @intCast(kvw), .pos0 = pos0 });
-            }
-            // query and relative states: scaled L2 clip, then the global layers' context scaling (in place)
-            const q = rows16(s.q, b, qw);
-            const rel = rows16(s.rel, b, relw);
-            try m.ops.qPrep(e, .{ .x = q, .scale = tv(a.q_scale), .out = q, .rows = rows, .heads = hd.q, .dim = hd.dim, .threshold = t.qk_clip, .tau = log });
-            try m.ops.relPrep(e, .{ .x = rel, .scale = tv(a.rel_scale), .out = rel, .rows = rows, .heads = hd.q, .dim = t.d_rel, .threshold = t.rel_clip, .tau = log });
-            try m.ops.kvPrep(e, .{ .k = rows16(s.kc, b, kvw), .v = rows16(s.vc, b, kvw), .kcache = v(kv, 0), .vcache = v(kv, kb), .rows = rows, .kv_heads = hd.kv, .dim = hd.dim, .pos0 = pos0, .ring = ring, .threshold = t.qk_clip, .eps = t.eps });
+            const last: u64 = @as(u64, pos0) + rows;
+            const keys: u64 = if (global) last else @min(last, t.window);
+            const uses_scratch = keys > ops_mod.attn_chunk;
+            if (uses_scratch and scratch_busy) e.barrier();
             try m.ops.attention(e, .{
-                .q = q,
-                .rel = rel,
+                .q = rows16(s.q, b, qw),
+                .rel = rows16(s.rel, b, relw),
                 .sink = rows16(s.sink, b, hd.q),
                 .gate = rows16(s.gate, b, qw),
                 .kcache = v(kv, 0),
@@ -424,22 +435,20 @@ pub const Run = struct {
                 .ring = ring,
                 .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd.dim))),
             });
+            if (uses_scratch) scratch_busy = true;
         }
+        e.barrier();
 
-        try r.lin(v(s.att, 0), a.wo, v(s.o, 0), n);
+        if (n <= 16) {
+            try m.ops.linearFusedRows(e, v(s.att, 0), n, @intCast(qw), &.{fused(a.wo, v(s.o, 0))});
+        } else {
+            try r.lin(v(s.att, 0), a.wo, v(s.o, 0), n);
+        }
+        e.barrier();
 
         // post-attention convolution, then residual: a block boundary keeps only the attention output as partial
-        for (r.items, 0..) |it, idx| {
-            const b: usize = r.base[idx];
-            const rows: u32 = @intCast(it.ids.len);
-            const hist = it.state.hist[k];
-            try m.ops.convStatic(e, .{ .x = rows16(s.o, b, h), .hist = v(hist, hl.attn), .w = tv(L.attn_conv), .out = rows16(s.a, b, h), .rows = rows, .channels = h, .pos0 = it.state.len });
-            try m.ops.convStore(e, .{ .x = rows16(s.o, b, h), .hist = v(hist, hl.attn), .rows = rows, .channels = h, .pos0 = it.state.len });
-        }
         const boundary = spec.boundary;
-        try m.ops.residualAttn(e, .{ .conv = v(s.a, 0), .block = if (boundary) null else v(hin, 0), .out = v(s.h32, 0), .rows = n, .cols = h });
-        // The repeat's first boundary joins the same saved core entry already in this slot.
-        if (boundary and !m.plan.restarts(k)) try r.copy(v(hin, 0), v(s.blocks, @as(usize, i / t.block) * plane * 2), n);
+        try layer_fused.postAttnConvResidual(r, k, i, boundary, fused_conv);
 
         const mnorm: [3]View = .{ tv(L.mlp_norm), tv(L.mlp_norm), tv(L.mlp_norm) };
         if (visit.messages) {
@@ -459,6 +468,7 @@ pub const Run = struct {
             .hidden = h,
             .eps = t.eps,
         });
+        e.barrier();
         try m.ops.route(e, .{
             .x = v(s.xm, 0),
             .w = tv(L.router),
@@ -471,24 +481,13 @@ pub const Run = struct {
             .topk = t.topk,
             .scale = t.route_scale,
         });
+        e.barrier();
     }
 
     /// Layer `i` after its experts: the post-MLP convolution and the residual into the next layer's hidden stream.
     pub fn finish(r: *Run, k: u32) !void {
-        const m = r.m;
-        const t = &m.config.text;
-        const s = &m.scratch;
-        const i = m.plan.visit(k).layer;
-        const h: u32 = t.hidden;
-        const hl = st.hist(t, i);
-        for (r.items, 0..) |it, idx| {
-            const b: usize = r.base[idx];
-            const rows: u32 = @intCast(it.ids.len);
-            const hist = it.state.hist[k];
-            try m.ops.convStatic(r.e, .{ .x = rows16(s.moe, b, h), .hist = v(hist, hl.mlp), .w = tv(m.weights.layers[i].mlp_conv), .out = rows16(s.c, b, h), .rows = rows, .channels = h, .pos0 = it.state.len });
-            try m.ops.convStore(r.e, .{ .x = rows16(s.moe, b, h), .hist = v(hist, hl.mlp), .rows = rows, .channels = h, .pos0 = it.state.len });
-        }
-        try m.ops.residualMlp(r.e, .{ .h = v(s.h32, 0), .conv = v(s.c, 0), .out = v(s.hid(k + 1), 0), .rows = r.n, .cols = h });
+        const i = r.m.plan.visit(k).layer;
+        try layer_fused.postMlpConvResidual(r, k, i, r.allItemsFusedConv());
     }
 
     /// The final attention-residual mix and norm over every row, the final-norm taps, then each item's last-row logits.
@@ -516,6 +515,7 @@ pub const Run = struct {
             .hidden = h,
             .eps = t.eps,
         });
+        e.barrier();
         try r.capture(m.plan.n_visits);
         var picked: u32 = 0;
         var first: u32 = undefined;
@@ -535,10 +535,12 @@ pub const Run = struct {
                 try m.ops.copyRows(e, .{ .src = rows16(s.xf, start, h), .src_ld = h, .dst = rows16(s.xl, at, h), .dst_ld = h, .rows = it.logit_rows, .cols = h });
                 at += it.logit_rows;
             }
+            e.barrier();
             break :gather v(s.xl, 0);
         };
         const vocab = t.unpadded_vocab;
         try m.ops.linear(e, .{ .x = x, .w = tv(m.weights.unembed), .y = v(s.ylogit, 0), .rows = picked, .n = vocab, .k = h });
+        e.barrier();
         try m.ops.softcap(e, .{ .y = v(s.ylogit, 0), .out = v(m.logits, 0), .rows = picked, .n = vocab, .ldy = vocab, .cap = t.logit_cap });
     }
 };

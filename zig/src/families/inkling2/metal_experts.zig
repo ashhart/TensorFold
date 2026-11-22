@@ -9,19 +9,41 @@ const Precision = @import("plan.zig").Precision;
 pub const View = @import("../../core/exl3_projection.zig").View;
 
 pub const threads = 256;
+const grouped_threads = 128;
+const grouped_bm = 32;
+const grouped_bn = 64;
+const grouped_min_rows = 17;
 const simd_width = 32;
 const max_width = 2304;
 const max_experts = 128;
 const max_topk = 8;
 const dot_rows = 4 * (threads / simd_width);
 
-const Kernel = enum { gate_up_nvfp4, gate_up_mxfp8, down_nvfp4, down_mxfp8, combine };
+const Kernel = enum {
+    gate_up_nvfp4,
+    gate_up_mxfp8,
+    down_nvfp4,
+    down_mxfp8,
+    combine,
+    bucket,
+    grouped_gate_up_nvfp4,
+    grouped_gate_up_mxfp8,
+    grouped_down_nvfp4,
+    grouped_down_mxfp8,
+};
 pub const symbols = blk: {
     const names = @typeInfo(Kernel).@"enum".field_names;
     var result: [names.len][:0]const u8 = undefined;
     for (names, 0..) |name, i| result[i] = "inkling2_exp_" ++ name;
     break :blk result;
 };
+
+fn kernelThreads(k: Kernel) usize {
+    return switch (k) {
+        .grouped_gate_up_nvfp4, .grouped_gate_up_mxfp8, .grouped_down_nvfp4, .grouped_down_mxfp8 => grouped_threads,
+        else => threads,
+    };
+}
 
 const DotArgs = extern struct {
     pairs: u32,
@@ -33,10 +55,11 @@ const DotArgs = extern struct {
     gate_cap: f32,
     up_cap: f32,
 };
+const BucketArgs = extern struct { pairs: u32, experts: u32, gate_up_n_tiles: u32, down_n_tiles: u32 };
 const CombineArgs = extern struct { rows: u32, topk: u32, hidden: u32, experts: u32 };
 
 comptime {
-    std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16);
+    std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(BucketArgs) == 16 and @sizeOf(CombineArgs) == 16);
 }
 
 pub const LoadOptions = struct {
@@ -77,6 +100,8 @@ const Scratch = struct {
     buffer: mtl.Buffer,
     stage: usize,
     down: usize,
+    sorted_pairs: usize,
+    tile_meta: usize,
 
     fn reserve(cursor: *usize, bytes: usize) usize {
         const off = cursor.*;
@@ -84,15 +109,24 @@ const Scratch = struct {
         return off;
     }
 
-    fn init(device: mtl.Device, pairs: u32, hidden: usize, inter: usize, shared: bool) !Scratch {
+    fn maxTiles(pairs: u32, experts: u32) u32 {
+        return @min(pairs, pairs / grouped_bm + experts);
+    }
+
+    fn init(device: mtl.Device, pairs: u32, hidden: usize, inter: usize, experts: u32, shared: bool) !Scratch {
         var bytes: usize = 0;
-        const stage = reserve(&bytes, pairs * inter * @sizeOf(u16));
-        const down = reserve(&bytes, pairs * hidden * @sizeOf(u16));
+        const stage = reserve(&bytes, @as(usize, pairs) * inter * @sizeOf(u16));
+        const down = reserve(&bytes, @as(usize, pairs) * hidden * @sizeOf(u16));
+        const sorted_pairs = reserve(&bytes, @as(usize, pairs) * @sizeOf(u32));
+        const tiles = maxTiles(pairs, experts);
+        const tile_meta = reserve(&bytes, (@as(usize, tiles) + 2) * 4 * @sizeOf(u32));
         if (bytes > device.maxBufferLength()) return error.ExpertScratchTooLarge;
         return .{
             .buffer = try device.buffer(bytes, if (shared) mtl.ResourceOptions.shared else mtl.ResourceOptions.private),
             .stage = stage,
             .down = down,
+            .sorted_pairs = sorted_pairs,
+            .tile_meta = tile_meta,
         };
     }
 
@@ -149,19 +183,25 @@ pub const Store = struct {
                 .down = try Matrix.load(cp, i, "w2", precision, t.experts, t.hidden, t.expert_inter, if (factors) |b| .{ .buffer = b, .offset = (2 * i + 1) * factor_stride } else null),
             };
         }
+        const src_owned = if (!d.tensorUnits())
+            try std.mem.concat(gpa, u8, &.{ "#define TF_SIMD_FRAGS 1\n", options.source })
+        else
+            null;
+        defer if (src_owned) |src| gpa.free(src);
         var compile = mtl.CompileOptions.mlx();
         compile.math_functions = .precise;
-        const lib = try mtl.Library.fromSource(d, options.source, compile);
+        const lib = try mtl.Library.fromSource(d, src_owned orelse options.source, compile);
         defer lib.deinit();
         var pipes: [symbols.len]mtl.Pipeline = undefined;
         var loaded: usize = 0;
         errdefer for (pipes[0..loaded]) |p| p.deinit();
-        for (symbols, &pipes) |symbol, *p| {
+        for (symbols, &pipes, 0..) |symbol, *p, idx| {
             p.* = try mtl.Pipeline.init(d, lib, symbol, false);
             loaded += 1;
-            if (p.maxThreads() < threads or p.simdWidth() != simd_width) return error.ExpertLaunchLimit;
+            const need = kernelThreads(@fromBackingInt(@intCast(idx)));
+            if (p.maxThreads() < need or p.simdWidth() != simd_width) return error.ExpertLaunchLimit;
         }
-        const scratch = try Scratch.init(d, pairs, t.hidden, t.expert_inter, options.shared_scratch);
+        const scratch = try Scratch.init(d, pairs, t.hidden, t.expert_inter, t.experts, options.shared_scratch);
         return .{
             .allocator = gpa,
             .layers = layers,
@@ -227,6 +267,27 @@ pub const Store = struct {
         e.dispatchGroups(mtl.Size.of(std.math.divCeil(u32, out_width, if (gate_up) dot_rows / 2 else dot_rows) catch unreachable, pairs, 1), mtl.Size.of(threads, 1, 1));
     }
 
+    fn grouped(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, x: View, pairs: u32) void {
+        const nv = layer.precision == .nvfp4;
+        const m = if (gate_up) &layer.gate_up else &layer.down;
+        const b = s.scratch;
+        e.setPipeline(s.pipe(if (gate_up) (if (nv) .grouped_gate_up_nvfp4 else .grouped_gate_up_mxfp8) else (if (nv) .grouped_down_nvfp4 else .grouped_down_mxfp8)));
+        bind(e, &.{ m.weight, m.scales, m.factors, x, b.at(b.sorted_pairs), b.at(b.tile_meta), b.at(if (gate_up) b.stage else b.down) });
+        const n = if (gate_up) 2 * s.inter else s.hidden;
+        const out_width = if (gate_up) s.inter else s.hidden;
+        e.setValue(DotArgs{
+            .pairs = pairs,
+            .src_div = if (gate_up) s.topk else 1,
+            .k = if (gate_up) s.hidden else s.inter,
+            .n = n,
+            .experts = s.experts,
+            .out_width = out_width,
+            .gate_cap = s.gate_cap,
+            .up_cap = s.up_cap,
+        }, 7);
+        e.dispatchIndirect(b.buffer, b.tile_meta + (if (gate_up) @as(usize, 0) else 16), mtl.Size.of(grouped_threads, 1, 1));
+    }
+
     /// Encode BF16 projections for active IDs, weighted by FP32 route scores, without submitting.
     pub fn encode(s: *const Store, e: mtl.ComputeEncoder, physical_layer: u32, x: View, ids: View, weights: View, out: View, rows: u32) !void {
         if (rows == 0 or rows > s.max_rows or physical_layer >= s.layers.len) return error.ExpertDispatch;
@@ -240,10 +301,28 @@ pub const Store = struct {
         if (overlap(out, row_bytes, x, row_bytes) or overlap(out, row_bytes, ids, route_bytes) or
             overlap(out, row_bytes, weights, route_bytes)) return error.ExpertAliasing;
         const layer = &s.layers[physical_layer];
-        s.dot(e, layer, true, x, ids, pairs);
-        e.barrier();
-        s.dot(e, layer, false, s.scratch.at(s.scratch.stage), ids, pairs);
-        e.barrier();
+        if (rows >= grouped_min_rows) {
+            const b = s.scratch;
+            e.setPipeline(s.pipe(.bucket));
+            bind(e, &.{ ids, b.at(b.sorted_pairs), b.at(b.tile_meta) });
+            e.setValue(BucketArgs{
+                .pairs = pairs,
+                .experts = s.experts,
+                .gate_up_n_tiles = std.math.divCeil(u32, 2 * s.inter, grouped_bn) catch unreachable,
+                .down_n_tiles = std.math.divCeil(u32, s.hidden, grouped_bn) catch unreachable,
+            }, 3);
+            e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(threads, 1, 1));
+            e.barrier();
+            s.grouped(e, layer, true, x, pairs);
+            e.barrier();
+            s.grouped(e, layer, false, b.at(b.stage), pairs);
+            e.barrier();
+        } else {
+            s.dot(e, layer, true, x, ids, pairs);
+            e.barrier();
+            s.dot(e, layer, false, s.scratch.at(s.scratch.stage), ids, pairs);
+            e.barrier();
+        }
         e.setPipeline(s.pipe(.combine));
         bind(e, &.{ s.scratch.at(s.scratch.down), ids, weights, out });
         e.setValue(CombineArgs{ .rows = rows, .topk = s.topk, .hidden = s.hidden, .experts = s.experts }, 4);

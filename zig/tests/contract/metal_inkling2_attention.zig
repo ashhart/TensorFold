@@ -290,3 +290,9 @@ pub fn controlKernel(p: *Probe) g.Kernel {
     };
     return k;
 }
+
+test "every attention planted control matches sources.inkling2_ops exactly once" {
+    for (mutations) |m| {
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, sources.inkling2_ops, m.from));
+    }
+}

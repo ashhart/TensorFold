@@ -2,6 +2,30 @@
 #define I2X_DOT_THREADS 256u
 #define I2X_COMBINE_THREADS 256u
 
+// Exact FP32 bit patterns for E4M3FN magnitudes 0x00..0x7f (0x7f = qNaN); sign bit is OR'd at bit 31.
+constant uint kI2xE4m3AbsBits[128] = {
+  0x00000000u, 0x3b000000u, 0x3b800000u, 0x3bc00000u, 0x3c000000u, 0x3c200000u, 0x3c400000u, 0x3c600000u,
+  0x3c800000u, 0x3c900000u, 0x3ca00000u, 0x3cb00000u, 0x3cc00000u, 0x3cd00000u, 0x3ce00000u, 0x3cf00000u,
+  0x3d000000u, 0x3d100000u, 0x3d200000u, 0x3d300000u, 0x3d400000u, 0x3d500000u, 0x3d600000u, 0x3d700000u,
+  0x3d800000u, 0x3d900000u, 0x3da00000u, 0x3db00000u, 0x3dc00000u, 0x3dd00000u, 0x3de00000u, 0x3df00000u,
+  0x3e000000u, 0x3e100000u, 0x3e200000u, 0x3e300000u, 0x3e400000u, 0x3e500000u, 0x3e600000u, 0x3e700000u,
+  0x3e800000u, 0x3e900000u, 0x3ea00000u, 0x3eb00000u, 0x3ec00000u, 0x3ed00000u, 0x3ee00000u, 0x3ef00000u,
+  0x3f000000u, 0x3f100000u, 0x3f200000u, 0x3f300000u, 0x3f400000u, 0x3f500000u, 0x3f600000u, 0x3f700000u,
+  0x3f800000u, 0x3f900000u, 0x3fa00000u, 0x3fb00000u, 0x3fc00000u, 0x3fd00000u, 0x3fe00000u, 0x3ff00000u,
+  0x40000000u, 0x40100000u, 0x40200000u, 0x40300000u, 0x40400000u, 0x40500000u, 0x40600000u, 0x40700000u,
+  0x40800000u, 0x40900000u, 0x40a00000u, 0x40b00000u, 0x40c00000u, 0x40d00000u, 0x40e00000u, 0x40f00000u,
+  0x41000000u, 0x41100000u, 0x41200000u, 0x41300000u, 0x41400000u, 0x41500000u, 0x41600000u, 0x41700000u,
+  0x41800000u, 0x41900000u, 0x41a00000u, 0x41b00000u, 0x41c00000u, 0x41d00000u, 0x41e00000u, 0x41f00000u,
+  0x42000000u, 0x42100000u, 0x42200000u, 0x42300000u, 0x42400000u, 0x42500000u, 0x42600000u, 0x42700000u,
+  0x42800000u, 0x42900000u, 0x42a00000u, 0x42b00000u, 0x42c00000u, 0x42d00000u, 0x42e00000u, 0x42f00000u,
+  0x43000000u, 0x43100000u, 0x43200000u, 0x43300000u, 0x43400000u, 0x43500000u, 0x43600000u, 0x43700000u,
+  0x43800000u, 0x43900000u, 0x43a00000u, 0x43b00000u, 0x43c00000u, 0x43d00000u, 0x43e00000u, 0x7fc00000u
+};
+
+inline float i2x_e4m3_lut(uchar b) {
+  return as_type<float>(kI2xE4m3AbsBits[b & 0x7fu] | ((uint(b) & 0x80u) << 24u));
+}
+
 inline float4 i2x_bf4(float4 x) {
   return float4(float(bfloat(x.x)), float(bfloat(x.y)), float(bfloat(x.z)), float(bfloat(x.w)));
 }
@@ -32,42 +56,68 @@ inline void i2x_dot(const device uchar* weight, const device uchar* w_scales,
     return;
   }
   const uint input_row = at.y / a.src_div;
-  const uint pitch = NV ? a.k / 2u : a.k;
+  const uint pitch = NV ? (a.k >> 1u) : a.k;
   const uint blocks = a.k / (NV ? 16u : 32u);
   const ulong w_row = ulong(expert) * a.n + col * (GATE_UP ? 2u : 1u);
   x += ulong(input_row) * a.k;
-  weight += w_row * pitch;
-  w_scales += w_row * blocks;
+  const device uchar* w_r0 = weight + w_row * pitch;
+  const device uchar* w_r1 = w_r0 + pitch;
+  const device uchar* w_r2 = w_r1 + pitch;
+  const device uchar* w_r3 = w_r2 + pitch;
+  const device uchar* s_r0 = w_scales + w_row * blocks;
+  const device uchar* s_r1 = s_r0 + blocks;
+  const device uchar* s_r2 = s_r1 + blocks;
+  const device uchar* s_r3 = s_r2 + blocks;
   const float factor = NV ? w_factor[expert] : 1.0f;
 
   float4 accum = 0.0f;
   for (uint block = lane; block < blocks; block += 32u) {
     float4 part = 0.0f;
     const uint base = block * (NV ? 8u : 32u);
-    const uchar4 sw = uchar4(w_scales[block], w_scales[blocks + block],
-                             w_scales[2u * blocks + block], w_scales[3u * blocks + block]);
-    const float4 scale = NV ? float4(i2x_e4m3(sw.x), i2x_e4m3(sw.y), i2x_e4m3(sw.z), i2x_e4m3(sw.w))
+    const uchar4 sw = uchar4(s_r0[block], s_r1[block], s_r2[block], s_r3[block]);
+    const float4 scale = NV ? float4(i2x_e4m3_lut(sw.x), i2x_e4m3_lut(sw.y), i2x_e4m3_lut(sw.z), i2x_e4m3_lut(sw.w))
                             : float4(i2x_mx_scale(sw.x), i2x_mx_scale(sw.y), i2x_mx_scale(sw.z), i2x_mx_scale(sw.w));
     if (NV) {
-      for (uint i = 0u; i < 8u; ++i) {
-        const uint p = base + i;
-        const uint4 w = uint4(weight[p], weight[pitch + p], weight[2u * pitch + p], weight[3u * pitch + p]);
-        const float4 low = float4(kI2xE2m1[w.x & 15u], kI2xE2m1[w.y & 15u],
-                                   kI2xE2m1[w.z & 15u], kI2xE2m1[w.w & 15u]);
-        const float4 high = float4(kI2xE2m1[w.x >> 4u], kI2xE2m1[w.y >> 4u],
-                                    kI2xE2m1[w.z >> 4u], kI2xE2m1[w.w >> 4u]);
-        const float4 w_low = i2x_bf4((low * scale) * factor);
-        const float4 w_high = i2x_bf4((high * scale) * factor);
-        part += w_low * float(x[2u * p]);
-        part += w_high * float(x[2u * p + 1u]);
+      _Pragma("clang loop unroll(full)")
+      for (uint g = 0u; g < 2u; ++g) {
+        const uint p4 = base + g * 4u;
+        const uchar4 w0 = *(const device uchar4*)(w_r0 + p4);
+        const uchar4 w1 = *(const device uchar4*)(w_r1 + p4);
+        const uchar4 w2 = *(const device uchar4*)(w_r2 + p4);
+        const uchar4 w3 = *(const device uchar4*)(w_r3 + p4);
+        const device bfloat* xp = x + 2u * p4;
+        const float4 xa = float4(float(xp[0]), float(xp[1]), float(xp[2]), float(xp[3]));
+        const float4 xb = float4(float(xp[4]), float(xp[5]), float(xp[6]), float(xp[7]));
+        _Pragma("clang loop unroll(full)")
+        for (uint i = 0u; i < 4u; ++i) {
+          const uint4 w = uint4(w0[i], w1[i], w2[i], w3[i]);
+          const float4 low = float4(kI2xE2m1[w.x & 15u], kI2xE2m1[w.y & 15u],
+                                     kI2xE2m1[w.z & 15u], kI2xE2m1[w.w & 15u]);
+          const float4 high = float4(kI2xE2m1[w.x >> 4u], kI2xE2m1[w.y >> 4u],
+                                      kI2xE2m1[w.z >> 4u], kI2xE2m1[w.w >> 4u]);
+          const float4 w_low = i2x_bf4((low * scale) * factor);
+          const float4 w_high = i2x_bf4((high * scale) * factor);
+          const float x_lo = (i < 2u) ? xa[2u * i] : xb[2u * (i - 2u)];
+          const float x_hi = (i < 2u) ? xa[2u * i + 1u] : xb[2u * (i - 2u) + 1u];
+          part += w_low * x_lo;
+          part += w_high * x_hi;
+        }
       }
     } else {
       const float4 mantissa = select(float4(1.0f), float4(0.5f), sw == uchar4(0));
-      for (uint i = 0u; i < 32u; ++i) {
-        const uint p = base + i;
-        const float4 w = float4(i2x_e4m3(weight[p]), i2x_e4m3(weight[pitch + p]),
-                                  i2x_e4m3(weight[2u * pitch + p]), i2x_e4m3(weight[3u * pitch + p]));
-        part += i2x_bf4((w * mantissa) * scale) * float(x[p]);
+      for (uint g = 0u; g < 8u; ++g) {
+        const uint p4 = base + g * 4u;
+        const uchar4 w0 = *(const device uchar4*)(w_r0 + p4);
+        const uchar4 w1 = *(const device uchar4*)(w_r1 + p4);
+        const uchar4 w2 = *(const device uchar4*)(w_r2 + p4);
+        const uchar4 w3 = *(const device uchar4*)(w_r3 + p4);
+        const device bfloat* xp = x + p4;
+        const float4 xv = float4(float(xp[0]), float(xp[1]), float(xp[2]), float(xp[3]));
+        _Pragma("clang loop unroll(full)")
+        for (uint i = 0u; i < 4u; ++i) {
+          const float4 w = float4(i2x_e4m3_lut(w0[i]), i2x_e4m3_lut(w1[i]), i2x_e4m3_lut(w2[i]), i2x_e4m3_lut(w3[i]));
+          part += i2x_bf4((w * mantissa) * scale) * xv[i];
+        }
       }
     }
     accum += part;

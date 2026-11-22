@@ -7,10 +7,12 @@ pub const attn_res = @embedFile("attn_res.metal");
 pub const conv = @embedFile("conv.metal");
 pub const qkv = @embedFile("qkv.metal");
 pub const attention = @embedFile("attention.metal");
+pub const attention_nax = @embedFile("attention_nax.metal");
 pub const route = @embedFile("route.metal");
 pub const head = @embedFile("head.metal");
 pub const mv_fuse = @embedFile("mv_fuse.metal");
 
 /// The library the runtime compiles: every kernel is named inkling2_*, in this order.
 pub const ops = common ++ "\n" ++ embed_norm ++ "\n" ++ attn_res ++ "\n" ++ conv ++ "\n" ++ qkv ++ "\n" ++
-    attention ++ "\n" ++ route ++ "\n" ++ head ++ "\n" ++ mv_fuse;
+    attention ++ "\n" ++ route ++ "\n" ++ head ++ "\n" ++ mv_fuse ++
+    "\n#ifdef TF_INKLING2_ATTN_NAX\n" ++ attention_nax ++ "\n#endif\n";

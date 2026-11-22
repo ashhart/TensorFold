@@ -5,6 +5,7 @@ pub const dsv41 = @import("deepseek_v41/sources.zig");
 
 pub const inkling2_ops = @import("inkling2/ops_sources.zig").ops;
 pub const inkling2_loop_ops = @import("inkling2/loop_sources.zig").ops;
+pub const inkling2_fused_ops = @import("inkling2/fused_sources.zig").ops;
 pub const inkling2_experts = @import("inkling2/experts_sources.zig").experts;
 
 pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");

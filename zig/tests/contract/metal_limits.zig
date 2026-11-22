@@ -62,6 +62,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var frags = false;
     if (std.mem.startsWith(u8, d.name, "inkling2 ops ")) {
         if (!assemble) return undefined;
+        if (std.mem.eql(u8, fun, "inkling2_attn_nax") or std.mem.eql(u8, fun, "inkling2_attn_decode_fast")) {
+            const raw = try std.mem.concat(a, u8, &.{ "#define TF_INKLING2_ATTN_NAX 1\n", sources.inkling2_ops });
+            return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
+        }
         return .{ .decl = d, .function = fun, .here = sources.inkling2_ops, .pre_m5 = sources.inkling2_ops };
     }
     if (std.mem.startsWith(u8, d.name, "inkling2 loop ") or std.mem.startsWith(u8, d.name, "inkling2 experts ")) {

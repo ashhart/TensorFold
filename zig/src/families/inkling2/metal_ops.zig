@@ -3,6 +3,9 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const exl3 = @import("../../core/exl3_projection.zig");
+const frags = @import("../../core/frags.zig");
+const gm = @import("metal_vision_gemm.zig");
+const fast = @import("metal_ops_fast.zig");
 const mv = @import("../deepseek_v41/metal/mv.zig");
 const mv_mma = @import("../deepseek_v41/metal/mv_mma.zig");
 
@@ -156,8 +159,7 @@ pub const AttnResArgs = struct {
 /// y [rows][n] = bf16(x [rows][k] w[n][k]^T) (or fp32 when `f32_out`), fp32 chains; a row's bits do not depend on rows.
 pub const LinearArgs = struct { x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool = false };
 /// One existing weight and its existing output. The fused launch writes `y` and allocates nothing.
-pub const Fused = struct { w: View, y: View, n: u32 };
-const FuseArgs = extern struct { k: u32, count: u32, n0: u32, n1: u32, n2: u32, n3: u32, n4: u32, n5: u32, n6: u32, n7: u32 };
+pub const Fused = fast.Fused;
 /// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32, weights f32 per row.
 pub const RouteArgs = struct {
     x: View,
@@ -237,6 +239,8 @@ pub const Ops = struct {
     pipes: [symbols.len]mtl.Pipeline,
     dense: mv.Pipelines,
     mma: mv_mma.Pipelines,
+    gemm: gm.Gemm,
+    fast_attn: fast.FastAttn,
     scratch: mtl.Buffer,
     scratch_bytes: usize,
 
@@ -259,6 +263,15 @@ pub const Ops = struct {
         errdefer o.dense.deinit();
         o.mma = try mv_mma.Pipelines.load(device);
         errdefer o.mma.deinit();
+        const alloc = std.heap.page_allocator;
+        const gemm_src = try frags.source(device, alloc, sources.inkling2_draft);
+        defer alloc.free(gemm_src);
+        const gemm_lib = try mtl.Library.fromSource(device, gemm_src, mtl.CompileOptions.mlx());
+        defer gemm_lib.deinit();
+        o.gemm = try gm.Gemm.init(device, gemm_lib, &.{ .bf16_nt, .bf16f_nt });
+        errdefer o.gemm.deinit();
+        o.fast_attn = try fast.FastAttn.load(device, text);
+        errdefer o.fast_attn.deinit();
         o.scratch_bytes = options.scratch_bytes;
         o.scratch = try device.buffer(options.scratch_bytes, mtl.ResourceOptions.private);
         return o;
@@ -268,6 +281,8 @@ pub const Ops = struct {
         for (o.pipes) |p| p.deinit();
         o.dense.deinit();
         o.mma.deinit();
+        o.gemm.deinit();
+        o.fast_attn.deinit();
         o.scratch.deinit();
     }
 
@@ -328,42 +343,28 @@ pub const Ops = struct {
         try o.denseRows(e, a.x, a.w, a.y, a.rows, a.n, a.k, a.f32_out);
     }
 
-    /// One-row GEMVs that share `x`. Same chains as the split matvec, one launch, the caller's buffers.
+    /// One-row GEMVs that share `x`. Same chains as `linearFusedRows(rows=1)`, one launch, the caller's buffers.
     pub fn linearFused(o: *const Ops, e: mtl.ComputeEncoder, x: View, k: u32, ins: []const Fused) !void {
-        if (ins.len == 0 or ins.len > 8 or k == 0) return error.InvalidInkling2Op;
-        var n = [8]u32{ 0, 0, 0, 0, 0, 0, 0, 0 };
-        var total: u32 = 0;
-        for (ins, 0..) |in, i| {
-            if (in.n == 0) return error.InvalidInkling2Op;
-            n[i] = in.n;
-            total += in.n;
-        }
-        e.setPipeline(o.pipe(.mv_fuse));
-        e.setBuffer(x.buffer, x.offset, 0);
-        for (0..8) |i| {
-            const src = if (i < ins.len) ins[i].w else x;
-            const dst = if (i < ins.len) ins[i].y else x;
-            e.setBuffer(src.buffer, src.offset, @intCast(1 + i));
-            e.setBuffer(dst.buffer, dst.offset, @intCast(9 + i));
-        }
-        e.setValue(FuseArgs{
-            .k = k,
-            .count = @intCast(ins.len),
-            .n0 = n[0],
-            .n1 = n[1],
-            .n2 = n[2],
-            .n3 = n[3],
-            .n4 = n[4],
-            .n5 = n[5],
-            .n6 = n[6],
-            .n7 = n[7],
-        }, 17);
-        e.dispatchGroups(mtl.Size.of(total, 1, 1), mtl.Size.of(32, 1, 1));
+        return o.linearFusedRows(e, x, 1, k, ins);
+    }
+
+    /// Multi-row GEMVs (1..8 rows/TG) sharing `x` and reusing weight loads across rows; bit-exact across `rows`.
+    pub fn linearFusedRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, rows: u32, k: u32, ins: []const Fused) !void {
+        return fast.linearFusedRows(o.pipe(.mv_fuse), e, x, rows, k, ins);
     }
 
     fn denseRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool) !void {
         if (rows == 0 or n == 0 or k == 0) return error.InvalidInkling2Op;
-        if (rows >= mv_mma.row_tile and k >= 32) {
+        if (rows >= 64) {
+            o.gemm.run(
+                e,
+                if (f32_out) .bf16f_nt else .bf16_nt,
+                .{ .buf = x.buffer, .off = x.offset },
+                .{ .buf = w.buffer, .off = w.offset },
+                .{ .buf = y.buffer, .off = y.offset },
+                .{ .m = rows, .n = n, .k = k, .lda = k, .ldb = k, .ldd = n },
+            );
+        } else if (rows >= 16 and k >= 32) {
             const xr = mv_mma.Ref{ .buf = x.buffer, .off = x.offset };
             const wr = mv_mma.Ref{ .buf = w.buffer, .off = w.offset };
             const yr = mv_mma.Ref{ .buf = y.buffer, .off = y.offset };
@@ -381,6 +382,7 @@ pub const Ops = struct {
         if (@as(usize, a.rows) * a.experts * 4 > o.scratch_bytes) return error.Inkling2ScratchTooSmall;
         const logits = View{ .buffer = o.scratch };
         try o.denseRows(e, a.x, a.w, logits, a.rows, a.experts, a.hidden, true);
+        e.barrier();
         e.setPipeline(o.pipe(.route_select));
         bind(e, &.{ logits, a.bias, a.ids, a.weights });
         e.setValue(RouteKernelArgs{ .rows = a.rows, .experts = a.experts, .topk = a.topk, .scale = a.scale }, 4);
@@ -457,6 +459,18 @@ pub const Ops = struct {
     pub fn attention(o: *const Ops, e: mtl.ComputeEncoder, a: AttentionArgs) !void {
         if (a.dim != head_dim or a.d_rel != rel_dim or a.rows == 0 or a.kv_heads == 0 or a.heads % a.kv_heads != 0 or
             a.heads / a.kv_heads > max_group or a.extent == 0) return error.InvalidInkling2Op;
+        const fast_args = AttnKernelArgs{
+            .rows = a.rows,
+            .pos0 = a.pos0,
+            .heads = a.heads,
+            .kv_heads = a.kv_heads,
+            .extent = a.extent,
+            .window = a.window,
+            .ring = a.ring,
+            .chunks = 1,
+            .scale = a.scale,
+        };
+        if (o.fast_attn.encode(e, a, fast_args)) return;
         const group = a.heads / a.kv_heads;
         const last: u64 = @as(u64, a.pos0) + a.rows;
         const keys: u64 = if (a.window != 0) @min(last, a.window) else last;
@@ -490,10 +504,12 @@ pub const Ops = struct {
             e.setValue(args, 9);
             e.dispatchGroups(mtl.Size.of(chunks, a.kv_heads, n), mtl.Size.of(128, 1, 1));
             if (chunks > 1) {
+                e.barrier();
                 e.setPipeline(o.pipe(.attn_merge));
                 bind(e, &.{ gate, out, scratch });
                 e.setValue(args, 3);
                 e.dispatchGroups(mtl.Size.of(a.heads, n, 1), mtl.Size.of(128, 1, 1));
+                if (r0 + block < a.rows) e.barrier();
             }
         }
     }

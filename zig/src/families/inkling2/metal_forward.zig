@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const st = @import("metal_state.zig");
 const layer = @import("metal_forward_layer.zig");
+const fused_ops_mod = @import("metal_fused_ops.zig");
 const snapshot = @import("metal_snapshot.zig");
 const Model = @import("metal_model.zig").Model;
 const View = @import("../../core/exl3_projection.zig").View;
@@ -76,7 +77,8 @@ pub fn forward(m: *Model, items: []const Item) !void {
     try check(m, items);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var r = layer.Run.init(m, items);
+    const fused_ops = try fused_ops_mod.forDevice(m.device);
+    var r = layer.Run.init(m, items, fused_ops);
     var pos: usize = 0;
     const ids = m.scratch.ids.slice(u32, m.options.rows);
     for (items) |it| {
@@ -104,6 +106,7 @@ fn run(m: *Model, r: *layer.Run) !void {
         try r.capture(visit);
         try r.attend(visit);
         try m.store.encode(r.e, m.plan.visit(visit).layer, view(m.scratch.xm), view(m.scratch.rids), view(m.scratch.rwts), view(m.scratch.moe), r.n);
+        r.e.barrier();
         try r.finish(visit);
     }
     try r.head();
