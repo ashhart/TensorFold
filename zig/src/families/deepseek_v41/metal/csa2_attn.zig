@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+const shape = @import("attn_shape.zig");
 
 pub const head_dim = 512;
 pub const window = 128;
@@ -9,7 +10,8 @@ pub const max_selected = 512;
 pub const rope_dims = 64;
 /// Heads a simdgroup carries (decode, prompt), and the groups of the two launch shapes.
 pub const heads_per_sg = 1;
-pub const prompt_heads_per_sg = 2;
+pub const prompt_heads_per_sg = shape.heads_per_group;
+pub const checkPromptHeads = shape.check;
 pub const chunks = 5;
 pub const prompt_rows = 2;
 pub const prompt_head_groups = 4;
@@ -105,6 +107,7 @@ pub fn encodeDecodeSegs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, seg
 /// Prompt rows: consecutive positions of one stream over a linear window buffer (`wbase` >= 0); bits equal decode's.
 pub fn encodePrompt(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call) !void {
     try check(c);
+    try checkPromptHeads(c.heads);
     e.setPipeline(p.pre[@backingInt(c.out)]);
     bind(e, b, c);
     const per = prompt_heads_per_sg * prompt_head_groups;

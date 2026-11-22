@@ -408,12 +408,11 @@ template <typename T>
   const uint ra = sg / TF_ATTN_HG, r = tg.x * TF_ATTN_RR + ra;
   const uint h0 = (tg.y * TF_ATTN_HG + sg % TF_ATTN_HG) * TF_ATTN_PH;
   if (r >= a.rows || h0 >= a.heads) return;
-  const uint nh = min(TF_ATTN_PH, a.heads - h0);
   const TfAttnMeta m = M[r];
   const float scale = (TF_CTL == 5 && ra == 1) ? a.scale * 1.0000001f : a.scale;
   float q[TF_ATTN_PH][16];
   for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
-    const ulong at = (ulong(r) * a.heads + h0 + min(hh, nh - 1)) * (TF_ATTN_D / 8) + 2 * lane;
+    const ulong at = (ulong(r) * a.heads + h0 + hh) * (TF_ATTN_D / 8) + 2 * lane;
     tf_attn_x16(TfKey{Q[at], Q[at + 1]}, q[hh]);
   }
   TfAccN<TF_ATTN_PH> s;
@@ -440,7 +439,8 @@ template <typename T>
     if (c.n == 0) continue;
     for (uint hh = 0; hh < TF_ATTN_PH; ++hh) tf_attn_join(s, hh, c.m[hh], c.l[hh], c.acc[hh]);
   }
-  for (uint hh = 0; hh < nh; ++hh)
+  #pragma unroll
+  for (uint hh = 0; hh < TF_ATTN_PH; ++hh)
     tf_attn_store(s, hh, SK[h0 + hh], CS + ulong(m.pos) * 64, O + (ulong(r) * a.heads + h0 + hh) * TF_ATTN_D, lane);
 }
 

@@ -25,6 +25,7 @@ pub const max_rows = 16;
 
 /// The shapes the kernels fix at compile time: a config that differs is refused before anything is built.
 pub fn check(c: *const Config) !void {
+    try attn.checkPromptHeads(c.heads);
     if (c.head_dim != attn.head_dim or c.rope_dim != attn.rope_dims or c.window != attn.window) return error.UnsupportedAttention;
     if (c.index_heads != index.heads or c.index_dim != index.dim or c.index_topk != attn.max_selected) return error.UnsupportedIndexer;
     if (c.candidate_block_size != index.block) return error.UnsupportedIndexer;
