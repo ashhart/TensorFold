@@ -28,6 +28,7 @@ fn sizes(id: usize) []const u8 {
 const Launch = struct {
     var n: usize = 0;
     var seen: [128]Seen = undefined;
+    var simulate_merges = false;
 
     fn run(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, shared: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
         const id = @intFromPtr(f);
@@ -36,9 +37,24 @@ const Launch = struct {
             const at = args.?[i].?;
             s.args[i] = if (size == '8') @as(*const u64, @ptrCast(@alignCast(at))).* else @as(*const u32, @ptrCast(@alignCast(at))).*;
         }
+        if (simulate_merges and id == ids.merge) mergeWrites(s);
         seen[n] = s;
         n += 1;
         return 0;
+    }
+
+    fn mergeWrites(s: Seen) void {
+        const rows: usize = @intCast(s.args[5]);
+        const heads: usize = @intCast(s.args[6]);
+        const stride = heads * latent.latent_width * 2;
+        const out: [*]u8 = @ptrFromInt(s.args[3]);
+        const sparse = s.args[8] != 0;
+        var counts: [*]const u32 = undefined;
+        if (sparse) counts = @ptrFromInt(s.args[4]);
+        for (0..rows) |r| {
+            if (sparse and counts[r] == 0) continue;
+            @memset(out[r * stride ..][0..stride], if (sparse) 0x5a else 0xd3);
+        }
     }
 
     /// The launches of function `id`, in order.
@@ -240,6 +256,51 @@ test "GLM DSA block: a window's rows from r0 rope full GLM-5.3's keys and querie
     f.init();
     const k: dsa.Kernels = .{ .set = .{ .glue = &f.ks, .mla = &f.m }, .ops = .{ .d = &f.d, .handle = null } };
     try t.expectError(error.NoRopeFreqs, dsa.attend(k, f.stream(), l, .{ .lc = 0, .ik = 0, .ig = 0, .pk = 0, .pk_rows = 0 }, s, 0, 3, 0x850_0000, 5, 1, 3));
+}
+
+test "prefill exact: E3 boundary dense prefix keeps the full chunk's head block" {
+    var f: Fakes = undefined;
+    f.init();
+    const k: dsa.Kernels = .{ .set = .{ .glue = &f.ks }, .ops = .{ .d = &f.d, .handle = null } };
+    var l = layer(false);
+    l.dense_limit = 2051;
+    l.heads = 1;
+    const rows = 2048;
+    const stride = l.heads * latent.latent_width * 2;
+    const c: dsa.Caches = .{ .lc = 0x800_0000, .ik = 0x810_0000, .ig = 0x820_0000, .pk = 0x830_0000, .pk_rows = 4098, .pt = 0x840_0000, .ps = flash_ps };
+    var s = scratch();
+    var counts: [rows]u32 = @splat(1);
+    @memset(counts[0..3], 0);
+    const got = try t.allocator.alloc(u8, rows * stride);
+    defer t.allocator.free(got);
+    const want = try t.allocator.alloc(u8, rows * stride);
+    defer t.allocator.free(want);
+    @memset(got, 0xa5);
+    @memset(want, 0xd3);
+    @memset(want[3 * stride ..], 0x5a);
+    s.counts = @intFromPtr(&counts);
+    s.ol = @intFromPtr(got.ptr);
+    Launch.simulate_merges = true;
+    defer Launch.simulate_merges = false;
+    try dsa.attend(k, f.stream(), l, c, s, 0, rows, 0x850_0000, 2048, 8, 512);
+
+    var cb: [8]Seen = undefined;
+    const chunks = Launch.of(ids.chunks_32, &cb);
+    try t.expectEqual(@as(usize, 2), chunks.len);
+    try t.expectEqual([3]u32{ 3, 1, 8 }, chunks[0].grid);
+    try t.expectEqualSlices(u64, &.{ s.qa, c.lc, 0x850_0000, 0, 0, s.partials.po, s.partials.pm, s.partials.pl, 3, 1, 0, @as(u32, @bitCast(@as(f32, 0.0625))), 0, c.pt, c.ps }, chunks[0].args[0..15]);
+    try t.expectEqual([3]u32{ 2048, 1, 5 }, chunks[1].grid);
+    try t.expectEqual(@as(u64, 2048), chunks[1].args[8]);
+    try t.expectEqual(s.counts, chunks[1].args[4]);
+    try t.expectEqual(@as(u64, 1), chunks[1].args[12]);
+    var mb: [8]Seen = undefined;
+    const merges = Launch.of(ids.merge, &mb);
+    try t.expectEqual(@as(usize, 2), merges.len);
+    try t.expectEqual([3]u32{ 3, 1, 1 }, merges[0].grid);
+    try t.expectEqualSlices(u64, &.{ s.partials.po, s.partials.pm, s.partials.pl, s.ol, s.dummy, 3, 1, 8, 0 }, merges[0].args[0..9]);
+    try t.expectEqual([3]u32{ 2048, 1, 1 }, merges[1].grid);
+    try t.expectEqualSlices(u64, &.{ s.partials.po, s.partials.pm, s.partials.pl, s.ol, s.counts, 2048, 1, 5, 1 }, merges[1].args[0..9]);
+    try t.expectEqualSlices(u8, want, got); // count-zero rows retain dense bytes; every other row is sparse-overwritten
 }
 
 test "GLM DSA block: token lists resolve pages to 576-wide rows on full GLM-5.3's padded page, Flash's 6,528 rows" {
