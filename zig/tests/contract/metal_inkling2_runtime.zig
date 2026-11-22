@@ -31,6 +31,11 @@ pub const Probe = struct {
     refs: [2]rig_.Ref = undefined,
     blocks: rig_.Ref = undefined,
     blocks_before: []u16 = &.{},
+    stage_hist_before: [2][]u16 = @splat(&.{}),
+    stage_raw: [2][]u16 = @splat(&.{}),
+    stage_hist: [2]rig_.Ref = undefined,
+    stage_out: [2]rig_.Ref = undefined,
+    taps_u16: []u16 = &.{},
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
@@ -68,6 +73,20 @@ pub const Probe = struct {
                 .{ .rows = 16, .n = p.hidden, .k = 3 },
                 .{ .rows = 32, .n = p.hidden, .k = 3 },
             },
+            .stage_conv => .{
+                .{ .rows = 1, .n = p.hidden, .k = 1 },
+                .{ .rows = 2, .n = p.hidden, .k = 1 },
+                .{ .rows = 1, .n = 1024, .k = 3 },
+                .{ .rows = 7, .n = 1024, .k = 2 },
+                .{ .rows = 512, .n = p.hidden, .k = 1 },
+            },
+            .commit_histories => .{
+                .{ .rows = 48, .n = 19, .k = 1 },
+                .{ .rows = 48, .n = 19, .k = 7 },
+                .{ .rows = 48, .n = 19, .k = 16 },
+                .{ .rows = 2, .n = 19, .k = 0 },
+                .{ .rows = 1, .n = 7, .k = 4 },
+            },
             else => .{
                 .{ .rows = 1, .n = p.hidden, .k = 1 },
                 .{ .rows = 5, .n = p.hidden, .k = 1 },
@@ -97,9 +116,10 @@ pub const Probe = struct {
             .depth = depth,
             .ops = if (self.kind == .attention_partial or self.kind == .mlp_partial) 1 else 0,
             .out = switch (self.kind) {
-                .copy_bf16, .mlp_partial, .capture_tap => .bf16,
+                .copy_bf16, .mlp_partial, .capture_tap, .stage_conv, .commit_histories => .bf16,
                 .copy_f32, .widen, .attention_partial => .f32,
             },
+            .in_place = self.kind == .stage_conv,
             .served = &self.served,
             .sums = .{ .f16 = 0, .bf16 = 0, .why = "pointwise moves and single additions have no reduction accumulator to discriminate" },
         } };
@@ -111,6 +131,11 @@ pub const Probe = struct {
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const values = try self.arena.allocator().alloc(f32, n);
         for (values) |*v| v.* = value(rng);
+        return values;
+    }
+    fn u16s(self: *Probe, n: usize, rng: std.Random) ![]u16 {
+        const values = try self.arena.allocator().alloc(u16, n);
+        for (values) |*v| v.* = c.toBf16(value(rng));
         return values;
     }
     fn input(self: *Probe, values: []const f32, bf: bool) !rig_.Ref {
@@ -127,8 +152,30 @@ pub const Probe = struct {
         self.shape = shape;
         self.f = @splat(&.{});
         self.blocks_before = &.{};
+        self.stage_hist_before = @splat(&.{});
+        self.stage_raw = @splat(&.{});
+        self.taps_u16 = &.{};
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
+        if (self.kind == .stage_conv) {
+            const pairs = p.stagePairs(shape.k);
+            for (0..pairs) |pair| {
+                self.stage_hist_before[pair] = try self.u16s(3 * shape.n, rng);
+                self.stage_raw[pair] = try self.u16s(shape.rows * shape.n, rng);
+                if (fill == .nonfinite and pair == 0) self.stage_raw[0][0] = c.toBf16(std.math.nan(f32));
+                self.refs[pair] = try self.rig.input(std.mem.sliceAsBytes(self.stage_raw[pair]));
+                self.stage_hist[pair] = try self.rig.output(3 * shape.n * 2);
+                self.stage_out[pair] = try self.rig.output((3 + shape.rows) * shape.n * 2);
+            }
+            return true;
+        }
+        if (self.kind == .commit_histories) {
+            self.taps_u16 = try self.u16s(shape.rows * shape.n * p.conv_row_values, rng);
+            if (fill == .nonfinite) self.taps_u16[shape.k * p.conv_widths[0]] = c.toBf16(std.math.nan(f32));
+            self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(self.taps_u16));
+            self.out = try self.rig.output(self.count() * 2);
+            return true;
+        }
         const n = shape.rows * shape.n;
         self.f[0] = try self.floats(n, rng);
         switch (self.kind) {
@@ -150,12 +197,14 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], true);
             },
             .copy_f32 => {},
+            .stage_conv, .commit_histories => unreachable,
         }
         if (fill == .nonfinite) self.f[0][0] = std.math.nan(f32);
         self.refs[0] = try self.input(self.f[0], self.kind == .copy_bf16 or self.kind == .widen or self.kind == .attention_partial or self.kind == .capture_tap);
         const elem: c.Elem = switch (self.kind) {
             .copy_bf16, .mlp_partial, .capture_tap => .bf16,
             .copy_f32, .widen, .attention_partial => .f32,
+            .stage_conv, .commit_histories => unreachable,
         };
         self.out = try self.rig.output(self.count() * c.size(elem));
         if (self.kind == .capture_tap) {
@@ -166,32 +215,91 @@ pub const Probe = struct {
     }
 
     pub fn run(self: *Probe) !void {
+        const call = p.Call{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k };
+        if (self.kind == .stage_conv) {
+            const pairs = p.stagePairs(self.shape.k);
+            for (0..pairs) |pair| {
+                @memcpy(self.rig.bytes(self.stage_hist[pair], 3 * self.shape.n * 2), std.mem.sliceAsBytes(self.stage_hist_before[pair]));
+            }
+        }
         const pass = self.rig.begin();
         const e = pass.e;
         e.setPipeline(self.pipe);
-        e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
         switch (self.kind) {
-            .copy_bf16, .copy_f32, .widen, .capture_tap => {
+            .stage_conv => {
+                const second: usize = if (p.stagePairs(self.shape.k) == 2) 1 else 0;
+                e.setBuffer(self.stage_hist[0].buf, self.stage_hist[0].off, 0);
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 1);
+                e.setBuffer(self.stage_out[0].buf, self.stage_out[0].off, 2);
+                e.setBuffer(self.stage_hist[second].buf, self.stage_hist[second].off, 3);
+                e.setBuffer(self.refs[second].buf, self.refs[second].off, 4);
+                e.setBuffer(self.stage_out[second].buf, self.stage_out[second].off, 5);
+                e.setValue(p.stageConvArgs(call), 6);
+            },
+            .commit_histories => {
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
                 e.setBuffer(self.out.buf, self.out.off, 1);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 2);
+                e.setValue(p.commitHistoriesArgs(call), 2);
+            },
+            .copy_bf16, .copy_f32, .widen, .capture_tap => {
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
+                e.setBuffer(self.out.buf, self.out.off, 1);
+                e.setValue(p.args(self.kind, call), 2);
             },
             .attention_partial => {
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
                 e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
                 e.setBuffer(self.blocks.buf, self.blocks.off, 2);
                 e.setBuffer(self.out.buf, self.out.off, 3);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 4);
+                e.setValue(p.args(self.kind, call), 4);
             },
             .mlp_partial => {
+                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
                 e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
                 e.setBuffer(self.out.buf, self.out.off, 2);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 3);
+                e.setValue(p.args(self.kind, call), 3);
             },
         }
-        e.dispatchThreads(mtl.Size.of(p.geometry(.{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }).count, 1, 1), mtl.Size.of(p.threads, 1, 1));
+        e.dispatchThreads(mtl.Size.of(p.dispatchCount(self.kind, call), 1, 1), mtl.Size.of(p.threads, 1, 1));
         try self.rig.finish(pass);
     }
 
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
+        if (self.kind == .stage_conv) {
+            const pairs = p.stagePairs(self.shape.k);
+            const commit = p.stageCommit(self.shape.k);
+            const w = self.shape.n;
+            const r = self.shape.rows;
+            const h_buf = try self.a.alloc(u16, 3 * w);
+            defer self.a.free(h_buf);
+            const s_buf = try self.a.alloc(u16, (3 + r) * w);
+            defer self.a.free(s_buf);
+            var at: usize = 0;
+            for (0..pairs) |pair| {
+                p.stageConvRef(self.stage_hist_before[pair], self.stage_raw[pair], w, r, commit, h_buf, s_buf);
+                for (h_buf) |v| {
+                    want[at] = c.fromBf16(v);
+                    mag[at] = @abs(want[at]);
+                    at += 1;
+                }
+                for (s_buf) |v| {
+                    want[at] = c.fromBf16(v);
+                    mag[at] = @abs(want[at]);
+                    at += 1;
+                }
+            }
+            return;
+        }
+        if (self.kind == .commit_histories) {
+            const out_u16 = try self.a.alloc(u16, self.count());
+            defer self.a.free(out_u16);
+            p.commitHistoriesRef(self.taps_u16, out_u16, self.shape.rows, self.shape.n, self.shape.k);
+            for (out_u16, want, mag) |v, *w, *m| {
+                w.* = c.fromBf16(v);
+                m.* = @abs(w.*);
+            }
+            return;
+        }
         if (self.kind == .capture_tap) {
             for (want, mag, 0..) |*w, *m, i| {
                 const row = i / (p.tap_channels * p.hidden);
@@ -209,6 +317,7 @@ pub const Probe = struct {
                 .copy_bf16, .copy_f32, .widen, .capture_tap => x,
                 .attention_partial => p.attentionPartial(x, y, self.shape.k),
                 .mlp_partial => p.mlpPartial(x, y),
+                .stage_conv, .commit_histories => unreachable,
             };
             m.* = @abs(@as(f64, x)) + @abs(@as(f64, y));
         }
