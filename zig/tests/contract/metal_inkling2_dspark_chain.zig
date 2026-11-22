@@ -144,19 +144,25 @@ pub const Pick = struct {
         t.chain.deinit();
     }
     pub fn kernel(t: *Pick) g.Kernel {
-        return .{ .ctx = t, .vt = &vt, .control = t.control, .spec = .{
-            .name = if (t.control != null) controls.Mutation.pick_tie.name() else name,
-            .accum = .none,
-            .depth = noSums,
-            .out = .raw,
-            .nan = .{ .stated = "a NaN is never the pick unless logit 0 is one, and then the pick is id 0; else ties go to the lower id" },
-            .served = &.{.{ .rows = 1, .n = host.vocab, .k = 0 }},
-        } };
+        return .{
+            .ctx = t,
+            .vt = &vt,
+            .control = t.control,
+            .spec = .{
+                .name = if (t.control != null) controls.Mutation.pick_tie.name() else name,
+                .accum = .none,
+                .depth = noSums,
+                .out = .raw,
+                .nan = .{ .stated = "a NaN is never the pick unless logit 0 is one, and then the pick is id 0; else ties go to the lower id" },
+                // k 1 is the same row with a NaN at id 0, where the rule picks id 0.
+                .served = &.{ .{ .rows = 1, .n = host.vocab, .k = 0 }, .{ .rows = 1, .n = host.vocab, .k = 1 } },
+            },
+        };
     }
     const vt = g.hooks(Pick);
 
     pub fn prepare(t: *Pick, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.n != host.vocab) return false;
+        if (shape.n != host.vocab or shape.k > 1) return false;
         t.rig.reset();
         t.a.free(t.logits);
         t.logits = try t.a.alloc(u16, host.vocab);
@@ -166,12 +172,13 @@ pub const Pick = struct {
         for (t.logits) |*v| v.* = c.toBf16(@as(f32, @floatFromInt(rng.uintLessThan(u32, 64))) / 4 - 8);
         t.logits[host.vocab - 1] = t.logits[host.vocab - 2];
         if (fill == .nonfinite) {
+            // Later NaNs lose to an infinity near the end of the row.
             t.logits[host.vocab / 3] = c.toBf16(std.math.nan(f32));
             t.logits[host.vocab / 2] = c.toBf16(-std.math.inf(f32));
             t.logits[host.vocab - 1] = c.toBf16(std.math.nan(f32));
-            // An odd seed puts a NaN first, where the rule picks id 0; an even one an infinity late in the row.
-            if (seed % 2 == 1) t.logits[0] = c.toBf16(std.math.nan(f32)) else t.logits[host.vocab - 7] = c.toBf16(std.math.inf(f32));
+            t.logits[host.vocab - 7] = c.toBf16(std.math.inf(f32));
         }
+        if (shape.k == 1) t.logits[0] = c.toBf16(std.math.nan(f32));
         t.in = try t.rig.input(std.mem.sliceAsBytes(t.logits));
         t.out = try t.rig.output(8 * @sizeOf(u32));
         return true;
