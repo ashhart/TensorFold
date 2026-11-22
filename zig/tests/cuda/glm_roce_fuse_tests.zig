@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 
-const d = 256;
+const d = 4096;
 const rows_cases = [_]usize{ 1, 2, 4, 8, 16 };
 const max_rows = 16;
 const max_partials = 2 * max_rows * d * 4;
@@ -75,8 +75,6 @@ pub fn run(gpu: check.Gpu, rank: usize) !void {
     defer post.free();
     var comb = try cuda.DeviceBuffer.alloc(gpu.d, max_rows * 16 * 4);
     defer comb.free();
-    var fused = try cuda.DeviceBuffer.alloc(gpu.d, max_x);
-    defer fused.free();
     const partial_host = try a.alloc(u8, max_partials / 2);
     defer a.free(partial_host);
     const x_host = try a.alloc(u8, max_x);
@@ -103,18 +101,18 @@ pub fn run(gpu: check.Gpu, rank: usize) !void {
         try post.upload(0, post_host[0 .. rows * 4 * 4]);
         try comb.upload(0, comb_host[0 .. rows * 16 * 4]);
         for (0..2) |kind| {
-            try x.upload(0, x_host[0..x_bytes]); // the in-place reference writes x; each epilogue starts from identical bytes
+            try x.upload(0, x_host[0..x_bytes]); // both epilogues write x in place; each starts from identical bytes
             const out_bytes = if (kind == 0) rows * d * 2 else x_bytes;
             const epilogue: cuda.roce.Post = if (kind == 0)
-                .{ .residual_add = .{ .x = x.ptr, .xout = fused.ptr } }
+                .{ .residual_add = .{ .x = x.ptr, .xout = x.ptr } }
             else
-                .{ .hc_post = .{ .x = x.ptr, .xout = fused.ptr, .post = post.ptr, .comb = comb.ptr } };
-            try fused.fill8(0xa5, s.handle);
+                .{ .hc_post = .{ .x = x.ptr, .xout = x.ptr, .post = post.ptr, .comb = comb.ptr } };
             try check.expect(try g.gatherPost(s, partials.ptr + rank * bytes, partials.ptr, bytes, d, epilogue), "glm-roce-fuse: an eligible TP2 cell did not fuse", .{});
             try s.synchronize();
             try g.check();
-            try fused.download(0, fused_host[0..out_bytes]);
+            try x.download(0, fused_host[0..out_bytes]);
 
+            try x.upload(0, x_host[0..x_bytes]); // the reference must see the source before the fused in-place stores
             try g.allGather(s, partials.ptr + rank * bytes, partials.ptr, bytes);
             try standalone(kind, reference[kind], s, x.ptr, x.ptr, partials.ptr, post.ptr, comb.ptr, rows);
             try s.synchronize();

@@ -105,9 +105,13 @@ __device__ __forceinline__ void gather_body(
                     glm_post::residual4(rank0, rank1, x + 4ll * i, xout + 4ll * i);
                 } else {
                     const int64_t col = 4ll * i, r = col / d, c = col - r * d;
+                    // Cache x before the first store: x may be xout, matching tf_glm_hc_post's snapshot contract.
+                    __nv_bfloat16 source[16];
+                    for (int t = 0; t < 4; ++t)
+                      for (int j = 0; j < 4; ++j) source[t * 4 + j] = x[(r * 4 + t) * d + c + j];
                     for (int s = 0; s < 4; ++s)
-                    glm_post::hc4(rank0, rank1, x + (r * 4) * d + c, xout + (r * 4 + s) * d + c,
-                                  d, s, post_w + r * 4, comb + r * 16);
+                    glm_post::hc4(rank0, rank1, source, xout + (r * 4 + s) * d + c,
+                                  4, s, post_w + r * 4, comb + r * 16);
                 }
             }
         }
