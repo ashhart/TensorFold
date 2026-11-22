@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: with `TF_GLM_PROF=1`, the four profiling traces are created at startup before the server reports ready, so the first prompt no longer pays their setup; profiling-off behaviour is unchanged (#4511).
+
 - Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#4504).
 
 - Server: chat and completions take `n` from 1 through 16, each choice its own engine request on the one prompt with its own `index` and `tensorfold.seed` (choice 0 keeps the request's seed, so `n: 1` replies are unchanged) and `usage` counting the prompt once; a request with `n` above 1 takes `n` places under `--max-inflight` and `--max-inflight-per-key`, all or none, and gets 400 with `logprobs` or a required tool call, while `/v1/responses` and `/v1/imprint` still refuse `n` other than 1 (#3148, closes #3114).
