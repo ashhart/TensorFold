@@ -28,6 +28,15 @@ inline void ink_tile_get(thread tfp::frag<bfloat>& f, const device bfloat* tile,
 }
 #endif
 
+#ifndef TF_SIMD_FRAGS
+// Columns c .. c + 3 of two query rows as a left fragment's eight values; a row that is no pair reads as zero.
+inline void ink_rows_get(thread tfp::frag<bfloat>& f, const device bfloat* r0, const device bfloat* r1, int c, bool lo, bool hi) {
+  const bfloat none = bfloat(0);
+  const bfloat4 zero = bfloat4(none, none, none, none);
+  f = tfp::frag<bfloat>(lo ? bfloat4(*(const device bfloat4*)(r0 + c)) : zero, hi ? bfloat4(*(const device bfloat4*)(r1 + c)) : zero);
+}
+#endif
+
 inline void ink_fold(float& mm, float& ll, float m, float l, float& a, float& b) {
   const float mn = max(mm, m);
   a = precise::exp2(mm - mn);
@@ -74,8 +83,18 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
   const device bfloat* qb0 = q + ink_prompt_rh(s, a.heads, group, kvh, pair_a) * D;
   const device bfloat* qb1 = q + ink_prompt_rh(s, a.heads, group, kvh, pair_b) * D;
   const size_t hb = s.off + size_t(kvh) * a.ring * D;
-  tfp::frag<float> acc[8], out[8];
-  for (uint d = 0; d < 8; ++d) { acc[d] = tfp::frag<float>(0); out[d] = tfp::frag<float>(0); }
+  tfp::frag<float> acc[8];
+  for (uint d = 0; d < 8; ++d) acc[d] = tfp::frag<float>(0);
+  // Where each of the lane's two rows keeps this chunk's folded sums, and whether it has a slot in this chunk at all.
+  size_t slot[2];
+  bool stored[2];
+  for (uint h = 0; h < 2; ++h) {
+    const uint row = min(m + uint(home.y) + 8 * h, total - 1), pos = uint(s.p0) + row / group, first = ink_prompt_first(a, pos);
+    stored[h] = m + uint(home.y) + 8 * h < total && b_lo <= pos && c >= first;
+    slot[h] = (ink_prompt_rh(s, a.heads, group, kvh, row) * a.chunks + c - (stored[h] ? first : c)) * D + uint(home.x);
+  }
+  // The earlier of the lane's two rows: a tile wholly EXTENT or more before it is live and unbiased for both.
+  const uint far_pos = uint(s.p0) + min(row_a, total - 1) / group;
   float top[2] = {-INFINITY, -INFINITY}, mass[2] = {0.0f, 0.0f};
   float upper[2] = {-INFINITY, -INFINITY}, whole[2] = {0.0f, 0.0f};
   for (uint kt = b_lo; kt <= k_hi; kt += KEYS) {
@@ -103,13 +122,14 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
     if (m < total && kt <= uint(s.p0) + min(m + 15, total - 1) / group) {
       for (uint d = 0; d < 8; ++d) {
         tfp::frag<bfloat> qa, kb0, kb1, kb2, kb3;
-        tfp::frag_get_rows(qa, qb0, qb1, 16 * d, home, row_a < total, row_b < total);
 #ifdef TF_SIMD_FRAGS
+        tfp::frag_get_rows(qa, qb0, qb1, 16 * d, home, row_a < total, row_b < total);
         tfp::frag_get_t(kb0, ks, D, 0, 16 * d, home);
         tfp::frag_get_t(kb1, ks, D, 16, 16 * d, home);
         tfp::frag_get_t(kb2, ks, D, 32, 16 * d, home);
         tfp::frag_get_t(kb3, ks, D, 48, 16 * d, home);
 #else
+        ink_rows_get(qa, qb0, qb1, 16 * d + home.x, row_a < total, row_b < total);
         ink_tile_get(kb0, tile_k, 0, 16 * d, home, keys);
         ink_tile_get(kb1, tile_k, 16, 16 * d, home, keys);
         ink_tile_get(kb2, tile_k, 32, 16 * d, home, keys);
@@ -120,7 +140,10 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
       }
       float peak[2] = {top[0], top[1]};
       const uint sub_lo = b_lo + ((kt - b_lo) / 1024) * 1024, sub_hi = sub_lo + 1023;
-      for (uint f = 0; f < 4; ++f) for (uint e = 0; e < 8; ++e) {
+      if (a.window == 0u && kt + KEYS - 1 + EXTENT <= far_pos) {
+        for (uint f = 0; f < 4; ++f) for (uint e = 0; e < 8; ++e)
+          score[f][e] = (e >> 2 ? row_b : row_a) < total ? (score[f][e] * a.scale + 0.0f) * LOG2E : -INFINITY;
+      } else for (uint f = 0; f < 4; ++f) for (uint e = 0; e < 8; ++e) {
         const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e), kp = kt + 16 * f + col;
         const uint lr = row < total ? row / group : 0, pos = uint(s.p0) + lr;
         const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
@@ -159,25 +182,25 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
       }
     }
     const bool fold_now = (kt - b_lo) % 1024 == 960 || kt + KEYS > k_hi;
+    // The chunk's first fold stores, a later one folds into what is stored; a row with no key yet stores zeros.
+    const bool opening = kt - b_lo < 1024;
     if (fold_now && m < total) for (uint h = 0; h < 2; ++h) {
-      if (top[h] == -INFINITY) continue;
-      float x, y;
-      ink_fold(upper[h], whole[h], top[h], mass[h], x, y);
-      for (uint d = 0; d < 8; ++d) for (uint e = 4 * h; e < 4 * h + 4; ++e) out[d][e] = out[d][e] * x + acc[d][e] * y;
+      const bool some = top[h] != -INFINITY;
+      if (!some && !opening) continue;
+      float x = 0.0f, y = 0.0f;
+      if (some) ink_fold(upper[h], whole[h], top[h], mass[h], x, y);
+      if (!stored[h]) continue;
+      for (uint d = 0; d < 8; ++d) for (uint e = 4 * h; e < 4 * h + 4; ++e) {
+        device float* o = part_o + slot[h] + 16 * d + TF_COL(e);
+        const float before = opening ? 0.0f : *o;
+        *o = some ? before * x + acc[d][e] * y : before;
+      }
     }
 #ifdef TF_SIMD_FRAGS
     threadgroup_barrier(mem_flags::mem_threadgroup); // no simdgroup reads ks/vs when the next tile overwrites them
 #endif
   }
   if (m >= total) return;
-  for (uint d = 0; d < 8; ++d) for (uint e = 0; e < 8; ++e) {
-    const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e);
-    if (row >= total) continue;
-    const uint pos = uint(s.p0) + row / group, first = ink_prompt_first(a, pos);
-    if (b_lo > pos || c < first) continue;
-    const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-    part_o[(prow * a.chunks + c - first) * D + 16 * d + col] = out[d][e];
-  }
   if (home.x == 0) for (uint h = 0; h < 2; ++h) {
     const uint row = m + uint(home.y) + 8 * h;
     if (row >= total || b_lo > uint(s.p0) + row / group) continue;
