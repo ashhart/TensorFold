@@ -53,6 +53,12 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const index_emulated = b.addRunArtifact(index_emulate);
     index_emulated.expectExitCode(0);
     b.step("test-glm-index-emulate", "GLM's prompt indexer kernels as host C++ against a plain top-K and a model of tf_glm_scores").dependOn(&index_emulated.step);
+    const rev25 = b.step("test-glm-rev25-host", "REV25 E6/E8 host bytes and opt-in environment coverage");
+    const rev25_emulated = b.addRunArtifact(index_emulate);
+    rev25_emulated.addArg("--rev25");
+    rev25_emulated.expectExitCode(0);
+    rev25.dependOn(&rev25_emulated.step);
+    rev25.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM index:", "GLM strict env:", "TF_GLM_INDEX_SPLIT:", "GLM REV25 E8:" } })).step);
     const kv8_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM FP8 KV:"} }));
     b.step("test-glm-fp8-kv-host", "GLM latent cache layout, mode agreement and recorded CUDA launches without devices").dependOn(&kv8_run.step);
     step.dependOn(&kv8_run.step);

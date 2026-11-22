@@ -10,7 +10,7 @@ const room = fw.Forward.room;
 const share = fw.Forward.share;
 
 /// Two consecutive prompt chunks of one sequence (`b` a view of `a`'s at its end), each on `pieced`'s kernels and bits.
-pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize) !void {
+pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize, final: bool) !void {
     const two = [_]*const Forward{ a, b };
     const rows = [_]usize{ ra, rb };
     var cuts: [2][fw.max_pieces][2]usize = undefined;
@@ -47,9 +47,10 @@ pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize) !voi
             .mla => di += 1,
         }
     }
+    const heads = [2]bool{ false, final };
     for (two, rows, 0..) |f, R, i| {
         try awaitShared(f, f.pieces.?, n[i]);
-        try f.finish(R);
+        try f.finish(R, heads[i]);
     }
 }
 
@@ -71,10 +72,10 @@ fn exchangeGlue(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: 
         if (split) {
             for (f.ranks) |r| {
                 const mine = share(n, world, r.w.share.rank);
-                try g.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo));
+                try g.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo), r.b.part + (lo + mine[0]) * D * 4);
             }
             try pieces.shareGlued(f, p, lo, n, last);
-        } else for (f.ranks) |r| try g.glueRows(r, j, site, lo, piece[1], room(r, lo));
+        } else for (f.ranks) |r| try g.glueRows(r, j, site, lo, piece[1], room(r, lo), 0);
         try p.shared[q].record(p.side);
     }
 }

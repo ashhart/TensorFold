@@ -112,10 +112,10 @@ fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contrac
 directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
 
 On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
-linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over ten registrations of the Qwen3.8-27B glue's
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over the registrations of the Qwen3.8-27B glue's
 `add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax`, the top-k a sampled row draws from (`topk_part` and
 `topk_merge`) and `embed`, the seven planted controls (the top-k's two: a merge breaking ties the wrong way, red at
-`shapes`, and a flag read off the candidates only, red at `nonfinite`), and the decode attention pair with its two planted controls. Gate 5 checks the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+`shapes`, and a flag read off the candidates only, red at `nonfinite`), the decode attention pair with its two planted controls, and the standalone merge with its two controls. Gate 5 checks the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
 native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
@@ -129,6 +129,14 @@ edges, and 8,193 through 32,770 visible keys at selected root positions. The pos
 (slices, heads, rows) grid where the number of slices is at most the number of rows. Gate 4 uses uniform attention with cancelling integer values; it tests the value
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
+
+The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
+`zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
+in the slices a row does not hold) at 1 to 16 tree rows and 33 to 131,073 visible keys, including 32-key slice edges.
+Gate 4 uses unit weights and cancelling integer values, and gate 1 plants NaN and infinities in the partials, an
+infinity of each sign in a row's last slice among them. Its two planted controls go red at gate 3: the real kernel on
+the old one-subgroup-a-head grid, and a copy that weighs the lanes past the last slice (it adds the last slice again).
+The tree table is the only row source; the multi-stream row positions are outside it.
 
 On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
 norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
@@ -323,6 +331,22 @@ never rescales, a merge dropping each block's scale, a row projection dropping i
 untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
 `nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
 zero point, and a word's nibbles read in reverse, both red at `shapes`.
+Ripple-65B's own kernels (`metal_ricursive*.zig`): its glue, each output inside float64's range at the release's bf16
+rounding points over the spread its fp32 steps allow (the scaled embedding; the add-norm in the forms the forward runs,
+the value residual's lerp, the sublayer's add and both; q and k's norms with RoPE and a ring slot on sliding layers,
+without RoPE on global ones; the output gate's fp32 sigmoid; the clamped SwiGLU), the decode attention's partials over a
+1,024-key window in a 3,072-slot ring and over a global layer's every key, and on the M5's tensor units the prompt
+attention for both layer kinds; the NVFP4 MLP (E2M1 nibbles low first, an unsigned E4M3 scale a block of 16, the
+tensor's fp32 global): its row kernels, bf16 of the global times the fp32 sum, the prompt's exact dequantization and the
+GEMM taking the global before its one rounding. Llama's row projections, merge, argmax and GEMM forms register again at
+Ripple's shapes (k to 40,960, 80 query heads, 100,352 logits), and Nemotron's `tf_sample_full`, Ripple's sampled draw,
+is held to a stated rule: each draw equals lanes' `gpu_full` twin. Fifteen controls edit the source, each red at
+`shapes`: an embedding reading its own row, an add-norm not writing its residual back, a lerp dropping its blend, a prep
+rotating a global layer or writing one ring slot late, a gate rounding its sigmoid's exp to bf16, a clamp missing its
+lower bound, a decode seeing the key before its window, a prompt attention seeing the 64 keys before it, one whose keys
+wrap 64 slots early, nibbles read high first, a scale's exponent bias off by one, the global applied after the sum
+rounds, a dequantization leaving out a block's scale, and a GEMM never taking the global. Their launches are in
+`ricursive_records.zig`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

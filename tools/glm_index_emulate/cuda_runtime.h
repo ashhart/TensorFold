@@ -15,7 +15,9 @@
 #define __align__(x) __attribute__((aligned(x)))
 struct dim3 { unsigned x, y, z; };
 struct float4 { float x, y, z, w; };
-inline thread_local dim3 threadIdx, blockIdx;
+struct uint4 { unsigned x, y, z, w; };
+inline float4 make_float4(float x, float y, float z, float w) { return {x, y, z, w}; }
+inline thread_local dim3 threadIdx, blockIdx, blockDim;
 namespace emu {
 inline std::barrier<>* block_bar;
 inline std::barrier<>* warp_bar[32];
@@ -76,6 +78,9 @@ inline int atomicMax(int* p, int v) {
   return old;
 }
 inline int __float_as_int(float f) { int i; std::memcpy(&i, &f, 4); return i; }
+inline float __int_as_float(int i) { float f; std::memcpy(&f, &i, 4); return f; }
+inline unsigned __float_as_uint(float f) { unsigned u; std::memcpy(&u, &f, 4); return u; }
+inline float __expf(float f) { return std::exp(f); }
 inline float __fadd_rn(float a, float b) { return a + b; }
 inline float __fmul_rn(float a, float b) { return a * b; }
 inline float __fmaf_rn(float a, float b, float c) { return std::fma(a, b, c); }

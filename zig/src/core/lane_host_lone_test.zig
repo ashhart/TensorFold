@@ -59,6 +59,7 @@ const Lone = struct {
         }
         l.resumed += 1;
         while (!s.finished) {
+            if (hooks.yield(hooks.ctx)) return true;
             const t = lanes.fake.next(s.context.items, null, s.context.items.len);
             _ = try s.commit(gpa, &.{t}, &.{});
             hooks.committed(hooks.ctx);
@@ -78,11 +79,37 @@ fn serveImages(request: *const Request, resumes: bool, images: bool) !Runs {
     return serveDriver(request, resumes, images, false);
 }
 
+fn draftedConfig(costs: *[16]lanes.config.Cost) !lanes.Config {
+    return lanes.Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+}
+
+fn expectSolo(request: *const Request, concurrent: []const u32) !void {
+    var costs: [16]lanes.config.Cost = undefined;
+    for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+    var cfg = try draftedConfig(&costs);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    var driver: Lone = .{ .be = target.backend() };
+    host.lone = .{ .ctx = &driver, .run = Lone.run, .resumes = true };
+    try host.start();
+    defer host.stop();
+    var box: Box = .{};
+    defer box.tokens.deinit(gpa);
+    try host.engine().submit(1, request, .{ .ctx = &box, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, box.wait());
+    try std.testing.expectEqualSlices(u32, box.tokens.items, concurrent);
+}
+
 fn serveDriver(request: *const Request, resumes: bool, images: bool, plain: bool) !Runs {
     // a drafted family's windowed rounds, as the lone driver's backends run them (lanes/engine_test.zig's model)
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
-    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+    var cfg = try draftedConfig(&costs);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
@@ -120,6 +147,12 @@ test "the lane core's last stream goes back to the lone driver, its tokens serve
 
 test "a stream the lone driver does not take stays in the lane core to its end" {
     const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24, .drafts = false }, true);
+    try std.testing.expectEqual(@as(u32, 0), runs.opened);
+    try std.testing.expectEqual(@as(u32, 0), runs.resumed);
+}
+
+test "a penalized stream stays in the lane core: no lone driver takes presence or frequency penalties" {
+    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24, .penalties = .{ .presence = 1.5, .frequency = 0.5 } }, true);
     try std.testing.expectEqual(@as(u32, 0), runs.opened);
     try std.testing.expectEqual(@as(u32, 0), runs.resumed);
 }
@@ -209,11 +242,24 @@ test "the lone driver's image opt-out keeps both opening and reclaim on the lane
 const LogBox = struct {
     mutex: std.Io.Mutex = .init,
     seq: *std.atomic.Value(usize),
+    host: ?*LaneHost = null,
+    peer_id: ?Id = null,
+    peer_at_first: ?u64 = null,
+    peer_at_finish: ?u64 = null,
     order: usize = 0,
     tokens: std.ArrayList(u32) = .empty,
     events: std.ArrayList(usize) = .empty,
     stats: api.Stats = .{},
     done: ?Reason = null,
+
+    fn peerRounds(b: *@This()) ?u64 {
+        const h = b.host orelse return null;
+        const id = b.peer_id orelse return null;
+        h.mutex.lockUncancelable(std.testing.io);
+        defer h.mutex.unlock(std.testing.io);
+        for (h.admitted.items) |j| if (j.id == id) return j.stream.rounds;
+        return null;
+    }
 
     fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
         const b: *@This() = @ptrCast(@alignCast(ctx));
@@ -221,10 +267,12 @@ const LogBox = struct {
         defer b.mutex.unlock(std.testing.io);
         switch (e.*) {
             .tokens => |t| {
+                if (b.peer_at_first == null) b.peer_at_first = b.peerRounds();
                 b.tokens.appendSlice(gpa, t) catch {};
                 b.events.append(gpa, t.len) catch {};
             },
             .finished => |f| {
+                b.peer_at_finish = b.peerRounds();
                 b.done = f.reason;
                 b.stats = f.stats;
                 b.order = b.seq.fetchAdd(1, .monotonic);
@@ -249,9 +297,11 @@ const LogBox = struct {
     }
 };
 
-test "a third stream at two lanes waits engine_busy in FIFO order, then decodes in every shared round" {
+test "lone driver: a third tiny prompt at two lanes starts within two rounds and shares later rounds" {
     const Wait = @import("wait_reason.zig").Wait;
-    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    var costs: [16]lanes.config.Cost = undefined;
+    for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+    var cfg = try draftedConfig(&costs);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
@@ -259,13 +309,15 @@ test "a third stream at two lanes waits engine_busy in FIFO order, then decodes 
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    var driver: Lone = .{ .be = target.backend() };
+    host.lone = .{ .ctx = &driver, .run = Lone.run, .resumes = true };
     try host.start();
     defer host.stop();
 
     var seq = std.atomic.Value(usize).init(0);
-    var a: LogBox = .{ .seq = &seq };
+    var a: LogBox = .{ .seq = &seq, .host = &host, .peer_id = 2 };
     var b: LogBox = .{ .seq = &seq };
-    var c: LogBox = .{ .seq = &seq };
+    var c: LogBox = .{ .seq = &seq, .host = &host, .peer_id = 2 };
     var d: LogBox = .{ .seq = &seq };
     defer {
         a.deinit();
@@ -303,9 +355,16 @@ test "a third stream at two lanes waits engine_busy in FIFO order, then decodes 
     try std.testing.expectEqual(Reason.length, b.wait());
     try std.testing.expect(c.stats.queued_seconds > 0);
     try std.testing.expect(c.stats.rounds > 0);
-    try std.testing.expect(c.order < d.order); // FIFO: C finished before the later request
+    try std.testing.expect(c.order < d.order);
 
-    // C's tokens are the fake's own continuation, one per round beside the survivor.
+    // Survivor rounds are global scheduling evidence: C must neither wait past two rounds nor be skipped thereafter.
+    try std.testing.expect(a.peer_at_finish != null and c.peer_at_first != null and c.peer_at_finish != null);
+    const rounds_to_first = c.peer_at_first.? - a.peer_at_finish.?;
+    try std.testing.expect(rounds_to_first <= 2);
+    const survivor_rounds = c.peer_at_finish.? - c.peer_at_first.?;
+    try std.testing.expect(survivor_rounds <= c.stats.rounds + 1);
+    try std.testing.expect(c.stats.rounds <= 2 * @as(u64, @intCast(c.tokens.items.len)) + 2);
+
     var history: std.ArrayList(u32) = .empty;
     defer history.deinit(gpa);
     try history.appendSlice(gpa, &prompt);
@@ -314,5 +373,9 @@ test "a third stream at two lanes waits engine_busy in FIFO order, then decodes 
         try history.append(gpa, t);
     }
     try std.testing.expectEqual(@as(usize, rc.max_tokens), c.tokens.items.len);
-    try std.testing.expect(c.events.items.len >= 2); // several shared rounds, not one degraded pass
+    try std.testing.expect(c.events.items.len >= 2);
+    try expectSolo(&ra, a.tokens.items);
+    try expectSolo(&rb, b.tokens.items);
+    try expectSolo(&rc, c.tokens.items);
+    try expectSolo(&rd, d.tokens.items);
 }

@@ -19,6 +19,7 @@ test {
     _ = @import("steps_test.zig");
     _ = @import("steps_serve_test.zig");
     _ = @import("vision_boot_test.zig");
+    _ = @import("calib_test.zig");
 }
 
 /// Replies that have shown their first tokens so far (Box.first).
@@ -474,12 +475,15 @@ test "dsv41 metal serve: (j) with a residency owner the server gets an idle tick
         defer Served.close(s);
         const k = s.engine().keepaliveTarget() orelse return error.NoKeepalive;
         for (0..3) |_| k.tick(k.ctx); // the idle ticker's tick: waiting joins committed, a tiny blit through the set
+        // the probe a long prompt gets each interval: the set in use, its waiting joins left waiting
+        const probe = k.probe orelse return error.NoKeepaliveProbe;
+        probe(k.ctx);
         var drafted: u64 = 0;
         var got: [1][]u32 = undefined;
         try serve(s.engine(), &.{.{ .prompt = &.{ 11, 12, 13, 14 }, .max = 8 }}, false, &got, &drafted);
         defer freeAll(&got);
         k.tick(k.ctx); // and again after a request
-        say(got[0].len == 8, "(j) idle ticker on a model with a residency owner: 4 ticks, a reply of {d} tokens between them", .{got[0].len});
+        say(got[0].len == 8, "(j) idle ticker on a model with a residency owner: 4 ticks and a probe, a reply of {d} tokens between them", .{got[0].len});
         try testing.expectEqual(@as(usize, 8), got[0].len);
     }
     const m = try fs.open(gpa, io, seed, .{});

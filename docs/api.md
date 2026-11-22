@@ -174,10 +174,11 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache, cache_salt
-([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The
-vision, speech, embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
-thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
+thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs,
+prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and
+slide_conversations. The vision, speech, embeddings, readouts and rerank fields report whether that user feature is
+present. The last two fields, thinking_switch and thinking_applicable, are the loaded chat template's and
+tokenizer's thinking facts (see
 [Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
 and no callback details or addresses are exposed.
 
@@ -463,7 +464,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
+| `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA, and Qwen3.8-27B and Qwen3.8-Flash-Next on Metal; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
@@ -482,7 +483,15 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 | `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400, a key with `inference` but not `read` 403 | Both |
 
-`n` must be 1; multiple choices receive HTTP 400.
+`n` takes 1 through 16 choices: each is its own engine request on the one prompt, and later choices resume the
+prompt the first fills (their `tensorfold.cached_tokens` show it). Choice 0 keeps the request's seed (a request that
+names none draws one for all its choices), so `n: 1` is unchanged; choice `i` draws with `mix(seed ^ i)` in 63 bits,
+named in its own `tensorfold.seed`, and a solo request with that seed gives its tokens. Each choice has its own
+tool-call ids, `stop_sequence` and loop-stop `error`. `usage` counts the prompt once and every choice's reply
+tokens. A stream sends every choice's chunks by `index`, then each choice's finish, then one usage chunk when asked.
+`n` above 1 with `logprobs` or a required tool call receives HTTP 400, as do `n` above 16 and, on a `--cortheon`
+server, a chat its turn loop would take (send `"cortheon": false` for several choices). `/v1/responses` and
+`/v1/imprint` serve one reply: `n` other than 1 receives HTTP 400 there.
 
 `modalities` must be absent or `["text"]`, and a truthy top-level `image`, `images`, `image_url`, `input_image`,
 `audio`, `input_audio`, `video` or `video_url` key is refused: this server accepts and produces text only.
@@ -1047,12 +1056,13 @@ A startup capacity estimate is not a measured release capacity.
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
 model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
-`MemAvailable`, at most the free memory CUDA reports, less a reserve (a tenth of RAM, at least 4 GiB). CUDA does not
-count the page cache as free, so before loading, the server drops the checkpoint's own shards from it. On native CUDA
-a stream's window is `--context`, the model's own window at `--context 0`, or, when it is unset, the family's default
-capped at the model's own window; on the paged families the streams and pages then fill the budget up to the streams'
-windows plus the cache's pages, so once those exceed it, the free memory after load is the reserve. To leave room for
-other containers, start the server with a smaller `--context` or `--parallel`.
+`MemAvailable`, at most the free memory CUDA reports plus the checkpoint's own cached bytes, less a reserve (a tenth
+of RAM, at least 4 GiB). The checkpoint's clean pages stay in the page cache; they are reclaimed when CUDA needs
+them, so the first prompt does not fault the weights back in. Other memory on the box still bounds the budget.
+On native CUDA, a stream's window is `--context`, the model's own window at `--context 0`, or, when it is unset, the
+family's default capped at the model's own window; on the paged families the streams and pages then fill the budget up
+to the streams' windows plus the cache's pages, so once those exceed it, the free memory after load is the reserve.
+To leave room for other containers, start the server with a smaller `--context` or `--parallel`.
 `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
 one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
 workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
@@ -1352,6 +1362,9 @@ from the end of its headers, after the key check and before its body is read or 
 ends, streams included. Each key counts apart, by its digest, whatever its label; a server without keys counts every
 request as one key. A refused request answers 429 with `Retry-After` and the route's error shape (`rate_limit_error`; the
 OpenAI-shaped `code` names the limit) and closes its connection without reading the body. A refusal spends no rate.
+A chat or completion with `n` above 1 holds `n` places under `--max-inflight` and `--max-inflight-per-key` (one rate
+charge): once its body is read it takes the other `n - 1` places, all or none, or answers the same 429 before any
+choice starts; it then counts as both accepted and refused in the metrics.
 
 The rate's buckets live in a table of 128 keys. A key's bucket stays until it has refilled, so cycling keys cannot reset a
 spent rate; with more than 128 keys starting requests within one refill, a further key is refused

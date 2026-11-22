@@ -419,7 +419,7 @@ pub fn forwardRunner(r: *q.Runner, ids: []const i32, p0: u32, mode: Mode) !?i32 
                     try d.launch(d.k.attn_prompt, .{ .x = (wr + 7) / 8, .y = sh.akv }, .{ wa.q, l.kc.?, l.vc.?, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(wr)), @as(f32, 1.0 / 16.0) });
                 } else {
                     try d.launch(d.k.attn_decode, .{ .x = T, .y = sh.akv, .z = ns }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi_max_pos != null) tree else table, mt, mpos, kvCap() });
-                    try d.launch(d.k.attn_merge, .{ .x = sh.aq, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                    try d.launch(d.k.attn_merge, .{ .x = sh.aq * 16, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
                 }
                 if (q.kv8 & 1 != 0) try d.launch(d.k.rot_heads, .{ .x = wr, .y = sh.aq }, .{wa.y});
                 const p_attn: *anyopaque = if (tail_at) |t0| off(a.p, t0 * @as(usize, sh.att_in) * 2) else a.p;

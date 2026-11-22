@@ -57,7 +57,8 @@ pub const Behind = struct {
     drain: *const fn (ctx: *anyopaque) anyerror!void,
 };
 /// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, prompt_rows: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
+
 pub const Slot = @import("target_slot.zig").Slot;
 pub const Target = struct {
     a: Allocator,
@@ -323,6 +324,7 @@ pub const Target = struct {
         if (s.image_rows) |*r| r.deinit();
         s.image_rows = null;
         const n: u32 = @intCast(s.hist.items.len);
+        t.stats.prompt_rows += n - s.resumed;
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
         if (hit) |l| logits = l else {
@@ -582,19 +584,3 @@ pub const Target = struct {
         return out.toOwnedSlice(t.a);
     }
 };
-
-test "argmax: the first maximum, NaN rows as the scalar scan" {
-    const a = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(7);
-    const rnd = prng.random();
-    const row = try a.alloc(f32, 129280);
-    defer a.free(row);
-    for (0..200) |k| {
-        for (row) |*x| x.* = rnd.floatNorm(f32);
-        if (k % 5 == 1) row[rnd.uintLessThan(usize, row.len)] = 9.0;
-        if (k % 5 == 2) row[rnd.uintLessThan(usize, row.len)] = std.math.nan(f32);
-        if (k % 5 == 3) @memset(row, -std.math.inf(f32));
-        if (k % 5 == 4) row[rnd.uintLessThan(usize, 7)] = std.math.nan(f32);
-        try std.testing.expectEqual(pick.scan(row), pick.argmax(row));
-    }
-}

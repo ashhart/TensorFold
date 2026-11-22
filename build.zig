@@ -126,6 +126,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
     @import("zig/build/lfm3_host.zig").steps(b, test_step);
+    @import("zig/build/qwen3_asr_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
@@ -267,6 +268,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
     @import("zig/build/cache_index_timing.zig").step(b);
+    @import("zig/build/host_draw_timing.zig").step(b);
     // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
     const template_limits = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
     b.step("test-template-limits-host", "Chat template nesting, render steps, stack and memory limits without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = template_limits, .filters = &.{"security:"} })).step);

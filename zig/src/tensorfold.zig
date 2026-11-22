@@ -82,6 +82,7 @@ pub const hy4_contract = @import("families/hy4_flash/contract_exports.zig");
 pub const qwen3_metal = @import("families/qwen3/metal/metal.zig");
 pub const llama = @import("families/llama/llama.zig");
 pub const flint = @import("families/flint/flint.zig");
+pub const ricursive = @import("families/ricursive/ricursive.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 pub const lfm3 = @import("families/lfm3/lfm3.zig");
@@ -122,6 +123,7 @@ test {
     _ = @import("families/llama/llama.zig");
     _ = qwen3_metal;
     _ = @import("families/flint/flint.zig");
+    _ = @import("families/ricursive/ricursive.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
@@ -178,3 +180,5 @@ pub const hc_pointwise_metal_adapter = @import("core/hc_pointwise_metal_impl.zig
 pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("core/attention_ref.zig");
+
+pub const metal_penalties = @import("families/flashnext/penalties.zig");

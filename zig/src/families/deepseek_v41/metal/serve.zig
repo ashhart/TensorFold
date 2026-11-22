@@ -10,6 +10,7 @@ const pass_ = @import("pass.zig");
 const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
+const calib = @import("calib.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -51,6 +52,8 @@ pub const Options = struct {
     gpu_chain: bool = false,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
+    /// the device and weights a stored cost table is specific to (0: none named)
+    identity: u64 = 0,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -98,15 +101,14 @@ pub const Metal = struct {
         m.warm = t;
     }
 
-    /// The server's idle ticker target (null without a residency owner).
+    /// The server's ticker target (null without a residency owner): idle ticks, and probes while a long prompt runs.
     pub fn keepalive(m: *Metal) ?api.keepalive.Target {
-        return if (m.warm != null) .{ .ctx = &m.warm.?, .tick = mtl.keepalive.Target.tick } else null;
+        return if (m.warm != null) .{ .ctx = &m.warm.?, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy } else null;
     }
 
     /// The lanes' view: one slot a stream, rows of 16 a forward, the release's DSpark shape on one device.
     pub fn model(m: *Metal) serve_lanes.Model {
-        const c = m.parts.env.c;
-        const shape: host.dspark.Shape = .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
+        const dshape = m.dsparkShape();
         return .{
             .ptr = m,
             .vision = m.vision(),
@@ -116,7 +118,7 @@ pub const Metal = struct {
             .world = 1,
             .prefill_step = m.opt.prompt.chunk,
             .forward_rows = pipelines.max_rows,
-            .shape = shape,
+            .shape = dshape,
             .target = targetFn,
             .pass = passFn,
             .calibrate = calibrate,
@@ -125,8 +127,9 @@ pub const Metal = struct {
             .health = .{ .ctx = m, .read = healthy },
             .keepalive = m.keepalive(),
             .close = close,
-            // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
-            .calib = if (host.calib_env.Knobs.fromEnv().file) |f| .{ .file = f } else .{ .mode = "default" },
+            // a cost table measured on this machine (TF_DSV41_CALIB or TF_DSV41_CALIB_FILE), else the defaults
+            .calib_id = m.opt.identity,
+            .calib = knobs(),
             .steps = m.opt.steps,
             .decode_share = m.opt.decode_share,
         };
@@ -154,6 +157,20 @@ pub const Metal = struct {
         return .{ .pixels = got.pixels, .gh = got.gh, .gw = got.gw, .tokens = got.tokens, .hash = got.hash };
     }
 
+    fn dsparkShape(m: *const Metal) host.dspark.Shape {
+        const c = m.parts.env.c;
+        return .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
+    }
+
+    /// TF_DSV41_CALIB and its neighbours; unset or blank keeps TF_DSV41_CALIB_FILE when set, else defaults.
+    fn knobs() host.calib_env.Knobs {
+        var k = host.calib_env.Knobs.fromEnv();
+        const no_mode = std.mem.trim(u8, k.mode orelse "", " \t\r\n").len == 0;
+        const no_file = std.mem.trim(u8, k.file orelse "", " \t\r\n").len == 0;
+        if (no_mode and no_file) k.mode = "default";
+        return k;
+    }
+
     fn self(ctx: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ctx));
     }
@@ -167,8 +184,13 @@ pub const Metal = struct {
         return if (m.dp != null) m.ad.pass() else null;
     }
 
-    fn calibrate(_: *anyopaque, _: Allocator, _: std.Io, _: []const u8, _: host.calib_env.Knobs, _: host.calib_env.Shape) anyerror!host.calib_lanes.Boot {
-        return error.Unmeasured; // the mode is "default": never asked to measure
+    fn calibrate(ctx: *anyopaque, a: Allocator, io: std.Io, dir: []const u8, k: host.calib_env.Knobs, want: host.calib_env.Shape) anyerror!host.calib_lanes.Boot {
+        return self(ctx).calibrateReport(a, io, dir, k, want, null);
+    }
+
+    /// `calibrate`, with what the measurement did written to `report` (the tests bound it).
+    pub fn calibrateReport(m: *Metal, a: Allocator, io: std.Io, dir: []const u8, k: host.calib_env.Knobs, want: host.calib_env.Shape, report: ?*calib.Report) !host.calib_lanes.Boot {
+        return calib.run(a, io, dir, k, want, .{ .t = m.t, .ad = if (m.dp != null) &m.ad else null, .slots = m.opt.slots, .limit = m.opt.limit, .vocab = m.parts.env.c.vocab, .shape = m.dsparkShape(), .report = report });
     }
 
     /// The device's allocated bytes now (the weights, slots, prompt buffers and kept-state host copies aside).

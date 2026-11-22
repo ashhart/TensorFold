@@ -27,3 +27,9 @@ fn keepsEnd(store: *const Store, job: *const Job) bool {
     return !job.request.untaught and store.rules.lookahead == 0 and
         (!store.rules.warm_usable or store.usable(@intCast(job.request.prompt.len), job.request.chunks));
 }
+
+/// Work a background pass gives way to: a queued foreground request, another prompt filling, a decoding stream.
+pub fn otherWork(h: *const LaneHost, job: *const Job) bool {
+    for (h.filling.items) |j| if (j != job) return true; // the lane thread's own list: the pass runs on it
+    return h.foregroundWaiting() or h.core.activeCount() > 0;
+}

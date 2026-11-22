@@ -315,14 +315,15 @@ pub const Forward = struct {
 
     const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
 
-    /// hc_post of rows lo..hi from partials `g` [world][hi - lo][D] (a gathered room or a split one's own rows).
-    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64) !void {
+    /// hc_post of rows lo..hi from ranked partials g; nonzero own replaces only rank me's gathered slot.
+    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64, own: u64) !void {
         const c = &r.w.config;
         const b = r.b;
         const S: usize = c.hc;
         const D: usize = c.hidden;
         const x = b.x + lo * S * D * 2;
-        try glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
+        if (own != 0) return glue.hcPostOwn(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world, own, r.w.share.rank);
+        return glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
     }
 
     /// forward._pre of rows lo..hi.
@@ -335,12 +336,12 @@ pub const Forward = struct {
     }
 
     /// One piece's glue after a site: hc_post, then the next layer's hc_pre or (after the last layer) the stream mean.
-    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64) !void {
+    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64, own: u64) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
         const layers = r.w.layers;
-        try f.postRows(r, lo, hi, g);
+        try f.postRows(r, lo, hi, g, own);
         if (site == .mixer) return f.preRows(r, layers[j].ffn_hc, layers[j].post_norm, lo, hi);
         if (j + 1 < layers.len) return f.preRows(r, layers[j + 1].attn_hc, layers[j + 1].in_norm, lo, hi);
         try glue.streamMean(f.set(), f.stream, r.b.x + lo * c.hc * c.hidden * 2, r.b.hidden + lo * c.hidden * 2, hi - lo, c.hidden, c.hc);
@@ -378,6 +379,11 @@ pub const Forward = struct {
 
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
+        return f.runMode(ids, true);
+    }
+
+    /// The same pass with `lm_head` only when its logits are read; final norms always cover every row.
+    pub fn runMode(f: *const Forward, ids: []const i32, head: bool) !void {
         const R = ids.len;
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
@@ -398,7 +404,7 @@ pub const Forward = struct {
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
         if (pieces > 1 or (pieces == 1 and f.splits(R))) try f.pieced(f.pieces.?, R, cut[0..pieces]) else try f.whole(R);
-        try f.finish(R);
+        try f.finish(R, head);
         if (f.prof) |p| p.mark(f.stream, .head);
     }
 
@@ -442,7 +448,7 @@ pub const Forward = struct {
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
-    pub fn finish(f: *const Forward, R: usize) !void {
+    pub fn finish(f: *const Forward, R: usize, head: bool) !void {
         prof_mod.context(f.prof, null, null, .chunk);
         const stamp = prof_mod.span(f.prof, f.stream, .head);
         defer stamp.end();
@@ -454,6 +460,7 @@ pub const Forward = struct {
                 try shared.heads(f, r);
                 continue;
             }
+            if (!head) continue;
             const head_rows: usize = if (b.prefill) 1 else R;
             const first = if (b.prefill) R - 1 else 0;
             try projection.matmul(f.set(), f.stream, r.w.head, b.fnormed + first * c.hidden * 2, c.hidden, b.logits, b.kda.mm_part, head_rows, r.w.share.vocab.len(), c.hidden, false);
