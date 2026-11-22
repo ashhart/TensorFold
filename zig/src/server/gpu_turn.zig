@@ -40,8 +40,7 @@ pub fn yield(io: std.Io, at: []const u8) f64 {
     return @as(f64, @floatFromInt(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e9;
 }
 
-/// Whether no speech holds the turn. Speech only shares it, so a hold that also refuses a shared probe is no voice
-/// and is not waited for; an error counts as free, as speech never depends on batch work seeing it.
+/// Whether no voice holds the turn: a hold refusing even a shared probe is no voice, and an error counts as free.
 fn free(io: std.Io, file: std.Io.File) bool {
     if (file.tryLock(io, .exclusive) catch return true) {
         file.unlock(io);
@@ -52,8 +51,7 @@ fn free(io: std.Io, file: std.Io.File) bool {
     return false;
 }
 
-/// Read-only so the speech server's and a render's users can share one file; flock needs no write access.
-/// Created only when absent, else `existing`: a name planted in the shared directory stays inert.
+/// Read-only, so speech and a render share one file; made only when absent, else `existing` keeps a planted name inert.
 fn open(io: std.Io, at: []const u8) !std.Io.File {
     const dir = std.Io.Dir.cwd();
     return existing(io, at, .read_only) catch |e| switch (e) {
@@ -126,8 +124,7 @@ fn marker(io: std.Io, at: []const u8) !std.Io.File {
     };
 }
 
-/// A file already at `name`, only when it is one regular file with no other name: never through a symlink, and
-/// nonblocking, so a planted FIFO cannot stall the open and a planted hard link cannot redirect the stamp's writes.
+/// The one regular file with no other name at `name`: no symlink, and nonblocking so a planted FIFO cannot stall.
 fn existing(io: std.Io, name: []const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !std.Io.File {
     const file: std.Io.File = if (@import("builtin").os.tag == .windows)
         try std.Io.Dir.cwd().openFile(io, name, .{ .mode = mode, .follow_symlinks = false })
@@ -144,8 +141,7 @@ fn existing(io: std.Io, name: []const u8, mode: std.Io.Dir.OpenFileOptions.Mode)
     return file;
 }
 
-/// Committed command buffers, waited in commit order. No error returns before every one has completed, so a
-/// failure never frees or reuses buffers the GPU still reads. `C` has `wait`, `failure` and `gpuSeconds`.
+/// Committed command buffers waited in order; errors wait for every one, so the GPU never reads a freed buffer.
 pub fn Queue(comptime C: type, comptime capacity: usize) type {
     return struct {
         ring: [capacity]C = undefined,
@@ -276,8 +272,7 @@ test "a planted lock path neither redirects the files speech makes nor holds spe
     var kept: [8]u8 = undefined;
     try std.testing.expectEqualStrings("kept", try tmp.dir.readFile(io, "victim", &kept));
 
-    // a real lock someone else holds exclusively and never lets go: speech still starts, without the turn, and
-    // batch work does not wait for a holder that is no voice
+    // an exclusive hold that never lets go: speech starts without the turn, and batch work does not wait on it
     try tmp.dir.deleteFile(io, "speech.lock");
     try tmp.dir.deleteFile(io, "speech.lock.stamp");
     const squatter = try open(io, lock);
