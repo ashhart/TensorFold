@@ -31,12 +31,15 @@ const qkv_shapes = [_]c.Shape{
     .{ .rows = 1, .n = 3072, .k = mini_h },
     .{ .rows = 16, .n = 384, .k = 128 },
     .{ .rows = 2048, .n = 384, .k = 128 },
+    .{ .rows = 3, .n = 3072, .k = mini_h },
+    .{ .rows = 9, .n = 3072, .k = mini_h },
 };
 
-/// Distinct q/k/v rows, with the Small single-input aliasing bug planted as the control.
+/// Distinct q/k/v rows; controls: the Small single-input aliasing bug, and a decode launch told one row fewer.
 pub const ProjectQkv = struct {
     kern: *const lm.Kernels,
     shared_input: bool = false,
+    short_rows: bool = false,
     shape: c.Shape = undefined,
     u: [3][]u16 = .{ &.{}, &.{}, &.{} },
     w: [3][]u16 = .{ &.{}, &.{}, &.{} },
@@ -44,7 +47,14 @@ pub const ProjectQkv = struct {
     out: [3]u64 = @splat(0),
 
     pub fn spec(self: *const ProjectQkv) c.Spec {
-        return .{ .name = if (self.shared_input) "control: Mini split QKV projection using Small's one normalized input for all roles" else "inkling2 loop tf_ink2_loop_project_qkv (distinct normalized q/k/v inputs, unchanged raw layouts)", .accum = .f32, .depth = depth, .out = .bf16, .served = if (self.shared_input) qkv_shapes[0..2] else &qkv_shapes };
+        const name = if (self.shared_input)
+            "control: Mini split QKV projection using Small's one normalized input for all roles"
+        else if (self.short_rows)
+            "control: inkling2 loop decode QKV (tf_ink2_loop_qkv_rows4/16) told one row fewer than it holds"
+        else
+            "inkling2 loop tf_ink2_loop_project_qkv + decode tf_ink2_loop_qkv_rows1/4/16 (distinct q/k/v inputs, same raw layouts)";
+        const control_shapes = if (self.short_rows) qkv_shapes[3..5] else qkv_shapes[0..2];
+        return .{ .name = name, .accum = .f32, .depth = depth, .out = .bf16, .served = if (self.shared_input or self.short_rows) control_shapes else &qkv_shapes };
     }
 
     fn depth(s: c.Shape) usize {
@@ -52,7 +62,7 @@ pub const ProjectQkv = struct {
     }
 
     pub fn control(self: *const ProjectQkv) ?g.Gate {
-        return if (self.shared_input) .shapes else null;
+        return if (self.shared_input or self.short_rows) .shapes else null;
     }
 
     pub fn free(self: *ProjectQkv, a: std.mem.Allocator) void {
@@ -100,7 +110,7 @@ pub const ProjectQkv = struct {
     pub fn run(self: *ProjectQkv, rig: *rig_.Rig) !void {
         const k = if (self.shared_input) self.dev[0] else self.dev[1];
         const v = if (self.shared_input) self.dev[0] else self.dev[2];
-        try lm.projectQkv(self.kern, rig.s, self.dev[0], k, v, self.dev[3], self.dev[4], self.dev[5], self.out[0], self.out[1], self.out[2], self.shape.rows, self.shape.k, self.shape.n, self.shape.n / 3);
+        try lm.projectQkv(self.kern, rig.s, self.dev[0], k, v, self.dev[3], self.dev[4], self.dev[5], self.out[0], self.out[1], self.out[2], self.shape.rows - @intFromBool(self.short_rows), self.shape.k, self.shape.n, self.shape.n / 3);
     }
 
     pub fn count(self: *const ProjectQkv) usize {
@@ -400,7 +410,7 @@ pub const Set = struct {
     loaded: bool = false,
     messages: [2]K(Messages) = undefined,
     gates: [3]K(Gate) = undefined,
-    qkvs: [2]K(ProjectQkv) = undefined,
+    qkvs: [3]K(ProjectQkv) = undefined,
     ars: [3]K(Ar) = undefined,
     rounds: [2]K(RoundBf16) = undefined,
 
@@ -411,7 +421,7 @@ pub const Set = struct {
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         for (&set.messages, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .aliased = i == 1 } } };
         for (&set.gates, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .fault = @fromBackingInt(@intCast(i)) } } };
-        for (&set.qkvs, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .shared_input = i == 1 } } };
+        for (&set.qkvs, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .shared_input = i == 1, .short_rows = i == 2 } } };
         for (&set.ars, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .partial_bf16 = i == 1, .short = i == 2 } } };
         for (&set.rounds, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .short = i == 1 } } };
         inline for (.{ "messages", "gates", "qkvs", "ars", "rounds" }) |f| for (&@field(set, f)) |*x| try list.append(a, x.kernel());
