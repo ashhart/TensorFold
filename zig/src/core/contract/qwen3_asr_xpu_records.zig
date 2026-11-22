@@ -1,4 +1,4 @@
-//! Qwen3-ASR's Gen12LP launches (qwen3_asr.cl, lfm3.cl at GQ 2) and what the driver builds of their SPIR-V.
+//! Qwen3-ASR's Gen12LP launches (qwen3_asr.cl, its _mv, lfm3.cl at GQ 2) and what the driver builds of their SPIR-V.
 const std = @import("std");
 const limits = @import("xpu_limits.zig");
 
@@ -33,6 +33,7 @@ pub const records = [_]Record{
     rec("qwen3-asr asr_gelu", "asr_gelu", "qwen3_asr", .{ 256, 1, 1 }, 0, 3),
     rec("qwen3-asr asr_attn_full", "asr_attn_full", "qwen3_asr", .{ 16, 1, 1 }, 0, 5),
     rec("qwen3-asr asr_qk_rope", "asr_qk_rope", "qwen3_asr", .{ 16, 1, 1 }, 0, 14),
+    rec("qwen3-asr asr_gemv", "asr_gemv", "qwen3_asr_mv", .{ 64, 1, 1 }, 0, 5),
     rec("qwen3-asr lfm3_gq2 lfm3_rmsnorm", "lfm3_rmsnorm", "lfm3_gq2", .{ 256, 1, 1 }, 64, 5),
     rec("qwen3-asr lfm3_gq2 lfm3_attn_partial", "lfm3_attn_partial", "lfm3_gq2", .{ 32, 1, 1 }, 0, 13),
     rec("qwen3-asr lfm3_gq2 lfm3_attn_merge_gate", "lfm3_attn_merge_gate", "lfm3_gq2", .{ 16, 1, 1 }, 0, 10),

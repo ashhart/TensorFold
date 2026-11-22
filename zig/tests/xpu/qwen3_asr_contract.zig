@@ -52,6 +52,7 @@ fn collect(s: *Suite, dev: *kit.Dev, out: *std.ArrayList(g.Kernel), only: ?[]con
         try s.add(tower.Gemm, out, only, try tower.Gemm.init(a, dev, .none, p[0]));
         if (p[1] != .none) try s.add(tower.Gemm, out, only, try tower.Gemm.init(a, dev, p[1], p[0]));
     }
+    for ([_]Mutation{ .none, .gemv_steps_reversed }) |m| try s.add(tower.Gemm, out, only, try tower.Gemm.initGemv(a, dev, m));
     for ([_]Mutation{ .none, .conv_taps_transposed }) |m| try s.add(tower.Conv, out, only, try tower.Conv.init(a, dev, m));
     for ([_]Mutation{ .none, .flatten_f_major }) |m| try s.add(tower.Flatten, out, only, try tower.Flatten.init(a, dev, m));
     for ([_]Mutation{ .none, .attn_causal }) |m| try s.add(tower.AttnFull, out, only, try tower.AttnFull.init(a, dev, m));
@@ -85,7 +86,7 @@ fn live(a: std.mem.Allocator, dev: *kit.Dev) !usize {
     if (out.items.len > 0) std.debug.print("{s}", .{out.items});
     for (records.records) |rec| {
         out.clearRetainingCapacity();
-        const img: kit.Image = if (std.mem.eql(u8, rec.launch.image, "qwen3_asr")) .qwen3_asr else .lfm3_gq2;
+        const img = std.meta.stringToEnum(kit.Image, rec.launch.image) orelse return error.UnknownImage;
         const sym = try a.allocSentinel(u8, rec.launch.symbol.len, 0);
         defer a.free(sym);
         @memcpy(sym, rec.launch.symbol);

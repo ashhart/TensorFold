@@ -9,6 +9,7 @@ const Control = struct { name: []const u8, image: []const u8, edits: []const [2]
 pub const controls = [_]Control{
     .{ .name = "gemm_no_residual", .image = "qwen3_asr", .edits = &.{.{ "if (has_res) t = bfr(t + bf(res[at]));", "if (has_res) t = bfr(t);" }} },
     .{ .name = "gemm_bf16_sums", .image = "qwen3_asr", .edits = &.{.{ "acc[i][j] += part[i][j];", "acc[i][j] = bfr(acc[i][j] + part[i][j]);" }} },
+    .{ .name = "gemv_steps_reversed", .image = "qwen3_asr_mv", .edits = &.{.{ "acc += sub_group_broadcast(part, j);", "acc += sub_group_broadcast(part, live - 1 - j);" }} },
     .{ .name = "conv_taps_transposed", .image = "qwen3_asr", .edits = &.{.{ "kh = (kk % 9) / 3, kw = kk % 3;", "kw = (kk % 9) / 3, kh = kk % 3;" }} },
     .{ .name = "flatten_f_major", .image = "qwen3_asr", .edits = &.{.{ "ci = col / f, ff = col % f;", "ff = col / c, ci = col % c;" }} },
     .{ .name = "layernorm_no_bias", .image = "qwen3_asr", .edits = &.{.{ "* rs * bf(w[i]) + bf(b[i]));", "* rs * bf(w[i]));" }} },

@@ -11,13 +11,14 @@ const g = contract.gates;
 const records = contract.qwen3_asr_xpu_records;
 
 /// The binding's image a kernel lives in.
-pub const Image = enum { qwen3_asr, lfm3_gq2 };
+pub const Image = enum { qwen3_asr, qwen3_asr_mv, lfm3_gq2 };
 
 /// The image a test builds: the binding's, or a control's (an edit of the same source, xpu_qwen3_asr_contract.zig).
 pub const Mutation = enum {
     none,
     gemm_no_residual,
     gemm_bf16_sums,
+    gemv_steps_reversed,
     conv_taps_transposed,
     flatten_f_major,
     layernorm_no_bias,
@@ -33,6 +34,7 @@ pub const Mutation = enum {
             .none => "",
             .gemm_no_residual => "control: xpu qwen3-asr asr_gemm, the residual is not added",
             .gemm_bf16_sums => "control: xpu qwen3-asr asr_gemm, each 16-k step added in bf16",
+            .gemv_steps_reversed => "control: xpu qwen3-asr asr_gemv, each 16 steps added last first",
             .conv_taps_transposed => "control: xpu qwen3-asr asr_conv, kh and kw swapped",
             .flatten_f_major => "control: xpu qwen3-asr asr_flatten, rows written f-major",
             .layernorm_no_bias => "control: xpu qwen3-asr asr_layernorm, the bias is dropped",
@@ -64,6 +66,7 @@ pub const Dev = struct {
     ctx: xpu.Context,
     s: xpu.Stream,
     asr: xpu.Module,
+    mv: xpu.Module,
     lf: xpu.Module,
     controls: [std.enums.values(Mutation).len]?xpu.Module = @splat(null),
 
@@ -74,6 +77,7 @@ pub const Dev = struct {
         self.ctx = try xpu.Context.init(&self.drv, ordinal);
         self.s = try xpu.Stream.init(&self.ctx);
         self.asr = try xpu.Module.load(&self.ctx, xpu.kernels.qwen3_asr);
+        self.mv = try xpu.Module.load(&self.ctx, xpu.kernels.qwen3_asr_mv);
         self.lf = try xpu.Module.load(&self.ctx, xpu.kernels.lfm3_gq2);
         self.controls = @splat(null);
     }
@@ -81,6 +85,7 @@ pub const Dev = struct {
     pub fn deinit(self: *Dev) void {
         for (&self.controls) |*m| if (m.*) |*x| x.unload();
         self.lf.unload();
+        self.mv.unload();
         self.asr.unload();
         self.s.deinit();
         self.ctx.deinit();
@@ -89,13 +94,17 @@ pub const Dev = struct {
 
     /// The image `m` builds for `img`: the binding's for none, else the control's (loaded once).
     pub fn module(self: *Dev, img: Image, m: Mutation) !*xpu.Module {
-        if (m == .none) return if (img == .qwen3_asr) &self.asr else &self.lf;
+        if (m == .none) return switch (img) {
+            .qwen3_asr => &self.asr,
+            .qwen3_asr_mv => &self.mv,
+            .lfm3_gq2 => &self.lf,
+        };
         const slot = &self.controls[@backingInt(m)];
         if (slot.* == null) slot.* = try xpu.Module.load(&self.ctx, blob(m));
         return &slot.*.?;
     }
 
-    /// `symbol` at the work-group its record holds, from the binding's image or the control's.
+    /// `symbol` at the work-group its record holds, from the binding's image or the control's (one image each).
     pub fn kernel(self: *Dev, img: Image, m: Mutation, symbol: [:0]const u8) !xpu.Kernel {
         const rec = recordOf(symbol) orelse return error.NoRecord;
         return (try self.module(img, m)).kernel(symbol, rec.launch.threads);

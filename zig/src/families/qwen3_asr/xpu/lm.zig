@@ -1,4 +1,4 @@
-//! The Qwen3 LM's XPU binding: lfm3_gq2's norm, SwiGLU and attention, glue's add, qwen3_asr.cl's GEMM and QK RoPE.
+//! The Qwen3 LM's XPU binding: lfm3_gq2's norm, SwiGLU, attention; glue's add; qwen3_asr.cl's GEMM, RoPE; its _mv.
 const std = @import("std");
 const xpu = @import("xpu");
 const cfg = @import("../config.zig");
@@ -15,9 +15,10 @@ pub const Lm = struct {
     t: cfg.Text,
     r: *rt.Runtime,
     asr: rt.Module,
+    mv: rt.Module,
     lf: rt.Module,
     glue: rt.Module,
-    k: struct { rms: rt.Kernel, add: rt.Kernel, gemm: rt.Kernel, qk: rt.Kernel, part: rt.Kernel, merge: rt.Kernel, swiglu: rt.Kernel },
+    k: struct { rms: rt.Kernel, add: rt.Kernel, gemm: rt.Kernel, gemv: rt.Kernel, qk: rt.Kernel, part: rt.Kernel, merge: rt.Kernel, swiglu: rt.Kernel },
     cap: usize, // positions the caches hold
     maxc: usize, // chunks a row's keys span at most
     pos0: usize = 0, // the pass's first position
@@ -35,6 +36,8 @@ pub const Lm = struct {
         if (!xpu.kernels.available) return error.BuiltWithoutKernels;
         var asr = try r.module(xpu.kernels.qwen3_asr);
         errdefer asr.deinit();
+        var mv = try r.module(xpu.kernels.qwen3_asr_mv);
+        errdefer mv.deinit();
         var lf = try r.module(xpu.kernels.lfm3_gq2);
         errdefer lf.deinit();
         var glue = try r.module(xpu.kernels.glue);
@@ -44,12 +47,14 @@ pub const Lm = struct {
             .t = t,
             .r = r,
             .asr = asr,
+            .mv = mv,
             .lf = lf,
             .glue = glue,
             .k = .{
                 .rms = try lf.kernel("lfm3_rmsnorm", .{ 256, 1, 1 }),
                 .add = try glue.kernel("add_bf16", .{ 64, 1, 1 }),
                 .gemm = try asr.kernel("asr_gemm", .{ 16, 16, 1 }),
+                .gemv = try mv.kernel("asr_gemv", .{ 64, 1, 1 }),
                 .qk = try asr.kernel("asr_qk_rope", .{ 16, 1, 1 }),
                 .part = try lf.kernel("lfm3_attn_partial", .{ 32, 1, 1 }),
                 .merge = try lf.kernel("lfm3_attn_merge_gate", .{ 16, 1, 1 }),
@@ -100,9 +105,10 @@ pub const Lm = struct {
     pub fn deinit(lm: *Lm, gpa: std.mem.Allocator) void {
         gpa.free(lm.logits);
         gpa.free(lm.ids);
-        inline for (.{ &lm.k.rms, &lm.k.add, &lm.k.gemm, &lm.k.qk, &lm.k.part, &lm.k.merge, &lm.k.swiglu }) |k| k.deinit();
+        inline for (.{ &lm.k.rms, &lm.k.add, &lm.k.gemm, &lm.k.gemv, &lm.k.qk, &lm.k.part, &lm.k.merge, &lm.k.swiglu }) |k| k.deinit();
         lm.glue.deinit();
         lm.lf.deinit();
+        lm.mv.deinit();
         lm.asr.deinit();
     }
 
@@ -141,7 +147,9 @@ pub const Lm = struct {
         try run(lm.r, &lm.k.rms, .{ rows, 1, 1 }, .{ src, w, y, n, eps });
     }
 
+    /// y = x w^T in bf16; one row (decode, the head) through asr_gemv, asr_gemm's bits at one row.
     pub fn gemm(lm: *Lm, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize) !void {
+        if (rows == 1) return run(lm.r, &lm.k.gemv, .{ (n + 3) / 4, 1, 1 }, .{ x, w, y, n, k });
         const z = lm.b.gate; // unread: no bias, no residual
         try run(lm.r, &lm.k.gemm, .{ (n + 63) / 64, (rows + 63) / 64, 1 }, .{ x, w, z, @as(u32, 0), z, @as(u32, 0), y, rows, n, k, n, @as(u32, 0) });
     }

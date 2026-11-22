@@ -261,6 +261,7 @@ const kernels = [_]Kernel{
     .{ .name = "lfm3_mv", .options = cl3 },
     .{ .name = "lfm3_gq2", .src = "lfm3", .options = cl3 ++ " -DGQ=2" },
     .{ .name = "qwen3_asr", .options = cl3 },
+    .{ .name = "qwen3_asr_mv", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).

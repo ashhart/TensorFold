@@ -33,3 +33,5 @@ pub const lfm3_mv: []const u8 = if (available) &Blob("spv_lfm3_mv").bytes else &
 pub const lfm3_gq2: []const u8 = if (available) &Blob("spv_lfm3_gq2").bytes else &.{};
 /// Qwen3-ASR's own ops: bf16 Linear and conv, LayerNorm, GELU, the tower's attention, Qwen3 QK norm and RoPE.
 pub const qwen3_asr: []const u8 = if (available) &Blob("spv_qwen3_asr").bytes else &.{};
+/// Qwen3-ASR's one-row Linear, asr_gemm's bits at one row, in its own image.
+pub const qwen3_asr_mv: []const u8 = if (available) &Blob("spv_qwen3_asr_mv").bytes else &.{};

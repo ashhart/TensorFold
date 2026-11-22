@@ -12,6 +12,10 @@ const bf = kit.bf;
 const val = kit.val;
 const u = kit.u;
 
+fn offset(p: ?*anyopaque, off: usize) ?*anyopaque {
+    return @ptrFromInt(@intFromPtr(p) + off);
+}
+
 /// The Linear's epilogue as the binding asks it: none (LM, conv_out), bias and residual (o, fc2), bias and GELU (fc1).
 pub const Epi = enum { plain, bias_res, bias_gelu };
 
@@ -29,6 +33,7 @@ pub const Gemm = struct {
     k: xpu.Kernel,
     m: Mutation,
     epi: Epi,
+    base: ?xpu.Kernel = null, // asr_gemm, when the test is asr_gemv's: the kernel it replaces at one row
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
     x: []u16 = &.{},
@@ -38,6 +43,7 @@ pub const Gemm = struct {
     pre: []f64 = &.{}, // each output's float64 sum plus bias, before the activation and residual
     ins: [4]?*anyopaque = undefined,
     out: ?*anyopaque = null,
+    twin: ?*anyopaque = null, // asr_gemm's output on the same inputs
 
     /// rows: x rows; n: outputs a row; k: the input width.
     pub fn spec(epi: Epi) c.Spec {
@@ -62,6 +68,28 @@ pub const Gemm = struct {
         };
     }
 
+    /// asr_gemv, a launch a row (the binding's decode and head take one): asr_gemm's bits, and float64 at gate 1.
+    pub fn gemvSpec() c.Spec {
+        var sp = spec(.plain);
+        sp.name = "xpu qwen3-asr asr_gemv";
+        sp.replaces = "asr_gemm at one row";
+        sp.tiles = .{ .{ .size = 1, .min = 1 }, .{ .size = 4, .min = 1 }, .{ .size = 256, .min = 1 } };
+        // an odd call (k 1,000: a short last step); the 0.6B LM's qkv, o, gate | up, down, head; 1.7B qkv, down
+        sp.served = &.{ .{ .rows = 1, .n = 130, .k = 1000 }, .{ .rows = 1, .n = 4096, .k = 1024 }, .{ .rows = 1, .n = 1024, .k = 2048 }, .{ .rows = 1, .n = 6144, .k = 1024 }, .{ .rows = 1, .n = 1024, .k = 3072 }, .{ .rows = 1, .n = 151936, .k = 1024 }, .{ .rows = 1, .n = 4096, .k = 2048 }, .{ .rows = 1, .n = 2048, .k = 6144 } };
+        return sp;
+    }
+
+    /// The control's image holds asr_gemv only: asr_gemm, the baseline, comes from the binding's.
+    pub fn initGemv(a: std.mem.Allocator, dev: *kit.Dev, m: Mutation) !Gemm {
+        var t = try init(a, dev, .none, .plain);
+        errdefer t.k.deinit();
+        const gemv = try dev.kernel(.qwen3_asr_mv, m, "asr_gemv");
+        t.base = t.k;
+        t.k = gemv;
+        t.m = m;
+        return t;
+    }
+
     pub fn init(a: std.mem.Allocator, dev: *kit.Dev, m: Mutation, epi: Epi) !Gemm {
         return .{ .a = a, .rig = .{ .a = a, .dev = dev }, .k = try dev.kernel(.qwen3_asr, m, "asr_gemm"), .m = m, .epi = epi };
     }
@@ -69,6 +97,7 @@ pub const Gemm = struct {
     pub fn deinit(t: *Gemm) void {
         t.free();
         t.k.deinit();
+        if (t.base) |*b| b.deinit();
         t.rig.deinit();
     }
 
@@ -82,7 +111,7 @@ pub const Gemm = struct {
     }
 
     pub fn kernel(t: *Gemm) g.Kernel {
-        return kit.mark(.{ .spec = spec(t.epi), .ctx = t, .vt = &vt }, t.m);
+        return kit.mark(.{ .spec = if (t.base != null) gemvSpec() else spec(t.epi), .ctx = t, .vt = &vt }, t.m);
     }
     const vt = g.hooks(Gemm);
 
@@ -138,6 +167,7 @@ pub const Gemm = struct {
         t.ins[2] = try t.rig.input(std.mem.sliceAsBytes(t.b));
         t.ins[3] = try t.rig.input(std.mem.sliceAsBytes(t.res));
         t.out = try t.rig.output(r * n * 2);
+        if (t.base != null) t.twin = try t.rig.scratch(r * n * 2);
         return true;
     }
 
@@ -146,11 +176,23 @@ pub const Gemm = struct {
         const has_b: u32 = @intFromBool(t.epi != .plain);
         const has_r: u32 = @intFromBool(t.epi == .bias_res);
         const act: u32 = @intFromBool(t.epi == .bias_gelu);
+        if (t.base != null) {
+            for (0..s.rows) |r| try t.rig.launch(t.k, .{ u((s.n + 3) / 4), 1, 1 }, .{ offset(t.ins[0], r * s.k * 2), t.ins[1], offset(t.out, r * s.n * 2), u(s.n), u(s.k) });
+            return;
+        }
         try t.rig.launch(t.k, .{ u((s.n + 63) / 64), u((s.rows + 63) / 64), 1 }, .{ t.ins[0], t.ins[1], t.ins[2], has_b, t.ins[3], has_r, t.out, u(s.rows), u(s.n), u(s.k), u(s.n), act });
     }
 
     pub fn count(t: *Gemm) usize {
         return t.shape.rows * t.shape.n;
+    }
+
+    /// asr_gemm's bytes on asr_gemv's inputs, all rows in one call.
+    pub fn replaced(t: *Gemm) ![]const u8 {
+        const s = t.shape;
+        const base = t.base orelse return error.NotAReplacement;
+        try t.rig.launch(base, .{ u((s.n + 63) / 64), u((s.rows + 63) / 64), 1 }, .{ t.ins[0], t.ins[1], t.ins[2], @as(u32, 0), t.ins[3], @as(u32, 0), t.twin, u(s.rows), u(s.n), u(s.k), u(s.n), @as(u32, 0) });
+        return t.rig.bytes(t.twin, s.rows * s.n * 2);
     }
 
     /// Output i from its sum: the bias, GELU and residual in float64, as the epilogue orders them.
