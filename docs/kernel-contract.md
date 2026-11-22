@@ -208,6 +208,19 @@ enabled on RDNA3.5 for single-round `K <= 1024` plans), whose rows past an item'
 `item_rows = 0` byte for byte when the largest item holds 3 or 4 rows. Its controls run over items one row short and go
 red at gate 3.
 
+HIP's shared-row decode score (`plan_rows.hip`: q fp32, d = 256, spans of 16,384 keys or more, launches of more than
+one row) replaces `tf_plan_score256_*` byte for byte with two launches on its grid, a block a plan row. First
+`tf_plan_lone_score256_*` scores the rows of one-row slots as `tf_plan_score256_*` does, at its occupancy, and its other
+blocks leave. Then `tf_plan_rows_score256_*`, counted from each multi-row slot's `first`, has the block of every second
+row score that row and the next of the same slot from one read of the keys; the other blocks leave, so a chunk never
+crosses a slot. Its registrations run both head groups (16 over 2, 24 over 4) and both cache kinds as one operator, on
+launches of 1 to 64 rows: slots of 3, 1, 4 and 2 rows one position apart (at the span's end, mid-span, across a block's
+first key, at the span's start), and 5 and 7 slots of one row each, over spans of 16,384 to 262,144 keys with NaN and
+infinite keys that some rows of a chunk see and others do not. Its controls go red at gate 3: one leads the chunks over
+the whole launch (every slot's `first` 0 and its count every row), so a chunk crosses a slot, and one launches the
+chunks alone, so no launch scores the rows of one-row slots. A row scored by both launches gets the same bits from
+each, so no control can show it; each kernel's own exit test keeps the two sets apart.
+
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
