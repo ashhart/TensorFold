@@ -7,6 +7,7 @@ const q = tf.qwen27;
 const lanes = tf.lanes;
 const rows = api.prompt_cache.rows;
 const disk_identity = @import("disk_identity.zig");
+const probe_hash = @import("probe_hash.zig");
 const Host = @import("qwen27_served.zig").Host;
 const State = q.snapshot.State;
 const Allocator = std.mem.Allocator;
@@ -124,11 +125,9 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
     be.release(&s);
     const st = hook.saved orelse return hook.failed orelse error.ProbeUnmarked;
     defer q.snapshot.drop(h.gpa, st);
-    const bytes = try h.gpa.alloc(u8, st.bytes + 8);
-    defer h.gpa.free(bytes);
-    try gather(h, st, &.{ .{ .off = 0, .len = 8 }, .{ .off = 8, .len = st.bytes } }, bytes);
+    const digest = try probe_hash.hash(h.gpa, 0x7127, &image, h, st, &.{ 8, st.bytes }, null);
     const rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9);
-    return .{ .hash = std.hash.Wyhash.hash(0x7127, bytes), .rate = rate };
+    return .{ .hash = digest, .rate = rate };
 }
 
 /// The store for --learn-conversations under `root`, attached to the cache; the probe seeds its prompt rate.

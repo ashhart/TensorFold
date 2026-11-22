@@ -20,7 +20,7 @@ fn pair() struct { first: [1100]u32, second: [1100]u32 } {
 }
 
 test "rows stage: a block still being written is charged and gathered once" {
-    const x = try Fixture.open("stage-share", .finish, false, 1 << 20);
+    const x = try Fixture.open("stage-share", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -43,7 +43,7 @@ test "rows stage: a block still being written is charged and gathered once" {
 }
 
 test "rows stage: a state whose earlier job failed to write its block is not published" {
-    const x = try Fixture.open("stage-lost", .finish, false, 1 << 20);
+    const x = try Fixture.open("stage-lost", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{ .mode = .first_fails };
     defer hold.release.store(true, .release);
@@ -68,7 +68,7 @@ test "rows stage: a state whose earlier job failed to write its block is not pub
 }
 
 test "rows stage: a block its writer failed to write is written by the next save, though a job that skipped it is in flight" {
-    const x = try Fixture.open("stage-chain", .finish, false, 1 << 20);
+    const x = try Fixture.open("stage-chain", .finish, false, 18 << 20);
     defer x.close();
     var failing: Hold = .{ .mode = .first_fails };
     defer failing.release.store(true, .release);
@@ -103,7 +103,7 @@ test "rows stage: a block its writer failed to write is written by the next save
 }
 
 test "rows stage: a job a fence cancelled promises no block, so the next save writes its own" {
-    const x = try Fixture.open("stage-fence", .finish, false, 1 << 20);
+    const x = try Fixture.open("stage-fence", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -124,8 +124,8 @@ test "rows stage: a job a fence cancelled promises no block, so the next save wr
     try t.expect(x.f.restored_ok);
 }
 
-test "rows stage: a save larger than the permit alone is skipped, not held" {
-    const x = try Fixture.open("stage-big", .finish, false, 1 << 20);
+test "rows stage: a fixed handoff already holding its whole permit skips, not waits" {
+    const x = try Fixture.open("stage-big", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -172,7 +172,7 @@ test "rows stage: a permit sized to the longest state writes a cold save the fix
 }
 
 test "rows stage: an eviction cannot wait, so a full permit skips the copy" {
-    const x = try Fixture.open("stage-evict", .evicted, false, 1 << 20);
+    const x = try Fixture.open("stage-evict", .evicted, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -194,7 +194,7 @@ test "rows stage: an eviction cannot wait, so a full permit skips the copy" {
 }
 
 test "rows stage: a newer save that fits beside the jobs in flight is staged ahead of one that waits" {
-    const x = try Fixture.open("stage-ahead", .finish, false, 1 << 20);
+    const x = try Fixture.open("stage-ahead", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -221,7 +221,7 @@ test "rows stage: a newer save that fits beside the jobs in flight is staged ahe
 
 test "rows stage: a close writes the saves that waited for room" {
     for ([_]rows.Spill{ .off, .finish }) |spill| {
-        const x = try Fixture.open("stage-close", spill, false, 1 << 20);
+        const x = try Fixture.open("stage-close", spill, false, 9 << 20);
         defer x.close();
         var hold: Hold = .{};
         defer hold.release.store(true, .release);
@@ -241,7 +241,7 @@ test "rows stage: a close writes the saves that waited for room" {
 }
 
 test "rows stage: a save that waited for room and lost its entry is counted as skipped" {
-    const x = try Fixture.open("stage-lost-entry", .off, false, 1 << 20);
+    const x = try Fixture.open("stage-lost-entry", .off, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -267,7 +267,7 @@ test "rows stage: a save that waited for room and lost its entry is counted as s
 }
 
 test "rows stage: losing the older of two waiting saves counts it as skipped" {
-    const x = try Fixture.open("stage-two-waiters", .off, false, 1 << 20);
+    const x = try Fixture.open("stage-two-waiters", .off, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -299,7 +299,7 @@ test "rows stage: losing the older of two waiting saves counts it as skipped" {
 }
 
 test "rows stage: a save that waited and loses its entry after a reap still counts, under an id no job holds" {
-    const x = try Fixture.open("stage-lost-after-reap", .off, false, 1 << 20);
+    const x = try Fixture.open("stage-lost-after-reap", .off, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);

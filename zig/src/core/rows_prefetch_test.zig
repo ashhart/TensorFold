@@ -97,6 +97,10 @@ pub fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
     }
 }
 
+/// First availability releases admission; terminal readiness may await backpressured chunk recycling.
+fn available(f: *prefetch.Prefetch, name: Name) void {
+    while (f.pending(name)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+}
 fn until(f: *prefetch.Prefetch, comptime field: []const u8, n: u64) void {
     while (@field(counts(f), field) < n) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
 }
@@ -131,17 +135,6 @@ fn none(_: void, _: Name) bool {
 
 fn only(n: *const Name, name: Name) bool {
     return std.mem.eql(u8, n, &name);
-}
-
-/// Every file under `dir` removed: a restore that still succeeds read nothing on the engine thread.
-fn emptyDir(dir: [:0]const u8) void {
-    const d = platform.c.opendir(dir) orelse return;
-    defer _ = platform.c.closedir(d);
-    while (platform.c.readdir(d)) |ent| {
-        if (ent.type != platform.c.DT.REG) continue;
-        var buf: [1200]u8 = undefined;
-        _ = platform.c.unlink(std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, std.mem.sliceTo(&ent.name, 0) }, 0) catch continue);
-    }
 }
 
 test "prefetch: a seed that cannot publish reports SeedNotWritten" {
@@ -217,8 +210,7 @@ test "prefetch: a state read ahead restores equal to a synchronous read and to a
     defer x.close();
     const f = try prefetch.make(x.r, t.io, .{});
     const name = x.start(f, again) orelse return error.NotReadAhead;
-    try t.expectEqual(@as(?prefetch.Phase, .ready), settled(f, name));
-    emptyDir(x.r.dir); // the restore below must come from the read ahead
+    available(f, name);
     const got = try request(a, &x.s, &x.f, again, 1404);
     try t.expectEqual(@as(u32, 1400), got.from);
     try t.expect(x.f.restored_ok); // every byte of the restored image equals a fresh pass's
@@ -256,9 +248,10 @@ test "prefetch: cancellation before, during and after the read frees each read e
     try t.expect(x.start(f, one) == null); // a cancelled read keeps its permit until its blocked syscall returns
     Gate.open.store(true, .release);
     until(f, "freed", 2);
-    const n3 = x.start(f, one) orelse return error.NotReadAhead; // after: read in full, then its request went
-    try t.expectEqual(@as(?prefetch.Phase, .ready), settled(f, n3));
+    const n3 = x.start(f, one) orelse return error.NotReadAhead; // after: some payload is available, then its request went
+    available(f, n3);
     f.sweep({}, none);
+    until(f, "freed", 3);
     const c = counts(f);
     try t.expectEqual(@as(u64, 3), c.made);
     try t.expectEqual(@as(u64, 3), c.freed);
@@ -317,7 +310,7 @@ test "prefetch: a failed read, or a file that fails its check, falls back to tod
     try t.expect(x.r.best(again, &.{}, &.{}, 0) == null);
 }
 
-test "prefetch: two requests for one state read it once; the second resumes the first's restore" {
+test "prefetch: two requests join one producer; its detached stream belongs to the first consumer" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -338,7 +331,7 @@ test "prefetch: two requests for one state read it once; the second resumes the 
     try t.expectEqualSlices(u8, &n1, &n2);
     try t.expect(f.pending(n1));
     Gate.open.store(true, .release);
-    try t.expectEqual(@as(?prefetch.Phase, .ready), settled(f, n1));
+    available(f, n1);
     try t.expectEqual(@as(u32, 1), Gate.entered.load(.acquire));
     const got1 = try request(a, &x.s, &x.f, again, 1404);
     const got2 = try request(a, &x.s, &x.f, other, 1403);
@@ -347,18 +340,18 @@ test "prefetch: two requests for one state read it once; the second resumes the 
     try t.expect(x.f.restored_ok);
     try t.expectEqual(fresh(again), got1.sum);
     try t.expectEqual(fresh(other), got2.sum);
-    try t.expectEqual(@as(u64, 1), x.r.counts.reads);
+    try t.expectEqual(@as(u64, 2), x.r.counts.reads); // a detached read belongs to its first engine consumer
     const c = counts(f);
     try t.expectEqual(@as(u64, 1), c.made);
     try t.expectEqual(@as(u64, 1), c.used);
 }
 
-test "prefetch: a read not finished at admission goes, and the state is read there as before" {
+test "prefetch: admission detaches an in-progress compatible read and waits for its stream" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var buf: [128]u8 = undefined;
-    const dir = root(&buf, "late");
+    const dir = root(&buf, "detach-progress");
     defer rmTree(dir);
     const again = try written(a, dir, 1);
     var x: Server = .{};
@@ -373,15 +366,47 @@ test "prefetch: a read not finished at admission goes, and the state is read the
     try t.expect(!f.pending(name)); // past its bound: the request stops waiting, counted once
     try t.expect(!f.pending(name));
     try t.expectEqual(@as(u64, 1), counts(f).timeouts);
+    Gate.open.store(true, .release);
     const got = try request(a, &x.s, &x.f, again, 1404);
     try t.expectEqual(@as(u32, 1400), got.from);
     try t.expect(x.f.restored_ok);
     try t.expectEqual(fresh(again), got.sum);
-    Gate.open.store(true, .release);
     until(f, "freed", 1);
     const c = counts(f);
-    try t.expectEqual(@as(u64, 0), c.used);
+    try t.expectEqual(@as(u64, 1), c.used);
     try t.expectEqual(@as(u64, 1), c.made);
+}
+
+test "prefetch: finish cancels and joins a detached producer without touching its source" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "detach-cancel");
+    defer rmTree(dir);
+    const again = try written(a, dir, 1);
+    var x: Server = .{};
+    try x.open(dir);
+    defer x.close();
+    const f = try prefetch.make(x.r, t.io, .{ .reads = 1 });
+    f.reader = Gate.reader;
+    Gate.reset(false);
+    defer Gate.open.store(true, .release);
+    const i = prefetch.choose(&x.s, again, &.{}, &.{}) orelse return error.NotReadAhead;
+    const name = x.start(f, again) orelse return error.NotReadAhead;
+    Gate.reached(1);
+    var plan = try prefetch.Plan.of(x.r, a, &x.r.states.items[i]);
+    defer plan.deinit(a);
+    const rd = f.take(name, &plan) orelse return error.NotReadAhead;
+    Gate.open.store(true, .release);
+    f.finish(rd);
+    try t.expectEqual(@as(u64, 1), counts(f).freed);
+    const got = try request(a, &x.s, &x.f, again, 1404);
+    try t.expectEqual(@as(u32, 1400), got.from);
+    try t.expect(x.f.restored_ok);
+    try t.expectEqual(fresh(again), got.sum);
+    try t.expectEqual(@as(u64, 1), x.r.counts.reads);
+    try t.expectEqual(@as(u64, 1), counts(f).used);
 }
 
 test "prefetch: reads and bytes held are bounded, and 0 reads is off with no thread" {
@@ -400,6 +425,9 @@ test "prefetch: reads and bytes held are bounded, and 0 reads is off with no thr
     try t.expect(x.start(f, one) != null);
     try t.expect(x.start(f, one) != null); // joining the same state takes no other read
     try t.expect(x.start(f, two) == null);
+    const held = f.snapshot();
+    try t.expectEqual(@as(usize, 1), held.held_reads);
+    try t.expectEqual(@as(u64, 2 * prefetch.chunk_bytes), held.held_bytes);
     f.stop();
     f.limits = .{ .bytes = 1 };
     try t.expect(x.start(f, one) == null);

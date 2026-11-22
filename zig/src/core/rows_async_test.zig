@@ -87,7 +87,7 @@ test "spill I/O: worker files have the synchronous SHA256 and a restore equals a
 fn byteFiles(planned: bool) !void {
     const synchronous = try Fixture.open("sync", .evicted, true, 1 << 20);
     defer synchronous.close();
-    const threaded = try Fixture.open("thread", .evicted, false, 1 << 20);
+    const threaded = try Fixture.open("thread", .evicted, false, 9 << 20);
     defer threaded.close();
     const tokens = fixture.prompt(7);
     for ([_]*Fixture{ synchronous, threaded }) |x| {
@@ -125,7 +125,7 @@ fn byteFiles(planned: bool) !void {
 
 test "spill I/O: ENOSPC, truncated short writes and fsync failures publish nothing and retain each job failure" {
     for ([_]@TypeOf(@as(Hold, .{}).mode){ .full, .short, .sync_failure }) |mode| {
-        const x = try Fixture.open("fault", .evicted, false, 1 << 20);
+        const x = try Fixture.open("fault", .evicted, false, 9 << 20);
         defer x.close();
         var fault: Hold = .{ .mode = mode, .release = .init(true) };
         x.r.file_io = fault.io();
@@ -167,7 +167,7 @@ test "spill I/O: the byte permit skips immediately and leaves token state unchan
 }
 
 test "spill I/O: an entry evicted during its write has no borrowed storage and publishes once" {
-    const x = try Fixture.open("in-flight", .finish, false, 1 << 20);
+    const x = try Fixture.open("in-flight", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -193,7 +193,7 @@ test "spill I/O: an entry evicted during its write has no borrowed storage and p
 }
 
 test "spill I/O: forget fences a blocked job before unlink and the old generation cannot reappear" {
-    const x = try Fixture.open("forget", .finish, false, 1 << 20);
+    const x = try Fixture.open("forget", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -211,7 +211,7 @@ test "spill I/O: forget fences a blocked job before unlink and the old generatio
 }
 
 test "spill I/O: unload releases the family while a blocked syscall owns only staged bytes" {
-    const x = try Fixture.open("unload", .finish, false, 1 << 20);
+    const x = try Fixture.open("unload", .finish, false, 9 << 20);
     var hold: Hold = .{};
     x.r.file_io = hold.io();
     const tokens = fixture.prompt(14);
@@ -230,7 +230,7 @@ test "spill I/O: unload releases the family while a blocked syscall owns only st
 }
 
 test "spill I/O: shutdown returns at its deadline while a write is blocked" {
-    const x = try Fixture.open("deadline", .finish, false, 1 << 20);
+    const x = try Fixture.open("deadline", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -250,7 +250,7 @@ test "spill I/O: shutdown returns at its deadline while a write is blocked" {
 }
 
 test "spill I/O: a completed payload is invisible until fsync finishes, with read-back verification" {
-    const x = try Fixture.open("sync-gate", .finish, false, 1 << 20);
+    const x = try Fixture.open("sync-gate", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{ .release = .init(true), .sync_release = .init(false) };
     defer hold.sync_release.store(true, .release);
@@ -271,7 +271,7 @@ test "spill I/O: a completed payload is invisible until fsync finishes, with rea
 }
 
 test "spill I/O: two in-flight states keep shared block references across a disk eviction" {
-    const x = try Fixture.open("shared", .finish, false, 1 << 20);
+    const x = try Fixture.open("shared", .finish, false, 18 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -301,7 +301,7 @@ test "spill I/O: two in-flight states keep shared block references across a disk
 
 test "spill I/O: killing a child inside a partial write leaves no published state on restart" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
-    const x = try Fixture.open("kill", .evicted, false, 1 << 20);
+    const x = try Fixture.open("kill", .evicted, false, 9 << 20);
     defer x.close();
     var fds: [2]c_int = undefined;
     if (platform.c.pipe(&fds) != 0) return error.PipeFailed;
@@ -349,7 +349,7 @@ test "spill I/O: killing a child inside a partial write leaves no published stat
 }
 
 test "spill I/O: a full byte permit holds another save that fits it alone until the first job is written" {
-    const x = try Fixture.open("full-permit", .finish, false, 1 << 20);
+    const x = try Fixture.open("full-permit", .finish, false, 9 << 20);
     defer x.close();
     var hold: Hold = .{};
     defer hold.release.store(true, .release);
@@ -394,7 +394,7 @@ test "spill I/O: the job permit holds a ninth small save behind eight blocked wr
 }
 
 test "spill I/O: shutdown keeps a completed job's own filesystem error" {
-    const x = try Fixture.open("stop-error", .evicted, false, 1 << 20);
+    const x = try Fixture.open("stop-error", .evicted, false, 9 << 20);
     defer x.close();
     var fault: Hold = .{ .mode = .full, .release = .init(true) };
     x.r.file_io = fault.io();
