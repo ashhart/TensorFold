@@ -20,6 +20,7 @@ pub const Kernels = struct {
     add: mtl.Pipeline,
     gather: mtl.Pipeline,
     take: mtl.Pipeline,
+    tap_ring: ?mtl.Pipeline = null,
     profiler: ?*profile.Trace = null,
 
     pub fn init(device: mtl.Device) !Kernels {
@@ -40,10 +41,13 @@ pub const Kernels = struct {
         const gather = try mtl.Pipeline.init(device, copy, "q27_tap_gather", false);
         errdefer gather.deinit();
         const take = try mtl.Pipeline.init(device, copy, "q27_take", false);
-        return .{ .embed = embed, .embed_bf16 = embed_bf16, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
+        errdefer take.deinit();
+        const tap_ring = if (@import("tap_prompt.zig").on()) try mtl.Pipeline.init(device, copy, "q27_tap_ring", false) else null;
+        return .{ .tap_ring = tap_ring, .embed = embed, .embed_bf16 = embed_bf16, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
     }
 
     pub fn deinit(k: Kernels) void {
+        if (k.tap_ring) |p| p.deinit();
         inline for (.{ k.embed, k.embed_bf16, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
     }
 

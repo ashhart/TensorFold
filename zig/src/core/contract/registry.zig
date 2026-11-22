@@ -396,6 +396,7 @@ pub const metal = joins.metal_before ++ [_]M{
     .{ .name = "qwen image qi_attention_causal_01", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "qwen image qi_attention_causal_10", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "qwen image qi_attention_causal_11", .threads = 128, .tg_memory = 0, .reserved = 128 },
+    .{ .name = "qwen27 copy q27_tap_ring", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen27 copy q27_take", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 dense d3_rows_r1", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "drama3 dense d3_rows_r8", .threads = 128, .tg_memory = 0, .reserved = 128 },

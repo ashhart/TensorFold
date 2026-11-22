@@ -55,6 +55,13 @@ pub const Generation = struct {
     }
     /// A prompt pass's rows into the drafter, 128 a call (its frame's); the target's pass may be longer.
     fn absorbChunk(g: *Generation, rows: usize) !void {
+        if (@import("../tap_prompt.zig").on() and g.runner.model.glue.tap_ring != null) {
+            if (g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null) return error.BadCommittedTaps;
+            errdefer g.runner.failed = true;
+            try @import("../tap_prompt_gpu.zig").absorb(g.runner.model.glue, g.runner.model.queue, g.runner.taps, g.draft.ring(), @intCast(rows));
+            if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+            return;
+        }
         var path: [128]u32 = undefined;
         var first: usize = 0;
         while (first < rows) : (first += path.len) {
@@ -97,16 +104,38 @@ pub const Generation = struct {
         try (TargetSession.Session{ .runner = g.runner }).decodeChunk(ids, last);
         try g.absorbChunk(ids.len);
     }
-    pub fn prefill(g: *Generation, ids: []const u32, chunk: usize) !void {
+    pub fn prefill(g: *Generation, ids: []const u32, requested_chunk: usize) !void {
         g.pending = null;
         std.debug.assert(g.keep == null);
-        if (g.runner.failed or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > g.runner.model.frame.capacity) return error.BadDraftContext;
-        var first: usize = 0;
-        while (first < ids.len) {
-            const count = @min(ids.len - first, g.runner.promptRows(@intCast(chunk)));
-            try g.promptChunk(ids[first..][0..count], first + count == ids.len);
-            first += count;
-        }
+        if (g.runner.failed or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or requested_chunk == 0 or requested_chunk > g.runner.model.frame.capacity) return error.BadDraftContext;
+        const Context = struct {
+            generation: *Generation,
+            ids: []const u32,
+            pub fn enabled(ctx: @This()) bool {
+                return @import("../tap_prompt.zig").on() and ctx.generation.runner.model.glue.tap_ring != null;
+            }
+            pub fn chunk(ctx: @This(), requested: usize) usize {
+                return ctx.generation.runner.promptRows(@intCast(requested));
+            }
+            pub fn window(ctx: @This()) u32 {
+                return ctx.generation.draft.graph.config.window;
+            }
+            pub fn invalidate(ctx: @This()) void {
+                ctx.generation.draft.backend.failed = true;
+            }
+            pub fn feed(ctx: @This(), first: usize, count: usize, omit: bool, last: bool) !void {
+                const one = ctx.generation;
+                if (!omit) return one.promptChunk(ctx.ids[first..][0..count], last);
+                const end = try std.math.add(u64, one.draft.committed_end, count);
+                const previous = one.runner.taps.discard;
+                one.runner.taps.discard = true;
+                defer one.runner.taps.discard = previous;
+                try (TargetSession.Session{ .runner = one.runner }).promptChunk(ctx.ids[first..][0..count], false);
+                one.draft.committed_end = end;
+                if (end != one.runner.offsets[0]) return error.BadDraftPosition;
+            }
+        };
+        try @import("../tap_prompt.zig").prefill(Context{ .generation = g, .ids = ids }, ids.len, requested_chunk);
     }
     /// Ends a pending keep and forgets the picked token, before anything but runRound uses the slot.
     pub fn settle(g: *Generation) !void {

@@ -1,6 +1,7 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
+    @import("qwen27_tap_lean_host.zig").tests(b, test_step);
     const real_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const recording = b.createModule(.{ .root_source_file = b.path("zig/qwen27_quant_metal.zig"), .target = b.graph.host, .imports = &.{.{ .name = "real_metal", .module = real_metal }} });
     const quant_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
@@ -120,16 +121,17 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
-    const ownership = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_engine.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = engine }} });
+    const target = metal.resolved_target.?;
+    const ownership = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_engine.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = engine }} });
     b.step("test-qwen-dense-route-host", "Existing 2B route and untied 9B and 27B route without weights").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ownership, .filters = &.{"a qwen3_5 checkpoint opens"} })).step);
     var dense_names: std.ArrayList([]const u8) = .empty;
     inline for (.{ "config_test.zig", "weights_test.zig", "checkpoint.zig", "projection.zig", "affine.zig", "geometry_test.zig" }) |file| tryNames(b, &dense_names, @embedFile("../src/families/qwen27/" ++ file));
     tryNames(b, &dense_names, @embedFile("../src/families/qwen3_5/config.zig"));
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
-    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     // memory_controller.zig imports living: the engine's own, as residency_host.zig gives its host module
-    const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
-    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = living } } });
+    const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .link_libc = true });
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = living } } });
     b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born" } })).step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
     const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
@@ -141,8 +143,8 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
         run.has_side_effects = true;
         startup_step.dependOn(&run.step);
     }
-    const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = b.graph.host });
-    const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
+    const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = target });
+    const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
     if (b.graph.host.result.os.tag == .macos) floor_root.linkSystemLibrary("objc", .{});
     const floor_test = b.addTest(.{ .root_module = floor_root, .test_runner = .{ .path = b.path("zig/qwen_vision_weights_runner.zig"), .mode = .simple } });
     const floor_step = b.step("test-qwen27-prompt-floor-host", "Actual startup and lane constructor floor diagnostics without devices");
@@ -152,25 +154,27 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
         run.has_side_effects = true;
         floor_step.dependOn(&run.step);
     }
-    const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     b.step("test-minimax-info-host", "MiniMax logprob offers against its actual wrapped backend without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = minimax, .filters = &.{"MiniMax capabilities:"} })).step);
-    const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
+    const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
     b.step("test-qwen27-bank-boundary-host", "Runner pending-keep guards with no device or shader execution").dependOn(&b.addRunArtifact(boundary).step);
-    const facts = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_metal_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
+    const facts = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_metal_test.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
     b.step("test-qwen27-facts-host", "Actual native window and copy facts with initialized recording fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = facts, .filters = &.{ "qwen27 window:", "draft sources: Metal Qwen27" } })).step);
-    const grants = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_shared_policy_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
+    const grants = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_shared_policy_test.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes } } });
     b.step("test-qwen27-grants-host", "Native shared draft policy counts granted and proposed nodes without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = grants })).step);
     const tree_host = b.addTest(.{ .root_module = engine, .filters = &.{"qwen27 window:"} });
     b.step("test-qwen27-draft-tree-host", "Real selector 31-node tree and verify parents without a GPU").dependOn(&b.addRunArtifact(tree_host).step);
     const object = b.addObject(.{ .name = "qwen27-speed-compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen27_speed_compile.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .debug,
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } },
     }) });
     _ = object.getEmittedBin();
-    b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders").dependOn(&object.step);
+    const check = b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders");
+    check.dependOn(&object.step);
+    @import("qwen27_tap_lean_host.zig").compileHost(b, metal, engine, check);
 }
 
 /// The production served cache policy, without the served suite's GPU startup paths.

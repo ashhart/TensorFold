@@ -1,4 +1,7 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
+pub const tap_prompt = @import("tap_prompt.zig");
+pub const tap_prompt_source = @import("qwen_runtime_sources").copy;
+pub const tap_prompt_gpu = @import("tap_prompt_gpu.zig");
 pub const dflash = @import("dflash/root.zig");
 pub const yarn = @import("yarn.zig");
 pub const loop = @import("loop.zig");

@@ -365,6 +365,10 @@ fn clearContext(b: *Metal, slot: u32) !void {
 
 /// A prompt chunk's `rows` taps into a slot's ring.
 pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
+    if (q.tap_prompt.on() and b.runner.model.glue.tap_ring != null) {
+        errdefer b.runner.failed = true;
+        return q.tap_prompt_gpu.absorb(b.runner.model.glue, b.runner.model.queue, b.runner.taps, g, @intCast(rows));
+    }
     try @import("qwen27_prompt_taps.zig").absorb(TapGather{ .b = b, .ring = g }, rows);
 }
 

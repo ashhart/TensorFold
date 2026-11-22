@@ -39,3 +39,13 @@ struct Take { uint rows, width; };
   if (t.x >= p.width || t.y >= p.rows || take[t.y] < 0) return;
   X[t.y * p.width + t.x] = R[ulong(take[t.y]) * p.width + t.x];
 }
+
+struct TapRing { uint width, capacity, planes, window, first, rows; ulong start; };
+[[max_total_threads_per_threadgroup(256)]] kernel void q27_tap_ring(
+    device const ushort* X [[buffer(0)]], constant TapRing& p [[buffer(1)]],
+    device ushort* Y [[buffer(2)]], uint2 t [[thread_position_in_grid]]) {
+  if (t.x >= p.width * p.planes || t.y >= p.rows) return;
+  const uint row = p.first + t.y, plane = t.x / p.width, column = t.x % p.width;
+  const ulong slot = (p.start + row) % p.window;
+  Y[slot * p.width * p.planes + t.x] = X[(ulong(plane) * p.capacity + row) * p.width + column];
+}
