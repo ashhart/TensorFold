@@ -20,8 +20,8 @@ const dr = lanes.drafter;
 const Stream = lanes.Stream;
 const Ref = k.Ref;
 const tap_list = [_]u32{ 5, 23, 41, 48 };
-/// Drafts a hold offers: four rows a stream keep four streams' shared round at 16 of the forward's 32 rows.
-const hold_depth: u32 = 3;
+/// Drafts a hold offers at most: the block after its anchor. The depth rule prices how many a round takes.
+const hold_depth: u32 = state.block - 1;
 /// Streams one greedy hold can chain on the GPU; a wider hold samples on the host as sampled streams do.
 const chain_streams = 16;
 
@@ -53,6 +53,8 @@ pub const Drafter = struct {
     chain_tokens: mtl.Buffer = undefined,
     scores: ?mtl.Buffer = null,
     capacity: usize = 1,
+    /// A draft's share of a full hold, timed by `measure`.
+    step_ms: f64 = 0,
     contexts: std.AutoHashMapUnmanaged(*Stream, state.Lane) = .empty,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, target: *const Model, drafter_dir: []const u8) !*Drafter {
@@ -175,7 +177,7 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = hold_depth, .step_ms = 0, .plain_guard = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
+        return .{ .depth = hold_depth, .step_ms = d.step_ms, .plain_guard = true, .batched = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
     }
 
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
@@ -292,6 +294,54 @@ pub const Drafter = struct {
         return &d.more.items[index - 1];
     }
 
+    /// One stream's greedy hold: its block, then each step's recurrent pass, logits and pick; `held` takes the drafts.
+    fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, held: Ref, pending: u32, anchor: u64, depth: usize) void {
+        d.encodeBlock(e, s, lane, pending, anchor, @intCast(depth));
+        var second_bank = false;
+        for (0..depth) |step| {
+            const current = if (second_bank) s.next_state else s.state;
+            const next = if (second_bank) s.state else s.next_state;
+            e.setPipeline(d.chain_step);
+            for ([_]Ref{ at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0) }, 0..) |b, slot_| e.setBuffer(b.buf, b.off, slot_);
+            e.setValue(k.TokenArgs{ .token = @intCast(step) }, 7);
+            e.setBuffer(held.buf, held.off, 8);
+            e.dispatchThreads(mtl.Size.of(state.rank, 1, 1), mtl.Size.of(256, 1, 1));
+            k.finalLogits(&d.pipelines, e, at(s.base, step * state.vocabulary * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(s.logits, 0));
+            e.setPipeline(d.chain_pick);
+            e.setBuffer(s.logits, 0, 0);
+            e.setBuffer(held.buf, held.off, 1);
+            e.setValue(k.TokenArgs{ .token = @intCast(step) }, 2);
+            e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+            second_bank = !second_bank;
+        }
+    }
+
+    /// A full hold on an empty context, the third of three runs timed: the depth rule prices a draft at its share.
+    pub fn measure(d: *Drafter) !void {
+        var lane = try state.Lane.init(d.target.device, d.capacity);
+        defer lane.deinit();
+        const held = Ref{ .buf = d.chain_tokens, .off = 0 };
+        var ms: f64 = 0;
+        for (0..3) |attempt| {
+            var t0: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.MONOTONIC, &t0);
+            @memset(d.scratch.state.slice(u16, state.rank), 0);
+            d.chain_tokens.slice(u32, 8)[0] = 2;
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            d.encodeChain(e, &d.scratch, &lane, held, 2, 0, hold_depth);
+            e.end();
+            cb.commit();
+            try failed(cb, "timed hold");
+            var t1: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.MONOTONIC, &t1);
+            if (attempt == 2) ms = @as(f64, @floatFromInt(t1.sec - t0.sec)) * 1e3 + @as(f64, @floatFromInt(t1.nsec - t0.nsec)) / 1e6;
+        }
+        d.step_ms = ms / @as(f64, @floatFromInt(hold_depth));
+    }
+
     /// Greedy streams: the blocks and every step in one command buffer, each draft picked on the GPU for the next.
     fn holdChained(d: *Drafter, items: []const dr.Hold) !void {
         const tokens = d.chain_tokens.slice(u32, chain_streams * 8);
@@ -305,24 +355,7 @@ pub const Drafter = struct {
             const lane = d.contexts.getPtr(item.stream).?;
             const held = Ref{ .buf = d.chain_tokens, .off = i * 8 * @sizeOf(u32) };
             tokens[i * 8] = item.pending;
-            d.encodeBlock(e, s, lane, item.pending, item.position - 1, @intCast(depth));
-            var second_bank = false;
-            for (0..depth) |step| {
-                const current = if (second_bank) s.next_state else s.state;
-                const next = if (second_bank) s.state else s.next_state;
-                e.setPipeline(d.chain_step);
-                for ([_]Ref{ at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0) }, 0..) |b, slot_| e.setBuffer(b.buf, b.off, slot_);
-                e.setValue(k.TokenArgs{ .token = @intCast(step) }, 7);
-                e.setBuffer(held.buf, held.off, 8);
-                e.dispatchThreads(mtl.Size.of(state.rank, 1, 1), mtl.Size.of(256, 1, 1));
-                k.finalLogits(&d.pipelines, e, at(s.base, step * state.vocabulary * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(s.logits, 0));
-                e.setPipeline(d.chain_pick);
-                e.setBuffer(s.logits, 0, 0);
-                e.setBuffer(held.buf, held.off, 1);
-                e.setValue(k.TokenArgs{ .token = @intCast(step) }, 2);
-                e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
-                second_bank = !second_bank;
-            }
+            d.encodeChain(e, s, lane, held, item.pending, item.position - 1, depth);
         }
         e.end();
         cb.commit();
