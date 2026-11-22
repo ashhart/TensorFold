@@ -23,6 +23,9 @@ pub fn validateTaps(c: *const cfg.Config, taps: []const u32) !void {
         return error.UnsupportedInkling2Taps;
 }
 
+/// Drafts a stream of a shared round takes at most: four streams' rows then fill one window's 16.
+const shared_drafts = 3;
+
 pub const Metal = struct {
     gpa: std.mem.Allocator,
     model: *Model,
@@ -37,6 +40,9 @@ pub const Metal = struct {
     values: []f32,
     prepared: bool = false,
     sink: ?be.FeatureSink = null,
+    /// A forward's ms by window width, timed by `warm`: the depth rule prices a lone stream's drafts with them.
+    costs: [st.window_rows]lanes.config.Cost = undefined,
+    timed: usize = 0,
     tap_gen: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
@@ -75,7 +81,7 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .window_costs_lone = true, .shared_drafts = shared_drafts };
     }
 
     fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
@@ -250,6 +256,23 @@ pub const Metal = struct {
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
         try self.feed(&cache, &ids, null);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+        // A window of each width after that prompt, the second of two runs timed.
+        for (1..st.window_rows + 1) |rows| {
+            var ms: f64 = 0;
+            for (0..2) |attempt| {
+                const t0 = now();
+                try fwd.run(self.model, &self.scratch, &cache, ids[0..rows], .{ .all = true });
+                if (attempt == 1) ms = now() - t0;
+            }
+            self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+        }
+        self.timed = st.window_rows;
+    }
+
+    fn now() f64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) * 1e-6;
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
