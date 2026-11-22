@@ -80,16 +80,19 @@ test "lone price: with enough widths sampled one noisy timing does not move its 
     defer startup.deinit(a);
     var samples: Table = .{};
     defer samples.deinit(a);
-    for (1..9) |rows| try startup.put(a, @intCast(rows), 36 + 0.5 * @as(f64, @floatFromInt(rows)));
-    // times 2 ms over the startup model at 1, 5 and 8 drafts; the 5-draft one is 5 ms slow
-    try samples.put(a, 1, 38.5);
-    try samples.put(a, 5, 43.5);
-    try samples.put(a, 8, 38.5);
-    try std.testing.expect(own.estimate(startup, samples, 5, 0).? < 43);
-    try std.testing.expect(own.estimate(startup, samples, 6, 0).? < 43);
+    for (1..11) |rows| try startup.put(a, @intCast(rows), 36 + 0.5 * @as(f64, @floatFromInt(rows)));
+    // samples are keyed by drafts: 1, 5 and 8 (2, 6 and 9 rows) are 2 ms over the startup model, the 5-draft one 5 ms
+    try samples.put(a, 1, 39);
+    try samples.put(a, 5, 44);
+    try samples.put(a, 8, 42.5);
+    try std.testing.expect(own.priceOf(startup, samples, 6, 0, true).? < 43);
+    try std.testing.expect(own.priceOf(startup, samples, 7, 0, true).? < 43);
+    // without the line a width keeps its own time and its neighbour the nearest one's
+    try std.testing.expectEqual(@as(?f64, 44), own.priceOf(startup, samples, 6, 0, false));
+    try std.testing.expectEqual(@as(?f64, 44.5), own.priceOf(startup, samples, 7, 0, false));
     // two samples keep each width's own time
-    samples.slots[8 - 1] = null;
-    try std.testing.expectEqual(@as(?f64, 43.5), own.estimate(startup, samples, 6, 0));
+    samples.slots[8] = null;
+    try std.testing.expectEqual(@as(?f64, 44), own.priceOf(startup, samples, 6, 0, true));
 }
 
 test "lone price: tile probes are bounded, respect available rows, and stop after calibration" {
@@ -449,7 +452,8 @@ test "lone price: without plain_guard no probe asks for a round with no draft, a
     defer s.deinit(a);
     const tokens: [15]u32 = @splat(7);
     const p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
-    try std.testing.expect(own.enabled(&e, p));
+    // the engine keeps shared pricing without plain_guard; a backend marks its lone rounds and probes by itself
+    try std.testing.expect(!own.enabled(&e, p));
     var w = win.who(&s);
     w.lone = true;
     // 8 rounds is the first deadline, as for a stream's cost_probe_after and every Cooldown

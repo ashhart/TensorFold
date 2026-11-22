@@ -54,9 +54,8 @@ fn fitted(startup: Table, samples: Table, rows: usize) ?f64 {
     return if (usable(price)) price else null;
 }
 
-/// The fitted time once enough widths are sampled; else the width's own sample, else the nearest plus the startup gap.
+/// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.
 pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64 {
-    if (fitted(startup, samples, rows)) |ms| return ms;
     if (usable(samples.get(@intCast(rows - 1)))) return samples.get(@intCast(rows - 1));
     const base = startup.get(@intCast(rows)) orelse return null;
     var nearest: ?usize = null;
@@ -76,13 +75,19 @@ pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64
     return base + overhead;
 }
 
+/// `estimate`, or with `line` (a lone XPU tree; the engine keeps each width's own timing) the fitted time when sampled.
+pub fn priceOf(startup: Table, samples: Table, rows: usize, overhead: f64, line: bool) ?f64 {
+    if (line) if (fitted(startup, samples, rows)) |ms| return ms;
+    return estimate(startup, samples, rows, overhead);
+}
+
 /// Complete-round prices in the caller's allocator (an arena or a fixed buffer, never freed), with no added overhead.
-pub fn prices(e: anytype, a: std.mem.Allocator, p: anytype) !Table {
+pub fn prices(e: anytype, a: std.mem.Allocator, p: anytype, line: bool) !Table {
     var out: Table = .{};
     const overhead = e.rule.overheadMs(1, p.stream.sampling != null);
     const samples = observed(p.stream);
     for (1..p.count() + 2) |rows| {
-        if (estimate(e.cfg.shared_costs, samples, rows, overhead)) |ms|
+        if (priceOf(e.cfg.shared_costs, samples, rows, overhead, line)) |ms|
             try out.put(a, @intCast(rows), ms);
     }
     return out;
@@ -172,8 +177,8 @@ pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
 pub const Pick = struct { counts: []u32, prices: Table, trial: ?u32 };
 
 /// A lone round's drafts, for the engine and a backend alike, after `prepare`: price each width, pick or trial one.
-pub fn choose(e: anytype, a: std.mem.Allocator, p: anytype, chances: []const f64, least_rows: u32) !Pick {
-    const priced = try prices(e, a, p);
+pub fn choose(e: anytype, a: std.mem.Allocator, p: anytype, chances: []const f64, least_rows: u32, line: bool) !Pick {
+    const priced = try prices(e, a, p, line);
     const counts = try @import("allocate.zig").allocateDrafts(a, &.{1}, &.{chances}, &priced, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = least_rows });
     var out: Pick = .{ .counts = counts, .prices = priced, .trial = null };
     if (probe(e, p)) |drafts| {

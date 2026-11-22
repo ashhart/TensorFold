@@ -317,7 +317,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     var trial: ?u32 = null;
     const counts = if (live) blk: {
         // least_rows 0: the engine prices a lone window's head alone as well
-        const pick = try lone_costs.choose(e, a, plans[0], probs[0], 0);
+        const pick = try lone_costs.choose(e, a, plans[0], probs[0], 0, false);
         own = pick.prices;
         trial = pick.trial;
         if (pick.trial) |rows| plans[0].cost_probe_rows = rows;

@@ -47,8 +47,8 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
     var buf: [2048]u8 align(16) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&buf);
-    // least_rows 2: a lone tree drafts at least one node
-    const pick = try lone_costs.choose(e, fixed.allocator(), p, chance, 2);
+    // least_rows 2: a lone tree drafts at least one node; a line through its sampled widths, not one timing
+    const pick = try lone_costs.choose(e, fixed.allocator(), p, chance, 2, true);
     return .{ .nodes = pick.counts[0], .trial = pick.trial };
 }
 
