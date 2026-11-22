@@ -237,6 +237,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DSV41_PREFILL_PIECES", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_GREEDY_GPU", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_DRAFT_TIMED", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_LANE_ALLOC", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_SYNC_EACH", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ENGRAM_POLL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ENGRAM_AIO", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },

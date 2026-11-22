@@ -25,10 +25,10 @@ pub const Options = struct {
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
     plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
+    lane_alloc: bool = false, // measured width and priced copy windows (TF_DSV41_LANE_ALLOC, CUDA serving)
     steps: bool = false, // prompts a step at a time between rounds (lane_steps.zig), for a target with pieces
     step_rows: u32 = 0, // a step's rows when the host sets no cap (the target's prompt chunk)
 };
-
 /// A stream's slot and what the backend holds for it between rounds.
 pub const St = struct {
     slot: u32,
@@ -119,11 +119,10 @@ pub const Lanes = struct {
         std.debug.print("dsv41 spec: {s}\n", .{sp.describe(&buf)});
     }
 
-    /// Put the DSpark depth in charge of the engine's rows.
+    /// Put the DSpark depth in charge of the engine's rows, unless the core's measured allocator is opted in.
     pub fn attach(x: *Lanes, e: *lanes.Engine) void {
-        e.trim = x.policy.rows();
+        if (!x.opts.lane_alloc) e.trim = x.policy.rows();
     }
-
     /// What the engine's Config reads of this model: 16 rows a slot, `batch_rows` a shared forward, the table's costs.
     pub fn model(x: *Lanes, arena: Allocator, batch_rows: u32) !lanes.Model {
         x.policy.depth.forward_rows = batch_rows;
@@ -132,7 +131,8 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
+        const alloc = x.opts.lane_alloc;
+        return .{ .fixed_draft_block = alloc, .learn_row_costs = alloc, .allocate_shared_drafts = alloc, .root_copies = alloc, .own_copy_rates = alloc, .lone_cost_tile = if (alloc) 4 else 0, .plain_guard = alloc, .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).

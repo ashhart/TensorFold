@@ -140,12 +140,14 @@ pub const Served = struct {
         }
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
         const trees = if (m.pass != null) try tree.Settings.fromEnv() else tree.Settings{};
-        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = gate_lanes.shapeOf(&m.f), .slots = m.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (m.pass != null) try spec.Settings.fromEnv() else .{} });
+        // Only rank 0 allocates; its explicit row plans keep every TP follower on the same windows.
+        const lane_alloc = try @import("sys").environment.read(bool, "TF_DSV41_LANE_ALLOC", false);
+        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = gate_lanes.shapeOf(&m.f), .slots = m.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .lane_alloc = lane_alloc, .spec = if (m.pass != null) try spec.Settings.fromEnv() else .{} });
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = if (m.rows) |b| b.cap else 16;
-        // drafts sized from cost tables, not the wall clock, so HTTP == CLI replay (TF_DSV41_DRAFT_TIMED=1: measured)
-        s.cfg.timed = try @import("sys").environment.read(bool, "TF_DSV41_DRAFT_TIMED", false);
+        // The default prices tables so HTTP == CLI replay; the allocator opts into live timing (TF_DSV41_DRAFT_TIMED also does).
+        s.cfg.timed = lane_alloc or try @import("sys").environment.read(bool, "TF_DSV41_DRAFT_TIMED", false);
         // the depth policy as booted (the reference's "DSpark on (depth ...)"): what a check reads from the log
         const dset = s.x.policy.depth.set;
         std.log.info("dsv41 depth: {t}, cap {d}, skip {s}, joint {d}, drafts priced {s}", .{ dset.mode, dset.cap, if (dset.skip) "on" else "off", dset.joint, if (s.cfg.timed) "by the wall clock" else "from the cost tables" });
