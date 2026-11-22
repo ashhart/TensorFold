@@ -308,6 +308,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_KEEP_LATE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (unset or blank leaves it unset)" },
     .{ .name = "TF_FLASHNEXT_DECODE_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_GRAPH_TAIL", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1 runs a lone verify's tail copies and greedy row best in its window graph; default 0)" },
     .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_FUSED_SPLIT", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
