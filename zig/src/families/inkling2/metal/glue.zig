@@ -121,6 +121,7 @@ pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, b
     e.setBuffer(p.route_dots, 0, 2);
     e.setValue(RouteArgs{ .rows = rows }, 3);
     e.dispatchGroups(mtl.Size.of(experts / 8, rows, 1), mtl.Size.of(256, 1, 1));
+    e.barrier();
     e.setPipeline(p.router);
     e.setBuffer(p.route_dots, 0, 0);
     inline for (.{ bias, ids, weights }, 1..) |r, i| e.setBuffer(r.buf, r.off, i);

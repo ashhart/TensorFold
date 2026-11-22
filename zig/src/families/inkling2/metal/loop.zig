@@ -18,7 +18,7 @@ pub const Pipelines = struct {
     gates: mtl.Pipeline,
     zeta: mtl.Pipeline,
     blend: mtl.Pipeline,
-    /// The gates' intermediates for up to 64 rows; launches in one encoder run in order, so they share it.
+    /// The gates' intermediates for up to 64 rows of each of `max_gates` tuples.
     scratch: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -35,7 +35,7 @@ pub const Pipelines = struct {
         errdefer zeta.deinit();
         const blend = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_blend", false);
         errdefer blend.deinit();
-        const scratch = try device.buffer(64 * gate_row_bytes, mtl.ResourceOptions.shared);
+        const scratch = try device.buffer(max_gates * 64 * gate_row_bytes, mtl.ResourceOptions.shared);
         return .{ .messages = messages, .gates = gate_pipeline, .zeta = zeta, .blend = blend, .scratch = scratch };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -70,19 +70,42 @@ pub fn gates(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: R
 
 /// As gates, with row r's m at `m_stride` binary32 values from row r - 1's.
 pub fn gatesStrided(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32, m_stride: u32) void {
-    std.debug.assert(rows > 0 and rows <= 64);
-    const normalized = Ref{ .buf = p.scratch };
-    const zeta = Ref{ .buf = p.scratch, .off = 64 * 2 * hidden * 2 };
-    e.setPipeline(p.gates);
-    bind(e, &.{ h, m, normalized });
-    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 3);
-    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-    e.setPipeline(p.zeta);
-    bind(e, &.{ normalized, down, zeta });
-    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 3);
-    e.dispatchGroups(mtl.Size.of(rank / 8, rows, 1), mtl.Size.of(256, 1, 1));
-    e.setPipeline(p.blend);
-    bind(e, &.{ h, m, zeta, forget, gain, out });
-    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 6);
-    e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(32, 1, 1));
+    gatesEach(p, e, &.{.{ .h = h, .m = m, .down = down, .forget = forget, .gain = gain, .out = out }}, rows, m_stride);
+}
+
+/// Controller tuples one call gates together: a visit's three attention roles.
+pub const max_gates = 3;
+pub const Gate = struct { h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out: Ref };
+
+/// gatesStrided for each tuple a step at a time, a barrier between steps; the tuples' outputs must be distinct.
+pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate, rows: u32, m_stride: u32) void {
+    std.debug.assert(rows > 0 and rows <= 64 and items.len > 0 and items.len <= max_gates);
+    const args = GateArgs{ .rows = rows, .stride = m_stride };
+    for (items, 0..) |g, i| {
+        e.setPipeline(p.gates);
+        bind(e, &.{ g.h, g.m, normalizedOf(p, i) });
+        e.setValue(args, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+    e.barrier();
+    for (items, 0..) |g, i| {
+        e.setPipeline(p.zeta);
+        bind(e, &.{ normalizedOf(p, i), g.down, zetaOf(p, i) });
+        e.setValue(args, 3);
+        e.dispatchGroups(mtl.Size.of(rank / 8, rows, 1), mtl.Size.of(256, 1, 1));
+    }
+    e.barrier();
+    for (items, 0..) |g, i| {
+        e.setPipeline(p.blend);
+        bind(e, &.{ g.h, g.m, zetaOf(p, i), g.forget, g.gain, g.out });
+        e.setValue(args, 6);
+        e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(32, 1, 1));
+    }
+}
+
+fn normalizedOf(p: *const Pipelines, tuple: usize) Ref {
+    return .{ .buf = p.scratch, .off = tuple * 64 * gate_row_bytes };
+}
+fn zetaOf(p: *const Pipelines, tuple: usize) Ref {
+    return .{ .buf = p.scratch, .off = tuple * 64 * gate_row_bytes + 64 * 2 * hidden * 2 };
 }
