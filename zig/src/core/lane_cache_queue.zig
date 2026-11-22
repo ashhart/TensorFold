@@ -56,6 +56,9 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
     defer store.reservation_guard = before;
     errdefer job.cache_promise = .{};
     const r = job.request;
+    const previous_salt = store.salt;
+    store.salt = r.cacheSalt();
+    defer store.salt = previous_salt;
     return store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame);
 }
 
@@ -82,6 +85,10 @@ pub fn interrupted(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
 fn takesPrefix(h: *const LaneHost, current: *const Job, next: *const Job, at: u32) bool {
     const store = h.cache orelse return false;
     const r = next.request;
+    if (current.request.cacheSalt() != r.cacheSalt()) return false;
+    const previous_salt = store.salt;
+    store.salt = r.cacheSalt();
+    defer store.salt = previous_salt;
     if (next.started or r.background or r.promptOnly() or r.prompt_logprobs != null or r.untaught or
         r.images.len != 0 or current.request.images.len != 0 or !store.usable(at, r.chunks)) return false;
     if (store.find(next.cacheKey(), r.chunks, h.spans(r))) |e| if (e.at >= at) return false;
@@ -90,6 +97,9 @@ fn takesPrefix(h: *const LaneHost, current: *const Job, next: *const Job, at: u3
 
 fn keepAt(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32, cancelled: bool, handoff: bool) void {
     const store = h.cache orelse return;
+    const previous_salt = store.salt;
+    store.salt = job.request.cacheSalt();
+    defer store.salt = previous_salt;
     var snapshot = Snapshot.init(h, job, if (handoff) at else null) catch {
         job.cache_promise = .{};
         store.counts.failed += 1;
@@ -130,6 +140,7 @@ fn keepAt(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32, cancelled: bool,
 
 fn extends(current: *const Job, job: *const Job, e: *const pc.Entry) bool {
     const r = job.request;
+    if (e.salt != r.cacheSalt()) return false;
     if (job == current or r.promptOnly() or r.prompt_logprobs != null or r.untaught) return false;
     if (job.started and job.entry == null) return false;
     const key = job.cacheKey();

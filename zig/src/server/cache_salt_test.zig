@@ -61,7 +61,7 @@ const Box = struct {
 fn run(e: api.Engine, id: api.Id, prompt: []const u32, history: u32, max: u32, salt: u64) !struct { tokens: std.ArrayList(u32), cached: ?u32 } {
     const key: []const u32 = if (salt != 0) try cache_salt.salted(gpa, prompt, salt) else &.{};
     defer if (salt != 0) gpa.free(key);
-    const r: api.Request = .{ .prompt = prompt, .max_tokens = max, .history_len = history, .cache_key = key, .salted = salt != 0 };
+    const r: api.Request = .{ .prompt = prompt, .max_tokens = max, .history_len = history, .cache_key = key, .salted = salt != 0, .cache_salt = salt };
     var b: Box = .{};
     try e.submit(id, &r, .{ .ctx = &b, .event = Box.event });
     try std.testing.expectEqual(api.Reason.length, b.wait());
@@ -105,6 +105,25 @@ test "cache salt isolation: A keeps, B and an unsalted request miss, A resumes e
         try std.testing.expectEqualSlices(u32, kept.tokens.items, ids);
     const own_key = try cache_salt.salted(gpa, &t1, one);
     defer gpa.free(own_key);
+    // A salt masks only four words. Construct a different raw prompt under salt two with exactly salt one's key.
+    const zero: [api.cache_salt_key.words]u32 = @splat(0);
+    const masks = try cache_salt.salted(gpa, &zero, two);
+    defer gpa.free(masks);
+    var collision = t1;
+    for (collision[0..api.cache_salt_key.words], 0..) |*word, i| word.* = if (i == 0)
+        ((own_key[i] & 0x7fff_ffff) ^ (masks[i] & 0x7fff_ffff)) & 0x7fff_ffff
+    else
+        own_key[i] ^ masks[i];
+    const collision_key = try cache_salt.salted(gpa, &collision, two);
+    defer gpa.free(collision_key);
+    try std.testing.expectEqualSlices(u32, own_key, collision_key);
+    var cross = try run(host.engine(), 5, &collision, 8, 6, two);
+    defer cross.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 0), cross.cached);
+    var restored = try run(host.engine(), 6, &t1, 8, 6, one);
+    defer restored.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 8), restored.cached);
+    try std.testing.expectEqualSlices(u32, kept.tokens.items, restored.tokens.items);
     for (0..api.cache_salt_key.words) |i| {
         var image = t1;
         image[i] |= 0x8000_0000;
