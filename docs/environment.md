@@ -60,6 +60,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, all four prompt traces are created before readiness; startup, gate, final-draw, cache-admission and memory-counter records go to the log. A prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
 | `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels and its qmmf linears use dependent launches) |
+| `TF_GLM_INDEX_SPLIT` | A whole prompt position from `0` to `4294967295`; default `2048` (from that position on, rank 0 splits a prompt chunk's indexer rows at TP=2 or more; `0` never splits) |
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
@@ -143,7 +144,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 36 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 37 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
