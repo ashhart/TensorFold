@@ -89,3 +89,37 @@ IK2_F32_DOT(ik2_gemm_f32_nn_00, false)
 IK2_F32_DOT(ik2_gemm_f32_nn_01, false)
 IK2_F32_DOT(ik2_gemm_f32_nn_10, false)
 IK2_F32_DOT(ik2_gemm_f32_nn_11, false)
+
+#ifdef TF_SIMD_FRAGS
+// y = x w^T for at most 8 rows without tensor units: one 8x8x8 MMA per K octet in order, the tile GEMM's bits.
+[[max_total_threads_per_threadgroup(32)]] [[kernel]] void ik2_gemm_bf16_nt_rows(
+    const device bfloat* A [[buffer(0)]], const device bfloat* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],
+    device bfloat* D [[buffer(3)]], uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  const int m = P[0], K = P[2], lda = P[3], ldb = P[4], ldd = P[5];
+  const int col = int(tg.x) * 16;
+  const uint qid = lane >> 2u;
+  const uint fm = (qid & 4u) + ((lane >> 1u) & 3u);
+  const uint fn = (qid & 2u) * 2u + (lane & 1u) * 2u;
+  const bool live = int(fm) < m;
+  const device bfloat* a = A + long(fm) * lda + fn;
+  const device bfloat* b0 = B + long(col) * ldb;
+  const device bfloat* b1 = b0 + 8 * long(ldb);
+  simdgroup_matrix<float, 8, 8> acc0(0.0f), acc1(0.0f);
+#pragma clang loop unroll_count(8)
+  for (int k = 0; k < K; k += 8) {
+    simdgroup_matrix<bfloat, 8, 8> fa, fb0, fb1;
+    fa.thread_elements()[0] = live ? a[k] : bfloat(0.0f);
+    fa.thread_elements()[1] = live ? a[k + 1] : bfloat(0.0f);
+    simdgroup_load(fb0, b0 + k, ldb, ulong2(0, 0), true);
+    simdgroup_load(fb1, b1 + k, ldb, ulong2(0, 0), true);
+    simdgroup_multiply_accumulate(acc0, fa, fb0, acc0);
+    simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);
+  }
+  if (!live) return;
+  device bfloat* d = D + long(fm) * ldd + col + fn;
+  d[0] = bfloat(acc0.thread_elements()[0]);
+  d[1] = bfloat(acc0.thread_elements()[1]);
+  d[8] = bfloat(acc1.thread_elements()[0]);
+  d[9] = bfloat(acc1.thread_elements()[1]);
+}
+#endif

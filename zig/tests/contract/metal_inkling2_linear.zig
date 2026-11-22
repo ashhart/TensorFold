@@ -264,6 +264,8 @@ pub const Probe = struct {
         const mma_text = try std.fmt.allocPrint(p.a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.mv_mma });
         defer p.a.free(mma_text);
         var o = p.o.*;
+        // The faulted matvec keeps rows 3 to 15, which production now sends to the MMA tile.
+        o.mma_min_rows = mv_mma.row_tile;
         o.dense = try mv.Pipelines.loadSource(p.device, dense_text);
         errdefer o.dense.deinit();
         o.mma = try mv_mma.Pipelines.loadSource(p.device, mma_text);

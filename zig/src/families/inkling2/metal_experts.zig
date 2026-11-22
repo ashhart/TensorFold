@@ -16,14 +16,22 @@ const max_topk = 8;
 const dot_rows = 2 * (threads / simd_width);
 const plan_threads = 1024;
 
-/// Prompt chunks of at least this many rows group their pairs by expert; fewer rows keep the one-row dots.
+/// Prompt chunks of at least this many rows group their pairs by expert on MMA tiles.
 pub const group_min_rows = 64;
+/// Rows from which a decode window groups its pairs by expert and decodes each expert's weights once for all its pairs.
+pub const dedup_min_rows = 2;
+/// Pairs of one expert a dedup tile covers (I2X_PAIRS in experts_dot.metal).
+const dedup_pairs = 4;
 const Kernel = enum {
     gate_up_nvfp4,
     gate_up_mxfp8,
     down_nvfp4,
     down_mxfp8,
     combine,
+    dedup_gate_up_nvfp4,
+    dedup_gate_up_mxfp8,
+    dedup_down_nvfp4,
+    dedup_down_mxfp8,
     group_plan,
     mma_gate_up_nvfp4,
     mma_gate_up_mxfp8,
@@ -48,7 +56,7 @@ const DotArgs = extern struct {
     up_cap: f32,
 };
 const CombineArgs = extern struct { rows: u32, topk: u32, hidden: u32, experts: u32 };
-const PlanArgs = extern struct { pairs: u32, experts: u32, tile: u32, gate_up_groups: u32, down_groups: u32, pad: [3]u32 = @splat(0) };
+const PlanArgs = extern struct { pairs: u32, experts: u32, tile: u32, gate_up_groups: u32, down_groups: u32, swap: u32, pad: [2]u32 = @splat(0) };
 
 /// Pairs per grouped tile, and the outputs one tile's threadgroup covers: 32 weight rows (16 gate/up columns).
 const group_tile = 16;
@@ -111,7 +119,7 @@ const Scratch = struct {
         const stage = reserve(&bytes, @as(usize, pairs) * inter * @sizeOf(u16));
         const down = reserve(&bytes, pairs * hidden * @sizeOf(u16));
         const order = reserve(&bytes, pairs * @sizeOf(u32));
-        const tiles = reserve(&bytes, (pairs / group_tile + experts + 2) * 16);
+        const tiles = reserve(&bytes, (pairs / dedup_pairs + experts + 2) * 16);
         const launch = reserve(&bytes, 32);
         if (bytes > device.maxBufferLength()) return error.ExpertScratchTooLarge;
         return .{
@@ -235,16 +243,20 @@ pub const Store = struct {
         return s.pipes[@backingInt(k)];
     }
 
-    fn dot(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, x: View, ids: View, pairs: u32, grouped: bool) void {
+    /// How a dot reads its pairs: one threadgroup row each, planned tiles sharing weight decodes, or MMA tiles.
+    const Mode = enum { pair, dedup, mma };
+
+    fn dot(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, x: View, ids: View, pairs: u32, mode: Mode) void {
         const nv = layer.precision == .nvfp4;
         const m = if (gate_up) &layer.gate_up else &layer.down;
         const b = s.scratch;
-        const kernel: Kernel = switch (grouped) {
-            false => if (gate_up) (if (nv) .gate_up_nvfp4 else .gate_up_mxfp8) else (if (nv) .down_nvfp4 else .down_mxfp8),
-            true => if (gate_up) (if (nv) .mma_gate_up_nvfp4 else .mma_gate_up_mxfp8) else (if (nv) .mma_down_nvfp4 else .mma_down_mxfp8),
+        const kernel: Kernel = switch (mode) {
+            .pair => if (gate_up) (if (nv) .gate_up_nvfp4 else .gate_up_mxfp8) else (if (nv) .down_nvfp4 else .down_mxfp8),
+            .dedup => if (gate_up) (if (nv) .dedup_gate_up_nvfp4 else .dedup_gate_up_mxfp8) else (if (nv) .dedup_down_nvfp4 else .dedup_down_mxfp8),
+            .mma => if (gate_up) (if (nv) .mma_gate_up_nvfp4 else .mma_gate_up_mxfp8) else (if (nv) .mma_down_nvfp4 else .mma_down_mxfp8),
         };
         e.setPipeline(s.pipe(kernel));
-        bind(e, &.{ m.weight, m.scales, m.factors, x, if (grouped) b.at(b.order) else ids, b.at(if (gate_up) b.stage else b.down) });
+        bind(e, &.{ m.weight, m.scales, m.factors, x, if (mode == .pair) ids else b.at(b.order), b.at(if (gate_up) b.stage else b.down) });
         const out_width = if (gate_up) s.inter else s.hidden;
         e.setValue(DotArgs{
             .pairs = pairs,
@@ -256,7 +268,7 @@ pub const Store = struct {
             .gate_cap = s.gate_cap,
             .up_cap = s.up_cap,
         }, 6);
-        if (grouped) {
+        if (mode != .pair) {
             e.setBuffer(b.buffer, b.tiles, 7);
             e.dispatchIndirect(b.buffer, b.launch + (if (gate_up) @as(usize, 0) else 16), mtl.Size.of(threads, 1, 1));
         } else {
@@ -264,23 +276,25 @@ pub const Store = struct {
         }
     }
 
-    /// Prompt chunks: sort the pairs by expert once, then each tile decodes its expert's weights for all of its pairs.
-    fn encodeGrouped(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, x: View, ids: View, rows: u32) void {
+    /// Sort the pairs by expert once, then each tile decodes its expert's weights for all of its pairs.
+    fn encodePlanned(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, x: View, ids: View, rows: u32, mode: Mode) void {
         const b = s.scratch;
+        const mma = mode == .mma;
         e.setPipeline(s.pipe(.group_plan));
         bind(e, &.{ ids, b.at(b.order), b.at(b.tiles), b.at(b.launch) });
         e.setValue(PlanArgs{
             .pairs = rows * s.topk,
             .experts = s.experts,
-            .tile = group_tile,
-            .gate_up_groups = groups(s.inter, group_rows / 2),
-            .down_groups = groups(s.hidden, group_rows),
+            .tile = if (mma) group_tile else dedup_pairs,
+            .gate_up_groups = if (mma) groups(s.inter, group_rows / 2) else groups(s.inter, dot_rows / 2),
+            .down_groups = if (mma) groups(s.hidden, group_rows) else groups(s.hidden, dot_rows),
+            .swap = @intFromBool(!mma),
         }, 4);
         e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(plan_threads, 1, 1));
         e.barrier();
-        s.dot(e, layer, true, x, ids, rows * s.topk, true);
+        s.dot(e, layer, true, x, ids, rows * s.topk, mode);
         e.barrier();
-        s.dot(e, layer, false, s.scratch.at(b.stage), ids, rows * s.topk, true);
+        s.dot(e, layer, false, s.scratch.at(b.stage), ids, rows * s.topk, mode);
     }
 
     /// Encode BF16 projections for active IDs, weighted by FP32 route scores, without submitting.
@@ -297,11 +311,13 @@ pub const Store = struct {
             overlap(out, row_bytes, weights, route_bytes)) return error.ExpertAliasing;
         const layer = &s.layers[physical_layer];
         if (rows >= group_min_rows and x.offset % 16 == 0) {
-            s.encodeGrouped(e, layer, x, ids, rows);
+            s.encodePlanned(e, layer, x, ids, rows, .mma);
+        } else if (rows >= dedup_min_rows) {
+            s.encodePlanned(e, layer, x, ids, rows, .dedup);
         } else {
-            s.dot(e, layer, true, x, ids, pairs, false);
+            s.dot(e, layer, true, x, ids, pairs, .pair);
             e.barrier();
-            s.dot(e, layer, false, s.scratch.at(s.scratch.stage), ids, pairs, false);
+            s.dot(e, layer, false, s.scratch.at(s.scratch.stage), ids, pairs, .pair);
         }
         e.barrier();
         e.setPipeline(s.pipe(.combine));

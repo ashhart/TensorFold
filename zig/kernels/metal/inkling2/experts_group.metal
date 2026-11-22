@@ -1,9 +1,9 @@
-// Prompt chunks group route pairs by expert; the MMA dots read the tiles from grid x so an expert's tiles run together.
+// Route pairs grouped by expert, for the MMA dots of prompt chunks and the dedup dots of decode windows.
 #define I2X_PLAN_THREADS 1024u
 
 struct Inkling2ExpPlanArgs {
   uint pairs, experts, tile, gate_up_groups;
-  uint down_groups, p0, p1, p2;
+  uint down_groups, swap, p1, p2;
 };
 
 // Sort pair slots by expert (bucket `experts` is inactive) into tiles {bucket, first pair, pairs}; tiles[0].x counts.
@@ -28,8 +28,9 @@ void inkling2_exp_group_plan(const device uint* ids [[buffer(0)]], device uint* 
       atomic_store_explicit(&seen[e], 0u, memory_order_relaxed);
     }
     tiles[0] = uint4(n, 0u, 0u, 0u);
-    launch[0] = n; launch[1] = a.gate_up_groups; launch[2] = 1u;
-    launch[4] = n; launch[5] = a.down_groups; launch[6] = 1u;
+    // swap: columns along grid x and tiles along y (the dedup dots); else tiles along x (the MMA dots)
+    launch[0] = a.swap ? a.gate_up_groups : n; launch[1] = a.swap ? n : a.gate_up_groups; launch[2] = 1u;
+    launch[4] = a.swap ? a.down_groups : n; launch[5] = a.swap ? n : a.down_groups; launch[6] = 1u;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint p = t; p < a.pairs; p += I2X_PLAN_THREADS) {

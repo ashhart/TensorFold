@@ -27,6 +27,13 @@ pub const control = struct {
     pub const to = "gemm_block<T, TA, TB, false, 256>(acc, A, B, lda, ldb, P[2] - 1, (P[2] - 1) / 256, rows, cols, home);";
 };
 
+/// Without tensor units the draft's small-row GEMM takes the 7- and 8-row shapes; this fault is only in its text.
+pub const control_rows = struct {
+    pub const label = "inkling2 media gemm control feeds the small-row GEMM's second column block the first block's weights";
+    pub const from = "simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);";
+    pub const to = "simdgroup_multiply_accumulate(acc1, fa, fb0, acc1);";
+};
+
 const tiles: [3]c.Tile = .{ .{ .size = 64 }, .{ .size = 128 }, .{ .size = 256, .min = 2 } };
 const edges = [_]c.Shape{
     .{ .rows = 64, .n = 128, .k = 256 }, .{ .rows = 64, .n = 129, .k = 257 },

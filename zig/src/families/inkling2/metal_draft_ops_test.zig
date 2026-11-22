@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
+const gm = @import("metal_vision_gemm.zig");
 
 const t = std.testing;
 
@@ -196,4 +197,45 @@ test "step logits are capped, bias-corrected, masked past the real vocabulary, a
         try t.expect(id >= grp * 8 and id < @min(grp * 8 + 8, unpadded));
         try t.expect(ys[id] >= top - 0.25);
     }
+}
+
+test "the small-row GEMM has the tile GEMM's bits at every row count" {
+    const g = try Gpu.init();
+    defer g.deinit();
+    var gemm = try gm.Gemm.init(g.device, g.lib, &.{.bf16_nt});
+    defer gemm.deinit();
+    const small = gemm.rows orelse return error.SkipZigTest; // a tensor-unit GPU keeps the tiles
+    const n = 80;
+    const k = 608; // two whole 256-deep blocks and a 96-deep rest
+    var prng = std.Random.DefaultPrng.init(21);
+    const rng = prng.random();
+    var x: [gm.Gemm.rows_max * k]u16 = undefined;
+    var w: [n * k]u16 = undefined;
+    for (&x) |*v| v.* = bf((rng.float(f32) * 2 - 1) * 3);
+    for (&w) |*v| v.* = bf((rng.float(f32) * 2 - 1) * 3);
+    const xb = try g.buffer(u16, &x);
+    defer xb.deinit();
+    const wb = try g.buffer(u16, &w);
+    defer wb.deinit();
+    for ([_]u32{ 1, 3, 7, 8 }) |m| {
+        const shape: gm.Shape = .{ .m = m, .n = n, .k = k, .lda = k, .ldb = k, .ldd = n };
+        var out: [2]mtl.Buffer = undefined;
+        for (&out, 0..) |*o, i| {
+            o.* = try g.device.buffer(gm.Gemm.rows_max * n * 2, mtl.ResourceOptions.shared);
+            @memset(o.slice(u16, gm.Gemm.rows_max * n), 0xffff);
+            gemm.rows = if (i == 0) small else null;
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = g.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            gemm.run(e, .bf16_nt, .{ .buf = xb }, .{ .buf = wb }, .{ .buf = o.* }, shape);
+            e.end();
+            cb.commit();
+            cb.wait();
+            try t.expect(cb.failure() == null);
+        }
+        defer for (out) |o| o.deinit();
+        try t.expectEqualSlices(u16, out[1].slice(u16, gm.Gemm.rows_max * n), out[0].slice(u16, gm.Gemm.rows_max * n));
+    }
+    gemm.rows = small;
 }

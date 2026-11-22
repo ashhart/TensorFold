@@ -31,6 +31,8 @@ pub const Shape = struct {
 
 pub const Gemm = struct {
     pipes: [5][2][2]?mtl.Pipeline = @splat(@splat(@splat(null))),
+    /// Without tensor units, bf16 x w^T for up to `rows_max` rows on 8x8 MMAs with the tile kernel's bits (null: tiles)
+    rows: ?mtl.Pipeline = null,
 
     /// The pipelines of `wanted` from `lib` (the library holds every kind; unused ones cost nothing to leave out).
     pub fn init(device: mtl.Device, lib: mtl.Library, wanted: []const Kind) !Gemm {
@@ -41,10 +43,18 @@ pub const Gemm = struct {
             const text = try std.fmt.bufPrint(&name, "ik2_gemm_{s}_{d}{d}", .{ @tagName(kind), m, n });
             g.pipes[@backingInt(kind)][m][n] = try mtl.Pipeline.init(device, lib, text, false);
         };
+        for (wanted) |kind| if (kind == .bf16_nt and !device.tensorUnits()) {
+            g.rows = try mtl.Pipeline.init(device, lib, "ik2_gemm_bf16_nt_rows", false);
+        };
         return g;
     }
 
+    /// Most rows the small GEMM takes (one 8x8 MMA row block).
+    pub const rows_max = 8;
+
     pub fn deinit(g: *Gemm) void {
+        if (g.rows) |p| p.deinit();
+        g.rows = null;
         for (&g.pipes) |*a| for (a) |*b| for (b) |*p| if (p.*) |pipe| {
             pipe.deinit();
             p.* = null;
@@ -57,6 +67,16 @@ pub const Gemm = struct {
             g.runExact(e, kind, a, b, d, s);
             return;
         }
+        if (kind == .bf16_nt and s.m <= rows_max and s.batch == 1 and s.n % 16 == 0 and s.k % 8 == 0) if (g.rows) |small| {
+            e.setPipeline(small);
+            e.setBuffer(a.buf, a.off, 0);
+            e.setBuffer(b.buf, b.off, 1);
+            const p = [16]i32{ @intCast(s.m), @intCast(s.n), @intCast(s.k), @intCast(s.lda), @intCast(s.ldb), @intCast(s.ldd), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            e.setBytes(std.mem.asBytes(&p), 2);
+            e.setBuffer(d.buf, d.off, 3);
+            e.dispatchGroups(mtl.Size.of(s.n / 16, 1, 1), mtl.Size.of(32, 1, 1));
+            return;
+        };
         const tn: u32 = (s.n + 127) / 128;
         const tm: u32 = (s.m + 63) / 64;
         const pipe = g.pipes[@backingInt(kind)][@intFromBool(s.m % 64 == 0)][@intFromBool(s.n % 128 == 0)].?;

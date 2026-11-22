@@ -30,6 +30,8 @@ pub const attn_partial_floats = 132;
 /// The dense MMA tile (kernels/metal/inkling2/dense_mma.metal): outputs a side, and the K step a staging round covers.
 const dense_tile = 16;
 const dense_chunk = 256;
+/// Rows from which a projection runs on MMA tiles (bit-equal to the matvec): the matvec re-reads its weights per row.
+pub const mma_min_rows = 3;
 
 pub const Options = struct {
     /// Scratch for attention partials and router logits; one buffer, reused by consecutive dispatches.
@@ -252,6 +254,8 @@ pub const Ops = struct {
     mma: mv_mma.Pipelines,
     scratch: mtl.Buffer,
     scratch_bytes: usize,
+    /// Rows from which `linear` takes an MMA tile; the contract's controls raise it to keep faulted matvecs in reach.
+    mma_min_rows: u32,
 
     pub fn load(device: mtl.Device, options: Options) !Ops {
         return loadSource(device, options, sources.inkling2_ops);
@@ -273,6 +277,7 @@ pub const Ops = struct {
         o.mma = try mv_mma.Pipelines.load(device);
         errdefer o.mma.deinit();
         o.scratch_bytes = options.scratch_bytes;
+        o.mma_min_rows = mma_min_rows;
         o.scratch = try device.buffer(options.scratch_bytes, mtl.ResourceOptions.private);
         return o;
     }
@@ -397,12 +402,12 @@ pub const Ops = struct {
 
     fn denseRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool) !void {
         if (rows == 0 or n == 0 or k == 0) return error.InvalidInkling2Op;
-        if (rows >= mv_mma.row_tile and k % dense_chunk == 0 and (x.offset | w.offset) % 16 == 0) {
+        if (rows >= o.mma_min_rows and k % dense_chunk == 0 and (x.offset | w.offset) % 16 == 0) {
             e.setPipeline(o.pipe(if (f32_out) .dense_mma_f32 else .dense_mma_bf16));
             bind(e, &.{ x, w, y });
             e.setValue(DenseArgs{ .k = k, .n = n, .rows = rows }, 3);
             e.dispatchGroups(mtl.Size.of((n + dense_tile - 1) / dense_tile, (rows + dense_tile - 1) / dense_tile, 1), mtl.Size.of(128, 1, 1));
-        } else if (rows >= mv_mma.row_tile and k >= 32) {
+        } else if (rows >= o.mma_min_rows and k >= 32) {
             const xr = mv_mma.Ref{ .buf = x.buffer, .off = x.offset };
             const wr = mv_mma.Ref{ .buf = w.buffer, .off = w.offset };
             const yr = mv_mma.Ref{ .buf = y.buffer, .off = y.offset };

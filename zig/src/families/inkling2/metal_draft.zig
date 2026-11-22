@@ -229,7 +229,7 @@ pub const Adapter = struct {
             const l = a.lanes.get(item.stream).?;
             l.held_len = 0;
             l.seq.slice(u32, k.m.block)[0] = item.pending;
-            try k.block(pass.encoder(), l, l.end);
+            try k.block(pass.encoder(), l, l.end, item.depth);
         }
         try pass.flush();
         for (items) |item| a.lanes.get(item.stream).?.held_len = item.depth;
@@ -241,7 +241,7 @@ pub const Adapter = struct {
         l.seq.slice(u32, k.m.block)[0] = pending;
         var pass: Pass = .{ .a = a };
         errdefer pass.flush() catch {};
-        try k.block(pass.encoder(), l, l.end);
+        try k.block(pass.encoder(), l, l.end, k.m.block - 1);
         try pass.flush();
     }
 

@@ -25,6 +25,8 @@ const served = [_]c.Shape{
 
 // A batch past the grouped threshold, so one dispatch takes the grouped path while its rows replay one at a time.
 const big_rows = experts.group_min_rows + 8;
+// A decode window past the dedup threshold: tiles of up to eight pairs per expert, replayed one row at a time.
+const small_rows = 12;
 
 const rule = "dense zero weights propagate nonfinite inputs; a nonfinite active route poisons the sum; inactive slots are ignored";
 
@@ -220,19 +222,19 @@ const Probe = struct {
         return null;
     }
 
-    /// One grouped dispatch of `big_rows` rows against the same rows dispatched one at a time: their bytes are equal.
-    fn agree(p: *Probe, s: *const Store, x: []const u16, ids: []const u32, weights: []const f32, what: []const u8) !?[]const u8 {
+    /// One grouped dispatch of `n` rows against the same rows dispatched one at a time: their bytes are equal.
+    fn agree(p: *Probe, s: *const Store, n: usize, x: []const u16, ids: []const u32, weights: []const f32, what: []const u8) !?[]const u8 {
         const row_bytes = p.shape.k * @sizeOf(u16);
         const input = try p.rig.input(std.mem.sliceAsBytes(x));
         const route_ids = try p.rig.input(std.mem.sliceAsBytes(ids));
         const route_weights = try p.rig.input(std.mem.sliceAsBytes(weights));
-        const batch = try p.rig.scratch(big_rows * row_bytes);
-        const split = try p.rig.scratch(big_rows * row_bytes);
-        @memset(p.rig.bytes(batch, big_rows * row_bytes), 0xff);
-        @memset(p.rig.bytes(split, big_rows * row_bytes), 0xff);
-        try s.run(p.rig.queue, 0, u.view(input), u.view(route_ids), u.view(route_weights), u.view(batch), big_rows);
+        const batch = try p.rig.scratch(n * row_bytes);
+        const split = try p.rig.scratch(n * row_bytes);
+        @memset(p.rig.bytes(batch, n * row_bytes), 0xff);
+        @memset(p.rig.bytes(split, n * row_bytes), 0xff);
+        try s.run(p.rig.queue, 0, u.view(input), u.view(route_ids), u.view(route_weights), u.view(batch), @intCast(n));
         const pass = p.rig.begin();
-        for (0..big_rows) |i| {
+        for (0..n) |i| {
             s.encode(pass.e, 0, shifted(input, i * row_bytes), shifted(route_ids, i * topk * 4), shifted(route_weights, i * topk * 4), shifted(split, i * row_bytes), 1) catch |err| {
                 pass.e.end();
                 pass.pool.pop();
@@ -240,20 +242,20 @@ const Probe = struct {
             };
         }
         try p.rig.finish(pass);
-        const want = p.rig.bytes(split, big_rows * row_bytes);
-        const got = p.rig.bytes(batch, big_rows * row_bytes);
+        const want = p.rig.bytes(split, n * row_bytes);
+        const got = p.rig.bytes(batch, n * row_bytes);
         const at = std.mem.indexOfDiff(u8, want, got) orelse return null;
-        return try std.fmt.bufPrint(&p.msg, "grouped batch of {d} rows ({s}) differs from one-row dispatch at row {d}, byte {d}", .{ big_rows, what, at / row_bytes, at % row_bytes });
+        return try std.fmt.bufPrint(&p.msg, "grouped batch of {d} rows ({s}) differs from one-row dispatch at row {d}, byte {d}", .{ n, what, at / row_bytes, at % row_bytes });
     }
 
     /// The prepared rows repeated to `big_rows` (nonfinite inputs included), or with every pair on one expert.
-    fn checkGrouped(p: *Probe, skew: bool) !?[]const u8 {
+    fn checkGrouped(p: *Probe, n: usize, skew: bool) !?[]const u8 {
         const a = p.arena.allocator();
         const k = p.shape.k;
-        const x = try a.alloc(u16, big_rows * k);
-        const ids = try a.alloc(u32, big_rows * topk);
-        const weights = try a.alloc(f32, big_rows * topk);
-        for (0..big_rows) |r| {
+        const x = try a.alloc(u16, n * k);
+        const ids = try a.alloc(u32, n * topk);
+        const weights = try a.alloc(f32, n * topk);
+        for (0..n) |r| {
             const from = r % p.shape.rows;
             @memcpy(x[r * k ..][0..k], p.x[from * k ..][0..k]);
             @memcpy(ids[r * topk ..][0..topk], p.ids[from * topk ..][0..topk]);
@@ -263,11 +265,11 @@ const Probe = struct {
             id.* = 1;
             w.* = @as(f32, @floatFromInt(1 + i % 7)) / 13;
         };
-        return p.agree(&p.store.?, x, ids, weights, if (skew) "every pair on one expert" else "prepared rows repeated");
+        return p.agree(&p.store.?, n, x, ids, weights, if (skew) "every pair on one expert" else "prepared rows repeated");
     }
 
     /// Dense random weights and BF16 activations make FP32 sums inexact, so the chain order shows in the bytes.
-    fn checkDense(p: *Probe, one: bool) !?[]const u8 {
+    fn checkDense(p: *Probe, n: usize, one: bool) !?[]const u8 {
         const a = p.arena.allocator();
         var cp = ck.Checkpoint.init(a);
         defer cp.deinit();
@@ -278,11 +280,11 @@ const Probe = struct {
         var prng = std.Random.DefaultPrng.init(0xd0d0);
         const rng = prng.random();
         const k = p.shape.k;
-        const x = try a.alloc(u16, big_rows * k);
+        const x = try a.alloc(u16, n * k);
         for (x) |*v| v.* = u.word((rng.float(f64) - 0.5) * 6);
-        const ids = try a.alloc(u32, big_rows * topk);
-        const weights = try a.alloc(f32, big_rows * topk);
-        for (0..big_rows) |r| {
+        const ids = try a.alloc(u32, n * topk);
+        const weights = try a.alloc(f32, n * topk);
+        for (0..n) |r| {
             var order: [fixture.experts]u32 = undefined;
             for (&order, 0..) |*v, i| v.* = @intCast(i);
             rng.shuffle(u32, &order);
@@ -291,7 +293,7 @@ const Probe = struct {
                 weights[r * topk + slot] = 0.1 + rng.float(f32);
             }
         }
-        return p.agree(&dense, x, ids, weights, if (one) "dense, every pair on one expert" else "dense random routes");
+        return p.agree(&dense, n, x, ids, weights, if (one) "dense, every pair on one expert" else "dense random routes");
     }
 
     pub fn check(p: *Probe, gate: g.Gate) !?[]const u8 {
@@ -311,13 +313,15 @@ const Probe = struct {
         }
         if (gate == .shapes and p.shape.rows > 1) {
             if (try p.checkSplit(got)) |reason| return reason;
-            if (try p.checkGrouped(false)) |reason| return reason;
-            if (try p.checkGrouped(true)) |reason| return reason;
-            if (try p.checkDense(false)) |reason| return reason;
-            if (try p.checkDense(true)) |reason| return reason;
+            for ([_]usize{ big_rows, small_rows }) |n| {
+                if (try p.checkGrouped(n, false)) |reason| return reason;
+                if (try p.checkGrouped(n, true)) |reason| return reason;
+                if (try p.checkDense(n, false)) |reason| return reason;
+                if (try p.checkDense(n, true)) |reason| return reason;
+            }
         }
         if (gate == .nonfinite) {
-            if (try p.checkGrouped(false)) |reason| return reason;
+            for ([_]usize{ big_rows, small_rows }) |n| if (try p.checkGrouped(n, false)) |reason| return reason;
         }
         if (!try p.rig.intact()) return "the batch or split dispatch wrote beyond its bound buffer views";
         return null;
@@ -361,8 +365,8 @@ const mutations = [_]Mutation{
         .format = .mxfp8,
         .gate = .shapes,
         .label = "control: inkling2 experts MXFP8 skips projection BF16 rounding before SwiGLU",
-        .from = "const float2 v = i2x_bf2(accum);",
-        .to = "const float2 v = accum;",
+        .from = "const float2 v = i2x_bf2(accum[r]);",
+        .to = "const float2 v = accum[r];",
     },
     .{
         .format = .mxfp8,
@@ -382,8 +386,8 @@ const mutations = [_]Mutation{
         .format = .mxfp8,
         .gate = .shapes,
         .label = "control: inkling2 experts MXFP8 down projection writes its first two columns swapped",
-        .from = "    dst[0] = bfloat(accum.x);\n    dst[1] = bfloat(accum.y);",
-        .to = "    dst[0] = bfloat(accum.y);\n    dst[1] = bfloat(accum.x);",
+        .from = "      dst[0] = bfloat(accum[r].x);\n      dst[1] = bfloat(accum[r].y);",
+        .to = "      dst[0] = bfloat(accum[r].y);\n      dst[1] = bfloat(accum[r].x);",
     },
     .{
         .format = .nvfp4,
@@ -473,15 +477,43 @@ const mutations = [_]Mutation{
         .format = .nvfp4,
         .gate = .sums,
         .label = "control: inkling2 experts NVFP4 rounds lane sums to BF16",
-        .from = "    accum += part;",
-        .to = "    accum = i2x_bf2(accum + part);",
+        .from = "accum[r] += part[r];",
+        .to = "accum[r] = i2x_bf2(accum[r] + part[r]);",
     },
     .{
         .format = .mxfp8,
         .gate = .sums,
         .label = "control: inkling2 experts MXFP8 rounds lane sums to BF16",
-        .from = "    accum += part;",
-        .to = "    accum = i2x_bf2(accum + part);",
+        .from = "accum[r] += part[r];",
+        .to = "accum[r] = i2x_bf2(accum[r] + part[r]);",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts dedup NVFP4 multiplies a tile's low weights by its first pair's activations",
+        .from = "part[r] += w_low * float(xs[r][block * 16u + 2u * i]);",
+        .to = "part[r] += w_low * float(xs[0][block * 16u + 2u * i]);",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts dedup MXFP8 multiplies a tile's weights by its first pair's activations",
+        .from = "part[r] += decoded * float(xs[r][block * 32u + i]);",
+        .to = "part[r] += decoded * float(xs[0][block * 32u + i]);",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts dedup NVFP4 reads every pair's activations from the tile's first pair",
+        .from = "xs[r] = x + ulong(pairs[r] / a.src_div) * a.k;",
+        .to = "xs[r] = x + ulong(pairs[0] / a.src_div) * a.k;",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts dedup MXFP8 stores every pair of a tile on the first pair's row",
+        .from = "device bfloat* dst = out + ulong(pairs[r]) * a.out_width + col;",
+        .to = "device bfloat* dst = out + ulong(pairs[0]) * a.out_width + col;",
     },
 };
 

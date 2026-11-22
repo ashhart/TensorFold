@@ -284,8 +284,8 @@ pub const Core = struct {
         rowsDispatch(e, 1);
     }
 
-    /// The block [seq[0] = anchor token, mask x (block - 1)] at positions anchor ..; seq[1 ..] gets its draft tokens.
-    pub fn block(k: *const Core, e: mtl.ComputeEncoder, l: *const Lane, anchor: u64) !void {
+    /// The block [seq[0] = anchor, mask x (block - 1)] at positions anchor ..; Markov steps fill seq[1 .. 1 + steps].
+    pub fn block(k: *const Core, e: mtl.ComputeEncoder, l: *const Lane, anchor: u64, steps: u32) !void {
         if (anchor + k.m.block > std.math.maxInt(u32)) return error.DraftContextFull;
         const m = k.m;
         const n: u32 = m.block;
@@ -334,7 +334,7 @@ pub const Core = struct {
         const U = Ref{ .buf = k.target.unembed.buffer, .off = k.target.unembed.offset };
         k.gemm.run(e, .bf16_nt, k.r("x").at(@as(usize, D) * 2), U, k.r("base"), .{ .m = n - 1, .n = V, .k = D, .lda = D, .ldb = D, .ldd = V });
         const nbest: u32 = (V + 7) / 8;
-        for (0..n - 1) |i| {
+        for (0..@min(steps, n - 1)) |i| {
             const step: u32 = @intCast(i);
             const rnn = Rnn{ .width = D, .rank = m.rank, .step = step };
             k.bind(e, .rnn, &.{ k.r("state"), k.w.w1, seq, k.r("x").at((i + 1) * D * 2), .{ .buf = l.f }, k.w.rnn_w, k.w.rnn_b, k.r("raw") }, rnn);

@@ -33,7 +33,7 @@ const kernels = [_]M{
 };
 
 pub const records = blk: {
-    var out: [kernels.len + gemm_kinds.len * 4]M = undefined;
+    var out: [kernels.len + gemm_kinds.len * 4 + 1]M = undefined;
     for (kernels, 0..) |k, i| out[i] = k;
     var at: usize = kernels.len;
     for (gemm_kinds) |kind| for (0..2) |m| for (0..2) |n| {
@@ -46,6 +46,8 @@ pub const records = blk: {
         };
         at += 1;
     };
+    // Without tensor units the draft's small-row GEMM runs on 8x8 matrices, one simdgroup a threadgroup.
+    out[at] = .{ .name = "inkling2 media ik2_gemm_bf16_nt_rows", .threads = 32, .tg_memory = 0, .reserved = 32, .offline = false };
     break :blk out;
 };
 

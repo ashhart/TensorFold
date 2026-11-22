@@ -115,6 +115,13 @@ pub const Suite = struct {
             const p = try s.hold(gemm.Probe, gemm.Probe.init(s.a, s.device, s.queue, mm, .bf16f_nt, gemm.control.label));
             try s.kernels.append(s.a, p.kernel(.shapes));
         }
+        if (!s.device.tensorUnits() and wanted(only, gemm.control_rows.label)) {
+            const lib = try s.mutate(true, gemm.control_rows.from, gemm.control_rows.to);
+            defer lib.deinit();
+            const mm = try s.hold(gm.Gemm, try gm.Gemm.init(s.device, lib, &.{.bf16_nt}));
+            const p = try s.hold(gemm.Probe, gemm.Probe.init(s.a, s.device, s.queue, mm, .bf16_nt, gemm.control_rows.label));
+            try s.kernels.append(s.a, p.kernel(.shapes));
+        }
         try s.plain(rows, only);
         try s.plain(dops, only);
         try s.plain(vision, only);
