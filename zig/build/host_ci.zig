@@ -216,6 +216,7 @@ const linux_host = [_][]const u8{
     "test-qwen-draw-host",
     "test-qwen27-ane-policy-host",
     "test-qwen27-bank-host",
+    "test-qwen27-causal-skip-host",
     "test-qwen27-keep-host",
     "test-qwen27-masks-host",
     "test-qwen27-pass-host",

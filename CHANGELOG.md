@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal Qwen3.8-27B: `TF_Q27_CAUSAL_SKIP=1` skips prompt-attention key chunks that no row of a threadgroup can see, writing the same neutral partials a full run writes; every output bit is unchanged and the switch is off by default (#N).
+
 - Server: chat and completions take `n` from 1 through 16, each choice its own engine request on the one prompt with its own `index` and `tensorfold.seed` (choice 0 keeps the request's seed, so `n: 1` replies are unchanged) and `usage` counting the prompt once; a request with `n` above 1 takes `n` places under `--max-inflight` and `--max-inflight-per-key`, all or none, and gets 400 with `logprobs` or a required tool call, while `/v1/responses` and `/v1/imprint` still refuse `n` other than 1 (#3148, closes #3114).
 
 - Metal: Qwen3.8-Flash-Next and Qwen3.8-27B accept `presence_penalty` and `frequency_penalty`, counting each reply row and its own draft path so drafted replies match undrafted ones; at zero the default path is unchanged (#3145).

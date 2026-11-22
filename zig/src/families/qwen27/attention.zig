@@ -24,7 +24,7 @@ const PagedPtrs = extern struct { keys: u64, values: u64, table: u64, page_bytes
 pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 /// Keep's gather and scatter: rows kept, and the KV heads a staging row holds.
 const KeepArgs = extern struct { kept: u32, kv_heads: u32 };
-pub const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32 };
+pub const PromptArgs = @import("attention_causal.zig").PromptArgs;
 pub const Limits = struct {
     rows: u32 = 128,
     streams: u32 = 8,
@@ -250,8 +250,7 @@ pub const page_rows = 256;
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
-/// The prompt kernel's threads a group: eight simdgroups, both kernels (attention_prompt*.metal's SG = 8).
-const prompt_threads = 256;
+const prompt_threads = @import("attention_causal.zig").prompt_threads;
 /// h_end and w_end above 0: an M-RoPE round, the h and w position planes `plane` rows past each other in `positions`.
 pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
 pub const Attention = struct {
@@ -260,6 +259,7 @@ pub const Attention = struct {
     io: [11]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
+    causal_skip: bool = false, // TF_Q27_CAUSAL_SKIP=1: prompt chunks no row of a threadgroup sees write only PM and PL
     /// Q27_JOIN's pack_b, tail and merges (attention_join.pipelines), taken for a plan with pairs (Plan.pair)
     join: ?[4]mtl.Pipeline = null,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
@@ -280,7 +280,7 @@ pub const Attention = struct {
             n += 1;
         }
         const units = device.tensorUnits();
-        return .{ .prefix = p, .io = io, .prompt = promptPipelines(device, library, units) catch |err| if (units) return err else null, .units = units };
+        return .{ .prefix = p, .io = io, .prompt = promptPipelines(device, library, units) catch |err| if (units) return err else null, .units = units, .causal_skip = try @import("sys").environment.read(bool, "TF_Q27_CAUSAL_SKIP", false) };
     }
     pub fn deinit(a: *Attention) void {
         for (a.prefix ++ a.io) |pipe| pipe.deinit();
@@ -474,7 +474,7 @@ pub const Attention = struct {
         // before M5 (no shared prefix) the partials take the tail's buffers, which hold every chunk's packed rows
         const parts = if (g.shared_prefix) [3]Field{ .poa, .pma, .pla } else [3]Field{ .pob, .pmb, .plb };
         if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
-        const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
+        const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .causal_skip = @intFromBool(a.causal_skip), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
         const pick = scratch.get(.pick).buffer;
         encodePick(e, a.prompt.?[4..6].*, binding.get(.caches), args, pick, .{ g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs });

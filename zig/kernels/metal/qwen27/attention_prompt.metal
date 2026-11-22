@@ -5,10 +5,16 @@ using namespace metal;
 using namespace mpp::tensor_ops;
 constant constexpr int PG = Q27_G, PKVH = Q27_KVH, PD = 256, PH = 128, PCK = 512, PTK = 32; // after attention_mpp.metal's G
 // kv_heads is the rank's, not the model's: a split attention writes local node rows.
-struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads; };
+struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads, causal_skip; };
 typedef vec<float, 8> q27f8;
 typedef vec<bfloat, 8> q27b8;
 typedef vec<half, 8> q27h8;
+
+// One past the last key any row of this threadgroup sees (0 if it holds no row); a chunk from there on is neutral.
+inline int q27_prompt_group_keys(constant Q27PromptArgs& args, int group, int tiles) {
+  const int first = group * tiles * 16, end = min(first + tiles * 16, args.rows * PG);
+  return end > first ? args.start + (end - 1) / PG + 1 : 0;
+}
 
 // Rows fm and fm+8, columns fn..fn+3 of a 16-row block; past `limit` at a chunk's edge, rows read zero.
 template <bool EDGE>
@@ -161,29 +167,32 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   const device bfloat* q = QA + ((int64_t)hk * args.rp + (live ? tile * 16 : 0)) * PD + h * PH;
   const device bfloat* k = caches[0].keys + (int64_t)hk * args.key_stride + h * PH;
   const device bfloat* v = caches[0].values + (int64_t)hk * args.value_stride + h * PH;
+  const bool skip = args.causal_skip != 0 && kbeg >= q27_prompt_group_keys(args, int(tg.z), SG / 2);  // PM -inf, PL 0: merge skips PO
   Q27PromptRun r;
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j++) r.O[j] = 0.0f;
   r.m0 = -INFINITY; r.m1 = -INFINITY; r.l0 = 0.0f; r.l1 = 0.0f;
-  int kt = kbeg;
+  int kt = skip ? kend : kbeg;
   if (!MASKED) {  // main's loop; q27_attn_prompt_pick sends MASKED when a value some row must not see isn't finite
     for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
     if (kt < kend) q27_prompt_step<true, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
   } else {
     // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask, then unmask
     const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
-    const ushort mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
+    const ushort mask = !skip && q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
     const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
     for (; kt < seen_by_all; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
     for (; kt < kend; kt += PTK) q27_prompt_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
   }
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
-  _Pragma("clang loop unroll(full)")
-  for (int j = 0; j < 8; j++) {
-    device float* dst = PO + (base + fm) * PD + h * PH + j * 16 + fn;
-    *(device float4*)dst = float4(r.O[j][0], r.O[j][1], r.O[j][2], r.O[j][3]);
-    *(device float4*)(dst + 8 * PD) = float4(r.O[j][4], r.O[j][5], r.O[j][6], r.O[j][7]);
+  if (!skip) {
+    _Pragma("clang loop unroll(full)")
+    for (int j = 0; j < 8; j++) {
+      device float* dst = PO + (base + fm) * PD + h * PH + j * 16 + fn;
+      *(device float4*)dst = float4(r.O[j][0], r.O[j][1], r.O[j][2], r.O[j][3]);
+      *(device float4*)(dst + 8 * PD) = float4(r.O[j][4], r.O[j][5], r.O[j][6], r.O[j][7]);
+    }
   }
   if (h == 0 && (lane & 9) == 0) {
     PM[base + fm] = r.m0; PL[base + fm] = r.l0;
