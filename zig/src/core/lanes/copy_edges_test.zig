@@ -46,3 +46,60 @@ test "copy edges: inactive, empty-table and empty-offer paths keep their existin
     try std.testing.expectEqual(@as(i64, 4), try r.copyRows(who, &.{}, 4, true));
     try std.testing.expect(state == null);
 }
+
+test "copy edges: zero and non-finite measured costs keep the offered width and backoff" {
+    const bad_costs = [_]f64{ 0, -0.0, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    for (bad_costs) |bad| for ([_]bool{ false, true }) |take| {
+        var costs = try startup();
+        defer costs.deinit(gpa);
+        var r = rule(&costs);
+        defer r.deinit();
+        var state: ?depth.State = null;
+        defer if (state) |*s| s.deinit(gpa);
+        const who: depth.Who = .{ .state = &state, .draft_room = 16, .finished = false, .forced = false };
+        try price.observeCopy(&r, 1, bad, false, who);
+        state.?.copy_plain = 3;
+        state.?.copy_wait = 16;
+        const rounds = state.?.copy_rounds;
+        try std.testing.expectEqual(@as(i64, 4), try r.copyRows(who, &.{0.75}, 4, take));
+        try std.testing.expectEqual(@as(?u64, 3), state.?.copy_plain);
+        try std.testing.expectEqual(@as(?u64, 16), state.?.copy_wait);
+        try std.testing.expectEqual(rounds, state.?.copy_rounds);
+    };
+}
+
+test "copy edges: a later invalid cost also falls back from a previously priced prefix" {
+    var costs = try startup();
+    defer costs.deinit(gpa);
+    var r = rule(&costs);
+    defer r.deinit();
+    var state: ?depth.State = null;
+    defer if (state) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &state, .draft_room = 16, .finished = false, .forced = false };
+    try price.observeCopy(&r, 1, 5, false, who);
+    try price.observeCopy(&r, 2, std.math.nan(f64), false, who);
+    state.?.copy_plain = 3;
+    state.?.copy_wait = 16;
+    try std.testing.expectEqual(@as(i64, 4), try r.copyRows(who, &.{0.75}, 4, true));
+    try std.testing.expectEqual(@as(?u64, 3), state.?.copy_plain);
+    try std.testing.expectEqual(@as(?u64, 16), state.?.copy_wait);
+}
+
+test "copy edges: finite prices still select the hand-priced prefix and preserve read versus take" {
+    var costs = try startup();
+    defer costs.deinit(gpa);
+    var r = rule(&costs);
+    defer r.deinit();
+    var state: ?depth.State = null;
+    defer if (state) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &state, .draft_room = 16, .finished = false, .forced = false };
+    for ([_]f64{ 5, 20, 50, 100 }, 1..) |ms, width| try price.observeCopy(&r, @intCast(width), ms, false, who);
+    state.?.copy_plain = 3;
+    state.?.copy_wait = 16;
+    try std.testing.expectEqual(@as(i64, 1), try r.copyRows(who, &.{0.75}, 4, false));
+    try std.testing.expectEqual(@as(?u64, 3), state.?.copy_plain);
+    try std.testing.expectEqual(@as(?u64, 16), state.?.copy_wait);
+    try std.testing.expectEqual(@as(i64, 1), try r.copyRows(who, &.{0.75}, 4, true));
+    try std.testing.expectEqual(@as(?u64, 0), state.?.copy_plain);
+    try std.testing.expectEqual(@as(?u64, r.k.depth_probe_every), state.?.copy_wait);
+}
