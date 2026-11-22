@@ -1,9 +1,13 @@
 //! The attention projection stage writes K/V interleaved; the consumers read that layout directly.
 pub fn project(k: anytype, e: anytype, weights: anytype, f: anytype, sums: anytype, rows: u32, t0: u32) !void {
     var q_sums = sums;
-    q_sums.ref.offset += @as(usize, t0) * 4;
-    const q_in = .{ .buffer = f.get(.input).buffer, .offset = f.get(.input).offset + @as(usize, t0) * weights.q.k * 2 };
-    const q_out = .{ .buffer = f.get(.q_gate).buffer, .offset = f.get(.q_gate).offset + @as(usize, t0) * weights.q.n * 2 };
+    if (@typeInfo(@TypeOf(sums)) == .optional) {
+        if (q_sums) |*sum| sum.offset += @as(usize, t0) * 4;
+    } else {
+        q_sums.ref.offset += @as(usize, t0) * 4;
+    }
+    const q_in: @TypeOf(f.get(.input)) = .{ .buffer = f.get(.input).buffer, .offset = f.get(.input).offset + @as(usize, t0) * weights.q.k * 2 };
+    const q_out: @TypeOf(f.get(.q_gate)) = .{ .buffer = f.get(.q_gate).buffer, .offset = f.get(.q_gate).offset + @as(usize, t0) * weights.q.n * 2 };
     try k.quant(e, weights.q, q_in, q_sums, f.get(.dims), q_out, rows - t0);
     try k.quant(e, weights.kv, f.get(.input), sums, f.get(.dims), f.get(.mixed), rows);
     e.barrier();
