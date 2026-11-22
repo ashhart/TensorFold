@@ -221,6 +221,17 @@ the whole launch (every slot's `first` 0 and its count every row), so a chunk cr
 chunks alone, so no launch scores the rows of one-row slots. A row scored by both launches gets the same bits from
 each, so no control can show it; each kernel's own exit test keeps the two sets apart.
 
+HIP's shared-row decode values (`plan_rows.hip`, under the same conditions with at most 8 query heads a block) replace
+`tf_plan_apply_*` byte for byte with two launches on its grid. `tf_plan_lone_apply_*` weighs the rows of one-row slots
+as `tf_plan_apply_*` does, and `tf_plan_rows_apply_*` has the block of every fourth row of a multi-row slot, counted
+from its `first`, weigh up to four rows of that slot from one read of each 128-key tile's values. Each row sums only
+its own keys in key order; a key past them is left out, not weighed 0, so a NaN or infinite value there cannot reach
+the row. Its registrations take fp32 scores and stats as inputs and run both head groups and both cache kinds on the
+score's launches (slots of 3, 1, 4, 2 and 6 rows, and 5 and 7 one-row slots), with NaN and infinite values at the key
+only a slot's last row weighs, at the key past all its rows and at scattered keys, and NaN and infinite scores and a
+NaN max at gate 1. Gate 4 weighs every key 1, 1/2 or 1/4 and sums integer values. Its controls go red at gate 3: one
+leads the chunks over the whole launch, and one launches the chunks alone.
+
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every

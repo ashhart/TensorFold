@@ -14,6 +14,7 @@ const scan_k = @import("contract_scan.zig");
 const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const walk_rows_k = @import("contract_walk_rows.zig");
+const apply_rows_k = @import("contract_apply_rows.zig");
 const prefill_k = @import("contract_prefill.zig");
 const add_rms_k = @import("contract_add_rms.zig");
 const tail_k = @import("contract_tail.zig");
@@ -206,6 +207,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&row_walks, 0..) |*w, i| w.* = .init(a, &r, s, &l, i);
     defer for (&row_walks) |*w| w.deinit();
     for (&row_walks) |*w| try kernels.append(a, w.kernel());
+    // d = 256's values of a launch's slots, a slot's rows on one read of them: each head group, both kinds; controls
+    var row_applies: [apply_rows_k.count_all]apply_rows_k.RowsApply = undefined;
+    for (&row_applies, 0..) |*w, i| w.* = .init(a, &r, s, &l, i);
+    defer for (&row_applies) |*w| w.deinit();
+    for (&row_applies) |*w| try kernels.append(a, w.kernel());
     var prefills: [2]prefill_k.Prefill = undefined;
     for (&prefills, [_]bool{ true, false }) |*p, paged| p.* = .init(a, &r, s, &l, paged);
     defer for (&prefills) |*p| p.deinit();
