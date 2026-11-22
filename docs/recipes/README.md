@@ -76,6 +76,12 @@ matches that draw from the target. Each verify row must use the serial row's ari
 attention boundaries, routing ties and recurrence updates. Rollback must restore all state after the
 accepted path, including draft-head state.
 
+Family device tests can reuse `core/lanes/invariance.zig`: construct its `Runner` callback with fixed caller-owned
+token and RNG-position buffers and call `check`. The dynamic fake-target example is in `invariance_fake.zig`.
+The gate compares cohorts 2, 4 and 8 with solo output through timed joins and leaves, drafts off and on,
+greedy and keyed sampling, fresh and restored prefixes. It requires observed draft acceptance, restoration,
+overlap and lifecycle events, and prints the smallest failing replay rather than accepting a serialized pass.
+
 Prompt reuse is equally strict. The MLX planner computes chunks from rendered tokens and caches only
 compatible boundaries. Its resume points are assistant-message starts and the second message start
 when the tokenizer exposes those markers. Chunks skip resume points less than 256 tokens from the
