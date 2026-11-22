@@ -37,6 +37,8 @@ pub const Probe = struct {
     route_ids: rig_.Ref = undefined,
     refs: [5]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    lo: []f64 = &.{},
+    hi: []f64 = &.{},
     nonfinite: bool = false,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
@@ -51,7 +53,7 @@ pub const Probe = struct {
             .conv_dynamic => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
             .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
             .swiglu => .{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
-            .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
+            .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
             .expert_pick => .{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => .{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
         };
@@ -62,8 +64,20 @@ pub const Probe = struct {
         self.arena.deinit();
         self.pipes.deinit();
     }
-    const vt_checked = g.hooks(Probe);
+    const vt_checked = blk: {
+        var vt = g.hooks(Probe);
+        vt.bounds = null;
+        vt.intervals = null;
+        break :blk vt;
+    };
     const vt_plain = blk: {
+        var vt = g.hooks(Probe);
+        vt.check = null;
+        vt.bounds = null;
+        vt.intervals = null;
+        break :blk vt;
+    };
+    const vt_logits = blk: {
         var vt = g.hooks(Probe);
         vt.check = null;
         break :blk vt;
@@ -75,7 +89,11 @@ pub const Probe = struct {
         };
         return .{
             .ctx = self,
-            .vt = if (self.kind == .router) &vt_checked else &vt_plain,
+            .vt = switch (self.kind) {
+                .router => &vt_checked,
+                .logits => &vt_logits,
+                else => &vt_plain,
+            },
             .spec = .{
                 .name = self.kind.label(),
                 .accum = .f32,
@@ -83,10 +101,11 @@ pub const Probe = struct {
                 .ops = 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
+                .tiles = if (self.kind == .logits) .{ .{ .size = 8 }, .{ .size = 8 }, .{} } else .{ .{}, .{}, .{} },
                 .served = &self.served,
                 .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
-                .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
+                .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .exact = self.kind != .logits, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
         };
     }
@@ -117,6 +136,8 @@ pub const Probe = struct {
         const n = shape.n;
         const nf = fill == .nonfinite;
         self.f = @splat(&.{});
+        self.lo = &.{};
+        self.hi = &.{};
         switch (self.kind) {
             .embed_norm => {
                 self.f[0] = try self.floats(64 * p.hidden, rng);
@@ -187,6 +208,8 @@ pub const Probe = struct {
             .logits => {
                 self.f[0] = try self.floats(r * p.hidden, rng);
                 self.f[1] = try self.floats(n * p.hidden, rng);
+                self.lo = try self.arena.allocator().alloc(f64, self.count());
+                self.hi = try self.arena.allocator().alloc(f64, self.count());
                 if (nf) self.f[0][0] = std.math.nan(f32);
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], true);
@@ -270,7 +293,32 @@ pub const Probe = struct {
                 for (0..n) |d| want[row * n + d] = p.swiglu(self.f[0][(row * n + d) * 2], self.f[0][(row * n + d) * 2 + 1]);
             },
             .logits => {
-                for (0..n) |v| want[row * n + v] = p.logit(self.f[0][row * p.hidden ..][0..p.hidden], self.f[1], v);
+                const err_gamma = c.gamma(@floatFromInt(depth(self.shape)), c.unit(.f32));
+                const h_row = self.f[0][row * p.hidden ..][0..p.hidden];
+                for (0..n) |v| {
+                    const u_row = self.f[1][v * p.hidden ..][0..p.hidden];
+                    var dot_f64: f64 = 0;
+                    var sum_mag: f64 = 0;
+                    for (0..p.hidden) |d| {
+                        const term = @as(f64, u_row[d]) * h_row[d];
+                        dot_f64 += term;
+                        sum_mag += @abs(term);
+                    }
+                    const idx = row * n + v;
+                    want[idx] = p.cap(p.roundBf16(dot_f64), 30);
+                    mag[idx] = sum_mag;
+                    if (std.math.isFinite(dot_f64)) {
+                        const err_dot = err_gamma * sum_mag;
+                        const cap_lo = p.cap(p.roundBf16(dot_f64 - err_dot), 30);
+                        const cap_hi = p.cap(p.roundBf16(dot_f64 + err_dot), 30);
+                        const cap_err = 96.0 * 0x1p-24 * @max(@abs(cap_lo), @abs(cap_hi)) + 0x1p-149;
+                        self.lo[idx] = cap_lo - cap_err;
+                        self.hi[idx] = cap_hi + cap_err;
+                    } else {
+                        self.lo[idx] = want[idx];
+                        self.hi[idx] = want[idx];
+                    }
+                }
             },
             .expert_pick => {
                 for (0..8) |j| {
@@ -281,7 +329,16 @@ pub const Probe = struct {
                 for (0..n) |d| want[row * n + d] = p.combine(self.f[0][row * 8 * n ..], self.f[1][row * 8 ..][0..8], n, d);
             },
         };
-        for (mag, want) |*m, w| m.* = 10 * @abs(w) + 1e-5;
+        if (self.kind != .logits) {
+            for (mag, want) |*m, w| m.* = 10 * @abs(w) + 1e-5;
+        }
+    }
+    pub fn bounds(self: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
+        for (allow, want, self.lo, self.hi) |*l, w, lo, hi| l.* = if (std.math.isFinite(w)) @max(@abs(w - lo), @abs(hi - w)) else 0;
+    }
+    pub fn intervals(self: *Probe, low: []f64, high: []f64) !void {
+        @memcpy(low, self.lo);
+        @memcpy(high, self.hi);
     }
     pub fn simulate(self: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
         if (self.kind == .ar) {
