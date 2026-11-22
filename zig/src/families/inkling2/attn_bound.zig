@@ -34,9 +34,11 @@ pub const Head = struct {
         a.free(h.sg);
     }
 
-    /// The bound on |y - want[d]| of the fp32 value before the output's rounding; the term 2^-149 is the final product's.
+    /// The bound on |y - want[d]| of the fp32 value before the output's rounding; +inf where exp(L) overflows.
     pub fn limit(h: Head, d: usize) f64 {
-        return (1 + 0x1p-20) * (h.mag[d] * std.math.expm1(h.big) + h.sg[d] * h.floor * @exp(h.big)) + 0x1p-149;
+        const grow = @exp(h.big);
+        if (!std.math.isFinite(grow)) return std.math.inf(f64);
+        return (1 + 0x1p-20) * (h.mag[d] * std.math.expm1(h.big) + h.sg[d] * h.floor * grow) + 0x1p-149;
     }
 
     /// The bound on the bf16-rounded output: the fp32 bound, the output's own rounding, bf16's subnormal step.

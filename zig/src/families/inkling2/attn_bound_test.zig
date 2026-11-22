@@ -275,3 +275,52 @@ test "bound: an output below the normal range" {
     std.debug.print("attn bound below normal: {d} of the values exceed the bound without its absolute term and stay inside the bound\n", .{found});
     try t.expect(found > 0);
 }
+
+test "bound: where exp(L) overflows the bound is infinite, never NaN" {
+    // q = k = 2^50 and v = 0: the model gives 0, float64 gives 0, and mag * expm1(L) is 0 * inf
+    const a = t.allocator;
+    const s: attn.Shape = .{ .rows = 1, .pos0 = 0, .heads = 1, .kv_heads = 1, .hd = 1, .drel = 1, .rext = 1, .window = 0 };
+    const in: attn.Inputs = .{ .q = &.{0x1p50}, .k = &.{0x1p50}, .v = &.{0}, .rel = &.{0}, .proj = &.{0}, .sink = &.{0}, .gate = &.{0} };
+    const hb = try bound.head(a, s, in, 0, 0);
+    defer hb.free(a);
+    var raw: [1]f32 = undefined;
+    try order.attendOrder(s, in, &raw, .{ .round_out = false });
+    try t.expectEqual(@as(f32, 0), raw[0]);
+    try t.expectEqual(@as(f64, 0), hb.want[0]);
+    try t.expect(hb.big > 709.8);
+    try t.expectEqual(std.math.inf(f64), hb.limit(0));
+    try t.expectEqual(std.math.inf(f64), hb.limitOut(0));
+    std.debug.print("attn bound overflow of exp(L): L {e:.2}, limit {d}\n", .{ hb.big, hb.limit(0) });
+}
+
+test "bound: a table rounded up at the weak key and down at the dominant one" {
+    // two keys, the second dominant: the table sums 64.2539 and 64.2461 round up at one and down at the other
+    const a = t.allocator;
+    const s: attn.Shape = .{ .rows = 1, .pos0 = 1, .heads = 1, .kv_heads = 1, .hd = 1, .drel = 2, .rext = 2, .window = 0 };
+    var best0: f64 = 0;
+    var best1: f64 = 0;
+    var bestk: f32 = 0;
+    var h: u16 = 0xc200; // -32 up
+    while (h < 0xc2f0) : (h += 1) {
+        const k1 = bf16_round.value(h);
+        var kk = [2]f32{ 0, k1 };
+        var vv = [2]f32{ 0, 1 };
+        const in: attn.Inputs = .{ .q = &.{1}, .k = &kk, .v = &vv, .rel = &.{ 1, 1 }, .proj = &.{ 64, 64, 0.25390625, 0.24609375 }, .sink = &.{-100}, .gate = &.{100} };
+        var raw: [1]f32 = undefined;
+        var out: [1]f32 = undefined;
+        try order.attendOrder(s, in, &raw, .{ .round_out = false });
+        try order.attendOrder(s, in, &out, .{});
+        const hb = try bound.head(a, s, in, 0, 0);
+        defer hb.free(a);
+        const r0 = @abs(@as(f64, raw[0]) - hb.want[0]) / hb.limit(0);
+        const r1 = @abs(@as(f64, out[0]) - hb.want[0]) / hb.limitOut(0);
+        if (r0 > best0) {
+            best0 = r0;
+            bestk = k1;
+        }
+        best1 = @max(best1, r1);
+    }
+    std.debug.print("attn bound table adversary: worst error/bound {e:.3} (fp32) at k {d}, {e:.3} (bf16 output)\n", .{ best0, bestk, best1 });
+    try t.expect(best0 <= 1 and best1 <= 1);
+    try t.expect(best0 > 0.5);
+}
