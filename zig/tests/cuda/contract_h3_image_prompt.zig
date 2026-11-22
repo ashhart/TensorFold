@@ -105,6 +105,8 @@ pub const Prm = struct {
     q_row: usize = 0,
     k_row: usize = 0,
     fused: bool = false,
+    /// A planted control: the same launch cut to its first block, so the outputs past it stay poisoned (gate 3 fails).
+    planted: bool = false,
 
     pub fn deinit(self: *Prm) void {
         self.rig.deinit();
@@ -112,8 +114,16 @@ pub const Prm = struct {
     }
 
     pub fn kernel(self: *Prm) g.Kernel {
-        return .{ .spec = spec(self.which), .ctx = self, .vt = &vt };
+        var sp = spec(self.which);
+        if (self.planted) sp.name = control_names.get(self.which);
+        return .{ .spec = sp, .ctx = self, .vt = &vt, .control = if (self.planted) .shapes else null };
     }
+
+    const control_names = blk: {
+        var n = std.enums.EnumArray(Which, []const u8).initUndefined();
+        for (std.enums.values(Which)) |w| n.set(w, spec(w).name ++ " control: first block only");
+        break :blk n;
+    };
 
     const vt = g.hooks(Prm);
 
@@ -435,7 +445,7 @@ pub const Prm = struct {
     }
 
     fn go(self: *Prm, grid: cuda.Dim3, args: *cuda.Args) !void {
-        try cuda.launch.launch(self.f, .{ .grid = grid, .block = .{ .x = 256 } }, self.rig.s, args);
+        try cuda.launch.launch(self.f, .{ .grid = if (self.planted) .{} else grid, .block = .{ .x = 256 } }, self.rig.s, args);
     }
 
     pub fn count(self: *Prm) usize {
