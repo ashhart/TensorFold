@@ -36,7 +36,6 @@ import type { ModelReadinessRequest } from '../shared/model-readiness'
 import type { AttachmentTextRequest } from './agent/types'
 
 const subscribe = <T>(channel: string, listener: (event: unknown, payload: T) => void) => { ipcRenderer.on(channel, listener); return () => ipcRenderer.removeListener(channel, listener) }
-
 const api = {
   ...clusterPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
   ...inputHistoryPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
