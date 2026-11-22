@@ -12,6 +12,7 @@ fn edit(kind: p.Kind) Edit {
         .router => .{ .from = "keys[t] = scores[t] + bias[t];", .to = "keys[t] = scores[t];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
+        .argmax => .{ .from = "return a > b || (a == b && ia < ib);", .to = "return a > b || (a == b && ia > ib);" },
         .expert_pick => .{ .from = "ids[r * 8 + j]", .to = "ids[r * 8 + 7 - j]" },
         .expert_combine => .{ .from = "acc += weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);", .to = "acc -= weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);" },
     };
@@ -32,6 +33,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .router => "control: metal inkling2 glue router tf_inkling2_router",
         .swiglu => "control: metal inkling2 glue swiglu tf_inkling2_swiglu",
         .logits => "control: metal inkling2 glue logits tf_inkling2_logits",
+        .argmax => "control: metal inkling2 glue argmax tf_inkling2_reduce_argmax",
         .expert_pick => "control: metal inkling2 glue expert_pick tf_inkling2_expert_pick",
         .expert_combine => "control: metal inkling2 glue expert_combine tf_inkling2_expert_combine",
     };

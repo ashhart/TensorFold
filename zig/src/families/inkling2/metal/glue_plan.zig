@@ -15,6 +15,7 @@ pub const Kind = enum {
     router,
     swiglu,
     logits,
+    argmax,
     expert_pick,
     expert_combine,
 
@@ -27,6 +28,7 @@ pub const Kind = enum {
             .router => "tf_inkling2_router",
             .swiglu => "tf_inkling2_swiglu",
             .logits => "tf_inkling2_logits",
+            .argmax => "tf_inkling2_reduce_argmax",
             .expert_pick => "tf_inkling2_expert_pick",
             .expert_combine => "tf_inkling2_expert_combine",
         };
@@ -40,6 +42,7 @@ pub const Kind = enum {
             .router => "metal inkling2 glue router tf_inkling2_router",
             .swiglu => "metal inkling2 glue swiglu tf_inkling2_swiglu",
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
+            .argmax => "metal inkling2 glue argmax tf_inkling2_reduce_argmax",
             .expert_pick => "metal inkling2 glue expert_pick tf_inkling2_expert_pick",
             .expert_combine => "metal inkling2 glue expert_combine tf_inkling2_expert_combine",
         };
@@ -54,7 +57,7 @@ pub fn valid(kind: Kind, c: Call) bool {
     return switch (kind) {
         .embed_norm => c.k == hidden and c.n == hidden,
         .router => c.k == hidden and c.n == top_k,
-        .logits => c.k == hidden and c.n > 0 and c.n <= 200058,
+        .logits, .argmax => c.k == hidden and c.n > 0 and c.n <= 200058,
         .ar => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
         .conv_static, .conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
@@ -62,6 +65,7 @@ pub fn valid(kind: Kind, c: Call) bool {
     };
 }
 pub fn count(kind: Kind, c: Call) usize {
+    if (kind == .argmax) return c.rows;
     const copies: usize = if (kind == .expert_pick) top_k else 1;
     return c.rows * c.n * copies;
 }

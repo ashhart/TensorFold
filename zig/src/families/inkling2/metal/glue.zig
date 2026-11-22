@@ -19,6 +19,7 @@ pub const Pipelines = struct {
     router: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     logits: mtl.Pipeline,
+    argmax: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
     route_scores: mtl.Pipeline,
@@ -31,7 +32,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [10]mtl.Pipeline = undefined;
+        var pipes: [11]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -42,6 +43,7 @@ pub const Pipelines = struct {
             "tf_inkling2_router",
             "tf_inkling2_swiglu",
             "tf_inkling2_logits",
+            "tf_inkling2_reduce_argmax",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
             "tf_inkling2_route_scores",
@@ -57,9 +59,10 @@ pub const Pipelines = struct {
             .router = pipes[4],
             .swiglu = pipes[5],
             .logits = pipes[6],
-            .expert_pick = pipes[7],
-            .expert_combine = pipes[8],
-            .route_scores = pipes[9],
+            .argmax = pipes[7],
+            .expert_pick = pipes[8],
+            .expert_combine = pipes[9],
+            .route_scores = pipes[10],
             .route_dots = try device.buffer(64 * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
@@ -138,13 +141,48 @@ pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, gu: Ref, out: Ref, row
     e.dispatchThreads(mtl.Size.of(width, rows, 1), unit);
 }
 
-const LogitArgs = extern struct { rows: u32, vocab: u32 };
+const LogitArgs = extern struct { rows: u32, vocab: u32, flags: u32, part_stride: u32 };
 pub fn logits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, rows: u32, vocab: u32) void {
     std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
     e.setPipeline(p.logits);
     inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
+    e.setBuffer(p.route_dots, 0, 3);
+    e.setBuffer(p.route_dots, 0, 4);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab, .flags = 1, .part_stride = 0 }, 5);
     e.dispatchGroups(mtl.Size.of((vocab + 7) / 8, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+}
+
+const ArgmaxArgs = extern struct { rows: u32, parts: u32 };
+pub fn logitsArgmax(
+    p: *const Pipelines,
+    e: mtl.ComputeEncoder,
+    h: Ref,
+    unembed: Ref,
+    out: Ref,
+    part_vals: Ref,
+    part_ids: Ref,
+    out_ids: Ref,
+    rows: u32,
+    vocab: u32,
+    write_logits: bool,
+) void {
+    std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
+    const parts: u32 = (vocab + 7) / 8;
+    const flags: u32 = if (write_logits) 3 else 2;
+    e.setPipeline(p.logits);
+    inline for (.{ h, unembed, out, part_vals, part_ids }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab, .flags = flags, .part_stride = parts }, 5);
+    e.dispatchGroups(mtl.Size.of(parts, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+    e.barrier();
+    argmax(p, e, part_vals, part_ids, out_ids, rows, parts);
+}
+
+pub fn argmax(p: *const Pipelines, e: mtl.ComputeEncoder, part_vals: Ref, part_ids: Ref, out_ids: Ref, rows: u32, parts: u32) void {
+    std.debug.assert(rows > 0 and parts > 0);
+    e.setPipeline(p.argmax);
+    inline for (.{ part_vals, part_ids, out_ids }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ArgmaxArgs{ .rows = rows, .parts = parts }, 3);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ExpertArgs = extern struct { rows: u32, channels: u32 };

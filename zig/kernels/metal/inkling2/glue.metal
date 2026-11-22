@@ -233,32 +233,126 @@ kernel void tf_inkling2_swiglu(
   out[size_t(r) * a.width + j] = bfloat(ink_cap(g, 4.0f) * ink_sigmoid(g) * ink_cap(u, 25.0f));
 }
 
-struct InkLogitArgs { uint rows, vocab; };
+struct InkLogitArgs { uint rows, vocab, flags, part_stride; };
+inline bool ink_argmax_better(float a, uint ia, float b, uint ib) {
+  if (ia == 0xffffffffu) return false;
+  if (ib == 0xffffffffu) return true;
+  const bool na = isnan(a), nb = isnan(b);
+  if (na || nb) {
+    if (na && ia == 0u) return !(nb && ib == 0u);
+    if (nb && ib == 0u) return false;
+    if (na != nb) return !na;
+    return ia < ib;
+  }
+  return a > b || (a == b && ia < ib);
+}
 // Threadgroup (x, y) handles 8 vocab rows x up to 8 token rows; a simdgroup per vocab row shares unembed reads.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_logits(
     const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
-    device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
+    device float* out [[buffer(2)]], device float* part_vals [[buffer(3)]],
+    device uint* part_ids [[buffer(4)]], constant InkLogitArgs& a [[buffer(5)]],
     uint3 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tg_vals[64];
   const uint v = tg.x * 8u + sg;
   const uint r0 = tg.y * 8u;
-  if (v >= a.vocab || r0 >= a.rows) return;
+  if (r0 >= a.rows) return;
   const uint rn = min(8u, a.rows - r0);
-  const device bfloat* w = unembed + size_t(v) * 2304u;
-  float acc[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-  for (uint i = 8u * lane; i < 2304u; i += 256u) {
-    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4u));
+  float y_row[8];
+  if (v < a.vocab) {
+    const device bfloat* w = unembed + size_t(v) * 2304u;
+    float acc[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint i = 8u * lane; i < 2304u; i += 256u) {
+      const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4u));
+      for (uint r = 0u; r < rn; ++r) {
+        const device bfloat* hr = h + size_t(r0 + r) * 2304u + i;
+        const float4 x0 = float4(*(const device bfloat4*)hr), x1 = float4(*(const device bfloat4*)(hr + 4u));
+        acc[r] += dot(w0, x0) + dot(w1, x1);
+      }
+    }
     for (uint r = 0u; r < rn; ++r) {
-      const device bfloat* hr = h + size_t(r0 + r) * 2304u + i;
-      const float4 x0 = float4(*(const device bfloat4*)hr), x1 = float4(*(const device bfloat4*)(hr + 4u));
-      acc[r] += dot(w0, x0) + dot(w1, x1);
+      const float dot = simd_sum(acc[r]);
+      // A9(a): unembedding rounds to bf16 before it widens for softcap30.
+      if (lane == 0u) {
+        const float y = ink_cap(float(bfloat(dot)), 30.0f);
+        y_row[r] = y;
+        if ((a.flags & 1u) != 0u) out[size_t(r0 + r) * a.vocab + v] = y;
+      }
     }
   }
-  for (uint r = 0u; r < rn; ++r) {
-    const float dot = simd_sum(acc[r]);
-    // A9(a): unembedding rounds to bf16 before it widens for softcap30.
-    if (lane == 0u) out[size_t(r0 + r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
+  if ((a.flags & 2u) != 0u) {
+    if (v < a.vocab && lane == 0u) {
+      for (uint r = 0u; r < rn; ++r) tg_vals[r * 8u + sg] = y_row[r];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg < rn) {
+      const uint id0 = tg.x * 8u + lane;
+      uint bid = (lane < 8u && id0 < a.vocab) ? id0 : 0xffffffffu;
+      float bv = (bid != 0xffffffffu) ? tg_vals[sg * 8u + lane] : 0.0f;
+      for (ushort d = 4u; d > 0u; d >>= 1u) {
+        const float ov = simd_shuffle_xor(bv, d);
+        const uint oid = simd_shuffle_xor(bid, d);
+        if (ink_argmax_better(ov, oid, bv, bid)) {
+          bv = ov;
+          bid = oid;
+        }
+      }
+      if (lane == 0u) {
+        const size_t idx = size_t(r0 + sg) * a.part_stride + tg.x;
+        part_vals[idx] = bv;
+        part_ids[idx] = bid;
+      }
+    }
+  }
+}
+
+struct InkArgmaxArgs { uint rows, parts; };
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_reduce_argmax(
+    const device float* part_vals [[buffer(0)]], const device uint* part_ids [[buffer(1)]],
+    device uint* out_ids [[buffer(2)]], constant InkArgmaxArgs& a [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float sg_vals[8];
+  threadgroup uint sg_ids[8];
+  if (row >= a.rows) return;
+  const size_t base = size_t(row) * a.parts;
+  float bv = 0.0f;
+  uint bid = 0xffffffffu;
+  for (uint i = t; i < a.parts; i += 256u) {
+    const float v = part_vals[base + i];
+    const uint id = part_ids[base + i];
+    if (ink_argmax_better(v, id, bv, bid)) {
+      bv = v;
+      bid = id;
+    }
+  }
+  for (ushort d = 16u; d > 0u; d >>= 1u) {
+    const float ov = simd_shuffle_xor(bv, d);
+    const uint oid = simd_shuffle_xor(bid, d);
+    if (ink_argmax_better(ov, oid, bv, bid)) {
+      bv = ov;
+      bid = oid;
+    }
+  }
+  if (lane == 0u) {
+    sg_vals[sg] = bv;
+    sg_ids[sg] = bid;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0u) {
+    float fv = (lane < 8u) ? sg_vals[lane] : 0.0f;
+    uint fid = (lane < 8u) ? sg_ids[lane] : 0xffffffffu;
+    for (ushort d = 4u; d > 0u; d >>= 1u) {
+      const float ov = simd_shuffle_xor(fv, d);
+      const uint oid = simd_shuffle_xor(fid, d);
+      if (ink_argmax_better(ov, oid, fv, fid)) {
+        fv = ov;
+        fid = oid;
+      }
+    }
+    if (lane == 0u) out_ids[row] = fid;
   }
 }
 

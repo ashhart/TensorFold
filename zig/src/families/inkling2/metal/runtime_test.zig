@@ -7,6 +7,7 @@ const snapshot = @import("snapshot.zig");
 const model = @import("model.zig");
 const fwd = @import("forward.zig");
 const backend = @import("backend.zig");
+const lanes = @import("lanes");
 
 fn mini() cfg.Config {
     return .{
@@ -173,4 +174,60 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
+}
+
+test "multi-row grammar mask indexing uses padded grammar stride (#4635)" {
+    const c = mini();
+    const unpadded_vocab: usize = c.text.unpadded_vocab;
+    const padded_vocab: usize = c.text.vocab;
+    const words = backend.minMaskWords(padded_vocab);
+    try std.testing.expectEqual(@as(usize, 6282), words);
+    try std.testing.expectEqual(@as(usize, 6252), backend.minMaskWords(unpadded_vocab));
+    const masks = try std.testing.allocator.alloc(u32, 3 * words);
+    defer std.testing.allocator.free(masks);
+    @memset(masks, 0);
+    // Row 0 allows token 10; row 1 allows only token 200057; row 2 allows only token 5.
+    masks[0 * words + (10 >> 5)] |= @as(u32, 1) << (10 & 31);
+    masks[1 * words + (200057 >> 5)] |= @as(u32, 1) << (200057 & 31);
+    masks[2 * words + (5 >> 5)] |= @as(u32, 1) << (5 & 31);
+    const stride = try backend.maskStride(masks.len, 3, unpadded_vocab);
+    try std.testing.expectEqual(words, stride);
+    const row1 = masks[stride .. 2 * stride];
+    try std.testing.expect(!lanes.grammar.allows(row1, 0));
+    try std.testing.expect(!lanes.grammar.allows(row1, 10));
+    try std.testing.expect(lanes.grammar.allows(row1, 200057));
+    const row2 = masks[2 * stride .. 3 * stride];
+    try std.testing.expect(lanes.grammar.allows(row2, 5));
+    try std.testing.expect(!lanes.grammar.allows(row2, 200057));
+    try std.testing.expectError(error.InvalidInklingMask, backend.maskStride(words * 2 + 1, 2, unpadded_vocab));
+    try std.testing.expectError(error.InvalidInklingMask, backend.maskStride(6251, 1, unpadded_vocab));
+}
+
+test "verify batch plans argmax, mixed, and logits-only modes accurately" {
+    const det = backend.SlotReq{ .rows = 4, .sampling = null, .has_masks = false, .has_logprobs = false };
+    const zero_temp = backend.SlotReq{ .rows = 2, .sampling = .{ .seed = 1, .temperature = 0 }, .has_masks = false, .has_logprobs = false };
+    const sampled_slot = backend.SlotReq{ .rows = 4, .sampling = .{ .seed = 1, .temperature = 0.7 }, .has_masks = false, .has_logprobs = false };
+    const masked_slot = backend.SlotReq{ .rows = 2, .sampling = null, .has_masks = true, .has_logprobs = false };
+    const logprob_slot = backend.SlotReq{ .rows = 2, .sampling = null, .has_masks = false, .has_logprobs = true };
+
+    const pure = backend.planVerifyBatch(&.{ det, zero_temp });
+    try std.testing.expectEqual(fwd.LogitMode.argmax, pure.mode);
+    try std.testing.expect(!pure.write_logits);
+
+    for ([_]backend.SlotReq{ sampled_slot, masked_slot, logprob_slot }) |other| {
+        const mixed = backend.planVerifyBatch(&.{ det, other });
+        try std.testing.expectEqual(fwd.LogitMode.both, mixed.mode);
+        try std.testing.expect(mixed.write_logits);
+    }
+
+    const logits_only = backend.planVerifyBatch(&.{ sampled_slot, masked_slot });
+    try std.testing.expectEqual(fwd.LogitMode.logits, logits_only.mode);
+    try std.testing.expect(logits_only.write_logits);
+}
+
+test "greedyArgmax keeps lowest ID on ties and matches NaN-at-0 propagation" {
+    try std.testing.expectEqual(@as(u32, 1), backend.greedyArgmax(&.{ 1.0, 5.0, 5.0, 2.0 }));
+    const nan = std.math.nan(f32);
+    try std.testing.expectEqual(@as(u32, 0), backend.greedyArgmax(&.{ nan, 100.0, std.math.inf(f32) }));
+    try std.testing.expectEqual(@as(u32, 2), backend.greedyArgmax(&.{ -1.0, nan, 3.0, nan }));
 }

@@ -40,6 +40,7 @@ pub const Probe = struct {
     lo: []f64 = &.{},
     hi: []f64 = &.{},
     nonfinite: bool = false,
+    msg: [160]u8 = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.glue);
@@ -54,6 +55,7 @@ pub const Probe = struct {
             .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
             .swiglu => .{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
             .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
+            .argmax => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 2, .n = 2057, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
             .expert_pick => .{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => .{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
         };
@@ -85,25 +87,26 @@ pub const Probe = struct {
     pub fn kernel(self: *Probe) g.Kernel {
         const out: c.Elem = switch (self.kind) {
             .ar, .router, .logits => .f32,
+            .argmax => .raw,
             else => .bf16,
         };
         return .{
             .ctx = self,
             .vt = switch (self.kind) {
-                .router => &vt_checked,
+                .router, .argmax => &vt_checked,
                 .logits => &vt_logits,
                 else => &vt_plain,
             },
             .spec = .{
                 .name = self.kind.label(),
-                .accum = .f32,
+                .accum = if (self.kind == .argmax) .none else .f32,
                 .depth = depth,
                 .ops = 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
-                .tiles = if (self.kind == .logits) .{ .{ .size = 8 }, .{ .size = 8 }, .{} } else .{ .{}, .{}, .{} },
+                .tiles = if (self.kind == .logits or self.kind == .argmax) .{ .{ .size = 8 }, .{ .size = 8 }, .{} } else .{ .{}, .{}, .{} },
                 .served = &self.served,
-                .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
+                .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else if (self.kind == .argmax) .{ .stated = "NaN at token 0 wins; later NaNs lose to finite tokens; finite ties pick the lowest id" } else .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
                 .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .exact = self.kind != .logits, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
@@ -214,6 +217,54 @@ pub const Probe = struct {
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], true);
             },
+            .argmax => {
+                self.f[0] = try self.arena.allocator().alloc(f32, r * p.hidden);
+                self.f[1] = try self.arena.allocator().alloc(f32, n * p.hidden);
+                @memset(self.f[0], 0);
+                @memset(self.f[1], 0);
+                for (0..r) |row| {
+                    for (0..8) |d| self.f[0][row * p.hidden + d] = if (d < 4) 1 else -0.5;
+                    if (row % 3 == 2) {
+                        for (8..16) |d| self.f[0][row * p.hidden + d] = 128;
+                    }
+                }
+                for (0..n) |v| {
+                    const pat = rng.uintLessThan(u32, 16);
+                    for (0..4) |d| self.f[1][v * p.hidden + d] = @floatFromInt(@as(i32, @intCast((pat >> @intCast(d)) & 1)) * 2 - 1);
+                    if (v == 1 or v == 2 or (n > 8 and v == n - 1)) {
+                        for (0..4) |d| self.f[1][v * p.hidden + d] = 2;
+                    }
+                    if (v >= 16 and v < 20) self.f[1][v * p.hidden + 8] = 8;
+                }
+                if (nf) {
+                    @memset(self.f[1][0..p.hidden], 0);
+                    self.f[1][0] = std.math.inf(f32);
+                    self.f[1][1] = std.math.inf(f32);
+                    self.f[0][0] = 1;
+                    self.f[0][1] = -1;
+                    if (r > 1) {
+                        @memset(self.f[0][p.hidden .. 2 * p.hidden], 0);
+                        self.f[0][p.hidden + 0] = -1;
+                        self.f[0][p.hidden + 1] = -1;
+                        self.f[0][p.hidden + 2] = 1;
+                        self.f[0][p.hidden + 3] = -1;
+                        self.f[0][p.hidden + 4] = 20;
+                    }
+                    if (n > 5) {
+                        @memset(self.f[1][2 * p.hidden .. 3 * p.hidden], 0);
+                        self.f[1][2 * p.hidden + 4] = 1;
+                        @memset(self.f[1][5 * p.hidden .. 6 * p.hidden], 0);
+                        self.f[1][5 * p.hidden + 2] = std.math.inf(f32);
+                        self.f[1][5 * p.hidden + 3] = std.math.inf(f32);
+                    }
+                }
+                self.refs[0] = try self.input(self.f[0], true);
+                self.refs[1] = try self.input(self.f[1], true);
+                self.refs[2] = try self.rig.scratch(r * n * 4);
+                const parts = (n + 7) / 8;
+                self.refs[3] = try self.rig.scratch(r * parts * 4);
+                self.refs[4] = try self.rig.scratch(r * parts * 4);
+            },
             .expert_pick => {
                 self.f[0] = try self.floats(r * p.expert_count * n, rng);
                 if (nf) self.f[0][0] = std.math.nan(f32);
@@ -237,7 +288,7 @@ pub const Probe = struct {
             .expert_combine => j == 0,
             else => true,
         }) round(values);
-        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits) 4 else 2);
+        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits or self.kind == .argmax) 4 else 2);
         self.out = try self.rig.output(bytes);
         return true;
     }
@@ -260,6 +311,7 @@ pub const Probe = struct {
             .router => host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
             .swiglu => host.swiglu(pl, e, at(R[0]), y, r, n),
             .logits => host.logits(pl, e, at(R[0]), at(R[1]), y, r, n),
+            .argmax => host.logitsArgmax(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), at(R[4]), y, r, n, false),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_combine => host.expertCombine(pl, e, at(R[0]), at(R[1]), y, r, n),
         }
@@ -320,6 +372,7 @@ pub const Probe = struct {
                     }
                 }
             },
+            .argmax => return error.CheckedByItsOwnRule,
             .expert_pick => {
                 for (0..8) |j| {
                     for (0..n) |d| want[(row * 8 + j) * n + d] = p.pick(self.f[0], self.ids, n, row, j, d);
@@ -362,7 +415,35 @@ pub const Probe = struct {
         defer self.a.free(mag);
         return self.reference(out, mag);
     }
+    fn argmaxCheck(self: *Probe) !?[]const u8 {
+        const r = self.shape.rows;
+        const n = self.shape.n;
+        for (self.rig.bytes(self.refs[2], r * n * 4)) |b| {
+            if (b != 0xa5) return "write_logits=false touched out logits buffer";
+        }
+        const got_ids = std.mem.bytesAsSlice(u32, try self.rig.outputBytes());
+        for (0..r) |row| {
+            const h_row = self.f[0][row * p.hidden ..][0..p.hidden];
+            var best_val: f32 = 0;
+            var best_id: ?usize = null;
+            for (0..n) |v| {
+                const u_row = self.f[1][v * p.hidden ..][0..p.hidden];
+                var dot_f64: f64 = 0;
+                for (0..p.hidden) |d| dot_f64 += @as(f64, u_row[d]) * h_row[d];
+                const y: f32 = @floatCast(p.cap(p.roundBf16(dot_f64), 30));
+                if (best_id == null or y > best_val) {
+                    best_val = y;
+                    best_id = v;
+                }
+            }
+            if (got_ids[row] != best_id.?) {
+                return try std.fmt.bufPrint(&self.msg, "row {d} picked id {d} where exact argmax picks {d}", .{ row, got_ids[row], best_id.? });
+            }
+        }
+        return null;
+    }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
+        if (self.kind == .argmax) return self.argmaxCheck();
         if (self.kind != .router) return "numeric hooks must be used";
         const bytes = try self.rig.outputBytes();
         const want = try self.a.alloc(f64, self.count());
