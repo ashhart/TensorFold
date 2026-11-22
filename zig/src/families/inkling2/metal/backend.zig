@@ -138,6 +138,7 @@ pub const Metal = struct {
 
     fn draw(self: *Metal, l: []const f32, sampling: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
         const t = sampled(sampling) orelse {
+            if (mask.len == 0 and l.len > 0) return firstGreatest(l);
             var best: ?usize = null;
             for (l, 0..) |w, id| {
                 if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
@@ -150,6 +151,31 @@ pub const Metal = struct {
             break :blk self.values;
         };
         return lanes.gpu_full.draw(self.gpa, values, t, @intCast(position), null);
+    }
+
+    /// The first index of the greatest logit, as draw's scan picks it: a NaN is picked only at index 0.
+    fn firstGreatest(l: []const f32) u32 {
+        if (l[0] != l[0]) return 0;
+        const V = @Vector(16, f32);
+        const least: V = @splat(-std.math.inf(f32));
+        var top = least;
+        var i: usize = 0;
+        while (i + 16 <= l.len) : (i += 16) {
+            const v: V = l[i..][0..16].*;
+            top = @max(top, @select(f32, v != v, least, v));
+        }
+        var best = @reduce(.Max, top);
+        for (l[i..]) |w| if (w > best) {
+            best = w;
+        };
+        const want: V = @splat(best);
+        i = 0;
+        while (i + 16 <= l.len) : (i += 16) {
+            const v: V = l[i..][0..16].*;
+            if (@reduce(.Or, v == want)) break;
+        }
+        for (l[i..], i..) |w, id| if (w == best) return @intCast(id);
+        return 0;
     }
 
     fn sampled(sampling: ?lanes.Sampling) ?lanes.Sampling {
@@ -432,6 +458,35 @@ fn logprobRow(l: []const f32, pick: u32, count: u8) lanes.LogprobRow {
     }
     r.count = @min(count, top);
     return r;
+}
+
+test "a greedy pick is the scan's: the first of equal maxima, and a NaN only at index 0" {
+    const scan = struct {
+        fn pick(l: []const f32) u32 {
+            var best: usize = 0;
+            for (l, 0..) |w, id| if (w > l[best]) {
+                best = id;
+            };
+            return @intCast(best);
+        }
+    }.pick;
+    var l: [203]f32 = undefined;
+    for (0..64) |round| {
+        for (&l, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 37 + round * 11) % 101)) - 50);
+        // Equal maxima, NaNs, both infinities and zeros of both signs, at places that move with the round.
+        l[(round * 7) % l.len] = 60;
+        l[(round * 13 + 5) % l.len] = 60;
+        if (round % 3 == 0) l[(round * 5 + 1) % l.len] = std.math.nan(f32);
+        if (round % 4 == 0) l[(round * 17 + 2) % l.len] = std.math.inf(f32);
+        if (round % 5 == 0) l[(round * 3) % l.len] = -std.math.inf(f32);
+        if (round % 7 == 0) l[0] = std.math.nan(f32);
+        try std.testing.expectEqual(scan(&l), Metal.firstGreatest(&l));
+        try std.testing.expectEqual(scan(l[0..17]), Metal.firstGreatest(l[0..17]));
+    }
+    var z = [_]f32{ -0.0, 0.0, -std.math.inf(f32) };
+    try std.testing.expectEqual(@as(u32, 0), Metal.firstGreatest(&z));
+    z = .{ -std.math.inf(f32), std.math.nan(f32), -std.math.inf(f32) };
+    try std.testing.expectEqual(@as(u32, 0), Metal.firstGreatest(&z));
 }
 
 test "sampled first-token logprob uses the last written handle, not argmax" {
