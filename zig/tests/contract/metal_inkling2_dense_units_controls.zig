@@ -7,9 +7,11 @@ const g = contract.gates;
 
 pub const Mutation = enum {
     none,
+    dense_1,
     dense_16,
     dense_32,
     dense_64,
+    dense6_1,
     dense6_16,
     dense6_32,
     dense6_64,
@@ -17,9 +19,11 @@ pub const Mutation = enum {
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
             .none => "",
+            .dense_1 => "control: metal inkling2 dense_units tf_ink2_dense_units_1 k-step",
             .dense_16 => "control: metal inkling2 dense_units tf_ink2_dense_units_16 k-step",
             .dense_32 => "control: metal inkling2 dense_units tf_ink2_dense_units_32 k-step",
             .dense_64 => "control: metal inkling2 dense_units tf_ink2_dense_units_64 k-step",
+            .dense6_1 => "control: metal inkling2 dense_units tf_ink2_dense6_units_1 k-step",
             .dense6_16 => "control: metal inkling2 dense_units tf_ink2_dense6_units_16 k-step",
             .dense6_32 => "control: metal inkling2 dense_units tf_ink2_dense6_units_32 k-step",
             .dense6_64 => "control: metal inkling2 dense_units tf_ink2_dense6_units_64 k-step",
@@ -34,43 +38,58 @@ pub const Mutation = enum {
     fn edit(m: Mutation) Edit {
         return switch (m) {
             .none => unreachable,
-            .dense_16 => .{ .from = "ink2_dense_core<1u, false>(", .to = "ink2_dense_core<1u, true>(" },
-            .dense_32 => .{ .from = "ink2_dense_core<2u, false>(", .to = "ink2_dense_core<2u, true>(" },
-            .dense_64 => .{ .from = "ink2_dense_core<4u, false>(", .to = "ink2_dense_core<4u, true>(" },
-            .dense6_16 => .{ .from = "ink2_dense6<1u, false>(", .to = "ink2_dense6<1u, true>(" },
-            .dense6_32 => .{ .from = "ink2_dense6<2u, false>(", .to = "ink2_dense6<2u, true>(" },
-            .dense6_64 => .{ .from = "ink2_dense6<4u, false>(", .to = "ink2_dense6<4u, true>(" },
+            .dense_1 => .{ .from = "ink2_dense_core<1u, true, false>(", .to = "ink2_dense_core<1u, true, true>(" },
+            .dense_16 => .{ .from = "ink2_dense_core<1u, false, false>(", .to = "ink2_dense_core<1u, false, true>(" },
+            .dense_32 => .{ .from = "ink2_dense_core<2u, false, false>(", .to = "ink2_dense_core<2u, false, true>(" },
+            .dense_64 => .{ .from = "ink2_dense_core<4u, false, false>(", .to = "ink2_dense_core<4u, false, true>(" },
+            .dense6_1 => .{ .from = "ink2_dense6<1u, true, false>(", .to = "ink2_dense6<1u, true, true>(" },
+            .dense6_16 => .{ .from = "ink2_dense6<1u, false, false>(", .to = "ink2_dense6<1u, false, true>(" },
+            .dense6_32 => .{ .from = "ink2_dense6<2u, false, false>(", .to = "ink2_dense6<2u, false, true>(" },
+            .dense6_64 => .{ .from = "ink2_dense6<4u, false, false>(", .to = "ink2_dense6<4u, false, true>(" },
         };
     }
 };
 
-pub fn apply(a: std.mem.Allocator, m: Mutation) ![]u8 {
-    if (m == .none) return a.dupe(u8, src.dense_units);
+pub fn applySource(a: std.mem.Allocator, text: []const u8, m: Mutation) ![]u8 {
+    if (m == .none) return a.dupe(u8, text);
     const change = m.edit();
-    if (std.mem.count(u8, src.dense_units, change.from) != 1) return error.ControlEditCount;
-    return std.mem.replaceOwned(u8, a, src.dense_units, change.from, change.to);
+    if (std.mem.count(u8, text, change.from) != 1) return error.ControlEditCount;
+    return std.mem.replaceOwned(u8, a, text, change.from, change.to);
+}
+
+pub fn apply(a: std.mem.Allocator, m: Mutation) ![]u8 {
+    return applySource(a, src.dense_units, m);
 }
 
 test "every dense_units control edits exactly its planted arithmetic" {
     const a = std.testing.allocator;
     for (std.enums.values(Mutation)) |m| {
         if (m == .none) continue;
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src.dense_units, m.edit().from));
         const edited = try apply(a, m);
         defer a.free(edited);
-        try std.testing.expect(std.mem.indexOf(u8, edited, m.edit().to) != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, edited, m.edit().to));
         try std.testing.expectEqual(g.Gate.shapes, m.gate().?);
         try std.testing.expect(std.mem.startsWith(u8, m.name(), "control: metal inkling2 dense_units "));
+        try std.testing.expectError(error.ControlEditCount, applySource(a, edited, m));
+        try std.testing.expectError(error.ControlEditCount, applySource(a, "", m));
+        const twice = try std.mem.concat(a, u8, &.{ src.dense_units, src.dense_units });
+        defer a.free(twice);
+        try std.testing.expectError(error.ControlEditCount, applySource(a, twice, m));
     }
     const plain = try apply(a, .none);
     defer a.free(plain);
     try std.testing.expectEqualStrings(src.dense_units, plain);
 }
 
-test "dense_units source exports all six entries once each" {
+test "dense_units source exports all eight entries once each and disables FP contraction" {
+    try std.testing.expect(std.mem.count(u8, src.dense_units, "#pragma METAL fp contract(off)") >= 1);
     inline for ([_][]const u8{
+        "tf_ink2_dense_units_1",
         "tf_ink2_dense_units_16",
         "tf_ink2_dense_units_32",
         "tf_ink2_dense_units_64",
+        "tf_ink2_dense6_units_1",
         "tf_ink2_dense6_units_16",
         "tf_ink2_dense6_units_32",
         "tf_ink2_dense6_units_64",

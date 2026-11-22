@@ -5,10 +5,20 @@ const src = @import("inkling2_metal");
 
 pub const Ref = @import("inkling2_metal_ref").Ref;
 
-pub const single_names = [3][:0]const u8{ "tf_ink2_dense_units_16", "tf_ink2_dense_units_32", "tf_ink2_dense_units_64" };
-pub const fused6_names = [3][:0]const u8{ "tf_ink2_dense6_units_16", "tf_ink2_dense6_units_32", "tf_ink2_dense6_units_64" };
+pub const single_names = [4][:0]const u8{
+    "tf_ink2_dense_units_1",
+    "tf_ink2_dense_units_16",
+    "tf_ink2_dense_units_32",
+    "tf_ink2_dense_units_64",
+};
+pub const fused6_names = [4][:0]const u8{
+    "tf_ink2_dense6_units_1",
+    "tf_ink2_dense6_units_16",
+    "tf_ink2_dense6_units_32",
+    "tf_ink2_dense6_units_64",
+};
 
-pub const Band = enum(u2) { b16 = 0, b32 = 1, b64 = 2 };
+pub const Band = enum(u2) { b1 = 0, b16 = 1, b32 = 2, b64 = 3 };
 
 pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 pub const Dense6Args = extern struct { rows: u32, k: u32, nq: u32, nk: u32, nv: u32, nr: u32, ns: u32, ng: u32 };
@@ -35,8 +45,8 @@ pub const Buffers6 = struct {
 };
 
 pub const Pipelines = struct {
-    single: [3]mtl.Pipeline,
-    fused6: [3]mtl.Pipeline,
+    single: [single_names.len]mtl.Pipeline,
+    fused6: [fused6_names.len]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, src.dense_units);
@@ -49,8 +59,8 @@ pub const Pipelines = struct {
         var out: Pipelines = undefined;
         var made: usize = 0;
         errdefer {
-            for (out.single[0..@min(made, 3)]) |pipe| pipe.deinit();
-            if (made > 3) for (out.fused6[0 .. made - 3]) |pipe| pipe.deinit();
+            for (out.single[0..@min(made, single_names.len)]) |pipe| pipe.deinit();
+            if (made > single_names.len) for (out.fused6[0 .. made - single_names.len]) |pipe| pipe.deinit();
         }
         for (single_names, &out.single) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
@@ -72,11 +82,12 @@ pub const Pipelines = struct {
 };
 
 pub fn bandFor(rows: u32) Band {
-    return if (rows <= 16) .b16 else if (rows <= 32) .b32 else .b64;
+    return if (rows == 1) .b1 else if (rows <= 16) .b16 else if (rows <= 32) .b32 else .b64;
 }
 
 pub fn bandRows(band: Band) u32 {
     return switch (band) {
+        .b1 => 1,
         .b16 => 16,
         .b32 => 32,
         .b64 => 64,
@@ -103,7 +114,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref
     return encodeBand(p, e, bandFor(c.rows), x, w, y, c);
 }
 
-/// Dispatches an explicit band variant (`16`, `32`, or `64` rows per threadgroup) for contract testing.
+/// Dispatches an explicit band variant (`1`, `16`, `32`, or `64` rows per threadgroup) for contract testing.
 pub fn encodeBand(p: *const Pipelines, e: mtl.ComputeEncoder, band: Band, x: Ref, w: Ref, y: Ref, c: Call) !void {
     try check(c);
     const ldy = if (c.ldy == 0) c.n else c.ldy;
@@ -119,7 +130,7 @@ pub fn encode6(p: *const Pipelines, e: mtl.ComputeEncoder, bufs: Buffers6, c: Ca
     return encode6Band(p, e, bandFor(c.rows), bufs, c);
 }
 
-/// Dispatches an explicit fused 6-projection band variant (`16`, `32`, or `64` rows per threadgroup).
+/// Dispatches an explicit fused 6-projection band variant (`1`, `16`, `32`, or `64` rows per threadgroup).
 pub fn encode6Band(p: *const Pipelines, e: mtl.ComputeEncoder, band: Band, bufs: Buffers6, c: Call6) !void {
     try check6(c);
     e.setPipeline(p.fused6[@backingInt(band)]);
@@ -135,12 +146,14 @@ pub fn encode6Band(p: *const Pipelines, e: mtl.ComputeEncoder, band: Band, bufs:
 }
 
 test "dense_units band selection, tile math, shape validation, and ABI sizes" {
-    try std.testing.expectEqual(Band.b16, bandFor(1));
+    try std.testing.expectEqual(Band.b1, bandFor(1));
+    try std.testing.expectEqual(Band.b16, bandFor(2));
     try std.testing.expectEqual(Band.b16, bandFor(16));
     try std.testing.expectEqual(Band.b32, bandFor(17));
     try std.testing.expectEqual(Band.b32, bandFor(32));
     try std.testing.expectEqual(Band.b64, bandFor(33));
     try std.testing.expectEqual(Band.b64, bandFor(512));
+    try std.testing.expectEqual(@as(u32, 1), bandRows(.b1));
     try std.testing.expectEqual(@as(u32, 16), bandRows(.b16));
     try std.testing.expectEqual(@as(u32, 32), bandRows(.b32));
     try std.testing.expectEqual(@as(u32, 64), bandRows(.b64));

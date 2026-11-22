@@ -3,9 +3,11 @@ const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 
 pub const records = [_]M{
+    .{ .name = "metal inkling2 dense_units tf_ink2_dense_units_1", .threads = 256, .tg_memory = 1024, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense_units_16", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense_units_32", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense_units_64", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_1", .threads = 256, .tg_memory = 1024, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_16", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_32", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_64", .threads = 256, .tg_memory = 16384, .reserved = 256, .offline = false },

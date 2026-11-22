@@ -9,7 +9,7 @@ const host = @import("tensorfold").inkling2_metal_host.dense_units;
 const controls = @import("metal_inkling2_dense_units_controls.zig");
 const src = @import("inkling2_metal");
 
-pub const Kind = enum { dense_16, dense_32, dense_64, dense6_16, dense6_32, dense6_64 };
+pub const Kind = enum { dense_1, dense_16, dense_32, dense_64, dense6_1, dense6_16, dense6_32, dense6_64 };
 
 const served_shapes = [_]c.Shape{
     .{ .rows = 1, .n = 24, .k = 2304 },
@@ -21,13 +21,14 @@ const served_shapes = [_]c.Shape{
 
 fn isFused6(k: Kind) bool {
     return switch (k) {
-        .dense6_16, .dense6_32, .dense6_64 => true,
+        .dense6_1, .dense6_16, .dense6_32, .dense6_64 => true,
         else => false,
     };
 }
 
 fn band(k: Kind) host.Band {
     return switch (k) {
+        .dense_1, .dense6_1 => .b1,
         .dense_16, .dense6_16 => .b16,
         .dense_32, .dense6_32 => .b32,
         .dense_64, .dense6_64 => .b64,
@@ -36,9 +37,11 @@ fn band(k: Kind) host.Band {
 
 fn symbol(k: Kind) []const u8 {
     return switch (k) {
+        .dense_1 => "tf_ink2_dense_units_1",
         .dense_16 => "tf_ink2_dense_units_16",
         .dense_32 => "tf_ink2_dense_units_32",
         .dense_64 => "tf_ink2_dense_units_64",
+        .dense6_1 => "tf_ink2_dense6_units_1",
         .dense6_16 => "tf_ink2_dense6_units_16",
         .dense6_32 => "tf_ink2_dense6_units_32",
         .dense6_64 => "tf_ink2_dense6_units_64",
@@ -47,9 +50,11 @@ fn symbol(k: Kind) []const u8 {
 
 fn mutation(k: Kind) controls.Mutation {
     return switch (k) {
+        .dense_1 => .dense_1,
         .dense_16 => .dense_16,
         .dense_32 => .dense_32,
         .dense_64 => .dense_64,
+        .dense6_1 => .dense6_1,
         .dense6_16 => .dense6_16,
         .dense6_32 => .dense6_32,
         .dense6_64 => .dense6_64,
@@ -62,9 +67,11 @@ fn depth(s: c.Shape) usize {
 
 pub fn spec(k: Kind, control: bool) c.Spec {
     const base = if (control) mutation(k).name() else switch (k) {
+        .dense_1 => "metal inkling2 dense_units tf_ink2_dense_units_1",
         .dense_16 => "metal inkling2 dense_units tf_ink2_dense_units_16",
         .dense_32 => "metal inkling2 dense_units tf_ink2_dense_units_32",
         .dense_64 => "metal inkling2 dense_units tf_ink2_dense_units_64",
+        .dense6_1 => "metal inkling2 dense_units tf_ink2_dense6_units_1",
         .dense6_16 => "metal inkling2 dense_units tf_ink2_dense6_units_16",
         .dense6_32 => "metal inkling2 dense_units tf_ink2_dense6_units_32",
         .dense6_64 => "metal inkling2 dense_units tf_ink2_dense6_units_64",
@@ -113,8 +120,14 @@ pub const Probe = struct {
     seam_y512: rig_.Ref = undefined,
     seam_y1_r17: rig_.Ref = undefined,
     seam_y1_r64: rig_.Ref = undefined,
+    seam_w_r1: rig_.Ref = undefined,
+    seam_w_16: rig_.Ref = undefined,
+    seam_row_1: rig_.Ref = undefined,
     seam_y6_1: [6]rig_.Ref = undefined,
     seam_y6_sep: [6]rig_.Ref = undefined,
+    seam_6_w_r1: [6]rig_.Ref = undefined,
+    seam_6_w_16: [6]rig_.Ref = undefined,
+    seam_6_row_1: [6]rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, control: bool) !Probe {
         const mut = if (control) mutation(kind) else .none;
@@ -242,6 +255,9 @@ pub const Probe = struct {
                 p.seam_y1 = try p.rig.scratch(shape.n * 2);
                 p.seam_y17 = try p.rig.scratch(17 * shape.n * 2);
                 p.seam_y65 = try p.rig.scratch(65 * shape.n * 2);
+                p.seam_w_r1 = try p.rig.scratch(136 * shape.n * 2);
+                p.seam_w_16 = try p.rig.scratch(136 * shape.n * 2);
+                p.seam_row_1 = try p.rig.scratch(16 * shape.n * 2);
                 if (shape.n == 24 and shape.k == 2304) {
                     p.seam_512 = true;
                     p.seam_x512 = try p.rig.scratch(512 * shape.k * 2);
@@ -261,10 +277,24 @@ pub const Probe = struct {
                 for (0..6) |i| {
                     p.seam_y6_1[i] = try p.rig.scratch(p.ns6[i] * 2);
                     p.seam_y6_sep[i] = try p.rig.scratch(65 * p.ns6[i] * 2);
+                    p.seam_6_w_r1[i] = try p.rig.scratch(136 * p.ns6[i] * 2);
+                    p.seam_6_w_16[i] = try p.rig.scratch(136 * p.ns6[i] * 2);
+                    p.seam_6_row_1[i] = try p.rig.scratch(16 * p.ns6[i] * 2);
                 }
             }
         }
         return true;
+    }
+
+    fn bufs6At(p: *const Probe, row_off: usize, outs: [6]rig_.Ref, out_row_off: usize) host.Buffers6 {
+        const x_byte_off = row_off * p.shape.k * 2;
+        var adj: [6]rig_.Ref = undefined;
+        for (outs, 0..) |o, i| adj[i] = .{ .buf = o.buf, .off = o.off + out_row_off * p.ns6[i] * 2 };
+        var b = p.bufs6(adj);
+        b.xq.off += x_byte_off;
+        b.xk.off += x_byte_off;
+        b.xv.off += x_byte_off;
+        return b;
     }
 
     fn bufs6(p: *const Probe, outs: [6]rig_.Ref) host.Buffers6 {
@@ -310,6 +340,19 @@ pub const Probe = struct {
             try host.encode(&p.pipes, pass.e, x, w, hr(p.seam_y1), .{ .rows = 1, .n = n, .k = k });
             try host.encode(&p.pipes, pass.e, x, w, hr(p.seam_y17), .{ .rows = 17, .n = n, .k = k });
             try host.encode(&p.pipes, pass.e, x, w, hr(p.seam_y65), .{ .rows = 65, .n = n, .k = k });
+            if (p.kind == .dense_1 or p.kind == .dense_16) {
+                var off_rows: usize = 0;
+                for (1..17) |width| {
+                    const wu: u32 = @intCast(width);
+                    const y_off = off_rows * p.shape.n * 2;
+                    try host.encodeBand(&p.pipes, pass.e, .b1, x, w, .{ .buf = p.seam_w_r1.buf, .off = p.seam_w_r1.off + y_off }, .{ .rows = wu, .n = n, .k = k });
+                    try host.encodeBand(&p.pipes, pass.e, .b16, x, w, .{ .buf = p.seam_w_16.buf, .off = p.seam_w_16.off + y_off }, .{ .rows = wu, .n = n, .k = k });
+                    const rx = host.Ref{ .buf = x.buf, .off = x.off + (width - 1) * p.shape.k * 2 };
+                    const ry = host.Ref{ .buf = p.seam_row_1.buf, .off = p.seam_row_1.off + (width - 1) * p.shape.n * 2 };
+                    try host.encode(&p.pipes, pass.e, rx, w, ry, .{ .rows = 1, .n = n, .k = k });
+                    off_rows += width;
+                }
+            }
             if (p.seam_512) {
                 const x17 = host.Ref{ .buf = p.in_refs[0].buf, .off = p.in_refs[0].off + 17 * p.shape.k * 2 };
                 const x64 = host.Ref{ .buf = p.in_refs[0].buf, .off = p.in_refs[0].off + 64 * p.shape.k * 2 };
@@ -326,6 +369,24 @@ pub const Probe = struct {
             if (!std.mem.eql(u8, y1, y_probe) or !std.mem.eql(u8, y1, y17) or !std.mem.eql(u8, y1, y65)) {
                 std.debug.print("FAIL seam {s} {d}x{d}: rows=1 differs from rows=17/65 row 0\n", .{ symbol(p.kind), p.shape.n, p.shape.k });
                 return error.WidthSeamMismatch;
+            }
+            if (p.kind == .dense_1 or p.kind == .dense_16) {
+                const w_r1 = p.rig.bytes(p.seam_w_r1, 136 * row_bytes);
+                const w_16 = p.rig.bytes(p.seam_w_16, 136 * row_bytes);
+                const each_1 = p.rig.bytes(p.seam_row_1, 16 * row_bytes);
+                if (!std.mem.eql(u8, w_r1, w_16)) {
+                    std.debug.print("FAIL rows1 {s} {d}x{d}: differs from dense_units_16 on widths 1..16\n", .{ symbol(p.kind), p.shape.n, p.shape.k });
+                    return error.WidthSeamMismatch;
+                }
+                var off_rows: usize = 0;
+                for (1..17) |width| {
+                    const span = width * row_bytes;
+                    if (!std.mem.eql(u8, each_1[0..span], w_16[off_rows * row_bytes ..][0..span])) {
+                        std.debug.print("FAIL rows1 {s} {d}x{d} w={d}: row-by-row differs from width {d}\n", .{ symbol(p.kind), p.shape.n, p.shape.k, width, width });
+                        return error.WidthSeamMismatch;
+                    }
+                    off_rows += width;
+                }
             }
             if (p.seam_512) {
                 const y512 = p.rig.bytes(p.seam_y512, 512 * row_bytes);
@@ -347,6 +408,16 @@ pub const Probe = struct {
             const w = hr(p.in_refs[3 + i]);
             try host.encode(&p.pipes, pass.e, x, w, hr(p.seam_y6_sep[i]), .{ .rows = 65, .n = @intCast(p.ns6[i]), .k = @intCast(p.shape.k) });
         }
+        if (p.kind == .dense6_1 or p.kind == .dense6_16) {
+            var off_rows: usize = 0;
+            for (1..17) |width| {
+                const wu: u32 = @intCast(width);
+                try host.encode6Band(&p.pipes, pass.e, .b1, p.bufs6At(0, p.seam_6_w_r1, off_rows), p.call6(wu));
+                try host.encode6Band(&p.pipes, pass.e, .b16, p.bufs6At(0, p.seam_6_w_16, off_rows), p.call6(wu));
+                try host.encode6(&p.pipes, pass.e, p.bufs6At(width - 1, p.seam_6_row_1, width - 1), p.call6(1));
+                off_rows += width;
+            }
+        }
         try p.rig.finish(pass);
         for (0..6) |i| {
             const row_bytes = p.ns6[i] * 2;
@@ -357,6 +428,24 @@ pub const Probe = struct {
             if (!std.mem.eql(u8, y1, y65[0..row_bytes]) or !std.mem.eql(u8, y65, y_sep)) {
                 std.debug.print("FAIL dense6 seam/eq {s} proj {d}: differs from rows=1 or separate dense_units\n", .{ symbol(p.kind), i });
                 return error.WidthSeamMismatch;
+            }
+            if (p.kind == .dense6_1 or p.kind == .dense6_16) {
+                const w_r1 = p.rig.bytes(p.seam_6_w_r1[i], 136 * row_bytes);
+                const w_16 = p.rig.bytes(p.seam_6_w_16[i], 136 * row_bytes);
+                const each_1 = p.rig.bytes(p.seam_6_row_1[i], 16 * row_bytes);
+                if (!std.mem.eql(u8, w_r1, w_16)) {
+                    std.debug.print("FAIL dense6 rows1 {s} proj {d}: differs on widths 1..16\n", .{ symbol(p.kind), i });
+                    return error.WidthSeamMismatch;
+                }
+                var off_rows: usize = 0;
+                for (1..17) |width| {
+                    const span = width * row_bytes;
+                    if (!std.mem.eql(u8, each_1[0..span], w_16[off_rows * row_bytes ..][0..span])) {
+                        std.debug.print("FAIL dense6 rows1 {s} proj {d} w={d}: differs\n", .{ symbol(p.kind), i, width });
+                        return error.WidthSeamMismatch;
+                    }
+                    off_rows += width;
+                }
             }
         }
     }
@@ -432,7 +521,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [12]Probe = undefined,
+    probes: [16]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {

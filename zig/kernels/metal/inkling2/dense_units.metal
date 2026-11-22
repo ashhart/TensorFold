@@ -1,4 +1,5 @@
 // Inkling 2 Mini's BF16 dense projections on the tensor units across all widths, after nax.h and units.metal.
+#pragma METAL fp contract(off)
 
 struct Ink2DenseArgs {
   uint rows, n, k, ldy;
@@ -8,24 +9,25 @@ struct Ink2Dense6Args {
   uint rows, k, nq, nk, nv, nr, ns, ng;
 };
 
-// Threadgroup (tg_col, tg_row): 16*BANDS rows by 32 columns; 8 simdgroups split K by 8 and add partials in order.
-template <uint BANDS, bool DROP_STEP>
+// Threadgroup (tg_col, tg_row): 1 row (ROWS1) or 16*BANDS rows by 32 columns; 8 simdgroups split K by 8.
+template <uint BANDS, bool ROWS1, bool DROP_STEP>
 inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, device bfloat* Y, uint rows, uint n,
                             uint k, uint ldy, uint tg_row, uint tg_col, uint sg, uint lane,
                             threadgroup float* part) {
-  const uint r_base = 16u * BANDS * tg_row;
+  const uint r_base = ROWS1 ? tg_row : 16u * BANDS * tg_row;
   const uint col0 = 32u * tg_col;
   if (r_base >= rows || col0 >= n) return;
   const uint steps = k / 128u;
   if (steps == 0u) return;
 
-  const uint rows_rem = min(rows - r_base, 16u * BANDS);
+  const uint rows_rem = ROWS1 ? 1u : min(rows - r_base, 16u * BANDS);
   const uint n_rem = min(n - col0, 32u);
-  const uint n_bands = (rows_rem + 15u) / 16u;
+  const uint n_bands = (BANDS == 1u) ? 1u : (rows_rem + 15u) / 16u;
   const bool full_n = n_rem == 32u;
   const bool full_n0 = n_rem >= 16u;
 
   const short2 home = tfp::frag_home(ushort(lane));
+  const bool row0_lane = home.y == 0;
   device const bfloat* Xr = X + ulong(r_base) * k;
   device const bfloat* Wc = W + ulong(col0) * k;
   device bfloat* Yr = Y + ulong(r_base) * ldy + col0;
@@ -51,24 +53,58 @@ inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, devi
       tfp::frag_get_in(b0, Wc, int(k), 0, k_off, home, int(n_rem), int(k));
       b1 = tfp::frag<bfloat>(bfloat(0.0f));
     }
-    TF_UNROLL
-    for (uint bb = 0u; bb < BANDS; ++bb) {
-      if (bb < n_bands) {
-        const int r_off = int(16u * bb);
-        tfp::frag<bfloat> fa;
-        if (16u * (bb + 1u) <= rows_rem) {
-          tfp::frag_get(fa, Xr, int(k), r_off, k_off, home);
-        } else {
-          tfp::frag_get_in(fa, Xr, int(k), r_off, k_off, home, int(rows_rem), int(k));
+    if (ROWS1) {
+      tfp::frag<bfloat> fa = tfp::frag<bfloat>(bfloat(0.0f));
+      if (row0_lane) {
+        TF_UNROLL
+        for (short e = 0; e < 4; ++e) fa[e] = Xr[k_off + home.x + e];
+      }
+      ink2_mma(lo[0], hi[0], fa, b0, b1);
+    } else {
+      TF_UNROLL
+      for (uint bb = 0u; bb < BANDS; ++bb) {
+        if (BANDS == 1u || bb < n_bands) {
+          const int r_off = int(16u * bb);
+          tfp::frag<bfloat> fa;
+          if (16u * (bb + 1u) <= rows_rem) {
+            tfp::frag_get(fa, Xr, int(k), r_off, k_off, home);
+          } else {
+            tfp::frag_get_in(fa, Xr, int(k), r_off, k_off, home, int(rows_rem), int(k));
+          }
+          ink2_mma(lo[bb], hi[bb], fa, b0, b1);
         }
-        ink2_mma(lo[bb], hi[bb], fa, b0, b1);
       }
     }
   }
 
+  if (ROWS1) {
+    if (row0_lane) {
+      TF_UNROLL
+      for (uint e = 0u; e < 4u; ++e) {
+        part[sg * 32u + uint(home.x) + e] = lo[0][e];
+        part[sg * 32u + 16u + uint(home.x) + e] = hi[0][e];
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u && row0_lane) {
+      TF_UNROLL
+      for (uint e = 0u; e < 4u; ++e) {
+        for (uint o = 1u; o < 8u; ++o) {
+          lo[0][e] += part[o * 32u + uint(home.x) + e];
+          hi[0][e] += part[o * 32u + 16u + uint(home.x) + e];
+        }
+        const uint c0 = uint(home.x) + e;
+        const uint c1 = 16u + c0;
+        if (full_n || c0 < n_rem) Yr[c0] = bfloat(lo[0][e]);
+        if (full_n || c1 < n_rem) Yr[c1] = bfloat(hi[0][e]);
+      }
+    }
+    return;
+  }
+
   TF_UNROLL
   for (uint bb = 0u; bb < BANDS; ++bb) {
-    if (bb < n_bands) {
+    if (BANDS == 1u || bb < n_bands) {
       const int r_off = int(16u * bb);
       ink2_part_put(part, lo[bb], hi[bb], sg, lane);
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -82,13 +118,13 @@ inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, devi
           tfp::frag_put_in(hi[bb], Yr, int(ldy), r_off, 16, home, int(rows_rem), int(n_rem));
         }
       }
-      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (BANDS > 1u && bb + 1u < n_bands) threadgroup_barrier(mem_flags::mem_threadgroup);
     }
   }
 }
 
 // Fused attention input projections (wq, wk, wv, wr, sink, gate) sharing the exact same reduction core.
-template <uint BANDS, bool DROP_STEP>
+template <uint BANDS, bool ROWS1, bool DROP_STEP>
 inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device const bfloat* xv,
                         device const bfloat* wq, device const bfloat* wk, device const bfloat* wv,
                         device const bfloat* wr, device const bfloat* ws, device const bfloat* wg,
@@ -139,7 +175,15 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
   } else {
     return;
   }
-  ink2_dense_core<BANDS, DROP_STEP>(px, pw, py, a.rows, pn, a.k, pn, tg.y, tx, sg, lane, part);
+  ink2_dense_core<BANDS, ROWS1, DROP_STEP>(px, pw, py, a.rows, pn, a.k, pn, tg.y, tx, sg, lane, part);
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense_units_1(
+    device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]], device bfloat* Y [[buffer(2)]],
+    constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[256];
+  ink2_dense_core<1u, true, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense_units_16(
@@ -147,7 +191,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense_core<1u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
+  ink2_dense_core<1u, false, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense_units_32(
@@ -155,7 +199,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense_core<2u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
+  ink2_dense_core<2u, false, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense_units_64(
@@ -163,7 +207,21 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense_core<4u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
+  ink2_dense_core<4u, false, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense6_units_1(
+    device const bfloat* xq [[buffer(0)]], device const bfloat* xk [[buffer(1)]],
+    device const bfloat* xv [[buffer(2)]], device const bfloat* wq [[buffer(3)]],
+    device const bfloat* wk [[buffer(4)]], device const bfloat* wv [[buffer(5)]],
+    device const bfloat* wr [[buffer(6)]], device const bfloat* ws [[buffer(7)]],
+    device const bfloat* wg [[buffer(8)]], device bfloat* yq [[buffer(9)]], device bfloat* yk [[buffer(10)]],
+    device bfloat* yv [[buffer(11)]], device bfloat* yr [[buffer(12)]], device bfloat* ys [[buffer(13)]],
+    device bfloat* yg [[buffer(14)]], constant Ink2Dense6Args& a [[buffer(15)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[256];
+  ink2_dense6<1u, true, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense6_units_16(
@@ -177,7 +235,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense6<1u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
+  ink2_dense6<1u, false, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense6_units_32(
@@ -191,7 +249,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense6<2u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
+  ink2_dense6<2u, false, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dense6_units_64(
@@ -205,5 +263,5 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
-  ink2_dense6<4u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
+  ink2_dense6<4u, false, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
