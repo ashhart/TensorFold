@@ -320,6 +320,15 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     core_checks.kvPages(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);
+    // Decode expert-store timing on a real pack: whole encode() and, for EXL3, per-projection stages.
+    const exl3_profile = b.addExecutable(.{ .name = "tf-inkling2-exl3-profile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/inkling2_exl3_profile.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = mods.sources } },
+    }) });
+    b.step("tf-inkling2-exl3-profile", "Inkling-2 expert-store decode timing on a real checkpoint pack").dependOn(&b.addInstallArtifact(exl3_profile, .{}).step);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
