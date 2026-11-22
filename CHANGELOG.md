@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: chat and completions take `n` from 1 through 16, each choice its own engine request on the one prompt with its own `index` and `tensorfold.seed` (choice 0 keeps the request's seed, so `n: 1` replies are unchanged) and `usage` counting the prompt once; a request with `n` above 1 takes `n` places under `--max-inflight` and `--max-inflight-per-key`, all or none, and gets 400 with `logprobs` or a required tool call, while `/v1/responses` and `/v1/imprint` still refuse `n` other than 1 (#3148, closes #3114).
+
 - Metal: Qwen3.8-Flash-Next and Qwen3.8-27B accept `presence_penalty` and `frequency_penalty`, counting each reply row and its own draft path so drafted replies match undrafted ones; at zero the default path is unchanged (#3145).
 
 - Ripple-65B-Preview on Metal: the native engine serves ricursiveAI's NVFP4 and bf16 releases as published, on M5 or later Macs (M1 to M4 are refused by name), with bf16 caches; `--context` defaults to and stops at 262,144 tokens, and a `thinking_budget` is refused for this model. Every model's `/v1/models` capabilities gain a `reasoning_optional` field, false for all but Ripple (#2231, fixes #2171). Thanks to @BobClawblaw.
