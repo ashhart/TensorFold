@@ -16,8 +16,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: tool-call arguments whose text contains `NaN` or `Infinity` (Qwen XML, GLM, Gemma, MiniMax string values, LFM2 Python strings) parse again; only values read as JSON refuse the non-finite literals. LFM2 tools with parameters named like schema keywords (`pattern`, `format`, `not`, `if`) are supported again (#4604, follows #4378).
 
-
-
 - GLM TP=2 prefill on CUDA: `TF_GLM_PAIR_EXPERTS=1` runs one grouped routed-expert pass per prompt pair with 128-row items, so experts with many tokens read their weights once; outputs are unchanged, +4.8% at 8K and +5.4% at 32K prompts on two GB10s, off by default (#4493).
 
 - MiniMax-H3-Image on Metal: `tf-h3-image-server` loads the prompt encoder, transformer and decoder once and serves one text-to-image request per input line, keeping the weights resident between pictures (#3718). Thanks to @plotarmordev.
@@ -25,8 +23,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Prompt cache: the fork rule picks its extra resume mark only from kept prompts with the request's `cache_salt`, as every other lookup does since #4504; unsalted requests are unchanged (#4601).
 
 - Qwen3.5 on CUDA: the start-up line and the prompt cache's recorded pass size say the rows the engine actually passes, 4096 by default and 8192 with `TF_QWEN35_CHUNK_SOLO=8192`, instead of 8192 always; nothing else reads the value, so tokens and behaviour are unchanged (#4600).
-
-
 
 - Server: the tokenizer memo now has its own allocator, so requests that add memo segments no longer leave allocator buckets behind on aarch64 Linux (#4455, thanks @bikepresentball).
 
