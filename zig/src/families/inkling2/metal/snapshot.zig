@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const state = @import("state.zig");
+const ap = @import("attention_plan.zig");
 
 /// Eight global layers retain [0,at); forty sliding layers retain ring prefixes, with independent K/V pieces per visit.
 pub fn bytes(at: usize) u64 {
@@ -45,17 +46,13 @@ fn encode(queue: mtl.Queue, cache: *const state.Cache, snap_buf: mtl.Buffer, sna
     const len = if (snap) |image| image.at else cache.len;
     for (0..state.visit_slots) |slot| {
         const live = if (cache.globals[slot]) len else @min(len, cache.ring(slot));
-        const n = live * state.kv_width * 2;
-        if (n != 0) if (snap) |image| {
-            e.copy(image.buf, at, cache.kv, cache.key_at[slot], n);
+        // A slot holds its heads one after another, each the ring's rows: a head's live rows are its first `live`.
+        const n = live * ap.head_dim * 2;
+        const head = cache.ring(slot) * ap.head_dim * 2;
+        if (n != 0) for ([_]usize{ cache.key_at[slot], cache.value_at[slot] }) |base| for (0..state.kv_width / ap.head_dim) |h| {
+            if (snap) |image| e.copy(image.buf, at, cache.kv, base + h * head, n) else e.copy(cache.kv, base + h * head, snap_buf, at, n);
             at += n;
-            e.copy(image.buf, at, cache.kv, cache.value_at[slot], n);
-        } else {
-            e.copy(cache.kv, cache.key_at[slot], snap_buf, at, n);
-            at += n;
-            e.copy(cache.kv, cache.value_at[slot], snap_buf, at, n);
         };
-        at += n;
     }
     if (snap) |image| e.copy(image.buf, at, cache.conv, 0, state.conv_bytes) else e.copy(cache.conv, 0, snap_buf, at, state.conv_bytes);
     e.end();
