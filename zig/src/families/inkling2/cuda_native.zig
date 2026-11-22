@@ -52,6 +52,7 @@ pub const Loaded = struct {
     free_streams: u32 = 1,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
+    reserve: *const fn (*anyopaque, u32) anyerror!void = reserve,
     target: *Owned,
 };
 
@@ -69,6 +70,11 @@ fn release(p: *anyopaque) void {
     o.weights.deinit();
     const gpa = o.gpa;
     gpa.destroy(o);
+}
+
+/// The server's stream count: a cache slot each, past the one allocated at load.
+fn reserve(p: *anyopaque, streams: u32) anyerror!void {
+    return own(p).backend.reserve(streams);
 }
 
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
@@ -147,6 +153,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Inkling2LoopTextOnly => "Inkling 2 Mini is text-only on CUDA: images and --vision are refused",
         error.Inkling2DSparkPending => "the Mini DSpark drafter has names and taps but no native draft engine in this build",
         error.Inkling2CapturedKernels => "Inkling 2 Mini runs the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
+        error.Inkling2TooManyStreams => "Inkling 2 Mini on CUDA holds at most 16 streams: lower --parallel",
         error.StructuresUnsupported, error.ChainsOnly => "Inkling 2 Mini serves only unconstrained, non-branching text drafts",
         else => null,
     };
@@ -155,7 +162,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 test "Mini native registration and refusal wording are explicit" {
     try std.testing.expectEqualStrings("inkling2_loop", model_type);
     try std.testing.expect(max_segments == 1 and prompt_rows == 2048 and window_rows == 16);
-    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopTextOnly, error.Inkling2DSparkPending, error.Inkling2CapturedKernels }) |err| {
+    try std.testing.expectEqual(16, engine.max_slots); // the stream cap explain() names
+    for ([_]anyerror{ error.Inkling2LoopOneRankOnly, error.Inkling2LoopTextOnly, error.Inkling2DSparkPending, error.Inkling2CapturedKernels, error.Inkling2TooManyStreams }) |err| {
         try std.testing.expect(explain(null, err) != null);
     }
 }

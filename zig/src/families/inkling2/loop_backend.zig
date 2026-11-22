@@ -27,13 +27,14 @@ pub const Backend = struct {
     m: *Model,
     k: *const Kernels,
     s: cuda.Stream,
-    lane: ?Lane = null,
-    stream: ?*lanes.Stream = null,
+    lanes_: [engine.max_slots]?Lane = @splat(null),
+    streams: [engine.max_slots]?*lanes.Stream = @splat(null), // the stream each model slot holds
     tokens: cuda.DeviceBuffer,
     logits16: cuda.DeviceBuffer,
     meta: cuda.DeviceBuffer,
-    slot: [2]cuda.DeviceBuffer,
+    slot: [engine.max_slots][2]cuda.DeviceBuffer = undefined, // each slot's last prompt logits and sampling rule
     next: u64 = 0,
+    held: usize = 0, // slots with buffers
 
     const be = lanes.backend;
 
@@ -45,16 +46,32 @@ pub const Backend = struct {
         errdefer logits16.free();
         var meta = try cuda.DeviceBuffer.alloc(d, 16);
         errdefer meta.free();
-        var last = try cuda.DeviceBuffer.alloc(d, v * 4);
-        errdefer last.free();
-        var rule = try cuda.DeviceBuffer.alloc(d, @sizeOf(cuda.sample.Rule));
-        errdefer rule.free();
-        return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .tokens = tokens, .logits16 = logits16, .meta = meta, .slot = .{ last, rule } };
+        var b: Backend = .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .tokens = tokens, .logits16 = logits16, .meta = meta };
+        try b.slotBuffers(m.n_slots);
+        return b;
+    }
+
+    /// Each model slot's own last-logits and rule buffers, up to `n`.
+    fn slotBuffers(b: *Backend, n: usize) !void {
+        for (0..n) |i| {
+            if (i < b.held) continue;
+            var last = try cuda.DeviceBuffer.alloc(b.d, b.m.w.c.text.unpadded_vocab * 4);
+            errdefer last.free();
+            b.slot[i] = .{ last, try cuda.DeviceBuffer.alloc(b.d, @sizeOf(cuda.sample.Rule)) };
+            b.held = i + 1;
+        }
+    }
+
+    /// The server's stream count: one model slot and its buffers per stream.
+    pub fn reserve(b: *Backend, streams: u32) !void {
+        if (streams > engine.max_slots) return error.Inkling2TooManyStreams;
+        try b.m.addSlots(b.s, streams);
+        try b.slotBuffers(streams);
     }
 
     pub fn deinit(b: *Backend) void {
-        if (b.lane) |*l| l.rows.deinit(b.gpa);
-        for (&b.slot) |*x| x.free();
+        for (&b.lanes_) |*x| if (x.*) |*l| l.rows.deinit(b.gpa);
+        for (b.slot[0..b.held]) |*pair| for (pair) |*x| x.free();
         b.meta.free();
         b.logits16.free();
         b.tokens.free();
@@ -70,7 +87,23 @@ pub const Backend = struct {
     }
 
     pub fn admits(b: *const Backend, prompt: usize, max_new: usize) bool {
-        return b.stream == null and prompt <= b.m.context and max_new <= b.m.context - prompt;
+        return b.freeSlot() != null and prompt <= b.m.context and max_new <= b.m.context - prompt;
+    }
+
+    fn freeSlot(b: *const Backend) ?usize {
+        for (b.streams[0..@min(b.m.n_slots, b.held)], 0..) |x, i| if (x == null) return i;
+        return null;
+    }
+
+    fn slotOf(b: *const Backend, s: *const lanes.Stream) ?usize {
+        for (b.streams, 0..) |x, i| if (x == s) return i;
+        return null;
+    }
+
+    /// The device buffer holding `s`'s last prompt logits.
+    pub fn lastOf(b: *const Backend, s: *const lanes.Stream) !u64 {
+        const i = b.slotOf(s) orelse return error.UnknownStream;
+        return b.lanes_[i].?.last;
     }
 
     fn self(ptr: *anyopaque) *Backend {
@@ -81,9 +114,12 @@ pub const Backend = struct {
         try cuda.copy_source.enqueue(b.d, dst, bytes, b.s);
     }
 
+    /// `s`'s lane, its model slot selected for the calls that follow.
     fn laneOf(b: *Backend, s: *const lanes.Stream) !*Lane {
-        if (b.stream != s) return error.UnknownStream;
-        return if (b.lane) |*l| l else error.UnknownStream;
+        const i = b.slotOf(s) orelse return error.UnknownStream;
+        if (i >= b.m.n_slots) return error.UnknownStream;
+        b.m.slot = i;
+        return if (b.lanes_[i]) |*l| l else error.UnknownStream;
     }
 
     fn resumeSaved(b: *Backend, s: *lanes.Stream) usize {
@@ -105,10 +141,10 @@ pub const Backend = struct {
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len > b.m.context or s.max_new > b.m.context - prompt.len) return error.PastContext;
-        if (b.stream != null and b.stream != s) return error.NoFreeSlot;
-        if (b.stream == null) {
-            b.lane = .{ .last = b.slot[0].ptr, .rule = b.slot[1].ptr };
-            b.stream = s;
+        if (b.slotOf(s) == null) {
+            const i = b.freeSlot() orelse return error.NoFreeSlot;
+            b.lanes_[i] = .{ .last = b.slot[i][0].ptr, .rule = b.slot[i][1].ptr };
+            b.streams[i] = s;
         }
         const l = try b.laneOf(s);
         l.sampled = false;
@@ -191,7 +227,7 @@ pub const Backend = struct {
 
     fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const b = self(ptr);
-        const going = b.stream == s and b.lane != null and b.lane.?.fill != null;
+        const going = if (b.slotOf(s)) |i| b.lanes_[i].?.fill != null else false;
         const l = if (going) try b.laneOf(s) else try b.opening(s);
         errdefer release(ptr, s);
         return b.chunk(s, l);
@@ -289,9 +325,9 @@ pub const Backend = struct {
 
     fn release(ptr: *anyopaque, s: *lanes.Stream) void {
         const b = self(ptr);
-        if (b.stream != s) return;
-        if (b.lane) |*l| l.rows.deinit(b.gpa);
-        b.lane = null;
-        b.stream = null;
+        const i = b.slotOf(s) orelse return;
+        if (b.lanes_[i]) |*l| l.rows.deinit(b.gpa);
+        b.lanes_[i] = null;
+        b.streams[i] = null;
     }
 };
