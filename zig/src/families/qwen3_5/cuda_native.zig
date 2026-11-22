@@ -377,7 +377,7 @@ pub const Lanes = struct {
         break :blk v;
     };
 
-    const scoring_vtable: be.Backend.VTable = comptime blk: {
+    const scoring_vtable: be.Backend.VTable = blk: {
         var v = text_vtable;
         v.prompt_rows = true;
         break :blk v;

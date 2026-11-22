@@ -191,7 +191,7 @@ pub fn fatbinsHost(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     var said: ?limits.Nvcc = null;
     const mode_path = try std.fmt.allocPrint(a, "{s}/norms.fatbin", .{dir});
     defer a.free(mode_path);
-    const mode_bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, mode_path, a, .limited(1 << 28));
+    const mode_bytes = try std.Io.Dir.cwd().readFileAlloc(io, mode_path, a, .limited(1 << 28));
     defer a.free(mode_bytes);
     const mode_images = try contract.cubin.images(a, mode_bytes);
     defer contract.cubin.freeImages(a, mode_images);
