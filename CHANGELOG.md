@@ -22,6 +22,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
+- Qwen3.8-27B NVFP4 on SM120: 16-row Gated DeltaNet verification pairs the scalar FP8 QKV and Z projections in one CUDA launch with byte-identical outputs (#4664).
+
 ## 1.3.4
 
 - `tensorfold pull`: a socks or https:// proxy in `HTTPS_PROXY` or `ALL_PROXY` is skipped with a warning and pull connects directly, as 1.3.3 did, instead of refusing the pull (http:// proxies unchanged).
