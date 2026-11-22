@@ -46,11 +46,15 @@ Concurrency, `bench_concurrent` (aggregate tokens a second, per stream in bracke
 | Prompt, streams | MLX | Native plain | Native DSpark |
 | --- | --- | --- | --- |
 | code, 1 | 22.9, 0.23 s | 30.4, 0.13 s | 37.2, 0.14 s |
-| code, 4 | 22.4 (22.8), 34.7 s | 63.3 (16.1), 0.50 s | 54.7 (13.9), 0.53 s |
+| code, 4 | 22.4 (22.8), 34.7 s | 63.3 (16.1), 0.50 s | 63.5 (16.0), 0.53 s |
 | chat, 1 | 23.2, 0.37 s | 28.4, 0.24 s | 35.0, 0.24 s |
-| chat, 4 | 22.6 (23.1), 34.6 s | 61.5 (15.8), 0.94 s | 39.8 (10.1), 0.99 s |
+| chat, 4 | 22.6 (23.1), 34.6 s | 61.5 (15.8), 0.94 s | 62.1 (15.9), 0.99 s |
 
-The reference server answers four requests one after another here. At four streams DSpark is slower than plain.
+The reference server answers four requests one after another here. A DSpark server times its verify forward by total
+rows at load (2.6 s), so the lane host prices shared rounds: at four streams a round of 4 rows costs 58 ms and each
+extra verify row about 10 ms plus a 10 ms head block a stream, so the rule drafts four streams only where that pays and
+DSpark matches plain (it drafted 7 deep for every stream before, 213 ms for 32 rows, and ran at 54.7 and 39.8). Rounds
+before a stream count's first plain price (about 128 rounds) still draft by the table alone.
 
 Cold first token (seconds, tokens a second in brackets):
 

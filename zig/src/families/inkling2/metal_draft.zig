@@ -115,7 +115,7 @@ pub const Adapter = struct {
 
     fn facts(ptr: *anyopaque) dr.Facts {
         const a = self(ptr);
-        return .{ .fixed_block = true, .depth = a.depth, .step_ms = a.step_ms, .plain_guard = true, .stream_bytes = @intCast(a.laneBytes()) };
+        return .{ .fixed_block = true, .depth = a.depth, .step_ms = a.step_ms, .plain_guard = true, .batched = true, .stream_bytes = @intCast(a.laneBytes()) };
     }
 
     fn open(ptr: *anyopaque, s: *lanes.Stream) !void {

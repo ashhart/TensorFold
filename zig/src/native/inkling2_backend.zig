@@ -7,6 +7,7 @@ const lanes = tf.lanes;
 const fl = tf.inkling2_metal;
 const be = lanes.backend;
 const Allocator = std.mem.Allocator;
+const costs = @import("inkling2_costs.zig");
 
 pub const window_rows = 16;
 pub const max_rows = 512;
@@ -61,6 +62,7 @@ pub const Target = struct {
     next: u64 = 0,
     sampling_scratch: []u8,
     follow: ?mtl.ResidencySet.Follow = null,
+    costs: costs.Table = .{}, // timed at load for a drafted server (Target.measureCosts); the lane config reads it
 
     pub fn samplingBytes(model: *const fl.Model) usize {
         return @as(usize, model.config.text.unpadded_vocab) * 64 + 128;
@@ -104,7 +106,12 @@ pub const Target = struct {
     }
 
     pub fn facts(self: *const Target) lanes.Model {
-        return .{ .exact_width = window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = self.options.rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = self.options.rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .shared_costs = self.costs.slice() };
+    }
+
+    /// Times the shared forward by total rows, for the lane rule's draft pricing (a plain server never drafts).
+    pub fn measureCosts(self: *Target, io: std.Io) !void {
+        try costs.measure(self.model, io, &self.costs);
     }
 
     pub fn backend(self: *Target) be.Backend {
@@ -557,4 +564,21 @@ test "inkling2 prompt chunks cut at the earliest of the stream's chunk starts an
     try std.testing.expectEqual(@as(usize, 40), cutAt(&.{50}, cutAt(&.{ 0, 40 }, 100, 0), 0));
     try std.testing.expectEqual(@as(usize, 100), cutAt(&.{ 0, 100, 128 }, 100, 0));
     try std.testing.expectEqual(@as(usize, 100), cutAt(&.{64}, 100, 64));
+}
+
+test "inkling2 target prices shared rounds by its timed table and leaves a lone stream's rule alone" {
+    var t: Target = undefined;
+    t.options = .{ .capacity = 64, .streams = 4, .rows = max_rows };
+    t.costs = .{};
+    for (costs.widths, 0..) |width, i| t.costs.costs[i] = .{ .width = width, .ms = 30 + 5 * @as(f64, @floatFromInt(width)) };
+    t.costs.timed = costs.widths.len;
+    var cfg = try lanes.Config.init(std.testing.allocator, t.facts(), window_rows, window_rows - 1);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?f64, 55), cfg.shared_costs.get(5)); // between the timed 4 and 6 rows
+    try std.testing.expectEqual(@as(?f64, 350), cfg.shared_costs.get(64));
+    try std.testing.expect(cfg.family_costs.empty()); // a lone stream keeps the depth heuristic
+    t.costs = .{};
+    var untimed = try lanes.Config.init(std.testing.allocator, t.facts(), window_rows, window_rows - 1);
+    defer untimed.deinit(std.testing.allocator);
+    try std.testing.expect(untimed.shared_costs.empty()); // a plain server times nothing
 }
