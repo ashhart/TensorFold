@@ -71,3 +71,21 @@ pub fn pop(p: *Pool, c: u32) u32 {
 pub fn owned(p: *const Pool, l: *const kv.Lease, id: u32) void {
     if (id % p.classes != l.owner) std.debug.panic("kv pool: page {d} of class {d} given to a lease of class {d}", .{ id, id % p.classes, l.owner });
 }
+
+/// Free pages [start, start + k) held by `l`, from its promise (one class: runs are refused above it).
+pub fn claimAt(p: *Pool, l: *kv.Lease, start: u32, k: usize) void {
+    var n: usize = 0;
+    for (p.free[0..p.nfree]) |id| if (id < start or id >= start + k) {
+        p.free[n] = id;
+        n += 1;
+    };
+    std.debug.assert(n + k == p.nfree);
+    p.nfree = n;
+    p.cfree[0] = n;
+    @memset(p.refs[start..][0..k], 1);
+    @memset(p.leased[start..][0..k], 1); // held as a lease holds its pages: never the store's to reclaim
+    p.nleased += k; // every page in this free run gained its first lease and no other holder
+    l.promised -= k;
+    p.promised -= k;
+    p.cpromised[0] -= k;
+}
