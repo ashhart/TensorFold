@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Tests: the lane host's lone-driver test no longer fails under CI load; its fake driver now hands streams back with their cache settled, as the lane core requires, and its scheduling check no longer depends on timing (#N).
+- Tests: the lane host's lone-driver test no longer fails under CI load; its fake driver now hands streams back with their cache settled, as the lane core requires, and its scheduling check no longer depends on timing (#4568).
 
 - Prompt caches: reuse now requires the request's full cache-salt identity in the RAM prefix cache, family device snapshots and Qwen3.8-27B standing slots; disk-restored state also checks the tokenizer and template files; page ownership on HIP fault and adoption paths is singular and transactional (#4504).
 
