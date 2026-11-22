@@ -408,7 +408,8 @@ pub const Engine = struct {
         };
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
-        try f.run(as_i32[0..rows]);
+        const last = start + rows == len;
+        try f.runMode(as_i32[0..rows], last);
         e.index_splits += @intFromBool(split);
         stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
         if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
@@ -417,7 +418,6 @@ pub const Engine = struct {
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         stamp.end();
         stamp = prof_mod.span(f.prof, e.stream, .draw);
-        const last = start + rows == len;
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
