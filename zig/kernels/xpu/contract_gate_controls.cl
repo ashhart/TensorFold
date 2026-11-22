@@ -210,3 +210,48 @@ KERNEL(16) void tf_ctl_attn_merge_unguarded(global const float *PM, global const
   }
   O[((long)t * 24 + hh) * 256 + g * 16 + lane] = intel_convert_bfloat16_as_ushort(o / l);
 }
+
+// Gate 3: attn_decode with its exponentials in one vector; planted: scores in lanes 0 to 7 only, so every p is 0.
+KERNEL(16) void tf_ctl_attn_exp_lanes(global const ushort *Q, global const ushort *KC, global const ushort *VC,
+                                      global float *PM, global float *PL, global float *PO, int p0, int NS, float scale,
+                                      global const int *TREE, global const ulong *MT, global const int *POS, int cap) {
+  const int sp = get_group_id(2), hk = get_group_id(1), t = get_group_id(0), lane = get_sub_group_local_id();
+  const int last = p0 + (TREE[t * 17] & 255), j0 = sp * 32, j1 = min(j0 + 32, last + 1);
+  float q[6][16], o[6][16], l[6], mv = -INFINITY;
+  for (int a = 0; a < 6; a++) {
+    for (int i = 0; i < 16; i++) {
+      q[a][i] = bf2f(Q[((long)t * 24 + hk * 6 + a) * 256 + i * 16 + lane]);
+      o[a][i] = 0.0f;
+    }
+    l[a] = 0.0f;
+  }
+  for (int j = j0; j < j1; j++) {
+    const long kr = j < p0 ? j : p0 + TREE[t * 17 + 1 + j - p0];
+    float kv[16], sc[6];
+    for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[(kr * 4 + hk) * 256 + i * 16 + lane]);
+    for (int a = 0; a < 6; a++) {
+      float d = 0.0f;
+      for (int i = 0; i < 16; i++) d += q[a][i] * kv[i];
+      sc[a] = sub_group_reduce_add(d) * scale;
+    }
+    for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * 4 + hk) * 256 + i * 16 + lane]);
+    float sv = -INFINITY;
+    for (int a = 0; a < 6; a++) sv = select(sv, sc[a], (int)(lane == a));
+    const float mn = fmax(mv, sv);
+    const float e = exp((lane < 8 ? mv : sv) - mn);
+    mv = mn;
+    for (int a = 0; a < 6; a++) {
+      const float al = sub_group_broadcast(e, a), p = sub_group_broadcast(e, a + 8);
+      l[a] = l[a] * al + p;
+      for (int i = 0; i < 16; i++) o[a][i] = o[a][i] * al + p * kv[i];
+    }
+  }
+  for (int a = 0; a < 6; a++) {
+    const long base = ((long)t * 24 + hk * 6 + a) * NS + sp;
+    if (lane == 0) {
+      PM[base] = sub_group_broadcast(mv, a);
+      PL[base] = l[a];
+    }
+    for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
+  }
+}
