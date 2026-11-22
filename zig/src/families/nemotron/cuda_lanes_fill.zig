@@ -120,7 +120,15 @@ fn finish(self: *Cuda, s: *lanes.Stream, first: u32) !void {
 }
 
 /// prefill_step: a chunk a call, other streams' rounds between; image prompts and segmented passes run whole at once.
-pub fn step(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
+pub fn step(ptr: *anyopaque, s: *lanes.Stream, rows: u32) anyerror!bool {
+    return stepOnce(ptr, s, rows) catch |err| {
+        // any failure but a cancel ends the stream here, as direct callers expect (open.zig); the host finds it gone
+        if (err != error.Cancelled) @as(*Cuda, @ptrCast(@alignCast(ptr))).release(s);
+        return err;
+    };
+}
+
+fn stepOnce(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const self: *Cuda = @ptrCast(@alignCast(ptr));
     const e = self.e;
     var sink: Cuda.PromptSink = .{ .gpa = self.gpa, .s = s };
