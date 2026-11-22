@@ -64,21 +64,27 @@ test "TF_QWEN_KV_SHARE: unset, empty or whitespace-only text is off, a count kee
 /// A stream the store keeps from or restores into: its lane's cache, or (before the lane opens) the state to restore.
 pub const Owner = struct { cache: ?*Cache = null, pending: ?radix.Saved = null };
 
-/// A kept recurrent state: the cache's state block (recurrences and convolution tails) in pinned host memory.
-const Snap = struct { host: cuda.HostBuffer };
+/// A kept recurrent state in one bounded device buffer, or the existing pinned-host fallback.
+const Snap = struct { host: cuda.HostBuffer, dev: ?cuda.DeviceBuffer = null };
+
+fn deviceSnapshots() bool {
+    const v = @import("core").profile.lookup("TF_QWEN_KV_SNAPSHOT_GPU") orelse return false;
+    return std.mem.eql(u8, v, "1");
+}
 
 pub const Prefix = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     pages: *pages_mod.Pages,
     store: radix.Store,
+    gpu: bool,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, p: *pages_mod.Pages, snaps: usize) !*Prefix {
         const x = try gpa.create(Prefix);
         errdefer gpa.destroy(x);
         const rules: radix.Rules = .{ .page = p.layout.page_tokens, .min_gap = 256, .min_prompt = 0, .tail = true };
         const pool_pages = radix.pagesOf(kv.Pool, &p.pool, p.layout.pageBytes());
-        x.* = .{ .gpa = gpa, .e = e, .pages = p, .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
+        x.* = .{ .gpa = gpa, .e = e, .pages = p, .gpu = deviceSnapshots(), .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
         errdefer x.store.deinit();
         x.store.limit(.{ .pages = p.pool.total(), .snaps = snaps });
         try p.pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise evicts its idle pages before it fails
@@ -108,7 +114,10 @@ pub const Prefix = struct {
         const cache = owner.cache.?;
         const e = x.e;
         try cache.flush(e);
-        try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
+        if (s.dev) |dev|
+            try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(cache.state.ptr, dev.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoDAsync")
+        else
+            try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
         try e.stream.synchronize();
     }
 
@@ -177,6 +186,20 @@ pub const Prefix = struct {
         return of(ptr).e.g.stateBytes();
     }
 
+    fn freeFailedSave(e: *Engine, s: *Snap) void {
+        if (s.dev) |*dev| {
+            cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed prefix snapshot's device copy did not drain");
+            dev.free();
+            return;
+        }
+        e.stream.synchronize() catch {
+            std.log.warn("qwen3_5: a failed prefix snapshot's pinned copy goes to the copy-source quarantine", .{});
+            cuda.copy_source.retainPinned(e.d, s.host, e.stream);
+            return;
+        };
+        s.host.free();
+    }
+
     fn save(ptr: *anyopaque, owner: ?*anyopaque, _: u32) anyerror!radix.Saved {
         const x = of(ptr);
         const o: *Owner = @ptrCast(@alignCast(owner orelse return error.NoQwenOwner));
@@ -184,10 +207,15 @@ pub const Prefix = struct {
         const e = x.e;
         const s = try x.gpa.create(Snap);
         errdefer x.gpa.destroy(s);
-        s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes()) };
-        errdefer s.host.free();
+        const dev: ?cuda.DeviceBuffer = if (x.gpu) cuda.DeviceBuffer.alloc(e.d, e.g.stateBytes()) catch null else null;
+        const host: cuda.HostBuffer = if (dev) |_| .{ .d = e.d, .bytes = &.{} } else try cuda.HostBuffer.alloc(e.d, e.g.stateBytes());
+        s.* = .{ .host = host, .dev = dev };
+        errdefer freeFailedSave(e, s);
         try cache.flush(e);
-        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
+        if (s.dev) |saved|
+            try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(saved.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoDAsync")
+        else
+            try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
         try e.stream.synchronize();
         return @ptrCast(s);
     }
@@ -200,7 +228,7 @@ pub const Prefix = struct {
     fn drop(ptr: *anyopaque, saved: radix.Saved) void {
         const x = of(ptr);
         const s: *Snap = @ptrCast(@alignCast(saved));
-        s.host.free();
+        if (s.dev) |*dev| dev.free() else s.host.free();
         x.gpa.destroy(s);
     }
 
