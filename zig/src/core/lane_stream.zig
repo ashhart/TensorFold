@@ -75,6 +75,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .untaught = r.untaught,
         .images = r.images,
         .key = r.cache_key,
+        .cache_salt = r.cacheSalt(),
     }) catch {
         freeProposer(h, job);
         recalls.release(job);
