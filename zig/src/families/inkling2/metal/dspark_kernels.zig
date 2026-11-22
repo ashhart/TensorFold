@@ -15,6 +15,9 @@ pub const Ref = @import("inkling2_metal_ref").Ref;
 pub const PositionArgs = extern struct { base: u32 };
 pub const ContextArgs = extern struct { base: u32, rows: u32, ring: u32 };
 pub const AttentionArgs = extern struct { committed: u32, ring: u32, local: u32, from: u32 };
+pub const UnitsArgs = extern struct { committed: u32, ring: u32, first: u32, chunk: u32, chunks: u32 };
+/// The keys a threadgroup of the tensor-unit attention takes: a multiple of 64.
+pub const units_chunk: u32 = 256;
 pub const TokenArgs = extern struct { token: u32 };
 pub const CountArgs = extern struct { count: u32 };
 pub const BaseArgs = extern struct { rows: u32, vocab: u32 };
@@ -139,6 +142,36 @@ pub const Chain = struct {
     }
 };
 
+/// The block attention on the tensor units, outside `Pipelines`: a chunk's partial sums, then their fold.
+pub const Units = struct {
+    partials: mtl.Pipeline,
+    merge: mtl.Pipeline,
+
+    pub fn load(device: mtl.Device, text: []const u8) !Units {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        const partials = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_attn_units", false);
+        errdefer partials.deinit();
+        return .{ .partials = partials, .merge = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_attn_merge", false) };
+    }
+    pub fn deinit(u: *Units) void {
+        u.merge.deinit();
+        u.partials.deinit();
+        u.* = undefined;
+    }
+};
+
+/// The first key a block reads and the chunks its retained context spans.
+pub fn unitsSpan(committed: u32, local: bool, from: u32) struct { first: u32, chunks: u32 } {
+    const first = @max(from, if (local and committed > 1024) committed - 1024 else 0);
+    return .{ .first = first, .chunks = if (committed == first) 0 else (committed - 1) / units_chunk - first / units_chunk + 1 };
+}
+
+/// The partial store a block's attention needs: a float pair and 128 sums a (row, head) and chunk.
+pub fn unitsBytes(chunks: usize) usize {
+    return 8 * 24 * chunks * (8 + 128 * 4);
+}
+
 fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
     for (refs, 0..) |r, slot| e.setBuffer(r.buf, r.off, slot);
 }
@@ -188,6 +221,30 @@ pub fn attend(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, block_k: Ref, 
     e.setPipeline(p.attention);
     bind(e, &.{ q, block_k, block_v, context_k, context_v, scores, out });
     e.setValue(AttentionArgs{ .committed = committed, .ring = ring_capacity, .local = @intFromBool(local), .from = from }, 7);
+    groups(e, 8 * 24, 128);
+}
+
+/// `attend` on the tensor units; `partials` is FP32 scratch of `unitsBytes` of the context's chunks.
+pub fn attendUnits(u: *const Units, e: mtl.ComputeEncoder, q: Ref, block_k: Ref, block_v: Ref, context_k: Ref, context_v: Ref, partials: Ref, out: Ref, committed: u32, ring_capacity: u32, local: bool, from: u32) void {
+    std.debug.assert(ring_capacity > 0 and ring_capacity % 64 == 0 and from <= committed);
+    const span = unitsSpan(committed, local, from);
+    const args = UnitsArgs{ .committed = committed, .ring = ring_capacity, .first = span.first, .chunk = units_chunk, .chunks = span.chunks };
+    const sums = Ref{ .buf = partials.buf, .off = partials.off + 8 * 24 * @as(usize, span.chunks) * 8 };
+    if (span.chunks != 0) {
+        e.setPipeline(u.partials);
+        bind(e, &.{ q, context_k, context_v, sums, partials });
+        e.setValue(args, 5);
+        e.dispatchGroups(mtl.Size.of(span.chunks, 8, 1), mtl.Size.of(64, 1, 1));
+    }
+    mergeUnits(u, e, q, block_k, block_v, partials, out, args);
+}
+
+/// The fold alone: the block's own keys, then the partials of `args.chunks` chunks in order.
+pub fn mergeUnits(u: *const Units, e: mtl.ComputeEncoder, q: Ref, block_k: Ref, block_v: Ref, partials: Ref, out: Ref, args: UnitsArgs) void {
+    const sums = Ref{ .buf = partials.buf, .off = partials.off + 8 * 24 * @as(usize, args.chunks) * 8 };
+    e.setPipeline(u.merge);
+    bind(e, &.{ q, block_k, block_v, sums, partials, out });
+    e.setValue(args, 6);
     groups(e, 8 * 24, 128);
 }
 

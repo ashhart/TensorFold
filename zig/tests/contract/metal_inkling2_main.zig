@@ -14,9 +14,11 @@ pub const Suites = struct {
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     chain: @import("metal_inkling2_dspark_chain.zig").Suite,
+    dspark_units: @import("metal_inkling2_dspark_units.zig").Suite,
 
-    pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
-        var s = Suites{
+    /// Built where it will live: each kernel's context points at a probe inside these suites.
+    pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
+        s.* = .{
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -27,6 +29,7 @@ pub const Suites = struct {
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .chain = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dspark_units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
@@ -39,7 +42,7 @@ pub const Suites = struct {
         try s.runtime.collect(only);
         try s.dspark.collect(only);
         try s.chain.collect(only);
-        return s;
+        try s.dspark_units.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
@@ -53,5 +56,6 @@ pub const Suites = struct {
         s.runtime.deinit();
         s.dspark.deinit();
         s.chain.deinit();
+        s.dspark_units.deinit();
     }
 };

@@ -46,6 +46,8 @@ pub const Drafter = struct {
     chain: k.Chain = undefined,
     chain_tokens: mtl.Buffer = undefined,
     scores: ?mtl.Buffer = null,
+    /// The block attention's tensor-unit kernels, on the chips that have the units.
+    units: ?k.Units = null,
     capacity: usize = 1,
     /// A draft's share of a full hold, timed by `measure`.
     step_ms: f64 = 0,
@@ -72,6 +74,8 @@ pub const Drafter = struct {
         d.chain = try k.Chain.load(device, @import("inkling2_metal").inkling2_dspark);
         errdefer d.chain.deinit();
         d.chain_tokens = try device.buffer(chain_streams * 8 * @sizeOf(u32), mtl.ResourceOptions.shared);
+        errdefer d.chain_tokens.deinit();
+        if (device.tensorUnits()) d.units = try k.Units.load(device, @import("inkling2_metal").inkling2_dspark_units);
         return d;
     }
 
@@ -80,6 +84,7 @@ pub const Drafter = struct {
         while (it.next()) |lane| lane.deinit();
         d.contexts.deinit(d.gpa);
         if (d.scores) |scores| scores.deinit();
+        if (d.units) |*u| u.deinit();
         d.chain_tokens.deinit();
         d.chain.deinit();
         for (d.more.items) |*extra| extra.deinit();
@@ -220,7 +225,7 @@ pub const Drafter = struct {
             fwd.dense(d.target, e, layer.k, at(s.x, 0), at(s.k_raw, 0), 8);
             fwd.dense(d.target, e, layer.v, at(s.x, 0), at(s.v_raw, 0), 8);
             k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(anchor));
-            k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
+            if (d.units) |*u| k.attendUnits(u, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from)) else k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
             fwd.dense(d.target, e, layer.o, at(s.attn, 0), at(s.y, 0), 8);
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.resid, 0), r(layer.post_norm), at(s.next_resid, 0), at(s.x, 0), 8, false);
             fwd.dense(d.target, e, layer.gate, at(s.x, 0), at(s.gate, 0), 8);
