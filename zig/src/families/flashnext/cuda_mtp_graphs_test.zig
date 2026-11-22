@@ -93,6 +93,8 @@ const Draft = struct {
     out: Buf = .{ .ptr = 0x2000_0000 },
     dlogits: Buf = .{ .ptr = 0x2100_0000 },
     saved: Buf = .{ .ptr = 0x2200_0000 },
+    saved_tail: u64 = 0x2200_1000,
+    saved_nrow: u64 = 0x2200_2000,
     keep: parts.Keep = .{},
 };
 
@@ -330,7 +332,14 @@ test "rank graphs: a rollback's key holds every buffer the replay touches and it
     var gen = q;
     gen.gen += 1;
     try expectMoved(base, wg.RollbackKey.init(&gen, &d, 2, &s));
-    const drafts: [4]Draft = .{ .{ .gen = 2, .keep = d.keep }, .{ .saved = .{ .ptr = 0x2200_0100 }, .keep = d.keep }, kept(d, 0x8000_0100, 0x8100_0000), kept(d, 0x8000_0000, 0x8100_0100) };
+    const drafts: [6]Draft = .{
+        .{ .gen = 2, .keep = d.keep },
+        .{ .saved = .{ .ptr = 0x2200_0100 }, .keep = d.keep },
+        .{ .saved_tail = 0x2200_1100, .keep = d.keep },
+        .{ .saved_nrow = 0x2200_2100, .keep = d.keep },
+        kept(d, 0x8000_0100, 0x8100_0000),
+        kept(d, 0x8000_0000, 0x8100_0100),
+    };
     for (&drafts) |*x| try expectMoved(base, wg.RollbackKey.init(&q, x, 2, &s));
     var other_s = s;
     other_s.h += 0x100;
