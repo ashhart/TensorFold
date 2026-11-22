@@ -8,3 +8,4 @@ pub const experts = @import("inkling2/experts_sources.zig").experts;
 pub const loop = @import("inkling2/loop_sources.zig").loop;
 pub const runtime = @import("inkling2/runtime_sources.zig").runtime;
 pub const inkling2_dspark = @import("inkling2/dspark_sources.zig").dspark;
+pub const inkling2_dspark_units = @import("inkling2/dspark_sources.zig").dspark_units;

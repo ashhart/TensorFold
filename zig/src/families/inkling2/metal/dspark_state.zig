@@ -1,6 +1,7 @@
 //! Fixed eight-row DSpark scratch and committed-only per-stream context rings.
 const std = @import("std");
 const mtl = @import("metal");
+const kernels = @import("dspark_kernels.zig");
 
 pub const hidden = 2304;
 pub const query = 3072;
@@ -86,8 +87,10 @@ pub fn globalRing(capacity: usize) usize {
     return std.mem.alignForward(usize, capacity, 128);
 }
 
+/// The attention scratch: a score a (row, head) and key, or the tensor-unit path's partials where they need more.
 pub fn scoreBytes(capacity: usize) u64 {
-    return @as(u64, 8 * 24 * 4) * (capacity + block);
+    const chunks = @max(capacity, 1024) / kernels.units_chunk + 2;
+    return @max(@as(u64, 8 * 24 * 4) * (capacity + block), kernels.unitsBytes(chunks));
 }
 
 /// Two sliding layers hold two fixed K/V rings; layer 1 holds two global K/V rings.

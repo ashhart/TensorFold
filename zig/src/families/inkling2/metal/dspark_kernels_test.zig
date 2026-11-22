@@ -153,3 +153,15 @@ test "folded correction rounds bias then logits before the thirty softcap" {
     const saturated = bf(30.0 * std.math.tanh(@as(f64, 1000) / 30.0));
     try t.expect(saturated <= 30 and saturated > 29.9);
 }
+
+test "the tensor-unit attention spans the kept keys in whole chunks, and none without a key" {
+    try t.expectEqual(@as(u32, 0), k.unitsSpan(0, false, 0).chunks);
+    try t.expectEqual(@as(u32, 0), k.unitsSpan(700, false, 700).chunks);
+    try t.expectEqual(@as(u32, 1), k.unitsSpan(1, false, 0).chunks);
+    try t.expectEqual(@as(u32, 3), k.unitsSpan(2 * k.units_chunk + 1, false, 0).chunks);
+    const sliding = k.unitsSpan(5000, true, 3);
+    try t.expectEqual(@as(u32, 3976), sliding.first);
+    try t.expectEqual((4999 / k.units_chunk) - (3976 / k.units_chunk) + 1, sliding.chunks);
+    try t.expectEqual(@as(u32, 4000), k.unitsSpan(5000, true, 4000).first);
+    try t.expectEqual(@as(usize, 8 * 24 * 2 * 520), k.unitsBytes(2));
+}

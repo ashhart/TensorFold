@@ -100,6 +100,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
     @import("inkling2_dspark_chain_metal_records.zig").records ++
+    @import("inkling2_dspark_units_metal_records.zig").records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
@@ -150,4 +151,5 @@ test {
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("inkling2_dspark_chain_metal_records.zig");
+    _ = @import("inkling2_dspark_units_metal_records.zig");
 }
