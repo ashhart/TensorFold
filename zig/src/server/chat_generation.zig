@@ -52,6 +52,7 @@ pub const Generation = struct {
     stops: reply_text.Stops,
     ignore_eos: bool,
     grammar: @import("eos_phase.zig").Phase = .none, // the request's grammar at the next token to commit
+    ends: []const u32, // the request's end tokens: the model's, and a FIM reply's FIM end tokens (completion_fim.zig)
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     required: bool = false, // tool_choice "required" or a named function: the reply must call a tool
@@ -80,7 +81,7 @@ pub const Generation = struct {
     deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
 
     fn eos(g: *const Generation, t: u32) bool {
-        return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
+        return g.grammar.ends(g.ignore_eos, g.ends, t);
     }
 
     /// Whether the route's own tool parser would find a call, or a refused envelope, in `text` taken as the answer.
@@ -116,6 +117,7 @@ pub const Generation = struct {
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
         const before = g.grammar; // the stream below judges each token's end at its own phase, as this loop does
+        if (g.max_tokens == 0) g.reason = "length"; // a prompt-only reply keeps none of the engine's tokens
         var landed: usize = 0;
         for (chunk) |t| {
             if (g.reason != null) break;
@@ -142,7 +144,7 @@ pub const Generation = struct {
             g.wrote_ns = nowNs(g.srv.io);
         }
         if (g.streaming_done) return;
-        const fresh = @import("eos_phase.zig").streamed(before, g.ignore_eos, g.srv.eos, chunk[0..landed]);
+        const fresh = @import("eos_phase.zig").streamed(before, g.ignore_eos, g.ends, chunk[0..landed]);
         if (fresh.ended) g.streaming_done = true;
         const live = g.liveRows();
         if (live) |l| try l.add(g.srv, g.a, fresh.tokens);
@@ -305,7 +307,7 @@ pub const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.ends);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
@@ -437,7 +439,7 @@ pub const Generation = struct {
             .thinking = thinking,
             .effort = effort,
             .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions } else null,
-            .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
+            .prompt_rows = if (m.prompt_rows) |r| try a.dupe(api.LogprobRow, r) else null,
             .loop_stop = stopped,
             .reasoning_recovered = recovered,
         };

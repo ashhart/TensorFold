@@ -125,6 +125,10 @@ def completion_cases(encode: Any) -> list[tuple[str, str, list[Any]]]:
         out.append(("completions", f"{name}-stream", [post("/v1/completions", {**bodies[name], "stream": True})]))
     out.append(("completions", "usage-chunk", [post("/v1/completions", {**bodies["text"], "stream": True, "stream_options": {"include_usage": True}})]))
     out.append(("completions", "think-script", [post("/v1/completions", {"prompt": "x @script=think", "stream": True})]))
+    for name, extra in (("echo-false", {"echo": False}), ("echo-unsupported", {"echo": True}), ("echo-stream", {"echo": True, "stream": True})):
+        out.append(("completions", name, [post("/v1/completions", {**bodies["text"], **extra})]))
+    for name, extra in (("suffix-null", {"suffix": None}), ("suffix-empty", {"suffix": ""}), ("suffix-unsupported", {"suffix": " world"})):
+        out.append(("completions", name, [post("/v1/completions", {**bodies["text"], **extra})]))
     return out
 
 

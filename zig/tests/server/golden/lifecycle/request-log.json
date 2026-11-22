@@ -158,6 +158,12 @@
 {"messages": [{"role": "user", "content": "Hi @script=think"}], "stream": true}
 {"prompt": "Once @script=plain", "stream": true, "stream_options": {"include_usage": true}}
 {"prompt": "x @script=think", "stream": true}
+{"prompt": "Once @script=plain", "echo": false}
+{"prompt": "Once @script=plain", "echo": true}
+{"prompt": "Once @script=plain", "echo": true, "stream": true}
+{"prompt": "Once @script=plain", "suffix": null}
+{"prompt": "Once @script=plain", "suffix": ""}
+{"prompt": "Once @script=plain", "suffix": " world"}
 {"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}]}
 {"stream": true, "messages": [{"role": "user", "content": "Hi @script=think"}]}
 {"messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}]}
