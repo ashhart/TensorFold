@@ -16,7 +16,6 @@ const Taps = @import("metal_dflash_taps.zig").Taps;
 /// The MoE block (moe.zig).
 pub const moe = @import("moe.zig").moe;
 const moeBlock = @import("moe.zig").block;
-
 pub const Ctx = struct {
     k: *const Kernels,
     c: *const cfg.Config,
@@ -40,7 +39,6 @@ pub const Ctx = struct {
     moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
     q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
 };
-
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
 pub const Span = struct { at: u32, n: u32, row: u32 };
 /// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
@@ -58,7 +56,6 @@ pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u3
         e.dispatchThreads(size(n * D / 2, 1, 1), size(256, 1, 1));
     }
 }
-
 // The draw rules live in draw_rule.zig (Metal-free: the host references and the tests use them uncoupled).
 pub const Draws = @import("draw_rule.zig").Draws;
 pub const Rule = @import("draw_rule.zig").Rule;
@@ -76,7 +73,6 @@ fn segments(x: *const Ctx, rows: u32, pos: u32, one: *[1]Seg) []const Seg {
     one[0] = .{ .s = x.s, .row0 = 0, .rows = rows, .pos = pos };
     return one;
 }
-
 /// The context reading segment `g`'s caches.
 fn withState(x: *const Ctx, g: Seg) Ctx {
     var y = x.*;
@@ -84,7 +80,6 @@ fn withState(x: *const Ctx, g: Seg) Ctx {
     y.segs = &.{};
     return y;
 }
-
 /// Single launches (or tight groups) for a profile that times each alone.
 pub const Part = struct {
     pub const names = [_][]const u8{ "hc_expand", "hc_mix", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax", "kda_pre", "kda_scan", "kda_post" };
