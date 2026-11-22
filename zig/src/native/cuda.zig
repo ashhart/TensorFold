@@ -27,8 +27,7 @@ const cuda_families = @import("cuda_families.zig");
 const cuda_witness = @import("cuda_witness.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 pub const registry = cuda_families.registry;
-/// --record opens here (engines.zig refuses it for a backend without this).
-pub const records = true;
+pub const records = true; // --record opens here (engines.zig refuses it for a backend without this)
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families = cuda_families.families;
@@ -53,8 +52,7 @@ const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque,
 threadlocal var bound: ?*const cuda.Context = null;
 const failed_load = @import("cuda_load_gpu.zig");
 const Gpu = failed_load.Gpu;
-/// One loaded model behind the lane host: everything the engine thread reads lives here.
-pub const Host = struct {
+pub const Host = struct { // One loaded model behind the lane host: everything the engine thread reads lives here.
     gpa: Allocator,
     gpu: ?*Gpu, // null in host tests: no context to bind
     family: *anyopaque,
@@ -153,7 +151,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant, .warm_images = h.inner.warm_images };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -404,7 +402,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
         const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
+        var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
+        if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
+        store.* = pc.Store.init(gpa, copies, rules, if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
             const disk = store.disk;
             store.deinit();
@@ -473,7 +473,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .decode_share = o.decode_share,
         .default_decode_share = 0.25, // #3397: shares long fills only (past Share.default_arm_rows); short prompts keep main's cells
         .prompt_cache_capacity = cache_capacity,
-        .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
+        .warm_turns = if (h.store) |s| s.rules.warm != .off else false, // a family's warm_quiet on one rank
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
