@@ -149,6 +149,8 @@ pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
 pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
 /// Flash Next experts grouped by expert for wide decode windows, the recorded expert kernels' bits (gx.zig).
 pub const flashnext_gx = @embedFile("decode/fn_gx.metal");
+/// The opt-in grouped gate/up decoding an expert's weights once for two pairs (gx_mb2.zig).
+pub const flashnext_gx_mb2 = @embedFile("decode/fn_gx_mb2.metal");
 
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");
