@@ -349,7 +349,11 @@ pub const Context = struct {
     pub const Settle = struct { ctx: *anyopaque, slot: u32, run: *const fn (ctx: *anyopaque, slot: u32) void };
 
     /// `drafting`: the stream drafts its own trees, so it gets K/V caches; its ring grows by `step` (null: the span).
-    pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool, step: ?u32) !*Context {
+    pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool) !*Context {
+        return initGrow(a, m, drafting, null);
+    }
+
+    pub fn initGrow(a: std.mem.Allocator, m: *const Model, drafting: bool, step: ?u32) !*Context {
         const c = m.graph.config;
         const device = m.backend.target.device;
         const x = try a.create(Context);

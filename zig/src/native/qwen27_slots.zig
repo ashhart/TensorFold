@@ -215,6 +215,7 @@ pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
 
 /// A pass that failed or went back to the queue frees its slot, pages and promise (a standing slot 0's rows stay).
 fn drop(b: *Metal, slot: u32) void {
+    b.give_back[slot] = b.runner.kv_step != null;
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0);
     b.owners[slot] = null;
 }
@@ -411,7 +412,7 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
     if (context_missing) {
-        const x = try Context.init(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
+        const x = try Context.initGrow(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
         x.settle = .{ .ctx = b.runner, .slot = slot, .run = q.decode_round.Runner.settleOpaque };
         b.contexts[slot] = x;
         try x.buffers(&added, b.gpa);
@@ -471,7 +472,7 @@ pub fn giveBack(b: *Metal) void {
         }
         if ((slot == 0 and b.standing.tokens.len > 0) or b.runner.busy(slot)) continue;
         b.give_back[k] = false;
-        b.runner.release(slot) catch |err| std.log.warn("qwen27: slot {d} keeps its K/V ({s})", .{ slot, @errorName(err) });
+        b.runner.releaseGrown(slot) catch |err| std.log.warn("qwen27: slot {d} keeps its K/V ({s})", .{ slot, @errorName(err) });
         clearContext(b, slot) catch {};
     }
 }
