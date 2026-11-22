@@ -5,3 +5,4 @@ pub const glue = @import("glue.zig");
 pub const experts = @import("experts.zig");
 pub const experts_plan = @import("experts_plan.zig");
 pub const loop = @import("loop.zig");
+pub const dense_fuse = @import("dense_fuse.zig");
