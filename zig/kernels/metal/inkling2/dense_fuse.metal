@@ -1,6 +1,7 @@
-// Fused 6-projection attention-input BF16 matvec, bit-identical to six sp_matvec launches.
+// Fused 6-projection attention-input BF16 matvec, bit-identical to six tf_dsv41_mv / mv_mma launches.
 #include <metal_stdlib>
 using namespace metal;
+#pragma METAL fp contract(off)
 
 struct InkMv6Args {
   uint rows, k, nq, nk, nv, nr, ns, ng;
@@ -50,22 +51,40 @@ inline void ink2_mv6_t(
   if (local_row >= n_rows) return;
 
   const device bfloat* w = W + (size_t)local_row * a.k;
+  const uint live = min(ROWS, a.rows);
   float acc[ROWS];
   _Pragma("clang loop unroll(full)")
   for (uint r = 0; r < ROWS; ++r) acc[r] = 0.0f;
-  for (uint i = 8u * lane; i < a.k; i += 256u) {
-    const float4 w0 = float4(*(const device bfloat4*)(w + i));
-    const float4 w1 = float4(*(const device bfloat4*)(w + i + 4u));
+  uint i = lane;
+  for (; i + 32u * 7u < a.k; i += 256u) {
+    float wv[8];
+    _Pragma("clang loop unroll(full)")
+    for (uint u = 0; u < 8u; ++u) wv[u] = float(w[i + 32u * u]);
     _Pragma("clang loop unroll(full)")
     for (uint r = 0; r < ROWS; ++r) {
+      if (r >= live) break;
       const device bfloat* x = X + (size_t)r * a.k + i;
-      acc[r] += dot(w0, float4(*(const device bfloat4*)x)) + dot(w1, float4(*(const device bfloat4*)(x + 4u)));
+      float xv[8];
+      _Pragma("clang loop unroll(full)")
+      for (uint u = 0; u < 8u; ++u) xv[u] = float(x[32u * u]);
+      _Pragma("clang loop unroll(full)")
+      for (uint u = 0; u < 8u; ++u) acc[r] = fma(xv[u], wv[u], acc[r]);
+    }
+  }
+  for (; i < a.k; i += 32u) {
+    const float wv = float(w[i]);
+    _Pragma("clang loop unroll(full)")
+    for (uint r = 0; r < ROWS; ++r) {
+      if (r >= live) break;
+      acc[r] = fma(float(X[(size_t)r * a.k + i]), wv, acc[r]);
     }
   }
   _Pragma("clang loop unroll(full)")
   for (uint r = 0; r < ROWS; ++r) {
-    const float s = simd_sum(acc[r]);
-    if (lane == 0 && r < a.rows) Y[(size_t)r * n_rows + local_row] = bfloat(s);
+    if (r >= live) break;
+    float s = acc[r];
+    for (ushort m = 1; m < 32; m *= 2) s += simd_shuffle_xor(s, m);
+    if (lane == 0) Y[(size_t)r * n_rows + local_row] = bfloat(s);
   }
 }
 

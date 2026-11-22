@@ -7,8 +7,10 @@ fn edit(kind: p.Kind) Edit {
     return switch (kind) {
         .embed_norm => .{ .from = "float(weight[d]) * (float(x[d]) * inverse)", .to = "float(weight[0]) * (float(x[d]) * inverse)" },
         .ar => .{ .from = "weights[s] = dot * INKLING_AR_SCALE;", .to = "weights[s] = dot;" },
+        .ar_bf16 => .{ .from = "ink2_ar_t<bfloat>(all_blocks, all_partial,", .to = "ink2_ar_t<bfloat>(all_blocks, all_blocks," },
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
-        .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
+        .conv_dynamic => .{ .from = "static_w[lag * channels + c]", .to = "static_w[(3 - lag) * channels + c]" },
+        .conv_dynamic_segs => .{ .from = "const uint r = global_r - seg.row0;", .to = "const uint r = 0u;" },
         .router => .{ .from = "keys[t] = scores[t] + bias[t];", .to = "keys[t] = scores[t];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
@@ -28,8 +30,10 @@ pub fn name(kind: p.Kind) []const u8 {
     return switch (kind) {
         .embed_norm => "control: metal inkling2 glue embed_norm tf_inkling2_embed_norm",
         .ar => "control: metal inkling2 glue ar tf_inkling2_ar",
+        .ar_bf16 => "control: metal inkling2 glue ar_bf16 tf_inkling2_ar_bf16",
         .conv_static => "control: metal inkling2 glue conv_static tf_inkling2_conv_static",
         .conv_dynamic => "control: metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
+        .conv_dynamic_segs => "control: metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs",
         .router => "control: metal inkling2 glue router tf_inkling2_router",
         .swiglu => "control: metal inkling2 glue swiglu tf_inkling2_swiglu",
         .logits => "control: metal inkling2 glue logits tf_inkling2_logits",

@@ -353,3 +353,19 @@ test "serve --config: CORS list overrides and file-line limits" {
     try text.appendSlice(a, "]\n");
     try f.refused(text.items, 1, "at most 64 --cors-origin entries are allowed");
 }
+
+test "serve --loops: Metal builds refuse it at parse and CUDA builds validate count >= 1" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    const a = f.arena.allocator();
+    if (!cli.Test.cuda_build) {
+        for ([_][]const []const u8{ &.{ "m", "--loops", "2" }, &.{ "m", "--loops=4" } }) |argv| {
+            try t.expectError(error.Usage, cli.parse(a, argv, &f.u));
+            try t.expect(std.mem.indexOf(u8, f.u.message, "--loops is not served by the native engine yet") != null);
+        }
+    } else {
+        const got = try cli.parse(a, &.{ "m", "--loops=2" }, &f.u);
+        try t.expectEqual(@as(?u32, 2), (try cli.request(a, "d", "t", got)).loops);
+        try t.expectError(error.Usage, cli.parse(a, &.{ "m", "--loops", "0" }, &f.u));
+    }
+}

@@ -3,6 +3,21 @@ const std = @import("std");
 const mtl = @import("metal");
 const plan = @import("../plan.zig");
 const ap = @import("attention_plan.zig");
+const glue = @import("glue.zig");
+
+pub const InkConvSeg = extern struct {
+    hist0: u64,
+    raw0: u64,
+    staged0: u64,
+    out0: u64,
+    hist1: u64,
+    raw1: u64,
+    staged1: u64,
+    out1: u64,
+    rows: u32,
+    commit: u32,
+};
+pub const StageConvSegsArgs = extern struct { width: u32, n_segs: u32, pairs: u32 };
 
 pub const window_rows = 16;
 pub const batch_rows = 32;
@@ -98,6 +113,7 @@ pub const Cache = struct {
     len: usize = 0,
     pending: ?usize = null,
     first_token: ?u32 = null,
+    conv_backed_up: bool = false,
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(device: mtl.Device, capacity: usize, schedule: *const plan.Plan) !Cache {
@@ -193,10 +209,25 @@ pub const Cache = struct {
         return layer;
     }
 
-    pub fn beginIn(c: *Cache, e: mtl.BlitEncoder, rows: usize) !void {
+    pub fn beginStage(c: *Cache, rows: usize) !void {
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
-        e.copy(c.conv, 0, c.backup, 0, conv_bytes);
         c.pending = rows;
+        c.conv_backed_up = false;
+    }
+
+    pub fn backupBlit(c: *const Cache, e: mtl.BlitEncoder) void {
+        e.copy(c.conv, 0, c.backup, 0, conv_bytes);
+    }
+
+    pub fn beginIn(c: *Cache, e: mtl.BlitEncoder, rows: usize) !void {
+        if (c.pending) |p| {
+            if (p != rows or c.conv_backed_up) return error.Inkling2CacheTransaction;
+        } else {
+            if (rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
+            c.pending = rows;
+        }
+        c.backupBlit(e);
+        c.conv_backed_up = true;
     }
 
     /// Save all four pre-window three-tap histories before KV/conv speculation.
@@ -204,6 +235,7 @@ pub const Cache = struct {
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
         try copyGpu(queue, c.conv, 0, c.backup, 0, conv_bytes, "begin");
         c.pending = rows;
+        c.conv_backed_up = true;
     }
 
     pub fn finishCommit(c: *Cache, accepted: usize) void {
@@ -213,6 +245,7 @@ pub const Cache = struct {
             c.tap.rows = accepted;
         } else c.tap = .{};
         c.pending = null;
+        c.conv_backed_up = false;
     }
 
     /// Commit accepted rows: staged taps select the new state; rejected KV positions are overwritten on replay.
@@ -220,6 +253,7 @@ pub const Cache = struct {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         if (accepted > rows) return error.Inkling2CacheTransaction;
         if (accepted < rows) {
+            if (!c.conv_backed_up) return error.Inkling2CacheTransaction;
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = queue.commandBuffer();
@@ -242,8 +276,9 @@ pub const Cache = struct {
 
     pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
         _ = c.pending orelse return error.Inkling2NoTransaction;
-        try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
+        if (c.conv_backed_up) try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
         c.pending = null;
+        c.conv_backed_up = false;
         c.tap = .{};
     }
 
@@ -277,11 +312,11 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 pub const argmax_parts: usize = (vocabulary + 7) / 8;
 
 pub const fields = [_][]const u8{
-    "ids",     "pos",      "seg_of",      "segs",            "p",          "prelude",    "blocks",     "bank0",         "bank1",    "messages",
-    "partial", "ar",       "gated",       "mlp_ar",          "mlp_gated",  "q_norm",     "k_norm",     "v_norm",        "q_raw",    "k_raw",
-    "v_raw",   "rel_raw",  "sink",        "gate",            "k_conv",     "v_conv",     "conv_stage", "q_prep",        "rel_prep", "rel_tab",
-    "part_o",  "part_ml",  "att",         "attn_dense",      "attn_conv",  "mlp_normed", "route_ids",  "route_weights", "gu",       "down",
-    "mlp_out", "mlp_conv", "logits_all",  "argmax_vals",     "argmax_part_ids", "argmax_ids",
+    "ids",     "pos",      "seg_of",    "segs",          "p",          "prelude",     "blocks",          "bank0",         "bank1",    "messages",
+    "partial", "ar",       "gated",     "mlp_ar",        "mlp_gated",  "q_norm",      "k_norm",          "v_norm",        "q_raw",    "k_raw",
+    "v_raw",   "rel_raw",  "sink",      "gate",          "k_conv",     "v_conv",      "conv_stage",      "q_prep",        "rel_prep", "rel_tab",
+    "part_o",  "part_ml",  "att",       "attn_dense",    "attn_conv",  "mlp_normed",  "route_ids",       "route_weights", "gu",       "down",
+    "mlp_out", "mlp_conv", "conv_segs", "conv_dyn_segs", "logits_all", "argmax_vals", "argmax_part_ids", "argmax_ids",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -293,13 +328,13 @@ fn sizes(rows: usize) [fields.len]usize {
     const fp = 4;
     const batch_cap: usize = @min(r, batch_rows);
     return .{
-        r * 4,                         r * 4,                         r * 4,                         max_segments * @sizeOf(ap.Seg),            r * h * bf,                     r * h * bf,       r * block_slots * h * bf,
-        r * h * bf,                    r * h * bf,                    r * message_entries * h * fp,  r * h * fp,                                3 * r * h * fp,                 3 * r * h * fp,   r * h * fp,
-        r * h * fp,                    r * h * bf,                    r * h * bf,                    r * h * bf,                                r * q * bf,                     r * kv * bf,      r * kv * bf,
-        r * rel_width * bf,            r * 24 * bf,                   r * q * bf,                    r * kv * bf,                               r * kv * bf,                    (3 + r) * h * bf, r * q * bf,
-        r * rel_width * bf,            r * 24 * ap.extent * bf,       r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp, r * q * bf, r * h * bf, r * h * bf,
-        r * h * bf,                    r * experts_per_token * 4,     r * experts_per_token * fp,    r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,       r * h * bf,
-        batch_cap * vocabulary * fp,   batch_cap * argmax_parts * fp, batch_cap * argmax_parts * 4,  batch_cap * 4,
+        r * 4,                                                r * 4,                                                        r * 4,                                            max_segments * @sizeOf(ap.Seg),            r * h * bf,                     r * h * bf,       r * block_slots * h * bf,
+        r * h * bf,                                           r * h * bf,                                                   r * message_entries * h * fp,                     r * h * fp,                                3 * r * h * fp,                 3 * r * h * fp,   r * h * fp,
+        r * h * fp,                                           r * h * bf,                                                   r * h * bf,                                       r * h * bf,                                r * q * bf,                     r * kv * bf,      r * kv * bf,
+        r * rel_width * bf,                                   r * 24 * bf,                                                  r * q * bf,                                       r * kv * bf,                               r * kv * bf,                    (3 + r) * h * bf, r * q * bf,
+        r * rel_width * bf,                                   r * 24 * ap.extent * bf,                                      r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,       r * h * bf,
+        r * h * bf,                                           r * experts_per_token * 4,                                    r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,       r * h * bf,
+        visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), batch_cap * vocabulary * fp,                      batch_cap * argmax_parts * fp,             batch_cap * argmax_parts * 4,   batch_cap * 4,
     };
 }
 
@@ -352,6 +387,8 @@ pub const Scratch = struct {
     down: mtl.Buffer,
     mlp_out: mtl.Buffer,
     mlp_conv: mtl.Buffer,
+    conv_segs: mtl.Buffer,
+    conv_dyn_segs: mtl.Buffer,
     logits_all: mtl.Buffer,
     argmax_vals: mtl.Buffer,
     argmax_part_ids: mtl.Buffer,

@@ -13,7 +13,9 @@ fn near(want: f64, got: f64) !void {
 test "glue entries have one shader, symbol, unique launch record and honest scalar reservation" {
     for (std.enums.values(p.Kind), records) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        var decl_buf: [64]u8 = undefined;
+        const decl = try std.fmt.bufPrint(&decl_buf, "{s}(", .{kind.symbol()});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, decl));
         try t.expectEqual(record.threads, record.reserved);
     }
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);

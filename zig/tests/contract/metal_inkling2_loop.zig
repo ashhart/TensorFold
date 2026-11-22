@@ -317,6 +317,82 @@ pub const Suite = struct {
         }
     }
 
+    /// Verify fused grid.z=3 Q/K/V dispatch matches three separate 1-role dispatches byte-for-byte.
+    pub fn multiRole(s: *Suite, seed: u64) !usize {
+        var prod: ?*Probe = null;
+        for (s.probes.items) |pr| if (pr.kind == .gates and std.mem.eql(u8, pr.kernel().spec.name, p.Kind.gates.label())) {
+            prod = pr;
+            break;
+        };
+        const pr = prod orelse return 0;
+        const rows: usize = 5;
+        var rig = rig_.Rig{ .a = s.a, .device = s.device, .queue = s.queue };
+        defer rig.deinit();
+        var prng = std.Random.DefaultPrng.init(seed ^ 0x9e37);
+        const rng = prng.random();
+        var roles: [3]host.Gate = undefined;
+        var sep_outs: [3]rig_.Ref = undefined;
+        var arena: std.heap.ArenaAllocator = .init(s.a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        const m_stride = p.message_entries * p.hidden;
+        const m_all = try aa.alloc(f32, rows * m_stride);
+        for (m_all) |*v| v.* = value(rng);
+        const m_base = try rig.input(std.mem.sliceAsBytes(m_all));
+        for (0..3) |r_i| {
+            const h = try aa.alloc(f32, rows * p.hidden);
+            for (h) |*v| v.* = value(rng);
+            const down = try aa.alloc(f32, p.rank * 2 * p.hidden);
+            for (down) |*v| v.* = value(rng);
+            round(down);
+            const forget = try aa.alloc(f32, p.hidden * p.rank);
+            for (forget) |*v| v.* = value(rng);
+            round(forget);
+            const gain = try aa.alloc(f32, p.hidden * p.rank);
+            for (gain) |*v| v.* = value(rng);
+            round(gain);
+            const d_bf = try aa.alloc(u16, down.len);
+            for (d_bf, down) |*b, v| b.* = c.toBf16(v);
+            const f_bf = try aa.alloc(u16, forget.len);
+            for (f_bf, forget) |*b, v| b.* = c.toBf16(v);
+            const g_bf = try aa.alloc(u16, gain.len);
+            for (g_bf, gain) |*b, v| b.* = c.toBf16(v);
+            const out_fused = try rig.output(rows * p.hidden * @sizeOf(f32));
+            sep_outs[r_i] = try rig.output(rows * p.hidden * @sizeOf(f32));
+            roles[r_i] = .{
+                .h = Probe.at(try rig.input(std.mem.sliceAsBytes(h))),
+                .m = .{ .buf = m_base.buf, .off = m_base.off + r_i * p.hidden * @sizeOf(f32) },
+                .down = Probe.at(try rig.input(std.mem.sliceAsBytes(d_bf))),
+                .forget = Probe.at(try rig.input(std.mem.sliceAsBytes(f_bf))),
+                .gain = Probe.at(try rig.input(std.mem.sliceAsBytes(g_bf))),
+                .out = Probe.at(out_fused),
+            };
+        }
+        const pass = rig.begin();
+        host.gatesEach(&pr.pipes, pass.e, &roles, @intCast(rows), @intCast(m_stride));
+        pass.e.barrier();
+        for (roles, 0..) |role, r_i| {
+            var solo = role;
+            solo.out = Probe.at(sep_outs[r_i]);
+            host.gatesEach(&pr.pipes, pass.e, &.{solo}, @intCast(rows), @intCast(m_stride));
+            pass.e.barrier();
+        }
+        try rig.finish(pass);
+        var bad: usize = 0;
+        for (roles, sep_outs, 0..) |role, sep, r_i| {
+            const nb = rows * p.hidden * @sizeOf(f32);
+            const got = rig.bytes(.{ .buf = role.out.buf, .off = role.out.off }, nb);
+            const want = rig.bytes(sep, nb);
+            if (std.mem.indexOfDiff(u8, got, want)) |diff| {
+                bad += 1;
+                std.debug.print("FAIL metal inkling2 loop multiRole role={d}: first diff at byte {d}\n", .{ r_i, diff });
+            }
+        }
+        const word = if (bad == 0) "PASS" else "FAIL";
+        std.debug.print("{s} multi-role metal inkling2 loop: grid.z=3 byte-equal to 3 solo launches, {d} differ\n", .{ word, bad });
+        return bad;
+    }
+
     pub fn deinit(s: *Suite) void {
         for (s.probes.items) |probe| {
             probe.deinit();

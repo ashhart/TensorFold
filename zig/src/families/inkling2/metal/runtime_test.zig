@@ -1,5 +1,7 @@
 //! Host-only schedule, cache-layout, accepted-history and compact-snapshot checks.
 const std = @import("std");
+const builtin = @import("builtin");
+const mtl = @import("metal");
 const cfg = @import("../config.zig");
 const layer_plan = @import("../plan.zig");
 const state = @import("state.zig");
@@ -54,6 +56,14 @@ fn schedule() layer_plan.Plan {
 test "Mini admits only its fixed geometry and expands 24 weights to 48 visits" {
     const c = mini();
     try model.admitConfig(&c);
+    for ([_]u32{ 1, 2, 4 }) |passes| {
+        var bad = c;
+        bad.text.loop.?.passes = passes;
+        try std.testing.expectError(error.UnsupportedInkling2Loop, model.admitConfig(&bad));
+    }
+    var no_loop = c;
+    no_loop.text.loop = null;
+    try std.testing.expectError(error.Inkling2NotMini, model.admitConfig(&no_loop));
     const p = schedule();
     try std.testing.expectEqual(@as(u32, 48), p.n_visits);
     try std.testing.expectEqual(@as(u32, 8), p.visitCount(.global));
@@ -231,4 +241,136 @@ test "greedyArgmax keeps lowest ID on ties and matches NaN-at-0 propagation" {
     const nan = std.math.nan(f32);
     try std.testing.expectEqual(@as(u32, 0), backend.greedyArgmax(&.{ nan, 100.0, std.math.inf(f32) }));
     try std.testing.expectEqual(@as(u32, 2), backend.greedyArgmax(&.{ -1.0, nan, 3.0, nan }));
+}
+
+fn blitFill(queue: mtl.Queue, buf: mtl.Buffer, off: usize, len: usize, byte: u8) !void {
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.fill(buf, off, len, byte);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.GpuFailed;
+}
+
+fn expectConvByte(queue: mtl.Queue, conv: mtl.Buffer, off: usize, len: usize, staging: mtl.Buffer, want: u8) !void {
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.copy(conv, off, staging, 0, len);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.GpuFailed;
+    const got = staging.slice(u8, len);
+    try std.testing.expectEqual(want, got[0]);
+    try std.testing.expectEqual(want, got[len - 1]);
+}
+
+test "single decode CB vs prefill cuts keeps cuts[0] = 2 and handles 3-case conv rollback" {
+    try std.testing.expectEqual(@as(usize, 2), fwd.cuts[0]);
+    try std.testing.expect(!fwd.usesCuts(1));
+    try std.testing.expect(!fwd.usesCuts(state.batch_rows));
+    try std.testing.expect(fwd.usesCuts(state.batch_rows + 1));
+    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const sched = schedule();
+    var cache = try state.Cache.init(device, 32, &sched);
+    defer cache.deinit();
+    const staging = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer staging.deinit();
+
+    // Case 1: pre-part-0 staged failure clears transaction metadata without copying stale backup into conv.
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x11);
+    try blitFill(queue, cache.backup, 0, state.conv_bytes, 0xEE);
+    try cache.beginStage(4);
+    try std.testing.expect(!cache.conv_backed_up);
+    try cache.rollback(queue);
+    try std.testing.expect(cache.pending == null);
+    try std.testing.expect(!cache.conv_backed_up);
+    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
+
+    // Case 2: post-part-0 failure after backupBlit committed restores backup into conv.
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x99);
+    try cache.rollback(queue);
+    try std.testing.expect(cache.pending == null);
+    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
+
+    // Case 3: post-full-CB partial accept selects staged offset; full accept/rollback keep conv exact.
+    try blitFill(queue, cache.taps, 0, state.taps_bytes, 0x44);
+    const sel_off = state.convByteOffset(0, 0, 1, 3 + state.window_rows);
+    const sel_len = 3 * state.convWidth(0) * 2;
+    try blitFill(queue, cache.taps, sel_off, sel_len, 0x55);
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x77);
+    try cache.commit(queue, 1);
+    try std.testing.expectEqual(@as(usize, 1), cache.len);
+    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
+
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x88);
+    try cache.rollback(queue);
+    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
+}
+
+test "flight Meta isolates per-flight conv segment tables from shared scratch" {
+    const fc = @import("forward_conv.zig");
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(fwd.Meta) % 8);
+    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var scratch = try state.Scratch.init(device, 4);
+    defer scratch.deinit();
+    const flight_meta = try device.buffer(2 * @sizeOf(fwd.Meta), mtl.ResourceOptions.shared);
+    defer flight_meta.deinit();
+    const m0: state.Ref = .{ .buf = flight_meta, .off = 0 };
+    const m1: state.Ref = .{ .buf = flight_meta, .off = @sizeOf(fwd.Meta) };
+    const c0 = fc.convSegsRef(&scratch, m0, 0, 0);
+    const c1 = fc.convSegsRef(&scratch, m1, 0, 0);
+    const cs = fc.convSegsRef(&scratch, null, 0, 0);
+    try std.testing.expectEqual(flight_meta.id, c0.buf.id);
+    try std.testing.expectEqual(flight_meta.id, c1.buf.id);
+    try std.testing.expectEqual(scratch.conv_segs.id, cs.buf.id);
+    try std.testing.expectEqual(@as(usize, @sizeOf(fwd.Meta)), c1.off - c0.off);
+    const d0 = fc.convDynSegsRef(&scratch, m0, 47, 1);
+    const d1 = fc.convDynSegsRef(&scratch, m1, 47, 1);
+    try std.testing.expectEqual(@as(usize, @sizeOf(fwd.Meta)), d1.off - d0.off);
+    try std.testing.expect(d0.off >= c0.off + state.visit_slots * 3 * @sizeOf(state.InkConvSeg));
 }

@@ -384,6 +384,7 @@ pub const Metal = struct {
         const self = cast(ptr);
         try self.drain();
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
+        if (windows.len == 0) return;
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var reqs: [st.batch_rows]SlotReq = undefined;
         var strides: [st.batch_rows]usize = undefined;
@@ -406,21 +407,9 @@ pub const Metal = struct {
             total += rows;
         }
         const batch = planVerifyBatch(reqs[0..windows.len]);
-        if (windows.len > 0) {
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            const cb = self.model.queue.commandBuffer();
-            const e = cb.blit();
-            for (segments[0..windows.len]) |seg| try seg.cache.beginIn(e, seg.rows);
-            e.end();
-            cb.commit();
-            cb.wait();
-            if (cb.failure()) |msg| {
-                for (segments[0..windows.len]) |seg| seg.cache.pending = null;
-                std.log.err("inkling2_loop verify begin: {s}", .{msg});
-                return error.GpuFailed;
-            }
-            begun = windows.len;
+        for (segments[0..windows.len]) |seg| {
+            try seg.cache.beginStage(seg.rows);
+            begun += 1;
         }
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;

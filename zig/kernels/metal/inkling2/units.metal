@@ -1,5 +1,6 @@
 // The tensor-unit op Inkling 2 Mini's expert products are built on, after nax.h: FP32 sums of BF16 products.
 using namespace metal;
+#pragma METAL fp contract(off)
 
 // (lo | hi) += a (b0 | b1)^T, b's blocks as stored, [output][column]: nax.h's 16x32x16 op without relaxed precision.
 inline void ink2_mma(thread tfp::frag<float>& lo, thread tfp::frag<float>& hi, thread const tfp::frag<bfloat>& a,

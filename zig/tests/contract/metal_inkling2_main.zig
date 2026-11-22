@@ -39,6 +39,11 @@ pub const Suites = struct {
         return s;
     }
 
+    pub fn gates(s: *Suites, seed: u64, t: *g.Tally) !void {
+        t.failed += try s.dense.widthSeam(seed);
+        t.failed += try s.loop.multiRole(seed);
+    }
+
     pub fn destroy(s: *Suites) void {
         s.attention.deinit();
         s.dense.deinit();

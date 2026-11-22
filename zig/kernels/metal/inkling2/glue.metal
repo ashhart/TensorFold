@@ -13,9 +13,10 @@ inline float ink_sigmoid(float x) {
 inline float ink_cap(float x, float c) {
   return c * precise::tanh(precise::divide(x, c));
 }
-inline float ink_value(const device bfloat* blocks, const device float* partial,
+template <typename P>
+inline float ink_value(const device bfloat* blocks, const device P* partial,
                        uint source, uint sources, uint d) {
-  return source + 1 == sources ? partial[d] : float(blocks[size_t(source) * 2304 + d]);
+  return source + 1 == sources ? float(partial[d]) : float(blocks[size_t(source) * 2304 + d]);
 }
 
 struct InkEmbedArgs { uint rows; };
@@ -45,18 +46,17 @@ kernel void tf_inkling2_embed_norm(
 
 struct InkARArgs { uint sources, queries, rows; };
 // Threadgroup (q, row): row's sources mixed by query q into out[q * rows + row]; a row has four block slots.
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_inkling2_ar(
-    const device bfloat* all_blocks [[buffer(0)]], const device float* all_partial [[buffer(1)]],
-    const device float* queries [[buffer(2)]], device float* all_out [[buffer(3)]],
-    constant InkARArgs& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+template <typename P>
+inline void ink2_ar_t(
+    const device bfloat* all_blocks, const device P* all_partial,
+    const device float* queries, device float* all_out,
+    constant InkARArgs& a, uint t, uint2 tg, uint lane,
+    threadgroup float* red, threadgroup float* means, threadgroup float* weights) {
   const uint q = tg.x, row = tg.y;
   if (q >= a.queries || row >= a.rows || a.sources == 0 || a.sources > 5) return;
   const device bfloat* blocks = all_blocks + size_t(row) * 4 * 2304;
-  const device float* partial = all_partial + size_t(row) * 2304;
+  const device P* partial = all_partial + size_t(row) * 2304;
   device float* out = all_out + (size_t(q) * a.rows + row) * 2304;
-  threadgroup float red[2 * 5 * 8], means[5], weights[5];
   for (uint s = 0; s < a.sources; ++s) {
     float ss = 0.0f;
     for (uint d = t; d < 2304; d += 256) {
@@ -105,6 +105,26 @@ kernel void tf_inkling2_ar(
   }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_ar(
+    const device bfloat* all_blocks [[buffer(0)]], const device float* all_partial [[buffer(1)]],
+    const device float* queries [[buffer(2)]], device float* all_out [[buffer(3)]],
+    constant InkARArgs& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float red[2 * 5 * 8], means[5], weights[5];
+  ink2_ar_t<float>(all_blocks, all_partial, queries, all_out, a, t, tg, lane, red, means, weights);
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_ar_bf16(
+    const device bfloat* all_blocks [[buffer(0)]], const device bfloat* all_partial [[buffer(1)]],
+    const device float* queries [[buffer(2)]], device float* all_out [[buffer(3)]],
+    constant InkARArgs& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float red[2 * 5 * 8], means[5], weights[5];
+  ink2_ar_t<bfloat>(all_blocks, all_partial, queries, all_out, a, t, tg, lane, red, means, weights);
+}
+
 struct InkConvArgs { uint rows, channels; };
 kernel void tf_inkling2_conv_static(
     const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
@@ -118,13 +138,13 @@ kernel void tf_inkling2_conv_static(
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
-kernel void tf_inkling2_conv_dynamic(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
-    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
-    device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
-    uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
-  if (r >= a.rows) return;
-  threadgroup float projected[32];
+struct InkConvDynSeg { ulong taps, input, out; uint row0, rows; };
+struct InkConvDynSegsArgs { uint n_segs, total_rows, channels; };
+
+inline void ink2_conv_dynamic_t(
+    const device bfloat* taps, const device bfloat* input,
+    const device bfloat* static_w, const device bfloat* projection,
+    device bfloat* out, uint r, uint channels, uint t, threadgroup float* projected) {
   if (t < 32) {
     float dot = 0.0f;
     for (uint d = 0; d < 2304; ++d)
@@ -132,14 +152,39 @@ kernel void tf_inkling2_conv_dynamic(
     projected[t] = float(bfloat(dot));
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint c = t; c < a.channels; c += 256) {
-    float sum = float(taps[size_t(r + 3) * a.channels + c]);
+  for (uint c = t; c < channels; c += 256) {
+    float sum = float(taps[size_t(r + 3) * channels + c]);
     for (uint lag = 0; lag < 4; ++lag) {
-      const float w = float(static_w[lag * a.channels + c]) + projected[4 * (c / 128) + lag];
-      sum += w * float(taps[size_t(r + 3 - lag) * a.channels + c]);
+      const float w = float(static_w[lag * channels + c]) + projected[4 * (c / 128) + lag];
+      sum += w * float(taps[size_t(r + 3 - lag) * channels + c]);
     }
-    out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
+    out[size_t(r) * channels + c] = bfloat(precise::divide(sum, 3.0f));
   }
+}
+
+kernel void tf_inkling2_conv_dynamic(
+    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
+    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
+    device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
+    uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
+  if (r >= a.rows) return;
+  threadgroup float projected[32];
+  ink2_conv_dynamic_t(taps, input, static_w, projection, out, r, a.channels, t, projected);
+}
+
+kernel void tf_inkling2_conv_dynamic_segs(
+    const device InkConvDynSeg* segs [[buffer(0)]], const device bfloat* static_w [[buffer(1)]],
+    const device bfloat* projection [[buffer(2)]], constant InkConvDynSegsArgs& a [[buffer(3)]],
+    uint t [[thread_position_in_threadgroup]], uint global_r [[threadgroup_position_in_grid]]) {
+  if (global_r >= a.total_rows) return;
+  uint si = 0;
+  while (si + 1u < a.n_segs && global_r >= segs[si].row0 + segs[si].rows) ++si;
+  const device InkConvDynSeg& seg = segs[si];
+  const uint r = global_r - seg.row0;
+  threadgroup float projected[32];
+  ink2_conv_dynamic_t(
+      (const device bfloat*)seg.taps, (const device bfloat*)seg.input,
+      static_w, projection, (device bfloat*)seg.out, r, a.channels, t, projected);
 }
 
 struct InkRouteArgs { uint rows; };

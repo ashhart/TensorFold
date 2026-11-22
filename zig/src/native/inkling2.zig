@@ -200,6 +200,9 @@ test "Inkling native admission keeps DSpark opt-in and refuses learned modes" {
     o.speed_up = "distributed";
     try std.testing.expect(refusal(o) != null);
     o.speed_up = null;
+    o.loops = 2;
+    try std.testing.expectEqualStrings("inkling2_loop: the model has exactly three core passes; --loops cannot override them", refusal(o).?);
+    o.loops = null;
     o.learn = "learned";
     try std.testing.expect(refusal(o) != null);
     try std.testing.expect(contextProblem(0, 10) != null);
@@ -213,6 +216,12 @@ test "Inkling native open publishes the exact admission refusal" {
     const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop", .learn_conversations = true };
     try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem)) == null);
     try std.testing.expectEqualStrings("inkling2_loop: learned disk states are not implemented; serve without --learn and --learn-conversations", problem);
+    for ([_]u32{ 1, 2, 4 }) |loops| {
+        problem = "not published";
+        const lo: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop", .loops = loops };
+        try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, lo, &problem)) == null);
+        try std.testing.expectEqualStrings("inkling2_loop: the model has exactly three core passes; --loops cannot override them", problem);
+    }
 }
 
 test "Inkling native open releases DSpark when the later context admission refuses (TF_INKLING2_METAL_DIR, TF_INKLING2_DSPARK_DIR)" {

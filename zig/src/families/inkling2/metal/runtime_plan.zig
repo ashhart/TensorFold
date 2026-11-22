@@ -14,6 +14,19 @@ pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const threads: u32 = 256;
 pub const RuntimeArgs = extern struct { count: u32, boundary: u32 };
 pub const StageConvArgs = extern struct { rows: u32, width: u32, commit: u32, pairs: u32 };
+pub const InkConvSeg = extern struct {
+    hist0: u64,
+    raw0: u64,
+    staged0: u64,
+    out0: u64,
+    hist1: u64,
+    raw1: u64,
+    staged1: u64,
+    out1: u64,
+    rows: u32,
+    commit: u32,
+};
+pub const StageConvSegsArgs = extern struct { width: u32, n_segs: u32, pairs: u32 };
 pub const CommitHistoriesArgs = extern struct { offset: u32, slots: u32, tap_rows: u32 };
 
 pub const Kind = enum {
@@ -24,6 +37,8 @@ pub const Kind = enum {
     mlp_partial,
     capture_tap,
     stage_conv,
+    stage_conv_segs,
+    stage_conv_static,
     commit_histories,
 
     pub fn symbol(k: Kind) []const u8 {
@@ -35,6 +50,8 @@ pub const Kind = enum {
             .mlp_partial => "tf_ink2_mlp_partial",
             .capture_tap => "tf_ink2_capture_tap",
             .stage_conv => "tf_ink2_stage_conv",
+            .stage_conv_segs => "tf_ink2_stage_conv_segs",
+            .stage_conv_static => "tf_ink2_stage_conv_static",
             .commit_histories => "tf_ink2_commit_histories",
         };
     }
@@ -47,6 +64,8 @@ pub const Kind = enum {
             .mlp_partial => "metal inkling2 runtime mlp_partial tf_ink2_mlp_partial",
             .capture_tap => "metal inkling2 runtime capture_tap tf_ink2_capture_tap",
             .stage_conv => "metal inkling2 runtime stage_conv tf_ink2_stage_conv",
+            .stage_conv_segs => "metal inkling2 runtime stage_conv_segs tf_ink2_stage_conv_segs",
+            .stage_conv_static => "metal inkling2 runtime stage_conv_static tf_ink2_stage_conv_static",
             .commit_histories => "metal inkling2 runtime commit_histories tf_ink2_commit_histories",
         };
     }
@@ -64,10 +83,18 @@ pub fn stageCommit(k: usize) bool {
     return (k & 1) != 0;
 }
 
+pub fn segCount(total_rows: usize) usize {
+    if (total_rows >= 16) return 4;
+    if (total_rows >= 6) return 3;
+    if (total_rows >= 2) return 2;
+    return 1;
+}
+
 pub fn valid(kind: Kind, c: Call) bool {
     if (c.rows == 0 or c.n == 0) return false;
     return switch (kind) {
         .stage_conv => c.rows <= max_stage_rows and c.k <= 3 and c.rows + 3 <= std.math.maxInt(u32) / c.n and stagePairs(c.k) <= std.math.maxInt(u32) / c.n,
+        .stage_conv_segs, .stage_conv_static => c.rows <= max_stage_rows and c.k <= 3 and c.n <= hidden and c.rows + 3 <= std.math.maxInt(u32) / c.n and stagePairs(c.k) <= std.math.maxInt(u32) / c.n,
         .commit_histories => c.rows <= visit_slots and c.n >= 3 and c.n <= 3 + window_rows and c.k + 3 <= c.n,
         else => blk: {
             if (c.rows > max_rows or c.rows > std.math.maxInt(u32) / c.n) break :blk false;
@@ -90,7 +117,7 @@ pub fn geometry(c: Call) Geometry {
 
 pub fn dispatchCount(kind: Kind, c: Call) usize {
     return switch (kind) {
-        .stage_conv => stagePairs(c.k) * c.n,
+        .stage_conv, .stage_conv_segs, .stage_conv_static => stagePairs(c.k) * c.n,
         .commit_histories => c.rows * 3 * conv_row_values,
         else => c.rows * c.n,
     };
@@ -101,6 +128,8 @@ pub fn outputCount(kind: Kind, c: Call) usize {
     return switch (kind) {
         .capture_tap => c.rows * c.n * tap_channels,
         .stage_conv => stagePairs(c.k) * (6 + c.rows) * c.n,
+        .stage_conv_segs => stagePairs(c.k) * (6 * segCount(c.rows) + c.rows) * c.n,
+        .stage_conv_static => stagePairs(c.k) * (6 * segCount(c.rows) + 2 * c.rows) * c.n,
         .commit_histories => c.rows * 3 * conv_row_values,
         else => c.rows * c.n,
     };
@@ -174,6 +203,20 @@ pub fn stageConvRef(hist_before: []const u16, raw: []const u16, width: usize, ro
     } else {
         @memcpy(hist_out, raw[(rows - 3) * width .. rows * width]);
     }
+}
+
+pub fn fromBf16(bits: u16) f32 {
+    return @bitCast(@as(u32, bits) << 16);
+}
+
+pub fn stageConvStaticRef(hist_before: []const u16, raw: []const u16, weight: []const u16, width: usize, rows: usize, commit: bool, hist_out: []u16, staged_out: []u16, conv_out: []f64) void {
+    stageConvRef(hist_before, raw, width, rows, commit, hist_out, staged_out);
+    const inv = 1.0 / @sqrt(5.0);
+    for (0..rows) |r| for (0..width) |ch| {
+        var sum: f64 = fromBf16(staged_out[(3 + r) * width + ch]);
+        for (0..4) |tap| sum += @as(f64, fromBf16(weight[ch * 4 + tap])) * fromBf16(staged_out[(r + tap) * width + ch]);
+        conv_out[r * width + ch] = sum * inv;
+    };
 }
 
 pub fn commitHistoriesRef(taps: []const u16, conv_out: []u16, slots: usize, tap_rows: usize, offset: usize) void {

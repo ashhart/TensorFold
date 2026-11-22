@@ -1,20 +1,20 @@
-//! Inkling 2 Mini fused 6-projection matvec under FP64 references, bit-identity vs sp_matvec, and planted controls.
+//! Inkling 2 Mini fused 6-projection matvec under FP64 references, bit-identity vs mv/mv_mma, and planted controls.
 const std = @import("std");
 const mtl = @import("metal");
+const tf = @import("tensorfold");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
 const dense_in = contract.dense;
 const rig_ = @import("rig.zig");
 const controls = @import("metal_inkling2_dense_controls.zig");
-const host = @import("tensorfold").inkling2_metal_host.dense_fuse;
+const host = tf.inkling2_metal_host.dense_fuse;
+const mv = tf.dsv41_metal.mv;
+const mv_mma = tf.dsv41_metal.mv_mma;
 const sources = @import("inkling2_metal");
-const all_sources = @import("kernel_sources");
-
-const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
 fn depth(s: c.Shape) usize {
-    return s.k / 32 + 8;
+    return (s.k + 31) / 32 + 6;
 }
 
 fn kernelLabel(tier: u32) []const u8 {
@@ -25,18 +25,6 @@ fn kernelLabel(tier: u32) []const u8 {
         8 => "metal inkling2 dense mv6_8 tf_ink2_mv6_8",
         16 => "metal inkling2 dense mv6_16 tf_ink2_mv6_16",
         32 => "metal inkling2 dense mv6_32 tf_ink2_mv6_32",
-        else => unreachable,
-    };
-}
-
-fn spSymbol(tier: u32) [:0]const u8 {
-    return switch (tier) {
-        1 => "sp_matvec_1",
-        2 => "sp_matvec_2",
-        4 => "sp_matvec_4",
-        8 => "sp_matvec_8",
-        16 => "sp_matvec_16",
-        32 => "sp_matvec_32",
         else => unreachable,
     };
 }
@@ -85,7 +73,7 @@ pub const Probe = struct {
     tier: u32,
     control: bool,
     pipes: host.Pipelines,
-    sp_pipe: ?mtl.Pipeline = null,
+    mv_pipes: ?mv.Pipelines = null,
     served: [3]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     dims: [6]usize = @splat(0),
@@ -107,21 +95,14 @@ pub const Probe = struct {
             var p = pipes;
             p.deinit();
         }
-        const sp_pipe: ?mtl.Pipeline = if (control) null else blk: {
-            const lib = try mtl.Library.fromSource(device, all_sources.spark25_glue, .{
-                .language = mtl.CompileOptions.mlx().language,
-                .math_functions = .precise,
-            });
-            defer lib.deinit();
-            break :blk try mtl.Pipeline.init(device, lib, spSymbol(tier), false);
-        };
+        const mv_pipes: ?mv.Pipelines = if (control) null else try mv.Pipelines.load(device);
         return .{
             .a = a,
             .rig = .{ .a = a, .device = device, .queue = queue },
             .tier = tier,
             .control = control,
             .pipes = pipes,
-            .sp_pipe = sp_pipe,
+            .mv_pipes = mv_pipes,
             .served = .{
                 .{ .rows = tier, .n = 3072, .k = 2304 },
                 .{ .rows = @max(1, tier / 2), .n = 13, .k = 512 },
@@ -145,7 +126,7 @@ pub const Probe = struct {
     pub fn deinit(p: *Probe) void {
         p.drop();
         p.base_bytes.deinit(p.a);
-        if (p.sp_pipe) |sp| sp.deinit();
+        if (p.mv_pipes) |*mp| mp.deinit();
         p.pipes.deinit();
         p.rig.deinit();
     }
@@ -158,7 +139,7 @@ pub const Probe = struct {
             .accum = .f32,
             .depth = depth,
             .out = .bf16,
-            .replaces = if (p.control) null else "six separate sp_matvec launches",
+            .replaces = if (p.control) null else "six separate tf_dsv41_mv launches",
             .tiles = .{ .{ .size = p.tier, .step = 1, .min = 1 }, .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 256, .step = 8, .min = 8 } },
             .served = &p.served,
         };
@@ -243,7 +224,6 @@ pub const Probe = struct {
         const x_map = [6]usize{ 0, 1, 2, 0, 0, 0 };
         const pass = p.rig.begin();
         const e = pass.e;
-        e.setPipeline(p.sp_pipe.?);
         var at: usize = 0;
         while (at < s.rows) : (at += p.tier) {
             const here: u32 = @intCast(@min(p.tier, s.rows - at));
@@ -251,11 +231,7 @@ pub const Probe = struct {
             for (0..6) |idx| {
                 const xr = p.x_ref[x_map[idx]];
                 const n_i = p.dims[idx];
-                e.setBuffer(xr.buf, xr.off + x_off, 0);
-                e.setBuffer(p.w_ref[idx].buf, p.w_ref[idx].off, 1);
-                e.setValue(DenseArgs{ .rows = here, .n = @intCast(n_i), .k = @intCast(s.k), .ldy = @intCast(n_i) }, 2);
-                e.setBuffer(p.base_ref[idx].buf, p.base_ref[idx].off + at * n_i * 2, 3);
-                e.dispatchGroups(mtl.Size.of((n_i + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+                try mv.encode(&p.mv_pipes.?, e, .{ .buf = xr.buf, .off = xr.off + x_off }, .{ .buf = p.w_ref[idx].buf, .off = p.w_ref[idx].off }, .{ .buf = p.base_ref[idx].buf, .off = p.base_ref[idx].off + at * n_i * 2 }, .{ .k = @intCast(s.k), .n = @intCast(n_i), .rows = here, .out = .bf16 });
             }
         }
         try p.rig.finish(pass);
@@ -273,7 +249,7 @@ pub const Probe = struct {
         for (want, mag, 0..) |w, m, i| {
             const got = c.read(.bf16, p.base_bytes.items, i);
             const limit = c.bound(sp, s, w, m);
-            if (@abs(got - w) > limit) return error.SpMatvecExceededFp64Bound;
+            if (@abs(got - w) > limit) return error.MvExceededFp64Bound;
         }
         return p.base_bytes.items;
     }
@@ -317,6 +293,62 @@ pub const Suite = struct {
             try s.probes.append(s.a, p);
             try s.kernels.append(s.a, p.kernel());
         };
+    }
+
+    /// Verify rows=1..33 across every mv6 tier and the rows=32->33 mv_mma seam with zero byte divergence.
+    pub fn widthSeam(s: *Suite, seed: u64) !usize {
+        var prod: ?*Probe = null;
+        for (s.probes.items) |p| if (!p.control) {
+            prod = p;
+            break;
+        };
+        const p = prod orelse return 0;
+        var mma_pipes = try mv_mma.Pipelines.load(s.device);
+        defer mma_pipes.deinit();
+        var bad: usize = 0;
+        var cases: usize = 0;
+        for (1..34) |rows| {
+            if (!try p.prepare(.{ .rows = rows, .n = 64, .k = 512 }, .random, seed + rows)) return error.Refused;
+            const pass = p.rig.begin();
+            const e = pass.e;
+            var at: usize = 0;
+            while (at < rows) : (at += 32) {
+                const here: u32 = @intCast(@min(32, rows - at));
+                const x_off = at * 512 * 2;
+                try host.encode6(
+                    &p.pipes,
+                    e,
+                    Probe.hr(p.x_ref[0], x_off),
+                    Probe.hr(p.x_ref[1], x_off),
+                    Probe.hr(p.x_ref[2], x_off),
+                    .{ .w = Probe.hr(p.w_ref[0], 0), .y = Probe.hr(p.y_ref[0], at * p.dims[0] * 2), .n = @intCast(p.dims[0]) },
+                    .{ .w = Probe.hr(p.w_ref[1], 0), .y = Probe.hr(p.y_ref[1], at * p.dims[1] * 2), .n = @intCast(p.dims[1]) },
+                    .{ .w = Probe.hr(p.w_ref[2], 0), .y = Probe.hr(p.y_ref[2], at * p.dims[2] * 2), .n = @intCast(p.dims[2]) },
+                    .{ .w = Probe.hr(p.w_ref[3], 0), .y = Probe.hr(p.y_ref[3], at * p.dims[3] * 2), .n = @intCast(p.dims[3]) },
+                    .{ .w = Probe.hr(p.w_ref[4], 0), .y = Probe.hr(p.y_ref[4], at * p.dims[4] * 2), .n = @intCast(p.dims[4]) },
+                    .{ .w = Probe.hr(p.w_ref[5], 0), .y = Probe.hr(p.y_ref[5], at * p.dims[5] * 2), .n = @intCast(p.dims[5]) },
+                    here,
+                    512,
+                );
+            }
+            const x_map = [6]usize{ 0, 1, 2, 0, 0, 0 };
+            for (0..6) |idx| {
+                const xr = p.x_ref[x_map[idx]];
+                try mv_mma.encode(&mma_pipes, e, .{ .buf = xr.buf, .off = xr.off }, .{ .buf = p.w_ref[idx].buf, .off = p.w_ref[idx].off }, .{ .buf = p.base_ref[idx].buf, .off = p.base_ref[idx].off }, .{ .k = 512, .n = @intCast(p.dims[idx]), .rows = @intCast(rows), .out = .bf16 });
+            }
+            try p.rig.finish(pass);
+            for (0..6) |idx| {
+                const nb = rows * p.dims[idx] * 2;
+                if (std.mem.indexOfDiff(u8, p.rig.bytes(p.y_ref[idx], nb), p.rig.bytes(p.base_ref[idx], nb))) |diff| {
+                    bad += 1;
+                    std.debug.print("FAIL metal inkling2 dense width seam rows={d} proj={d}: first diff at byte {d}\n", .{ rows, idx, diff });
+                }
+            }
+            cases += 1;
+        }
+        const word = if (bad == 0) "PASS" else "FAIL";
+        std.debug.print("{s} width seam metal inkling2 dense: rows=1..33 ({d} cases) byte-equal to mv_mma, {d} differ\n", .{ word, cases, bad });
+        return bad;
     }
 
     pub fn deinit(s: *Suite) void {

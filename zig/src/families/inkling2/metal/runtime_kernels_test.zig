@@ -18,7 +18,9 @@ test "runtime source is the one exported source and every helper has one launch 
     for (std.enums.values(p.Kind), records, model.runtime_names) |kind, record, runtime_name| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqualStrings(kind.symbol(), runtime_name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        var decl_buf: [64]u8 = undefined;
+        const decl = try std.fmt.bufPrint(&decl_buf, "{s}(", .{kind.symbol()});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, decl));
         try t.expectEqual(p.threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try t.expectEqual(@as(u32, 0), record.tg_memory);
@@ -32,7 +34,7 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expectEqual(@as(usize, 0), @offsetOf(p.RuntimeArgs, "count"));
     try t.expectEqual(@as(usize, 4), @offsetOf(p.RuntimeArgs, "boundary"));
     for (std.enums.values(p.Kind)) |kind| {
-        if (kind == .stage_conv or kind == .commit_histories) continue;
+        if (kind == .stage_conv or kind == .stage_conv_segs or kind == .stage_conv_static or kind == .commit_histories) continue;
         const call = p.Call{ .rows = 7, .n = p.hidden, .k = if (kind == .attention_partial) 4 else 1 };
         try t.expect(p.valid(kind, call));
         const a = p.args(kind, call);

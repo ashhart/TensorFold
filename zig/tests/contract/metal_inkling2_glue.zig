@@ -24,6 +24,13 @@ fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
 
+fn dynSegSplit(total: usize, n_segs: usize, idx: usize) usize {
+    if (total == 7 and n_segs == 3) return ([_]usize{ 1, 2, 4 })[idx];
+    if (total == 5 and n_segs == 2) return ([_]usize{ 2, 3 })[idx];
+    const q = total / n_segs;
+    return if (idx + 1 == n_segs) total - q * idx else q;
+}
+
 pub const Probe = struct {
     a: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -36,6 +43,13 @@ pub const Probe = struct {
     ids: []u32 = &.{},
     route_ids: rig_.Ref = undefined,
     refs: [5]rig_.Ref = undefined,
+    dyn_segs_ref: rig_.Ref = undefined,
+    dyn_taps_refs: [4]rig_.Ref = undefined,
+    dyn_out_refs: [4]rig_.Ref = undefined,
+    dyn_seg_rows: [4]usize = @splat(0),
+    dyn_n_segs: usize = 0,
+    dyn_res_ids: [16]mtl.objc.Id = undefined,
+    dyn_res_len: usize = 0,
     out: rig_.Ref = undefined,
     lo: []f64 = &.{},
     hi: []f64 = &.{},
@@ -49,9 +63,10 @@ pub const Probe = struct {
         var self: Probe = .{ .a = a, .arena = .init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .kind = kind, .pipes = try host.Pipelines.loadSource(device, text) };
         self.served = switch (kind) {
             .embed_norm => .{ .{ .rows = 1, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden }, .{ .rows = 7, .n = p.hidden, .k = p.hidden } },
-            .ar => .{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
+            .ar, .ar_bf16 => .{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
             .conv_static => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
             .conv_dynamic => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
+            .conv_dynamic_segs => .{ .{ .rows = 2, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
             .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
             .swiglu => .{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
             .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 17, .n = 131, .k = p.hidden } },
@@ -86,7 +101,7 @@ pub const Probe = struct {
     };
     pub fn kernel(self: *Probe) g.Kernel {
         const out: c.Elem = switch (self.kind) {
-            .ar, .router, .logits => .f32,
+            .ar, .ar_bf16, .router, .logits => .f32,
             .argmax => .raw,
             else => .bf16,
         };
@@ -108,12 +123,12 @@ pub const Probe = struct {
                 .served = &self.served,
                 .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else if (self.kind == .argmax) .{ .stated = "NaN at token 0 wins; later NaNs lose to finite tokens; finite ties pick the lowest id" } else .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
-                .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .exact = self.kind != .logits, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
+                .sums = if (self.kind == .ar or self.kind == .ar_bf16) .{} else .{ .f16 = 0, .bf16 = 0, .exact = self.kind != .logits, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
         };
     }
     pub fn count(self: *Probe) usize {
-        return if (self.kind == .ar) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
+        return if (self.kind == .ar or self.kind == .ar_bf16) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const out = try self.arena.allocator().alloc(f32, n);
@@ -152,7 +167,7 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[0], true);
                 self.refs[2] = try self.input(self.f[1], true);
             },
-            .ar => {
+            .ar, .ar_bf16 => {
                 self.f[0] = try self.floats((r - 1) * p.hidden, rng);
                 self.f[1] = try self.floats(p.hidden, rng);
                 self.f[2] = try self.floats(2 * p.hidden, rng);
@@ -175,7 +190,7 @@ pub const Probe = struct {
                 }
                 if (nf) self.f[2][0] = std.math.inf(f32);
                 self.refs[0] = try self.input(self.f[0], true);
-                self.refs[1] = try self.input(self.f[1], false);
+                self.refs[1] = try self.input(self.f[1], self.kind == .ar_bf16);
                 self.refs[2] = try self.input(self.f[2], false);
             },
             .conv_static => {
@@ -192,6 +207,47 @@ pub const Probe = struct {
                 self.f[3] = try self.floats(32 * p.hidden, rng);
                 if (nf) self.f[1][0] = std.math.nan(f32);
                 for (0..4) |j| self.refs[j] = try self.input(self.f[j], true);
+            },
+            .conv_dynamic_segs => {
+                self.dyn_n_segs = if (r >= 7) 3 else 2;
+                self.f[0] = try self.floats((r + 3 * self.dyn_n_segs) * n, rng);
+                self.f[1] = try self.floats(r * p.hidden, rng);
+                self.f[2] = try self.floats(4 * n, rng);
+                self.f[3] = try self.floats(32 * p.hidden, rng);
+                round(self.f[0]);
+                round(self.f[1]);
+                round(self.f[2]);
+                round(self.f[3]);
+                if (nf) self.f[1][0] = std.math.nan(f32);
+                self.refs[1] = try self.input(self.f[1], true);
+                self.refs[2] = try self.input(self.f[2], true);
+                self.refs[3] = try self.input(self.f[3], true);
+                var seg_descs: [4]host.InkConvDynSeg = undefined;
+                self.dyn_res_len = 0;
+                self.dyn_res_ids[self.dyn_res_len] = self.refs[1].buf.id;
+                self.dyn_res_len += 1;
+                var row0: usize = 0;
+                var tap_off: usize = 0;
+                for (0..self.dyn_n_segs) |si| {
+                    const sr = dynSegSplit(r, self.dyn_n_segs, si);
+                    self.dyn_seg_rows[si] = sr;
+                    const t_len = (sr + 3) * n;
+                    self.dyn_taps_refs[si] = try self.input(self.f[0][tap_off..][0..t_len], true);
+                    self.dyn_out_refs[si] = try self.rig.output(sr * n * 2);
+                    seg_descs[si] = .{
+                        .taps = self.dyn_taps_refs[si].buf.gpuAddress() + self.dyn_taps_refs[si].off,
+                        .input = self.refs[1].buf.gpuAddress() + self.refs[1].off + row0 * p.hidden * 2,
+                        .out = self.dyn_out_refs[si].buf.gpuAddress() + self.dyn_out_refs[si].off,
+                        .row0 = @intCast(row0),
+                        .rows = @intCast(sr),
+                    };
+                    self.dyn_res_ids[self.dyn_res_len] = self.dyn_taps_refs[si].buf.id;
+                    self.dyn_res_ids[self.dyn_res_len + 1] = self.dyn_out_refs[si].buf.id;
+                    self.dyn_res_len += 2;
+                    row0 += sr;
+                    tap_off += t_len;
+                }
+                self.dyn_segs_ref = try self.rig.input(std.mem.sliceAsBytes(seg_descs[0..self.dyn_n_segs]));
             },
             .router => {
                 self.f[0] = try self.floats(r * p.hidden, rng);
@@ -284,12 +340,12 @@ pub const Probe = struct {
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
         for (self.f, 0..) |values, j| if (values.len > 0 and switch (self.kind) {
             .ar => j == 0,
-            .router => j < 2,
+            .ar_bf16, .router => j < 2,
             .expert_combine => j == 0,
             else => true,
         }) round(values);
-        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits or self.kind == .argmax) 4 else 2);
-        self.out = try self.rig.output(bytes);
+        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .ar_bf16 or self.kind == .router or self.kind == .logits or self.kind == .argmax) 4 else 2);
+        if (self.kind != .conv_dynamic_segs) self.out = try self.rig.output(bytes);
         return true;
     }
     fn at(ref: rig_.Ref) host.Ref {
@@ -306,8 +362,13 @@ pub const Probe = struct {
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
+            .ar_bf16 => host.arBf16(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
+            .conv_dynamic_segs => {
+                e.useResources(self.dyn_res_ids[0..self.dyn_res_len], mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+                host.convDynamicSegs(pl, e, at(self.dyn_segs_ref), at(R[2]), at(R[3]), @intCast(self.dyn_n_segs), r, n);
+            },
             .router => host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
             .swiglu => host.swiglu(pl, e, at(R[0]), y, r, n),
             .logits => host.logits(pl, e, at(R[0]), at(R[1]), y, r, n),
@@ -325,7 +386,7 @@ pub const Probe = struct {
                 const x = self.f[0][self.ids[row] * p.hidden ..][0..p.hidden];
                 for (0..p.hidden) |d| want[row * p.hidden + d] = p.embedValue(x, self.f[1], d);
             },
-            .ar => {
+            .ar, .ar_bf16 => {
                 var qout: [2 * p.hidden]f64 = undefined;
                 for (0..2) |q| p.blockResidual(self.f[0], self.f[1], self.f[2], r, q, qout[q * p.hidden ..][0..p.hidden]);
                 @memcpy(want, &qout);
@@ -336,6 +397,21 @@ pub const Probe = struct {
             },
             .conv_dynamic => {
                 for (0..n) |d| want[row * n + d] = p.dynamicConv(self.f[0], self.f[1], self.f[2], self.f[3], n, row, d);
+            },
+            .conv_dynamic_segs => {
+                var row0: usize = 0;
+                var tap_off: usize = 0;
+                for (0..self.dyn_n_segs) |si| {
+                    const sr = self.dyn_seg_rows[si];
+                    const t_slice = self.f[0][tap_off .. tap_off + (sr + 3) * n];
+                    const in_slice = self.f[1][row0 * p.hidden ..];
+                    for (0..sr) |lr| for (0..n) |d| {
+                        want[(row0 + lr) * n + d] = p.dynamicConv(t_slice, in_slice, self.f[2], self.f[3], n, lr, d);
+                    };
+                    row0 += sr;
+                    tap_off += (sr + 3) * n;
+                }
+                break;
             },
             .router => {
                 const route = p.route(self.f[0][row * p.hidden ..][0..p.hidden], self.f[1], self.f[2]);
@@ -394,7 +470,7 @@ pub const Probe = struct {
         @memcpy(high, self.hi);
     }
     pub fn simulate(self: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
-        if (self.kind == .ar) {
+        if (self.kind == .ar or self.kind == .ar_bf16) {
             const sim: p.ArSum = .{
                 .accum = switch (acc) {
                     .none => .none,

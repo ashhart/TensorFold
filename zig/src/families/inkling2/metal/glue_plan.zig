@@ -10,8 +10,10 @@ pub const ar_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const Kind = enum {
     embed_norm,
     ar,
+    ar_bf16,
     conv_static,
     conv_dynamic,
+    conv_dynamic_segs,
     router,
     swiglu,
     logits,
@@ -23,8 +25,10 @@ pub const Kind = enum {
         return switch (k) {
             .embed_norm => "tf_inkling2_embed_norm",
             .ar => "tf_inkling2_ar",
+            .ar_bf16 => "tf_inkling2_ar_bf16",
             .conv_static => "tf_inkling2_conv_static",
             .conv_dynamic => "tf_inkling2_conv_dynamic",
+            .conv_dynamic_segs => "tf_inkling2_conv_dynamic_segs",
             .router => "tf_inkling2_router",
             .swiglu => "tf_inkling2_swiglu",
             .logits => "tf_inkling2_logits",
@@ -37,8 +41,10 @@ pub const Kind = enum {
         return switch (k) {
             .embed_norm => "metal inkling2 glue embed_norm tf_inkling2_embed_norm",
             .ar => "metal inkling2 glue ar tf_inkling2_ar",
+            .ar_bf16 => "metal inkling2 glue ar_bf16 tf_inkling2_ar_bf16",
             .conv_static => "metal inkling2 glue conv_static tf_inkling2_conv_static",
             .conv_dynamic => "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
+            .conv_dynamic_segs => "metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs",
             .router => "metal inkling2 glue router tf_inkling2_router",
             .swiglu => "metal inkling2 glue swiglu tf_inkling2_swiglu",
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
@@ -52,14 +58,14 @@ pub const Kind = enum {
 pub const Call = struct { rows: usize, n: usize, k: usize };
 pub fn valid(kind: Kind, c: Call) bool {
     const key_depth: usize = if (kind == .expert_combine) top_k else 4;
-    const max_width: usize = if (kind == .conv_dynamic) 1024 else hidden;
+    const max_width: usize = if (kind == .conv_dynamic or kind == .conv_dynamic_segs) 1024 else hidden;
     if (c.rows == 0 or c.rows > 64) return false;
     return switch (kind) {
         .embed_norm => c.k == hidden and c.n == hidden,
         .router => c.k == hidden and c.n == top_k,
         .logits, .argmax => c.k == hidden and c.n > 0 and c.n <= 200058,
-        .ar => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
-        .conv_static, .conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
+        .ar, .ar_bf16 => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
+        .conv_static, .conv_dynamic, .conv_dynamic_segs, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
     };
