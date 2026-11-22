@@ -19,6 +19,7 @@ const fw = struct {
     pub const Rank = struct { w: *u8, st: *State, b: *Buffers, segs: []const Seg = &.{} };
     pub var observed_ring = false;
     pub var observed_taps = false;
+    pub var observed_propose: ?bool = null;
     pub const Forward = struct {
         d: u8,
         m: *u8,
@@ -45,7 +46,11 @@ const fw = struct {
             for (ids, 0..) |id, i| hidden[i] = @intCast(id);
             for (f.ranks[0].segs, 0..) |g, i| logits[i] = @intCast(ids[g.row0 + g.rows - 1]);
         }
-        pub fn mtp(f: *Forward, _: []const i32, _: []const u64) !void {
+        pub fn mtp(f: *Forward, ids: []const i32, hidden: []const u64) !void {
+            return f.mtpMode(ids, hidden, true);
+        }
+        pub fn mtpMode(f: *Forward, _: []const i32, _: []const u64, propose: bool) !void {
+            observed_propose = propose;
             const first: *u16 = @ptrFromInt(f.ranks[0].b.fnormed);
             first.* = 777;
         }
@@ -154,6 +159,7 @@ test "GLM prompt workflow: multiple passes, nonzero and reused slots retain the 
     try pass(&e, &.{.{ .slot = 11, .ids = &.{ 12, 13, 14 } }});
     try t.expectEqual(@as(u16, 41), held(&e, 7));
     try t.expectEqual(@as(u16, 14), held(&e, 11));
+    try t.expectEqual(false, fw.observed_propose.?);
 }
 test "GLM prompt workflow: normal path and batched passes retain the incumbent" {
     var b: Box = .{};

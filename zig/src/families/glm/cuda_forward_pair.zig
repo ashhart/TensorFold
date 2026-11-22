@@ -10,7 +10,7 @@ const room = fw.Forward.room;
 const share = fw.Forward.share;
 
 /// Two consecutive prompt chunks of one sequence (`b` a view of `a`'s at its end), each on `pieced`'s kernels and bits.
-pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize) !void {
+pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize, final: bool) !void {
     const two = [_]*const Forward{ a, b };
     const rows = [_]usize{ ra, rb };
     var cuts: [2][fw.max_pieces][2]usize = undefined;
@@ -47,9 +47,10 @@ pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize) !voi
             .mla => di += 1,
         }
     }
+    const heads = [2]bool{ false, final };
     for (two, rows, 0..) |f, R, i| {
         try awaitShared(f, f.pieces.?, n[i]);
-        try f.finish(R);
+        try f.finish(R, heads[i]);
     }
 }
 
