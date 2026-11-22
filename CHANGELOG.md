@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: masked sparse attention, its padding entries and the DFlash2 head's q4 matmul give the float64 reference's NaN and Inf instead of dropping or inventing them, which clears nine known kernel-contract failures; finite outputs are unchanged (#4396).
+
 - Hardening: tool-call parsing, streaming parsers and grammar compiles bound their work and validate arguments before emitting them (#4378).
 
 - CUDA on unified-memory Linux (GB10): the start-up budget counts the checkpoint's own cached pages as room, so a checkpoint that was just read is not refused for them, without dropping them from the page cache before the load (#4427, refs #3192, #1857).
