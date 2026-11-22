@@ -166,6 +166,7 @@ pub fn relTable(k: *const Kernels, s: hip.Stream, r: Rows, rel: u64, proj: u64, 
 
 /// Attention into chunk partials, then the ordered merge; `sink` and `gate` RAW (no sigmoid in glue: #4387's bug).
 pub fn attend(k: *const Kernels, s: hip.Stream, r: Rows, l: Layer, stride: u32, slots: usize, q: u64, kv: Cache, tab: u64, part_o: u64, part_ml: u64, sink: u64, gate: u64, out: u64) !void {
+    try ringFits(l, r.rows);
     if (slotsFor(l, r.last_pos + 1) > stride) return error.Inkling2Partials;
     const scale: f32 = 1.0 / @sqrt(@as(f32, head_dim));
     const threads = tile_pairs * 32;
@@ -202,6 +203,12 @@ pub fn attend(k: *const Kernels, s: hip.Stream, r: Rows, l: Layer, stride: u32, 
     for ([_]u64{ part_o, part_ml, sink, gate, r.pos, out }) |v| try b.add(v);
     for ([_]u32{ r.heads, l.window, l.chunk, 0, slots_rh, per }) |v| try b.add(int(v));
     try go(k.merge, s, .{ .x = r.rows * r.heads }, head_dim, &b);
+}
+
+/// The ring the tiles assume: whole 64-key tiles (Stage::load never wraps one), and a window plus the rows less one.
+pub fn ringFits(l: Layer, rows: u32) error{ Inkling2RingTiles, Inkling2RingShort }!void {
+    if (l.ring == 0 or l.ring % tile_keys != 0) return error.Inkling2RingTiles;
+    if (@as(u64, l.window) + rows > @as(u64, l.ring) + 1) return error.Inkling2RingShort;
 }
 
 /// Whether a global call runs a block a sub-chunk: few rows, and partials for every row, head and sub-chunk.
