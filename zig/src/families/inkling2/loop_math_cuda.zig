@@ -27,6 +27,7 @@ pub const Kernels = struct {
     gate_down_fn: cuda.Function,
     gate_up_fn: cuda.Function,
     project_qkv_fn: cuda.Function,
+    qkv_rows_fns: [3]cuda.Function, // decode QKV for at most 1, 4 and 16 rows
     round_bf16_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
@@ -40,6 +41,11 @@ pub const Kernels = struct {
             .gate_down_fn = try mod.function("tf_ink2_loop_gate_down"),
             .gate_up_fn = try mod.function("tf_ink2_loop_gate_up"),
             .project_qkv_fn = try mod.function("tf_ink2_loop_project_qkv"),
+            .qkv_rows_fns = .{
+                try mod.function("tf_ink2_loop_qkv_rows1"),
+                try mod.function("tf_ink2_loop_qkv_rows4"),
+                try mod.function("tf_ink2_loop_qkv_rows16"),
+            },
             .round_bf16_fn = try mod.function("tf_ink2_loop_round_bf16"),
         };
     }
@@ -149,6 +155,10 @@ pub fn projectQkv(
     var a: cuda.Args = .{};
     for ([_]u64{ u_q, u_k, u_v, wq, wk, wv, raw_q, raw_k, raw_v }) |v| a.add(v);
     for ([_]i32{ int(rows), int(c), int(q_width), int(kv_width) }) |v| a.add(v);
+    if (rows <= 16 and c % 64 == 0) { // decode: a warp 32 outputs, the same sums in the same order
+        const f = k.qkv_rows_fns[if (rows == 1) 0 else if (rows <= 4) 1 else 2];
+        return go(f, s, .{ .x = @intCast((@max(q_width, kv_width) + 31) / 32), .y = 3 }, 32, &a);
+    }
     try go(k.project_qkv_fn, s, .{ .x = @intCast((rows + 15) / 16), .y = @intCast((@max(q_width, kv_width) + 15) / 16), .z = 3 }, 256, &a);
 }
 
