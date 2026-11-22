@@ -14,6 +14,7 @@ pub const Suites = struct {
     loop: @import("metal_inkling2_loop.zig").Suite,
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
+    chain: @import("metal_inkling2_dspark_chain.zig").Suite,
 
     /// Heap-allocated so inline probe arrays inside each suite keep stable addresses across return.
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suites {
@@ -29,6 +30,7 @@ pub const Suites = struct {
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .chain = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.destroy();
         try s.attention.collect(only);
@@ -40,6 +42,7 @@ pub const Suites = struct {
         try s.loop.collect(only);
         try s.runtime.collect(only);
         try s.dspark.collect(only);
+        try s.chain.collect(only);
         return s;
     }
 
@@ -53,6 +56,7 @@ pub const Suites = struct {
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();
+        s.chain.deinit();
         s.a.destroy(s);
     }
 };
