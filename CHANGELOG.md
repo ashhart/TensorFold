@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: Discover shows a model as installed again once its selected revision matches the one it would download (#4313 compared the snapshot path, not its sha), and the room worker test lists the ticket bot's reviewed imports (#4606).
+
 - Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
 
 ## 1.3.4
