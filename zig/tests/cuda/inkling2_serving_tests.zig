@@ -44,7 +44,7 @@ fn trace(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32, sampling: ?lanes
     const logits = try gpu.gpa.alloc(f32, n * v);
     errdefer gpu.gpa.free(logits);
     try b.prefill(&s);
-    try download(t, t.slot[0].ptr, logits[0..v]);
+    try download(t, try t.lastOf(&s), logits[0..v]);
     var handle: ?u64 = try b.first(&s, prompt.len);
     for (0..n) |i| {
         ids[i] = if (host) try lanes.gpu_full.draw(gpu.gpa, logits[i * v ..][0..v], sampling, @intCast(prompt.len + i), null) else try b.read(handle.?);
@@ -152,6 +152,63 @@ fn admission(gpu: Gpu, loaded: *native.Loaded, a: []const u32, b: []const u32) !
     while (!second.finished) try e.step();
     try std.testing.expectEqual(lanes.stream.Reason.length, second.reason);
     if (!std.mem.eql(u32, second.emitted(), plain_b.ids)) return error.MiniAdmissionChangedSecond;
+}
+
+/// Four slots: interleaved greedy and seeded streams equal solo; a fifth is refused before anything is queued.
+fn concurrent(gpu: Gpu, loaded: *native.Loaded, ids: []const u32) !void {
+    const n = 4;
+    const cuts = [n][2]usize{ .{ 0, 257 }, .{ 17, 1042 }, .{ 300, 2400 }, .{ 5, 70 } };
+    var solo: [n]Trace = undefined;
+    var done: usize = 0;
+    defer for (solo[0..done]) |*x| x.deinit(gpu.gpa);
+    for (cuts, 0..) |c, i| {
+        solo[i] = try trace(gpu, loaded, ids[c[0]..c[1]], if (i % 2 == 0) null else sampled, 10, false, .{});
+        done += 1;
+    }
+    try loaded.reserve(loaded.ctx, n);
+    {
+        var busy: [n]lanes.Stream = undefined;
+        var opened: usize = 0;
+        defer for (busy[0..opened]) |*x| {
+            loaded.backend.release(x);
+            x.deinit(gpu.gpa);
+        };
+        for (&busy, 0..) |*x, i| {
+            x.* = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-busy", .prompt = ids[i .. i + 8], .max_new = 1 });
+            opened += 1;
+            if (!native.fits(loaded.ctx, 8, 1)) return error.MiniSlotMissing;
+            try loaded.backend.prefill(x);
+        }
+        if (native.fits(loaded.ctx, 8, 1)) return error.MiniFifthAdmitted;
+        var fifth = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-fifth", .prompt = ids[0..8], .max_new = 1 });
+        defer fifth.deinit(gpu.gpa);
+        try std.testing.expectError(error.NoFreeSlot, loaded.backend.prefill(&fifth));
+        if (fifth.fill_at.load(.monotonic) != 0) return error.MiniFifthQueued;
+    }
+    var streams: [n]lanes.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*x| x.deinit(gpu.gpa);
+    for (cuts, 0..) |c, i| {
+        streams[i] = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-concurrent", .prompt = ids[c[0]..c[1]], .max_new = 10, .sampling = if (i % 2 == 0) null else sampled });
+        made += 1;
+    }
+    var cfg = try lanes.Config.init(gpu.gpa, loaded.facts, native.prompt_rows, native.window_rows);
+    defer cfg.deinit(gpu.gpa);
+    cfg.timed = false;
+    var clock: lanes.fake.FixedClock = .{};
+    var e = lanes.Engine.init(gpu.gpa, &cfg, loaded.backend, clock.clock());
+    defer e.deinit();
+    for (&streams) |*x| try e.addStream(x);
+    var live = true;
+    while (live) {
+        try e.step();
+        live = false;
+        for (&streams) |*x| live = live or !x.finished;
+    }
+    for (&streams, solo) |*x, want| {
+        if (x.reason != .length) return error.MiniServingDidNotFinish;
+        if (!std.mem.eql(u32, x.emitted(), want.ids)) return error.MiniConcurrentChangedTokens;
+    }
 }
 
 /// Priced copies deliberately alternate whole matches, first-row rejection and a prefix match.
@@ -282,6 +339,8 @@ pub fn run(gpu: Gpu, model: []const u8, ids_path: []const u8) !void {
     check.pass("Mini CUDA fresh and resumed prompts produce identical logits and tokens", .{});
     try admission(gpu, &loaded, ids[0..257], ids[17..1042]);
     check.pass("Mini CUDA one-slot admission serializes concurrent requests without changing tokens", .{});
+    try concurrent(gpu, &loaded, ids);
+    check.pass("Mini CUDA four slots: concurrent greedy and seeded replies equal solo, a fifth is refused", .{});
     try copiedDrafts(gpu, &loaded, ids[0..64]);
     check.pass("Mini CUDA opt-in copy drafting preserves target tokens and rolls back exactly", .{});
 }
