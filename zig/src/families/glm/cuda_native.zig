@@ -352,7 +352,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
     const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
     own.link.lead(cuda.tp_watch.open(), p.world); // the other ranks begin asleep (follow): the first step wakes them
-    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
+    if (own.e.local.len > 0 and o.mtp_confidence != null) return error.SharesOneRankEach; // chances need every share's
+    own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared or own.e.local.len > 0, .mtp_confidence = o.mtp_confidence };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
     if (own.share > 0) if (own.layout) |*l| { // TF_KV_SHARE: the plan counts each kept state's slot
@@ -512,6 +513,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4, MIXED_PRECISION and EXL3 mcg checkpoints (the log names what config.json has)",
         error.UnreadableExl3 => "an EXL3 routed expert is not an mcg trellis of 1 to 8 bits with its marker and fp16 scales (the log names the tensor)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
+        error.SharesNotOnRanks => "full GLM-5.3 sums in three shares: serve it at TF_GLM_WORLD 1 (all three on one GPU) or 3",
+        error.SharesOneRankEach => "full GLM-5.3 at TF_GLM_WORLD 1 runs its three shares in one process: serve without --drafter, --vision, --mtp-confidence, KV pages, packed linears, prompt logprobs or structured output",
+        error.SharesKeepNoStates => "full GLM-5.3 at TF_GLM_WORLD 1 keeps no prompt states yet: serve with --prompt-cache-gib 0",
         else => null,
     };
 }
