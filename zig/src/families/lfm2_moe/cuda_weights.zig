@@ -230,7 +230,47 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
             .down = try x.linear(&.{try name(&b1, p, "feed_forward.down_proj")}, &.{h}, c.intermediate, 4),
         } };
     }
+    // a full load binds every name; a thin layer-prefix check may leave the rest unbound on purpose
+    try refuseLeftovers(&ck, n == c.layers);
     return w;
+}
+
+/// `ck` with names `get` never took, refused; `full` is false for a thin layer-prefix check.
+pub fn refuseLeftovers(ck: *const core.checkpoint.Checkpoint, full: bool) !void {
+    if (!full) return;
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return error.UnusedLfmTensors;
+}
+
+test "a stray tensor refuses a full load, never a layer-prefix check" {
+    const fixture = core.checkpoint_fixture;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data: [4]u16 = @splat(0x3f80);
+    const wide: [4]u32 = @splat(0x20);
+    const entries = [_]fixture.Entry{
+        .{ .name = "model.embed_tokens.weight", .dtype = "U32", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&wide) },
+        .{ .name = "model.layers.0.operator_norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "model.stray.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+    };
+    try fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var ck = try core.checkpoint.Checkpoint.openModel(a, io, dir);
+    defer ck.close();
+    _ = try ck.expect("model.embed_tokens.weight", .u32, &.{4});
+    _ = try ck.expect("model.layers.0.operator_norm.weight", .bf16, &.{4});
+    try std.testing.expectError(error.UnusedLfmTensors, refuseLeftovers(&ck, true));
+    try refuseLeftovers(&ck, false); // the same checkpoint on a layer-prefix check is not a refusal
+    _ = try ck.expect("model.stray.weight", .bf16, &.{4});
+    try refuseLeftovers(&ck, true); // every name bound: a complete checkpoint loads
 }
 
 test "the stage holds the 6-bit head's table and one expert table" {
