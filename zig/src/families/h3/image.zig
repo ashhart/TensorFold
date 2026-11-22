@@ -19,6 +19,5 @@ pub const Runner = prompt.Runner;
 pub const Vision = prompt.Vision;
 
 pub const Decoder = decoder.Decoder;
-pub const most_batch = decoder.most_batch;
 pub const host = decoder.host;
 pub const vae = decoder.vae;
