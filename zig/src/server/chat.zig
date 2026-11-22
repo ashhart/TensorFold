@@ -218,6 +218,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
     if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
     request.salted = salt != 0;
+    request.cache_salt = salt;
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
     errdefer srv.release(false, request);

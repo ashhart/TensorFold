@@ -7,7 +7,7 @@ const modes = @import("cache_modes.zig");
 pub fn find(s: *const pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
     var best: ?*pc.Entry = null;
     for (s.entries.items) |e| {
-        if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
+        if (e.expired or e.salt != s.salt or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
         if (best != null and e.at <= best.?.at) continue;
         const n = e.tokens.len;
         if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
