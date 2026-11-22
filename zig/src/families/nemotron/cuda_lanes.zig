@@ -75,6 +75,7 @@ pub const Cuda = struct {
             _ = self.pages.?.close(l.seq);
         } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
+        self.fills.deinit(self.gpa); // passes left between their chunks
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
