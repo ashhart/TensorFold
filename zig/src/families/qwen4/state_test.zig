@@ -7,6 +7,8 @@ pub const Backend = struct {
     live: usize = 0,
     allocs: usize = 0,
     copies: usize = 0,
+    zero_offset: usize = 0,
+    zero_bytes: usize = 0,
     fail_copy: bool = false,
     fail_drain: bool = false,
     pub fn allocationBytes(n: usize) !u64 {
@@ -23,7 +25,9 @@ pub const Backend = struct {
         a.free(buffer);
         b.live -= 1;
     }
-    pub fn zero(_: *Backend, buffer: Buffer, offset: usize, n: usize) !void {
+    pub fn zero(b: *Backend, buffer: Buffer, offset: usize, n: usize) !void {
+        b.zero_offset = offset;
+        b.zero_bytes = n;
         @memset(buffer[offset..][0..n], 0);
     }
     pub fn copy(b: *Backend, to: Buffer, to_offset: usize, from: Buffer, from_offset: usize, n: usize) !void {
@@ -48,6 +52,10 @@ fn stateIs(s: *State, value: u8) !void {
     const v = try s.current(.{ .bytes = s.layout.state_bytes });
     for (v.buffer[v.offset..][0..v.len]) |byte| try std.testing.expectEqual(value, byte);
 }
+fn kvIs(s: *State, value: u8) !void {
+    const v = try s.kv(.{ .bytes = s.layout.kv_bytes });
+    for (v.buffer[v.offset..][0..v.len]) |byte| try std.testing.expectEqual(value, byte);
+}
 test "Qwen4 frames: every partial keep and rejection picks its exact frame; another stream remains unchanged" {
     var problem: cfg.Problem = .{};
     var c = try cfg.parse(a, @embedFile("fixtures/tiny-dense.json"), &problem);
@@ -58,8 +66,14 @@ test "Qwen4 frames: every partial keep and rejection picks its exact frame; anot
     var other = try State.open(a, &b, &c, 32, 4, std.math.maxInt(u64));
     defer other.close() catch unreachable;
     try other.reset();
+    try kvIs(&other, 0xcc);
+    try std.testing.expectEqual(other.layout.kv_bytes, b.zero_offset);
+    try std.testing.expectEqual(other.bytes - other.layout.kv_bytes, b.zero_bytes);
     for (0..5) |keep| {
         try s.reset();
+        try kvIs(&s, 0xcc);
+        try std.testing.expectEqual(s.layout.kv_bytes, b.zero_offset);
+        try std.testing.expectEqual(s.bytes - s.layout.kv_bytes, b.zero_bytes);
         try stateIs(&s, 0);
         try s.begin(4);
         try complete(&s, &.{ 1, 2, 3, 4 });
@@ -69,6 +83,7 @@ test "Qwen4 frames: every partial keep and rejection picks its exact frame; anot
         try std.testing.expectEqualSlices(u32, (&[_]u32{ 1, 2, 3, 4 })[0..keep], s.history());
         try stateIs(&other, 0);
         try std.testing.expectEqual(@as(usize, 0), other.pos);
+        try kvIs(&other, 0xcc);
     }
     try s.begin(2);
     try complete(&s, &.{ 5, 6 });

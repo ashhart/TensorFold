@@ -206,9 +206,6 @@ pub const Draft = struct {
         while (made < linear_n) : (made += 1) d.spare[made] = try cuda.DeviceBuffer.alloc(driver, d.layout.state);
         d.host = try gpa.alloc(u16, @max(l.rows * vocab, draft_n));
         errdefer gpa.free(d.host);
-        errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
-        // zeroed on the compute stream, ahead of the passes that read them
-        for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
         d.point();
         return d;
     }
@@ -257,7 +254,6 @@ pub const Draft = struct {
         d.host = try gpa.alloc(u16, @max(l.rows * vocab, draft_n));
         errdefer gpa.free(d.host);
         errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
-        for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
         try stream.d.check(stream.d.api.cuMemsetD8Async(block.ptr, 0, bytes_in, stream.handle), "cuMemsetD8Async");
         d.point();
         return d;

@@ -49,6 +49,17 @@ pub fn argmax(raw: []const u8) u32 {
     }
     return @intCast(at);
 }
+/// `n` allocated buffers; their unread capacity is left as the device returned it.
+pub fn buffers(gpa: std.mem.Allocator, driver: *cuda.Driver, n: usize, len: usize) ![]cuda.DeviceBuffer {
+    const Allocated = struct {
+        driver: *cuda.Driver,
+        len: usize,
+        fn make(a: @This()) !cuda.DeviceBuffer {
+            return cuda.DeviceBuffer.alloc(a.driver, a.len);
+        }
+    };
+    return made(cuda.DeviceBuffer, gpa, n, Allocated{ .driver = driver, .len = len });
+}
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
 pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const Zeroed = struct {
@@ -79,7 +90,7 @@ fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
     while (held < n) {
         out[held] = try src.make();
         held += 1; // counted before its fill, so a failed fill frees it with the rest
-        try src.fill(&out[held - 1]);
+        if (@hasDecl(@TypeOf(src), "fill")) try src.fill(&out[held - 1]);
     }
     return out;
 }
@@ -327,10 +338,10 @@ pub const Engine = struct {
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
         seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.convBytes(e.heads));
         seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.stateBytes(e.heads));
-        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
-        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
-        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap));
-        seq.pooled = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
+        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try buffers(e.gpa, e.driver, attn_n, sizes.kvBytes(cap, e.heads));
+        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try buffers(e.gpa, e.driver, attn_n, sizes.kvBytes(cap, e.heads));
+        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try buffers(e.gpa, e.driver, attn_n, sizes.indexBytes(cap));
+        seq.pooled = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try buffers(e.gpa, e.driver, attn_n, pooledBytes(cap));
         seq.tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         try seq.tail.fill8(0, e.stream.handle);
         return seq;
