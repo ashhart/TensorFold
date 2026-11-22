@@ -24,8 +24,9 @@ pub const Loaded = struct {
     h3p_mod: cuda.Module,
     h3_list: [std.enums.values(h3_k.Which).len]h3_k.H3,
     h3_topk: h3_topk_k.TopK,
-    h3d_list: [std.enums.values(h3d_k.Which).len]h3d_k.Dec,
-    h3p_list: [std.enums.values(h3p_k.Which).len]h3p_k.Prm,
+    /// Each decoder and prompt kernel twice: served, then its planted control.
+    h3d_list: [2 * std.enums.values(h3d_k.Which).len]h3d_k.Dec,
+    h3p_list: [2 * std.enums.values(h3p_k.Which).len]h3p_k.Prm,
 
     /// Frees every rig's arena and unloads the three images; call once the gates are done.
     pub fn deinit(l: *Loaded) void {
@@ -53,14 +54,16 @@ pub fn append(l: *Loaded, a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, 
     try kernels.append(a, l.h3_topk.kernel());
     l.h3d_mod = try cuda.Module.load(gpu.d, &images.decoder);
     const h3d_which = comptime std.enums.values(h3d_k.Which);
-    for (h3d_which, &l.h3d_list) |w, *m| {
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3d_mod.function(h3d_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a) };
+    for (&l.h3d_list, 0..) |*m, i| {
+        const w = h3d_which[i % h3d_which.len];
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3d_mod.function(h3d_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = i >= h3d_which.len };
     }
     for (&l.h3d_list) |*m| try kernels.append(a, m.kernel());
     l.h3p_mod = try cuda.Module.load(gpu.d, &images.prompt);
     const h3p_which = comptime std.enums.values(h3p_k.Which);
-    for (h3p_which, &l.h3p_list) |w, *m| {
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3p_mod.function(h3p_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a) };
+    for (&l.h3p_list, 0..) |*m, i| {
+        const w = h3p_which[i % h3p_which.len];
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = try l.h3p_mod.function(h3p_k.symbol(w)), .arena = std.heap.ArenaAllocator.init(a), .planted = i >= h3p_which.len };
     }
     for (&l.h3p_list) |*m| try kernels.append(a, m.kernel());
 }
