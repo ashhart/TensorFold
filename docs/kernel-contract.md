@@ -484,7 +484,9 @@ fp32 and each output must equal bf16(fp32(sum P v / sum P)) bit for bit. Eight c
 distance late, no sink, one q a bf16 step up (prompt), a window one key long, the sink and gate given after their
 sigmoid (as #4387's glue did), tau off, a table read one column late, and a prep writing one stream's keys into
 another's slots. `attend()` refuses a ring that is not whole 64-key tiles or is shorter than the window plus the
-call's rows less one.
+call's rows less one, a call with no streams (only one stream takes the prompt kernel), and partial buffers holding
+fewer than rows x heads x stride partials. It does not refuse a global position past the ring, since the contract's
+4,096-slot ring over 1M keys wraps on purpose: the engine glue keeps a global layer's positions inside its ring.
 
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
