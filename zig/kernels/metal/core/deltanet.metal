@@ -568,6 +568,23 @@ kernel void tf_delta_gdn_publish_conv(device const ushort* next_conv [[buffer(0)
   if (at.x < conv_width) conv[slot * conv_width + at.x] = next_conv[slot * conv_width + at.x];
 }
 
+// TF_Q27_CONV_INPLACE: a thread owns one channel of one slot and holds its new taps in registers before writing them.
+kernel void tf_delta_gdn_conv_commit_in_place(device ushort* conv [[buffer(0)]],
+                                device const ushort* projection [[buffer(1)]],
+                                device const uint* kept_rows [[buffer(2)]],
+                                device const TfDeltaKeep* keeps [[buffer(3)]],
+                                device const uint* windows [[buffer(4)]],
+                                constant TfDeltaParams& p [[buffer(5)]],
+                                uint2 at [[thread_position_in_grid]]) {
+  const uint channels = 2 * p.nk * p.dk + p.nv * p.dv, kept = p.taps - 1;
+  const TfDeltaKeep keep = keeps[at.y];
+  if (at.x >= channels || keep.rows == 0) return;
+  const uint row = kept_rows[keep.first + keep.rows - 1], base = keep.state_slot * kept;
+  ushort words[7];
+  for (uint t = 0; t < kept; ++t) { const uint s = windows[row * p.taps + t + 1]; words[t] = s < kept ? conv[(base + s) * channels + at.x] : projection[(s - kept) * channels + at.x]; }
+  for (uint t = 0; t < kept; ++t) conv[(base + t) * channels + at.x] = words[t];
+}
+
 kernel void tf_delta_gdn_clear(device uint* state [[buffer(0)]],
                           device ushort* conv [[buffer(1)]],
                           constant TfDeltaParams& p [[buffer(2)]],

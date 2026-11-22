@@ -45,7 +45,7 @@ pub const Size = struct { width: usize = 1, height: usize = 1, depth: usize = 1 
 pub const Pipeline = struct {
     id: usize,
     pub fn init(_: Device, _: Library, name: []const u8, _: bool) !Pipeline {
-        const names = [_][]const u8{ "pre", "tree", "replay", "post", "conv_commit", "unused5", "unused6", "unused7", "publish_conv", "unused9", "tree_slots_1", "tree_slots_2", "tree_slots_4", "tree_slots_8", "tree_slots_16" };
+        const names = [_][]const u8{ "pre", "tree", "replay", "post", "conv_commit", "unused5", "unused6", "unused7", "publish_conv", "conv_commit_in_place", "tree_slots_1", "tree_slots_2", "tree_slots_4", "tree_slots_8", "tree_slots_16" };
         for (names, 0..) |suffix, i| if (std.mem.endsWith(u8, name, suffix)) return .{ .id = i };
         return .{ .id = 20 };
     }
@@ -103,11 +103,14 @@ pub const Recorder = struct {
     params: Params = undefined,
     restores: usize = 0,
     segments: usize = 2,
+    barriers: usize = 0,
+    launches: [21]usize = @splat(0),
     fn words(r: *Recorder, at: usize) []u32 {
         const b = r.bindings[at].?;
         return @as([*]u32, @ptrCast(@alignCast(b.buffer.data.ptr + b.offset)))[0 .. (b.buffer.data.len - b.offset) / 4];
     }
     fn run(r: *Recorder) void {
+        r.launches[r.pipeline] += 1;
         const p = r.params;
         const stride = p.nv * p.dv * p.dk;
         if (r.pipeline >= 10 and r.pipeline <= 14) {
@@ -138,6 +141,12 @@ pub const Recorder = struct {
                 const out = r.words(6)[slot * width ..][0..width];
                 if (keeps[i * 4 + 1] == 0) @memcpy(out, r.words(0)[slot * width ..][0..width]) else @memset(out, 0);
             }
+        } else if (r.pipeline == 9) {
+            const keeps = r.words(3);
+            const width = (2 * p.nk * p.dk + p.nv * p.dv) * (p.taps - 1) / 2;
+            for (0..r.segments) |i| {
+                if (keeps[i * 4 + 1] != 0) @memset(r.words(0)[keeps[i * 4 + 2] * width ..][0..width], 0);
+            }
         } else if (r.pipeline == 8) {
             const keeps = r.words(1);
             const width = (2 * p.nk * p.dk + p.nv * p.dv) * (p.taps - 1) / 2;
@@ -166,7 +175,9 @@ pub const ComputeEncoder = struct {
     pub fn dispatchGroups(e: ComputeEncoder, _: Size, _: Size) void {
         e.record.run();
     }
-    pub fn barrier(_: ComputeEncoder) void {}
+    pub fn barrier(e: ComputeEncoder) void {
+        e.record.barriers += 1;
+    }
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const CommandBuffer = struct {

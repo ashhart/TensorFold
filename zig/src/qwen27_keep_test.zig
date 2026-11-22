@@ -12,6 +12,7 @@ test {
     _ = @import("families/qwen27/gdn_test.zig");
     _ = @import("families/qwen27/attention_plan.zig");
     _ = @import("families/qwen27/attention_test.zig");
+    _ = @import("families/qwen27/gdn_conv_inplace_test.zig");
 }
 
 test "qwen27 speed: shared in-place verify then empty and full keeps restore state and retain conv histories" {
@@ -43,6 +44,7 @@ test "qwen27 speed: shared in-place verify then empty and full keeps restore sta
         pool.kernels = undefined;
         pool.kernels.pipelines = .{ .pre = .{ .id = 0 }, .tree = .{ .id = 1 }, .replay = .{ .id = 2 }, .post = .{ .id = 3 }, .conv_commit = .{ .id = 4 }, .tree_slots = .{ .{ .id = 10 }, .{ .id = 11 }, .{ .id = 12 }, .{ .id = 13 }, .{ .id = 14 } } };
         pool.kernels.publish_conv = .{ .id = 8 };
+        pool.kernels.conv_in_place = .{ .id = 9 };
         const bytes = 2 * shape.state * 4;
         var metadata: gpu.Metadata = undefined;
         inline for (@typeInfo(gpu.Metadata).@"struct".field_names, 0..) |field, i| {
@@ -87,7 +89,41 @@ test "qwen27 speed: shared in-place verify then empty and full keeps restore sta
             .{ .window = window, .state_slot = 1, .next_slot = 1, .path = if (empty_second) &.{} else &.{0} },
         });
         defer keep.deinit();
+        const saved_state = try a.dupe(u8, state);
+        defer a.free(saved_state);
+        const saved_other = try a.dupe(u8, other);
+        defer a.free(saved_other);
+        const saved_history = try a.dupe(u8, history);
+        defer a.free(saved_history);
+        const saved_other_history = try a.dupe(u8, other_history);
+        defer a.free(saved_other_history);
+        pool.conv_in_place = true;
+        const before = record;
+        try (gpu.DevicePlan{ .host = keep, .metadata = metadata }).metadata.upload(keep);
+        try pool.commitLayers(.{ .host = keep, .metadata = metadata }, e);
+        try std.testing.expectEqual(before.launches[8], record.launches[8]);
+        try std.testing.expectEqual(before.launches[9] + 1, record.launches[9]);
+        try std.testing.expectEqual(before.barriers + 1, record.barriers);
+        try std.testing.expectEqual(@as(u64, 1), pool.conv_in_place_commits);
+        const on_state = try a.dupe(u8, state);
+        defer a.free(on_state);
+        const on_other = try a.dupe(u8, other);
+        defer a.free(on_other);
+        const on_history = try a.dupe(u8, history);
+        defer a.free(on_history);
+        const on_other_history = try a.dupe(u8, other_history);
+        defer a.free(on_other_history);
+        @memcpy(@constCast(state), saved_state);
+        @memcpy(@constCast(other), saved_other);
+        @memcpy(@constCast(history), saved_history);
+        @memcpy(@constCast(other_history), saved_other_history);
+        record.restores = before.restores;
+        pool.conv_in_place = false;
         try pool.commit(0, .{ .host = keep, .metadata = metadata }, e);
+        try std.testing.expectEqualSlices(u8, on_state, state);
+        try std.testing.expectEqualSlices(u8, on_other, other);
+        try std.testing.expectEqualSlices(u8, on_history, history);
+        try std.testing.expectEqualSlices(u8, on_other_history, other_history);
         try std.testing.expectEqualSlices(u8, original, state);
         try std.testing.expectEqual(empty_second, std.mem.eql(u8, second, other));
         try std.testing.expectEqualSlices(u8, old_history, history);

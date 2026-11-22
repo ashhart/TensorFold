@@ -139,6 +139,7 @@ pub const Runner = struct {
         }
         var pool = try GdnPool.init(a, m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
+        pool.conv_in_place = try @import("sys").environment.read(bool, "TF_Q27_CONV_INPLACE", false);
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue); // before M5 the tail reads simdgroup-matrix results
@@ -440,10 +441,7 @@ pub const Runner = struct {
         try ops.metadata(e, result, .{ .buf = m.keeps.buffer, .off = m.keeps.offset }, .{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset }, null, p);
         e.barrier();
         const plan = @import("gdn_pool_gpu.zig").DevicePlan{ .host = recurrent, .metadata = m };
-        for (0..r.gdn.budget.layers) |gi| try r.gdn.commitScan(gi, plan, e);
-        e.barrier();
-        for (0..r.gdn.budget.layers) |gi| try r.gdn.commitPublish(gi, plan, e);
-        e.barrier();
+        try r.gdn.commitLayers(plan, e);
         var ai: usize = 0;
         for (r.model.weights.layers) |layer| if (layer.mixer == .attention) {
             var views: [attn.planning.max_streams]attn.Cache = undefined;

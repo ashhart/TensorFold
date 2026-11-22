@@ -90,6 +90,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         "test-deltanet-marks",
         "Run the DeltaNet prompt chain's marks against segments ending there, no models",
     ).dependOn(&b.addRunArtifact(marks_check).step);
+    const conv_cells = program(b, "tf-deltanet-conv-inplace-check", "Build TF_Q27_CONV_INPLACE's conv byte cells on synthetic rows, no models", "zig/tests/deltanet_conv_inplace.zig", target, false, &.{ .{ .name = "metal", .module = metal }, .{ .name = "core_delta", .module = s.delta } });
+    b.step("test-deltanet-conv-inplace", "Run TF_Q27_CONV_INPLACE's conv byte cells on this Mac's GPU, no models").dependOn(&b.addRunArtifact(conv_cells).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = s.delta })).step);
 
     const fork_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/recurrent_forks.zig"), .target = target, .optimize = .ReleaseSafe }) });

@@ -68,6 +68,8 @@ pub const Pool = struct {
     profiler: ?*profile.Trace = null,
     tree_mode: gdn.TreeMode = .auto,
     residency: ?metal.ResidencySet.Follow = null,
+    conv_in_place: bool = false, // TF_Q27_CONV_INPLACE
+    conv_in_place_commits: u64 = 0, // layers committed that way
 
     pub fn setResident(pool: *Pool, hook: ?metal.ResidencySet.Follow) void {
         if (pool.residency) |f| metal.resident.fields.apply(pool, f, false);
@@ -255,7 +257,17 @@ pub const Pool = struct {
     pub fn commitDevice(pool: *Pool, layer: usize, plan: DevicePlan, e: metal.ComputeEncoder) !void {
         try pool.commitScan(layer, plan, e);
         e.barrier();
+        if (pool.conv_in_place) return;
         try pool.commitPublish(layer, plan, e);
+        e.barrier();
+    }
+
+    /// Every layer's keep: scans, a barrier, then the publishes and their barrier unless the scans wrote history.
+    pub fn commitLayers(pool: *Pool, plan: DevicePlan, e: metal.ComputeEncoder) !void {
+        for (0..pool.budget.layers) |layer| try pool.commitScan(layer, plan, e);
+        e.barrier();
+        if (pool.conv_in_place) return;
+        for (0..pool.budget.layers) |layer| try pool.commitPublish(layer, plan, e);
         e.barrier();
     }
 
@@ -284,6 +296,17 @@ pub const Pool = struct {
             e.setValue(p, 7);
             e.setBuffer(state.buffer, state.offset, 8);
             e.dispatchThreads(.{ .width = 32, .height = p.dv, .depth = p.nv * plan.host.keeps.len }, .{ .width = 32, .height = 4 });
+        }
+        if (pool.conv_in_place) {
+            e.setPipeline(pool.kernels.conv_in_place);
+            gdn.bind(e, .{ history, try pool.layerSpan(.qkv, layer) }, 0);
+            e.setBuffer(m.kept_rows.buffer, m.kept_rows.offset, 2);
+            e.setBuffer(m.keeps.buffer, m.keeps.offset, 3);
+            e.setBuffer(m.windows.buffer, m.windows.offset, 4);
+            e.setValue(p, 5);
+            e.dispatchThreads(.{ .width = pool.budget.shape.qkv, .height = plan.host.keeps.len }, .{ .width = 32 });
+            pool.conv_in_place_commits += 1;
+            return;
         }
         e.setPipeline(pool.kernels.pipelines.conv_commit);
         gdn.bind(e, .{ history, try pool.layerSpan(.qkv, layer) }, 0);
