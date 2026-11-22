@@ -22,6 +22,11 @@ pub fn enabled() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
+/// TF_FLASHNEXT_WINDOW_GRAPH_PARITY=1: retain both whole-accept state/spare pointer directions.
+pub fn retainSettleGraphs() bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH_PARITY", false) catch false;
+}
+
 /// attnRows' host values for rows ending at `ends` in a `cap`-token cache: dense chunks, the score grid (0: none).
 pub const Geometry = struct {
     chunks: u32,
@@ -113,6 +118,17 @@ pub const Key = struct {
         var h: Hash = .{};
         h.geometry(.at(pos0 + rows, seq.cap));
         h.values(&[_]u64{ seq.gen, seq.cap, pieces(seq), s.h, s.cap, scores, model, hooks.logits_out, hooks.streams });
+        if (retainSettleGraphs()) {
+            var parity: u64 = 0;
+            if (hooks.keep) |keep| if (seq.state.len != 0) {
+                for (keep.layers) |layer| {
+                    if (layer.state_out == 0) continue;
+                    parity = @intFromBool(seq.state[0].ptr < layer.state_out);
+                    break;
+                }
+            };
+            h.fixed(parity); // a shape bucket: the full pointers still move in place below
+        }
         h.keep(hooks.keep);
         return .{ .rows = @intCast(rows), .shape = h.shape.final(), .moving = h.moving.final() };
     }
