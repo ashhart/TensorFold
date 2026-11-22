@@ -256,7 +256,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 try b.prepared.put(a, 1, adapter);
                 try b.tiled.put(a, 2, .{ .w = try owned.take(), .scales = try owned.take(), .biases = try owned.take(), .n = 32, .k = 64 });
                 back.gathered_taps = try owned.take();
-                back.contexts[1] = try Context.init(a, &draft_model, true);
+                back.contexts[1] = try Context.init(a, &draft_model, true, null);
             }
             defer if (auxiliary) {
                 back.contexts[1].?.deinit(a);
@@ -300,7 +300,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             h.resident.?.held.flush();
             try record.check();
             if (auxiliary) {
-                const c = try Context.init(a, &draft_model, true);
+                const c = try Context.init(a, &draft_model, true, null);
                 h.resident.?.held.flush();
                 try record.check();
                 try draft_model.swap(c);
@@ -346,10 +346,10 @@ test "residency owner Qwen27: parked context constructor unwinds each failed buf
             draft.graph.config = draftGeometry();
             if (point < 3) {
                 record.fail_at = record.allocations.items.len + point;
-                try std.testing.expectError(error.InjectedBufferFailure, Context.init(a, &draft, true));
+                try std.testing.expectError(error.InjectedBufferFailure, Context.init(a, &draft, true, null));
             } else {
                 draft.graph.config.eps = 0;
-                try std.testing.expectError(error.BadDraftConfig, Context.init(a, &draft, true));
+                try std.testing.expectError(error.BadDraftConfig, Context.init(a, &draft, true, null));
             }
             record.fail_at = null;
             owner.held.flush();
