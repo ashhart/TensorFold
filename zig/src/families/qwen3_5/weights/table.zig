@@ -11,12 +11,14 @@ pub const Tensor = st.Tensor;
 pub const DType = st.DType;
 pub const Error = error{ MissingTensor, NoSafetensors } || config.Error || std.mem.Allocator.Error;
 
-const Where = struct { file: usize, stored: []const u8 };
+const Where = struct { file: usize, stored: []const u8, idx: usize };
 
 pub const Table = struct {
     gpa: std.mem.Allocator,
     files: []Shard,
     where: std.StringHashMapUnmanaged(Where) = .empty,
+    /// One flag a key, set when `get` hands its tensor out: what a full read leaves is a leftover.
+    used: []bool = &.{},
     /// A key prefix the table drops (`language_model.`), as `_Shards(strip=)`.
     strip: []const u8,
     quant: formats.Config,
@@ -37,10 +39,18 @@ pub const Table = struct {
         }
         var t: Table = .{ .gpa = gpa, .files = files, .strip = strip, .quant = quant };
         errdefer t.where.deinit(gpa);
+        var n: usize = 0;
         for (files, 0..) |*f, i| for (f.names.keys()) |key| {
             const short = if (strip.len > 0 and std.mem.startsWith(u8, key, strip)) key[strip.len..] else key;
-            try t.where.put(gpa, short, .{ .file = i, .stored = key });
+            const gop = try t.where.getOrPut(gpa, short);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .file = i, .stored = key, .idx = n };
+                n += 1;
+            } else gop.value_ptr.* = .{ .file = i, .stored = key, .idx = gop.value_ptr.idx };
         };
+        t.used = try gpa.alloc(bool, n);
+        errdefer gpa.free(t.used);
+        @memset(t.used, false);
         return t;
     }
 
@@ -48,6 +58,7 @@ pub const Table = struct {
         for (t.files) |*f| f.close(io);
         t.gpa.free(t.files);
         t.where.deinit(t.gpa);
+        t.gpa.free(t.used);
         t.* = undefined;
     }
 
@@ -66,13 +77,40 @@ pub const Table = struct {
         return t.where.contains(key);
     }
 
-    /// The tensor under `key`; a missing one is `error.MissingTensor`, logged by name.
+    /// The tensor under `key`, marked as used; a missing one is `error.MissingTensor`, logged by name.
     pub fn get(t: *const Table, key: []const u8) Error!Tensor {
         const w = t.where.get(key) orelse {
             std.log.err("checkpoint has no tensor {s}", .{key});
             return error.MissingTensor;
         };
+        t.used[w.idx] = true;
         return t.files[w.file].get(w.stored).?;
+    }
+
+    /// The tensor under `key` without marking it: `get`'s dtype peek for open-time checks.
+    pub fn peek(t: *const Table, key: []const u8) ?Tensor {
+        const w = t.where.get(key) orelse return null;
+        return t.files[w.file].get(w.stored);
+    }
+
+    /// Marks every key starting `prefix` as used: a part another loader owns or the model leaves out on purpose.
+    pub fn skip(t: *const Table, prefix: []const u8) void {
+        var it = t.where.iterator();
+        while (it.next()) |kv| {
+            if (std.mem.startsWith(u8, kv.key_ptr.*, prefix)) t.used[kv.value_ptr.idx] = true;
+        }
+    }
+
+    /// The count of tensors no `get` read, naming the first five (a full load refuses them).
+    pub fn unused(t: *const Table) usize {
+        var n: usize = 0;
+        var it = t.where.iterator();
+        while (it.next()) |kv| {
+            if (t.used[kv.value_ptr.idx]) continue;
+            n += 1;
+            if (n <= 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{kv.key_ptr.*});
+        }
+        return n;
     }
 
     /// Every key of the table (stripped names), in no order.
