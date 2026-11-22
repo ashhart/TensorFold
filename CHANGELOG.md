@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3-ASR on CUDA (tools only, not served yet): `tf-qwen3-asr` runs a WAV clip through the 0.6B or 1.7B checkpoint (the audio tower, then greedy decode through the Qwen3 CUDA pass the embedding engine runs), `tf-qwen3-asr-forced` teacher-forces a clip on a reference case, and `test-qwen3-asr-host` and `tf-qwen3-asr-check` cover config admission, tensor names, log-mel rows and a float64 tower without a GPU (#2239, refs #2105). Thanks to @jschmied.
+
 - CI: the root pytest job installs PyYAML, which the workflow-conditions test added in 41177aefad needs, so GitHub pytest runs collect again (#N).
 
 - Tests: the Flash Next environment table test counts the TF_FLASHNEXT_FUSED_SPLIT switch #3475 added (37 settings), so main is green again (#N).
