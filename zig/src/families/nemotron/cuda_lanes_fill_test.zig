@@ -115,10 +115,7 @@ test "nemotron cuda steps: a cancel between chunks ends the pass at its next ste
     const prompt: [12]u32 = @splat(3);
     var s = try lanes.Stream.init(a, .{ .id = "cancel", .prompt = &prompt, .max_new = 4, .cancel_check = .{ .ptr = &flag, .check = Flag.check } });
     defer s.deinit(a);
-    try std.testing.expectError(error.ContextFull, r.step(&s)); // opens the lane on the own sequence
-    // a pass between its chunks, as a first step leaves it: the next step finds the stream cancelled
-    const cancel: engine.Cancel = .{ .ptr = &s, .check = Cuda.cancelled, .yields = false };
-    try r.b.fills.put(a, &s, .{ .prompt = &prompt, .from = 0, .s = 4, .dump = null, .head = null, .cancel = cancel, .keep = null, .chunks = &.{}, .lessons = false, .wide = true, .background = false });
+    try between(&r, &s, &prompt, 4); // the next step finds the stream cancelled
     flag.on = true;
     try std.testing.expectError(error.Cancelled, r.step(&s));
     try std.testing.expectEqual(@as(usize, 0), r.b.fills.count());
@@ -211,4 +208,21 @@ test "nemotron cuda steps: the backend's end frees a pass still between its chun
     defer s.deinit(a);
     try between(&r, &s, &prompt, 8);
     r.b.deinit(); // the testing allocator reports a pass left behind
+}
+
+test "nemotron cuda steps: a step failing other than by a cancel releases its lane once its work landed (REV59 6)" {
+    var r: Rig = .{};
+    r.init();
+    r.e.vision = null;
+    defer r.deinit();
+    const prompt: [12]u32 = @splat(3);
+    var s = try lanes.Stream.init(a, .{ .id = "failed", .prompt = &prompt, .max_new = 4 });
+    defer s.deinit(a);
+    const before = syncs;
+    try std.testing.expectError(error.ContextFull, r.step(&s)); // opened on the own sequence, then failed
+    try std.testing.expectEqual(@as(usize, 0), r.b.lanes.count());
+    try std.testing.expect(r.b.own_free); // the own sequence free for the next stream
+    try std.testing.expect(syncs > before); // freed after the stream's queued work
+    try std.testing.expectError(error.ContextFull, r.step(&s)); // a retry opens afresh
+    try std.testing.expectEqual(@as(usize, 0), r.b.lanes.count());
 }

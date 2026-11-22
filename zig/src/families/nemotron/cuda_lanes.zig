@@ -491,7 +491,11 @@ pub const Cuda = struct {
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-        const self = of(ptr);
+        of(ptr).release(s);
+    }
+
+    /// The stream's pass and lane gone once its GPU work has landed; again, nothing.
+    pub fn release(self: *Cuda, s: *const lanes.Stream) void {
         fill.forget(self, s); // a pass released between its chunks
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.e.stream.synchronize() catch {};
