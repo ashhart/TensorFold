@@ -1,6 +1,6 @@
-//! Scalar HC activations reserve 256 threads; nvcc 13.0 CUDA resources are measured on all five targets.
+//! Scalar HC activations reserve 256 threads; nvcc 13.0 CUDA resources are measured only on sm_121.
 const registry = @import("registry.zig");
-const receipts = @import("measurements/qwen4_130_all_sms.zig");
+const receipts = @import("measurements/qwen4_130_sm121.zig");
 const limits = @import("limits.zig");
 const suffixes = [_][]const u8{ "", "_bad_nan", "_bad_repeat", "_bad_tail" };
 pub const cuda = blk: {
