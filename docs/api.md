@@ -901,14 +901,17 @@ overrun, so the reply equals its `grammar_budget: false` reply token for token u
 binds. The mask depends only on the grammar's place and the tokens left, so
 drafted, `"draft": false` and concurrent replies stay the same with it on. When `max_tokens` is already below the
 grammar's shortest reply, the mask is not applied and the reply is cut as without it. The first request for a grammar
-explores its parser states over the tokenizer's tokens (on the request thread, then kept for the last eight grammars);
-a grammar with more than 16,384 such states is only masked where its explored states decide it, never beyond what
-completes. Exploring is also limited by a fixed amount of work, counted in parser and token steps rather than time, so
-the same grammar gets the same answer on every machine and under any load. The limit is about 256 times what
-`json_object` takes over a 250,000-token vocabulary; a grammar past it gets HTTP 400 that names the limit, and is never
-masked in part. It is also refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with
-token-level, budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with
-thinking on they start after the think end.
+explores its parser states over the tokenizer's tokens on a bounded background job. Client-supplied schemas,
+regexes, choices, EBNF and tools keep a 2,000 ms wait, a fixed counted-work cap, a successor-edge cap and a table-memory
+cap; four budget jobs may run at once. A refusal names work, edges, table memory, time or waiting for a compile slot.
+The fixed `json_object` rule is built by the server, so only it has a larger counted-work cap and a 30-second budget
+wait. Its compiled rule and successful budget tables are retained once per loaded tokenizer, outside the client
+caches; selecting the same rule later reuses them. Identical client schema text does not receive those larger bounds.
+A grammar with more than 16,384 named parser states is masked only where the explored states decide it, never beyond
+what completes. Counted work is deterministic for a grammar and tokenizer; deadline and slot outcomes depend on load.
+A refused exploration never publishes partial masks. Libraries predating budget support are refused with HTTP 400,
+as are grammars with token-level, budgeted, captured or left-recursive rules. With thinking on, the masks start after
+the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 grammar over 512 KiB on the native server, a server without xgrammar (with the install command; on the native server, a
