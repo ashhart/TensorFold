@@ -103,6 +103,55 @@ fn resumedAt(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32, cut: u32, sa
     try sameTrace(fresh, &resumed);
 }
 
+/// A keeps states at 14 and 39; B resumes A's 14, keeps its 39 and decodes; A resumed at 39 must equal fresh A.
+fn crossPrompt(gpu: Gpu, loaded: *native.Loaded, ids: []const u32) !void {
+    const Saved = @TypeOf(loaded.target.model).Saved;
+    const Keeper = struct {
+        b: *Backend,
+        saved: [2]?*Saved = .{ null, null },
+        fn at(ptr: *anyopaque, s: *lanes.Stream, mark: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ptr));
+            k.saved[@intFromBool(mark != 14)] = k.b.saveState(s, mark) catch null;
+        }
+    };
+    const t = target(loaded);
+    const b = loaded.backend;
+    const a = ids[0..40];
+    var other: [40]u32 = undefined;
+    @memcpy(other[0..14], ids[0..14]);
+    @memcpy(other[14..], ids[500..526]);
+    var fresh = try trace(gpu, loaded, a, null, 8, false, .{});
+    defer fresh.deinit(gpu.gpa);
+    var ka: Keeper = .{ .b = t };
+    defer for (ka.saved) |x| if (x) |y| t.dropState(y);
+    {
+        var s = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-a", .prompt = a, .max_new = 1, .reuse = .{ .marks = &.{ 14, 39 } } });
+        defer s.deinit(gpu.gpa);
+        defer b.release(&s);
+        s.reuse.hook = .{ .ptr = &ka, .at = Keeper.at };
+        try b.prefill(&s);
+    }
+    var kb: Keeper = .{ .b = t };
+    defer for (kb.saved) |x| if (x) |y| t.dropState(y);
+    {
+        var s = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-b", .prompt = &other, .max_new = 8, .reuse = .{ .saved = ka.saved[0] orelse return error.MiniSnapshotNotSaved, .at = 14, .marks = &.{39} } });
+        defer s.deinit(gpu.gpa);
+        defer b.release(&s);
+        s.reuse.hook = .{ .ptr = &kb, .at = Keeper.at };
+        try b.prefill(&s);
+        if (s.cached != 14 or kb.saved[1] == null) return error.MiniSnapshotNotRestored;
+        var h = try b.first(&s, other.len);
+        for (0..6) |i| h = try b.queue(&s, .{ .handle = h }, other.len + i + 1);
+    }
+    var resumed = try trace(gpu, loaded, a, null, 8, false, .{ .saved = ka.saved[1] orelse return error.MiniSnapshotNotSaved, .at = 39 });
+    defer resumed.deinit(gpu.gpa);
+    if (resumed.cached != 39 or resumed.failed) return error.MiniSnapshotNotRestored;
+    sameTrace(&fresh, &resumed) catch |err| {
+        std.debug.print("RESULT mini-serving cross-prompt resume mismatch={s} fresh={any} resumed={any}\n", .{ @errorName(err), fresh.ids, resumed.ids });
+        return err;
+    };
+}
+
 fn freshAndResumed(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32) !void {
     for ([_]?lanes.Sampling{ null, sampled }, 0..) |sampling, case| {
         var fresh = try trace(gpu, loaded, prompt, sampling, 8, false, .{});
@@ -337,6 +386,8 @@ pub fn run(gpu: Gpu, model: []const u8, ids_path: []const u8) !void {
     check.pass("Mini CUDA serving matches the host reference token for token", .{});
     try freshAndResumed(gpu, &loaded, ids[0..2309]);
     check.pass("Mini CUDA fresh and resumed prompts produce identical logits and tokens", .{});
+    try crossPrompt(gpu, &loaded, ids);
+    check.pass("Mini CUDA a state resumed after another prompt resumed its prefix equals the fresh prompt", .{});
     try admission(gpu, &loaded, ids[0..257], ids[17..1042]);
     check.pass("Mini CUDA one-slot admission serializes concurrent requests without changing tokens", .{});
     try concurrent(gpu, &loaded, ids);
