@@ -460,7 +460,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
@@ -480,6 +480,7 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
     try t.expect(!(try e.value(bool, "TF_QWEN27_TIED_HEAD", null, false)) and try e.value(bool, "TF_QWEN27_TIED_HEAD", "1", false));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+    try t.expect(!(try e.value(bool, "TF_Q27_MTP_GPU_PICK", null, false)) and try e.value(bool, "TF_Q27_MTP_GPU_PICK", "1", false));
 }
 
 test "rank aliases name their flag and refuse from their retirement release" {

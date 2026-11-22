@@ -16,6 +16,8 @@ pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
 /// The MTP draft head's forward (mtp-4bit.safetensors beside the checkpoint).
 pub const mtp = @import("mtp.zig");
+/// TF_Q27_MTP_GPU_PICK: the draft pick from a GPU top-1 row.
+pub const mtp_pick = @import("mtp_pick.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
 pub const gdn_hook = @import("gdn_hook.zig");
