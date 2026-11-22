@@ -163,7 +163,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
-                } else {
+                } else if (try @import("cuda_group_proj.zig").run(e, &.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt)) {} else {
                     try e.projAgain(m.gate, x0, e.gate, rows, prompt);
                     try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
