@@ -34,6 +34,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
 | Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
 | Unlimited-OCR-2 | [Native Metal, the bf16 release: page images to structured text, 131k context](unlimited-ocr-metal.md) |
+| Inkling 2 Mini | [Native Metal, packed NVFP4/MXFP8 experts, DSpark head, images; experimental](inkling-2-mini-metal.md) |
 | Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
 | Ripple-65B-Preview | [Native Metal, the publisher's NVFP4 and bf16 releases](ripple-65b-metal.md) |
 
