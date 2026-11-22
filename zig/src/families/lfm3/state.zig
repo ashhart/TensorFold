@@ -181,7 +181,7 @@ pub const Scratch = struct {
     }
 
     pub fn prepareRangeRepair(self: *Scratch) !void {
-        const slice_rows = @min(self.rows, attn_slice);
+        const slice_rows: usize = @min(self.rows, attn_slice);
         const partials = slice_rows * c.query_heads * chunks;
         if (self.repair_exp == null) self.repair_exp = try self.memory.alloc(partials * c.head_dim * @sizeOf(i32));
         if (self.repair_flags == null) self.repair_flags = try self.memory.alloc(slice_rows * c.query_heads * @sizeOf(u32));

@@ -147,6 +147,8 @@ pub const Probe = struct {
     fn segmented(p: *Probe, e: mtl.ComputeEncoder) void {
         const b = &p.inner;
         const used = (b.data.history + b.data.rows + 4095) / 4096;
+        e.useResource(b.args[1].buf, mtl.ResourceUsage.read);
+        e.useResource(b.args[2].buf, mtl.ResourceUsage.read);
         e.setPipeline(p.segment_partial.?);
         bind(e, &.{ b.args[0], p.table, p.rows, b.risk });
         for (b.extra, 4..) |ref, i| e.setBuffer(ref.buf, ref.off, i);

@@ -12,6 +12,7 @@ const pairs = @import("row_projection.zig");
 const Buffer = mtl.Buffer;
 pub const counters = @import("../../core/gpu_counters.zig");
 const repair = @import("range_repair.zig");
+const range_order = @import("range_order.zig");
 
 pub const Segment = struct { cache: *st.Cache, rows: usize };
 pub const Head = enum { last, all };
@@ -405,15 +406,11 @@ fn sharedAttention(enc: *Encoder, s: *st.Scratch, segments: []const Segment, lay
     enc.groups(.{ c.query_heads, total, used }, .{ 128, 1, 1 });
     try enc.end();
     try enc.begin(.attention);
+    range_order.useCaches(enc.e, segments, layer, mtl.ResourceUsage.read);
     if (s.repair_exp != null) {
         repair.shared(enc.e, &enc.m.kernels, s, layer, total, used);
     } else {
         enc.pipe("lfm3_attn_segments_merge");
-        for (segments) |seg| {
-            const cache = seg.cache.blocks[layer].attention;
-            enc.e.useResource(cache.keys, mtl.ResourceUsage.read);
-            enc.e.useResource(cache.values, mtl.ResourceUsage.read);
-        }
         enc.e.setBuffer(s.pm, 0, 0);
         enc.e.setBuffer(s.pl, 0, 1);
         enc.e.setBuffer(s.po, 0, 2);
