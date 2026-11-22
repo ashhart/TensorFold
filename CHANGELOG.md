@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: `serve` with `--drafter` runs Qwen3.8-27B's DFlash2 drafter on the HIP engine through the lane core, where it was refused, and the drafter's weights and per-stream contexts count in the memory plan (#3665, refs #1563). Thanks to @AbrahamCete.
+
 - Hardening: tool-call parsing, streaming parsers and grammar compiles bound their work and validate arguments before emitting them (#4378).
 
 - GLM-5.3-Flash on Metal: every resident kept state is staged to disk while its borrowed rows can still be read, whatever `--spill-gib` is set to, so a long conversation's disk copy no longer stays at an older depth and later turns resume from the newest state (#2755, refs #2669).
