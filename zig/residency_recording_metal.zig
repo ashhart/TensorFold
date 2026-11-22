@@ -9,10 +9,7 @@ pub const Size = real.Size;
 pub const DispatchType = real.DispatchType;
 pub const Pipeline = struct {
     id: real.objc.Id,
-    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !@This() {
-        return .{ .id = @ptrFromInt(1) };
-    }
-    pub fn initOptional(_: Device, _: Library, _: []const u8, _: bool) !@This() {
+    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !Pipeline {
         return .{ .id = @ptrFromInt(1) };
     }
     pub fn deinit(_: @This()) void {}
@@ -24,23 +21,13 @@ pub const Pipeline = struct {
     }
 };
 pub const Library = struct {
-    id: real.objc.Id = @ptrFromInt(1),
-    pub fn fromFile(_: Device, _: []const u8) !@This() {
-        return .{};
-    }
-    pub fn fromBytes(_: Device, _: []const u8) !@This() {
-        return .{};
-    }
-    pub fn fromSource(_: Device, _: []const u8, _: CompileOptions) !@This() {
-        return .{};
+    id: objc.Id = @ptrFromInt(1),
+    pub fn fromSource(_: Device, _: []const u8, _: CompileOptions) !Library {
+        return error.KernelCompile;
     }
     pub fn deinit(_: @This()) void {}
 };
-pub const CompileOptions = struct {
-    pub fn mlx() @This() {
-        return .{};
-    }
-};
+pub const CompileOptions = real.CompileOptions;
 pub const Event = real.Event;
 pub const SharedEvent = struct {
     pub fn value(_: @This()) u64 {
@@ -175,6 +162,43 @@ pub const Buffer = struct {
 pub const Device = struct {
     id: objc.Id = @ptrFromInt(1),
     record: *Record,
+    pub fn init() !Device {
+        return error.NoDevice;
+    }
+    pub fn deinit(_: Device) void {}
+    pub fn name(_: Device) [*:0]const u8 {
+        return "recording";
+    }
+    pub fn generation(_: Device) u32 {
+        return 15;
+    }
+    pub fn tensorUnits(_: Device) bool {
+        return false;
+    }
+    pub fn maxBufferLength(_: Device) u64 {
+        return 1 << 30;
+    }
+    pub fn responds(_: Device, comptime _: [:0]const u8) bool {
+        return false;
+    }
+    pub fn queue(d: Device) !Queue {
+        return .{ .record = d.record };
+    }
+    pub fn hasMetal4(_: Device) bool {
+        return false;
+    }
+    pub fn queue4(d: Device) !Queue {
+        return .{ .record = d.record };
+    }
+    pub fn bufferNoCopy(d: Device, _: *anyopaque, len: usize, options: usize) !Buffer {
+        return d.buffer(len, options);
+    }
+    pub fn sharedEvent(_: Device) !SharedEvent {
+        return .{};
+    }
+    pub fn event(_: Device) !Event {
+        return .{ .id = @ptrFromInt(1) };
+    }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
         if (d.record.fail_at == d.record.allocations.items.len) return error.InjectedBufferFailure;
         const p = try d.record.gpa.create(Allocation);

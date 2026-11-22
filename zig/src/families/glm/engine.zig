@@ -1,5 +1,6 @@
 //! Metal GLM-5.3-Flash: a greedy reply at a time; prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -345,7 +346,7 @@ pub const Engine = struct {
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
-        e.committed = platform.c.mach_absolute_time();
+        e.committed = if (builtin.os.tag.isDarwin()) platform.c.mach_absolute_time() else monotonicNs();
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
         } else cb.wait();
@@ -357,6 +358,13 @@ pub const Engine = struct {
             return error.GpuFailed;
         }
         if (e.ep) |ep| if (ep.failed.load(.acquire) or ep.gaveUp() > 0) return error.EpLinkFailed;
+    }
+
+    /// `mach_absolute_time` is Darwin-only; host tests on other systems take the monotonic clock instead.
+    fn monotonicNs() u64 {
+        var ts: platform.c.timespec = undefined;
+        _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     }
 
     /// Wait until every command buffer this engine committed has completed (before the host touches shared state).

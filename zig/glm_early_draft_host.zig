@@ -5,10 +5,30 @@ const cfg = @import("src/families/glm/config.zig");
 const wts = @import("src/families/glm/weights.zig");
 const st = @import("src/families/glm/state.zig");
 const Slots = @import("src/families/glm/slots.zig").Slots;
+const Win = @import("src/families/glm/slots.zig").Win;
 const Engine = @import("src/families/glm/engine.zig").Engine;
 const Kernels = @import("src/families/glm/kernels.zig").Kernels;
 
 const a = std.testing.allocator;
+
+fn blank(value: anytype) void {
+    const T = @typeInfo(@TypeOf(value)).pointer.child;
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.field_names) |name| {
+            blank(&@field(value.*, name));
+        },
+        .array => for (&value.*) |*item| blank(item),
+        .optional => value.* = null,
+        .@"union" => |info| {
+            var payload: @FieldType(T, info.field_names[0]) = undefined;
+            blank(&payload);
+            value.* = @unionInit(T, info.field_names[0], payload);
+        },
+        .int, .float => value.* = 0,
+        .bool => value.* = false,
+        else => {},
+    }
+}
 
 fn prepare(value: anytype, dummy: wts.Ref, next_id: *usize) void {
     const P = @TypeOf(value);
@@ -28,10 +48,10 @@ fn prepare(value: anytype, dummy: wts.Ref, next_id: *usize) void {
     }
     switch (@typeInfo(T)) {
         .pointer => {},
-        .@"struct" => |info| inline for (info.fields) |field| {
-            prepare(&@field(value.*, field.name), dummy, next_id);
+        .@"struct" => |info| inline for (info.field_names) |name| {
+            prepare(&@field(value.*, name), dummy, next_id);
         },
-        .array => for (value.*) |*item| prepare(item, dummy, next_id),
+        .array => for (&value.*) |*item| prepare(item, dummy, next_id),
         .optional => if (value.*) |*item| prepare(item, dummy, next_id),
         .@"union" => switch (value.*) {
             inline else => |*item| prepare(item, dummy, next_id),
@@ -66,14 +86,14 @@ fn nth(record: *const mtl.Record, id: mtl.objc.Id, wanted: usize) !*const mtl.Pa
     return error.MissingPass;
 }
 
-fn bound(pass: *const mtl.Pass, expected: mtl.Buffer, offset: usize) !void {
+fn bound(pass: *const mtl.Pass, expected: wts.Ref, offset: usize) !void {
     const got = pass.buffers[0];
     try std.testing.expect(got.buffer != null);
-    try std.testing.expect(got.buffer.?.id == expected.id);
-    try std.testing.expectEqual(offset, got.offset);
+    try std.testing.expect(got.buffer.?.id == expected.buf.id);
+    try std.testing.expectEqual(expected.off + offset, got.offset);
 }
 
-fn externalEncode(_: *anyopaque, _: *Slots, _: mtl.CommandBuffer, _: mtl.ComputeEncoder, _: []const Slots.Win) void {}
+fn externalEncode(_: *anyopaque, _: *Slots, _: mtl.CommandBuffer, _: mtl.ComputeEncoder, _: []const Win) void {}
 fn externalLand(_: *anyopaque, _: *Slots, _: bool) void {}
 
 fn checkCase(early: bool, external: bool) !void {
@@ -112,14 +132,20 @@ fn checkCase(early: bool, external: bool) !void {
     e.s = initialized.state;
     e.sc = initialized.scratch;
 
-    var weights = std.mem.zeroes(wts.Weights);
+    var weights: wts.Weights = undefined;
+    blank(&weights);
     weights.buffers = .empty;
     weights.gpa = a;
-    weights.layers[e.c.layers].hc = null;
-    weights.layers[e.c.layers].attn = .{ .mla = std.mem.zeroes(wts.Mla) };
-    weights.layers[e.c.layers].mlp = .{ .moe = std.mem.zeroes(wts.Moe) };
-    weights.mtp = std.mem.zeroes(wts.Mtp);
-    var kernels = std.mem.zeroes(Kernels);
+    const mtp_layer = &weights.layers[e.c.layers];
+    mtp_layer.attn = .{ .mla = undefined };
+    blank(&mtp_layer.attn.mla);
+    mtp_layer.mlp = .{ .moe = undefined };
+    blank(&mtp_layer.mlp.moe);
+    var mtp_w: wts.Mtp = undefined;
+    blank(&mtp_w);
+    weights.mtp = mtp_w;
+    var kernels: Kernels = undefined;
+    blank(&kernels);
     var next_id: usize = 0x1000;
     prepare(&weights, e.sc.normed, &next_id);
     prepare(&kernels, e.sc.normed, &next_id);
@@ -142,29 +168,29 @@ fn checkCase(early: bool, external: bool) !void {
     slot.mtp = true;
     slot.seen = 0;
     slot.width = 3;
-    slot.mtp_pos = 7;
+    slot.s.mtp_pos = 7;
     slot.row0 = 2;
     slot.s.pos = 0;
 
     try slots.draftAll(&.{.{ .slot = 0, .prompt = false, .follow = &.{ 11, 12, 13 }, .depth = 2 }});
     try std.testing.expectEqual(@as(@TypeOf(slot.held_n), 2), slot.held_n);
-    try std.testing.expectEqual(@as(@TypeOf(slot.mtp_pos), 10), slot.mtp_pos);
+    try std.testing.expectEqual(@as(@TypeOf(slot.s.mtp_pos), 10), slot.s.mtp_pos);
     try std.testing.expectEqual(if (early) @as(usize, 2) else @as(usize, 5), count(&record, e.k.copy_u32.id));
     try std.testing.expectEqual(if (early) @as(usize, 2) else @as(usize, 3), count(&record, e.k.qmv_x.id));
     const qr = try first(&record, e.k.qmv_qr.id);
     const qr_offset = if (early) 2 * @as(usize, e.c.q_lora) * 2 else 0;
-    try bound(qr, e.sc.qr.buf, qr_offset);
+    try bound(qr, e.sc.qr, qr_offset);
     const add = try first(&record, e.k.add.id);
     if (early) {
-        try bound(add, e.sc.m_x.buf, 2 * @as(usize, e.c.hidden) * 2);
+        try bound(add, e.sc.m_x, 2 * @as(usize, e.c.hidden) * 2);
     } else {
-        try bound(add, slots.lasts.buf, 0);
+        try bound(add, slots.lasts, 0);
     }
     const hnorm = try nth(&record, e.k.rms.id, 1);
     if (early) {
-        try bound(hnorm, e.sc.hidden.buf, 2 * @as(usize, e.c.hidden) * 2);
+        try bound(hnorm, e.sc.hidden, 2 * @as(usize, e.c.hidden) * 2);
     } else {
-        try bound(hnorm, slots.rows.buf, 0);
+        try bound(hnorm, slots.rows, 0);
     }
     try std.testing.expectEqual(@as(usize, 0), record.waits);
     if (early and !external) {
