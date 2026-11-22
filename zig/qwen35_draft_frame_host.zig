@@ -276,6 +276,7 @@ fn actualFrame(block: usize) !void {
 
 test {
     _ = @import("qwen35_draft_equality.zig");
+    _ = @import("qwen35_draft_graphs_host.zig");
 }
 
 test "Draft frames: combined target rows above capacity refuse before even settling an earlier round" {
