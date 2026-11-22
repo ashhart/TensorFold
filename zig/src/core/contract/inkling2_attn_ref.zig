@@ -284,3 +284,59 @@ test "CUDA's defaults keep the bits the reference had in zig/tests/cuda (#4125)"
         try std.testing.expectEqualSlices(u64, &bits_, &got);
     }
 }
+
+// bits from the base file (5c1fea67f:zig/tests/cuda/contract_inkling2_attn_ref.zig) on these inputs
+test "CUDA's defaults keep the base bits past the extent, on a full window, the exact branch, gate 4 and tau" {
+    const a = std.testing.allocator;
+    const ring = 128;
+    const q = try a.alloc(u16, 2 * heads * D);
+    defer a.free(q);
+    const k = try a.alloc(u16, kv * ring * D);
+    defer a.free(k);
+    const v = try a.alloc(u16, k.len);
+    defer a.free(v);
+    const tab = try a.alloc(u16, 2 * heads * extent);
+    defer a.free(tab);
+    const sink = try a.alloc(u16, 2 * heads);
+    defer a.free(sink);
+    const gate = try a.alloc(u16, 2 * heads * D);
+    defer a.free(gate);
+    for ([_][]u16{ q, k, v, tab, gate, sink }, 1..) |x, m| for (x, 0..) |*e, i| {
+        e.* = pinned(i, m);
+    };
+    q[(1 * heads + 13) * D + 3] = c.toBf16(std.math.nan(f32));
+    sink[1 * heads + 7] = c.toBf16(std.math.inf(f32));
+    const st = [_]usize{ 0, 0 };
+    const Case = struct { pos: [2]usize, window: usize, exact: bool, r: usize, h: usize, bits: ?[4]u64 };
+    const cases = [_]Case{
+        .{ .pos = .{ 5000, 5001 }, .window = 0, .exact = false, .r = 0, .h = 13, .bits = .{ 0xbfc94c2fe7b239f9, 0xbfbbd5eb445673c4, 0x3f65377f773ff541, 0x3f571c5526af1cd6 } },
+        .{ .pos = .{ 2000, 2001 }, .window = 1024, .exact = false, .r = 0, .h = 5, .bits = .{ 0x3fc15c3191d15f7c, 0x3fd77f821709cc70, 0x3f5c6a56e75e29fd, 0x3f735aa88f30c395 } },
+        .{ .pos = .{ 300, 301 }, .window = 1024, .exact = true, .r = 0, .h = 0, .bits = .{ 0xbfc56a13a38f6bbf, 0xbfc0eaa55736282d, 0x3f456b149c7b1678, 0x3f40eb7056f63eb7 } },
+        .{ .pos = .{ 300, 301 }, .window = 0, .exact = false, .r = 1, .h = 13, .bits = null }, // a NaN q: want and tol NaN
+        .{ .pos = .{ 300, 301 }, .window = 0, .exact = false, .r = 1, .h = 7, .bits = null }, // a +inf sink: want and tol NaN
+    };
+    const ks = try a.create(Keys);
+    defer a.destroy(ks);
+    for (cases) |cs| {
+        const call: Call = .{ .q = q, .k = k, .v = v, .tab = tab, .sink = sink, .gate = gate, .pos = &cs.pos, .stream = &st, .ring = ring, .window = cs.window, .exact = cs.exact };
+        var w: [D]f64 = undefined;
+        var t: [D]f64 = undefined;
+        row(&call, cs.r, cs.h, ks, &w, &t);
+        if (cs.bits) |b| {
+            try std.testing.expectEqualSlices(u64, &b, &.{ @bitCast(w[0]), @bitCast(w[77]), @bitCast(t[0]), @bitCast(t[77]) });
+        } else for (w, t) |x, y| try std.testing.expect(std.math.isNan(x) and std.math.isNan(y));
+    }
+    const p = try a.alloc(f64, 5001);
+    defer a.free(p);
+    const col = try a.alloc(f64, 5001);
+    defer a.free(col);
+    const sp = [_]usize{ 5000, 5001 };
+    const call: Call = .{ .q = q, .k = k, .v = v, .tab = tab, .sink = sink, .gate = gate, .pos = &sp, .stream = &st, .ring = ring, .window = 0 };
+    var o: [D]f64 = undefined;
+    simulate(&call, 0, 12, .f32, .sequential, p, col, &o);
+    try std.testing.expectEqualSlices(u64, &.{ 0x3fd4c00000000000, 0xbfc2200000000000 }, &.{ @bitCast(o[0]), @bitCast(o[77]) });
+    simulate(&call, 0, 12, .bf16, .pairwise, p, col, &o);
+    try std.testing.expectEqualSlices(u64, &.{ 0x3fd4e00000000000, 0xbfc2000000000000 }, &.{ @bitCast(o[0]), @bitCast(o[77]) });
+    for ([_]usize{ 127999, 128000, 300000, 1048575 }, [_]u64{ 0x3ff0000000000000, 0x3ff00000d1b6e1a9, 0x3ff15ce10ac9824d, 0x3ff35d741b82a5cf }) |pos, b|
+        try std.testing.expectEqual(b, @as(u64, @bitCast(tau(pos))));
+}
