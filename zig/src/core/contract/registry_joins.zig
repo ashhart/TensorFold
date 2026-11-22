@@ -161,6 +161,7 @@ pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
     @import("qmmf_many_records.zig").records ++
     @import("gb10_many_records.zig").records ++
     @import("nvfp4_tile_pending.zig").records ++
+    @import("nvfp4_fact128_pending.zig").records ++
     landed_cuda ++
     dsv41_pending ++
     @import("inc4_pending.zig").trees ++

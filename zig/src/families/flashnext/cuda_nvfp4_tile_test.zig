@@ -29,6 +29,7 @@ test "K32 family dispatch: flag off, decode and up-only fallback keep the actual
     k.nvfp4.warps = 4;
     for (&k.nvfp4.fns, 0..) |*f, i| f.* = Mock.function(&driver, i + 1);
     for (&k.nvfp4.fact_fns, 0..) |*f, i| f.* = Mock.function(&driver, i + 21);
+    for (&k.nvfp4.fact128_fns, 0..) |*f, i| f.* = Mock.function(&driver, i + 41);
     k.nvfp4.resident = @splat(64);
     const s: cuda.Stream = .{ .d = &driver, .handle = null };
     const layer: cuda.experts.Layer = .{ .format = .nvfp4, .up = 20, .down = 30, .up_scale = 40, .down_scale = 50, .width = 160, .dims = 256, .experts = 6, .limit = 3 };
@@ -53,6 +54,17 @@ test "K32 family dispatch: flag off, decode and up-only fallback keep the actual
     try t.expectEqual(@as(usize, 32), Mock.selected);
     try t.expectEqualSlices(u64, &baseline_down, &Mock.args);
     try t.expectEqual(cuda.experts_tile.Tile.shared[1], Mock.shared);
+    // FACT128 dispatches its own WM=2 entries even when the K32 tile selects both epilogues.
+    try tile.run(&k, 128, s, .up, .{ .x = 10, .stride = 256, .slots = 3 }, layer, plan, 110, 3, 5);
+    try t.expectEqual(@as(usize, 41), Mock.selected);
+    try t.expectEqualSlices(u64, &baseline_up, &Mock.args);
+    try t.expectEqual(@as(u32, 256), Mock.threads);
+    try t.expectEqual(@as(u32, 51200), Mock.shared);
+    try tile.run(&k, 128, s, .down_f32, .{ .x = 10, .stride = 160 }, layer, plan, 110, 3, 5);
+    try t.expectEqual(@as(usize, 42), Mock.selected);
+    try t.expectEqualSlices(u64, &baseline_down, &Mock.args);
+    try t.expectEqual(@as(u32, 256), Mock.threads);
+    try t.expectEqual(@as(u32, 41984), Mock.shared);
     // decode, 5 blocks on 256 warps: half (fns[6]) at 3 items, classic at 30 (one wave), waves (fns[4]) at 60
     for ([_]usize{ 3, 30, 60 }, [_]usize{ 7, 1, 5 }) |items, id| {
         try tile.run(&k, 16, s, .up, .{ .x = 10, .stride = 256, .slots = 3 }, layer, plan, 110, items, 5);
@@ -61,4 +73,24 @@ test "K32 family dispatch: flag off, decode and up-only fallback keep the actual
         try t.expectEqual(@as(u32, 128), Mock.threads);
         try t.expectEqual(@as(u32, 0), Mock.shared);
     }
+}
+
+test "FACT_ROWS 128 alone widens prompt plan items; legacy thresholds and decode stay unchanged" {
+    const cuda_batch_kernels = @import("cuda_batch_kernels.zig");
+    const MockForms = struct { forms: cuda_batch_kernels.Forms };
+    var k: MockForms = .{ .forms = .{} };
+    try std.testing.expectEqual(@as(usize, 16), tile.size(&k, 63));
+    try std.testing.expectEqual(@as(usize, 64), tile.size(&k, 64));
+    try std.testing.expectEqual(@as(usize, 64), tile.size(&k, 8192));
+    k.forms.fact_rows = 128;
+    try std.testing.expectEqual(@as(usize, 16), tile.size(&k, 63));
+    try std.testing.expectEqual(@as(usize, 128), tile.size(&k, 64));
+    try std.testing.expectEqual(@as(usize, 128), tile.size(&k, 127));
+    try std.testing.expectEqual(@as(usize, 128), tile.size(&k, 128));
+    try std.testing.expectEqual(@as(usize, 128), tile.size(&k, 8192));
+    k.forms.fact_rows = 32;
+    try std.testing.expectEqual(@as(usize, 16), tile.size(&k, 31));
+    try std.testing.expectEqual(@as(usize, 64), tile.size(&k, 32));
+    k.forms.fact_rows = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 16), tile.size(&k, 8192));
 }

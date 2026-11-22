@@ -57,12 +57,13 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 `TF_FLASHNEXT_PROMPT_EXPERT_TILE=1` selects the K32 staging pipeline for NVFP4 prompt gate-up;
 `2` also selects its FP32 down projection. Unset or `0` keeps the existing kernels. Decode retains its existing
 16-pair form. `TF_FLASHNEXT_FACT_ROWS` retains its existing prompt threshold, including `0` to disable prompt tiles.
+Setting it to `128` instead selects 128-pair WM=2 FACT items for every prompt pass of at least 64 rows, ahead of K32.
 The pipeline adapts MiaAI-Lab's MIT recipe patch0014 and retains the same packed weights, BF16 activations,
-16-term dots, scale-FMA order and epilogue. This is an unqualified opt-in pending the GPU gates.
+16-term dots, scale-FMA order and epilogue. These are unqualified opt-ins pending the GPU gates.
 
-`tf-cuda-test nvfp4-fact` compares both prompt forms with the decode bytes on skewed routes, row and column tails,
-odd K32 groups and shared-expert skips. The normal CUDA kernel contract adds both replacement kernels and their
-rounding-order controls. Their compiler resource slots remain pending until measured for each served SM.
+`tf-cuda-test nvfp4-fact` compares decode, FACT64, K32 and FACT128 on skewed routes, row and column tails,
+odd K32 groups, shared-expert skips, an empty routed expert and chunks of 2048, 3072 and 8192 rows. The CUDA
+kernel contract adds FACT128 byte, rounding-order and non-finite gates. Compiler resource slots remain pending.
 Before enabling it for serving, run the full contract and compare main/candidate prompt-cut, resumed/fresh,
 drafted/plain and concurrent/solo tokens at the same checkpoint. Measure cold 4k, 16k and 128k prefill with cache
 disabled, alternating with the flag off. Host checks and compile-only checks do not establish GPU exactness or speed.

@@ -12,6 +12,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, fa
     const moe = b.step("test-moetile-host", "Shared down slot fixtures, launch dispatch and contract records without a GPU");
     all.dependOn(moe);
     moe.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"shared down stride"} })).step);
+    moe.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "K32 family dispatch", "FACT_ROWS 128" } })).step);
     const fixtures = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/moetile_tests.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "flashnext", .module = family } } });
     moe.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fixtures })).step);
     const root = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_flashnext_glue_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "flashnext", .module = family } } });

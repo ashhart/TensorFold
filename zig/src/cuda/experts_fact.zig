@@ -8,8 +8,17 @@ const Epi = experts.Epi;
 const Rows = experts.Rows;
 const Layer = experts.Layer;
 
-/// SwiGLU gate-up (.up) or fp32 down (.down_f32) on promptTile items: run's bits at every row, weights read once.
+/// SwiGLU gate-up (.up) or fp32 down (.down_f32) on 64-pair items: run's bits at every row, weights read once.
 pub fn runFact(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    return run(e, s, epi, in, l, p, out, items, skip, false);
+}
+
+/// The same FACT arithmetic on 128-pair items: WM=2 shares each staged weight tile across two M-warps.
+pub fn runFact128(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    return run(e, s, epi, in, l, p, out, items, skip, true);
+}
+
+fn run(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32, wide: bool) !void {
     const gate = epi == .up;
     if (epi == .down_bf16 or (gate and l.relu2)) return error.EpilogueNotBuilt;
     const nb = (if (gate) l.width else l.dims) / Nvfp4Experts.cols;
@@ -27,7 +36,8 @@ pub fn runFact(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, 
     a.add(if (gate) l.limit else @as(f32, 0.0));
     a.add(skip);
     const fi: usize = if (gate) 0 else 1;
-    const wn = Nvfp4Experts.fact_wn[fi];
-    const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + wn - 1) / wn)), .y = 1, .z = 1 }, .block = .{ .x = @intCast(wn * 32), .y = 1, .z = 1 }, .shared = Nvfp4Experts.promptSmem(if (gate) 2 else 1, wn) };
-    try launch_.launch(e.fact_fns[fi], cfg, s, &a);
+    const wn = (if (wide) Nvfp4Experts.fact128_wn else Nvfp4Experts.fact_wn)[fi];
+    const wm: usize = if (wide) 2 else 1;
+    const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + wn - 1) / wn)), .y = 1, .z = 1 }, .block = .{ .x = @intCast(wm * wn * 32), .y = 1, .z = 1 }, .shared = Nvfp4Experts.promptSmemWM(if (gate) 2 else 1, wm, wn) };
+    try launch_.launch((if (wide) e.fact128_fns else e.fact_fns)[fi], cfg, s, &a);
 }

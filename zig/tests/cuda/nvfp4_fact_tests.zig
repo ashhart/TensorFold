@@ -9,7 +9,7 @@ const d = 256; // eight k32 groups: four 64-input stages, so every pipeline dept
 const width = 160; // five 32-column blocks: gate-up's 4-warp CTA holds a partial second block row
 const experts = 6;
 const slots = 3; // two routed picks and the skipped shared slot
-const most = 300; // 600 routed pairs: items of 64 pairs and their remainders
+const most = 8192; // chunk fixtures 2048/3072/8192; routed expert 5 stays empty and expert 0 is hot
 const fx = cuda.experts.Nvfp4Experts;
 
 const Source = struct {
@@ -83,9 +83,9 @@ pub fn run(gpu: check.Gpu) !void {
     const dx = try r.dev(std.mem.sliceAsBytes(x));
     const picks = try a.alloc(i32, most * slots);
     for (0..most) |row| {
-        // expert 0 takes most pairs (several 64-pair items), the others a few each
-        picks[row * slots] = if (row % 3 == 0) @intCast(1 + row % (experts - 1)) else 0;
-        picks[row * slots + 1] = @intCast(1 + (row * 7) % (experts - 1));
+        // expert 0 takes most pairs; experts 1..4 share the rest; routed expert 5 is always empty
+        picks[row * slots] = if (row % 3 == 0) @intCast(1 + row % (experts - 2)) else 0;
+        picks[row * slots + 1] = @intCast(1 + (row * 7) % (experts - 2));
         picks[row * slots + 2] = experts; // the shared expert, skipped
     }
     const dp = try r.dev(std.mem.sliceAsBytes(picks));
@@ -104,20 +104,23 @@ pub fn run(gpu: check.Gpu) !void {
     defer kernels.unload();
     var tile_k = try cuda.experts_tile.Tile.load(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), .both);
     defer tile_k.unload();
-    const act = [3]u64{ try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2) };
-    const out = [3]u64{ try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4) };
+    const act = [4]u64{ try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2), try r.out(pairs_most * width * 2) };
+    const out = [4]u64{ try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4), try r.out(pairs_most * d * 4) };
     const tile = cuda.experts.promptTile(.nvfp4);
     var control_differs = false;
-    for ([_]usize{ 1, 7, 17, 22, 64, 65, 130, most }) |rows| {
+    for ([_]usize{ 1, 7, 17, 22, 64, 65, 130, 300, 2048, 3072, most }) |rows| {
         const pairs = rows * slots;
-        for (0..3) |form| {
+        for (0..4) |form| {
             for ([_]u64{ act[form], out[form] }, [_]usize{ width * 2, d * 4 }) |p, bytes| try gpu.d.check(gpu.d.api.cuMemsetD8Async(p, 0xff, pairs * bytes, r.s.handle), "cuMemsetD8Async");
-            const t: usize = if (form == 0) 16 else tile;
+            const t: usize = if (form == 0) 16 else if (form == 3) 128 else tile;
             const items = cuda.grouped.maxItems(pairs, experts + 1, t);
             try router.route(r.s, dp, pairs, experts + 1, t, plan);
             if (form == 2) {
                 try tile_k.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
                 try tile_k.run(r.s, .down_f32, .{ .x = act[form], .stride = width }, owned.view(), plan, out[form], items, experts);
+            } else if (form == 3) {
+                try fx.runFact128(&kernels, r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
+                try fx.runFact128(&kernels, r.s, .down_f32, .{ .x = act[form], .stride = width }, owned.view(), plan, out[form], items, experts);
             } else {
                 const f = if (form == 0) &fx.run else &fx.runFact;
                 try f(&kernels, r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act[form], items, experts);
@@ -135,6 +138,10 @@ pub fn run(gpu: check.Gpu) !void {
         const k32_y = try r.back(f32, out[2], pairs * d);
         try check.sameBytes("K32 tile gate-up equals the decode form", std.mem.sliceAsBytes(k32_act), std.mem.sliceAsBytes(act0));
         try check.sameBytes("K32 tile fp32 down equals the decode form", std.mem.sliceAsBytes(k32_y), std.mem.sliceAsBytes(y0));
+        const wide_act = try r.back(u16, act[3], pairs * width);
+        const wide_y = try r.back(f32, out[3], pairs * d);
+        try check.sameBytes("FACT128 gate-up equals the decode form at every chunk and tail", std.mem.sliceAsBytes(wide_act), std.mem.sliceAsBytes(act0));
+        try check.sameBytes("FACT128 fp32 down equals the decode form at every chunk and tail", std.mem.sliceAsBytes(wide_y), std.mem.sliceAsBytes(y0));
         // control: the existing prompt tile (scaled codes, one sum over K) on the same plan must part somewhere
         {
             const items = cuda.grouped.maxItems(pairs, experts + 1, tile);
@@ -144,7 +151,7 @@ pub fn run(gpu: check.Gpu) !void {
             if (!std.mem.eql(u16, ctl, act0)) control_differs = true;
         }
         // FP64: every routed pair's down output within the decode form's own bound (bf16 activations, fp32 down)
-        for (0..rows) |row| for (0..slots) |slot| {
+        if (rows <= 300) for (0..rows) |row| for (0..slots) |slot| {
             const e: usize = @intCast(picks[row * slots + slot]);
             if (e == experts) continue;
             var activation: [width]f64 = undefined;
@@ -180,5 +187,5 @@ pub fn run(gpu: check.Gpu) !void {
         };
     }
     try check.expect(control_differs, "control: the scaled-code prompt tile parts from the decode form's bytes (the equality check is sensitive)", .{});
-    r.report("NVFP4 fact tiles: gate-up and fp32 down bit-equal to the decode form at rows 1/7/17/22/64/65/130/300 (64-pair items vs 16), FP64-bounded; control red");
+    r.report("NVFP4 FACT64/FACT128 tiles: gate-up and fp32 down bit-equal to decode at tails and chunks 2048/3072/8192, hot/cold and empty experts; FP64-bounded through 300 rows; controls red");
 }

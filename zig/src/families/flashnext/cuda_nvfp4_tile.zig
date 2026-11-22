@@ -9,15 +9,16 @@ pub fn factRows() usize {
     return if (r == 0) std.math.maxInt(usize) else r;
 }
 
-/// Pairs a routed item holds for an n-row pass: the prompt tile's, an expert's weights read once an item, or 16.
+/// Item pairs per n-row pass: FACT128 always; otherwise the prompt threshold or 16-pair decode.
 pub fn size(k: anytype, n: usize) usize {
-    return if (n >= k.forms.fact_rows) cuda.experts.promptTile(.nvfp4) else 16;
+    if (k.forms.fact_rows == 128) return if (n >= 64) 128 else 16;
+    if (n < k.forms.fact_rows) return 16;
+    return cuda.experts.promptTile(.nvfp4);
 }
-
-/// Prompt tiles may select the K32 pipeline; decode calls take the decode form in equal waves; same bits.
+/// FACT128 uses its WM=2 entries; K32 remains a 64-pair alternative; decode calls retain equal waves and the same bits.
 pub fn run(k: anytype, pt: usize, s: cuda.Stream, epi: cuda.experts.Epi, in: cuda.experts.Rows, l: cuda.experts.Layer, p: cuda.grouped.Plan, out: u64, items: usize, skip: i32) !void {
-    if (pt != 16) if (k.expert_tile) |*tile| if (tile.takes(epi)) return tile.run(s, epi, in, l, p, out, items, skip);
-    const launch = if (pt == 16) &cuda.experts_waves.run else &cuda.experts.Nvfp4Experts.runFact;
+    if (pt == 64) if (k.expert_tile) |*tile| if (tile.takes(epi)) return tile.run(s, epi, in, l, p, out, items, skip);
+    const launch = if (pt == 16) &cuda.experts_waves.run else if (pt == 128) &cuda.experts.Nvfp4Experts.runFact128 else &cuda.experts.Nvfp4Experts.runFact;
     return launch(&k.nvfp4, s, epi, in, l, p, out, items, skip);
 }
 
