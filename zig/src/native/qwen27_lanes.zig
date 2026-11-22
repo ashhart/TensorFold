@@ -47,6 +47,8 @@ pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
     gpa: std.mem.Allocator,
     pass_profile: bool = false,
+    draw_pool_on: bool = false, // TF_Q27_DRAW_POOL: decode rows on helpers kept between calls
+    draw_pool: @import("qwen27_draws.zig").Pool(Rows) = .{},
     tensor_units: bool = false, // the device capability used by startup and first-token policy
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
@@ -118,6 +120,8 @@ pub const Metal = struct {
         errdefer gpa.destroy(b);
         b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
+        b.draw_pool_on = try @import("sys").environment.read(bool, "TF_Q27_DRAW_POOL", false);
+        if (b.draw_pool_on) b.draw_pool.start();
         errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
@@ -137,6 +141,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(b: *Metal) void {
+        b.draw_pool.deinit();
         b.settle() catch {};
         q.residency.setBack(b, null);
         b.standing.deinit(b.gpa);
@@ -263,7 +268,9 @@ pub const Metal = struct {
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
             // each row's whole-row draw at its own position, the window's rows on threads
-            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks, .pens = if (pens) .{ .ctx = &b.pens, .apply = lowerRow } else null, .row0 = first }, rows);
+            const job = Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks, .pens = if (pens) .{ .ctx = &b.pens, .apply = lowerRow } else null, .row0 = first };
+            const draws = @import("qwen27_draws.zig");
+            return if (b.draw_pool_on) b.draw_pool.each(job, rows) else draws.each(job, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);
