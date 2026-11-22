@@ -104,3 +104,12 @@ test "nemotron cuda steps: a cancel between chunks ends the pass at its next ste
     try std.testing.expectEqual(@as(usize, 0), r.b.fills.count());
     try std.testing.expect(r.b.lanes.contains(&s)); // the lane host releases the stream itself
 }
+
+test "nemotron cuda steps: the lanes report each chunk's fill, so the host accounts it and Drafted steps them (REV59 1)" {
+    var r: Rig = .{};
+    r.init();
+    defer r.deinit();
+    const vt = r.b.backend().vtable;
+    // drafted.zig steps a target only with all three: else --drafter falls back to the whole pass
+    try std.testing.expect(vt.prefill_step != null and vt.reports_fill and vt.features != null);
+}
