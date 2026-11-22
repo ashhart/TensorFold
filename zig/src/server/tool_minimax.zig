@@ -69,7 +69,8 @@ fn element(a: Allocator, text: []const u8, at: *usize, schema: tool_params.Schem
     const lead = p + (text[p..].len - std.mem.trimStart(u8, text[p..], " \t\r\n").len);
     if (!structured or !std.mem.startsWith(u8, text[lead..], ns ++ "<")) {
         const end = std.mem.indexOfPos(u8, text, p, closer) orelse return null;
-        if (!tool_params.finiteJson(text[p..end])) return null;
+        // a literal NaN or Infinity refuses a value its schema reads only as JSON; a string's text is kept as written
+        if (!tool_params.finiteJson(text[p..end]) and try tool_params.jsonOnly(a, .{ .value = current, .root = schema.root })) return null;
         const decoded = try tool_params.decode(a, text[p..end], .{ .value = current, .root = schema.root }, false);
         at.* = end + closer.len;
         return .{ .tag = opened.tag, .value = decoded, .end = at.* };

@@ -312,7 +312,6 @@ fn stripFence(text: []const u8) []const u8 {
 
 /// ``_parse_tool_call_payload``: one call from a block; null when it is not one, Invalid where Python raises.
 fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool) Error!?Call {
-    if (!tool_params.finiteJson(block)) return error.Invalid;
     if (std.mem.startsWith(u8, block, "call:") or std.mem.startsWith(u8, block, ":")) {
         if (try gemmaCall(a, block)) |c| return c;
     }
@@ -320,6 +319,8 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
         .ok => |v| v,
         .err => null,
     };
+    // JSON's NaN and Infinity literals refuse a block read as JSON; XML, GLM and Gemma values are text
+    if (decoded != null and !tool_params.finiteJson(block)) return error.Invalid;
     if (decoded) |v| {
         if (v == .array) {
             for (v.array) |item| {
