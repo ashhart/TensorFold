@@ -12,6 +12,9 @@ const poll: std.Io.Duration = .fromMilliseconds(20);
 /// Longest speech waits behind an exclusive hold: batch probes take microseconds, so a longer one is not a probe.
 const patience: std.Io.Duration = .fromSeconds(1);
 
+/// Windows files have no mode bits, so only POSIX widens or checks them.
+const modes = @hasDecl(std.Io.File.Permissions, "fromMode");
+
 /// Shared hold; best effort, so speech goes on without one when the lock cannot be opened or stays held.
 pub fn speak(io: std.Io, at: []const u8) ?std.Io.File {
     defer stamp(io, at);
@@ -61,7 +64,7 @@ fn open(io: std.Io, at: []const u8) !std.Io.File {
                 return create_err;
             };
             errdefer file.close(io);
-            try file.setPermissions(io, .fromMode(0o644)); // past the creator's umask, so the other user opens it
+            if (modes) try file.setPermissions(io, .fromMode(0o644)); // past the creator's umask, so the other user opens it
             return file;
         },
         else => e,
@@ -79,7 +82,7 @@ pub fn mark(io: std.Io, at: []const u8) ?Mark {
     const file = marker(io, at) catch return null;
     defer file.close(io);
     const stat = file.stat(io) catch return null;
-    if (stat.permissions.toMode() & 0o666 != 0o666) return null;
+    if (modes and stat.permissions.toMode() & 0o666 != 0o666) return null;
     var result: Mark = .{ .inode = stat.inode, .bytes = undefined };
     if ((file.readPositionalAll(io, &result.bytes, 0) catch return null) != result.bytes.len) return null;
     return result;
@@ -114,7 +117,7 @@ fn marker(io: std.Io, at: []const u8) !std.Io.File {
                 return create_err;
             };
             errdefer file.close(io);
-            try file.setPermissions(io, .fromMode(0o666));
+            if (modes) try file.setPermissions(io, .fromMode(0o666));
             var bytes: [16]u8 = undefined;
             io.random(&bytes);
             try file.writePositionalAll(io, &bytes, 0);
