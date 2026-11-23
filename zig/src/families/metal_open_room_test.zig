@@ -9,6 +9,7 @@ const cases = [_]Case{
     .{ .name = "spark25", .src = @embedFile("spark25/metal_backend.zig"), .undo = "self.held -= need;", .refit = "r.fit(r.ctx, self.options.budget - self.held, null, &.{});" },
     .{ .name = "flint", .src = @embedFile("flint/backend.zig"), .undo = "self.held -= need;", .refit = "r.fit(r.ctx, self.options.budget - self.held, null, &.{});" },
     .{ .name = "step5", .src = @embedFile("step5/backend.zig"), .undo = "self.held -= need;", .refit = "r.fit(r.ctx, self.options.budget - self.held, null, &.{});" },
+    .{ .name = "minimax_m3", .src = @embedFile("minimax_m3/prompt_pass.zig"), .undo = "self.held -= need;", .refit = "r.fit(r.ctx, self.options.budget - self.held, null, &.{});" },
 };
 
 test "Metal open room: a pass failing after its room fit gives the room back with the bytes, in every family (D1073)" {
