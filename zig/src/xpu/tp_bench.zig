@@ -1,7 +1,7 @@
 //! Phase 1 benchmark & bit-exactness verification for Level Zero P2P TP=2 and TP=4 collectives on Arc Pro Xe2.
 const std = @import("std");
 const ze = @import("ze");
-const device_id = @import("device_id.zig");
+const device_id = @import("device_id");
 const tp_mod = @import("tp.zig");
 const kb = @import("xpu_tp_kernels");
 
