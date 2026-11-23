@@ -192,6 +192,14 @@ fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     for (out[0..c.topk]) |*v| v.* -= log_total;
 }
 
+/// Grown nodes' own log-chances as path scores in place (a Tree's scores): each node's plus its parent's path.
+pub fn pathScores(parents: []const i32, scores: []f64) void {
+    for (parents, scores, 0..) |p, *s, i| {
+        std.debug.assert(p < @as(i32, @intCast(i)));
+        if (p >= 0) s.* += scores[@intCast(p)];
+    }
+}
+
 /// Up to `most` nodes best first, rows under `most_window`: the open node of least path cost next; the count grown.
 pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
     const Open = struct { cost: f64, parent: i32, token: u32, row: usize, own: f64 };
@@ -281,6 +289,17 @@ test "best first: a node's children follow it, the cheapest open node first, cha
     try std.testing.expectEqual(@as(i32, -1), parents[0]);
     for (parents[0..n], 0..) |p, i| try std.testing.expect(p < @as(i32, @intCast(i)));
     for (tokens[0..n], parents[0..n]) |t, p| try std.testing.expectEqual(p >= 0, t >= 10); // row 1's ids under row 0's
+    // a Tree's scores are paths: less the parent's, each node's own log-chance again, a chance of at most one
+    var path = own;
+    pathScores(parents[0..n], path[0..n]);
+    var over_one = false; // planted: own log-chances read as paths put a child's chance above one
+    for (parents[0..n], own[0..n], path[0..n]) |p, o, s| {
+        const local = s - (if (p >= 0) path[@intCast(p)] else 0);
+        try std.testing.expectApproxEqAbs(o, local, 1e-12);
+        try std.testing.expect(@exp(local) <= 1);
+        over_one = over_one or @exp(o - (if (p >= 0) own[@intCast(p)] else 0)) > 1;
+    }
+    try std.testing.expect(over_one);
 }
 
 test "DSpine table: each row's pick follows its sender's row; unary logits alone (no second pass) pick otherwise" {

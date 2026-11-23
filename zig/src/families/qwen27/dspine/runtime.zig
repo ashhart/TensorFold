@@ -118,6 +118,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        m.setResident(null);
         if (m.head_copy) |b| b.deinit();
         m.frame.deinit();
         m.dropPrepared();
@@ -256,7 +257,7 @@ pub const Model = struct {
         const dt = core.lanes.draft_tree;
         var tokens: [64]u32 = undefined;
         var parents: [64]i32 = undefined;
-        var own: [64]f64 = undefined;
+        var scores: [64]f64 = undefined;
         const want = @min(nodes, tokens.len);
         // each row: its 16 ids ascending, then 16 unused unary logits (the table scores every candidate)
         var words: [15 * 32]u32 = @splat(0);
@@ -268,20 +269,25 @@ pub const Model = struct {
             };
         }
         const c: dt.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.asBytes(&logits), .topk = 16, .rank = 0, .predecessor = &.{}, .successor = &.{}, .sampling = sampling, .position = position, .table = true, .layout = .{ .words = 32, .ids = 0, .logits = 16 } };
-        const n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], own[0..want]);
+        const n = dt.grow(64, c, pending, 15, want, tokens[0..want], parents[0..want], scores[0..want]);
+        dt.pathScores(parents[0..n], scores[0..n]); // Tree.scores are paths: lanes' `local` subtracts the parent's
         const out_tokens = try m.allocator.dupe(u32, tokens[0..n]);
         errdefer m.allocator.free(out_tokens);
         const out_parents = try m.allocator.dupe(i32, parents[0..n]);
         errdefer m.allocator.free(out_parents);
-        return .{ .gpa = m.allocator, .tokens = out_tokens, .parents = out_parents, .scores = try m.allocator.dupe(f64, own[0..n]) };
+        return .{ .gpa = m.allocator, .tokens = out_tokens, .parents = out_parents, .scores = try m.allocator.dupe(f64, scores[0..n]) };
     }
 
-    /// Its long-lived buffers, for a residency set: weights, head copy, caches, ring, packed gates and TG.
+    /// Its buffers for a residency set: weights, head copy, ring, packed gates, TG, and DFlash2's backend set.
     pub fn buffers(m: *const Model, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {
         for (m.checkpoint.shards.items) |s| try list.append(a, s.buffer);
         if (m.head_copy) |b| try list.append(a, b);
-        for (m.caches) |c| try list.appendSlice(a, &.{ c.keys, c.values });
         try list.appendSlice(a, &.{ m.pending, m.packed_w, m.tg });
+        try @import("../residency.zig").appendDraft(m, a, list);
+    }
+    /// The set's follow hook for buffers made or replaced later (frame pool, prepared weights, lane contexts).
+    pub fn setResident(m: *Model, hook: ?mtl.ResidencySet.Follow) void {
+        @import("../residency.zig").setDraft(m, hook);
     }
     /// An empty context; after a GPU failure too.
     pub fn reset(m: *Model) void {

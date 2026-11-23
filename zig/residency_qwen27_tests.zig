@@ -447,3 +447,67 @@ test "residency owner Qwen27: prepared draft tile publication replaces and unwin
     }
     try record.allFreed();
 }
+
+const dspine = @import("src/families/qwen27/dspine/runtime.zig");
+
+test "residency owner Qwen27: DSpine's inventory holds every buffer, and its hook follows frame and prepared weights" {
+    var record: mtl.Record = .{ .gpa = a };
+    defer record.deinit();
+    {
+        const device = record.device();
+        var owned: Buffers = .{ .device = device };
+        defer owned.deinit();
+        var m: dspine.Model = undefined;
+        m.allocator = a;
+        m.residency = null;
+        m.checkpoint.shards = .empty;
+        defer m.checkpoint.shards.deinit(a);
+        try m.checkpoint.shards.append(a, .{ .buffer = try owned.take(), .bytes = 64 });
+        m.head_copy = try owned.take();
+        m.pending = try owned.take();
+        m.packed_w = try owned.take();
+        m.tg = try owned.take();
+        m.attention.part = try owned.take();
+        m.topk.part = try owned.take();
+        m.frame = .{ .allocator = a, .device = device, .queue = record.queue() };
+        defer m.frame.deinit();
+        _ = try m.frame.begin();
+        _ = try m.frame.alloc(16, 16, .bf16);
+        m.frame.release();
+        m.caches = try backend_mod.newCaches(a, device, draftGeometry(), 1);
+        defer backend_mod.freeCaches(a, m.caches);
+        const Adapter = @import("src/core/affine4_lane.zig").Adapter;
+        m.prepared = .empty;
+        defer m.prepared.deinit(a);
+        m.tiled = .empty;
+        defer m.tiled.deinit(a);
+        var adapter: Adapter = undefined;
+        adapter.words = try owned.take();
+        adapter.metadata = try owned.take();
+        adapter.projection.sums_buffer = try owned.take();
+        try m.prepared.put(a, 1, adapter);
+        try m.tiled.put(a, 2, .{ .w = try owned.take(), .scales = try owned.take(), .biases = try owned.take(), .n = 32, .k = 64 });
+        var list: std.ArrayList(mtl.Buffer) = .empty;
+        defer list.deinit(a);
+        try m.buffers(&list, a);
+        var owner = (try mtl.resident.Resident.hold(a, std.testing.io, device, record.queue(), list.items, "qwen27")).?;
+        defer owner.deinit();
+        m.setResident(owner.follow());
+        defer m.setResident(null);
+        try record.checkInitial(); // planted: without the frame pool, prepared and tiled weights, buffers() misses some
+        try record.check();
+        _ = try m.frame.begin(); // a frame buffer made after the set joins it through the hook
+        _ = try m.frame.alloc(32, 32, .bf16);
+        owner.held.flush();
+        try record.check();
+        m.frame.release();
+        var next: Adapter = undefined;
+        next.words = try owned.take();
+        next.metadata = try owned.take();
+        next.projection.sums_buffer = try owned.take();
+        try residency.putPrepared(&m, 3, next);
+        owner.held.flush();
+        try record.check();
+    }
+    try record.allFreed();
+}

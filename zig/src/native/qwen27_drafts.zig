@@ -28,6 +28,11 @@ pub fn followsDraw(lone: bool, s: *const lanes.Stream) bool {
     return lone and s.sampling != null;
 }
 
+/// The draw a tree aims at: a lone sampled stream's, drafting on from where it stands; else none (drafter scores).
+pub fn drawFor(lone: bool, s: *const lanes.Stream, position: u64, stands: u64) @TypeOf(s.sampling) {
+    return if (position == stands + 1 and followsDraw(lone, s)) s.sampling else null;
+}
+
 /// Only slots that currently draft compete for rows in the next shared allocation.
 fn live(b: *const Metal) usize {
     var n: usize = 0;
@@ -81,13 +86,13 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        if (g.draft.* == .dspine) { // a sampled stream's tree aims at its keyed draws
-            asks[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .sampling = r.stream.sampling, .position = r.position };
+        // a lone sampled stream's tree ranks its candidates as the target's keyed race will draw them
+        const drawn = drawFor(lone, r.stream, r.position, stands);
+        if (g.draft.* == .dspine) { // a shared round reads each node's chance from its scores: no noise in them
+            asks[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .sampling = drawn, .position = r.position };
         }
         batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
-        // a lone sampled stream's tree ranks its candidates as the target's keyed race will draw them
-        if (r.position == stands + 1 and followsDraw(lone, r.stream)) {
-            const x = r.stream.sampling.?;
+        if (drawn) |x| {
             draws[n] = .{ .seed = x.seed };
             batch[n].noise = draws[n].noise();
             batch[n].temperature = x.temperature;

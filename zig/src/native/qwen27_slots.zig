@@ -11,6 +11,7 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
+const slot_context = @import("qwen27_slots_context.zig");
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -402,7 +403,7 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     const context_missing = b.draft != null and slot > 0 and b.contexts[slot] == null;
     if (!kv and !context_missing) return;
     const drafting = slot < b.draft_slots;
-    const context_bytes: usize = if (b.draft) |d| contextBytes(d.model, drafting) else 0;
+    const context_bytes: usize = if (b.draft) |d| slot_context.bytes(d.model, drafting) else 0;
     const need = (if (kv) b.runner.slotBytes() else 0) + (if (context_missing) context_bytes else 0);
     if (b.grow) |g| if (!g.room(g.ctx, need, s)) return error.LaneMemory;
     var added: std.ArrayList(mtl.Buffer) = .empty;
@@ -415,22 +416,6 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
         try x.buffers(&added, b.gpa);
     }
     if (b.grow) |g| g.added(g.ctx, added.items);
-}
-
-/// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
-fn contextBytes(d: q.drafter.Any, drafting: bool) usize {
-    const g = d.ring();
-    const ring = @as(usize, g.window) * g.stride;
-    const m = switch (d) {
-        .dflash2 => |m| m,
-        .dspine => |m| return m.contextBytes(drafting),
-    };
-    const c = m.graph.config;
-    var caches: usize = 0;
-    if (drafting) for (0..c.layers) |i| {
-        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
-    };
-    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
