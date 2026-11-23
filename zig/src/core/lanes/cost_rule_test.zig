@@ -47,10 +47,13 @@ test "the head is sampled once between widths and keeps the pass minimum" {
     try std.testing.expectEqual(@as(f64, 0.34), head);
     try std.testing.expectEqual(@as(usize, 3), s.head_calls);
     try std.testing.expectEqual(@as(usize, 24), s.window_calls);
+    for (0..rule.reps) |pass| for (0..3) |width| {
+        try std.testing.expectEqual(@as(u8, @intCast(width)), s.events[pass * 3 + width]);
+    };
     for (0..3) |width| {
-        const start = width * (rule.reps + 2);
-        for (s.events[start .. start + rule.reps + 1]) |event| try std.testing.expectEqual(@as(u8, @intCast(width)), event);
-        try std.testing.expectEqual(@as(u8, 255), s.events[start + rule.reps + 1]);
+        const start = rule.reps * 3 + 2 * width;
+        try std.testing.expectEqual(@as(u8, @intCast(width)), s.events[start]);
+        try std.testing.expectEqual(@as(u8, 255), s.events[start + 1]);
     }
 }
 
