@@ -9,6 +9,7 @@ pub const experts: u32 = 128;
 pub const intermediate: u32 = 1152;
 pub const top: u32 = 8;
 pub const Ref = @import("inkling2_metal_ref").Ref;
+pub const router_fused_min_rows: u32 = 33;
 const unit = mtl.Size.of(32, 1, 1);
 
 pub const Pipelines = struct {
@@ -17,10 +18,13 @@ pub const Pipelines = struct {
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
+    route_scores: mtl.Pipeline,
+    route_select: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     logits: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
+    route_dots: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.glue);
@@ -28,7 +32,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [9]mtl.Pipeline = undefined;
+        var pipes: [11]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -41,6 +45,8 @@ pub const Pipelines = struct {
             "tf_inkling2_logits",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
+            "tf_inkling2_route_scores",
+            "tf_inkling2_route_select",
         }, &pipes) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -55,10 +61,24 @@ pub const Pipelines = struct {
             .logits = pipes[6],
             .expert_pick = pipes[7],
             .expert_combine = pipes[8],
+            .route_scores = pipes[9],
+            .route_select = pipes[10],
+            .route_dots = try device.buffer((router_fused_min_rows - 1) * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
     pub fn deinit(p: *Pipelines) void {
-        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
+        p.route_dots.deinit();
+        p.expert_combine.deinit();
+        p.expert_pick.deinit();
+        p.logits.deinit();
+        p.swiglu.deinit();
+        p.route_select.deinit();
+        p.route_scores.deinit();
+        p.router.deinit();
+        p.conv_dynamic.deinit();
+        p.conv_static.deinit();
+        p.ar.deinit();
+        p.embed_norm.deinit();
     }
 };
 
@@ -104,13 +124,27 @@ pub fn convDynamic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, input:
     e.setPipeline(p.conv_dynamic);
     inline for (.{ taps, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 5);
-    e.dispatchGroups(mtl.Size.of(rows, 1, 1), unit);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 const RouteArgs = extern struct { rows: u32 };
 /// Router IDs and weights are sorted by ascending expert index for the deterministic expert sum.
 pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
     std.debug.assert(rows > 0 and rows <= 256);
+    if (rows < router_fused_min_rows) {
+        e.setPipeline(p.route_scores);
+        inline for (.{ x, weight }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setBuffer(p.route_dots, 0, 2);
+        e.setValue(RouteArgs{ .rows = rows }, 3);
+        e.dispatchGroups(mtl.Size.of(experts / 8, rows, 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+        e.setPipeline(p.route_select);
+        e.setBuffer(p.route_dots, 0, 0);
+        inline for (.{ bias, ids, weights }, 1..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setValue(RouteArgs{ .rows = rows }, 4);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), unit);
+        return;
+    }
     e.setPipeline(p.router);
     inline for (.{ x, weight, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 5);

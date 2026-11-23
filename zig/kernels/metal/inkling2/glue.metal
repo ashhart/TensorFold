@@ -109,41 +109,36 @@ kernel void tf_inkling2_conv_static(
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
-[[max_total_threads_per_threadgroup(32)]]
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_conv_dynamic(
     const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
     const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
     device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
     uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
   if (r >= a.rows) return;
-  const device bfloat* proj_row = projection + size_t(t) * 2304u;
-  const device bfloat* in_row = input + size_t(r) * 2304u;
-  float dot = 0.0f;
-  for (uint d = 0u; d < 2304u; d += 4u) {
-    const float4 p = float4(*(const device bfloat4*)(proj_row + d));
-    const float4 x = float4(*(const device bfloat4*)(in_row + d));
-    dot += p.x * x.x;
-    dot += p.y * x.y;
-    dot += p.z * x.z;
-    dot += p.w * x.w;
-  }
-  const float proj_t = float(bfloat(dot));
-  for (uint b128 = 0u, g = 0u; b128 < a.channels; b128 += 128u, g += 4u) {
-    const float pv[4] = {
-        simd_shuffle(proj_t, ushort(g)),
-        simd_shuffle(proj_t, ushort(g + 1u)),
-        simd_shuffle(proj_t, ushort(g + 2u)),
-        simd_shuffle(proj_t, ushort(g + 3u)),
-    };
-    const uint end = min(b128 + 128u, a.channels);
-    for (uint c = b128 + t; c < end; c += 32u) {
-      float sum = float(taps[size_t(r + 3) * a.channels + c]);
-      for (uint lag = 0u; lag < 4u; ++lag) {
-        const float w = float(static_w[lag * a.channels + c]) + pv[lag];
-        sum += w * float(taps[size_t(r + 3 - lag) * a.channels + c]);
-      }
-      out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
+  threadgroup float projected[32];
+  if (t < 32u) {
+    const device bfloat* proj_row = projection + size_t(t) * 2304u;
+    const device bfloat* in_row = input + size_t(r) * 2304u;
+    float dot = 0.0f;
+    for (uint d = 0u; d < 2304u; d += 4u) {
+      const float4 p = float4(*(const device bfloat4*)(proj_row + d));
+      const float4 x = float4(*(const device bfloat4*)(in_row + d));
+      dot += p.x * x.x;
+      dot += p.y * x.y;
+      dot += p.z * x.z;
+      dot += p.w * x.w;
     }
+    projected[t] = float(bfloat(dot));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint c = t; c < a.channels; c += 256u) {
+    float sum = float(taps[size_t(r + 3) * a.channels + c]);
+    for (uint lag = 0u; lag < 4u; ++lag) {
+      const float w = float(static_w[lag * a.channels + c]) + projected[4u * (c / 128u) + lag];
+      sum += w * float(taps[size_t(r + 3 - lag) * a.channels + c]);
+    }
+    out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
   }
 }
 
@@ -152,6 +147,114 @@ inline uint ink_order_key(float v) {
   if (v == 0.0f) v = 0.0f;
   const uint b = as_type<uint>(v);
   return (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
+}
+
+inline void ink_select_top8(
+    const thread float* sc, const device float* bias, device uint* ids, device float* weights,
+    threadgroup float* scores, uint row, uint lane) {
+  float key[4];
+  bool lane_nan = false;
+  for (uint k = 0u; k < 4u; ++k) {
+    const uint e = lane + 32u * k;
+    key[k] = sc[k] + bias[e];
+    lane_nan = lane_nan || isnan(key[k]);
+  }
+  uint picked[8];
+  float chosen[8];
+  if (!simd_any(lane_nan)) {
+    uint okey[4];
+    for (uint k = 0u; k < 4u; ++k) okey[k] = ink_order_key(key[k]);
+    uint taken = 0u;
+    for (uint r = 0u; r < 8u; ++r) {
+      uint best = 0u, at = 0xFFFFFFFFu;
+      for (uint k = 0u; k < 4u; ++k) {
+        if (((taken >> k) & 1u) == 0u && okey[k] > best) {
+          best = okey[k];
+          at = lane + 32u * k;
+        }
+      }
+      const uint top = simd_max(best);
+      const uint winner = simd_min(best == top ? at : 0xFFFFFFFFu);
+      float s = 0.0f;
+      if ((winner & 31u) == lane) {
+        const uint k = winner >> 5u;
+        taken |= 1u << k;
+        s = sc[k];
+      }
+      picked[r] = winner;
+      chosen[r] = simd_shuffle(s, ushort(winner & 31u));
+    }
+  } else {
+    for (uint k = 0u; k < 4u; ++k) scores[lane + 32u * k] = sc[k];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+      bool used[128] = {};
+      for (uint j = 0u; j < 8u; ++j) {
+        uint best = 128u;
+        for (uint e = 0u; e < 128u; ++e) if (!used[e]) {
+          const float ke = scores[e] + bias[e];
+          const float kb = best == 128u ? 0.0f : scores[best] + bias[best];
+          if (best == 128u || ke > kb) best = e;
+        }
+        used[best] = true;
+        picked[j] = best;
+        chosen[j] = scores[best];
+      }
+    }
+  }
+  if (lane == 0u) {
+    for (uint j = 1u; j < 8u; ++j) {
+      const uint id = picked[j];
+      const float score = chosen[j];
+      uint k = j;
+      while (k > 0u && picked[k - 1u] > id) {
+        picked[k] = picked[k - 1u];
+        chosen[k] = chosen[k - 1u];
+        --k;
+      }
+      picked[k] = id;
+      chosen[k] = score;
+    }
+    float den = 1e-20f;
+    for (uint j = 0u; j < 8u; ++j) den += chosen[j];
+    for (uint j = 0u; j < 8u; ++j) {
+      ids[row * 8u + j] = picked[j];
+      weights[row * 8u + j] = precise::divide(chosen[j], den) * 8.0f;
+    }
+  }
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_route_scores(
+    const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
+    device float* dots [[buffer(2)]], constant InkRouteArgs& a [[buffer(3)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint e = tg.x * 8u + sg, row = tg.y;
+  if (e >= 128u || row >= a.rows) return;
+  const device bfloat* w = weight + size_t(e) * 2304u;
+  const device bfloat* v = x + size_t(row) * 2304u;
+  float acc = 0.0f;
+  for (uint i = 8u * lane; i < 2304u; i += 256u) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4u));
+    const float4 v0 = float4(*(const device bfloat4*)(v + i)), v1 = float4(*(const device bfloat4*)(v + i + 4u));
+    acc += dot(w0, v0) + dot(w1, v1);
+  }
+  const float sum = simd_sum(acc);
+  if (lane == 0u) dots[row * 128u + e] = sum;
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_inkling2_route_select(
+    const device float* dots [[buffer(0)]], const device float* bias [[buffer(1)]],
+    device uint* ids [[buffer(2)]], device float* weights [[buffer(3)]],
+    constant InkRouteArgs& a [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]], uint row [[threadgroup_position_in_grid]]) {
+  if (row >= a.rows) return;
+  threadgroup float scores[128];
+  float sc[4];
+  for (uint k = 0u; k < 4u; ++k) sc[k] = ink_sigmoid(dots[row * 128u + lane + 32u * k]);
+  ink_select_top8(sc, bias, ids, weights, scores, row, lane);
 }
 
 // Fused router: sigmoid(weight . x), top-8 of score + bias (lowest expert on tie), ascending IDs, 512 B TG.
@@ -190,73 +293,9 @@ kernel void tf_inkling2_router(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (sg != 0u) return;
-  float sc[4], key[4];
-  bool lane_nan = false;
-  for (uint k = 0u; k < 4u; ++k) {
-    const uint e = lane + 32u * k;
-    sc[k] = scores[e];
-    key[k] = sc[k] + bias[e];
-    lane_nan = lane_nan || isnan(key[k]);
-  }
-  uint picked[8];
-  float chosen[8];
-  if (!simd_any(lane_nan)) {
-    uint okey[4];
-    for (uint k = 0u; k < 4u; ++k) okey[k] = ink_order_key(key[k]);
-    uint taken = 0u;
-    for (uint r = 0u; r < 8u; ++r) {
-      uint best = 0u, at = 0xFFFFFFFFu;
-      for (uint k = 0u; k < 4u; ++k) {
-        if (((taken >> k) & 1u) == 0u && okey[k] > best) {
-          best = okey[k];
-          at = lane + 32u * k;
-        }
-      }
-      const uint top = simd_max(best);
-      const uint winner = simd_min(best == top ? at : 0xFFFFFFFFu);
-      float s = 0.0f;
-      if ((winner & 31u) == lane) {
-        const uint k = winner >> 5u;
-        taken |= 1u << k;
-        s = sc[k];
-      }
-      picked[r] = winner;
-      chosen[r] = simd_shuffle(s, ushort(winner & 31u));
-    }
-  } else if (lane == 0u) {
-    bool used[128] = {};
-    for (uint j = 0u; j < 8u; ++j) {
-      uint best = 128u;
-      for (uint e = 0u; e < 128u; ++e) if (!used[e]) {
-        const float ke = scores[e] + bias[e];
-        const float kb = best == 128u ? 0.0f : scores[best] + bias[best];
-        if (best == 128u || ke > kb) best = e;
-      }
-      used[best] = true;
-      picked[j] = best;
-      chosen[j] = scores[best];
-    }
-  }
-  if (lane == 0u) {
-    for (uint j = 1u; j < 8u; ++j) {
-      const uint id = picked[j];
-      const float score = chosen[j];
-      uint k = j;
-      while (k > 0u && picked[k - 1u] > id) {
-        picked[k] = picked[k - 1u];
-        chosen[k] = chosen[k - 1u];
-        --k;
-      }
-      picked[k] = id;
-      chosen[k] = score;
-    }
-    float den = 1e-20f;
-    for (uint j = 0u; j < 8u; ++j) den += chosen[j];
-    for (uint j = 0u; j < 8u; ++j) {
-      ids[row * 8u + j] = picked[j];
-      weights[row * 8u + j] = precise::divide(chosen[j], den) * 8.0f;
-    }
-  }
+  float sc[4];
+  for (uint k = 0u; k < 4u; ++k) sc[k] = scores[lane + 32u * k];
+  ink_select_top8(sc, bias, ids, weights, scores, row, lane);
 }
 
 struct InkActArgs { uint rows, width; };

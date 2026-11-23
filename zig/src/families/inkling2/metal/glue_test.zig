@@ -18,8 +18,8 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     }
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
-    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.conv_dynamic)].threads);
-    try t.expectEqual(@as(u32, 0), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
+    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.router)].threads);
     try t.expectEqual(@as(u32, 512), records[@backingInt(p.Kind.router)].tg_memory);
 }

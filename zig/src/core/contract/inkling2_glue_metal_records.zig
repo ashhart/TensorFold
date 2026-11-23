@@ -4,7 +4,7 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue embed_norm tf_inkling2_embed_norm", .threads = 256, .tg_memory = 48, .reserved = 256 },
     .{ .name = "metal inkling2 glue ar tf_inkling2_ar", .threads = 576, .tg_memory = 720, .reserved = 576 },
     .{ .name = "metal inkling2 glue conv_static tf_inkling2_conv_static", .threads = 32, .tg_memory = 0, .reserved = 32 },
-    .{ .name = "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic", .threads = 256, .tg_memory = 128, .reserved = 256 },
     .{ .name = "metal inkling2 glue router tf_inkling2_router", .threads = 256, .tg_memory = 512, .reserved = 256 },
     .{ .name = "metal inkling2 glue swiglu tf_inkling2_swiglu", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue logits tf_inkling2_logits", .threads = 32, .tg_memory = 0, .reserved = 32 },
