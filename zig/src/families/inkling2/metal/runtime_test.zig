@@ -374,7 +374,8 @@ fn expectConvByte(queue: mtl.Queue, conv: mtl.Buffer, off: usize, len: usize, st
 }
 
 test "3-case GPU conv rollback restores backup or selects staged history (TF_INKLING2_METAL_DIR)" {
-    if (!builtin.os.tag.isDarwin() or @import("sys").getenv("TF_INKLING2_METAL_DIR") == null) return error.SkipZigTest;
+    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (@import("sys").getenv("TF_INKLING2_METAL_DIR") == null) return error.SkipZigTest;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
