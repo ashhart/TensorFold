@@ -19,6 +19,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers, the part plan); nothing calls it yet (#3563).
 
+- DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export (#3729).
+
 - Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
@@ -254,20 +256,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Idol's FLUX.2 VAE image encoder runs natively on Metal in fp32: one 1,024 x 1,024 picture to the denoiser's 4,101 condition rows, with the posterior's noise as an input. It is 0.185 s an encode on an M5 Ultra against 0.095 s for the SDK's bf16 encoder on torch MPS, and lies far closer to a float64 run: worst row 5.1e-5 against the SDK's 2.7e-2. `tf-idol-vae` gates it from a case `tools/zig/idol_case.py vae` records, with the ungated FLUX.2-klein-4B weights (#1774, after #1766, for #1757). Thanks to @jayleaton.
 
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
-
-- DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export (#3729).
-
-- DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) (#3567).
-
-- DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread (#3566).
-
-- DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port; a request cancelled by its cut leaves no held export. Nothing is exported unless the flag is given (#3565).
-
-- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
-
-- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers, the part plan); nothing calls it yet (#3563).
-
-- Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
 
