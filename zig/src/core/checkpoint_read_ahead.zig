@@ -192,7 +192,9 @@ fn packInner(gpa: std.mem.Allocator, io: std.Io, p: anytype, prefix: []const u8,
             }
         }
     }
-    const owned = try spans.toOwnedSlice(gpa);
+    // an exact copy, so the slice's allocation never depends on an in-place remap
+    const owned = try gpa.dupe(Span, spans.items);
+    spans.clearAndFree(gpa);
     const reader = try start(gpa, io, owned, count);
     return .{ .reader = reader, .arena = arena };
 }
