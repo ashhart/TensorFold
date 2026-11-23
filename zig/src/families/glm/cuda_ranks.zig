@@ -18,6 +18,7 @@ pub const Settings = struct {
     kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (an uneven fused KDA input, padded at load, tiled for glm_mm) or 0
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
+    keep_seqs: bool = false, // TF_GLM_KEEP_SEQS: 1 (a released slot keeps its sequence for its next request)
     pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
     pair_experts: bool = false, // TF_GLM_PAIR_EXPERTS=1: paired chunks share 128-pair NVFP4 routed-expert items (0: two 64-pair passes)
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
@@ -108,6 +109,12 @@ pub const Settings = struct {
         if (get("TF_GLM_PROMPT_PAIR")) |v| {
             if (std.mem.eql(u8, v, "1")) s.pair = true else if (std.mem.eql(u8, v, "0")) s.pair = false else {
                 problem.* = "TF_GLM_PROMPT_PAIR: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KEEP_SEQS")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.keep_seqs = true else if (std.mem.eql(u8, v, "0")) s.keep_seqs = false else {
+                problem.* = "TF_GLM_KEEP_SEQS: 0 or 1";
                 return error.BadSetting;
             }
         }
