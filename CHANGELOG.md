@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5 on CUDA: SenseNova-Loop-9B (`sensenova_loop`) serves in BF16, text only, on the looped schedule (physical layers 0-3, 4-27 twice, 28-31) with its mHC stream routing, one copy of the weights and a cache slot per execution; drafts, vision, pipeline stages and tensor parallel are refused for it, and other Qwen checkpoints run as before (#3723, refs #3717). Thanks to @Maxrio9.
+
 - GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#N).
 
 - Server: `tensorfold capabilities --json` now lists `TENSORFOLD_PARALLEL` and the other environment variables `serve` honours, so the desktop app's Engine variables page accepts them (#N, fixes #3684).
