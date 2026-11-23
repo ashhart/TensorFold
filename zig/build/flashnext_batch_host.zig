@@ -16,7 +16,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/load_memory.zig"), .target = b.graph.host });
     b.step("test-flashnext-memory-host", "Flash Next allocation floor and working-set refusal without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
     const bounded = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_budget_test.zig"), .target = b.graph.host, .link_libc = true });
-    b.step("test-flashnext-ssd-budget-host", "Refused SSD pools fit the unchanged ceiling with whole-layer capacity").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bounded })).step);
+    const bounded_run = b.addRunArtifact(b.addTest(.{ .root_module = bounded }));
+    b.step("test-flashnext-ssd-budget-host", "Refused SSD pools fit the unchanged ceiling with whole-layer capacity").dependOn(&bounded_run.step);
+    all.dependOn(&bounded_run.step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const empty = b.addWriteFiles().add("flashnext-test-empty.zig", "pub const bytes = \"\";\n");
