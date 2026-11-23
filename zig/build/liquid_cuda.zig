@@ -2,15 +2,12 @@
 const std = @import("std");
 
 const Made = struct { cuda: *std.Build.Module, optimize: std.builtin.OptimizeMode, m: *std.Build.Module };
-var made: [8]Made = undefined;
-var count: usize = 0;
+var made: std.ArrayList(Made) = .empty;
 
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
-    for (made[0..count]) |x| if (x.cuda == cuda and x.optimize == optimize) return x.m;
+    for (made.items) |x| if (x.cuda == cuda and x.optimize == optimize) return x.m;
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/liquid/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
-    if (count == made.len) @panic("liquid_cuda: more runtimes than expected");
-    made[count] = .{ .cuda = cuda, .optimize = optimize, .m = m };
-    count += 1;
+    made.append(b.allocator, .{ .cuda = cuda, .optimize = optimize, .m = m }) catch @panic("liquid_cuda: out of memory");
     return m;
 }
 
