@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const json = @import("json");
+const auth = @import("auth.zig");
 const args_mod = @import("chat_cli_args.zig");
 const history = @import("chat_cli_history.zig");
 const turn = @import("chat_cli_turn.zig");
@@ -96,18 +97,18 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
 
 pub const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
 
-/// The key ``--url`` sends: TENSORFOLD_API_KEY's first, as serve splits the variable; null when it names none.
+/// The first nonempty valid entry for ``--url``; null when all are empty. Every entry is checked first.
 pub fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
     const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
     var keys = std.mem.splitScalar(u8, text, ',');
+    var selected: ?[]const u8 = null;
     while (keys.next()) |raw| {
         const key = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
         if (key.len == 0) continue;
-        if (key.len > 256) return error.Refused;
-        for (key) |ch| if (ch < 0x21 or ch == 0x7f) return error.Refused;
-        return key;
+        if (!auth.validKey(key)) return error.Refused;
+        if (selected == null) selected = key;
     }
-    return null;
+    return selected;
 }
 
 /// What a running server's 401 adds: whether TENSORFOLD_API_KEY gave the key it refused.

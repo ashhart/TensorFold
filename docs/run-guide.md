@@ -30,9 +30,10 @@ served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
 The command starts a loopback server and sends one deterministic request. `--check` stops that server after a nonempty
 reply and exits 0; this ephemeral check replaces any caller API key with a private temporary key. Without `--check`, set
 `TENSORFOLD_API_KEY` in the environment first: persistent `start` requires at least one nonempty, valid entry, passes a
-comma-separated list to the child unchanged, and uses its first nonempty trimmed entry for the managed checks. The server
-accepts each registered entry. Send external requests with `Authorization: Bearer KEY`, replacing `KEY` with one accepted entry.
-Keys are never printed or placed in the child arguments. A failed first reply is fatal and the started server is stopped.
+comma-separated list to the child unchanged, and uses its first nonempty trimmed entry for the managed checks. Every entry
+must be UTF-8, at most 256 bytes, and contain no whitespace or control characters. The server accepts each registered entry.
+Send external requests with `Authorization: Bearer KEY`, replacing `KEY` with one accepted entry. Keys are never printed or
+placed in the child arguments. A failed first reply is fatal and the started server is stopped.
 No existing `serve` default or flag changes.
 
 ## Send a request
