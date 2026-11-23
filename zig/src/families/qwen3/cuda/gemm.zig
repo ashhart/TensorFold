@@ -146,6 +146,7 @@ pub const Gemms = struct {
         errdefer linear.deinit();
         try accept(&g.lt, n, k, linear.algo);
         got.value_ptr.* = .{ .linear = linear };
+        errdefer got.value_ptr.checked.deinit(g.gpa);
         try g.check(got.value_ptr, n, k, reference_rows);
         got.value_ptr.one = try g.oneRow(got.value_ptr, n, k);
         return got.value_ptr;

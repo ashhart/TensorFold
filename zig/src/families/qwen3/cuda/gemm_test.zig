@@ -119,3 +119,22 @@ test "qwen3 gemm control: a planted split-K 1-row candidate gives other bits, is
     defer pr.deinit(gpa);
     try t.expect(try rowsAgree(&g, &dev, &pr, n, k));
 }
+
+test "qwen3 gemm: a plan whose every allocation fails in turn leaks nothing, its checked rows included" {
+    var dev: Device = undefined;
+    try dev.open();
+    defer dev.close();
+    var failed: usize = 0;
+    while (true) : (failed += 1) {
+        var failing = t.FailingAllocator.init(gpa, .{ .fail_index = failed });
+        var g = try gemm.Gemms.init(failing.allocator(), &dev.d);
+        defer g.deinit();
+        _ = g.plan(1024, 1024) catch |e| {
+            try t.expectEqual(error.OutOfMemory, e);
+            continue;
+        };
+        break;
+    }
+    // past the checked-row put: getOrPut, that put, then the probe's own allocations fail
+    try t.expect(failed > 2);
+}
