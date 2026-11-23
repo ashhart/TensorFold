@@ -41,6 +41,8 @@ fn restored(x: *fixture.Fixture, tokens: []const u32, at: u32) !void {
 const Keep = struct {
     x: *fixture.Fixture,
     tokens: []const u32,
+    at: u32,
+    idle_step: bool,
     started: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     err: ?anyerror = null,
@@ -50,51 +52,76 @@ const Keep = struct {
         notes.sink = &k.heard;
         defer notes.sink = null;
         k.started.store(true, .release);
-        k.x.keep(k.tokens, 1000) catch |err| {
+        defer k.done.store(true, .release);
+        if (k.idle_step) {
+            k.x.keep(k.tokens, k.at) catch |err| {
+                k.err = err;
+            };
+            return;
+        }
+        // The transient image is admitted by Store.keep; an idle step could steal the newest save's queue entry.
+        k.x.f.prompt = k.tokens;
+        k.x.f.at = k.at;
+        std.testing.expect(k.x.s.keep(k.tokens, k.at, null, k.x.f.starts, k.x.f.spans)) catch |err| {
             k.err = err;
         };
-        k.done.store(true, .release);
     }
 };
 
 test "borrowed spill: a newest keep waits for the earlier write and restores after its rows expire" {
     for ([_]bool{ false, true }) |oversized| for ([_]rows.Spill{ .off, .finish, .evicted }) |spill| {
-        const x = try fixture.Fixture.open("borrowed-busy", spill, false, 1 << 20);
+        const x = try fixture.Fixture.open("borrowed-busy", spill, false, 9 << 20);
         defer x.close();
         var image = x.r.img.*;
         image.transient = transient;
         x.r.img = &image;
-        var hold: fixture.Gate = .{};
+        var hold: fixture.Gate = .{ .hold_ns = 10 * std.time.ns_per_s };
         defer hold.release.store(true, .release);
         x.r.file_io = hold.io();
         const tokens = fixture.prompt(73);
-        try x.keep(&tokens, 900);
+        var earlier: Keep = .{ .x = x, .tokens = &tokens, .at = 900, .idle_step = false };
+        const earlier_thread = try std.Thread.spawn(.{}, Keep.run, .{&earlier});
+        defer {
+            hold.release.store(true, .release);
+            earlier_thread.join();
+        }
+        const earlier_started = fixture.Gate.wait(&earlier.started);
         try fixture.Gate.wait(&hold.entered);
         const used = x.r.worker.?.bytes();
+        try t.expect(used > 0);
+        try t.expect(x.r.worker.?.pending() > 0);
+        try t.expect(!hold.left.load(.acquire));
         // One image fills the permit; a shared prefix can stage later, while a cold image needs the fallback.
         const limit = used;
         x.r.worker.?.limit = limit;
         const next = if (oversized) fixture.prompt(76) else tokens;
-        var keep: Keep = .{ .x = x, .tokens = &next };
+        var keep: Keep = .{ .x = x, .tokens = &next, .at = 1000, .idle_step = true };
         const thread = try std.Thread.spawn(.{}, Keep.run, .{&keep});
+        defer {
+            hold.release.store(true, .release);
+            thread.join();
+        }
         const started = fixture.Gate.wait(&keep.started);
         // Only a broken keep can return while its predecessor still owns the permit.
         const until = rows.write.nowNs() + 100 * std.time.ns_per_ms;
         while (!keep.done.load(.acquire) and rows.write.nowNs() < until) rows.write.io.nap();
         const premature = keep.done.load(.acquire);
+        try t.expect(!hold.left.load(.acquire));
         hold.release.store(true, .release);
-        thread.join();
+        try fixture.Gate.wait(&earlier.done);
+        try fixture.Gate.wait(&keep.done);
+        try earlier_started;
         try started;
+        if (earlier.err) |err| return err;
         if (keep.err) |err| return err;
         try t.expectEqual(false, premature);
-        // Both sizes now meet StagingFull and stream pieces; no whole-image permit.
-        const reason = "StagingFull";
+        const reason = if (oversized) "StagingFull" else "StagingBusy";
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, keep.heard.text(), reason));
         try t.expect(std.mem.indexOf(u8, keep.heard.text(), "1000 borrowed tokens") != null);
-        const action = "streaming bounded pieces";
+        const action: []const u8 = if (oversized) "streaming bounded pieces" else "waiting for staging permit";
         try t.expect(std.mem.indexOf(u8, keep.heard.text(), action) != null);
         try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
-        try t.expect(x.r.stage.len > 0);
+        try t.expectEqual(oversized, x.r.stage.len > 0);
         try restore(x, &next, 1000);
         try t.expectEqual(@as(u64, 2), x.r.counts.writes);
         try t.expectEqual(limit, x.r.worker.?.limit);
