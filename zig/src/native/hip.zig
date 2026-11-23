@@ -247,22 +247,6 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return .{ .active = u.device, .cache = 0, .peak = u.peak };
 }
 
-test "HIP optional family offers: image metadata comes from the loaded owner's offer" {
-    try std.testing.expect(fam.offerOf(.{}).vision == null);
-    try std.testing.expect(fam.offerOf(.{ .offer = serve.Offer{} }).vision == null);
-    const Stub = struct {
-        fn prepare(_: *anyopaque, _: Allocator, _: []const u8, _: u32) !api.PreparedImage {
-            return error.Unused;
-        }
-    };
-    var owner: u8 = 0;
-    const v: api.Vision = .{ .ctx = &owner, .prepare = Stub.prepare, .image_token = 9, .image_tokens = 6144, .max_images = 2 };
-    const offered = fam.offerOf(.{ .offer = serve.Offer{ .vision = v } }).vision.?;
-    try std.testing.expectEqual(v.ctx, offered.ctx);
-    try std.testing.expectEqual(v.image_token, offered.image_token);
-    try std.testing.expectEqual(v.image_tokens, offered.image_tokens);
-}
-
 /// The engine for `o.dir`, or null with `problem` when no HIP family reads it; under tensor parallelism, rank 0.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
@@ -576,6 +560,7 @@ test {
     _ = @import("draft_sources_hip_test.zig");
     _ = @import("mtp_drafts_hip_test.zig");
     _ = @import("hip_confidence_test.zig");
+    _ = @import("hip_offers_test.zig");
     _ = hip_drafter;
 }
 test "slide admission: hip refuses before checkpoint or device access" {
