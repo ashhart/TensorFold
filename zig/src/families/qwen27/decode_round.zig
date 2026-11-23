@@ -14,6 +14,7 @@ const GdnPool = @import("gdn_pool_gpu.zig").Pool;
 const GdnHook = @import("gdn_hook.zig").Hook;
 const GdnPlan = @import("gdn_plan.zig").Plan;
 const Round = @import("round_plan.zig").Round;
+const fingerprint = @import("round_fingerprint.zig").fingerprint;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
@@ -63,10 +64,13 @@ pub const Runner = struct {
     /// The last tapped pass's rows by slot: their cache start, first frame row and count (0: none held).
     tapped: [attn.planning.max_streams]Tapped = @splat(.{}),
     tail: ?forward.Tail = null,
+    picks_tail: bool = false,
     accepted_chain: bool = false,
     /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
     tail_from: ?u32 = null,
     last_gpu_seconds: f64 = 0,
+    /// Verify passes take the model's Metal 4 context when it has one; an A/B tool turns it off for one runner.
+    metal4: bool = true,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
     trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
@@ -276,7 +280,7 @@ pub const Runner = struct {
         defer metric.end();
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         mtl.pass_metrics.rows(round.ids.len);
-        if (r.tail != null and (accepted or head != .all)) return error.BadVerifyTail;
+        if (r.tail != null and !r.picks_tail and (accepted or head != .all)) return error.BadVerifyTail;
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
@@ -330,7 +334,7 @@ pub const Runner = struct {
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
         const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{@import("pass_queue.zig").queue(r, round.ids.len)}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
         };
@@ -579,22 +583,4 @@ fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mt
         return err;
     };
     return b;
-}
-
-fn fingerprint(round: *const Round) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update(std.mem.sliceAsBytes(round.ids));
-    hash.update(std.mem.sliceAsBytes(round.slots));
-    hash.update(std.mem.sliceAsBytes(round.feed_positions));
-    hash.update(std.mem.sliceAsBytes(round.draw_positions));
-    hash.update(std.mem.sliceAsBytes(round.firsts));
-    for (round.windows) |window| {
-        hash.update(std.mem.asBytes(&window.start));
-        hash.update(std.mem.asBytes(&window.taps));
-        hash.update(std.mem.sliceAsBytes(window.parents));
-        hash.update(std.mem.sliceAsBytes(window.conv));
-    }
-    var out: [32]u8 = undefined;
-    hash.final(&out);
-    return out;
 }

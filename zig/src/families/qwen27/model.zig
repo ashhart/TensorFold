@@ -19,6 +19,8 @@ pub const Model = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
+    /// Verify passes' own Metal 4 queue, where this Mac has one and TF_Q27_METAL4 allows it (see metal4Wanted).
+    metal4: ?mtl.Queue = null,
     /// This rank's share of the family's weights; `local` shapes are what this graph builds, `global` the file's.
     shard: cfg.Shard,
     /// The local config, so downstream shapes are the rank's own.
@@ -129,6 +131,12 @@ pub const Model = struct {
         validation.end();
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
+        m.metal4 = null;
+        if (try metal4Wanted(m.device)) m.metal4 = m.device.queue4() catch |err| blk: {
+            std.log.info("qwen27: verify passes stay on Metal 3: {s}", .{@errorName(err)});
+            break :blk null;
+        };
+        errdefer if (m.metal4) |q| q.deinit();
         m.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer m.checkpoint.deinit();
         const headers = timing.span(.checkpoint_headers);
@@ -219,6 +227,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.metal4) |q| q.deinit();
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
         if (m.moe) |*k| k.deinit();
@@ -231,6 +240,11 @@ pub const Model = struct {
         m.allocator.destroy(m);
     }
 };
+
+/// Metal 4 on chips with tensor units, where it was measured; TF_Q27_METAL4=0 turns it off and 1 on elsewhere.
+fn metal4Wanted(device: mtl.Device) !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_METAL4", device.tensorUnits());
+}
 
 /// Default frame rows follow attention geometry; a validated environment override keeps its width.
 pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {

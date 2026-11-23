@@ -8,6 +8,16 @@ const Timeline = @import("metal4_timeline.zig").Timeline;
 const Id = objc.Id;
 const heap = std.heap.c_allocator;
 
+/// Apple's unfair lock; off Apple an empty stand-in, since other builds still analyze this file and never run it.
+const darwin = @import("builtin").os.tag.isDarwin();
+const Lock = if (darwin) std.c.os_unfair_lock else struct {};
+fn hold(lock: *Lock) void {
+    if (darwin) std.c.os_unfair_lock_lock(lock);
+}
+fn releaseLock(lock: *Lock) void {
+    if (darwin) std.c.os_unfair_lock_unlock(lock);
+}
+
 /// In only where the root declares `tf_metal4 = true` (the DeepSeek server) and in tests; elsewhere compiled out.
 pub const enabled = @import("builtin").is_test or (@hasDecl(@import("root"), "tf_metal4") and @import("root").tf_metal4);
 
@@ -313,7 +323,7 @@ pub const State = struct {
     queue: Id,
     event: Id,
     set: Id,
-    lock_word: std.c.os_unfair_lock = .{},
+    lock_word: Lock = .{},
     tick: u64 = 0,
     next: usize = 0,
     /// slots begun and not yet committed
@@ -373,11 +383,11 @@ pub const State = struct {
     }
 
     fn lock(q: *State) void {
-        std.c.os_unfair_lock_lock(&q.lock_word);
+        hold(&q.lock_word);
     }
 
     fn unlock(q: *State) void {
-        std.c.os_unfair_lock_unlock(&q.lock_word);
+        releaseLock(&q.lock_word);
     }
 
     /// The next slot, begun: its previous use has completed (it is waited for if not) and its allocator is reset.
@@ -562,6 +572,14 @@ pub const State = struct {
         if (q.timeline) |t| t.end();
     }
 };
+
+pub fn waitForFence(e: Id, fence: Id) void {
+    objc.msg(void, e, "waitForFence:beforeEncoderStages:", .{ fence, stage_dispatch });
+}
+
+pub fn updateFence(e: Id, fence: Id) void {
+    objc.msg(void, e, "updateFence:afterEncoderStages:", .{ fence, stage_dispatch });
+}
 
 test "the follow table: lookups, a dropped key, growth keeps every live address" {
     const t = Table.init(8);
