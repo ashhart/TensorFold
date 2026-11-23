@@ -438,14 +438,13 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 }
 
 pub fn requestedLanes(count: u32, fixed: bool) error{Slots}!u32 {
-    _ = fixed;
-    return count;
+    const slots = @import("automatic_lanes").bounded(count, fixed, 32);
+    if (slots == 0 or slots > 32) return error.Slots;
+    return slots;
 }
 
 fn requestedSlots(o: Options) error{Slots}!u32 {
-    const slots = @import("automatic_lanes").bounded(o.lanes, o.lanes_fixed, 32);
-    if (slots == 0 or slots > 32) return error.Slots;
-    return slots;
+    return requestedLanes(o.lanes, o.lanes_fixed);
 }
 
 /// The native entry: a GB10 (sm_121) at TF_TP_WORLD=2 (rank 1 runs `tf-muse follow`); drafts need --drafter.
