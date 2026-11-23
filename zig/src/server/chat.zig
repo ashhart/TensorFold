@@ -302,7 +302,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (srv.recipients and input.prompt == null) gen.recipient = try recipient_reply.Reading.of(a, srv.text, request.prompt, input.tools, prepared.reasoning);
     const result: Failure!Reply = blk: {
         if (sink) |s| if (s.begin) |begin| begin(s.ctx, prepared.prompt_len) catch break :blk error.Cancelled;
-        if (sink != null and input.tools.len > 0 and srv.text.vtable.format != .kimi) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
+        if (sink != null and input.tools.len > 0 and srv.text.vtable.format != .kimi and !@import("chat_inkling2.zig").enabled(srv)) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
         gen.loop(gone) catch |e| break :blk e;
         break :blk gen.finish(cx, prepared.prompt_len, received, prepared.thinking, prepared.reasoning, effort, prepared.sampled, prepared.drafts);
     };
