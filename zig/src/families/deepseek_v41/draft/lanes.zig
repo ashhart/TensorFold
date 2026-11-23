@@ -378,7 +378,7 @@ pub const Lanes = struct {
             if (!dsparkRound(st, w) or !sp.wouldWant(st.slot)) continue;
             // keyed rows: the sampler's device choice (vsample.choose); a nucleus row's statistics stay on the host
             const sampled = if (w.stream.sampling) |smp| smp.temperature > 0 else false;
-            if (sampled and spec_mod.isNucleus(w.stream.sampling)) continue;
+            if (sampled and spec_mod.isNucleus(w.stream.sampling) and !sp.settings.nucleus) continue;
             arm(x.pass.ptr, st.slot, g.start, @intCast(g.tokens.len), sampled);
         }
     }

@@ -37,7 +37,7 @@ pub const Pass = struct {
     }
 
     /// Right after a window: each slot's next passes wide or narrow by its rows, then the chain behind it.
-    fn queueChain(ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: mtl.Buffer) void {
+    fn queueChain(ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: []const mtl.Buffer) void {
         const p = self(ctx);
         for (group) |g| p.x.note(g.slot, @intCast(g.tokens.len));
         if (p.early) |e| e.queue(group, logits, off, taps);
@@ -116,7 +116,7 @@ pub const Pass = struct {
             .chain => {
                 const e = p.early.?;
                 // a chain settled since (the target drained it): its rows are the host's now, the pass runs here
-                if (e.chain != null and e.chain.?.ask != null) return e.collect(ys[0..out.len]);
+                if (e.chain != null and e.chain.?.begun) return e.collect(ys[0..out.len]);
                 try p.chainDone();
                 return p.x.propose(asks, ys[0..out.len]);
             },

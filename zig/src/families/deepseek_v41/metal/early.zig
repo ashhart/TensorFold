@@ -1,4 +1,4 @@
-//! Drafts behind the verify: a window's picks (greedy or keyed), acceptance, ingest and next pass queued on the GPU.
+//! Drafts behind the verify: default single-slot greedy/raced, plus opt-in multi-slot & filtered GPU picks/accept.
 const std = @import("std");
 const mtl = @import("metal");
 const host = @import("dsv41");
@@ -6,80 +6,107 @@ const dspark = @import("dspark.zig");
 const plan_ = @import("dspark_plan.zig");
 const pipelines = @import("pipelines.zig");
 const picks_ = @import("early_picks.zig");
+const mkv = @import("markov.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
+const attn = pipelines.attn;
 const R = pipelines.max_rows;
 const Plan = plan_.Plan;
 const threads = 1024;
+const slot_plan_ints = 68;
 pub const raced = picks_.raced;
+pub const supported = picks_.supported;
 
 pub const Stats = struct {
-    /// chains queued behind a window (`keyed`: of sampled windows); their passes the lanes took, and those dropped
+    /// chains queued behind a window (`keyed`: sampled windows); passes the lanes took, and those dropped
     queued: u64 = 0,
     keyed: u64 = 0,
     used: u64 = 0,
     dropped: u64 = 0,
     /// chains whose accepted count a test swapped (`skew_every`)
     skewed: u64 = 0,
+    /// multi-slot chains queued (2+ slots in one behind-the-verify chain)
+    multi: u64 = 0,
 };
 
 /// A window about to be verified whose slot may draft behind it (Pass.arm).
 const Arm = struct { slot: u32, start: u64, rows: u32 };
 
-/// A chain queued behind a window: its slot's window, its command buffer, and what the lanes asked of it since.
-const Chain = struct {
+/// One slot of a queued chain behind a verify window.
+const ChainSlot = struct {
     slot: u32,
     start: u64,
     rows: u32,
-    /// its pass's chain runs on the GPU (dspark.Pass.drawsOnGpu)
-    gpu: bool,
-    /// the drafts its pass makes
-    block: u32,
+    r0: u32,
     taps: mtl.Buffer,
-    cb: mtl.CommandBuffer,
     /// the window's first rows the lanes asked ingested: the chain's own ingest when its picks accepted as many
     deferred: ?u32 = null,
-    /// the pass the lanes began over it
+    /// the pass ask the lanes began for this slot
     ask: ?dspark.Ask = null,
+};
+
+/// A chain queued behind a window: its slots, its command buffer, and what the lanes asked of it since.
+const Chain = struct {
+    slots: [R]ChainSlot = undefined,
+    n_slots: usize = 0,
+    /// maps caller's `begin(asks)` index k -> `slots[idx]`
+    ask_order: [R]u8 = @splat(0),
+    begun: bool = false,
+    /// its pass's chain runs on the GPU (dspark.Pass.drawsOnGpu for all slots)
+    gpu: bool = false,
+    /// whether this chain needs top-K GPU Markov filtering (greedy/raced stay on shared-w2 full-vocab)
+    use_topk: bool = false,
+    /// the drafts its pass makes per slot
+    block: u32 = 0,
+    cb: mtl.CommandBuffer = undefined,
 };
 
 pub const Early = struct {
     a: std.mem.Allocator,
     x: *dspark.Pass,
+    cert: bool,
     picks: picks_.Picks,
-    /// tokens [R] u32, picks [R] u32, the accepted count and the bonus, then each sampled row's key base [R] u64
+    /// tokens [R] u32, picks [R] u32, results [2*R] u32, legacy bases [R] u64 / cert Row [R] + Slot [R]
     state: mtl.Buffer,
-    /// the plan of each accepted count: [R][Plan.ints] i32
+    /// legacy: [R][Plan.ints] i32; cert: [R][R][slot_plan_ints] i32 (68 KiB)
     plans: mtl.Buffer,
-    armed: ?Arm = null,
-    /// more than one greedy slot armed for the coming window (no chain)
+    armed: [R]Arm = undefined,
+    n_armed: usize = 0,
     crowded: bool = false,
     chain: ?Chain = null,
     stats: Stats = .{},
-    /// tests: every this many chains (0: none) the GPU swaps an accepted count of 0 and 1, so the chain is dropped
+    /// tests: every this many chains (0: none) the GPU swaps slot 0's acc 0 and 1, so the chain is dropped
     skew_every: u32 = 0,
 
     const tokens_at = 0;
     const picks_at = 4 * R;
     const result_at = 8 * R;
     const bases_at = 8 * R + 16;
+    const rows_at = 16 * R;
+    const slots_at = rows_at + R * @sizeOf(picks_.Row);
+    const state_bytes = @max(bases_at + 8 * R, slots_at + R * @sizeOf(picks_.Slot));
+    const legacy_plans_bytes = @as(usize, R) * Plan.ints * 4;
+    const cert_plans_bytes = @as(usize, R) * R * slot_plan_ints * 4;
 
     pub fn init(a: std.mem.Allocator, x: *dspark.Pass) !*Early {
-        var picks = try picks_.Picks.init(x.device);
+        const cert = x.p.mma_cert != null;
+        var picks = try picks_.Picks.initWith(x.device, cert);
         errdefer picks.deinit();
-        const state = try x.device.buffer(bases_at + 8 * R, mtl.ResourceOptions.shared);
+        const state = try x.device.buffer(state_bytes, mtl.ResourceOptions.shared);
         errdefer state.deinit();
-        const plans = try x.device.buffer(@as(usize, R) * Plan.ints * 4, mtl.ResourceOptions.shared);
+        @memset(state.contents()[0..state_bytes], 0);
+        const plans_bytes = if (cert) cert_plans_bytes else legacy_plans_bytes;
+        const plans = try x.device.buffer(plans_bytes, mtl.ResourceOptions.shared);
         errdefer plans.deinit();
-        @memset(plans.contents()[0 .. @as(usize, R) * Plan.ints * 4], 0);
+        @memset(plans.contents()[0..plans_bytes], 0);
         if (x.resident) |set| {
             set.add(state);
             set.add(plans);
             set.commit();
         }
         const e = try a.create(Early);
-        e.* = .{ .a = a, .x = x, .picks = picks, .state = state, .plans = plans };
+        e.* = .{ .a = a, .x = x, .cert = cert, .picks = picks, .state = state, .plans = plans };
         return e;
     }
 
@@ -93,21 +120,30 @@ pub const Early = struct {
 
     // the window ---------------------------------------------------------------------------------------------------
 
-    /// Before a window: `slot`'s rows from `start` may draft behind it (a keyed window's sampling is read at `queue`).
+    /// Before a window: `slot`'s rows from `start` may draft behind it (sampling read at `queue`).
     pub fn arm(e: *Early, slot: u32, start: u64, rows: u32, sampled: bool) void {
         _ = sampled;
-        if (e.armed != null) e.crowded = true else e.armed = .{ .slot = slot, .start = start, .rows = rows };
+        if (e.n_armed > 0) e.crowded = true;
+        if (e.n_armed < R) {
+            e.armed[e.n_armed] = .{ .slot = slot, .start = start, .rows = rows };
+            e.n_armed += 1;
+        }
     }
 
-    /// Right after a window's command buffers: its slot's chain (picks, accepted drafts, ingest and pass), when armed.
-    pub fn queue(e: *Early, group: []const iface.Segment, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer) void {
-        const armed = e.armed orelse return;
+    /// Right after a window's command buffers: queue picks, accept, ingest and next draft pass.
+    pub fn queue(e: *Early, group: []const iface.Segment, logits: mtl.Buffer, logits_off: usize, taps: []const mtl.Buffer) void {
+        const n_armed = e.n_armed;
+        const crowded = e.crowded;
         defer {
-            e.armed = null;
+            e.n_armed = 0;
             e.crowded = false;
         }
-        if (e.crowded or group.len != 1 or e.chain != null) return;
-        const g = group[0];
+        if (e.cert) return e.queueCert(n_armed, group, logits, logits_off, taps);
+        if (crowded or n_armed != 1 or group.len != 1 or taps.len != 1 or e.chain != null) return;
+        e.queueLegacy(e.armed[0], group[0], logits, logits_off, taps[0]);
+    }
+
+    fn queueLegacy(e: *Early, armed: Arm, g: iface.Segment, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer) void {
         const x = e.x;
         const c = x.c;
         const B = x.blockOf(g.slot);
@@ -115,34 +151,30 @@ pub const Early = struct {
         if (g.slot != armed.slot or g.start != armed.start or n != armed.rows or g.slot >= x.runs.len) return;
         const keyed = if (g.sampling) |s| s.temperature > 0 else false;
         if (keyed and !raced(g.sampling.?, c.vocab)) return;
-        if (g.draws.len != n) return;
-        // rows past the accepted ones land in the block's own rows, which every pass writes before it reads them
-        if (n == 0 or n > c.dspark_block + 1 or n > R or g.start + n + B > x.tables.positions) return;
-        // the slot's rows from the window on as the drafter last had them (a cut window's put back), then kept again
+        if (g.draws.len != n or n == 0 or n > c.dspark_block + 1 or n > R or g.start + n + B > x.tables.positions) return;
         x.undo.settle(g.slot, g.start);
-        e.stage(g, n, B) catch return;
+        e.stageLegacy(g, n, B) catch return;
         x.undo.save(g.slot, g.start, n);
         const skew = e.skew_every > 0 and n > 1 and (e.stats.queued + 1) % e.skew_every == 0;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = x.queue.commandBuffer();
-        // a buffer never committed never runs: the rings stay as they are
-        e.encode(cb, logits, logits_off, taps, g.start, n, B, skew, if (keyed) g.sampling.? else null) catch return;
+        e.encodeLegacy(cb, logits, logits_off, taps, g.start, n, B, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
         e.stats.skewed += @intFromBool(skew);
         e.stats.keyed += @intFromBool(keyed);
-        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .block = B, .gpu = x.mk != null, .taps = taps, .cb = cb.retain() };
+        var ch: Chain = .{ .n_slots = 1, .block = B, .gpu = x.mk != null, .cb = cb.retain() };
+        ch.slots[0] = .{ .slot = g.slot, .start = g.start, .rows = n, .r0 = 0, .taps = taps };
+        e.chain = ch;
         e.stats.queued += 1;
     }
 
-    /// The host's part of a chain: the window's ids (and keyed rows' key bases), each accepted count's plan, the block.
-    fn stage(e: *Early, g: iface.Segment, n: u32, B: u32) !void {
+    fn stageLegacy(e: *Early, g: iface.Segment, n: u32, B: u32) !void {
         const x = e.x;
         const c = x.c;
         const ids = e.state.slice(u32, R);
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
         if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
-        // the GPU chain's draws for the next ask: its first draft's position is the accept's (pos_base + accepted)
         if (x.mk) |*m| m.writeAsk(0, host.dspark.Params.of(g.sampling, 0));
         const all = e.plans.slice(i32, @as(usize, R) * Plan.ints);
         for (0..n) |acc| {
@@ -160,8 +192,7 @@ pub const Early = struct {
         host.dspark.blockIds(.{ .block = B, .noise = c.dspark_noise_token }, 0, block);
     }
 
-    /// The chain's encoders: picks (keyed by `smp`) and acceptance, every window row's ingest (serial), the pass.
-    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, start: u64, n: u32, B: u32, skew: bool, smp: ?lanes.Sampling) !void {
+    fn encodeLegacy(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, start: u64, n: u32, B: u32, skew: bool, smp: ?lanes.Sampling) !void {
         const x = e.x;
         const se = cb.compute(.serial);
         e.picks.encode(se, .{ .buf = logits, .off = logits_off }, .{ .buf = e.state, .off = picks_at }, .{ .buf = e.state, .off = bases_at }, n, x.c.vocab, smp);
@@ -174,7 +205,7 @@ pub const Early = struct {
         se.setBuffer(x.plan.buf, 0, 4);
         se.setBuffer(x.b.ids.buf, x.b.ids.off, 5);
         se.setBuffer(e.state, result_at, 6);
-        if (x.mk) |*m| se.setBuffer(m.o.buf, @import("markov.zig").Out.asks_at + 8, 7) else se.setBuffer(e.state, result_at + 8, 7);
+        if (x.mk) |*m| se.setBuffer(m.o.buf, mkv.Out.asks_at + 8, 7) else se.setBuffer(e.state, result_at + 8, 7);
         se.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(threads, 1, 1));
         const ok = x.encodeIngest(se, .{ .buf = taps, .rows = n }, n);
         se.end();
@@ -186,88 +217,258 @@ pub const Early = struct {
         try done;
     }
 
+    fn queueCert(e: *Early, n_armed: usize, group: []const iface.Segment, logits: mtl.Buffer, logits_off: usize, taps: []const mtl.Buffer) void {
+        const x = e.x;
+        const c = x.c;
+        const G = group.len;
+        if (G == 0 or G != n_armed or G > x.group() or taps.len != G or e.chain != null) return;
+        var B: u32 = c.dspark_block;
+        var total_rows: u32 = 0;
+        var any_keyed = false;
+        var any_topk = false;
+        var gpu = x.mk != null;
+        var ch: Chain = .{ .n_slots = G };
+        for (group, 0..) |g, j| {
+            const n: u32 = @intCast(g.tokens.len);
+            var matched = false;
+            for (e.armed[0..n_armed]) |ar| if (ar.slot == g.slot and ar.start == g.start and ar.rows == n) {
+                matched = true;
+                break;
+            };
+            if (!matched or g.slot >= x.runs.len) return;
+            for (group[0..j]) |prev| if (prev.slot == g.slot) return;
+            if (!picks_.supported(g.sampling, c.vocab)) return;
+            if (g.draws.len != n or n == 0 or n > c.dspark_block + 1 or total_rows + n > R) return;
+            B = @min(B, x.blockOf(g.slot));
+            const keyed = if (g.sampling) |s| s.temperature > 0 else false;
+            any_keyed = any_keyed or keyed;
+            const p = host.dspark.Params.of(g.sampling, 0);
+            gpu = gpu and x.drawsOnGpu(p);
+            any_topk = any_topk or x.needsTopK(p);
+            ch.slots[j] = .{ .slot = g.slot, .start = g.start, .rows = n, .r0 = total_rows, .taps = taps[j] };
+            total_rows += n;
+        }
+        if (G * B > R) return;
+        for (group) |g| if (g.start + g.tokens.len + B > x.tables.positions) return;
+        ch.block = B;
+        ch.gpu = gpu;
+        ch.use_topk = gpu and x.mk != null and x.mk.?.topk > 0 and any_topk;
+        const skew = e.skew_every > 0 and ch.slots[0].rows > 1 and (e.stats.queued + 1) % e.skew_every == 0;
+        e.stageCert(group, &ch, B, skew);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = x.queue.commandBuffer();
+        e.encodeCert(cb, logits, logits_off, &ch, total_rows) catch return;
+        cb.commit();
+        ch.cb = cb.retain();
+        e.chain = ch;
+        e.stats.skewed += @intFromBool(skew);
+        e.stats.keyed += @intFromBool(any_keyed);
+        e.stats.multi += @intFromBool(G > 1);
+        e.stats.queued += 1;
+    }
+
+    fn stageCert(e: *Early, group: []const iface.Segment, ch: *const Chain, B: u32, skew: bool) void {
+        const x = e.x;
+        const c = x.c;
+        const G = group.len;
+        const ids = e.state.slice(u32, R);
+        const row_specs: []picks_.Row = @alignCast(std.mem.bytesAsSlice(picks_.Row, e.state.contents()[rows_at..][0 .. R * @sizeOf(picks_.Row)]));
+        const slot_descs: []picks_.Slot = @alignCast(std.mem.bytesAsSlice(picks_.Slot, e.state.contents()[slots_at..][0 .. R * @sizeOf(picks_.Slot)]));
+        const all_plans = e.plans.slice(i32, @as(usize, R) * R * slot_plan_ints);
+        const block: []u32 = @alignCast(std.mem.bytesAsSlice(u32, x.b.bytes(x.b.ids, 4 * G * B)));
+        for (group, 0..) |g, j| {
+            const cs = ch.slots[j];
+            const n = cs.rows;
+            for (0..n) |r| {
+                ids[cs.r0 + r] = g.tokens[r];
+                row_specs[cs.r0 + r] = picks_.Row.of(g.sampling, g.draws[r]);
+            }
+            const pos_base = g.start + 2;
+            slot_descs[j] = .{ .r0 = cs.r0, .n = n, .block = B, .skew = @intFromBool(skew and j == 0), .pos_lo = @truncate(pos_base), .pos_hi = @truncate(pos_base >> 32) };
+            if (ch.gpu) x.mk.?.writeAsk(j, host.dspark.Params.of(g.sampling, 0));
+            for (0..n) |acc| {
+                const m = all_plans[(j * R + acc) * slot_plan_ints ..][0..slot_plan_ints];
+                for (0..n) |r| {
+                    m[r] = @intCast(g.start + r);
+                    const dest = if (r <= acc) plan_.ringRow(c, g.slot, g.start + r) else plan_.blockRow(c, g.slot, @intCast(r - acc - 1));
+                    m[R + r] = @intCast(dest);
+                }
+                const start_next = g.start + acc + 1;
+                var run = x.runs[g.slot];
+                run.land(g.start, acc + 1);
+                const cx = run.context(c.window, start_next);
+                for (0..B) |i| {
+                    m[2 * R + i] = @intCast(start_next + i);
+                    m[3 * R + i] = @intCast(plan_.blockRow(c, g.slot, @intCast(i)));
+                }
+                const rec: attn.DsparkAsk = .{ .base = g.slot * plan_.poolRows(c), .first_mod = @intCast(cx.first % c.window), .ctx_count = cx.count, .start_pos = @intCast(start_next) };
+                @memcpy(m[4 * R ..][0..4], @as(*const [4]i32, @ptrCast(&rec)));
+            }
+            host.dspark.blockIds(.{ .block = B, .noise = c.dspark_noise_token }, 0, block[j * B ..][0..B]);
+        }
+    }
+
+    fn encodeCert(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, ch: *const Chain, total_rows: u32) !void {
+        const x = e.x;
+        const G: u32 = @intCast(ch.n_slots);
+        for (ch.slots[0..ch.n_slots]) |cs| x.undo.encodeSettleAndSave(cb, cs.slot, cs.start, cs.start, cs.rows);
+        const ce = cb.compute(.concurrent);
+        e.picks.encodeRows(ce, .{ .buf = logits, .off = logits_off }, .{ .buf = e.state, .off = picks_at }, .{ .buf = e.state, .off = rows_at }, total_rows, x.c.vocab);
+        ce.barrier();
+        ce.setPipeline(e.picks.accept_multi.?);
+        ce.setValue([5]u32{ G, @intFromBool(ch.gpu), @sizeOf(mkv.CertAsk), @offsetOf(mkv.CertAsk, "pos0"), Plan.asks }, 0);
+        ce.setBuffer(e.state, slots_at, 1);
+        ce.setBuffer(e.state, tokens_at, 2);
+        ce.setBuffer(e.state, picks_at, 3);
+        ce.setBuffer(e.plans, 0, 4);
+        ce.setBuffer(x.plan.buf, 0, 5);
+        ce.setBuffer(x.b.ids.buf, x.b.ids.off, 6);
+        ce.setBuffer(e.state, result_at, 7);
+        if (ch.gpu) ce.setBuffer(x.mk.?.o.buf, mkv.Out.asks_at, 8) else ce.setBuffer(e.state, result_at, 8);
+        ce.dispatchGroups(mtl.Size.of(G, 1, 1), mtl.Size.of(64, 1, 1));
+        ce.barrier();
+        for (ch.slots[0..ch.n_slots], 0..) |cs, j| {
+            if (j > 0) ce.barrier();
+            x.encodeIngestAt(ce, .{ .buf = cs.taps, .rows = cs.rows }, cs.r0, cs.rows) catch |err| {
+                ce.end();
+                return err;
+            };
+        }
+        ce.barrier();
+        const l: dspark.Launch = .{ .rows = G * ch.block, .n = ch.block, .asks = &.{}, .gpu = ch.gpu, .use_topk = ch.use_topk };
+        const done = x.encodeAll(ce, &l);
+        ce.end();
+        try done;
+    }
+
     // the lanes' asks ----------------------------------------------------------------------------------------------
 
-    /// An ingest of the queued chain's window rows 0 .. m - 1 from its taps: left to the chain (true), or not ours.
+    /// An ingest of one of the queued chain's slots' window rows 0 .. m - 1 from its taps: left to the chain (true).
     pub fn covers(e: *Early, slot: u32, start: u64, taps: mtl.Buffer, off: usize, rows: []const u32) bool {
         const ch = &(e.chain orelse return false);
-        if (ch.slot != slot or ch.start != start or ch.deferred != null or taps.id != ch.taps.id or off != 0) return false;
-        if (rows.len == 0 or rows.len > ch.rows) return false;
-        for (rows, 0..) |r, i| if (r != i) return false;
-        ch.deferred = @intCast(rows.len);
-        return true;
+        for (ch.slots[0..ch.n_slots]) |*cs| {
+            if (cs.slot != slot) continue;
+            if (cs.start != start or cs.deferred != null or taps.id != cs.taps.id or off != 0) return false;
+            if (rows.len == 0 or rows.len > cs.rows) return false;
+            for (rows, 0..) |r, i| if (r != i) return false;
+            cs.deferred = @intCast(rows.len);
+            return true;
+        }
+        return false;
     }
 
-    /// The lanes begin the pass after the deferred rows: the chain's own (true), or not ours.
+    /// The lanes begin the pass after the deferred rows: matches our queued chain's slots 1-to-1 (true), else not ours.
     pub fn begin(e: *Early, asks: []const iface.Ask) bool {
         const ch = &(e.chain orelse return false);
-        const m = ch.deferred orelse return false;
-        if (asks.len != 1 or ch.ask != null) return false;
-        const k = asks[0];
-        if (k.slot != ch.slot or k.start != ch.start + m) return false;
-        ch.ask = .{ .slot = k.slot, .anchor = k.anchor, .start = k.start, .params = k.params };
+        if (asks.len != ch.n_slots or ch.begun) return false;
+        var seen: [R]bool = @splat(false);
+        for (asks, 0..) |k, ai| {
+            var found: ?usize = null;
+            for (ch.slots[0..ch.n_slots], 0..) |cs, idx| {
+                if (cs.slot != k.slot) continue;
+                if (seen[idx]) return false;
+                const m = cs.deferred orelse return false;
+                if (k.start != cs.start + m) return false;
+                found = idx;
+                break;
+            }
+            const idx = found orelse return false;
+            seen[idx] = true;
+            ch.ask_order[ai] = @intCast(idx);
+        }
+        for (asks, 0..) |k, ai| {
+            const idx = ch.ask_order[ai];
+            ch.slots[idx].ask = .{ .slot = k.slot, .anchor = k.anchor, .start = k.start, .params = k.params };
+        }
+        ch.begun = true;
         return true;
     }
 
-    /// The begun pass's results: the chain's when its picks accepted the rows the host kept, else the host's own pass.
+    /// The begun pass's results: the chain's when every slot's picks matched the host, else exact host fallback.
     pub fn collect(e: *Early, out: []dspark.Proposal) !void {
         const ch = e.chain orelse return error.NothingBegun;
-        const ask = ch.ask orelse return error.NothingBegun;
+        if (!ch.begun or out.len != ch.n_slots) return error.NothingBegun;
         e.chain = null;
-        const got = try e.wait(ch);
-        const m = ch.deferred.?;
-        if (got.acc + 1 == m and got.bonus == ask.anchor) {
-            e.keep(ch, m);
-            const l: dspark.Launch = .{ .rows = ch.block, .n = ch.block, .asks = (&ask)[0..1], .gpu = ch.gpu };
-            try e.x.finish(&l, out);
+        var got: [R]Got = undefined;
+        try e.wait(ch, got[0..ch.n_slots]);
+        var all_ok = true;
+        for (ch.slots[0..ch.n_slots], got[0..ch.n_slots]) |cs, g| {
+            if (g.acc + 1 != cs.deferred.? or g.bonus != cs.ask.?.anchor) {
+                all_ok = false;
+                break;
+            }
+        }
+        if (all_ok) {
+            var asks_grp: [R]dspark.Ask = undefined;
+            var props_grp: [R]dspark.Proposal = undefined;
+            for (ch.slots[0..ch.n_slots]) |cs| e.keepSlot(cs, cs.deferred.?);
+            for (0..ch.n_slots) |k| {
+                const idx = ch.ask_order[k];
+                asks_grp[idx] = ch.slots[idx].ask.?;
+                props_grp[idx] = out[k];
+            }
+            const l: dspark.Launch = .{ .rows = @as(u32, @intCast(ch.n_slots)) * ch.block, .n = ch.block, .asks = asks_grp[0..ch.n_slots], .gpu = ch.gpu, .use_topk = ch.use_topk };
+            try e.x.finish(&l, props_grp[0..ch.n_slots]);
             e.stats.used += 1;
             return;
         }
         e.stats.dropped += 1;
-        try e.replace(ch, m);
-        try e.x.propose((&ask)[0..1], out);
+        for (ch.slots[0..ch.n_slots], got[0..ch.n_slots]) |cs, g| {
+            const m = cs.deferred.?;
+            if (g.acc + 1 == m) e.keepSlot(cs, m) else try e.replaceSlot(cs, m);
+        }
+        var caller_asks: [R]dspark.Ask = undefined;
+        for (0..ch.n_slots) |k| caller_asks[k] = ch.slots[ch.ask_order[k]].ask.?;
+        try e.x.propose(caller_asks[0..ch.n_slots], out);
     }
 
-    /// The queued chain finished and settled: a deferred ingest kept or redone, every other ring row put back.
+    /// The queued chain finished and settled: deferred ingests kept or redone, other ring rows put back.
     pub fn drain(e: *Early) !void {
         const ch = e.chain orelse return;
         e.chain = null;
-        const got = try e.wait(ch);
-        if (ch.ask != null) e.stats.dropped += 1;
-        const m = ch.deferred orelse return e.x.undo.settle(ch.slot, ch.start);
-        if (got.acc + 1 == m) return e.keep(ch, m);
-        try e.replace(ch, m);
+        var got: [R]Got = undefined;
+        try e.wait(ch, got[0..ch.n_slots]);
+        if (ch.begun) e.stats.dropped += 1;
+        for (ch.slots[0..ch.n_slots], got[0..ch.n_slots]) |cs, g| {
+            const m = cs.deferred orelse {
+                try e.x.restoreUndo(cs.slot, cs.start);
+                continue;
+            };
+            if (g.acc + 1 == m) e.keepSlot(cs, m) else try e.replaceSlot(cs, m);
+        }
     }
 
     const Got = struct { acc: u32, bonus: u32 };
 
-    fn wait(e: *Early, ch: Chain) !Got {
+    fn wait(e: *Early, ch: Chain, out: []Got) !void {
         defer ch.cb.release();
         ch.cb.wait();
         if (ch.cb.failure()) |msg| {
             std.debug.print("dsv41 early drafts: command buffer failed: {s}\n", .{msg});
             return error.CommandBufferFailed;
         }
-        const r = e.state.slice(u32, result_at / 4 + 2)[result_at / 4 ..][0..2];
-        return .{ .acc = @min(r[0], ch.rows - 1), .bonus = r[1] };
+        const r = e.state.slice(u32, result_at / 4 + 2 * R)[result_at / 4 ..][0 .. 2 * R];
+        for (ch.slots[0..ch.n_slots], out, 0..) |cs, *g, j| g.* = .{ .acc = @min(r[2 * j], cs.rows - 1), .bonus = r[2 * j + 1] };
     }
 
-    /// The chain's ingest is the host's: its ring rows landed, kept in case a later commit is shorter.
-    fn keep(e: *Early, ch: Chain, m: u32) void {
-        e.x.runs[ch.slot].land(ch.start, m);
-        e.x.undo.shrink(ch.slot, m);
+    /// The slot's chain ingest matches the host's: its ring rows landed, kept in case a later commit is shorter.
+    fn keepSlot(e: *Early, cs: ChainSlot, m: u32) void {
+        e.x.runs[cs.slot].land(cs.start, m);
+        e.x.undo.shrink(cs.slot, m);
     }
 
-    /// The chain's picks accepted other rows than the host keeps (`m`): its rows put back, the host's ingested.
-    fn replace(e: *Early, ch: Chain, m: u32) !void {
-        e.x.undo.settle(ch.slot, ch.start);
+    /// The slot's chain picks differed from the host's (`m`): its rows put back, the host's ingested.
+    fn replaceSlot(e: *Early, cs: ChainSlot, m: u32) !void {
+        try e.x.restoreUndo(cs.slot, cs.start);
         var rows: [R]u32 = undefined;
         for (rows[0..m], 0..) |*r, i| r.* = @intCast(i);
-        try e.x.ingest(ch.slot, ch.start, .{ .buf = ch.taps, .rows = ch.rows }, rows[0..m]);
+        try e.x.ingest(cs.slot, cs.start, .{ .buf = cs.taps, .rows = cs.rows }, rows[0..m]);
     }
 
     pub fn describe(e: *const Early, buf: []u8) []const u8 {
         const s = e.stats;
+        if (e.cert) return std.fmt.bufPrint(buf, "drafts behind the verify: {d} queued ({d} keyed, {d} multi), {d} used, {d} dropped; {d} drafter ring rows put back", .{ s.queued, s.keyed, s.multi, s.used, s.dropped, e.x.undo.restored }) catch buf[0..0];
         return std.fmt.bufPrint(buf, "drafts behind the verify: {d} queued ({d} keyed), {d} used, {d} dropped; {d} drafter ring rows put back", .{ s.queued, s.keyed, s.used, s.dropped, e.x.undo.restored }) catch buf[0..0];
     }
 };

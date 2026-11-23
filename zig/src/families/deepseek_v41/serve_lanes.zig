@@ -72,6 +72,8 @@ pub const Model = struct {
     spec_default: bool = false,
     /// optional backend-calibrated default cost table used when no cached calibration exists
     default_costs: ?*const fn (gpa: Allocator, rows: usize) anyerror!costs_mod.Costs = null,
+    /// speculative nucleus passes while TF_DSV41_SPEC_NUCLEUS is unset (opt-in M5 Ultra filtered behind-the-verify)
+    spec_nucleus_default: bool = false,
 };
 
 /// The replies' share of wall time beside a prompt in steps when neither --decode-share nor the env names one.
@@ -169,7 +171,7 @@ pub const Served = struct {
         }
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
         const trees = if (dspark_on) backend.trees orelse try tree.Settings.fromEnv() else tree.Settings{};
-        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettingsFor(&calib_env.env, backend.shape.block), .spec = if (dspark_on) try spec.Settings.fromEnvOr(backend.spec_default) else .{}, .plain_streams_default = 3, .steps = backend.steps, .step_rows = backend.prefill_step });
+        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettingsFor(&calib_env.env, backend.shape.block), .spec = if (dspark_on) try spec.Settings.fromEnvOr2(backend.spec_default, backend.spec_nucleus_default) else .{}, .plain_streams_default = 3, .steps = backend.steps, .step_rows = backend.prefill_step });
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = backend.forward_rows;

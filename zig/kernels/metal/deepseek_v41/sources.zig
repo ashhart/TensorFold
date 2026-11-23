@@ -65,6 +65,8 @@ pub const hc = @embedFile("hc.metal");
 pub const glue_tmp = @embedFile("glue_tmp.metal");
 /// DeepSeek-V4.1 drafts behind a verify window: its greedy picks, the drafts they accept, the drafter's staging.
 pub const early = @embedFile("early.metal");
+/// DeepSeek-V4.1 opt-in behind-the-verify filtered picks (top_k/top_p/min_p) and multi-slot acceptance.
+pub const early_cert = @embedFile("early_cert.metal");
 /// DeepSeek-V4.1's DSpark Markov chain over the whole vocabulary on the GPU (greedy drafts and confidences).
 pub const markov = @embedFile("markov.metal");
 /// DeepSeek-V4.1 opt-in DSpark Markov chain (shared-w2 multi-ask full-vocab + top-K single-TG resident chain).
