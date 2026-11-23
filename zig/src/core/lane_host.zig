@@ -200,7 +200,7 @@ pub const LaneHost = struct {
     };
 
     /// The family's queue as a keepalive target, when it set one.
-    pub fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
+    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
         return self(ctx).keepalive_target;
     }
 
@@ -214,7 +214,7 @@ pub const LaneHost = struct {
         return i;
     }
 
-    pub fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
+    fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
         if (@import("lane_prompt_only.zig").refuses(h, request) or !@import("lane_export.zig").exportable(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
@@ -239,7 +239,7 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    pub fn cancelFn(ctx: *anyopaque, id: Id) void {
+    fn cancelFn(ctx: *anyopaque, id: Id) void {
         const h = self(ctx);
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
@@ -247,7 +247,7 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    pub fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
+    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         const source = self(ctx).memory orelse return null;
         return source.read(source.ctx, reset_peak);
     }
