@@ -24,7 +24,7 @@ pub fn reclaim(h: *LaneHost) void {
     const lone = h.lone orelse return;
     if (!lone.resumes) return; // a driver that only opens streams would prefill this one again
     h.lock();
-    const idle = h.admitted.items.len == 1 and h.queued.items.len == 0 and h.filling.items.len == 0 and !h.foregroundWaiting() and h.cancels.items.len == 0 and !h.closing;
+    const idle = h.admitted.items.len == 1 and h.queued.items.len == 0 and h.filling.items.len == 0 and !h.foregroundWaiting() and h.cancels.items.len == 0 and !h.closing.load(.acquire);
     const job = if (idle) h.admitted.items[0] else null;
     h.unlock();
     const j = job orelse return;
@@ -60,7 +60,7 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             host.lock();
             defer host.unlock();
             // a reader `limit` behind hands its stream back: the host holds it until its client reads
-            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing or backlog.behind(host, host.lone_job.?);
+            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing.load(.acquire) or backlog.behind(host, host.lone_job.?);
         }
         fn prefillYield(ctx: *anyopaque) bool {
             if (!yield(ctx)) return false;

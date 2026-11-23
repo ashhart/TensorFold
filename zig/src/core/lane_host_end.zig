@@ -148,6 +148,7 @@ pub fn closeAll(h: *LaneHost) void {
     h.admitted = .empty;
     h.filling.clearRetainingCapacity();
     h.unlock();
+    @import("lane_host_status.zig").noteLive(h); // empty before any terminal job or stream is deinitialized
     defer queued.deinit(h.gpa);
     defer admitted.deinit(h.gpa);
     for (admitted.items) |job| {
@@ -182,6 +183,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         return true;
     }
     job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    @import("lane_host_status.zig").publish(h); // the fill ends here
     job.reported();
     if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
     job.stream.deinit(h.gpa);

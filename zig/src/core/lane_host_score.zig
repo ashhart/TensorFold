@@ -57,7 +57,7 @@ pub fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
 fn put(h: *LaneHost, ask: *Ask) error{Failed}!void {
     h.lock();
     defer h.unlock();
-    if (h.closing) return error.Failed;
+    if (h.closing.load(.acquire)) return error.Failed;
     h.scores.asks.append(h.gpa, ask) catch return error.Failed;
     h.wake.broadcast(h.io);
     while (!ask.done) h.scores.answered.waitUncancelable(h.io, &h.mutex);
@@ -81,7 +81,7 @@ pub fn answer(h: *LaneHost) void {
     for (list) |a| {
         // a drain's deadline stops the queue: the started score finishes, the rest fail without running
         h.lock();
-        const closing = h.closing;
+        const closing = h.closing.load(.acquire);
         h.unlock();
         if (closing) {
             a.failed = true;
@@ -123,7 +123,7 @@ pub fn answer(h: *LaneHost) void {
 /// Questions left when the engine stops: each fails.
 pub fn close(h: *LaneHost) void {
     h.lock();
-    h.closing = true;
+    h.closing.store(true, .release);
     for (h.scores.asks.items) |a| {
         a.failed = true;
         a.done = true;

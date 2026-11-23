@@ -2,6 +2,7 @@
 pub const dflash = @import("dflash/root.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
+pub const tied_head = @import("tied_head.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
 pub const checkpoint = @import("checkpoint.zig");
