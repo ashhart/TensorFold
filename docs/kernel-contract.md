@@ -603,6 +603,18 @@ reading the next head's column, the plain rope one position late, the YaRN rope 
 forms and expand_v reading the next head's weights, the chunks the next head's queries, the split chunks reading a
 rank's page z as chunk z, and the per-rank merge one chunk short).
 
+Inkling 2 Mini on Metal (`zig/tests/contract/metal_inkling2_*.zig`; run `tf-kernel-contract --only inkling2`) registers the
+loop's glue, gates and attention, the packed NVFP4 and MXFP8 experts in their one-row, grouped prompt and deduplicated
+verify forms (the one-row kernels' bytes are the bound), the dense MMA tiles, the 8-row prompt attention, the DSpark head
+and the vision tower's GEMMs. On an M4 Pro at `e90ecce19a`: 86 kernels pass gates 1 to 4, 132 controls red as planted,
+0 missed, 0 limit problems. The media GEMM's `f32_nt` and `f32_nn` kinds are filled with fp32 values whose low fraction
+bits are set: a bf16 dyadic fits in 10 fraction bits, so the M5 tensor units' operand cut matched and a gate that should
+have spent part of the bound read 0. The grouped MMA kernels (`experts_group_mma.metal`, `dense_mma.metal`, the loop
+gates) assume an 8x8x8 `simdgroup_matrix` multiply-accumulate adds its products in k order from the accumulator; the
+byte-equality gates against the one-row kernels hold on an M4 Pro and an M4 Max. An M5 Ultra held them at an earlier
+head (`e6cb02e09e`, a contributor's run counting 131 controls where the M4 chips count 132) and was not rerun at this
+one.
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

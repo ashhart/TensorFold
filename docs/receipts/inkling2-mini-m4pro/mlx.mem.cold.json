@@ -1,0 +1,14 @@
+{
+ "label": "mlx-mem",
+ "rows": [
+  {
+   "asked": 8192,
+   "rep": 0,
+   "prompt_tokens": 8192,
+   "cached_tokens": 0,
+   "first_token_s": 18.705,
+   "prefill_tps": 438.0,
+   "body_bytes": 51634
+  }
+ ]
+}

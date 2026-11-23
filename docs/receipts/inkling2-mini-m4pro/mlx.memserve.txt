@@ -1,0 +1,28 @@
+<venv>/mlx_lm/server.py:1881: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-11-23 04:16:58,936 - INFO - Starting httpd at 127.0.0.1 on port 8099...
+[transformers] You are using a model of type `inkling2_loop` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-11-23 04:17:00,930 - WARNING - You are using a model of type `inkling2_loop` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-11-23 04:17:01,333 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-11-23 04:17:01,333 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-11-23 04:17:01,333 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 04:17:01,333 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 04:17:01] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 04:17:01,417 - INFO - Prompt processing progress: 1/1
+2026-11-23 04:17:03,221 - INFO - Prompt Cache: 1 sequences, 0.00 GB
+2026-11-23 04:17:03,221 - INFO - - assistant: 1 sequences, 0.00 GB
+2026-11-23 04:17:03,221 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 04:17:03,221 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 04:17:03] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 04:17:08,129 - INFO - Prompt processing progress: 2048/8192
+2026-11-23 04:17:12,425 - INFO - Prompt processing progress: 4096/8192
+2026-11-23 04:17:17,154 - INFO - Prompt processing progress: 6144/8192
+2026-11-23 04:17:21,810 - INFO - Prompt processing progress: 8191/8192
+2026-11-23 04:17:21,875 - INFO - Prompt processing progress: 8192/8192
+2026-11-23 04:17:21,992 - INFO - Prompt Cache: 3 sequences, 1.22 GB
+2026-11-23 04:17:21,992 - INFO - - assistant: 3 sequences, 1.22 GB
+2026-11-23 04:17:21,992 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 04:17:21,992 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 04:17:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-23 04:17:22,224 - INFO - Prompt processing progress: 20/21
+2026-11-23 04:17:22,274 - INFO - Prompt processing progress: 21/21

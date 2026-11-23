@@ -51,3 +51,26 @@ test "the template raises for an unknown effort, one out of range and text that 
         try t.expect(diag.raised);
     }
 }
+
+test "the template refuses an audio part by name, and an image part outside a user or tool message" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var compiled = try template.compile(t.allocator, jinja, null);
+    defer compiled.deinit();
+    const audio = "Inkling 2 does not accept audio input";
+    const cases = [_]struct { messages: []const u8, message: []const u8 }{
+        .{ .messages = "[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{}}]}]", .message = audio },
+        .{ .messages = "[{\"role\":\"user\",\"content\":[{\"type\":\"audio_url\"}]}]", .message = audio },
+        .{ .messages = "[{\"role\":\"user\",\"content\":[{\"type\":\"audio\"}]}]", .message = audio },
+        .{ .messages = "[{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\"}]}]", .message = "Image content is only supported for user and tool messages" },
+    };
+    for (cases) |c| {
+        const messages = try std.json.parseFromSliceLeaky(std.json.Value, a, c.messages, .{});
+        var diag: template.Diag = .{};
+        defer t.allocator.free(diag.msg);
+        try t.expectError(error.TemplateFailed, template.render(t.allocator, &compiled, messages, .null, .{ .object = .empty }, true, &diag));
+        try t.expect(diag.raised);
+        try t.expect(std.mem.indexOf(u8, diag.msg, c.message) != null);
+    }
+}
