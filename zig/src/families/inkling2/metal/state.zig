@@ -7,7 +7,7 @@ const experts_plan = @import("experts_plan.zig");
 const tree = @import("tree.zig");
 
 pub const window_rows = 16;
-pub const batch_rows = 32;
+pub const batch_rows = 64;
 pub const prompt_rows = 256;
 pub const max_rows = 256;
 pub const max_segments = batch_rows;

@@ -10,6 +10,8 @@ fn tau(pos: usize) f64 {
 test "inkling2 metal ABI matches the shaders" {
     try t.expectEqual(@as(usize, 24), @sizeOf(p.Seg));
     try t.expectEqual(@as(usize, 36), @sizeOf(p.PrepArgs));
+    try t.expectEqual(@as(usize, 40), @sizeOf(p.AttnArgs));
+    try t.expectEqual(@as(usize, 160), @sizeOf(p.AttnSlotsArgs));
     try t.expectEqual(@as(usize, 24), @sizeOf(p.MergeArgs));
     try t.expectEqual(@as(usize, 28), @sizeOf(p.PromptArgs));
     try t.expectEqual(@as(u32, 24), (p.Rows{ .rows = 1, .last_pos = 0 }).heads);
@@ -43,9 +45,9 @@ test "inkling2 metal decode and prompt dispatch geometry" {
     const sr = p.Rows{ .rows = 8, .last_pos = 4095, .streams = 2 };
     const sd = try p.attend(sr, sl, 33, 8 * 24 * 33);
     try t.expectEqual(p.Path.decode, sd.path);
-    try t.expectEqual([3]u32{ 192, 33, 1 }, sd.grid);
+    try t.expectEqual([3]u32{ 8, 33, 4 }, sd.grid);
     try t.expectEqual([3]u32{ 192, 1, 1 }, sd.merge_grid);
-    try t.expectEqual(@as(u32, 32), sd.threads);
+    try t.expectEqual(@as(u32, 192), sd.threads);
     const gl = p.Layer.global(1048576);
     try t.expectEqual(@as(u32, 16384), gl.chunk);
     try t.expectEqual(@as(u32, 1024), p.Layer.global(65536).chunk);
@@ -58,7 +60,14 @@ test "inkling2 metal decode and prompt dispatch geometry" {
     const streamed = p.Rows{ .rows = 1, .last_pos = 1048575, .streams = 2 };
     const scalar = try p.attend(streamed, gl, 64, 0);
     try t.expectEqual(p.Path.decode, scalar.path);
-    try t.expectEqual([3]u32{ 24, 64, 1 }, scalar.grid);
+    try t.expectEqual([3]u32{ 8, 64, 1 }, scalar.grid);
+    const nine = try p.attend(.{ .rows = 9, .last_pos = 1048575 }, gl, 64, 9 * 24 * 64 * p.subs);
+    try t.expectEqual([3]u32{ 8, 64, 5 }, nine.grid);
+    const sixteen = try p.attend(.{ .rows = 16, .last_pos = 1048575 }, gl, 64, 16 * 24 * 64 * p.subs);
+    try t.expectEqual([3]u32{ 8, 64, 8 }, sixteen.grid);
+    const batch64 = try p.attend(.{ .rows = 64, .last_pos = 1048575 }, gl, 64, 64 * 24 * 64 * p.subs);
+    try t.expectEqual(p.Path.decode, batch64.path);
+    try t.expectEqual([3]u32{ 8, 64, 32 }, batch64.grid);
     try t.expectError(error.Inkling2Partials, p.attend(streamed, gl, 63, 0));
     const prompt = try p.attend(.{ .rows = 130, .last_pos = 20000 }, gl, 2, 130 * 24 * 2);
     try t.expectEqual(p.Path.prompt, prompt.path);
