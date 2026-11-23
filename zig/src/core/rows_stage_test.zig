@@ -33,6 +33,14 @@ const Stager = struct {
     }
 };
 
+fn pendingAtLeast(r: *rows.Rows, n: usize) !void {
+    const end = waits.deadline();
+    while ((if (r.worker) |w| w.pending() else 0) < n) {
+        if (rows.write.nowNs() >= end) return error.WriterTimedOut;
+        rows.write.io.nap();
+    }
+}
+
 test "rows stage: a block still being written is charged and gathered once" {
     const x = try Fixture.open("stage-share", .finish, false, 18 << 20);
     defer x.close();
@@ -59,15 +67,23 @@ test "rows stage: a block still being written is charged and gathered once" {
 test "rows stage: a state whose earlier job failed to write its block is not published" {
     const x = try Fixture.open("stage-lost", .finish, false, 18 << 20);
     defer x.close();
-    var hold: Hold = .{ .mode = .first_fails };
-    defer hold.release.store(true, .release);
-    x.r.file_io = hold.io();
+    // A two-chunk handoff backpressures a staged save while its writer is gated; stagers get threads.
+    var failing: Hold = .{ .mode = .first_fails, .hold_ns = 10 * std.time.ns_per_s };
+    defer failing.release.store(true, .release);
+    var fast: Hold = .{ .release = .init(true) };
+    x.r.file_io = failing.io();
     const p = pair();
-    try x.keep(&p.first, 900);
-    try Hold.wait(&hold.entered);
-    try x.keep(&p.second, 900);
-    try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
-    hold.release.store(true, .release);
+    var stage1 = Stager{ .x = x, .tokens = &p.first, .at = 900 };
+    const thread1 = try std.Thread.spawn(.{}, Stager.run, .{&stage1});
+    defer thread1.join();
+    try pendingAtLeast(x.r, 1);
+    try Hold.wait(&failing.entered);
+    x.r.worker.?.io = fast.io(); // job 1 keeps the failing gate; the next job writes through `fast`
+    var stage2 = Stager{ .x = x, .tokens = &p.second, .at = 900 };
+    const thread2 = try std.Thread.spawn(.{}, Stager.run, .{&stage2});
+    defer thread2.join();
+    try pendingAtLeast(x.r, 2); // job 2 was submitted while job 1 still promised the shared block
+    failing.release.store(true, .release); // fail job 1 only after job 2 skipped that block
     try x.settle();
     try t.expectEqual(@as(usize, 0), x.r.states.items.len);
     try t.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
@@ -84,29 +100,40 @@ test "rows stage: a state whose earlier job failed to write its block is not pub
 test "rows stage: a block its writer failed to write is written by the next save, though a job that skipped it is in flight" {
     const x = try Fixture.open("stage-chain", .finish, false, 18 << 20);
     defer x.close();
-    var failing: Hold = .{ .mode = .first_fails };
+    var failing: Hold = .{ .mode = .first_fails, .hold_ns = 10 * std.time.ns_per_s };
     defer failing.release.store(true, .release);
-    var held: Hold = .{};
+    var held: Hold = .{ .hold_ns = 10 * std.time.ns_per_s };
     defer held.release.store(true, .release);
+    var fast: Hold = .{ .release = .init(true) };
     x.r.file_io = failing.io();
     const first = fixture.prompt(17);
     const second = sibling(18);
     const third = sibling(19);
-    try x.keep(&first, 900);
+    var stage1 = Stager{ .x = x, .tokens = &first, .at = 900 };
+    const thread1 = try std.Thread.spawn(.{}, Stager.run, .{&stage1});
+    defer thread1.join();
+    try pendingAtLeast(x.r, 1);
     try Hold.wait(&failing.entered);
-    var stage = Stager{ .x = x, .tokens = &second, .at = 900 };
-    const thread = try std.Thread.spawn(.{}, Stager.run, .{&stage});
-    defer thread.join();
-    x.r.worker.?.io = held.io(); // what the worker writes after the first job waits on `held`
+    x.r.worker.?.io = fast.io();
+    var stage2 = Stager{ .x = x, .tokens = &second, .at = 900 };
+    const thread2 = try std.Thread.spawn(.{}, Stager.run, .{&stage2});
+    defer thread2.join();
+    try pendingAtLeast(x.r, 2);
+    x.r.worker.?.io = held.io(); // the skipped job's files hold this gate in flight
     failing.release.store(true, .release);
     try Hold.wait(&held.entered);
-    rows.write.reap(x.r);
+    const end = waits.deadline();
+    while (x.r.failures.count < 1 and rows.write.nowNs() < end) {
+        rows.write.reap(x.r);
+        rows.write.io.nap();
+    }
     x.r.admission.retry_at = 0; // the back-off the first failure set has run out
     try t.expectEqual(@as(usize, 1), x.r.worker.?.pending());
+    x.r.worker.?.io = fast.io(); // the next save writes while the skipped job is still in flight
     var stage3 = Stager{ .x = x, .tokens = &third, .at = 900 };
     const thread3 = try std.Thread.spawn(.{}, Stager.run, .{&stage3});
     defer thread3.join();
-    try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
+    try pendingAtLeast(x.r, 2);
     held.release.store(true, .release);
     try x.settle();
     try t.expectEqual(@as(usize, 1), x.r.states.items.len);
