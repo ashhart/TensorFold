@@ -65,6 +65,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
+    const text: ?[]const u8 = if (std.c.getenv("FLINT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const draft_stream: u64 = if (draft) |d| d.streamBytes() + fl.state.prompt_rows * model.config.hidden * 5 * 2 else 0;
     const c = &model.config; // the decode window's and the prompt chunk's buffers
     const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows) + fl.state.scratchBytes(c, fl.state.prompt_rows);
