@@ -31,12 +31,16 @@ fn spec(w: controls.Which) c.Spec {
         .rel_table => .{ "metal inkling2 attention relative table tf_ink2_rel_table", &.{ .{ .rows = 4, .n = H * EXTENT, .k = R }, .{ .rows = 1, .n = H * EXTENT, .k = R } }, flat, 4, 0 },
         .decode_sliding => .{ "metal inkling2 attention scalar sliding tf_ink2_attn_scalar", &.{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 2049 } }, depth, 64, 8 },
         .decode_global => .{ "metal inkling2 attention scalar global tf_ink2_attn_scalar", &.{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 2, .n = H * D, .k = 1030 } }, depth, 64, 8 },
+        .decode_gqa_sliding => .{ "metal inkling2 attention gqa sliding tf_ink2_attn_gqa", &.{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 1, .n = H * D, .k = 2049 } }, depth, 64, 8 },
+        .decode_gqa_global => .{ "metal inkling2 attention split global tf_ink2_attn_split", &.{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 3, .n = H * D, .k = 2050 } }, depth, 64, 8 },
         .attn_slots_sliding => .{ "metal inkling2 attention slots sliding tf_ink2_attn_slots", &.{ .{ .rows = 6, .n = H * D, .k = 1030 }, .{ .rows = 4, .n = H * D, .k = 2049 } }, depth, 64, 8 },
         .attn_slots_global => .{ "metal inkling2 attention slots global tf_ink2_attn_slots", &.{ .{ .rows = 6, .n = H * D, .k = 2050 }, .{ .rows = 4, .n = H * D, .k = 1100 } }, depth, 64, 8 },
         .prompt_m5 => .{ "metal inkling2 prompt m5 tf_ink2_attn_prompt", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 } }, depth, 64, 8 },
         .prompt_pre_m5 => .{ "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 } }, depth, 64, 8 },
         .prompt_sliding_m5 => .{ "metal inkling2 prompt m5 tf_ink2_attn_prompt_sliding", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 } }, depth, 64, 8 },
         .prompt_sliding_pre_m5 => .{ "metal inkling2 prompt pre-m5 tf_ink2_attn_prompt_sliding", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 } }, depth, 64, 8 },
+        .verify_slide_nax => .{ "metal inkling2 prompt m5 tf_ink2_attn_verify_slide_nax", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 3, .n = H * D, .k = 2049 } }, depth, 64, 8 },
+        .verify_global_nax => .{ "metal inkling2 prompt m5 tf_ink2_attn_verify_global_nax", &.{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 3, .n = H * D, .k = 2050 } }, depth, 64, 8 },
     };
     return .{ .name = r[0], .accum = .f32, .depth = r[2], .ops = r[3], .mids = r[4], .out = .bf16, .served = r[1], .sums = .{ .f16 = 0, .bf16 = 0, .exact = true, .why = "P and outputs have required bf16 roundings" } };
 }
@@ -49,19 +53,11 @@ fn rn(x: f64) f64 {
 fn bits(x: f64) u16 {
     return c.toBf16(@floatCast(x));
 }
-fn minNum(x: f64, y: f64) f64 {
-    return if (std.math.isNan(x)) y else if (std.math.isNan(y)) x else @min(x, y);
-}
 fn maxNan(x: f64, y: f64) f64 {
     return if (std.math.isNan(x) or std.math.isNan(y)) std.math.nan(f64) else @max(x, y);
 }
-fn sigmoid(x: f64) f64 {
-    return 1 / (1 + @exp(-x));
-}
 /// Prompt P rounds to BF16 at each tile maximum; later rescaling does not round twice. The result anchors weights.
-fn promptWeights(score: []const f64, weights: []f64) f64 {
-    const tile_keys = 64;
-    const sub_keys = 1024;
+fn promptWeights(score: []const f64, weights: []f64, tile_keys: usize, sub_keys: usize) f64 {
     var top = -std.math.inf(f64);
     var upper = -std.math.inf(f64);
     var first: usize = 0;
@@ -212,9 +208,9 @@ pub const Probe = struct {
         p.rig.reset();
         p.shape = s;
         p.fill = fill;
-        const global = p.which == .prep_global or p.which == .prep_slots or p.which == .decode_global or p.which == .attn_slots_global or p.which == .prompt_m5 or p.which == .prompt_pre_m5;
-        const sliding = p.which == .prep_sliding or p.which == .decode_sliding or p.which == .attn_slots_sliding or controls.isPromptSliding(p.which);
-        p.layer = .{ .window = if (sliding) 1024 else 0, .ring = 2048, .chunk = if (sliding) 256 else plan.global_chunk, .tau = global };
+        const global = p.which == .prep_global or p.which == .prep_slots or p.which == .decode_global or p.which == .decode_gqa_global or p.which == .attn_slots_global or p.which == .prompt_m5 or p.which == .prompt_pre_m5 or p.which == .verify_global_nax;
+        const sliding = p.which == .prep_sliding or p.which == .decode_sliding or p.which == .decode_gqa_sliding or p.which == .attn_slots_sliding or controls.isPromptSliding(p.which) or p.which == .verify_slide_nax;
+        p.layer = .{ .window = if (sliding) 1024 else 0, .ring = 2048, .chunk = if (p.which == .verify_slide_nax) plan.sliding_chunk else if (sliding) 256 else plan.global_chunk, .tau = global };
         const rows = s.rows;
         const rh = rows * H;
         p.n_slots = if (controls.isSlots(p.which)) @min(rows, 3) else 1;
@@ -397,14 +393,24 @@ pub const Probe = struct {
                 e.dispatchGroups(mtl.Size.of(rows * H, stride, 1), mtl.Size.of(32, 1, 1));
             } else {
                 bindRefs(e, &.{ p.refs[0], p.slot_kv[0], p.slot_kv[3], p.refs[3], p.meta[2], p.po, p.pml }, 0);
-                if (controls.isPrompt(p.which)) {
+                if (controls.isVerify(p.which)) {
+                    const pair_tiles = (rows * (H / KV) + 15) / 16;
+                    const p0: u32 = @intCast(p.shape.k - rows);
+                    const c_min: u32 = if (p.layer.window > 0) ((p0 + 1) -| p.layer.window) / p.layer.chunk else 0;
+                    const gz: u32 = if (p.layer.window > 0) @as(u32, @intCast(p.shape.k - 1)) / p.layer.chunk - c_min + 1 else stride;
+                    e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = c_min, .chunks = stride, .scale = sc }, 7);
+                    e.dispatchGroups(mtl.Size.of(pair_tiles, KV, gz), mtl.Size.of(if (p.layer.window > 0) 32 else 256, 1, 1));
+                } else if (controls.isPrompt(p.which)) {
                     e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 7);
                     const blocks = (rows * (H / KV) + plan.prompt_pairs - 1) / plan.prompt_pairs;
                     e.dispatchGroups(mtl.Size.of(blocks, KV, stride), mtl.Size.of(256, 1, 1));
                 } else {
                     bindRefs(e, p.meta[0..2], 7);
-                    e.setValue(plan.AttnArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 9);
-                    e.dispatchGroups(mtl.Size.of(rows * H, stride, 1), mtl.Size.of(32, 1, 1));
+                    const gqa = p.which == .decode_gqa_sliding or p.which == .decode_gqa_global;
+                    const gx: u32 = if (!gqa) rows * H else (if (p.layer.window == 0 and rows > 1) (rows + 1) / 2 else rows) * KV;
+                    const tgx: u32 = if (p.which == .decode_gqa_global) 256 else 32;
+                    e.setValue(plan.AttnArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = if (gqa) rows else 0, .chunks = stride, .scale = sc }, 9);
+                    e.dispatchGroups(mtl.Size.of(gx, stride, 1), mtl.Size.of(tgx, 1, 1));
                 }
             }
             e.barrier();
@@ -457,7 +463,8 @@ pub const Probe = struct {
             v.* = y * y;
             mag[i] = @abs(y);
         }
-        const f = minNum(threshold / (@sqrt(sum(sq[0..x.len], sim)) + 1e-6), 1);
+        const raw_f = threshold / (@sqrt(sum(sq[0..x.len], sim)) + 1e-6);
+        const f = if (std.math.isNan(raw_f)) 1.0 else @min(raw_f, 1.0);
         for (want, x, mag) |*w, v, *m| {
             w.* = rn(v * f);
             if (t) |tv| w.* = rn(w.* * tv);
@@ -532,7 +539,8 @@ pub const Probe = struct {
                     peak = maxNan(peak, score[j]);
                 }
                 if (prompt) {
-                    peak = promptWeights(score[0..n], weights[0..n]);
+                    const tk: usize = if (controls.isVerify(p.which)) 32 else 64;
+                    peak = promptWeights(score[0..n], weights[0..n], tk, if (p.which == .verify_slide_nax) 32 else 1024);
                 } else for (weights[0..n], score[0..n]) |*w, sc| w.* = @exp(sc - peak);
                 const merged_peak = if (prompt) maxNan(peak, z) else peak;
                 const rescale = if (prompt) @exp(peak - merged_peak) else 1;
@@ -540,7 +548,7 @@ pub const Probe = struct {
                 for (0..D) |d| {
                     for (lo..pos + 1) |kp| terms[kp - lo] = weights[kp - lo] * bf(p.vc[c_off + (kvh * ring + kp % ring) * D + d]);
                     const num = sum(terms[0..n], sim) * rescale;
-                    const y = num / den * sigmoid(bf(p.gate[rh * D + d]));
+                    const y = num / den / (1 + @exp(-bf(p.gate[rh * D + d])));
                     want[rh * D + d] = if (sim != null) rn(y) else y;
                     mag[rh * D + d] = (@abs(num) + den + 1) * (1 + @abs(y));
                     for (terms[0..n]) |v| mag[rh * D + d] += @abs(v * rescale);
@@ -552,7 +560,7 @@ pub const Probe = struct {
 
 fn supported(device: mtl.Device, w: controls.Which) bool {
     return switch (w) {
-        .prompt_m5, .prompt_sliding_m5 => device.tensorUnits(),
+        .prompt_m5, .prompt_sliding_m5, .verify_slide_nax, .verify_global_nax => device.tensorUnits(),
         .prompt_pre_m5, .prompt_sliding_pre_m5 => !device.tensorUnits(),
         else => true,
     };

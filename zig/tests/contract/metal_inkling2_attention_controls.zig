@@ -9,12 +9,16 @@ pub const Which = enum {
     rel_table,
     decode_sliding,
     decode_global,
+    decode_gqa_sliding,
+    decode_gqa_global,
     attn_slots_sliding,
     attn_slots_global,
     prompt_m5,
     prompt_pre_m5,
     prompt_sliding_m5,
     prompt_sliding_pre_m5,
+    verify_slide_nax,
+    verify_global_nax,
 };
 pub fn function(w: Which) []const u8 {
     return switch (w) {
@@ -22,19 +26,26 @@ pub fn function(w: Which) []const u8 {
         .prep_slots => "tf_ink2_prep_slots",
         .rel_table => "tf_ink2_rel_table",
         .decode_sliding, .decode_global => "tf_ink2_attn_scalar",
+        .decode_gqa_sliding => "tf_ink2_attn_gqa",
+        .decode_gqa_global => "tf_ink2_attn_split",
         .attn_slots_sliding, .attn_slots_global => "tf_ink2_attn_slots",
         .prompt_m5, .prompt_pre_m5 => "tf_ink2_attn_prompt",
         .prompt_sliding_m5, .prompt_sliding_pre_m5 => "tf_ink2_attn_prompt_sliding",
+        .verify_slide_nax => "tf_ink2_attn_verify_slide_nax",
+        .verify_global_nax => "tf_ink2_attn_verify_global_nax",
     };
 }
 pub fn isPromptSliding(w: Which) bool {
     return w == .prompt_sliding_m5 or w == .prompt_sliding_pre_m5;
 }
+pub fn isVerify(w: Which) bool {
+    return w == .verify_slide_nax or w == .verify_global_nax;
+}
 pub fn isPrompt(w: Which) bool {
-    return w == .prompt_m5 or w == .prompt_pre_m5 or isPromptSliding(w);
+    return w == .prompt_m5 or w == .prompt_pre_m5 or isPromptSliding(w) or isVerify(w);
 }
 pub fn isAttention(w: Which) bool {
-    return w == .decode_sliding or w == .decode_global or w == .attn_slots_sliding or w == .attn_slots_global or isPrompt(w);
+    return w == .decode_sliding or w == .decode_global or w == .decode_gqa_sliding or w == .decode_gqa_global or w == .attn_slots_sliding or w == .attn_slots_global or isPrompt(w);
 }
 pub fn isSlots(w: Which) bool {
     return w == .prep_slots or w == .attn_slots_sliding or w == .attn_slots_global;
@@ -47,12 +58,15 @@ pub const Mutation = enum {
     prep_slots_bad_slot,
     rel_late,
     decode_late_bias,
+    decode_gqa_drop_last,
     attn_slots_bad_slot,
     merge_no_sink,
     prompt_late_bias,
     prompt_pre_late_bias,
     prompt_sliding_no_sink,
     prompt_sliding_pre_no_sink,
+    verify_slide_bad_kt,
+    verify_global_skip_tiles,
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
             .none => "",
@@ -61,12 +75,15 @@ pub const Mutation = enum {
             .prep_slots_bad_slot => "control: metal inkling2 attention prep slots ignoring rseg slot tf_ink2_prep_slots",
             .rel_late => "control: metal inkling2 attention relative projection one column late tf_ink2_rel_table",
             .decode_late_bias => "control: metal inkling2 attention sliding first key score boosted tf_ink2_attn_scalar",
+            .decode_gqa_drop_last => "control: metal inkling2 attention split global skips odd rows tf_ink2_attn_split",
             .attn_slots_bad_slot => "control: metal inkling2 attention slots ignoring rseg slot tf_ink2_attn_slots",
             .merge_no_sink => "control: metal inkling2 attention global merge without sink tf_ink2_merge",
             .prompt_late_bias => "control: metal inkling2 prompt m5 first key bias boosted tf_ink2_attn_prompt",
             .prompt_pre_late_bias => "control: metal inkling2 prompt pre-m5 first key bias boosted tf_ink2_attn_prompt",
             .prompt_sliding_no_sink => "control: metal inkling2 prompt m5 sliding without sink tf_ink2_attn_prompt_sliding",
             .prompt_sliding_pre_no_sink => "control: metal inkling2 prompt pre-m5 sliding without sink tf_ink2_attn_prompt_sliding",
+            .verify_slide_bad_kt => "control: metal inkling2 prompt m5 verify slide shifted chunk tf_ink2_attn_verify_slide_nax",
+            .verify_global_skip_tiles => "control: metal inkling2 prompt m5 verify global skipped tiles tf_ink2_attn_verify_global_nax",
         };
     }
     pub fn gate(m: Mutation) ?contract.gates.Gate {
@@ -80,12 +97,15 @@ pub const Mutation = enum {
             .prep_slots_bad_slot => .prep_slots,
             .rel_late => .rel_table,
             .decode_late_bias => .decode_sliding,
+            .decode_gqa_drop_last => .decode_gqa_global,
             .attn_slots_bad_slot => .attn_slots_global,
             .merge_no_sink => .decode_global,
             .prompt_late_bias => .prompt_m5,
             .prompt_pre_late_bias => .prompt_pre_m5,
             .prompt_sliding_no_sink => .prompt_sliding_m5,
             .prompt_sliding_pre_no_sink => .prompt_sliding_pre_m5,
+            .verify_slide_bad_kt => .verify_slide_nax,
+            .verify_global_skip_tiles => .verify_global_nax,
         };
     }
     const Edit = struct { from: []const u8, to: []const u8 };
@@ -112,6 +132,10 @@ pub const Mutation = enum {
                 .from = "const float score = (dot_score * a.scale + bias) * LOG2E;",
                 .to = "const float score = (dot_score * a.scale + bias + (kp == from ? 128.0f : 0.0f)) * LOG2E;",
             },
+            .decode_gqa_drop_last => .{
+                .from = "const uint step = (n_keys + 7u) >> 3u;",
+                .to = "const uint step = 0u;",
+            },
             .attn_slots_bad_slot => .{
                 .from = "const device bfloat* kc_s = kc_arr[slot];",
                 .to = "const device bfloat* kc_s = kc_arr[0];",
@@ -127,6 +151,14 @@ pub const Mutation = enum {
             .prompt_sliding_no_sink, .prompt_sliding_pre_no_sink => .{
                 .from = "const float sk = float(sink[prow]) * LOG2E;",
                 .to = "const float sk = -INFINITY;",
+            },
+            .verify_slide_bad_kt => .{
+                .from = "const uint kvh = tg.y, c = a.c0 + tg.z, kt = c * 32u;",
+                .to = "const uint kvh = tg.y, c = a.c0 + tg.z, kt = (c + 1u) * 32u;",
+            },
+            .verify_global_skip_tiles => .{
+                .from = "const uint t_step = (n_tiles + 7u) >> 3u;",
+                .to = "const uint t_step = 0u;",
             },
         };
     }

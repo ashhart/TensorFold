@@ -8,6 +8,22 @@ struct Ink2Dense6Args {
   uint rows, k, nq, nk, nv, nr, ns, ng;
 };
 
+// Vectorized 8-byte bfloat4 fragment loads (k is always a multiple of 128, home.x is a multiple of 4).
+inline void ink2_frag_get_bf4(thread tfp::frag<bfloat>& f, device const bfloat* p, int ld, int r, int c, short2 home) {
+  device const bfloat* q = p + (r + home.y) * ld + (c + home.x);
+  f = tfp::frag<bfloat>(*(device const bfloat4*)q, *(device const bfloat4*)(q + 8 * ld));
+}
+
+inline void ink2_frag_get_rows_bf4(thread tfp::frag<bfloat>& f, device const bfloat* p, int ld, int r, int c,
+                                   short2 home, int nr) {
+  const bfloat z1 = bfloat(0.0f);
+  const bfloat4 z = bfloat4(z1, z1, z1, z1);
+  const int r0 = r + home.y, r1 = r0 + 8;
+  const bfloat4 v0 = r0 < nr ? *(device const bfloat4*)(p + r0 * ld + c + home.x) : z;
+  const bfloat4 v1 = r1 < nr ? *(device const bfloat4*)(p + r1 * ld + c + home.x) : z;
+  f = tfp::frag<bfloat>(v0, v1);
+}
+
 // Threadgroup (tg_col, tg_row): 16*BANDS rows by 32 columns; 8 simdgroups split K by 8 and add partials in order.
 template <uint BANDS, bool DROP_STEP>
 inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, device bfloat* Y, uint rows, uint n,
@@ -42,13 +58,13 @@ inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, devi
     const int k_off = int(16u * b);
     tfp::frag<bfloat> b0, b1;
     if (full_n) {
-      tfp::frag_get(b0, Wc, int(k), 0, k_off, home);
-      tfp::frag_get(b1, Wc, int(k), 16, k_off, home);
+      ink2_frag_get_bf4(b0, Wc, int(k), 0, k_off, home);
+      ink2_frag_get_bf4(b1, Wc, int(k), 16, k_off, home);
     } else if (full_n0) {
-      tfp::frag_get(b0, Wc, int(k), 0, k_off, home);
-      tfp::frag_get_in(b1, Wc, int(k), 16, k_off, home, int(n_rem), int(k));
+      ink2_frag_get_bf4(b0, Wc, int(k), 0, k_off, home);
+      ink2_frag_get_rows_bf4(b1, Wc, int(k), 16, k_off, home, int(n_rem));
     } else {
-      tfp::frag_get_in(b0, Wc, int(k), 0, k_off, home, int(n_rem), int(k));
+      ink2_frag_get_rows_bf4(b0, Wc, int(k), 0, k_off, home, int(n_rem));
       b1 = tfp::frag<bfloat>(bfloat(0.0f));
     }
     TF_UNROLL
@@ -57,9 +73,9 @@ inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, devi
         const int r_off = int(16u * bb);
         tfp::frag<bfloat> fa;
         if (16u * (bb + 1u) <= rows_rem) {
-          tfp::frag_get(fa, Xr, int(k), r_off, k_off, home);
+          ink2_frag_get_bf4(fa, Xr, int(k), r_off, k_off, home);
         } else {
-          tfp::frag_get_in(fa, Xr, int(k), r_off, k_off, home, int(rows_rem), int(k));
+          ink2_frag_get_rows_bf4(fa, Xr, int(k), r_off, k_off, home, int(rows_rem));
         }
         ink2_mma(lo[bb], hi[bb], fa, b0, b1);
       }
@@ -70,19 +86,26 @@ inline void ink2_dense_core(device const bfloat* X, device const bfloat* W, devi
   for (uint bb = 0u; bb < BANDS; ++bb) {
     if (bb < n_bands) {
       const int r_off = int(16u * bb);
-      ink2_part_put(part, lo[bb], hi[bb], sg, lane);
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-      if (sg == 0u) {
-        ink2_part_sum(part, lo[bb], hi[bb], lane);
-        if (full_n && 16u * (bb + 1u) <= rows_rem) {
-          tfp::frag_put(lo[bb], Yr, int(ldy), r_off, 0, home);
-          tfp::frag_put(hi[bb], Yr, int(ldy), r_off, 16, home);
-        } else {
-          tfp::frag_put_in(lo[bb], Yr, int(ldy), r_off, 0, home, int(rows_rem), int(n_rem));
-          tfp::frag_put_in(hi[bb], Yr, int(ldy), r_off, 16, home, int(rows_rem), int(n_rem));
+      const bool has_q1 = rows_rem > 16u * bb + 8u;
+      for (uint q = 0u; q < (has_q1 ? 2u : 1u); ++q) {
+        ink2_part_put_half(part, lo[bb], hi[bb], q, sg, lane);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sg == 0u) {
+          ink2_part_sum_half(part, lo[bb], hi[bb], q, lane);
+          const int rr = r_off + int(home.y) + int(q) * 8;
+          if (rr < int(rows_rem)) {
+            const uint off = 4u * q;
+            for (uint side = 0u; side < 2u; ++side) {
+              const int cc = int(16u * side) + int(home.x);
+              const float4 v = side == 0u ? float4(lo[bb][off], lo[bb][off + 1u], lo[bb][off + 2u], lo[bb][off + 3u])
+                                          : float4(hi[bb][off], hi[bb][off + 1u], hi[bb][off + 2u], hi[bb][off + 3u]);
+              for (int j = 0; j < 4; ++j)
+                if (cc + j < int(n_rem)) Yr[rr * int(ldy) + cc + j] = bfloat(v[j]);
+            }
+          }
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
       }
-      threadgroup_barrier(mem_flags::mem_threadgroup);
     }
   }
 }
@@ -146,7 +169,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]], device bfloat* Y [[buffer(2)]],
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense_core<1u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
@@ -154,7 +177,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]], device bfloat* Y [[buffer(2)]],
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense_core<2u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
@@ -162,7 +185,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]], device bfloat* Y [[buffer(2)]],
     constant Ink2DenseArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense_core<4u, false>(X, W, Y, a.rows, a.n, a.k, a.ldy, tg.y, tg.x, sg, lane, part);
 }
 
@@ -176,7 +199,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device bfloat* yg [[buffer(14)]], constant Ink2Dense6Args& a [[buffer(15)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense6<1u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
 
@@ -190,7 +213,7 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device bfloat* yg [[buffer(14)]], constant Ink2Dense6Args& a [[buffer(15)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense6<2u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }
 
@@ -204,6 +227,6 @@ inline void ink2_dense6(device const bfloat* xq, device const bfloat* xk, device
     device bfloat* yg [[buffer(14)]], constant Ink2Dense6Args& a [[buffer(15)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float part[4096];
+  threadgroup float part[2048];
   ink2_dense6<4u, false>(xq, xk, xv, wq, wk, wv, wr, ws, wg, yq, yk, yv, yr, ys, yg, a, tg, sg, lane, part);
 }

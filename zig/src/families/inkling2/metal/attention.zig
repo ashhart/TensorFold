@@ -16,10 +16,14 @@ pub const Kernels = struct {
     prep_slots: mtl.Pipeline,
     rel_table: mtl.Pipeline,
     decode: mtl.Pipeline,
+    decode_gqa: mtl.Pipeline,
+    decode_split: mtl.Pipeline,
     decode_slots: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
     prompt_sliding: mtl.Pipeline,
+    verify_slide_nax: ?mtl.Pipeline = null,
+    verify_global_nax: ?mtl.Pipeline = null,
     units: bool,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device) !Kernels {
@@ -30,15 +34,17 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [8]mtl.Pipeline = undefined;
+        var pipes: [10]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        const libs = [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib };
+        const libs = [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib };
         const names = [_][]const u8{
             "tf_ink2_prep",
             "tf_ink2_prep_slots",
             "tf_ink2_rel_table",
             "tf_ink2_attn_scalar",
+            "tf_ink2_attn_gqa",
+            "tf_ink2_attn_split",
             "tf_ink2_attn_slots",
             "tf_ink2_merge",
             "tf_ink2_attn_prompt",
@@ -48,6 +54,13 @@ pub const Kernels = struct {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
         }
+        var verify_slide_nax: ?mtl.Pipeline = null;
+        var verify_global_nax: ?mtl.Pipeline = null;
+        if (units) {
+            verify_slide_nax = try mtl.Pipeline.init(device, prompt_lib, "tf_ink2_attn_verify_slide_nax", false);
+            errdefer if (verify_slide_nax) |p| p.deinit();
+            verify_global_nax = try mtl.Pipeline.init(device, prompt_lib, "tf_ink2_attn_verify_global_nax", false);
+        }
         return .{
             .scalar_lib = scalar_lib,
             .prompt_lib = prompt_lib,
@@ -55,18 +68,26 @@ pub const Kernels = struct {
             .prep_slots = pipes[1],
             .rel_table = pipes[2],
             .decode = pipes[3],
-            .decode_slots = pipes[4],
-            .merge = pipes[5],
-            .prompt = pipes[6],
-            .prompt_sliding = pipes[7],
+            .decode_gqa = pipes[4],
+            .decode_split = pipes[5],
+            .decode_slots = pipes[6],
+            .merge = pipes[7],
+            .prompt = pipes[8],
+            .prompt_sliding = pipes[9],
+            .verify_slide_nax = verify_slide_nax,
+            .verify_global_nax = verify_global_nax,
             .units = units,
         };
     }
     pub fn deinit(k: *Kernels) void {
+        if (k.verify_global_nax) |p| p.deinit();
+        if (k.verify_slide_nax) |p| p.deinit();
         k.prompt_sliding.deinit();
         k.prompt.deinit();
         k.merge.deinit();
         k.decode_slots.deinit();
+        k.decode_split.deinit();
+        k.decode_gqa.deinit();
         k.decode.deinit();
         k.rel_table.deinit();
         k.prep_slots.deinit();
@@ -137,6 +158,35 @@ fn promptSlidingLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Row
 fn partialsLaunch(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, launch: planning.Launch, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref) void {
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     if (launch.path == .decode) {
+        if (k.units and r.streams == 1 and r.heads == 24 and r.kv_heads == 8 and r.rows >= 2 and r.last_pos >= 256) {
+            const pair_tiles: usize = (r.rows * 3 + 15) / 16;
+            if (l.window > 0) {
+                const p0: u32 = r.last_pos + 1 - r.rows;
+                const lo_min: u32 = if (p0 + 1 > l.window) p0 + 1 - l.window else 0;
+                const c_min: u32 = lo_min / l.chunk;
+                const c_max: u32 = r.last_pos / l.chunk;
+                e.setPipeline(k.verify_slide_nax.?);
+                bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml }, 0);
+                e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = c_min, .chunks = launch.partials_rh, .scale = scale }, 7);
+                e.dispatchGroups(mtl.Size.of(pair_tiles, r.kv_heads, c_max - c_min + 1), mtl.Size.of(32, 1, 1));
+                return;
+            }
+            e.setPipeline(k.verify_global_nax.?);
+            bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml }, 0);
+            e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = 0, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
+            e.dispatchGroups(mtl.Size.of(pair_tiles, r.kv_heads, launch.grid[1]), mtl.Size.of(256, 1, 1));
+            return;
+        }
+        if (r.streams == 1 and r.heads == 24 and r.kv_heads == 8 and r.last_pos >= 256) {
+            const pair_rows = l.window == 0 and r.rows > 1;
+            const row_groups: usize = if (pair_rows) (r.rows + 1) / 2 else r.rows;
+            e.setPipeline(if (l.window == 0) k.decode_split else k.decode_gqa);
+            bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+            e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = r.rows, .chunks = launch.partials_rh, .scale = scale }, 9);
+            const tg_threads: usize = if (l.window == 0) 256 else launch.threads;
+            e.dispatchGroups(mtl.Size.of(row_groups * r.kv_heads, launch.grid[1], launch.grid[2]), mtl.Size.of(tg_threads, 1, 1));
+            return;
+        }
         e.setPipeline(k.decode);
         bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
         e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 9);
