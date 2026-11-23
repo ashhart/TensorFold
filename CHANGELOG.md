@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM3 on Metal: warm turns, so a tool loop whose re-rendered history changes mid-conversation re-prefills only from the first changed token, with outputs identical to a fresh run (#N).
 
-- Qwen on Metal: with `TF_Q27_KV_GROW=<rows>` (a multiple of 16; 0 or unset is off) a serve's K/V slots start at that many rows, grow as their streams do and give the rows back when a stream ends, and drafter tap rings grow the same way; replies are byte-identical with it on or off (#1896). Thanks to @grantoverton.
-
-- LFM3 on Metal: warm turns, so a tool loop whose re-rendered history changes mid-conversation re-prefills only from the first changed token, with outputs identical to a fresh run (#N).
-
-
-
 - GLM, MiniMax and Nemotron on CUDA: each is placed by `--tp`, `--rank`, `--master` and `--master-port`, and `--master` with `--master-port` sets `NCCL_COMM_ID` when it is unset (a different one refuses); `TF_GLM_RANK`/`TF_GLM_WORLD`, `TF_MINIMAX_RANK`/`TF_MINIMAX_WORLD` and `TF_NEMOTRON_RANK`/`TF_NEMOTRON_WORLD` still work as aliases until 1.3.1, with a start-up warning, and a flag and an alias that differ refuse (#2919, part of #2560). Thanks to @laudney.
 
 - Gemma 4 on Metal: a new stream's prompt fills one chunk per call at the same chunk cuts as before, with other streams' decode rounds running between chunks, so a long prompt no longer freezes their replies; a cancel between chunks keeps the last finished chunk, and a drafting stream's drafter takes each chunk's tapped rows as it lands (#3025, fixes #3021).
