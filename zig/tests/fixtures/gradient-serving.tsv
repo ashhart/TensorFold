@@ -1,6 +1,6 @@
 zig/kernels/cuda/affine4_pack.cu	cbc03ae0622574b57ae266091ea9f26888b21b2b1c020a031940eacddcf8ff14	raw
 zig/kernels/cuda/ck_lane.cu	652fa9993c0c6905e6564681bcca07dc61c1d7f448e2e91ada377a59174dd5e1	raw	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/contract_controls.cu	b331c9cd4ce9cbf2183290e1e6f83261b4eecd16d1681ce98053f3cd837fd45b	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
+zig/kernels/cuda/contract_controls.cu	71fd23855c3707241c19823b897e96fa52b37cb36d513da46020ad09d2b26b87	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
 zig/kernels/cuda/contract_ctl_router.cuh	9320ff62a3bf4e06cb43f6a630a8cb1d5705471d83df6e965f5297ac2cd59d33	raw
 zig/kernels/cuda/embed_rows.cu	c3cad38db6576728a15e048a45f2c1a571233fc3fedc83d04b75b0d1587ecfea	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
@@ -18,7 +18,7 @@ zig/kernels/cuda/flashnext_mtp.cu	a9c21f52cd00d9aa05e9cf1dae5b0168e5e48f87cb3a4a
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228	raw
 zig/kernels/cuda/glm_glue.cu	74e69a7c20827d498c190334fffaa896f2a4f05e107fdf9d2d34b09b55a1c75c	raw	#2722 (one added line, the include of glm_index_decode.cuh: the decode select's scan and merge)
-zig/kernels/cuda/glm_glue_attn.cuh	a8c16ed0c54130689d19386de84217aac232c007effafdb6c7fc149ac7188051	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_attn.cuh	2a0bc3c4966555fad4ae812e62b28558f41774fd5b2dbef6fa9b6d220ba260d8	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_bmm.cuh	6077ea47fc9f462f072a973d44ef4cab711526a3f374cfeb91f1cd65f5fad8f9	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_hc.cuh	b0b2a43aebf5de0d52c37a1db7c2efe10e2515f61bc40ab2c58be230af461601	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); #5164 (the pre side's bodies in common/mhc.cuh; every glm_glue function's SASS unchanged at five SMs)
 zig/kernels/cuda/common/mhc.cuh	24182f1c2292857d23963e1676f6be9ea12978266fa5edf6fe32a857eb20af21	raw	#5164: glm_glue_hc.cuh's mHC pre-side bodies, which glm_glue's entries expand or call
@@ -29,7 +29,7 @@ zig/kernels/cuda/glm_glue_norm.cuh	60909be1be7c09c39aabff15dbfcf69ba9d04179d36ec
 zig/kernels/cuda/glm_glue_router.cuh	99911df38e6ad2826491b3fa5efd47aea5e54eebb7cd83eed586ba0dd9305658	raw
 zig/kernels/cuda/glm_glue_rows.cuh	d46f9db4677c995d83e5a601adcaeaa5b4ebcd365ef758bbdf10dbeaa69e0983	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); #3659 (TF_GLM_MOE_DIRECT: tf_glm_topk takes an optional flat-picks pointer, null when unset; tf_glm_combine_tail added, tf_glm_combine unchanged)
 zig/kernels/cuda/glm_kda.cu	aef9f980f8a928f2b6c439c7e1eda499fba12c32a7605e39062bef83952a83d2	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
-zig/kernels/cuda/glm_ops.cu	bf90d5eeb62c145d8a140db90e057fa53d3c1f6b77f739d14122a0e04a216b51	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); dependent-launch inputs without __restrict__ (no non-coherent load above the wait)
+zig/kernels/cuda/glm_ops.cu	a1bce733ad303e91ba3765cb7006742861ee33fa3d9b26d21bed4e4036b5c6a7	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); dependent-launch inputs without __restrict__ (no non-coherent load above the wait)
 zig/kernels/cuda/glm_quant.cu	e04ee0760ddd215244117bbf113f625ce2e9da3eef04345eb0741e1cd2c876ea	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_triton.cuh	8eee12f24bbf283a08a29f9396e3db5588b48fce85abe74de7f85adc12fa94f4	raw
 zig/kernels/cuda/common/glue_math.cuh	b7234684fc786b3700473358632bf10f0b2d2240e5957eefddb13254dae5d746	raw
@@ -42,7 +42,7 @@ zig/kernels/cuda/nemotron_attention.cu	a8a6bc39c2620176aff6c5d436b4a93edf5c86c8d
 zig/kernels/cuda/nemotron_keyed.cu	ed8bdd7012970d9896ec703bd7c3d5ec83e02f41dba4ce1f896fc39c1ee349c9	raw
 zig/kernels/cuda/nemotron_latent.cu	04fba97043d0948f82a3b9477f448dd76b21f6d11d1a445e020bd41cacb85c2b	raw	commits e40bd6eae, 8a8ff3d64; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/nemotron_mamba.cu	dcaba12253d3931ae48c7ebd4e13dfb956f540ae19f4ab83130c3f21745be5ec	raw	commits fa2af585f, f0ef17e69; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/nemotron_ops.cu	2ef87c655b49d33214f8856d2ad775aacf6198ab2ca343f87fde588639ecccd1	raw	#3124
+zig/kernels/cuda/nemotron_ops.cu	c95b1df56910c879538e471c8b7e53355923802f53ab8e9e7daf99f3502ceec6	raw	#3124; TF_NEMOTRON_WIDE_ROUNDS (tf_plan_routed stages 32 rows; gather, last-row and scatter copies take 16 parts; 16 rows or 8 parts unchanged)
 zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe3c3557a48bca96f6511	raw	commits 739c924de, 8cfdaa739, b77a33b08, 7f6f940eb, 05d0617af, bc76d90d6; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/norms.cu	843caf5b21ffad7d190b263a833f684fab7ae1407158102d2ca1219a2c60af1c	raw	P2 of #4861 (inv_rms butterflies through tf_common::warp_sum; same SASS on sm_80/86/89/120/121)
 zig/kernels/cuda/nvfp4_experts.cu	dc78d37c1eb1d9a9fff6c1ba9c5f0a9b0eb485a47a56e7b0b2fdbb8bbf1b223b	raw	#2266 (decode cp.async rings, GB10 SASS unchanged); #4493 (opt-in paired prompt experts, 128-row items)
