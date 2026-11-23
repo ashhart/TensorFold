@@ -75,19 +75,28 @@ fn report(c: Costs, how: []const u8) void {
 pub fn schedule(windows: anytype, heads: anytype, agree: anytype, lead: bool, head: bool, reference: ?Timed) !Timed {
     for (0..warm) |_| _ = try windows.time(st.max_rows - 1);
     var t: Timed = .{ .window = undefined, .head = .{ 0, 0 } };
-    try cost_rule.measureWindows(windows, &t.window, false);
+    try measureWindows(windows, &t.window, false, agree, lead);
     if (head) for (&t.head, 0..) |*h, i| {
         h.* = try cost_rule.fastest(heads, i);
     };
     try cost_rule.smoothSynced(windows, &t.window, agree, lead);
     const drifted = if (reference) |r| cost_rule.drifted(&t.window, &r.window) else false;
     if (try agree.decide(lead and drifted)) {
-        try cost_rule.measureWindows(windows, &t.window, true);
+        try measureWindows(windows, &t.window, true, agree, lead);
         if (head) for (&t.head, 0..) |*h, i| {
             h.* = @min(h.*, try cost_rule.fastest(heads, i));
         };
     }
     return t;
+}
+
+fn measureWindows(windows: anytype, ms: []f64, keep: bool, agree: anytype, lead: bool) !void {
+    var invalid = false;
+    cost_rule.measureWindows(windows, ms, keep) catch |err| {
+        if (err != error.InvalidWindowCost) return err;
+        invalid = true;
+    };
+    if (try agree.decide(lead and invalid)) return error.InvalidWindowCost;
 }
 
 /// The depth rule's table: window ms by width, and a head level's ms from the two chains.
@@ -189,18 +198,26 @@ const HeadTimer = struct {
 const Script = struct {
     calls: *std.ArrayList(usize),
     dip: ?usize = null,
+    invalid: bool = false,
     pub fn time(s: Script, i: usize) !f64 {
         try s.calls.append(std.testing.allocator, i);
+        if (s.invalid) return 0;
         return 10 + @as(f64, @floatFromInt(i)) - @as(f64, if (s.dip == i) 3 else 0);
     }
 };
 
-const Fixed = struct {
-    answer: bool,
-    asked: *?bool,
-    pub fn decide(f: Fixed, mine: bool) !bool {
-        f.asked.* = mine;
-        return f.answer;
+const Decisions = struct {
+    bits: std.ArrayList(bool) = .empty,
+    at: usize = 0,
+    lead: bool = true,
+    pub fn decide(d: *Decisions, mine: bool) !bool {
+        if (d.lead) {
+            try d.bits.append(std.testing.allocator, mine);
+            return mine;
+        }
+        const result = d.bits.items[d.at];
+        d.at += 1;
+        return result;
     }
 };
 
@@ -208,17 +225,48 @@ test "both Macs make the same timing calls, and only rank 0's word starts a seco
     const gpa = std.testing.allocator;
     var runs: [2]std.ArrayList(usize) = .{ .empty, .empty };
     defer for (&runs) |*r| r.deinit(gpa);
-    // rank 0 reads a dip at 3 rows; rank 1's clock reads nothing odd but follows rank 0's word
+    var decisions: Decisions = .{};
+    defer decisions.bits.deinit(gpa);
+    const reference: Timed = .{ .window = @splat(100), .head = .{ 100, 100 } };
     for ([_]bool{ true, false }, &runs) |lead, *calls| {
-        var asked: ?bool = null;
+        decisions.lead = lead;
         const w: Script = .{ .calls = calls, .dip = if (lead) 3 else null };
-        const t = try schedule(w, w, Fixed{ .answer = true, .asked = &asked }, lead, true, null);
-        try std.testing.expectEqual(false, asked.?);
-        try std.testing.expect(t.window[0] == 10 and t.head[1] > t.head[0]);
+        const timed = try schedule(w, w, &decisions, lead, true, if (lead) reference else null);
+        try std.testing.expect(timed.window[0] == 10 and timed.head[1] > timed.head[0]);
     }
     try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
-    // The forced decisions add one repair per width, then a complete retry with the same head samples.
-    try std.testing.expectEqual(@as(usize, warm + st.max_rows + 2 * (st.max_rows + 2) * (1 + cost_rule.reps)), runs[0].items.len);
+    const full = warm + 2 * (st.max_rows + 2) * (1 + cost_rule.reps);
+    try std.testing.expect(runs[0].items.len >= full and runs[0].items.len <= full + st.max_rows);
+    try std.testing.expectEqual(decisions.bits.items.len, decisions.at);
+}
+
+fn invalidClocks(bad_leader: bool) !void {
+    const gpa = std.testing.allocator;
+    var runs: [2]std.ArrayList(usize) = .{ .empty, .empty };
+    defer for (&runs) |*r| r.deinit(gpa);
+    var decisions: Decisions = .{};
+    defer decisions.bits.deinit(gpa);
+    for ([_]bool{ true, false }, &runs) |lead, *calls| {
+        decisions.lead = lead;
+        const w: Script = .{ .calls = calls, .invalid = lead == bad_leader };
+        if (bad_leader) {
+            try std.testing.expectError(error.InvalidWindowCost, schedule(w, w, &decisions, lead, false, null));
+        } else {
+            const timed = try schedule(w, w, &decisions, lead, false, null);
+            if (lead) try std.testing.expectEqual(@as(f64, 10), timed.window[0]);
+        }
+        if (lead) try std.testing.expect(decisions.bits.items.len > 0);
+    }
+    try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
+    try std.testing.expectEqual(decisions.bits.items.len, decisions.at);
+}
+
+test "paired timing: an invalid leader clock stops both ranks after the same measured sweep" {
+    try invalidClocks(true);
+}
+
+test "paired timing: an invalid follower clock cannot stop a valid leader's schedule" {
+    try invalidClocks(false);
 }
 
 test "the table holds every width and a head level's ms from the two chains" {
