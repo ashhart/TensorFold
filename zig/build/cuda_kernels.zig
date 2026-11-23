@@ -175,7 +175,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
     // ours: Inkling 2's grouped experts
     .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
-    // ours: Inkling 2's vision tower glue and attention
+    // ours: Inkling 2's vision tower glue
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     .{ .name = "ricursive", .flags = glue }, // ours: Ripple's glue (embed, add-norms, output gate, FFN activation), glue.metal step for step
     .{ .name = "ricursive_prep", .flags = glue }, // ours: Ripple's attention prep (q/k head norms, RoPE, K and V into rings or pages)
