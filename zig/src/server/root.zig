@@ -25,6 +25,8 @@ test {
     _ = @import("kimi_reply_test.zig");
     _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
+    _ = @import("inkling2_chat_test.zig");
+    _ = @import("inkling2_reply_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
