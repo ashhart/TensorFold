@@ -426,7 +426,9 @@ pub const Metal = struct {
             total += rows;
         }
         for (segments[0..windows.len]) |seg| {
-            try seg.cache.beginTree(self.model.queue, seg.rows, seg.parents);
+            if (seg.parents) |ps| {
+                if (st.isChain(ps)) try seg.cache.beginStage(seg.rows) else try seg.cache.beginTree(self.model.queue, seg.rows, ps);
+            } else try seg.cache.beginStage(seg.rows);
             begun += 1;
         }
         const verify_gen = self.nextVerifyGeneration();
