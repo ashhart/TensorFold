@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const fl = tf.flint;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
+const metal_admit = @import("metal_admit.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -38,8 +39,8 @@ const Host = struct {
     }
 };
 
-fn admittedStreams(_: std.mem.Allocator, _: u64, _: u64, o: api.Open, _: u64, _: *[]const u8) !?u32 {
-    return o.lanes;
+fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return metal_admit.streams(a, "flint", stream_bytes, left, o, window, problem);
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -64,16 +65,16 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
-    const text: ?[]const u8 = if (std.c.getenv("FLINT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    const draft_stream: u64 = if (draft) |d| d.streamBytes() + fl.state.prompt_rows * model.config.hidden * 5 * 2 else 0;
     const c = &model.config; // the decode window's and the prompt chunk's buffers
     const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows) + fl.state.scratchBytes(c, fl.state.prompt_rows);
-    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch + if (draft) |d| try d.fixedBytes() + @as(u64, @max(o.lanes, 1)) * (d.streamBytes() + fl.state.prompt_rows * model.config.hidden * 5 * 2) else 0) catch {
+    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch + if (draft) |d| try d.fixedBytes() else 0) catch {
         if (draft) |d| d.deinit();
         model.deinit();
         problem.* = "FLINT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0 and at most this Mac's RAM, or unset it for 75% of RAM";
         return null;
     };
-    const fits = fl.budget.longest(&model.config, budget, model.config.context);
+    const fits = fl.budget.longest(&model.config, budget -| draft_stream, model.config.context);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Flint caches fit {d} tokens under its load limit (75% of RAM, or FLINT_LOAD_LIMIT_GB)", .{ window, fits });
@@ -81,7 +82,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
-    const served = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)), budget, o, @intCast(window), problem) orelse {
+    const served = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)) + draft_stream, budget, o, @intCast(window), problem) orelse {
         if (draft) |d| d.deinit();
         model.deinit();
         return null;
@@ -95,7 +96,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.resident = null;
     h.drafter = draft;
     h.drafted = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(served, 1), .budget = budget });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
     if (draft != null) try h.metal.calibrate();
