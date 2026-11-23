@@ -115,7 +115,8 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
     const total = ram() orelse 0;
     const loaded = footprint() orelse 0;
     if (total == 0 or loaded == 0) {
-        const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else @min(spare, DEFAULT_MINIMUM);
+        const proposed = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else @min(spare, DEFAULT_MINIMUM);
+        const b = if (gib == null and fixed != null) @min(proposed, fixed.?) else proposed;
         std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ gibs(b), rank });
         return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
