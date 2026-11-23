@@ -156,3 +156,32 @@ test "status: a reader hammering the status during rounds never makes the round 
     try std.testing.expect(tally.done.load(.acquire)); // the request finished under the hammering
     try std.testing.expectEqual(baseline, host.st.round_waits.load(.monotonic)); // and no round waited for a reader
 }
+
+test "status: idle decode marks expire individually at read time" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    defer host.stop();
+
+    const status = @import("lane_host_status.zig");
+    status.noteDecoded(&host, 4, false);
+    host.decoded.items[0].at -= std.time.ns_per_s; // stagger the two marks' expiry inside the rolling window
+    status.noteDecoded(&host, 4, false);
+    var value: api.Status = .{};
+    host.engine().status(&value, &.{});
+    try std.testing.expectEqual(@as(f64, 4), value.decode_tokens_per_second);
+
+    std.Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake) catch {};
+    host.engine().status(&value, &.{});
+    try std.testing.expectEqual(@as(f64, 2), value.decode_tokens_per_second); // only the older mark expired
+
+    std.Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake) catch {};
+    host.engine().status(&value, &.{});
+    try std.testing.expectEqual(@as(f64, 0), value.decode_tokens_per_second);
+}
