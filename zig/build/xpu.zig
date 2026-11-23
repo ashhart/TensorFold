@@ -112,6 +112,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     ) });
     const ze_mod = zeModule(b, target, optimize);
     const tp_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const device_id_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze_mod }} });
     tp_mod.addImport("ze", ze_mod);
     // one `core` for these trees: the Gemma 4 config, the safetensors readers, Nemotron, the CLI and server
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -124,6 +125,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         const tpb = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp_bench.zig"), .target = target, .optimize = optimize, .link_libc = true });
         tpb.addImport("xpu_tp_kernels", embedded_tp);
         tpb.addImport("ze", ze_mod);
+        tpb.addImport("device_id", device_id_mod);
         const tpb_exe = b.addExecutable(.{ .name = "tf-xpu-tp-bench", .root_module = tpb });
         b.step("xpu-tp-bench", "Build the multi-GPU Level Zero P2P TP=2/4 collective benchmark").dependOn(&b.addInstallArtifact(tpb_exe, .{}).step);
     }
@@ -175,6 +177,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen27.addImport("xpu_qwen27_kernels", embedded);
     qwen27.addImport("ze", ze_mod);
+    qwen27.addImport("device_id", device_id_mod);
     qwen27.addImport("xpu_tp", tp_mod);
     qwen27.addImport("core", core);
     // the runner's open rules (one runner at a time, every option back to the process's own), run on this host
@@ -196,6 +199,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         flashnext.addImport("xpu_tp", tp_mod);
         flashnext.addImport("core", core);
         flashnext.addImport("ze", ze_mod);
+        flashnext.addImport("device_id", device_id_mod);
         engines.addImport("flashnext_xpu", flashnext);
         const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_engine.zig"), .target = target, .optimize = optimize, .link_libc = true });
         gemma4.addImport("xpu_gemma4_kernels", embedded_g4);
