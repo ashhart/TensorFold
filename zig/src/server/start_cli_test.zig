@@ -28,6 +28,7 @@ const Run = struct {
     self_exe: ?[]const u8 = null,
     machine: machine_mod.Machine = .{ .backend = .metal, .memory = 96 * gib, .gpu_limit = 64 * gib },
     pull_code: u8 = 0,
+    cancel_in_pull: bool = false,
     pulls: std.ArrayList([]const u8) = .empty,
 
     fn init(a: Allocator, tmp: *std.testing.TmpDir) !Run {
@@ -58,6 +59,7 @@ const Run = struct {
             .input = &r.stdin,
             .interactive = r.interactive,
             .self_exe = r.self_exe,
+            .signals = r.cancel_in_pull,
             .given = r.machine,
             .registry = &entries,
             .override = r.root,
@@ -68,6 +70,12 @@ const Run = struct {
 
     fn fakePull(ctx: *anyopaque, spec: []const u8) !u8 {
         const r: *Run = @ptrCast(@alignCast(ctx));
+        if (r.cancel_in_pull) {
+            var action: std.posix.Sigaction = undefined;
+            std.posix.sigaction(.INT, null, &action);
+            if (action.handler.handler == std.posix.SIG.DFL) return error.DownloadSignalNotInstalled;
+            stop.request(.INT);
+        }
         try r.pulls.append(r.a, spec);
         try r.out.writer.print("stored {s} at {s}/private-snapshot\n", .{ spec, r.root });
         const model = std.mem.eql(u8, spec, "Org/Model@" ++ revision);
@@ -191,6 +199,21 @@ test "start CLI: explicit consent shows sizes and pulls both pinned specs before
     r.input = "yes\n";
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{}));
     try std.testing.expectEqual(@as(usize, 2), r.pulls.items.len);
+}
+
+test "start CLI: Ctrl-C during a deferred download stops before a drafter or server" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    r.cancel_in_pull = true;
+    stop.reset();
+    defer stop.reset();
+    try std.testing.expectEqual(@as(u8, 130), try r.command(&.{ "--yes", "--check" }));
+    try std.testing.expectEqual(@as(usize, 1), r.pulls.items.len);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, try r.path("pid"), .{}));
 }
 
 test "start CLI: an unpublished snapshot is not complete and cannot skip its pull" {
