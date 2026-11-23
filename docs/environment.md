@@ -126,7 +126,6 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSV41_PRODUCE_LINK` | On a follower rank (above 0) of a `TF_DSV41_KV_SPLIT` pool: the `mcdma-rpcd` listen link name (1 to 20 of letters, digits, `_`, `-`) on which that rank exports its share of every hand-off. Rank 0's `--mcdma-produce` exports shard 0, one link a rank. Unset: the follower exports nothing and a split pool's hand-offs cannot complete |
 | `TF_DSV41_HANDOFF_DUMP` | A directory path without control characters, used as given; a DeepSeek-V4.1 producer also writes each hand-off export there as a file, with or without `--mcdma-produce`. Unset or blank writes none |
 | `TF_PREFILL_TIMEOUT_S` | With `--prefill-from`: whole seconds 1 through 86400 for the trigger; default 60 plus 1 per 400 tokens sent |
-| `TF_DSV41_PREFILL_PIECES` | DeepSeek-V4.1: exactly `0` or `1`, default 0. On CUDA, `1` lets the round planner run prompt pieces and decode rows in one pass; on Metal, `1` runs a prompt a chunk at a time between the other streams' rounds (as `--decode-share` above 0, `TENSORFOLD_PREFILL_ORDER=srpt` or a `TENSORFOLD_PREFILL_POLICY`, `_SHARE` or `_BUDGET` also do), replies taking `--decode-share`, else `TENSORFOLD_PREFILL_SHARE`, else 0.25 of wall time beside it; malformed text stops the start naming it |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
