@@ -215,11 +215,14 @@ fn arguments(
 
 /// A value as JSON spells it, else as Python does.
 fn literal(a: Allocator, raw: []const u8) Allocator.Error!?Value {
-    const v = switch (try json.parseText(a, raw)) {
-        .ok => |v| v,
-        .err => (try tool_params.pythonLiteral(a, raw)) orelse return null,
-    };
-    return if (tool_params.finiteJson(raw) and tool_params.finiteDecoded(v)) v else null;
+    switch (try json.parseText(a, raw)) {
+        // JSON's NaN and Infinity literals refuse only text read as JSON; a Python literal keeps its own check
+        .ok => |v| return if (tool_params.finiteJson(raw) and tool_params.finiteDecoded(v)) v else null,
+        .err => {
+            const v = (try tool_params.pythonLiteral(a, raw)) orelse return null;
+            return if (tool_params.finite(v)) v else null;
+        },
+    }
 }
 
 /// A value the schema does not take, read as the type it names: "4" as 4, 4.0 as 4, 1 as true, 123 as "123".

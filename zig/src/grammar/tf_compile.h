@@ -26,13 +26,24 @@ constexpr size_t active_limit = 4;       // compiles running at once; an abandon
 constexpr size_t cache_limit = 8;        // grammars finished in time, served without a slot or a thread
 constexpr size_t stack_bytes = 8 << 20;  // the server's request threads' stack, where compiles ran before
 
-inline std::runtime_error TimeError(int milliseconds) {
-    return std::runtime_error("grammar compilation exceeds the " + std::to_string(milliseconds) + " ms time limit");
+enum class WaitLimit { client, fixed_grammar };
+constexpr int fixed_grammar_time_limit_ms = 30000;
+
+inline int TimeBudget(int milliseconds, WaitLimit limit = WaitLimit::client) {
+    const int ceiling = limit == WaitLimit::fixed_grammar ? fixed_grammar_time_limit_ms : time_limit_ms;
+    return std::clamp(milliseconds, 1, ceiling);
 }
 
-inline std::runtime_error SlotError(int milliseconds) {
-    return std::runtime_error("grammar compilation exceeds the " + std::to_string(milliseconds) +
-                              " ms time limit waiting for one of " + std::to_string(active_limit) + " compile slots");
+struct CompileTimeout : std::runtime_error { using std::runtime_error::runtime_error; };
+struct CompileSlots : std::runtime_error { using std::runtime_error::runtime_error; };
+
+inline CompileTimeout TimeError(int milliseconds) {
+    return CompileTimeout("grammar compilation exceeds the " + std::to_string(milliseconds) + " ms time limit");
+}
+
+inline CompileSlots SlotError(int milliseconds) {
+    return CompileSlots("grammar compilation exceeds the " + std::to_string(milliseconds) +
+                        " ms time limit waiting for one of " + std::to_string(active_limit) + " compile slots");
 }
 
 // Compiles keyed by format and exact text: hits under the lock, misses on a detached thread, published under it.
@@ -42,8 +53,8 @@ public:
     using Work = std::function<Result(const std::string&)>;
 
     // Work runs once per pending input outside every lock. Cooperative callers share a cancellation token with the job.
-    Result Compile(int kind, std::string text, Work work, int milliseconds = time_limit_ms, std::shared_ptr<Cancel> cancel = {}) {
-        const int budget = std::clamp(milliseconds, 1, time_limit_ms);
+    Result Compile(int kind, std::string text, Work work, int milliseconds = time_limit_ms, std::shared_ptr<Cancel> cancel = {}, WaitLimit limit = WaitLimit::client) {
+        const int budget = TimeBudget(milliseconds, limit);
         const auto deadline = Clock::now() + std::chrono::milliseconds(budget);
         const auto state = state_;
         std::unique_lock<std::mutex> lock(state->mutex);

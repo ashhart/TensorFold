@@ -8,6 +8,81 @@ fn env(a: std.mem.Allocator, pairs: []const [2][]const u8) !std.process.Environ.
     return m;
 }
 
+test "pull proxy: repeated configure failures name the current timeout or proxy variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", route.stall_name }) |name| {
+        var first = try env(a, &.{.{ route.connect_name, "0" }});
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &first));
+        try std.testing.expectEqualStrings(route.connect_name, route.refused);
+        const timeout = std.mem.eql(u8, name, route.stall_name);
+        var second = try env(a, &.{.{ name, if (timeout) "0" else "http://user:secret@[bad" }});
+        try std.testing.expectError(if (timeout) error.InvalidEnvironment else error.ProxyUrl, route.configure(a, &second));
+        try std.testing.expect(std.ascii.eqlIgnoreCase(name, route.refused));
+        var out: std.Io.Writer.Allocating = .init(a);
+        try route.refusal(&out.writer, if (timeout) error.InvalidEnvironment else error.ProxyUrl);
+        try std.testing.expect(std.ascii.startsWithIgnoreCase(out.written(), name));
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "secret") == null);
+    }
+}
+
+test "pull proxy: successful configure clears a preceding refusal even without a proxy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    var invalid = try env(a, &.{.{ route.stall_name, "bad" }});
+    var empty = try env(a, &.{});
+    var skipped = try env(a, &.{.{ "HTTPS_PROXY", "socks5://proxy.example:1080" }});
+    var valid = try env(a, &.{.{ "HTTP_PROXY", "http://proxy.example:3128" }});
+    for ([_]?*const std.process.Environ.Map{ null, &empty, &skipped, &valid }) |next| {
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &invalid));
+        try std.testing.expectEqualStrings(route.stall_name, route.refused);
+        try route.configure(a, next);
+        try std.testing.expectEqualStrings("", route.refused);
+    }
+    try std.testing.expectEqual(@as(u32, 30), route.settings.connect_s);
+    try std.testing.expectEqual(@as(u32, 60), route.settings.stall_s);
+    try std.testing.expectEqual(@as(u16, 3128), route.settings.http.?.port);
+}
+
+test "pull proxy: every proxy parse allocation failure names the variable before or after credentials" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = route.settings;
+    defer route.settings = before;
+    const refused_before = route.refused;
+    defer route.refused = refused_before;
+    const cases = [_]struct { []const u8, usize }{
+        .{ "proxy.example:3128", 0 },
+        .{ "proxy.example:3128", 1 },
+        .{ "http://proxy.example:3128", 0 },
+        .{ "http://user:secret@proxy.example:3128", 0 },
+        .{ "http://user:secret@proxy.example:3128", 1 },
+    };
+    for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }) |name| for (cases) |c| {
+        var first = try env(a, &.{.{ route.connect_name, "0" }});
+        try std.testing.expectError(error.InvalidEnvironment, route.configure(a, &first));
+        var second = try env(a, &.{.{ name, c[0] }});
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = c[1] });
+        try std.testing.expectError(error.OutOfMemory, route.configure(failing.allocator(), &second));
+        try std.testing.expect(std.ascii.eqlIgnoreCase(name, route.refused));
+        var out: std.Io.Writer.Allocating = .init(a);
+        try route.refusal(&out.writer, error.OutOfMemory);
+        try std.testing.expect(std.ascii.startsWithIgnoreCase(out.written(), name));
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "secret") == null);
+    };
+}
+
 test "pull proxy: each scheme takes its own variable, lower case first, ALL_PROXY last" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -63,7 +138,6 @@ test "pull proxy: an unusable proxy or timeout names its variable, never the val
     defer arena.deinit();
     const a = arena.allocator();
     const cases = [_]struct { name: []const u8, value: []const u8, says: []const u8 }{
-        .{ .name = "HTTPS_PROXY", .value = "socks5://ana:s3cret@proxy.example:1080", .says = "only http:// proxies" },
         .{ .name = "HTTP_PROXY", .value = "http://ana:s3cret@[bad", .says = "is not a proxy URL" },
         .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .value = "0", .says = "whole seconds" },
     };
@@ -78,6 +152,22 @@ test "pull proxy: an unusable proxy or timeout names its variable, never the val
         try std.testing.expect(std.mem.indexOf(u8, out.written(), c.says) != null);
         try std.testing.expect(std.mem.indexOf(u8, out.written(), "s3cret") == null);
     }
+}
+
+test "pull proxy: a socks or https:// proxy is skipped by name, never refused (pull connects directly, as 1.3.3 did)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][2][]const u8{ .{ "HTTPS_PROXY", "socks5://ana:s3cret@proxy.example:1080" }, .{ "ALL_PROXY", "https://proxy.example:443" } }) |c| {
+        var m = try env(a, &.{.{ c[0], c[1] }});
+        const s = try route.fromEnv(a, &m);
+        try std.testing.expect(s.https == null);
+        try std.testing.expect(std.ascii.eqlIgnoreCase(s.skipped, c[0]));
+        try std.testing.expect(std.mem.indexOf(u8, s.skipped, "s3cret") == null);
+    }
+    var both = try env(a, &.{ .{ "HTTPS_PROXY", "socks5://proxy.example:1080" }, .{ "HTTP_PROXY", "http://proxy.example:3128" } });
+    const s = try route.fromEnv(a, &both);
+    try std.testing.expect(s.https == null and s.http != null and s.http.?.port == 3128);
 }
 
 test "pull proxy: NO_PROXY matches exact hosts, suffixes, * and host:port" {
@@ -112,4 +202,16 @@ test "pull proxy: the timeouts read their own variables" {
     const s = try route.fromEnv(a, &m);
     try std.testing.expectEqual(@as(u32, 5), s.connect_s);
     try std.testing.expectEqual(@as(u32, 7), s.stall_s);
+}
+
+test "pull route: more distinct addresses than the table holds never fails a pull; the newest keeps its deadline" {
+    const io = std.testing.io;
+    const deadline: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 99, @intCast(i / 256), @intCast(i % 256) }, .port = 443 } };
+        try route.rememberAddress(io, address, deadline);
+    }
+    const newest: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 99, 0, 199 }, .port = 443 } };
+    try std.testing.expect(route.addressDeadline(io, &newest) != null);
 }

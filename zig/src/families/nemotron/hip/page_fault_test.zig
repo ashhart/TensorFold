@@ -51,7 +51,7 @@ const Fixture = struct {
             .act = .bf16,
             .keys = &.{},
             .values = &.{},
-            .ids = try pages.Ids.init(a, count),
+            .ids = try @import("hip_serve").pages.Ids.init(a, count),
         };
         errdefer f.pool.ids.deinit(a);
         const desc = try hip.DeviceBuffer.alloc(&f.runtime, 64);

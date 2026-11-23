@@ -17,8 +17,8 @@ pub const Pair = struct {
     pos: cuda.DeviceBuffer, // an i32: where the second chunk's view of the sequence starts
     steps: u64 = 0, // paired steps so far (glm-pair-check counts them)
 
-    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize) !Pair {
-        var b = try fw.Buffers.initTwin(d, w, bp, capacity);
+    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize, joint: bool) !Pair {
+        var b = try fw.Buffers.initTwin(d, w, bp, capacity, joint);
         errdefer b.deinit();
         var p = try fw.Pieces.initTwin(d, pieces);
         errdefer p.deinit();

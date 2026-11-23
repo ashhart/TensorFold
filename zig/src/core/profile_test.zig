@@ -233,7 +233,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
 }
 
 test "stable profile: GLM's direct switches register their off and on directions without supplying a value" {
-    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST }) |id| {
+    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST, .TF_GLM_PAIR_EXPERTS }) |id| {
         const e = p.entry(id);
         try t.expectEqual(p.Syntax.one, e.syntax);
         try t.expect(e.differs("1"));
@@ -250,6 +250,14 @@ test "stable profile: GLM's direct switches register their off and on directions
         try t.expect(e.applies("glm5_next", "cuda") and !e.applies("glm5_next", "metal") and !e.applies("qwen3_5", "cuda"));
         try t.expectEqual(p.Class.identical, e.class);
         try t.expectEqualStrings("#2370", e.evidence);
+        try t.expect(p.resolve(.stable, id, null) == null);
+        try t.expectEqual(id, p.registered(@tagName(id)).?);
+    }
+    {
+        const id = p.Switch.TF_GLM_PAIR_EXPERTS;
+        const e = p.entry(id);
+        try t.expect(e.applies("glm5_next", "cuda") and !e.applies("glm5_next", "metal") and !e.applies("qwen3_5", "cuda"));
+        try t.expectEqual(p.Class.identical, e.class);
         try t.expect(p.resolve(.stable, id, null) == null);
         try t.expectEqual(id, p.registered(@tagName(id)).?);
     }

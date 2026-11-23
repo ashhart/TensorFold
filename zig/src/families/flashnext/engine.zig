@@ -281,6 +281,7 @@ pub const Engine = struct {
         e.snap_pool.deinit();
         e.peer_drops.deinit(gpa);
         if (e.penalties) |*p| p.deinit(gpa);
+        if (e.r.gx) |g| g.logCounts();
         e.r.deinit();
         e.r.device.deinit();
         e.arena_state.deinit();

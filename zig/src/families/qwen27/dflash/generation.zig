@@ -7,7 +7,7 @@ const gpuFailed = @import("../decode_round.zig").gpuFailed;
 const Round = @import("../round_plan.zig").Round;
 const Draft = @import("runtime_model.zig").Model;
 pub const Proposer = struct { ptr: *anyopaque, call: *const fn (*anyopaque, u32, u32) anyerror!@import("selector.zig").Tree };
-pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, matched: usize, min_rows: u32 = 0, extended: u32 = 0, extension_landed: u32 = 0 };
+pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, matched: usize, min_rows: u32 = 0, extended: u32 = 0, extension_landed: u32 = 0, tree_landed: u32 = 0 };
 /// What the context says follows `path` (the pending token first), at most `max` tokens; borrowed until the next call.
 pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32 };
 pub const Generation = struct {
@@ -282,8 +282,12 @@ pub const Generation = struct {
         g.pending = accepted.pending;
         if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(@import("core").tree_round.max_rows, remaining)) return error.EmptyAcceptedDraft;
         var landed: u32 = 0;
-        for (accepted.path) |row| landed += @intFromBool(row >= drafted.len);
-        return .{ .tokens = try g.allocator.dupe(u32, accepted.tokens), .rounds = 1, .verified = ids.len, .matched = accepted.matched, .min_rows = @intCast(ids.len), .extended = @intCast(copied.len), .extension_landed = landed };
+        var tree_landed: u32 = 0;
+        for (accepted.path) |row| {
+            landed += @intFromBool(row >= drafted.len);
+            tree_landed += @intFromBool(row >= 1 and row < drafted.len);
+        }
+        return .{ .tokens = try g.allocator.dupe(u32, accepted.tokens), .rounds = 1, .verified = ids.len, .matched = accepted.matched, .min_rows = @intCast(ids.len), .extended = @intCast(copied.len), .extension_landed = landed, .tree_landed = tree_landed };
     }
     fn runImpl(g: *Generation, count: usize, force_length: bool, nodes: usize, eos_override: ?[]const u32, already_delivered: bool) !Result {
         g.pending = null;

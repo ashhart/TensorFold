@@ -78,8 +78,11 @@ pub const Device = struct {
     pub fn tensorUnits(d: Device) bool {
         return d.r.tensor_units;
     }
-    pub fn generation(d: Device) usize {
+    pub fn generation(d: Device) u32 {
         return if (d.r.tensor_units) 17 else 15;
+    }
+    pub fn name(_: Device) [*:0]const u8 {
+        return ""; // no chip the cutover table lists: its generation's cutover, as before the per-chip key
     }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
         d.r.live_bytes += bytes;

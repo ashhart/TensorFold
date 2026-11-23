@@ -72,6 +72,7 @@ pub const Engine = struct {
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
+                .copy_guard = cfg.copy_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
@@ -218,6 +219,8 @@ pub const Engine = struct {
         const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
         if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
         const held_levels = s.held_levels;
+        const timed_copy = e.cfg.family_mtp and s.drafts and @import("lone_copy.zig").records(e, s, plan.kind);
+        const verified: ?f64 = if (timed_copy) e.clock.elapsedMs(.cost) else null;
         if (e.cfg.family_mtp and s.drafts) {
             if (early and o.cut == null) {
                 var w = win.who(s);
@@ -235,6 +238,7 @@ pub const Engine = struct {
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
+        if (e.cfg.copy_guard) try @import("lone_copy.zig").time(e, s, plan.kind, rows, verified);
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {
             // the stream's round time beyond its window and head levels, for the lane planner
             if (e.cfg.lane_costs.get(@intCast(rows))) |w| {
@@ -528,6 +532,7 @@ pub const Engine = struct {
     pub fn release(e: *Engine, s: *Stream) void {
         e.late.cancel(s);
         if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
+        if (e.cfg.copy_guard) @import("lone_copy.zig").keep(e, s);
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);
         e.backend.release(s);
