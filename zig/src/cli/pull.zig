@@ -112,8 +112,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const blobs_dir = try std.fs.path.join(a, &.{ repo_dir, "blobs" });
     const snapshot_dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", sha });
     const refs_dir = try std.fs.path.join(a, &.{ repo_dir, "refs" });
-    for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
-    // A failed same-revision repair must not leave its old completion marker behind.
+    // A failed same-revision repair must not create directories or leave its old completion marker behind.
     const ref_path = try std.fs.path.join(a, &.{ refs_dir, "main" });
     var ref_buf: [128]u8 = undefined;
     const published: ?[]const u8 = w.readFile(io, ref_path, &ref_buf) catch |err| switch (err) {
@@ -122,6 +121,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     };
     if (published) |text| if (std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), sha))
         try w.deleteFile(io, ref_path);
+    for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
 
     var big: std.ArrayList(Big) = .empty;
     for (entries) |e| {
