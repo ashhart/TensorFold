@@ -420,3 +420,39 @@ test "indexed odd and wide codebooks project routed rows against the scalar refe
             try std.testing.expectApproxEqAbs(expected, got, 0.00005 * peak);
     }
 }
+
+test "Metal EXL3 dense windows of two to four rows keep every one-row bit" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const max = 4;
+    // A verification window of two or three rows is the multi2 body's regime; four rows switch to multi4.
+    for ([_]ex.format.Codebook{ .mul1, .mcg }) |book| {
+        const w = try Owned.init(device, 6, book, 0x71717);
+        defer w.deinit();
+        const x = try input(device, max);
+        defer x.deinit();
+        const scratch = try device.buffer(try ex.scratchBytes(k, n, max), mtl.ResourceOptions.shared);
+        defer scratch.deinit();
+        const one = try device.buffer(max * n * 2, mtl.ResourceOptions.shared);
+        defer one.deinit();
+        const window = try device.buffer(max * n * 2, mtl.ResourceOptions.shared);
+        defer window.deinit();
+        {
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.serial);
+            for (0..max) |r| try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 + r * (k + 16) * 2 }, .{ .buffer = one, .offset = r * n * 2 }, .{ .buffer = scratch }, .{ .count = 1, .x_stride = k + 16, .y_stride = n });
+            try complete(cb, e);
+        }
+        for (2..max + 1) |count| {
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = window }, .{ .buffer = scratch }, .{ .count = count, .x_stride = k + 16, .y_stride = n });
+            try complete(cb, e);
+            try std.testing.expectEqualSlices(u16, one.slice(u16, max * n)[0 .. count * n], window.slice(u16, max * n)[0 .. count * n]);
+        }
+    }
+}
