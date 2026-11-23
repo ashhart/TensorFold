@@ -15,7 +15,8 @@ pub fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Alloc
         if (ready +| cache_fit.MARGIN > cap) return error.OverMemoryLimit;
         if (gib == null) if (eng.r.fsr) |fsr| if (fsr.pool != null) {
             const maximum = try @import("flashnext_cache_budget.zig").automatic(cap, ready, dev.allocated());
-            return cache_fit.budgetUnderMaximum(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), maximum, a, why, rank);
+            if (maximum < cache_fit.defaultBudget(cap -| ready -| cache_fit.MARGIN))
+                return cache_fit.budgetUnderMaximum(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), maximum, a, why, rank);
         };
         return cache_fit.budgetUnder(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), a, why, rank);
     }
