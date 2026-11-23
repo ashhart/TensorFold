@@ -59,8 +59,10 @@ pub const pin_sampled = pin_ids + state.max_rows;
 const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
 pub const pin_prompt = window_words;
 const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
-// a shared window's batched draw: a Rule a row, a position a row, then its tokens
-const pin_draw = pin_shared + max_streams * window_words;
+/// Where a shared window's batched draw (a Rule a row, a position a row, its tokens) begins: past the switch's streams.
+pub fn pinDraw(c: Config) usize {
+    return pin_shared + @import("cuda_wide.zig").streams(c) * window_words;
+}
 const draw_rules_words = state.max_rows * 8;
 const draw_meta_words = state.max_rows;
 const draw_tokens_words = state.max_rows;
@@ -160,6 +162,7 @@ pub const Engine = struct {
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
         const wide = @import("cuda_wide.zig");
         e.c.wide_rounds = wide.on() and wide.allowed(e.c, e.k.gb10, opts.slide); // before any buffer
+        e.k.wide = e.c.wide_rounds;
         if (wide.on()) if (wide.refusal(e.c, e.k.gb10, opts.slide)) |why| std.log.warn("TF_NEMOTRON_WIDE_ROUNDS is set but rounds stay at 8 streams: {s}", .{why});
         errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
@@ -221,7 +224,7 @@ pub const Engine = struct {
         errdefer if (!keep_owner) if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_draw + draw_rules_words + draw_meta_words + draw_tokens_words) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pinDraw(e.c) + draw_rules_words + draw_meta_words + draw_tokens_words) * 4);
         errdefer if (!keep_owner) e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer if (!keep_owner) e.history.free();
@@ -476,7 +479,7 @@ pub const Engine = struct {
         }
         if (total > state.sharedRows(e.c)) return error.WindowTooWide;
         try e.copied.synchronize();
-        const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * window_words];
+        const host = e.pinned.slice(u32)[pin_shared..][0 .. parts.len * window_words];
         var views: [max_streams]state.Buffers = undefined;
         var parts_f: [max_streams]Seg = undefined;
         var row0: usize = 0;
@@ -499,13 +502,13 @@ pub const Engine = struct {
             e.draw_at[k] = @intCast(draw_row);
             draw_row += p.rows;
         }
-        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pin_draw, pin_draw + draw_rules_words) else null;
+        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pinDraw(e.c), pinDraw(e.c) + draw_rules_words) else null;
         if (batch) |b| try @import("cuda_shared_draw.zig").upload(b, e.ops());
         try e.copied.record(e.stream);
         var f = e.forward(null);
         f.batch = if (batch) |*b| b else null;
         try f.windowSegs(parts_f[0..parts.len]);
-        const slab = e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words ..][0..draw_row];
+        const slab = e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words ..][0..draw_row];
         if (batch != null) {
             try e.ops().download(std.mem.sliceAsBytes(slab), e.b.draw_tokens);
         } else for (parts, 0..) |p, k| {
@@ -522,7 +525,7 @@ pub const Engine = struct {
     /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
     pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
         try e.sampled_ready.synchronize();
-        return e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
+        return e.pinned.slice(u32)[pinDraw(e.c) + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
     }
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.

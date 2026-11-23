@@ -78,7 +78,11 @@ fn call(l: qlinear.Linear, r: *Rig, w: W, x: u64, xs: u64, part: u64, out: u64, 
         .fp8 => |q| .{ .fp8 = q },
         .bf16 => |q| .{ .bf16 = q },
     };
-    try l.decode(r.s, weight, .{ .x = x + at * k * 2, .sums = xs + at * (k / 64) * 4, .part = part }, out + at * n * 2, rows);
+    const ax = x + at * k * 2;
+    const axs = xs + at * (k / 64) * 4;
+    // nemotron Ops.dense with the switch on: affine-4 rows past 16 take verify's tiles
+    if (weight == .affine4 and rows > qlinear.Affine4Kernels.max_rows) return l.affine4.?.verify(r.s, ax, axs, weight.affine4, out + at * n * 2, rows);
+    try l.decode(r.s, weight, .{ .x = ax, .sums = axs, .part = part }, out + at * n * 2, rows);
 }
 
 pub fn run(gpu: Gpu) !void {
