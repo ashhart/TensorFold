@@ -35,6 +35,7 @@ pub const Kernels = struct {
     rmsnorm_2048: cuda.Function, // and its q_lora
     rmsnorm_4096_f32w: cuda.Function,
     residual_add: cuda.Function,
+    residual_add_own: cuda.Function, // full GLM-5.3's under split prefill (#4510)
     stream_mean: cuda.Function,
     rank_sum: cuda.Function,
     hc_post: cuda.Function,
@@ -276,6 +277,13 @@ pub fn residualAdd(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, row
     var a: cuda.Args = .{};
     inline for (.{ x, xout, g, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
     try rows8Launch(set.glue.residual_add, stream, &a, rows, d, .{ x, xout, g });
+}
+
+/// Split prefill's residualAdd: rank me reads own in place instead of its unused slot in gathered g.
+pub fn residualAddOwn(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, rows: usize, d: usize, world: usize, own: u64, me: usize) !void {
+    var a: cuda.Args = .{};
+    inline for (.{ x, xout, g, i64of(rows * d), i64of(d), cint(world), own, cint(me) }) |v| a.add(v);
+    try rows8Launch(set.glue.residual_add_own, stream, &a, rows, d, .{ x, xout, own, g });
 }
 
 /// glue.stream_mean: out [rows][d] = bf16 of the s streams' mean (the final collapse).
