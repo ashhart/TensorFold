@@ -155,6 +155,9 @@ pub const Screen = struct {
     sample: mtl.Pipeline,
 
     pub fn load(device: mtl.Device, text: []const u8) !Screen {
+        return loadSources(device, text, sources.experts_units);
+    }
+    pub fn loadSources(device: mtl.Device, text: []const u8, units_text: []const u8) !Screen {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const pack = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_pack", false);
@@ -174,7 +177,7 @@ pub const Screen = struct {
         var proj_units: ?mtl.Pipeline = null;
         var q4_units: ?mtl.Pipeline = null;
         if (device.tensorUnits()) {
-            const ulib = try mtl.Library.fromSource(device, sources.experts_units, mtl.CompileOptions.mlx());
+            const ulib = try mtl.Library.fromSource(device, units_text, mtl.CompileOptions.mlx());
             defer ulib.deinit();
             proj_units = try mtl.Pipeline.init(device, ulib, "tf_ink2_dspark_q2_proj_units", false);
             errdefer if (proj_units) |p| p.deinit();
@@ -354,9 +357,13 @@ pub fn q2Proj(s: *const Screen, e: mtl.ComputeEncoder, u_codes: Ref, u_params: R
 }
 
 pub fn q2Screen(s: *const Screen, e: mtl.ComputeEncoder, base_approx: Ref, p_codes: Ref, p_params: Ref, beta: Ref, lambda: Ref, candidates: Ref) void {
+    q2ScreenCount(s, e, base_approx, p_codes, p_params, beta, lambda, candidates, vocab);
+}
+
+pub fn q2ScreenCount(s: *const Screen, e: mtl.ComputeEncoder, base_approx: Ref, p_codes: Ref, p_params: Ref, beta: Ref, lambda: Ref, candidates: Ref, count: u32) void {
     e.setPipeline(s.screen);
     bind(e, &.{ base_approx, p_codes, p_params, beta, lambda, candidates });
-    e.setValue(CountArgs{ .count = vocab }, 6);
+    e.setValue(CountArgs{ .count = count }, 6);
     groups(e, 128, 256);
 }
 

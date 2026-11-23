@@ -11,4 +11,5 @@ test {
     _ = @import("metal_inkling2_runtime_controls.zig");
     _ = @import("metal_inkling2_dspark_controls.zig");
     _ = @import("metal_inkling2_dspark_chain_controls.zig");
+    _ = @import("metal_inkling2_dspark_screen_controls.zig");
 }

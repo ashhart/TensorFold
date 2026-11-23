@@ -15,6 +15,7 @@ pub const Suites = struct {
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     chain: @import("metal_inkling2_dspark_chain.zig").Suite,
+    dspark_screen: @import("metal_inkling2_dspark_screen.zig").Suite,
 
     /// Heap-allocated so inline probe arrays inside each suite keep stable addresses across return.
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suites {
@@ -31,6 +32,7 @@ pub const Suites = struct {
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .chain = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dspark_screen = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.destroy();
         try s.attention.collect(only);
@@ -43,6 +45,7 @@ pub const Suites = struct {
         try s.runtime.collect(only);
         try s.dspark.collect(only);
         try s.chain.collect(only);
+        try s.dspark_screen.collect(only);
         return s;
     }
 
@@ -57,6 +60,7 @@ pub const Suites = struct {
         s.runtime.deinit();
         s.dspark.deinit();
         s.chain.deinit();
+        s.dspark_screen.deinit();
         s.a.destroy(s);
     }
 };
