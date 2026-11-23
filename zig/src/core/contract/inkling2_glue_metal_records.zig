@@ -22,4 +22,5 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue logits_r8 tf_inkling2_coalesced_logits_r8", .threads = 128, .tg_memory = 6272, .reserved = 128 },
     .{ .name = "metal inkling2 glue logits_r16 tf_inkling2_coalesced_logits_r16", .threads = 128, .tg_memory = 8320, .reserved = 128 },
     .{ .name = "metal inkling2 glue logits_r32 tf_inkling2_coalesced_logits_r32", .threads = 256, .tg_memory = 12416, .reserved = 256 },
+    .{ .name = "metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs", .threads = 256, .tg_memory = 128, .reserved = 256 },
 };

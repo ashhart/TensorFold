@@ -1,5 +1,6 @@
 //! Host-only schedule, cache-layout, accepted-history and compact-snapshot checks.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const ap = @import("attention_plan.zig");
 const cfg = @import("../config.zig");
@@ -347,4 +348,105 @@ test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused part
     try std.testing.expectEqualSlices(u8, s_ref.p.contents()[0 .. rows * state.hidden * 2], s.p.contents()[0 .. rows * state.hidden * 2]);
     try std.testing.expectEqualSlices(u8, s_ref.partial.contents()[0 .. rows * state.hidden * 4], s.partial.contents()[0 .. rows * state.hidden * 4]);
     try std.testing.expectEqualSlices(u8, s_ref.ar.contents()[0 .. 3 * rows * state.hidden * 4], s.ar.contents()[0 .. 3 * rows * state.hidden * 4]);
+}
+
+fn blitFill(queue: mtl.Queue, buf: mtl.Buffer, off: usize, len: usize, byte: u8) !void {
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.fill(buf, off, len, byte);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.GpuFailed;
+}
+
+fn expectConvByte(queue: mtl.Queue, conv: mtl.Buffer, off: usize, len: usize, staging: mtl.Buffer, want: u8) !void {
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.copy(conv, off, staging, 0, len);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.GpuFailed;
+    const got = staging.slice(u8, len);
+    try std.testing.expectEqual(want, got[0]);
+    try std.testing.expectEqual(want, got[len - 1]);
+}
+
+test "3-case GPU conv rollback restores backup or selects staged history (TF_INKLING2_METAL_DIR)" {
+    if (!builtin.os.tag.isDarwin() or @import("sys").getenv("TF_INKLING2_METAL_DIR") == null) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const sched = schedule();
+    var cache = try state.Cache.init(device, 32, &sched);
+    defer cache.deinit();
+    const staging = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer staging.deinit();
+
+    // Case 1: pre-part-0 staged failure clears transaction metadata without copying stale backup into conv.
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x11);
+    try blitFill(queue, cache.backup, 0, state.conv_bytes, 0xEE);
+    try cache.beginStage(4);
+    try std.testing.expect(!cache.conv_backed_up);
+    try cache.rollback(queue);
+    try std.testing.expect(cache.pending == null);
+    try std.testing.expect(!cache.conv_backed_up);
+    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
+
+    // Case 2: post-part-0 failure after backupBlit committed restores backup into conv.
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x99);
+    try cache.rollback(queue);
+    try std.testing.expect(cache.pending == null);
+    try expectConvByte(queue, cache.conv, 0, state.conv_bytes, staging, 0x11);
+
+    // Case 3: post-full-CB partial accept selects staged offset; full accept/rollback keep conv exact.
+    try blitFill(queue, cache.taps, 0, state.taps_bytes, 0x44);
+    const sel_off = state.convByteOffset(0, 0, 1, 3 + state.max_rows);
+    const sel_len = 3 * state.convWidth(0) * 2;
+    try blitFill(queue, cache.taps, sel_off, sel_len, 0x55);
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x77);
+    try cache.commit(queue, 1);
+    try std.testing.expectEqual(@as(usize, 1), cache.len);
+    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
+
+    try cache.beginStage(4);
+    {
+        const cb = queue.commandBuffer();
+        const b = cb.blit();
+        cache.backupBlit(b);
+        b.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure() != null) return error.GpuFailed;
+        cache.conv_backed_up = true;
+    }
+    try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x88);
+    try cache.rollback(queue);
+    try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
 }
