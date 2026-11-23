@@ -212,3 +212,12 @@ test "Metal review: the rotating 150ms width cannot be starved by an earlier edg
     try t.expectEqual(@as(usize, 1), timer.n);
     try t.expectEqual(@as(usize, 1), timer.seen[0]);
 }
+
+
+test "Metal review: no valid measured pass refuses a fresh table" {
+    const Invalid = struct {
+        pub fn time(_: @This(), _: usize) !f64 { return 0; }
+    };
+    var ms: [2]f64 = undefined;
+    try t.expectError(error.InvalidWindowCost, rule.measureWindows(Invalid{}, &ms, false));
+}
