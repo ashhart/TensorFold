@@ -41,3 +41,19 @@ inline void ink2_part_sum(threadgroup float* part, thread tfp::frag<float>& lo, 
       hi[e] += part[(o * 16u + 8u + e) * 32u + lane];
     }
 }
+// A simdgroup's half-fragment (q = 0 or 1, 8 floats/lane = 2048 floats total) into part and summed in order.
+inline void ink2_part_put_half(threadgroup float* part, thread const tfp::frag<float>& lo, thread const tfp::frag<float>& hi, uint q, uint sg, uint lane) {
+  const uint off = 4u * q;
+  for (uint e = 0u; e < 4u; ++e) {
+    part[(sg * 8u + e) * 32u + lane] = lo[off + e];
+    part[(sg * 8u + 4u + e) * 32u + lane] = hi[off + e];
+  }
+}
+inline void ink2_part_sum_half(threadgroup float* part, thread tfp::frag<float>& lo, thread tfp::frag<float>& hi, uint q, uint lane) {
+  const uint off = 4u * q;
+  for (uint e = 0u; e < 4u; ++e)
+    for (uint o = 1u; o < 8u; ++o) {
+      lo[off + e] += part[(o * 8u + e) * 32u + lane];
+      hi[off + e] += part[(o * 8u + 4u + e) * 32u + lane];
+    }
+}

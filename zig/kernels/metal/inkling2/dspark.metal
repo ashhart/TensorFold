@@ -293,3 +293,186 @@ kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const
   const bfloat logit = bfloat(float(base[i]) + float(bias));
   out[i] = bfloat(30.0f * tanh(float(logit) / 30.0f));
 }
+
+struct DsparkPackArgs { uint rows, ngroups; };
+
+// One-time GPU 2-bit affine quantizer (group size 64): packs 16 codes per uint and half2(scale, lo) per group.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_pack(const device bfloat* mat [[buffer(0)]], device uint* codes [[buffer(1)]], device half2* params [[buffer(2)]], constant DsparkPackArgs& a [[buffer(3)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint g_idx = tg * 8u + sg;
+  const uint total = a.rows * a.ngroups;
+  if (g_idx >= total) return;
+  const device bfloat* src = mat + size_t(g_idx) * 64u + 2u * lane;
+  const float v0 = float(src[0]), v1 = float(src[1]);
+  const float lo = simd_min(min(v0, v1));
+  const float hi = simd_max(max(v0, v1));
+  const float span = hi - lo;
+  const float scale = span > 0.0f ? span / 3.0f : 0.0f;
+  const float inv = span > 0.0f ? 3.0f / span : 0.0f;
+  const uint q0 = uint(clamp(rint((v0 - lo) * inv), 0.0f, 3.0f));
+  const uint q1 = uint(clamp(rint((v1 - lo) * inv), 0.0f, 3.0f));
+  uint bits = (q0 | (q1 << 2u)) << (4u * (lane & 7u));
+  bits |= simd_shuffle_xor(bits, 1);
+  bits |= simd_shuffle_xor(bits, 2);
+  bits |= simd_shuffle_xor(bits, 4);
+  if ((lane & 7u) == 0u) codes[size_t(g_idx) * 4u + (lane >> 3u)] = bits;
+  if (lane == 0u) params[g_idx] = half2(half(scale), half(lo));
+}
+
+// 2-bit screened unembed projection for greedy DSpark chain: factored half4 math at full DRAM bandwidth.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_proj(const device uint* u_codes [[buffer(0)]], const device half2* u_params [[buffer(1)]], const device bfloat* y [[buffer(2)]], device half* out [[buffer(3)]], constant DsparkBaseArgs& a [[buffer(4)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint id = tg * 8u + sg;
+  if (id >= a.vocab) return;
+  const device uint* rc = u_codes + size_t(id) * 144u;
+  const device half2* rp = u_params + size_t(id) * 36u;
+  float acc[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint w = lane; w < 144u; w += 32u) {
+    const uint word = rc[w];
+    const half2 pr = rp[w >> 2u];
+    const half sc = pr.x, lo = pr.y;
+    const half4 q0 = half4(half(word & 3u), half((word >> 2u) & 3u), half((word >> 4u) & 3u), half((word >> 6u) & 3u));
+    const half4 q1 = half4(half((word >> 8u) & 3u), half((word >> 10u) & 3u), half((word >> 12u) & 3u), half((word >> 14u) & 3u));
+    const half4 q2 = half4(half((word >> 16u) & 3u), half((word >> 18u) & 3u), half((word >> 20u) & 3u), half((word >> 22u) & 3u));
+    const half4 q3 = half4(half((word >> 24u) & 3u), half((word >> 26u) & 3u), half((word >> 28u) & 3u), half((word >> 30u) & 3u));
+    const uint col = w * 16u;
+    for (uint row = 0u; row < a.rows; ++row) {
+      const device bfloat* xr = y + size_t(row) * DSP_H + col;
+      const half4 x0 = half4(float4(*(const device bfloat4*)xr));
+      const half4 x1 = half4(float4(*(const device bfloat4*)(xr + 4u)));
+      const half4 x2 = half4(float4(*(const device bfloat4*)(xr + 8u)));
+      const half4 x3 = half4(float4(*(const device bfloat4*)(xr + 12u)));
+      const half4 xs = (x0 + x1) + (x2 + x3);
+      const half xsum = (xs.x + xs.y) + (xs.z + xs.w);
+      const half qdot = metal::dot(q0, x0) + metal::dot(q1, x1) + metal::dot(q2, x2) + metal::dot(q3, x3);
+      acc[row] += float(sc * qdot + lo * xsum);
+    }
+  }
+  for (uint row = 0u; row < a.rows; ++row) {
+    const float sum = simd_sum(acc[row]);
+    if (lane == 0u) out[size_t(row) * a.vocab + id] = half(sum);
+  }
+}
+
+// 2-bit screened Phi dot + per-TG top-2 shortlist (128 TGs -> 256 candidate vocab IDs), factored half4 math.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_screen(const device half* base_approx [[buffer(0)]], const device uint* p_codes [[buffer(1)]], const device half2* p_params [[buffer(2)]], const device bfloat* beta [[buffer(3)]], const device bfloat* lambda [[buffer(4)]], device uint* candidates [[buffer(5)]], constant DsparkCountArgs& a [[buffer(6)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup half lam[DSP_RANK];
+  threadgroup float tg_v[32];
+  threadgroup uint tg_i[32];
+  lam[t] = half(float(lambda[t]));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint v0 = uint((size_t(tg) * a.count) / 128u);
+  const uint v1 = uint((size_t(tg + 1u) * a.count) / 128u);
+  const uint sw = (sg << 1u) | (lane >> 4u);
+  const uint sl = lane & 15u;
+  const uint col = sl * 16u;
+  const half4 l0 = half4(lam[col], lam[col + 1u], lam[col + 2u], lam[col + 3u]);
+  const half4 l1 = half4(lam[col + 4u], lam[col + 5u], lam[col + 6u], lam[col + 7u]);
+  const half4 l2 = half4(lam[col + 8u], lam[col + 9u], lam[col + 10u], lam[col + 11u]);
+  const half4 l3 = half4(lam[col + 12u], lam[col + 13u], lam[col + 14u], lam[col + 15u]);
+  const half4 ls = (l0 + l1) + (l2 + l3);
+  const half lsum = (ls.x + ls.y) + (ls.z + ls.w);
+  float bv0 = -INFINITY, bv1 = -INFINITY;
+  uint bi0 = 0u, bi1 = 0u;
+  for (uint i = v0 + sw; i < v1; i += 16u) {
+    const uint word = p_codes[size_t(i) * 16u + sl];
+    const half2 pr = p_params[size_t(i) * 4u + (sl >> 2u)];
+    const half4 q0 = half4(half(word & 3u), half((word >> 2u) & 3u), half((word >> 4u) & 3u), half((word >> 6u) & 3u));
+    const half4 q1 = half4(half((word >> 8u) & 3u), half((word >> 10u) & 3u), half((word >> 12u) & 3u), half((word >> 14u) & 3u));
+    const half4 q2 = half4(half((word >> 16u) & 3u), half((word >> 18u) & 3u), half((word >> 20u) & 3u), half((word >> 22u) & 3u));
+    const half4 q3 = half4(half((word >> 24u) & 3u), half((word >> 26u) & 3u), half((word >> 28u) & 3u), half((word >> 30u) & 3u));
+    const half qdot = metal::dot(q0, l0) + metal::dot(q1, l1) + metal::dot(q2, l2) + metal::dot(q3, l3);
+    float part = float(pr.x * qdot + pr.y * lsum);
+    part += simd_shuffle_xor(part, 8);
+    part += simd_shuffle_xor(part, 4);
+    part += simd_shuffle_xor(part, 2);
+    part += simd_shuffle_xor(part, 1);
+    if (sl == 0u) {
+      const float raw = float(base_approx[i]) + float(beta[i]) + part;
+      const float v = isnan(raw) ? -INFINITY : raw;
+      if (v > bv0 || (v == bv0 && i < bi0)) {
+        bv1 = bv0; bi1 = bi0;
+        bv0 = v; bi0 = i;
+      } else if (v > bv1 || (v == bv1 && i < bi1)) {
+        bv1 = v; bi1 = i;
+      }
+    }
+  }
+  if (sl == 0u) {
+    tg_v[sw * 2u] = bv0; tg_i[sw * 2u] = bi0;
+    tg_v[sw * 2u + 1u] = bv1; tg_i[sw * 2u + 1u] = bi1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t != 0u) return;
+  float wv0 = -INFINITY, wv1 = -INFINITY;
+  uint wi0 = 0u, wi1 = 0u;
+  for (uint j = 0u; j < 32u; ++j) {
+    const float v = tg_v[j];
+    const uint idx = tg_i[j];
+    if (v > wv0 || (v == wv0 && idx < wi0)) {
+      wv1 = wv0; wi1 = wi0;
+      wv0 = v; wi0 = idx;
+    } else if (v > wv1 || (v == wv1 && idx < wi1)) {
+      wv1 = v; wi1 = idx;
+    }
+  }
+  candidates[tg * 2u] = wi0;
+  candidates[tg * 2u + 1u] = wi1;
+}
+
+// Exact BF16 unembed + Phi + beta + softcap30 evaluation over the 256 shortlist candidates plus token 0.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_refine(const device uint* candidates [[buffer(0)]], const device bfloat* unembed [[buffer(1)]], const device bfloat* y_row [[buffer(2)]], const device bfloat* phi [[buffer(3)]], const device bfloat* beta [[buffer(4)]], const device bfloat* lambda [[buffer(5)]], device bfloat* cand_logits [[buffer(6)]], device uint* cand_ids [[buffer(7)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup float lam[DSP_RANK];
+  lam[t] = float(lambda[t]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint c = tg * 8u + sg;
+  if (c >= 257u) return;
+  const uint id = (c == 256u) ? 0u : candidates[c];
+  const device bfloat* uw = unembed + size_t(id) * DSP_H;
+  float bacc = 0.0f;
+  for (uint i = 8u * lane; i < DSP_H; i += 256u) {
+    const float4 w0 = float4(*(const device bfloat4*)(uw + i)), w1 = float4(*(const device bfloat4*)(uw + i + 4u));
+    const float4 x0 = float4(*(const device bfloat4*)(y_row + i)), x1 = float4(*(const device bfloat4*)(y_row + i + 4u));
+    bacc += metal::dot(w0, x0) + metal::dot(w1, x1);
+  }
+  const float bsum = simd_sum(bacc);
+  const device bfloat* pr = phi + size_t(id) * DSP_RANK + 8u * lane;
+  const float4 p0 = float4(*(const device bfloat4*)pr), p1 = float4(*(const device bfloat4*)(pr + 4u));
+  const float4 l0 = float4(lam[8u * lane], lam[8u * lane + 1u], lam[8u * lane + 2u], lam[8u * lane + 3u]);
+  const float4 l1 = float4(lam[8u * lane + 4u], lam[8u * lane + 5u], lam[8u * lane + 6u], lam[8u * lane + 7u]);
+  const float pdot = simd_sum(metal::dot(p0, l0) + metal::dot(p1, l1));
+  if (lane != 0u) return;
+  const bfloat rbase = bfloat(bsum);
+  const bfloat rbias = bfloat(float(beta[id]) + pdot);
+  const bfloat rlogit = bfloat(float(rbase) + float(rbias));
+  cand_logits[c] = bfloat(30.0f * tanh(float(rlogit) / 30.0f));
+  cand_ids[c] = id;
+}
+
+// Exact greedy pick over the 257 refined candidates into held[a.token + 1].
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_pick(const device bfloat* cand_logits [[buffer(0)]], const device uint* cand_ids [[buffer(1)]], device uint* held [[buffer(2)]], constant DsparkTokenArgs& a [[buffer(3)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float values[8];
+  threadgroup uint places[8];
+  const float raw = float(cand_logits[t]);
+  float best = isnan(raw) ? -INFINITY : raw;
+  uint at = cand_ids[t];
+  if (t == 0u) {
+    const float raw0 = float(cand_logits[256]);
+    const float v0 = isnan(raw0) ? -INFINITY : raw0;
+    if (v0 > best || (v0 == best && 0u < at)) { best = v0; at = 0u; }
+  }
+  for (ushort o = 16; o > 0; o >>= 1) {
+    const float pv = simd_shuffle_xor(best, o);
+    const uint pi = simd_shuffle_xor(at, o);
+    if (pv > best || (pv == best && pi < at)) { best = pv; at = pi; }
+  }
+  if (lane == 0u) { values[sg] = best; places[sg] = at; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t != 0u) return;
+  for (uint g = 0u; g < 8u; ++g)
+    if (values[g] > best || (values[g] == best && places[g] < at)) { best = values[g]; at = places[g]; }
+  held[a.token + 1] = isnan(float(cand_logits[256])) ? 0u : at;
+}

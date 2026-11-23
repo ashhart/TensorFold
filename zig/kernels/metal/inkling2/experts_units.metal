@@ -150,3 +150,60 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
   threadgroup float part[4096];
   ink2_units<true, false>(X, W, S, 1.0f, counts, members, Y, a, tg, sg, lane, part);
 }
+
+struct DsparkBaseUnitsArgs { uint rows, vocab; };
+
+// M5 tensor-unit 2-bit screened unembed projection: 16x32x16 half NAX op, 18 K-steps per simdgroup, 8 KiB scratch.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dspark_q2_proj_units(
+    device const uint* u_codes [[buffer(0)]], device const half2* u_params [[buffer(1)]],
+    device const bfloat* y [[buffer(2)]], device half* out [[buffer(3)]],
+    constant DsparkBaseUnitsArgs& a [[buffer(4)]], uint tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[2048];
+  const uint v0 = 32u * tg;
+  const short2 home = tfp::frag_home(ushort(lane));
+  const uint hx = uint(home.x), hy = uint(home.y);
+  const bool live0 = hy < a.rows;
+  const device bfloat* xr = y + ulong(live0 ? hy : 0u) * 2304u + hx;
+  const uint r0 = min(v0 + hy, a.vocab - 1u);
+  const uint r1 = min(v0 + 8u + hy, a.vocab - 1u);
+  const uint r2 = min(v0 + 16u + hy, a.vocab - 1u);
+  const uint r3 = min(v0 + 24u + hy, a.vocab - 1u);
+  const device uint* c0 = u_codes + ulong(r0) * 144u;
+  const device uint* c1 = u_codes + ulong(r1) * 144u;
+  const device uint* c2 = u_codes + ulong(r2) * 144u;
+  const device uint* c3 = u_codes + ulong(r3) * 144u;
+  const device half2* p0 = u_params + ulong(r0) * 36u;
+  const device half2* p1 = u_params + ulong(r1) * 36u;
+  const device half2* p2 = u_params + ulong(r2) * 36u;
+  const device half2* p3 = u_params + ulong(r3) * 36u;
+  const uint shift = 2u * hx;
+  tfp::frag<float> lo = tfp::frag<float>(0.0f), hi = tfp::frag<float>(0.0f);
+  const half4 z4 = half4(0.0h);
+  for (uint w = sg * 18u; w < (sg + 1u) * 18u; ++w) {
+    const uint g = w >> 2u;
+    const half4 x0 = live0 ? half4(float4(*(const device bfloat4*)(xr + 16u * w))) : z4;
+    const tfp::frag<half> af = tfp::frag<half>(x0, z4);
+    const uint w0 = c0[w] >> shift, w1 = c1[w] >> shift, w2 = c2[w] >> shift, w3 = c3[w] >> shift;
+    const half2 pr0 = p0[g], pr1 = p1[g], pr2 = p2[g], pr3 = p3[g];
+    const half4 q0 = pr0.y + pr0.x * half4(half(w0 & 3u), half((w0 >> 2u) & 3u), half((w0 >> 4u) & 3u), half((w0 >> 6u) & 3u));
+    const half4 q1 = pr1.y + pr1.x * half4(half(w1 & 3u), half((w1 >> 2u) & 3u), half((w1 >> 4u) & 3u), half((w1 >> 6u) & 3u));
+    const half4 q2 = pr2.y + pr2.x * half4(half(w2 & 3u), half((w2 >> 2u) & 3u), half((w2 >> 4u) & 3u), half((w2 >> 6u) & 3u));
+    const half4 q3 = pr3.y + pr3.x * half4(half(w3 & 3u), half((w3 >> 2u) & 3u), half((w3 >> 4u) & 3u), half((w3 >> 6u) & 3u));
+    const tfp::frag<half> bf0 = tfp::frag<half>(q0, q1);
+    const tfp::frag<half> bf1 = tfp::frag<half>(q2, q3);
+    tfp::mma_16x32<false, true>(lo, hi, af, bf0, bf1);
+  }
+  ink2_part_put_half(part, lo, hi, 0u, sg, lane);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0u && live0) {
+    ink2_part_sum_half(part, lo, hi, 0u, lane);
+    for (uint side = 0u; side < 2u; ++side) {
+      const uint col = v0 + 16u * side + hx;
+      const float4 v = side == 0u ? float4(lo[0], lo[1], lo[2], lo[3])
+                                  : float4(hi[0], hi[1], hi[2], hi[3]);
+      for (uint j = 0u; j < 4u; ++j)
+        if (col + j < a.vocab) out[ulong(hy) * a.vocab + col + j] = half(v[j]);
+    }
+  }
+}

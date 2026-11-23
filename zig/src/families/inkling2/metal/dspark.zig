@@ -45,6 +45,15 @@ pub const Drafter = struct {
     /// The greedy chain's kernels, and each held stream's eight tokens: the anchor, then its drafts.
     chain: k.Chain = undefined,
     chain_tokens: mtl.Buffer = undefined,
+    /// 2-bit screened greedy head pipelines and pre-packed unembed/phi buffers.
+    screen: k.Screen = undefined,
+    u_codes: mtl.Buffer = undefined,
+    u_params: mtl.Buffer = undefined,
+    p_codes: mtl.Buffer = undefined,
+    p_params: mtl.Buffer = undefined,
+    cand_ids: mtl.Buffer = undefined,
+    cand_out_ids: mtl.Buffer = undefined,
+    cand_logits: mtl.Buffer = undefined,
     scores: ?mtl.Buffer = null,
     capacity: usize = 1,
     /// A draft's share of a full hold, timed by `measure`.
@@ -72,6 +81,32 @@ pub const Drafter = struct {
         d.chain = try k.Chain.load(device, @import("inkling2_metal").inkling2_dspark);
         errdefer d.chain.deinit();
         d.chain_tokens = try device.buffer(chain_streams * 8 * @sizeOf(u32), mtl.ResourceOptions.shared);
+        errdefer d.chain_tokens.deinit();
+        d.screen = try k.Screen.load(device, @import("inkling2_metal").inkling2_dspark);
+        errdefer d.screen.deinit();
+        d.u_codes = try device.buffer(state.vocabulary * (state.hidden / 16) * @sizeOf(u32), mtl.ResourceOptions.private);
+        errdefer d.u_codes.deinit();
+        d.u_params = try device.buffer(state.vocabulary * (state.hidden / 64) * 4, mtl.ResourceOptions.private);
+        errdefer d.u_params.deinit();
+        d.p_codes = try device.buffer(state.vocabulary * (state.rank / 16) * @sizeOf(u32), mtl.ResourceOptions.private);
+        errdefer d.p_codes.deinit();
+        d.p_params = try device.buffer(state.vocabulary * (state.rank / 64) * 4, mtl.ResourceOptions.private);
+        errdefer d.p_params.deinit();
+        d.cand_ids = try device.buffer(256 * @sizeOf(u32), mtl.ResourceOptions.private);
+        errdefer d.cand_ids.deinit();
+        d.cand_out_ids = try device.buffer(257 * @sizeOf(u32), mtl.ResourceOptions.private);
+        errdefer d.cand_out_ids.deinit();
+        d.cand_logits = try device.buffer(257 * 2, mtl.ResourceOptions.private);
+        errdefer d.cand_logits.deinit();
+        {
+            const cb = target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            k.q2Pack(&d.screen, e, r(target.weights.unembed), at(d.u_codes, 0), at(d.u_params, 0), state.vocabulary, state.hidden / 64);
+            k.q2Pack(&d.screen, e, at(d.weights.phi, 0), at(d.p_codes, 0), at(d.p_params, 0), state.vocabulary, state.rank / 64);
+            e.end();
+            cb.commit();
+            try failed(cb, "q2 pack");
+        }
         return d;
     }
 
@@ -80,6 +115,14 @@ pub const Drafter = struct {
         while (it.next()) |lane| lane.deinit();
         d.contexts.deinit(d.gpa);
         if (d.scores) |scores| scores.deinit();
+        d.cand_logits.deinit();
+        d.cand_out_ids.deinit();
+        d.cand_ids.deinit();
+        d.p_params.deinit();
+        d.p_codes.deinit();
+        d.u_params.deinit();
+        d.u_codes.deinit();
+        d.screen.deinit();
         d.chain_tokens.deinit();
         d.chain.deinit();
         for (d.more.items) |*extra| extra.deinit();
@@ -91,7 +134,7 @@ pub const Drafter = struct {
     }
 
     pub fn fixedBytes(d: *const Drafter) u64 {
-        return d.weights.fixedBytes() + state.scratchBytes();
+        return d.weights.fixedBytes() + state.scratchBytes() + d.u_codes.length() + d.u_params.length() + d.p_codes.length() + d.p_params.length();
     }
 
     pub fn scoreBytes(capacity: usize) u64 {
@@ -248,7 +291,7 @@ pub const Drafter = struct {
         try failed(cb, "absorb");
     }
 
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, pending: u32, anchor: u64, depth: u32) void {
+    fn encodeBlockCore(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, pending: u32, anchor: u64, depth: u32) void {
         s.ids.slice(u32, 1)[0] = pending;
         glue.embedNorm(&d.target.glue, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.x, 0), 1);
         k.initializeRows(&d.pipelines, e, at(s.x, 0), r(d.weights.weights.mask), at(s.x, 0));
@@ -268,8 +311,12 @@ pub const Drafter = struct {
             const next_norm = if (i + 1 < d.weights.weights.layers.len) d.weights.weights.layers[i + 1].input_norm else d.weights.weights.norm;
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.next_resid, 0), r(next_norm), at(s.resid, 0), at(s.x, 0), 8, false);
         }
-        k.base(&d.pipelines, e, r(d.target.weights.unembed), at(s.x, state.hidden * 2), at(s.base, 0), depth, state.vocabulary);
         k.kappa(&d.pipelines, e, at(s.x, state.hidden * 2), at(lane.newest, 0), r(d.weights.weights.rnn), r(d.weights.weights.rnn_bias), at(s.kappa, 0), depth);
+    }
+
+    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, pending: u32, anchor: u64, depth: u32) void {
+        d.encodeBlockCore(e, s, lane, pending, anchor, depth);
+        k.base(&d.pipelines, e, r(d.target.weights.unembed), at(s.x, state.hidden * 2), at(s.base, 0), depth, state.vocabulary);
     }
 
     fn recurrent(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, step: usize, previous: u32, second_bank: bool) void {
@@ -289,16 +336,18 @@ pub const Drafter = struct {
         return &d.more.items[index - 1];
     }
 
-    /// One stream's greedy hold: its block, then each step's recurrent pass, logits and pick; `held` takes the drafts.
+    /// One stream's greedy hold: block + 2-bit screened exact head; `held` takes the drafts.
     fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, held: Ref, pending: u32, anchor: u64, depth: usize) void {
-        d.encodeBlock(e, s, lane, pending, anchor, @intCast(depth));
+        d.encodeBlockCore(e, s, lane, pending, anchor, @intCast(depth));
+        k.q2Proj(&d.screen, e, at(d.u_codes, 0), at(d.u_params, 0), at(s.x, state.hidden * 2), at(s.base, 0), @intCast(depth), state.vocabulary);
         var second_bank = false;
         for (0..depth) |step| {
             const current = if (second_bank) s.next_state else s.state;
             const next = if (second_bank) s.state else s.next_state;
             k.chainStep(&d.chain, e, at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0), held, @intCast(step));
-            k.finalLogits(&d.pipelines, e, at(s.base, step * state.vocabulary * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(s.logits, 0));
-            k.chainPick(&d.chain, e, at(s.logits, 0), held, @intCast(step));
+            k.q2Screen(&d.screen, e, at(s.base, step * state.vocabulary * 2), at(d.p_codes, 0), at(d.p_params, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(d.cand_ids, 0));
+            k.q2Refine(&d.screen, e, at(d.cand_ids, 0), r(d.target.weights.unembed), at(s.x, (1 + step) * state.hidden * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(d.cand_logits, 0), at(d.cand_out_ids, 0));
+            k.q2Pick(&d.screen, e, at(d.cand_logits, 0), at(d.cand_out_ids, 0), held, @intCast(step));
             second_bank = !second_bank;
         }
     }
