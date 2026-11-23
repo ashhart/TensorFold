@@ -490,7 +490,7 @@ pub const Metal = struct {
     }
 };
 
-/// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, which is past the unembedding's real rows.
+/// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, which passes the unembedding's rows.
 fn maskWords(vocab: u32) usize {
     return (@as(usize, vocab) + 31) / 32;
 }
