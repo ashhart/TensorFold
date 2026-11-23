@@ -1,6 +1,6 @@
 //! The backend's heavy vtable entries: verify, keep, draft, tree and release.
 const std = @import("std");
-const ds = @import("model.zig");
+const ds = @import("model_metal.zig");
 const lanes = @import("lanes");
 const be = lanes.backend;
 const Stream = lanes.Stream;
