@@ -355,9 +355,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const shared = try q.simd_attention.sharedPrefix(model.device.tensorUnits());
     // the MTP head's keys and values: one more attention layer a slot, beside the drafter's ring when there is one
     const head_kv: usize = if (mtp_on) @as(usize, capacity + window) * model.config.kvDim() * 2 * 2 else 0;
-    var fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
-    // a drafter's own tap row: its planes, and a v1 drafter's fusion buffers beside them
-    if (draft_model) |d| fit_prompt.tap_row = memory.tapRowBytes(model.config.hidden, d.graph.config.tap_count, d.graph.config.variant == .v1);
+    var fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model)); if (draft_model) |d| fit_prompt.tap_row = memory.tapRowBytes(model.config.hidden, d.graph.config.tap_count, d.graph.config.variant == .v1);
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
@@ -413,7 +411,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .image_share = if (o.vision) |x| x.image_share else .request, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft) |d| .{ .kind = d.model.graph.config.kind(), .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft) |d| .{ .kind = d.model.graph.config.kind(), .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
