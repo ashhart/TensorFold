@@ -213,15 +213,21 @@ pub const Drafter = struct {
         if (streams + 1 <= x.free.len) return;
         if (x.lanes.count() != 0) return error.DraftReserveWithStreams;
         try x.e.reserve(streams + 1);
+        try x.clearCaches(); // the timing passes below read them: zeroed first, not fresh device memory
         x.gpa.free(x.free);
         x.free = try x.gpa.alloc(bool, streams + 1);
         @memset(x.free, true);
         x.free[streams] = false;
         x.step_ms = try x.time(streams);
         x.n_holds = try x.timeHolds(streams); // on the streams' slots: zeroed after, before any stream opens
-        for (x.e.caches.items) |b| try x.kb.d.check(x.kb.d.api.cuMemsetD8Async(b.ptr, 0, b.len, x.kb.s.handle), "cuMemsetD8Async");
+        try x.clearCaches();
         try row_costs.time(x.kb, x.io, &x.costs); // without them the depth rule cannot trade drafts against rows
         x.timed = true;
+    }
+
+    /// Every EAGLE-3 cache zeroed on the drafter's stream.
+    fn clearCaches(x: *Drafter) !void {
+        for (x.e.caches.items) |b| try x.kb.d.check(x.kb.d.api.cuMemsetD8Async(b.ptr, 0, b.len, x.kb.s.handle), "cuMemsetD8Async");
     }
 
     /// One more draft's ms: chains of `depth` and of 1 on the spare slot, the best of three each.
