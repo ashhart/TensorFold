@@ -91,7 +91,7 @@ pub const State = struct {
     /// Whether a new stream of `rows` rows waits for the arena's thread before its open (Pool.waits); own stream: no.
     pub fn waits(s: *const State, rows: usize, others: usize) bool {
         if (s.choose() != .pool) return false;
-        return s.pool.?.waits(@min(rows + mtp.max_rows, prompt.max_tokens), others > 0);
+        return s.pool.?.waits(@min(rows + windowRows(), prompt.max_tokens), others > 0);
     }
 
     /// The lane host's admission: the own stream is free, or a lane and the request's pages are.
