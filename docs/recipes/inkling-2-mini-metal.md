@@ -178,7 +178,9 @@ host-test line at `e90ecce19a`.
   server looks are in [image input](../vision.md#jpeg-input)); without it each JPEG is refused by name and PNG and text
   still serve. Images need `--vision`.
 - Replies carry the model's raw delimiters (`<|message_model|><|content_thinking|>` and the like): they are not split
-  into `reasoning_content`.
+  into `reasoning_content`, a finished reply puts the same string in `content` as well, and `usage.reasoning_tokens` is 0
+  (found by a contributor on an M3 Pro). #4124 splits Inkling 2 replies by the format's state table; merged into this
+  branch it gave the split and a nonzero `reasoning_tokens` on the M4 Pro, so this limit goes when #4124 is on `main`.
 - A DSpark server refuses `--prompt-cache-gib`: the draft head keeps per-stream state a kept prompt state does not
   hold, so the served default with drafts never resumes a prompt. `--drafter` is refused (the head is the checkpoint's
   own), as are `--slide`, `--loops`, `--policy` and `--checkpoint-slots`.
