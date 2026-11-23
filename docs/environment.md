@@ -167,7 +167,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 37 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 38 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -209,6 +209,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
 | `TF_FLASHNEXT_PROMPT` | Exactly `rows` for the rows path; unset or blank keeps the plain path |
 | `TF_FLASHNEXT_DRAFT_HEAD` | Exactly `bf16` or `affine4`; unset or blank is `affine4`, a bf16 language head's draft rows held as 4-bit affine groups of 32. `bf16` keeps the rows as stored. Drafts only, so replies are unchanged |
+| `TF_FLASHNEXT_MTP_WEIGHTS` | Exactly `checkpoint` or `mxfp8`; unset or blank is `checkpoint`, the MTP drafter's rows as the checkpoint stores them. `mxfp8` re-codes the drafter's BF16 linears to MXFP8 as they load, leaving its two fusion projections and its shared expert as stored, on CUDA only: on Metal or HIP, or where a drafter linear is stored as anything but BF16, it stops the start naming the setting |
 
 An on-by-default switch keeps the same kernels and bits as off; only the launch count changes.
 The two row counts and the two draft counts keep their existing clamps after parsing.
