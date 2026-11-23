@@ -597,4 +597,4 @@ fn argmax(l: []const u16) usize {
     return best;
 }
 
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
