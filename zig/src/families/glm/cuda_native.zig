@@ -264,6 +264,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     own.progress.enter(.weights);
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null, .owner = &own.group });
     errdefer own.e.deinit();
+    own.e.keep_seqs = try @import("sys").environment.value(bool, "TF_GLM_KEEP_SEQS", ranks.environment("TF_GLM_KEEP_SEQS"), false);
     if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
         var problem: []const u8 = "";
         const ql: cuda.qlinear.Linear = .{ .lane = &own.e.m.lane, .nvfp4_prompt = &own.e.m.prompt }; // the tower's MXFP8, NVFP4

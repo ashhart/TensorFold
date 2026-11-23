@@ -61,6 +61,7 @@ test {
     _ = @import("cuda_thin_bytes.zig");
     _ = @import("cuda_images_interleave_test.zig");
     _ = @import("cuda_pages_test.zig");
+    _ = @import("cuda_keep_seqs_test.zig");
     _ = @import("cuda_snapshot_layout_test.zig");
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_ranks_roce_test.zig");

@@ -106,6 +106,7 @@ pub const Engine = struct {
     index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
+    keep_seqs: bool = false, // TF_GLM_KEEP_SEQS: a released slot keeps its sequence for its next request
     l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
@@ -324,13 +325,18 @@ pub const Engine = struct {
         if (e.images) |v| try v.activate(slot);
     }
 
-    /// Frees slot `slot`'s sequence (slot 0 stays, and a paged one gives its pages back) and binds slot 0.
+    /// Frees slot `slot`'s sequence unless keepsSequence(slot) (a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
         if (e.images) |v| v.release(slot);
         const paged = if (e.pages) |p| p.paged(slot) else false;
-        if (paged) e.pages.?.close(slot) else if (slot != 0) e.free(slot);
+        if (paged) e.pages.?.close(slot) else if (!keepsSequence(e, slot)) e.free(slot);
         e.cur = e.seqs.items[0].?;
         e.slot = 0;
+    }
+
+    /// Whether a released slot keeps its sequence: slot 0 always, every slot with TF_GLM_KEEP_SEQS.
+    pub fn keepsSequence(e: *const Engine, slot: u32) bool {
+        return slot == 0 or e.keep_seqs;
     }
 
     fn free(e: *Engine, slot: usize) void {
