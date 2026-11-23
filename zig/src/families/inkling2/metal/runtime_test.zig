@@ -226,4 +226,12 @@ test "Model.scanNvfp4Weights merges all 20 NVFP4 layers and skips null globals" 
     const tie = model.Model.scanNvfp4Weights(&w);
     try std.testing.expect(tie.normal_range and !tie.two_prod_exact and tie.usesThreeProdFallback());
     try std.testing.expectEqual(@as(usize, 4), tie.tie_fallback_experts);
+    amax_buf.slice(f32, 2)[0] = 1.0;
+    amax_buf.slice(f32, 2)[1] = 2688.125;
+    den_buf.slice(f32, 1)[0] = std.math.inf(f32);
+    const inf_den = model.Model.scanNvfp4Weights(&w);
+    try std.testing.expect(!inf_den.finite_globals and inf_den.normal_range and inf_den.two_prod_exact and inf_den.finite_scales);
+    try std.testing.expect(!inf_den.usesThreeProdFallback());
+    try std.testing.expectEqual(@as(usize, 0), inf_den.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), inf_den.exact_fallback_experts);
 }

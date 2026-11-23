@@ -183,8 +183,8 @@ pub fn scanNvfp4Tensors(amax: []const f32, denominator: []const f32, scales: []c
         return out;
     }
     const d = denominator[0];
-    const d_ok = std.math.isFinite(d) and roundBf16(d) != 0 and !std.math.isNan(roundBf16(d));
-    if (!d_ok) out.finite_globals = false;
+    const d_bf = roundBf16(d);
+    if (!std.math.isFinite(d) or !std.math.isFinite(d_bf) or d_bf == 0) out.finite_globals = false;
     const per = scales.len / amax.len;
     for (amax, 0..) |a, ei| {
         const row_scales = scales[ei * per ..][0..per];
@@ -193,15 +193,9 @@ pub fn scanNvfp4Tensors(amax: []const f32, denominator: []const f32, scales: []c
             out.finite_scales = false;
             out.nan_scales += nans;
         }
-        const a_ok = std.math.isFinite(a);
-        if (!a_ok or !d_ok) {
-            out.finite_globals = false;
-            out.normal_range = false;
-            out.two_prod_exact = false;
-            out.unsafe_phi_experts += 1;
-            out.exact_fallback_experts += 1;
-            continue;
-        }
+        const a_bf = roundBf16(a);
+        if (!std.math.isFinite(a) or !std.math.isFinite(a_bf)) out.finite_globals = false;
+        // Decide 2-product vs 3-product fallback strictly from phi(a, d), matching experts.metal:25,49.
         const p = phi(a, d);
         if (!nvfp4PhiInSafeRange(p)) {
             out.normal_range = false;

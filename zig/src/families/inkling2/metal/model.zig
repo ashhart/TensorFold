@@ -259,6 +259,11 @@ pub const Model = struct {
                 "inkling2: nvfp4 checkpoint triggers 3-prod fallback on {d}/{d} experts (unsafe_phi={d}, tie_fallback={d})",
                 .{ m.nvfp4_scan.exact_fallback_experts, m.nvfp4_scan.experts, m.nvfp4_scan.unsafe_phi_experts, m.nvfp4_scan.tie_fallback_experts },
             );
+        } else if (!m.nvfp4_scan.finite_globals) {
+            std.log.warn(
+                "inkling2: nvfp4 checkpoint has nonfinite global scales with finite phi (2-prod dispatch active)",
+                .{},
+            );
         }
         if (!m.nvfp4_scan.finite_scales) {
             std.log.warn(

@@ -75,8 +75,7 @@ pub fn assertBlockProof(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Que
         \\  else ink2_nv_block<false>(W, S, phi, sc, got_out);
         \\  atomic_fetch_add_explicit(&stats[safe ? 1u : 2u], 1u, memory_order_relaxed);
         \\  for (uint j = 0u; j < 16u; ++j) {
-        \\    const bool both_nan = isnan(ref_out[j]) && isnan(got_out[j]);
-        \\    if (!both_nan && as_type<uint>(ref_out[j]) != as_type<uint>(got_out[j]))
+        \\    if (as_type<uint>(ref_out[j]) != as_type<uint>(got_out[j]))
         \\      atomic_fetch_add_explicit(&stats[0], 1u, memory_order_relaxed);
         \\  }
         \\  if (pi == 65544u && sc == 7u) {
@@ -106,8 +105,7 @@ pub fn assertQuadProof(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queu
         \\    const bfloat4 got_v = safe ? ink2_nv_quad_2p(W, S, 0.5f * phi, sc, 4u * q)
         \\                               : ink2_nv_quad(W, S, phi, sc, 4u * q);
         \\    for (uint j = 0u; j < 4u; ++j) {
-        \\      const bool both_nan = isnan(float(ref_v[j])) && isnan(float(got_v[j]));
-        \\      if (!both_nan && as_type<ushort>(ref_v[j]) != as_type<ushort>(got_v[j]))
+        \\      if (as_type<ushort>(ref_v[j]) != as_type<ushort>(got_v[j]))
         \\        atomic_fetch_add_explicit(&stats[0], 1u, memory_order_relaxed);
         \\    }
         \\  }

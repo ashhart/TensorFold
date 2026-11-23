@@ -156,6 +156,17 @@ test "NVFP4 2-product decode is bit-exact across normal BF16 phi and edge bounds
     try std.testing.expect(!p.nvfp4PhiInSafeRange(std.math.nan(f32)));
     try std.testing.expect(!p.nvfp4PhiInSafeRange(std.math.inf(f32)));
 
+    for ([_]f32{ 0.0, -0.0 }) |factor| {
+        try std.testing.expect(p.nvfp4TwoProdSafe(factor));
+        for (0..256) |sc| {
+            for (0..16) |nibble| {
+                const a = p.nvWeight(@intCast(nibble), 0, @intCast(sc), factor);
+                const b = p.nvWeightTwoProd(@intCast(nibble), 0, @intCast(sc), factor);
+                try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
+            }
+        }
+    }
+
     const exps = [_]i32{ -116, -115, -1, 0, 1, 117 };
     for (exps) |e| {
         for (0..128) |m| {
@@ -167,11 +178,7 @@ test "NVFP4 2-product decode is bit-exact across normal BF16 phi and edge bounds
                     for (0..16) |nibble| {
                         const a = p.nvWeight(@intCast(nibble), 0, @intCast(sc), factor);
                         const b = p.nvWeightTwoProd(@intCast(nibble), 0, @intCast(sc), factor);
-                        if (std.math.isNan(a)) {
-                            try std.testing.expect(std.math.isNan(b));
-                        } else {
-                            try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
-                        }
+                        try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
                     }
                 }
             }
@@ -242,4 +249,22 @@ test "NVFP4 2-product guard filters failing BF16 quotient ties and scans checkpo
     try std.testing.expectEqual(@as(usize, 0), s_edge.tie_fallback_experts);
     try std.testing.expectEqual(@as(usize, 2), s_edge.exact_fallback_experts);
     try std.testing.expectEqual(@as(usize, 2), s_edge.nan_scales);
+
+    const inf_den_amax = [_]f32{ 1.0, 2688.125 };
+    const inf_den = [_]f32{std.math.inf(f32)};
+    const inf_den_scales = [_]u8{ 0x38, 0x39, 0x3a, 0x3b };
+    const s_inf_den = p.scanNvfp4Tensors(&inf_den_amax, &inf_den, &inf_den_scales);
+    try std.testing.expect(!s_inf_den.finite_globals and s_inf_den.normal_range and s_inf_den.two_prod_exact and s_inf_den.finite_scales);
+    try std.testing.expect(!s_inf_den.usesThreeProdFallback());
+    try std.testing.expectEqual(@as(usize, 0), s_inf_den.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), s_inf_den.exact_fallback_experts);
+
+    const mixed_inf_amax = [_]f32{ 1.0, std.math.floatMax(f32) };
+    const neg_inf_den = [_]f32{-std.math.inf(f32)};
+    const s_mixed_inf = p.scanNvfp4Tensors(&mixed_inf_amax, &neg_inf_den, &inf_den_scales);
+    try std.testing.expect(!s_mixed_inf.finite_globals and !s_mixed_inf.normal_range and !s_mixed_inf.two_prod_exact);
+    try std.testing.expect(s_mixed_inf.usesThreeProdFallback());
+    try std.testing.expectEqual(@as(usize, 1), s_mixed_inf.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), s_mixed_inf.tie_fallback_experts);
+    try std.testing.expectEqual(@as(usize, 1), s_mixed_inf.exact_fallback_experts);
 }
