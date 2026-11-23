@@ -30,8 +30,10 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
         try t.expectEqual(width, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         const threadgroup: u32 = switch (kind) {
-            .fuse_taps => 32,
-            .block_qkv, .context_kv, .residual_norm => 16,
+            .fuse_taps => 64,
+            .residual_norm => 9232,
+            .logits => 1024,
+            .block_qkv, .context_kv => 16,
             .attention => 528,
             else => 0,
         };

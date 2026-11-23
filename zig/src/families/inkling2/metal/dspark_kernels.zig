@@ -19,6 +19,8 @@ pub const TokenArgs = extern struct { token: u32 };
 pub const CountArgs = extern struct { count: u32 };
 pub const BaseArgs = extern struct { rows: u32, vocab: u32 };
 pub const PackArgs = extern struct { rows: u32, ngroups: u32 };
+pub const Q4UnitsArgs = extern struct { k: u32, n0: u32, n1: u32, n2: u32 };
+pub const SampleArgs = extern struct { step: u32, position: u32, seed_lo: u32, seed_hi: u32, top_k: u32, inv_t: f32, top_p: f32, min_log: f32 };
 
 /// Round through binary32 and nearest-even BF16, returning an exactly representable FP64 value.
 pub fn roundBf16(v: anytype) f64 {
@@ -143,17 +145,22 @@ pub const Chain = struct {
 /// 2-bit screened greedy head kernels (outside `Pipelines` so `Kind` contracts remain unchanged).
 pub const Screen = struct {
     pack: mtl.Pipeline,
+    q4_pack: mtl.Pipeline,
     proj: mtl.Pipeline,
     proj_units: ?mtl.Pipeline = null,
+    q4_units: ?mtl.Pipeline = null,
     screen: mtl.Pipeline,
     refine: mtl.Pipeline,
     pick: mtl.Pipeline,
+    sample: mtl.Pipeline,
 
     pub fn load(device: mtl.Device, text: []const u8) !Screen {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const pack = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_pack", false);
         errdefer pack.deinit();
+        const q4_pack = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q4_pack", false);
+        errdefer q4_pack.deinit();
         const proj = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_proj", false);
         errdefer proj.deinit();
         const screen = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_screen", false);
@@ -162,20 +169,28 @@ pub const Screen = struct {
         errdefer refine.deinit();
         const pick = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_pick", false);
         errdefer pick.deinit();
+        const sample = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_q2_sample", false);
+        errdefer sample.deinit();
         var proj_units: ?mtl.Pipeline = null;
+        var q4_units: ?mtl.Pipeline = null;
         if (device.tensorUnits()) {
             const ulib = try mtl.Library.fromSource(device, sources.experts_units, mtl.CompileOptions.mlx());
             defer ulib.deinit();
             proj_units = try mtl.Pipeline.init(device, ulib, "tf_ink2_dspark_q2_proj_units", false);
+            errdefer if (proj_units) |p| p.deinit();
+            q4_units = try mtl.Pipeline.init(device, ulib, "tf_ink2_dspark_q4_units", false);
         }
-        return .{ .pack = pack, .proj = proj, .proj_units = proj_units, .screen = screen, .refine = refine, .pick = pick };
+        return .{ .pack = pack, .q4_pack = q4_pack, .proj = proj, .proj_units = proj_units, .q4_units = q4_units, .screen = screen, .refine = refine, .pick = pick, .sample = sample };
     }
     pub fn deinit(s: *Screen) void {
+        if (s.q4_units) |p| p.deinit();
         if (s.proj_units) |p| p.deinit();
+        s.sample.deinit();
         s.pick.deinit();
         s.refine.deinit();
         s.screen.deinit();
         s.proj.deinit();
+        s.q4_pack.deinit();
         s.pack.deinit();
         s.* = undefined;
     }
@@ -299,7 +314,7 @@ pub fn finalLogits(p: *const Pipelines, e: mtl.ComputeEncoder, base_values: Ref,
     e.setPipeline(p.logits);
     bind(e, &.{ base_values, phi, beta, lambda, out });
     e.setValue(CountArgs{ .count = vocab }, 5);
-    threads(e, vocab, 256);
+    groups(e, (vocab + 7) / 8, 256);
 }
 
 pub fn q2Pack(s: *const Screen, e: mtl.ComputeEncoder, mat: Ref, codes: Ref, params: Ref, rows: u32, ngroups: u32) void {
@@ -307,6 +322,20 @@ pub fn q2Pack(s: *const Screen, e: mtl.ComputeEncoder, mat: Ref, codes: Ref, par
     bind(e, &.{ mat, codes, params });
     e.setValue(PackArgs{ .rows = rows, .ngroups = ngroups }, 3);
     groups(e, (@as(usize, rows) * ngroups + 7) / 8, 256);
+}
+
+pub fn q4Pack(s: *const Screen, e: mtl.ComputeEncoder, mat: Ref, codes: Ref, params: Ref, rows: u32, ngroups: u32) void {
+    e.setPipeline(s.q4_pack);
+    bind(e, &.{ mat, codes, params });
+    e.setValue(PackArgs{ .rows = rows, .ngroups = ngroups }, 3);
+    groups(e, (@as(usize, rows) * ngroups + 7) / 8, 256);
+}
+
+pub fn q4Units(s: *const Screen, e: mtl.ComputeEncoder, codes: Ref, params: Ref, x: Ref, y0: Ref, y1: Ref, y2: Ref, k_dim: u32, n0: u32, n1: u32, n2: u32) void {
+    e.setPipeline(s.q4_units.?);
+    bind(e, &.{ codes, params, x, y0, y1, y2 });
+    e.setValue(Q4UnitsArgs{ .k = k_dim, .n0 = n0, .n1 = n1, .n2 = n2 }, 6);
+    groups(e, (@as(usize, n0) + n1 + n2) / 32, 256);
 }
 
 pub fn q2Proj(s: *const Screen, e: mtl.ComputeEncoder, u_codes: Ref, u_params: Ref, y: Ref, out: Ref, rows: u32, vocabulary_count: u32) void {
@@ -341,5 +370,12 @@ pub fn q2Pick(s: *const Screen, e: mtl.ComputeEncoder, cand_logits: Ref, cand_id
     e.setPipeline(s.pick);
     bind(e, &.{ cand_logits, cand_ids, held });
     e.setValue(TokenArgs{ .token = step }, 3);
+    groups(e, 1, 256);
+}
+
+pub fn q2Sample(s: *const Screen, e: mtl.ComputeEncoder, cand_logits: Ref, cand_ids: Ref, held: Ref, args: SampleArgs) void {
+    e.setPipeline(s.sample);
+    bind(e, &.{ cand_logits, cand_ids, held });
+    e.setValue(args, 3);
     groups(e, 1, 256);
 }

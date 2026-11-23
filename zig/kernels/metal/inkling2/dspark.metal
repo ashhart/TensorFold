@@ -26,10 +26,9 @@ kernel void tf_ink2_dspark_init_rows(const device bfloat* anchor [[buffer(0)]], 
   }
 }
 
-kernel void tf_ink2_dspark_fuse_taps(const device bfloat* taps [[buffer(0)]], const device bfloat* fuse_weight [[buffer(1)]], const device bfloat* norm_weight [[buffer(2)]], device bfloat* c [[buffer(3)]], device bfloat* newest_f [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
+kernel void tf_ink2_dspark_fuse_taps(const device bfloat* taps [[buffer(0)]], const device bfloat* fuse_weight [[buffer(1)]], const device bfloat* norm_weight [[buffer(2)]], device bfloat* c [[buffer(3)]], device bfloat* newest_f [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   const uint fusion = group / a.count, row = group % a.count;
-  threadgroup float alpha[4];
-  threadgroup float scale;
+  threadgroup float alpha[4], red[8], scale;
   if (t == 0) {
     float scores[4];
     float peak = -INFINITY;
@@ -37,19 +36,29 @@ kernel void tf_ink2_dspark_fuse_taps(const device bfloat* taps [[buffer(0)]], co
     float sum = 0.0f;
     for (uint j = 0; j < 4; ++j) { scores[j] = exp(scores[j] - peak); sum += scores[j]; }
     for (uint j = 0; j < 4; ++j) alpha[j] = float(bfloat(scores[j] / sum));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float vals[9];
+  float part = 0.0f;
+  for (uint n = 0; n < 9; ++n) {
+    const uint d = n * 256 + t;
+    float mixed = 0.0f;
+    for (uint j = 0; j < 4; ++j) mixed += alpha[j] * float(taps[(row * 4 + j) * DSP_H + d]);
+    vals[n] = mixed;
+    part += mixed * mixed;
+  }
+  const float sg_sum = simd_sum(part);
+  if (lane == 0) red[t / 32] = sg_sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) {
     float square = 0.0f;
-    for (uint d = 0; d < DSP_H; ++d) {
-      float mixed = 0.0f;
-      for (uint j = 0; j < 4; ++j) mixed += alpha[j] * float(taps[(row * 4 + j) * DSP_H + d]);
-      square += mixed * mixed;
-    }
+    for (uint s = 0; s < 8; ++s) square += red[s];
     scale = rsqrt(square / float(DSP_H) + DSP_EPS);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint d = t; d < DSP_H; d += 256) {
-    float mixed = 0.0f;
-    for (uint j = 0; j < 4; ++j) mixed += alpha[j] * float(taps[(row * 4 + j) * DSP_H + d]);
-    const bfloat out = bfloat(mixed * scale * float(norm_weight[fusion * DSP_H + d]));
+  for (uint n = 0; n < 9; ++n) {
+    const uint d = n * 256 + t;
+    const bfloat out = bfloat(vals[n] * scale * float(norm_weight[fusion * DSP_H + d]));
     c[(fusion * a.count + row) * DSP_H + d] = out;
     if (fusion == 3 && row + 1 == a.count) newest_f[d] = out;
   }
@@ -171,21 +180,26 @@ kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const
 }
 
 kernel void tf_ink2_dspark_residual_norm(const device bfloat* x [[buffer(0)]], const device bfloat* residual [[buffer(1)]], const device bfloat* weight [[buffer(2)]], device bfloat* new_residual [[buffer(3)]], device bfloat* normalized [[buffer(4)]], constant DsparkResidualArgs& a [[buffer(5)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
-  threadgroup float scale;
+  threadgroup float sq[DSP_H], scale;
+  float sigmas[9];
+  for (uint n = 0; n < 9; ++n) {
+    const uint d = n * 256 + t;
+    const uint at = row * DSP_H + d;
+    const float v = a.init ? float(x[at]) : float(x[at]) + float(residual[at]);
+    sigmas[n] = v;
+    sq[d] = v * v;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
     float sum = 0.0f;
-    for (uint d = 0; d < DSP_H; ++d) {
-      const uint at = row * DSP_H + d;
-      const float v = a.init ? float(x[at]) : float(x[at]) + float(residual[at]);
-      sum += v * v;
-    }
+    for (uint d = 0; d < DSP_H; ++d) sum += sq[d];
     scale = rsqrt(sum / float(DSP_H) + DSP_EPS);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint n = 0; n < 9; ++n) {
     const uint d = n * 256 + t;
     const uint at = row * DSP_H + d;
-    const float sigma = a.init ? float(x[at]) : float(x[at]) + float(residual[at]);
+    const float sigma = sigmas[n];
     new_residual[at] = bfloat(sigma);
     normalized[at] = bfloat(sigma * scale * float(weight[d]));
   }
@@ -285,10 +299,20 @@ kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], cons
   }
 }
 
-kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const device bfloat* phi [[buffer(1)]], const device bfloat* beta [[buffer(2)]], const device bfloat* lambda [[buffer(3)]], device bfloat* out [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint i [[thread_position_in_grid]]) {
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const device bfloat* phi [[buffer(1)]], const device bfloat* beta [[buffer(2)]], const device bfloat* lambda [[buffer(3)]], device bfloat* out [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup float lam[DSP_RANK];
+  lam[t] = float(lambda[t]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint i = tg * 8u + sg;
   if (i >= a.count) return;
-  float dot = 0.0f;
-  for (uint d = 0; d < DSP_RANK; ++d) dot += float(phi[i * DSP_RANK + d]) * float(lambda[d]);
+  const device bfloat* row = phi + size_t(i) * DSP_RANK + 8u * lane;
+  const float4 p0 = float4(*(const device bfloat4*)row);
+  const float4 p1 = float4(*(const device bfloat4*)(row + 4u));
+  const float4 l0 = float4(lam[8u * lane], lam[8u * lane + 1u], lam[8u * lane + 2u], lam[8u * lane + 3u]);
+  const float4 l1 = float4(lam[8u * lane + 4u], lam[8u * lane + 5u], lam[8u * lane + 6u], lam[8u * lane + 7u]);
+  const float dot = simd_sum(metal::dot(p0, l0) + metal::dot(p1, l1));
+  if (lane != 0u) return;
   const bfloat bias = bfloat(float(beta[i]) + dot);
   const bfloat logit = bfloat(float(base[i]) + float(bias));
   out[i] = bfloat(30.0f * tanh(float(logit) / 30.0f));
@@ -316,6 +340,28 @@ kernel void tf_ink2_dspark_q2_pack(const device bfloat* mat [[buffer(0)]], devic
   bits |= simd_shuffle_xor(bits, 2);
   bits |= simd_shuffle_xor(bits, 4);
   if ((lane & 7u) == 0u) codes[size_t(g_idx) * 4u + (lane >> 3u)] = bits;
+  if (lane == 0u) params[g_idx] = half2(half(scale), half(lo));
+}
+
+// One-time GPU 4-bit affine quantizer (group size 64): packs 8 codes per uint and half2(scale, lo) per group.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q4_pack(const device bfloat* mat [[buffer(0)]], device uint* codes [[buffer(1)]], device half2* params [[buffer(2)]], constant DsparkPackArgs& a [[buffer(3)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint g_idx = tg * 8u + sg;
+  const uint total = a.rows * a.ngroups;
+  if (g_idx >= total) return;
+  const device bfloat* src = mat + size_t(g_idx) * 64u + 2u * lane;
+  const float v0 = float(src[0]), v1 = float(src[1]);
+  const float lo = simd_min(min(v0, v1));
+  const float hi = simd_max(max(v0, v1));
+  const float span = hi - lo;
+  const float scale = span > 0.0f ? span / 15.0f : 0.0f;
+  const float inv = span > 0.0f ? 15.0f / span : 0.0f;
+  const uint q0 = uint(clamp(rint((v0 - lo) * inv), 0.0f, 15.0f));
+  const uint q1 = uint(clamp(rint((v1 - lo) * inv), 0.0f, 15.0f));
+  uint bits = (q0 | (q1 << 4u)) << (8u * (lane & 3u));
+  bits |= simd_shuffle_xor(bits, 1);
+  bits |= simd_shuffle_xor(bits, 2);
+  if ((lane & 3u) == 0u) codes[size_t(g_idx) * 8u + (lane >> 2u)] = bits;
   if (lane == 0u) params[g_idx] = half2(half(scale), half(lo));
 }
 
@@ -354,6 +400,12 @@ kernel void tf_ink2_dspark_q2_proj(const device uint* u_codes [[buffer(0)]], con
   }
 }
 
+inline half4 dspark_q2_unpack4(uint w) {
+  const half2 h01 = as_type<half2>(0x64006400u | (w & 3u) | ((w & 12u) << 14u)) - half2(1024.0h);
+  const half2 h23 = as_type<half2>(0x64006400u | ((w >> 4u) & 3u) | ((w & 0xc0u) << 10u)) - half2(1024.0h);
+  return half4(h01, h23);
+}
+
 // 2-bit screened Phi dot + per-TG top-2 shortlist (128 TGs -> 256 candidate vocab IDs), factored half4 math.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_q2_screen(const device half* base_approx [[buffer(0)]], const device uint* p_codes [[buffer(1)]], const device half2* p_params [[buffer(2)]], const device bfloat* beta [[buffer(3)]], const device bfloat* lambda [[buffer(4)]], device uint* candidates [[buffer(5)]], constant DsparkCountArgs& a [[buffer(6)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
@@ -378,10 +430,10 @@ kernel void tf_ink2_dspark_q2_screen(const device half* base_approx [[buffer(0)]
   for (uint i = v0 + sw; i < v1; i += 16u) {
     const uint word = p_codes[size_t(i) * 16u + sl];
     const half2 pr = p_params[size_t(i) * 4u + (sl >> 2u)];
-    const half4 q0 = half4(half(word & 3u), half((word >> 2u) & 3u), half((word >> 4u) & 3u), half((word >> 6u) & 3u));
-    const half4 q1 = half4(half((word >> 8u) & 3u), half((word >> 10u) & 3u), half((word >> 12u) & 3u), half((word >> 14u) & 3u));
-    const half4 q2 = half4(half((word >> 16u) & 3u), half((word >> 18u) & 3u), half((word >> 20u) & 3u), half((word >> 22u) & 3u));
-    const half4 q3 = half4(half((word >> 24u) & 3u), half((word >> 26u) & 3u), half((word >> 28u) & 3u), half((word >> 30u) & 3u));
+    const half4 q0 = dspark_q2_unpack4(word);
+    const half4 q1 = dspark_q2_unpack4(word >> 8u);
+    const half4 q2 = dspark_q2_unpack4(word >> 16u);
+    const half4 q3 = dspark_q2_unpack4(word >> 24u);
     const half qdot = metal::dot(q0, l0) + metal::dot(q1, l1) + metal::dot(q2, l2) + metal::dot(q3, l3);
     float part = float(pr.x * qdot + pr.y * lsum);
     part += simd_shuffle_xor(part, 8);
@@ -475,4 +527,72 @@ kernel void tf_ink2_dspark_q2_pick(const device bfloat* cand_logits [[buffer(0)]
   for (uint g = 0u; g < 8u; ++g)
     if (values[g] > best || (values[g] == best && places[g] < at)) { best = values[g]; at = places[g]; }
   held[a.token + 1] = isnan(float(cand_logits[256])) ? 0u : at;
+}
+
+
+struct DsparkSampleArgs { uint step, position, seed_lo, seed_hi, top_k; float inv_t, top_p, min_log; };
+
+inline ulong dspark_mix64(ulong x) {
+  x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ul; x ^= x >> 27; x *= 0x94D049BB133111EBul; return x ^ (x >> 31);
+}
+inline uint dspark_fkey(float v) { const uint b = as_type<uint>(v); return (b & 0x80000000u) ? ~b : (b | 0x80000000u); }
+
+// SplitMix64 Gumbel-max GPU sampler over the 256 refined shortlist candidates into held[a.step + 1].
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_q2_sample(const device bfloat* cand_logits [[buffer(0)]], const device uint* cand_ids [[buffer(1)]], device uint* held [[buffer(2)]], constant DsparkSampleArgs& a [[buffer(3)]], uint t [[thread_index_in_threadgroup]]) {
+  threadgroup uint sk[256], si[256];
+  threadgroup float sv[256];
+  threadgroup uint keep_n;
+  const float raw = float(cand_logits[t]);
+  const float val = isnan(raw) ? -INFINITY : raw * a.inv_t;
+  sk[t] = dspark_fkey(val); sv[t] = val; si[t] = cand_ids[t];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint k = 2u; k <= 256u; k <<= 1u) {
+    for (uint j = k >> 1u; j > 0u; j >>= 1u) {
+      const uint ixj = t ^ j;
+      if (ixj > t) {
+        const bool asc = (t & k) == 0u;
+        const bool gt = (sk[t] > sk[ixj]) || (sk[t] == sk[ixj] && si[t] < si[ixj]);
+        if (asc ? !gt : gt) {
+          const uint tk = sk[t], ti = si[t]; const float tv = sv[t];
+          sk[t] = sk[ixj]; si[t] = si[ixj]; sv[t] = sv[ixj];
+          sk[ixj] = tk; si[ixj] = ti; sv[ixj] = tv;
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+  }
+  if (t == 0u) {
+    const uint n = (a.top_k == 0u || a.top_k > 256u) ? 256u : a.top_k;
+    const float m = sv[0];
+    float norm = 0.0f;
+    for (uint j = 0u; j < n; ++j) norm += precise::exp(sv[j] - m);
+    uint keep = n;
+    if (a.top_p > 0.0f && a.top_p < 1.0f && norm > 0.0f) {
+      float cum = 0.0f;
+      for (uint j = 0u; j < n; ++j) { cum += precise::exp(sv[j] - m) / norm; if (cum >= a.top_p) { keep = j + 1u; break; } }
+    }
+    if (a.min_log > -INFINITY) {
+      const float fl = m + a.min_log; uint j = 0u;
+      while (j < keep && sv[j] >= fl) ++j;
+      keep = max(j, 1u);
+    }
+    keep_n = keep;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float gscore = -INFINITY;
+  const uint id = si[t];
+  if (t < keep_n) {
+    const ulong seed = (ulong(a.seed_hi) << 32) | ulong(a.seed_lo);
+    const ulong base = dspark_mix64(dspark_mix64(seed + 0x9E3779B97F4A7C15ul) ^ (ulong(a.position) * 0xD1B54A32D192ED03ul));
+    const float u = (float(uint(dspark_mix64(base ^ ulong(id)) >> 40)) + 0.5f) * (1.0f / 16777216.0f);
+    gscore = sv[t] - precise::log(-precise::log(u));
+  }
+  sv[t] = gscore;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0u) {
+    uint best = 0u; float bv = sv[0];
+    for (uint j = 1u; j < keep_n; ++j) if (sv[j] > bv) { bv = sv[j]; best = j; }
+    held[a.step + 1u] = si[best];
+  }
 }

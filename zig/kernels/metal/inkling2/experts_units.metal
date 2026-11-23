@@ -153,6 +153,13 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
 
 struct DsparkBaseUnitsArgs { uint rows, vocab; };
 
+// Decode 4 2-bit codes via IEEE-754 half2 mantissa bias (0x6400 = 1024.0h) with zero int-to-half casts.
+inline half4 ink2_q2_unpack4(uint w) {
+  const half2 h01 = as_type<half2>(0x64006400u | (w & 3u) | ((w & 12u) << 14u)) - half2(1024.0h);
+  const half2 h23 = as_type<half2>(0x64006400u | ((w >> 4u) & 3u) | ((w & 0xc0u) << 10u)) - half2(1024.0h);
+  return half4(h01, h23);
+}
+
 // M5 tensor-unit 2-bit screened unembed projection: 16x32x16 half NAX op, 18 K-steps per simdgroup, 8 KiB scratch.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dspark_q2_proj_units(
     device const uint* u_codes [[buffer(0)]], device const half2* u_params [[buffer(1)]],
@@ -184,12 +191,11 @@ struct DsparkBaseUnitsArgs { uint rows, vocab; };
     const uint g = w >> 2u;
     const half4 x0 = live0 ? half4(float4(*(const device bfloat4*)(xr + 16u * w))) : z4;
     const tfp::frag<half> af = tfp::frag<half>(x0, z4);
-    const uint w0 = c0[w] >> shift, w1 = c1[w] >> shift, w2 = c2[w] >> shift, w3 = c3[w] >> shift;
     const half2 pr0 = p0[g], pr1 = p1[g], pr2 = p2[g], pr3 = p3[g];
-    const half4 q0 = pr0.y + pr0.x * half4(half(w0 & 3u), half((w0 >> 2u) & 3u), half((w0 >> 4u) & 3u), half((w0 >> 6u) & 3u));
-    const half4 q1 = pr1.y + pr1.x * half4(half(w1 & 3u), half((w1 >> 2u) & 3u), half((w1 >> 4u) & 3u), half((w1 >> 6u) & 3u));
-    const half4 q2 = pr2.y + pr2.x * half4(half(w2 & 3u), half((w2 >> 2u) & 3u), half((w2 >> 4u) & 3u), half((w2 >> 6u) & 3u));
-    const half4 q3 = pr3.y + pr3.x * half4(half(w3 & 3u), half((w3 >> 2u) & 3u), half((w3 >> 4u) & 3u), half((w3 >> 6u) & 3u));
+    const half4 q0 = pr0.y + pr0.x * ink2_q2_unpack4(c0[w] >> shift);
+    const half4 q1 = pr1.y + pr1.x * ink2_q2_unpack4(c1[w] >> shift);
+    const half4 q2 = pr2.y + pr2.x * ink2_q2_unpack4(c2[w] >> shift);
+    const half4 q3 = pr3.y + pr3.x * ink2_q2_unpack4(c3[w] >> shift);
     const tfp::frag<half> bf0 = tfp::frag<half>(q0, q1);
     const tfp::frag<half> bf1 = tfp::frag<half>(q2, q3);
     tfp::mma_16x32<false, true>(lo, hi, af, bf0, bf1);
@@ -205,5 +211,75 @@ struct DsparkBaseUnitsArgs { uint rows, vocab; };
       for (uint j = 0u; j < 4u; ++j)
         if (col + j < a.vocab) out[ulong(hy) * a.vocab + col + j] = half(v[j]);
     }
+  }
+}
+
+struct DsparkQ4UnitsArgs { uint k, n0, n1, n2; };
+
+// Decode 4 4-bit codes via IEEE-754 half2 mantissa bias (0x6400 = 1024.0h) with zero int-to-half casts.
+inline half4 ink2_q4_unpack4(uint w) {
+  const half2 h01 = as_type<half2>(0x64006400u | (w & 15u) | ((w & 0xf0u) << 12u)) - half2(1024.0h);
+  const half2 h23 = as_type<half2>(0x64006400u | ((w >> 8u) & 15u) | ((w & 0xf000u) << 4u)) - half2(1024.0h);
+  return half4(h01, h23);
+}
+
+// M5 NAX 4-bit affine (gs=64) 8-row DSpark block projection with 1/2/3-way fused output split, 8 KiB scratch.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_dspark_q4_units(
+    device const uint* codes [[buffer(0)]], device const half2* params [[buffer(1)]],
+    device const bfloat* x [[buffer(2)]], device bfloat* y0 [[buffer(3)]],
+    device bfloat* y1 [[buffer(4)]], device bfloat* y2 [[buffer(5)]],
+    constant DsparkQ4UnitsArgs& a [[buffer(6)]], uint tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float part[2048];
+  const uint col0 = 32u * tg;
+  const uint k_words = a.k >> 3u, k_groups = a.k >> 6u, steps = a.k >> 7u;
+  const short2 home = tfp::frag_home(ushort(lane));
+  const uint hx = uint(home.x), hy = uint(home.y);
+  const device bfloat* xr = x + ulong(hy) * a.k + hx;
+  const device uint* c0 = codes + ulong(col0 + hy) * k_words;
+  const device uint* c1 = c0 + 8u * k_words;
+  const device uint* c2 = c0 + 16u * k_words;
+  const device uint* c3 = c0 + 24u * k_words;
+  const device half2* p0 = params + ulong(col0 + hy) * k_groups;
+  const device half2* p1 = p0 + 8u * k_groups;
+  const device half2* p2 = p0 + 16u * k_groups;
+  const device half2* p3 = p0 + 24u * k_groups;
+  const uint w_sub = hx >> 3u;
+  const uint shift = (hx & 4u) << 2u;
+  tfp::frag<float> lo = tfp::frag<float>(0.0f), hi = tfp::frag<float>(0.0f);
+  const half4 z4 = half4(0.0h);
+  for (uint b = sg * steps; b < (sg + 1u) * steps; ++b) {
+    const uint w_idx = 2u * b + w_sub;
+    const uint g = b >> 2u;
+    const half4 x0 = half4(float4(*(const device bfloat4*)(xr + 16u * b)));
+    const tfp::frag<half> af = tfp::frag<half>(x0, z4);
+    const half2 pr0 = p0[g], pr1 = p1[g], pr2 = p2[g], pr3 = p3[g];
+    const half4 q0 = pr0.y + pr0.x * ink2_q4_unpack4(c0[w_idx] >> shift);
+    const half4 q1 = pr1.y + pr1.x * ink2_q4_unpack4(c1[w_idx] >> shift);
+    const half4 q2 = pr2.y + pr2.x * ink2_q4_unpack4(c2[w_idx] >> shift);
+    const half4 q3 = pr3.y + pr3.x * ink2_q4_unpack4(c3[w_idx] >> shift);
+    tfp::mma_16x32<false, true>(lo, hi, af, tfp::frag<half>(q0, q1), tfp::frag<half>(q2, q3));
+  }
+  ink2_part_put_half(part, lo, hi, 0u, sg, lane);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0u) {
+    ink2_part_sum_half(part, lo, hi, 0u, lane);
+    device bfloat* ydst = y0;
+    uint ndst = a.n0, base_col = col0;
+    if (col0 >= a.n0) {
+      if (col0 < a.n0 + a.n1) {
+        ydst = y1;
+        ndst = a.n1;
+        base_col = col0 - a.n0;
+      } else {
+        ydst = y2;
+        ndst = a.n2;
+        base_col = col0 - a.n0 - a.n1;
+      }
+    }
+    const bfloat4 v0 = bfloat4(bfloat(lo[0]), bfloat(lo[1]), bfloat(lo[2]), bfloat(lo[3]));
+    const bfloat4 v1 = bfloat4(bfloat(hi[0]), bfloat(hi[1]), bfloat(hi[2]), bfloat(hi[3]));
+    *(device bfloat4*)(ydst + ulong(hy) * ndst + base_col + hx) = v0;
+    *(device bfloat4*)(ydst + ulong(hy) * ndst + base_col + 16u + hx) = v1;
   }
 }

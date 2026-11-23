@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const gpu_rule = lanes.gpu_rule;
 const ck = @import("../../../core/checkpoint_metal.zig");
 const Model = @import("model.zig").Model;
+const dense_units = @import("dense_units.zig");
 const fwd = @import("forward.zig");
 const glue = @import("glue.zig");
 const k = @import("dspark_kernels.zig");
@@ -19,12 +20,49 @@ const tap_list = [_]u32{ 5, 23, 41, 48 };
 const hold_depth: u32 = state.block - 1;
 /// Streams one greedy hold can chain on the GPU; a wider hold samples on the host as sampled streams do.
 const chain_streams = 16;
+const q4_off_q_c: usize = 0;
+const q4_off_k_c: usize = q4_off_q_c + state.query * (state.hidden / 2);
+const q4_off_v_c: usize = q4_off_k_c + state.kv * (state.hidden / 2);
+const q4_off_o_c: usize = q4_off_v_c + state.kv * (state.hidden / 2);
+const q4_off_gate_c: usize = q4_off_o_c + state.hidden * (state.query / 2);
+const q4_off_up_c: usize = q4_off_gate_c + state.intermediate * (state.hidden / 2);
+const q4_off_down_c: usize = q4_off_up_c + state.intermediate * (state.hidden / 2);
+const q4_layer_codes: usize = q4_off_down_c + state.hidden * (state.intermediate / 2);
+const q4_off_q_p: usize = 0;
+const q4_off_k_p: usize = q4_off_q_p + state.query * (state.hidden / 16);
+const q4_off_v_p: usize = q4_off_k_p + state.kv * (state.hidden / 16);
+const q4_off_o_p: usize = q4_off_v_p + state.kv * (state.hidden / 16);
+const q4_off_gate_p: usize = q4_off_o_p + state.hidden * (state.query / 16);
+const q4_off_up_p: usize = q4_off_gate_p + state.intermediate * (state.hidden / 16);
+const q4_off_down_p: usize = q4_off_up_p + state.intermediate * (state.hidden / 16);
+const q4_layer_params: usize = q4_off_down_p + state.hidden * (state.intermediate / 16);
 
 fn at(buf: mtl.Buffer, off: usize) Ref {
     return .{ .buf = buf, .off = off };
 }
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
+}
+fn dense2(m: *const Model, e: mtl.ComputeEncoder, w0: ck.Tensor, w1: ck.Tensor, input: Ref, y0: Ref, y1: Ref, rows: usize) void {
+    const k_dim = w0.shape[w0.rank - 1];
+    if (m.dense_units) |*du| if (k_dim % 128 == 0) {
+        const b = r(w0);
+        dense_units.encode6(du, e, .{ .xq = input, .xk = input, .xv = input, .wq = b, .wk = r(w1), .wv = b, .wr = b, .ws = b, .wg = b, .yq = y0, .yk = y1, .yv = y0, .yr = y0, .ys = y0, .yg = y0 }, .{ .rows = @intCast(rows), .k = @intCast(k_dim), .nq = @intCast(w0.shape[0]), .nk = @intCast(w1.shape[0]), .nv = 0, .nr = 0, .ns = 0, .ng = 0 }) catch unreachable;
+        return;
+    };
+    fwd.dense(m, e, w0, input, y0, rows);
+    fwd.dense(m, e, w1, input, y1, rows);
+}
+fn dense3(m: *const Model, e: mtl.ComputeEncoder, w0: ck.Tensor, w1: ck.Tensor, w2: ck.Tensor, input: Ref, y0: Ref, y1: Ref, y2: Ref, rows: usize) void {
+    const k_dim = w0.shape[w0.rank - 1];
+    if (m.dense_units) |*du| if (k_dim % 128 == 0) {
+        const b = r(w0);
+        dense_units.encode6(du, e, .{ .xq = input, .xk = input, .xv = input, .wq = b, .wk = r(w1), .wv = r(w2), .wr = b, .ws = b, .wg = b, .yq = y0, .yk = y1, .yv = y2, .yr = y0, .ys = y0, .yg = y0 }, .{ .rows = @intCast(rows), .k = @intCast(k_dim), .nq = @intCast(w0.shape[0]), .nk = @intCast(w1.shape[0]), .nv = @intCast(w2.shape[0]), .nr = 0, .ns = 0, .ng = 0 }) catch unreachable;
+        return;
+    };
+    fwd.dense(m, e, w0, input, y0, rows);
+    fwd.dense(m, e, w1, input, y1, rows);
+    fwd.dense(m, e, w2, input, y2, rows);
 }
 fn failed(cb: mtl.CommandBuffer, what: []const u8) !void {
     cb.wait();
@@ -51,6 +89,8 @@ pub const Drafter = struct {
     u_params: mtl.Buffer = undefined,
     p_codes: mtl.Buffer = undefined,
     p_params: mtl.Buffer = undefined,
+    q4_codes: ?mtl.Buffer = null,
+    q4_params: ?mtl.Buffer = null,
     cand_ids: mtl.Buffer = undefined,
     cand_out_ids: mtl.Buffer = undefined,
     cand_logits: mtl.Buffer = undefined,
@@ -98,14 +138,34 @@ pub const Drafter = struct {
         errdefer d.cand_out_ids.deinit();
         d.cand_logits = try device.buffer(257 * 2, mtl.ResourceOptions.private);
         errdefer d.cand_logits.deinit();
+        if (d.screen.q4_units != null) {
+            d.q4_codes = try device.buffer(3 * q4_layer_codes, mtl.ResourceOptions.private);
+            errdefer if (d.q4_codes) |b| b.deinit();
+            d.q4_params = try device.buffer(3 * q4_layer_params, mtl.ResourceOptions.private);
+            errdefer if (d.q4_params) |b| b.deinit();
+        }
         {
             const cb = target.queue.commandBuffer();
             const e = cb.compute(.serial);
             k.q2Pack(&d.screen, e, r(target.weights.unembed), at(d.u_codes, 0), at(d.u_params, 0), state.vocabulary, state.hidden / 64);
             k.q2Pack(&d.screen, e, at(d.weights.phi, 0), at(d.p_codes, 0), at(d.p_params, 0), state.vocabulary, state.rank / 64);
+            if (d.q4_codes) |qc| {
+                const qp = d.q4_params.?;
+                for (d.weights.weights.layers, 0..) |layer, i| {
+                    const cb0 = i * q4_layer_codes;
+                    const pb0 = i * q4_layer_params;
+                    k.q4Pack(&d.screen, e, r(layer.q), at(qc, cb0 + q4_off_q_c), at(qp, pb0 + q4_off_q_p), state.query, state.hidden / 64);
+                    k.q4Pack(&d.screen, e, r(layer.k), at(qc, cb0 + q4_off_k_c), at(qp, pb0 + q4_off_k_p), state.kv, state.hidden / 64);
+                    k.q4Pack(&d.screen, e, r(layer.v), at(qc, cb0 + q4_off_v_c), at(qp, pb0 + q4_off_v_p), state.kv, state.hidden / 64);
+                    k.q4Pack(&d.screen, e, r(layer.o), at(qc, cb0 + q4_off_o_c), at(qp, pb0 + q4_off_o_p), state.hidden, state.query / 64);
+                    k.q4Pack(&d.screen, e, r(layer.gate), at(qc, cb0 + q4_off_gate_c), at(qp, pb0 + q4_off_gate_p), state.intermediate, state.hidden / 64);
+                    k.q4Pack(&d.screen, e, r(layer.up), at(qc, cb0 + q4_off_up_c), at(qp, pb0 + q4_off_up_p), state.intermediate, state.hidden / 64);
+                    k.q4Pack(&d.screen, e, r(layer.down), at(qc, cb0 + q4_off_down_c), at(qp, pb0 + q4_off_down_p), state.hidden, state.intermediate / 64);
+                }
+            }
             e.end();
             cb.commit();
-            try failed(cb, "q2 pack");
+            try failed(cb, "q2/q4 pack");
         }
         return d;
     }
@@ -115,6 +175,8 @@ pub const Drafter = struct {
         while (it.next()) |lane| lane.deinit();
         d.contexts.deinit(d.gpa);
         if (d.scores) |scores| scores.deinit();
+        if (d.q4_params) |b| b.deinit();
+        if (d.q4_codes) |b| b.deinit();
         d.cand_logits.deinit();
         d.cand_out_ids.deinit();
         d.cand_ids.deinit();
@@ -134,7 +196,8 @@ pub const Drafter = struct {
     }
 
     pub fn fixedBytes(d: *const Drafter) u64 {
-        return d.weights.fixedBytes() + state.scratchBytes() + d.u_codes.length() + d.u_params.length() + d.p_codes.length() + d.p_params.length();
+        const q4b: u64 = if (d.q4_codes) |b| b.length() + d.q4_params.?.length() else 0;
+        return d.weights.fixedBytes() + state.scratchBytes() + d.u_codes.length() + d.u_params.length() + d.p_codes.length() + d.p_params.length() + q4b;
     }
 
     pub fn scoreBytes(capacity: usize) u64 {
@@ -251,8 +314,7 @@ pub const Drafter = struct {
         k.fuseTaps(&d.pipelines, e, taps, r(d.weights.weights.fuse), at(d.weights.dflare, 0), at(d.scratch.fused, 0), at(lane.newest, 0), n);
         for (d.weights.weights.layers, 0..) |layer, i| {
             const c = at(d.scratch.fused, i * rows * state.hidden * 2);
-            fwd.dense(d.target, e, layer.k_ctx, c, at(d.scratch.ck, 0), rows);
-            fwd.dense(d.target, e, layer.v_ctx, c, at(d.scratch.cv, 0), rows);
+            dense2(d.target, e, layer.k_ctx, layer.v_ctx, c, at(d.scratch.ck, 0), at(d.scratch.cv, 0), rows);
             k.commitContext(&d.pipelines, e, at(d.scratch.ck, 0), at(d.scratch.cv, 0), r(layer.k_norm_ctx), at(lane.k[i], 0), at(lane.v[i], 0), @intCast(start), n, @intCast(lane.rings[i]));
         }
     }
@@ -297,17 +359,28 @@ pub const Drafter = struct {
         k.initializeRows(&d.pipelines, e, at(s.x, 0), r(d.weights.weights.mask), at(s.x, 0));
         k.residualNorm(&d.pipelines, e, at(s.x, 0), at(s.resid, 0), r(d.weights.weights.layers[0].input_norm), at(s.resid, 0), at(s.x, 0), 8, true);
         for (d.weights.weights.layers, 0..) |layer, i| {
-            fwd.dense(d.target, e, layer.q, at(s.x, 0), at(s.q_raw, 0), 8);
-            fwd.dense(d.target, e, layer.k, at(s.x, 0), at(s.k_raw, 0), 8);
-            fwd.dense(d.target, e, layer.v, at(s.x, 0), at(s.v_raw, 0), 8);
-            k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(anchor));
-            k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
-            fwd.dense(d.target, e, layer.o, at(s.attn, 0), at(s.y, 0), 8);
-            k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.resid, 0), r(layer.post_norm), at(s.next_resid, 0), at(s.x, 0), 8, false);
-            fwd.dense(d.target, e, layer.gate, at(s.x, 0), at(s.gate, 0), 8);
-            fwd.dense(d.target, e, layer.up, at(s.x, 0), at(s.up, 0), 8);
-            k.swiglu(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), 8 * state.intermediate);
-            fwd.dense(d.target, e, layer.down, at(s.act, 0), at(s.y, 0), 8);
+            if (d.q4_codes) |qc| {
+                const qp = d.q4_params.?;
+                const cb0 = i * q4_layer_codes;
+                const pb0 = i * q4_layer_params;
+                k.q4Units(&d.screen, e, at(qc, cb0 + q4_off_q_c), at(qp, pb0 + q4_off_q_p), at(s.x, 0), at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), state.hidden, state.query, state.kv, state.kv);
+                k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(anchor));
+                k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
+                k.q4Units(&d.screen, e, at(qc, cb0 + q4_off_o_c), at(qp, pb0 + q4_off_o_p), at(s.attn, 0), at(s.y, 0), at(s.y, 0), at(s.y, 0), state.query, state.hidden, 0, 0);
+                k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.resid, 0), r(layer.post_norm), at(s.next_resid, 0), at(s.x, 0), 8, false);
+                k.q4Units(&d.screen, e, at(qc, cb0 + q4_off_gate_c), at(qp, pb0 + q4_off_gate_p), at(s.x, 0), at(s.gate, 0), at(s.up, 0), at(s.gate, 0), state.hidden, state.intermediate, state.intermediate, 0);
+                k.swiglu(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), 8 * state.intermediate);
+                k.q4Units(&d.screen, e, at(qc, cb0 + q4_off_down_c), at(qp, pb0 + q4_off_down_p), at(s.act, 0), at(s.y, 0), at(s.y, 0), at(s.y, 0), state.intermediate, state.hidden, 0, 0);
+            } else {
+                dense3(d.target, e, layer.q, layer.k, layer.v, at(s.x, 0), at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), 8);
+                k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(anchor));
+                k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
+                fwd.dense(d.target, e, layer.o, at(s.attn, 0), at(s.y, 0), 8);
+                k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.resid, 0), r(layer.post_norm), at(s.next_resid, 0), at(s.x, 0), 8, false);
+                dense2(d.target, e, layer.gate, layer.up, at(s.x, 0), at(s.gate, 0), at(s.up, 0), 8);
+                k.swiglu(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), 8 * state.intermediate);
+                fwd.dense(d.target, e, layer.down, at(s.act, 0), at(s.y, 0), 8);
+            }
             const next_norm = if (i + 1 < d.weights.weights.layers.len) d.weights.weights.layers[i + 1].input_norm else d.weights.weights.norm;
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.next_resid, 0), r(next_norm), at(s.resid, 0), at(s.x, 0), 8, false);
         }
@@ -336,8 +409,8 @@ pub const Drafter = struct {
         return &d.more.items[index - 1];
     }
 
-    /// One stream's greedy hold: block + 2-bit screened exact head; `held` takes the drafts.
-    fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, held: Ref, pending: u32, anchor: u64, depth: usize) void {
+    /// One stream's chained hold (greedy or sampled): block + 2-bit screened exact head; `held` takes the drafts.
+    fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, held: Ref, pending: u32, anchor: u64, depth: usize, sampling: ?lanes.Sampling) void {
         d.encodeBlockCore(e, s, lane, pending, anchor, @intCast(depth));
         k.q2Proj(&d.screen, e, at(d.u_codes, 0), at(d.u_params, 0), at(s.x, state.hidden * 2), at(s.base, 0), @intCast(depth), state.vocabulary);
         var second_bank = false;
@@ -347,7 +420,13 @@ pub const Drafter = struct {
             k.chainStep(&d.chain, e, at(current, 0), at(s.kappa, step * 3 * state.rank * 4), r(d.weights.weights.rnn), r(d.weights.weights.markov_w1), at(s.z, 0), at(next, 0), at(s.lambda, 0), held, @intCast(step));
             k.q2Screen(&d.screen, e, at(s.base, step * state.vocabulary * 2), at(d.p_codes, 0), at(d.p_params, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(d.cand_ids, 0));
             k.q2Refine(&d.screen, e, at(d.cand_ids, 0), r(d.target.weights.unembed), at(s.x, (1 + step) * state.hidden * 2), at(d.weights.phi, 0), at(d.weights.beta, 0), at(s.lambda, 0), at(d.cand_logits, 0), at(d.cand_out_ids, 0));
-            k.q2Pick(&d.screen, e, at(d.cand_logits, 0), at(d.cand_out_ids, 0), held, @intCast(step));
+            if (sampling) |st| {
+                const rule = st.gpuRule();
+                const sh = rule.seedHalves();
+                k.q2Sample(&d.screen, e, at(d.cand_logits, 0), at(d.cand_out_ids, 0), held, .{ .step = @intCast(step), .position = @intCast(anchor + 1 + step), .seed_lo = sh[0], .seed_hi = sh[1], .top_k = rule.top_k, .inv_t = rule.inv_t, .top_p = rule.top_p, .min_log = rule.min_log });
+            } else {
+                k.q2Pick(&d.screen, e, at(d.cand_logits, 0), at(d.cand_out_ids, 0), held, @intCast(step));
+            }
             second_bank = !second_bank;
         }
     }
@@ -367,7 +446,7 @@ pub const Drafter = struct {
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            d.encodeChain(e, &d.scratch, &lane, held, 2, 0, hold_depth);
+            d.encodeChain(e, &d.scratch, &lane, held, 2, 0, hold_depth, null);
             e.end();
             cb.commit();
             try failed(cb, "timed hold");
@@ -378,11 +457,13 @@ pub const Drafter = struct {
         d.step_ms = ms / @as(f64, @floatFromInt(hold_depth));
     }
 
-    /// Greedy streams: the blocks and every step in one command buffer, each draft picked on the GPU for the next.
+    /// Chained streams (greedy or sampled): blocks and all draft steps in one command buffer on the GPU.
     fn holdChained(d: *Drafter, items: []const dr.Hold) !void {
         const tokens = d.chain_tokens.slice(u32, chain_streams * 8);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        d.target.queue.roundBegin("dspark_hold");
+        defer d.target.queue.roundEnd();
         const cb = d.target.queue.commandBuffer();
         const e = cb.compute(.serial);
         for (items, 0..) |item, i| {
@@ -391,7 +472,7 @@ pub const Drafter = struct {
             const lane = d.contexts.getPtr(item.stream).?;
             const held = Ref{ .buf = d.chain_tokens, .off = i * 8 * @sizeOf(u32) };
             tokens[i * 8] = item.pending;
-            d.encodeChain(e, s, lane, held, item.pending, item.position - 1, depth);
+            d.encodeChain(e, s, lane, held, item.pending, item.position - 1, depth, item.sampling);
         }
         e.end();
         cb.commit();
@@ -420,9 +501,7 @@ pub const Drafter = struct {
             deepest = @max(deepest, @min(item.depth, 7));
             @memset((try d.slot(i)).state.slice(u16, state.rank), 0);
         }
-        var greedy = items.len <= chain_streams;
-        for (items) |item| greedy = greedy and item.sampling == null;
-        if (greedy) return d.holdChained(items);
+        if (items.len <= chain_streams) return d.holdChained(items);
         const previous = try d.gpa.alloc(u32, items.len);
         defer d.gpa.free(previous);
         const values = try d.gpa.alloc(f32, state.vocabulary);
