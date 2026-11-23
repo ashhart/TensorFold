@@ -373,7 +373,9 @@ pub fn sums(f: *Frame, field: @import("gpu_frame.zig").Field, rows: u32) @import
     return .{ .ref = f.get(field), .stride = @import("quant_gpu.zig").padded(rows) };
 }
 
-/// Only the unsplit decode producers emit out-projection sums; prompt merges and ranks retain their own sums.
+/// Producer sums stay off after the repeated four-stream M5 regression; standalone sums keep the consumer ordering.
 pub fn outSums(m: anytype, reduce: anytype) bool {
-    return m.device.tensorUnits() and reduce == null and !m.kernels.prompt;
+    _ = m;
+    _ = reduce;
+    return false;
 }

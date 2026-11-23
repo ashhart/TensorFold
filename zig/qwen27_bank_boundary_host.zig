@@ -2,7 +2,7 @@
 const std = @import("std");
 const q = @import("tensorfold").qwen27;
 
-test "qwen27 bank boundary: out sums are only supplied by unsplit tensor-unit decode producers" {
+test "qwen27 bank boundary: producer sums stay disabled for every device and round" {
     const Device = struct {
         units: bool,
         pub fn tensorUnits(d: @This()) bool {
@@ -13,7 +13,7 @@ test "qwen27 bank boundary: out sums are only supplied by unsplit tensor-unit de
     const Model = struct { device: Device, kernels: Kernels };
     for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |prompt| for ([_]?u8{ null, 1 }) |reduce| {
         const model = Model{ .device = .{ .units = units }, .kernels = .{ .prompt = prompt } };
-        try std.testing.expectEqual(units and !prompt and reduce == null, q.forward.outSums(&model, reduce));
+        try std.testing.expectEqual(false, q.forward.outSums(&model, reduce));
     };
 }
 
