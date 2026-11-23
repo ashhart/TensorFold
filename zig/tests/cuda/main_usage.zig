@@ -154,6 +154,7 @@ pub const usage =
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
     \\  prompt-swiglu-contract    the lean gate/up SwiGLU pair against two products and the act kernel, controls red
     \\  prompt-swiglu-bench       same-process A-B-A: the lean SwiGLU pair against two products and the act kernel
+    \\  int4-contract             the GPTQ int4 experts and head through gates 1-4 on this GPU, each planted control red
     \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
     \\  qwen-shared-prefix [time] attn_rows's classes across streams on shared pages == each stream alone, red controls; time: A/B
