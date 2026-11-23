@@ -1,8 +1,8 @@
 /// Our Metal sources, compiled into one metallib that executables embed.
 pub const kernels = [_][]const u8{
     "zig/kernels/metal/runtime_tests.metal",
-    "zig/kernels/metal/nemotron_expert_up.metal",
-    "zig/kernels/metal/nemotron_expert_down.metal",
+    "zig/kernels/metal/nemotron/expert_up.metal",
+    "zig/kernels/metal/nemotron/expert_down.metal",
     "zig/kernels/metal/nemotron/add_norm_moe_xs.metal", // for the hand-authored <4096,512,1> (add_norm_moe_xs_bolt) instantiation
 };
 
