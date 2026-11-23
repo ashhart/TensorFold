@@ -46,12 +46,13 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
         };
         const cursor_key = if (key) |k| lanes.cost_cache.buildKey(&k, &.{"metal-heal-v2"}) else null;
         var cursor: u64 = if (cursor_key) |k| lanes.cost_cache.load(u64, gpa, io, k) orelse 0 else 0;
+        const before = cursor;
         var timer: WarmTimer = .{ .s = &scratch, .wall = .{ .io = io } };
         const stats = try cost_rule.warm_prices.prepared(&timer, &values, &widths, &cursor, 0, Agree{ .slots = sl }, lead);
         if (!lead) return null;
         for (&costs.window, values) |*w, m| w.ms = m;
         if (stats.lowered > 0) if (key) |k| lanes.cost_cache.save(Costs, gpa, io, k, costs);
-        if (stats.reads > 0) if (cursor_key) |k| lanes.cost_cache.save(u64, gpa, io, k, cursor);
+        if (cursor != before) if (cursor_key) |k| lanes.cost_cache.save(u64, gpa, io, k, cursor);
         report(costs, "checked");
         return costs;
     }
