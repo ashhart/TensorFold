@@ -250,3 +250,32 @@ extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Af
     using namespace tf::rocm;
     wmma12_k32_ref_tile<IdentityAct<DotBF16>, GemmOut<DotBF16>>(a);
 }
+
+// Gate 3: the plain item-rows stream tile over items one row short, so each item's last row is never summed or stored.
+struct TfCtlShortItems : tf::rocm::MlxDecoder<4> {
+    __device__ static bool take_item(tf::rocm::Affine& a, int z) {
+        if (!tf::rocm::take_item(a, z)) return false;
+        a.m -= a.m > 1 ? 1 : 0;
+        return true;
+    }
+};
+
+#if TF_DOT2_BF16
+using TfCtlDot = tf::rocm::DotBF16;
+#else
+using TfCtlDot = tf::rocm::DotF16;
+#endif
+
+template <int CB>
+__device__ void tf_ctl_items(tf::rocm::Affine& a, const tf::rocm::StreamSides& s, int lpc_log2, int gshift) {
+    using namespace tf::rocm;
+    stream_tile<TfCtlShortItems, IdentityAct<TfCtlDot>, TfCtlDot, StreamRound<TfCtlDot>, 4, CB>(a, s, lpc_log2, gshift);
+}
+
+#define TF_CTL_ITEMS_PLAIN(CB)                                                                                        \
+    extern "C" __global__ void __launch_bounds__(128)                                                                 \
+        tf_ctl_items_short_plain_##CB(tf::rocm::Affine a, tf::rocm::StreamSides s, int lpc_log2, int gshift) {        \
+        tf_ctl_items<CB>(a, s, lpc_log2, gshift);                                                                     \
+    }
+TF_CTL_ITEMS_PLAIN(2)
+TF_CTL_ITEMS_PLAIN(4)

@@ -11,6 +11,12 @@ const pipelines = @import("pipelines.zig");
 const ps = @import("prompt_scratch.zig");
 const pb = @import("prompt_bufs.zig");
 const pl = @import("prompt_layer.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
+const pp = @import("prompt_prof.zig");
+const pc = @import("prompt_chunk.zig");
+const Chunk = pc.Chunk;
+const submit = pc.submit;
 
 const Config = host.config.Config;
 const ced = host.ced;
@@ -40,6 +46,9 @@ pub const Opts = struct {
     full: bool = false,
     /// routed experts on the decode row kernels instead of the grouped kernels (the reference for them)
     expert_loop: bool = false,
+    /// a cold chunk of seg_min rows or more runs its first Engram span on its first seg % of rows first (0: one run)
+    seg: u32 = 30,
+    seg_min: u32 = 512,
 };
 
 /// What a prompt reads: the config, kernels, RoPE tables, weights, Engram rows and the queue it commits on.
@@ -73,14 +82,12 @@ pub fn check(c: *const Config) !u32 {
     return d;
 }
 
-/// Where a prompt's encoder time went: host fills, host encoding, host waits, GPU time (TF_DSV41_PROMPT_PROF).
-pub const Prof = struct { prep_ns: u64 = 0, enc_ns: u64 = 0, stall_ns: u64 = 0, gpu_s: f64 = 0, chunks: u32 = 0 };
+pub const Prof = pp.Prof;
+/// The monotonic clock in ns (the prompt's profile and wall time).
+pub const now = pp.now;
 
-fn now() u64 {
-    var t: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &t);
-    return @as(u64, @intCast(t.sec)) * std.time.ns_per_s + @as(u64, @intCast(t.nsec));
-}
+/// A chunk's inputs prepared ahead into input set `set`: the tail (slot) they are for and the chunk's rows.
+const Stage = struct { tail: *const Tail, a: u32, b: u32, set: usize };
 
 pub const Prompt = struct {
     o: Opts,
@@ -93,7 +100,15 @@ pub const Prompt = struct {
     /// rows of logits and taps the last finish wrote (the prompt's last rows)
     head: u32 = 0,
     taps: u32 = 0,
+    /// the image rows of the prompt being run (null: text only); its image positions carry virtual ids
+    images: ?*const vrows.Rows = null,
     prof: Prof = .{},
+    /// the next chunk's inputs an `encode` that stopped short of the prompt's end prepared for the next call
+    stage: ?Stage = null,
+    /// calls whose first chunk's inputs the previous call prepared (`stage`)
+    stage_hits: u64 = 0,
+    /// each set's Engram row ids of every layer ([rows][cols], one hash pass a chunk), then the hashes' scratch
+    ix: []i64 = &.{},
 
     pub fn init(device: mtl.Device, c: *const Config, o: Opts, limit: u32) !Prompt {
         const d = try check(c);
@@ -101,27 +116,40 @@ pub const Prompt = struct {
         if (c.layers > 64) return error.TooManyLayers;
         var s = try Scratch.init(device, c, o.chunk, o.ix_rows, limit);
         errdefer s.deinit();
-        return .{ .o = o, .d = d, .s = s, .b = try Bufs.init(device, c, o.chunk, o.head_rows, o.taps_rows) };
+        var b = try Bufs.init(device, c, o.chunk, o.head_rows, o.taps_rows);
+        errdefer b.deinit();
+        const ix = try std.heap.page_allocator.alloc(i64, 3 * @as(usize, o.chunk) * c.engram_layers.len * c.hashCols());
+        return .{ .o = o, .d = d, .s = s, .b = b, .ix = ix };
     }
 
     pub fn deinit(p: *Prompt) void {
         p.s.deinit();
         p.b.deinit();
+        std.heap.page_allocator.free(p.ix);
     }
 
     /// The whole prompt: positions [tail.end, hist.len) through the encoder, then the decoder's cone and the head.
     pub fn run(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *Tail, hist: []const u32) !void {
-        p.prof = .{};
-        const t0 = now();
+        p.prof = .{ .t0 = now() };
+        p.stage = null;
+        const t0 = p.prof.t0;
         try p.encode(env, slot, tail, hist, @intCast(hist.len));
+        const td = now();
         try p.finish(env, slot, tail);
-        if (std.c.getenv("TF_DSV41_PROMPT_PROF") == null) return;
-        const ms = struct {
-            fn of(ns: u64) f64 {
-                return @as(f64, @floatFromInt(ns)) / 1e6;
-            }
-        }.of;
-        std.log.scoped(.dsv41).info("prompt {d} rows: {d:.0} ms, encoder {d} chunks: gpu {d:.0} ms, host fill {d:.0} ms, host encode {d:.0} ms, host wait {d:.0} ms", .{ hist.len, ms(now() - t0), p.prof.chunks, p.prof.gpu_s * 1e3, ms(p.prof.prep_ns), ms(p.prof.enc_ns), ms(p.prof.stall_ns) });
+        p.prof.dec_ns = now() - td;
+        p.report(env.c, hist.len, now() - t0);
+    }
+
+    /// The prompt's profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
+    pub fn report(p: *const Prompt, c: *const Config, rows: usize, wall_ns: u64) void {
+        if (std.c.getenv("TF_DSV41_PROMPT_PROF") != null) p.prof.report(c, rows, wall_ns);
+    }
+
+    /// The prepared next chunk is dropped if it was `tail`'s (that slot's prompt ended or restarts).
+    pub fn forget(p: *Prompt, tail: *const Tail) void {
+        if (p.stage) |st| if (st.tail == tail) {
+            p.stage = null;
+        };
     }
 
     /// Encoder chunks over [tail.end, upto): the next chunk fills ahead; an unstaged one between its command buffers.
@@ -129,11 +157,18 @@ pub const Prompt = struct {
         if (upto > hist.len or upto < tail.end) return error.BadRows;
         var cur: usize = 0;
         var staged = false;
+        if (p.stage) |st| if (st.tail == tail and st.a == tail.end and tail.end < upto and st.b == try p.chunkEnd(tail.end, upto)) {
+            cur = st.set;
+            staged = true;
+            p.stage_hits += 1;
+        };
+        p.stage = null;
+        const from = tail.end;
         while (tail.end < upto) {
             const a = tail.end;
             const b = try p.chunkEnd(a, upto);
-            const late: ?Late = if (staged) null else .{ .hist = hist, .set = cur };
-            if (!staged) try p.prepIds(env, hist, a, b, cur);
+            const late: ?Late = if (staged) null else .{ .set = cur, .m = p.segRows(b - a), .n = b - a };
+            if (late) |l| try p.prepIds(env, hist, a, b, l);
             staged = false;
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -142,8 +177,12 @@ pub const Prompt = struct {
             var ch = try p.encoderChunk(env, slot, tail, a, b, cur, late);
             p.prof.enc_ns += (now() - te) - (p.prof.prep_ns - filled);
             var ahead: anyerror!void = {};
-            if (b < upto) {
-                if (p.chunkEnd(b, upto)) |nb| {
+            // the next chunk of this call, else the next call's first, that call taking as many rows as this one
+            const lim: u32 = if (b < upto) upto else @intCast(@min(hist.len, b + (upto - from)));
+            var nb: u32 = b;
+            if (b < lim) {
+                if (p.chunkEnd(b, lim)) |e| {
+                    nb = e;
                     ahead = p.prepTimed(env, hist, b, nb, 1 - cur);
                     staged = true;
                 } else |err| ahead = err;
@@ -153,16 +192,28 @@ pub const Prompt = struct {
             p.prof.stall_ns += now() - t0;
             try ran;
             p.prof.gpu_s += ch.gpuSeconds();
+            p.prof.enc_late_s += ch.lateSeconds();
             p.prof.chunks += 1;
             tail.end = b;
             try ahead;
+            if (b == upto and nb > b) p.stage = .{ .tail = tail, .a = b, .b = nb, .set = 1 - cur };
             cur = 1 - cur;
         }
     }
 
-    /// The end of the chunk starting at `a`: `chunk` rows, at most `upto`.
+    /// A cold chunk's first run of rows: `seg` percent of them (0: the chunk runs whole).
+    fn segRows(p: *const Prompt, rows: u32) u32 {
+        if (p.o.seg == 0 or rows < p.o.seg_min) return 0;
+        const m: u32 = @intCast(@as(u64, rows) * p.o.seg / 100);
+        return if (m == 0 or m >= rows) 0 else m;
+    }
+
+    /// The end of the chunk starting at `a`: `chunk` rows, cut so an image's span runs inside one chunk.
     fn chunkEnd(p: *const Prompt, a: u32, upto: u32) !u32 {
-        return @min(upto, a + p.o.chunk);
+        var b = @min(upto, a + p.o.chunk);
+        if (p.images) |im| b = try im.chunkEnd(a, b);
+        if (b > upto) return error.ImageSpanSplit;
+        return b;
     }
 
     /// Commits the chunk [a, b) reading input set `set` (its ids written; its Engram rows too unless `late`).
@@ -179,10 +230,14 @@ pub const Prompt = struct {
         return ch;
     }
 
+    /// The chunk's ids (image positions embed the image token, the Engram gate shuts there) and Engram rows.
     fn prepTimed(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
+        try p.writeIds(env, hist, a, b, set);
+        if (env.c.engram_layers.len == 0) return;
         const t0 = now();
-        defer p.prof.prep_ns += now() - t0;
-        return p.prepare(env, hist, a, b, set);
+        try p.hashRows(env, hist, a, b, set);
+        p.prof.prep_ns += now() - t0;
+        for (0..env.c.engram_layers.len) |li| try p.rowsTimed(env, set, li, 0, b - a);
     }
 
     fn encoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, ch: *Chunk, a: u32, b: u32, late: ?Late) !void {
@@ -191,18 +246,22 @@ pub const Prompt = struct {
         const x = p.px(env, slot, a, b);
         const bb = &p.b;
         try g.embed(&env.p.glue, ch.e, env.model.top.embed, bb.ids, bb.streams[0], bb.pres[0], rows, c.hidden, c.vocab);
-        for (0..p.d) |i| {
+        if (p.images) |im| im.merge(ch.e, bb.streams[0], a, b);
+        var i: u32 = 0;
+        while (i < p.d) : (i += 1) {
             const w = &env.model.layers[i];
             if (w.layer != i) return error.LayerOrder;
             const at = i % 2;
             if (std.mem.indexOfScalar(u32, c.engram_layers.items(), w.layer)) |li| {
                 if (late) |l| {
+                    if (l.m > 0 and li == firstEngram(c)) {
+                        i = try p.runs(env, slot, ch, a, b, l, li, i);
+                        continue;
+                    }
                     // the layers before run while this layer's rows are read and written
-                    ch.close();
-                    try p.rowsTimed(env, l.hist, a, b, l.set, li);
-                    ch.open(env.queue);
+                    try p.between(env, ch, l, li, 0, rows);
                 }
-                try p.engram(&x, ch.e, w.engram orelse return error.EngramWeightsMissing, li, bb.streams[at], rows);
+                try p.engram(&x, ch.e, w.engram orelse return error.EngramWeightsMissing, li, bb.streams[at], 0, rows);
             }
             try pl.encode(&x, ch.e, w, p.io(at), .{ .k = a, .o = a });
         }
@@ -215,6 +274,37 @@ pub const Prompt = struct {
         const H = c.hidden;
         g.scatter(&env.p.glue, e, x.at(bb.streams[at], b - m, 8 * H), whole(tail.x), dest, m, 8 * H, 1);
         g.scatter(&env.p.glue, e, x.at(bb.pres[at], b - m, 16), whole(tail.pre), dest, m, 16, 1);
+    }
+
+    /// Between command buffers: the open one committed, Engram layer index `li`'s rows [r0, r1) read and written.
+    fn between(p: *Prompt, env: Env, ch: *Chunk, l: Late, li: usize, r0: u32, r1: u32) !void {
+        const c = env.c;
+        ch.close();
+        if (p.prof.first_ns == 0) p.prof.first_ns = now() - p.prof.t0;
+        if (li == firstEngram(c) and r0 == 0) {
+            // the chunk's first commit is out: the rest of this layer's reads, then the other layers', queue
+            if (l.m > 0) p.issue(env, l.set, li, l.m, l.n);
+            for (0..c.engram_layers.len) |lj| if (lj != li) p.issue(env, l.set, lj, 0, l.n);
+        }
+        try p.rowsTimed(env, l.set, li, r0, r1);
+        ch.open(env.queue);
+    }
+
+    /// A cold chunk's first Engram span (layer i up to the next) on rows [0, m), then [m, rows); the last layer run.
+    fn runs(p: *Prompt, env: Env, slot: *const kv.Slot, ch: *Chunk, a: u32, b: u32, l: Late, li: usize, i: u32) !u32 {
+        const c = env.c;
+        var end = p.d;
+        for (c.engram_layers.items()) |el| if (el > i and el < end) {
+            end = el;
+        };
+        for ([2][2]u32{ .{ 0, l.m }, .{ l.m, b - a } }) |span| {
+            try p.between(env, ch, l, li, span[0], span[1]);
+            const x = p.px(env, slot, a, a + span[1]);
+            const w = &env.model.layers[i];
+            try p.engram(&x, ch.e, w.engram orelse return error.EngramWeightsMissing, li, p.b.streams[i % 2], span[0], span[1] - span[0]);
+            for (i..end) |j| try pl.encode(&x, ch.e, &env.model.layers[j], p.io(j % 2), .{ .k = a + span[0], .o = a + span[0] });
+        }
+        return end - 1;
     }
 
     /// The decoder layers d.. over their cone (every row if `full`) from the tail; the last rows' head and taps.
@@ -261,7 +351,10 @@ pub const Prompt = struct {
         const done = p.decoderPass(env, slot, tail, e, a, b);
         e.end();
         try done;
+        const tc = mtl.clock.seconds();
         try submit(cb);
+        p.prof.dec_gpu_s += cb.gpuSeconds();
+        p.prof.dec_late_s += cb.gpuStart() - tc;
     }
 
     fn decoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, e: mtl.ComputeEncoder, a: u32, b: u32) !void {
@@ -334,32 +427,60 @@ pub const Prompt = struct {
         return .{ .x = p.b.streams[at], .pre = p.b.pres[at], .x_out = p.b.streams[1 - at], .pre_out = p.b.pres[1 - at] };
     }
 
-    /// Each row's image flag (the route's bias_vl) for rows [a, b): text rows, all clear.
+    /// Each row's image flag (the route's bias_vl) for rows [a, b), and the merge's sources.
     fn imageFlags(p: *const Prompt, a: u32, b: u32) void {
-        @memset(p.s.bytes(p.s.image, b - a), 0);
+        const flags = p.s.bytes(p.s.image, b - a);
+        if (p.images) |im| im.describe(a, b, flags) else @memset(flags, 0);
     }
 
-    /// The chunk's ids (every row's Engram gate open) and Engram rows.
-    fn prepare(p: *const Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
-        try p.writeIds(env, hist, a, b, set);
-        for (0..env.c.engram_layers.len) |li| try p.engramRows(env, hist, a, b, set, li);
-    }
-
-    /// The chunk's ids, with every Engram layer's reads started (its rows come later, between command buffers).
-    fn prepIds(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
+    /// The chunk's ids and Engram row ids; the first Engram layer's reads started for the chunk's first run of rows.
+    fn prepIds(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, l: Late) !void {
         const t0 = now();
         defer p.prof.prep_ns += now() - t0;
-        try p.writeIds(env, hist, a, b, set);
+        try p.writeIds(env, hist, a, b, l.set);
         const c = env.c;
         if (c.engram_layers.len == 0) return;
-        const l = env.lookup orelse return error.EngramLookupMissing;
-        l.host.prefetch(l.a, l.source, hist[a..b], hist[a -| (c.engram_max_ngram - 1)..a], 0, 1);
+        try p.hashRows(env, hist, a, b, l.set);
+        p.issue(env, l.set, firstEngram(c), 0, if (l.m > 0) l.m else b - a);
+        if (p.prof.issue_ns == 0) p.prof.issue_ns = now() - t0;
     }
 
-    fn rowsTimed(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize, li: usize) !void {
+    /// Set `set`'s Engram rows' ids of every layer for the chunk [a, b), one hash pass.
+    fn hashRows(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
+        const c = env.c;
+        const l = env.lookup orelse return error.EngramLookupMissing;
+        const L = c.engram_layers.len;
+        if (l.host.layer_ids.len != L) return error.EngramLayers;
+        var outs: [host.engram_host.max_layers][]i64 = undefined;
+        for (outs[0..L], 0..) |*o, hl| o.* = p.ixOf(c, set, hl, b - a);
+        const hs = p.ix[2 * @as(usize, p.o.chunk) * L * c.hashCols() ..][0 .. @as(usize, b - a) * L * c.hashCols()];
+        try l.host.shardIndexAll(hist[a..b], hist[a -| (c.engram_max_ngram - 1)..a], 0, 1, hs, outs[0..L]);
+    }
+
+    /// Host layer index `hl`'s ids of set `set`'s first `n` rows.
+    fn ixOf(p: *const Prompt, c: *const Config, set: usize, hl: usize, n: u32) []i64 {
+        const per = @as(usize, p.o.chunk) * c.hashCols();
+        return p.ix[(set * c.engram_layers.len + hl) * per ..][0 .. @as(usize, n) * c.hashCols()];
+    }
+
+    /// Starts reading Engram layer index `li`'s rows of set `set`'s rows [r0, r1); a failure is only logged.
+    fn issue(p: *const Prompt, env: Env, set: usize, li: usize, r0: u32, r1: u32) void {
+        const l = env.lookup orelse return;
+        const s = l.source orelse return;
+        const hl = hostIndex(l, env.c, li) orelse return;
+        const C = env.c.hashCols();
+        s.vtable.issue(s.ptr, hl, p.ixOf(env.c, set, hl, r1)[r0 * C ..]) catch |e| if (!@import("builtin").is_test) std.log.scoped(.dsv41).warn("engram: prefetch of layer {d} failed ({t})", .{ env.c.engram_layers.items()[li], e });
+    }
+
+    fn rowsTimed(p: *Prompt, env: Env, set: usize, li: usize, r0: u32, r1: u32) !void {
         const t0 = now();
-        defer p.prof.prep_ns += now() - t0;
-        return p.engramRows(env, hist, a, b, set, li);
+        const s0 = pp.statsOf(env.lookup);
+        defer {
+            const dt = now() - t0;
+            p.prof.prep_ns += dt;
+            p.prof.eng[li].add(dt, s0, pp.statsOf(env.lookup), @as(u64, r1 - r0) * env.c.hashCols());
+        }
+        return p.engramRows(env, set, li, r0, r1);
     }
 
     fn writeIds(p: *const Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
@@ -368,95 +489,53 @@ pub const Prompt = struct {
         const emb: []u32 = @alignCast(std.mem.bytesAsSlice(u32, p.b.bytes(st.ids, 4 * ids.len)));
         const mask = p.b.bytes(st.mask, ids.len);
         for (ids, emb, mask) |id, *o, *m| {
-            if (id >= env.c.vocab) return error.BadToken;
-            o.* = id;
-            m.* = 1;
+            const image = prep.isVid(id);
+            if (image and p.images == null) return error.BadToken;
+            if (!image and id >= env.c.vocab) return error.BadToken;
+            o.* = if (image) p.images.?.embed_id else id;
+            m.* = @intFromBool(!image);
         }
     }
 
-    /// Engram layer index `li`'s rows of the chunk [a, b) into set `set`.
-    fn engramRows(p: *const Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize, li: usize) !void {
+    /// Engram layer index `li`'s rows of set `set`'s rows [r0, r1) (their ids from `hashRows`) into the set.
+    fn engramRows(p: *const Prompt, env: Env, set: usize, li: usize, r0: u32, r1: u32) !void {
         const c = env.c;
         const l = env.lookup orelse return error.EngramLookupMissing;
-        const ids = hist[a..b];
         const K = c.hashCols() * c.engram_head_dim;
-        const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, p.b.bytes(p.b.sets[set].rows[li], 2 * ids.len * K)));
-        const look = hist[a -| (c.engram_max_ngram - 1)..a];
-        try l.host.windowRows(l.a, l.source, ids, look, c.engram_layers.items()[li], 0, 1, c.engram_head_dim, out);
+        const all: []u16 = @alignCast(std.mem.bytesAsSlice(u16, p.b.bytes(p.b.sets[set].rows[li], 2 * @as(usize, r1) * K)));
+        const out = all[r0 * K ..];
+        const hl = hostIndex(l, c, li) orelse return error.NotEngram;
+        const idx = p.ixOf(c, set, hl, r1)[r0 * c.hashCols() ..];
+        const s = l.source orelse return host.engram_host.indexRows(idx, c.engram_head_dim, out);
+        try s.vtable.rows(s.ptr, hl, idx, c.engram_head_dim, out);
     }
 
-    /// As forward.zig's (rows come as bf16, the step starts at act_quant), wkv on the prompt MMA; adds into streams.
-    fn engram(p: *const Prompt, x: *const pl.Px, e: mtl.ComputeEncoder, w: weights.Engram, li: usize, streams: Ref, rows: u32) !void {
+    /// forward.zig's step (bf16 rows in, from act_quant), wkv on the prompt MMA, into chunk rows [r0, r0 + rows).
+    fn engram(p: *const Prompt, x: *const pl.Px, e: mtl.ComputeEncoder, w: weights.Engram, li: usize, streams: Ref, r0: u32, rows: u32) !void {
         const ep = &x.p.engram;
         const b = &p.b;
         const call = forward.engramCall(x.c, rows);
         if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
-        try eng.encodeAq(ep, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
+        const st = plus(streams, @as(usize, r0) * 8 * x.c.hidden);
+        try eng.encodeAq(ep, e, cv(eng.Ref, plus(b.rows[li], @as(usize, r0) * w.wkv.k * 2)), cv(eng.Ref, b.emb), call);
         const mma = pipelines.fp8_mma;
         try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
-        try eng.encodeGate(ep, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
-        try eng.encodeAdd(ep, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, b.gate), cv(eng.Ref, streams), call);
+        try eng.encodeGate(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, plus(b.mask, r0)), cv(eng.Ref, b.gate), call);
+        try eng.encodeAdd(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, b.gate), cv(eng.Ref, st), call);
     }
 };
 
-/// A chunk whose Engram rows fill late: the encoder and its Engram stages read set `set`'s rows of `hist`.
-const Late = struct { hist: []const u32, set: usize };
+/// A cold chunk of `n` rows in input set `set`: its Engram rows fill late; `m` > 0: its first Engram span in two runs.
+const Late = struct { set: usize, m: u32, n: u32 };
 
-/// An encoder chunk's command buffers, committed in order on one queue; its open encoder is `e`.
-const Chunk = struct {
-    cbs: [1 + host.engram_host.max_layers]mtl.CommandBuffer = undefined,
-    n: usize = 0,
-    e: mtl.ComputeEncoder = undefined,
-    live: bool = false,
-
-    fn open(ch: *Chunk, q: mtl.Queue) void {
-        ch.cbs[ch.n] = q.commandBuffer();
-        ch.e = ch.cbs[ch.n].compute(.serial);
-        ch.n += 1;
-        ch.live = true;
-    }
-
-    fn close(ch: *Chunk) void {
-        ch.e.end();
-        ch.cbs[ch.n - 1].commit();
-        ch.live = false;
-    }
-
-    /// An encode error: the open buffer is dropped, the committed ones run out before the caller's buffers go.
-    fn abandon(ch: *Chunk) void {
-        if (ch.live) {
-            ch.e.end();
-            ch.n -= 1;
-            ch.live = false;
-        }
-        for (ch.cbs[0..ch.n]) |cb| cb.wait();
-    }
-
-    /// Waits for every buffer, then reports the first failure (none still runs when the caller reuses the set).
-    fn wait(ch: *const Chunk) !void {
-        for (ch.cbs[0..ch.n]) |cb| cb.wait();
-        for (ch.cbs[0..ch.n]) |cb| try submitted(cb);
-    }
-
-    fn gpuSeconds(ch: *const Chunk) f64 {
-        var t: f64 = 0;
-        for (ch.cbs[0..ch.n]) |cb| t += cb.gpuSeconds();
-        return t;
-    }
-};
-
-fn submit(cb: mtl.CommandBuffer) !void {
-    cb.commit();
-    return submitted(cb);
+/// The Engram layer the encoder meets first (its reads start before the first commit).
+fn firstEngram(c: *const Config) usize {
+    return std.mem.indexOfMin(u32, c.engram_layers.items());
 }
 
-/// Waits for a committed command buffer and reports its failure.
-fn submitted(cb: mtl.CommandBuffer) !void {
-    cb.wait();
-    if (cb.failure()) |msg| {
-        std.debug.print("prompt command buffer failed: {s}\n", .{msg});
-        return error.CommandBufferFailed;
-    }
+/// The host's index of the config's Engram layer index `li`.
+fn hostIndex(l: forward.Lookup, c: *const Config, li: usize) ?usize {
+    return std.mem.indexOfScalar(u32, l.host.layer_ids, c.engram_layers.items()[li]);
 }
 
 test "the cone's rows by layer under the release config: kept 128, the ring's spare rows" {

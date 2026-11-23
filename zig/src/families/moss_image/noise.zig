@@ -122,8 +122,13 @@ fn fill16(d: *[16]f32) void {
 
 /// torch.randn of `out.len` float32 values (16 or more) in torch's order, as manual_seed(seed) makes them.
 pub fn randn(seed: u64, out: []f32) void {
-    std.debug.assert(out.len >= 16);
     var t = Twister.init(seed);
+    draw(&t, out);
+}
+
+/// The next torch.randn of `out.len` values (16 or more) from `t`: consecutive draws on one generator chain this way.
+pub fn draw(t: *Twister, out: []f32) void {
+    std.debug.assert(out.len >= 16);
     for (out) |*v| v.* = t.uniform();
     var i: usize = 0;
     while (i + 16 <= out.len) : (i += 16) fill16(out[i..][0..16]);

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "glm_pdl.cuh"
+
 struct ProbeView {
     const float* src;
     int n;
@@ -59,4 +61,30 @@ extern "C" __global__ void tf_probe_pdl_step(unsigned long long* counter, unsign
 #if __CUDA_ARCH__ >= 900
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
+}
+
+// glm-pdl-order: lets the next grid in at once, spins about `spins` clocks, then copies `src` over `dst`.
+extern "C" __global__ void tf_probe_pdl_slow_copy(const uint4* src, uint4* dst, long long n16, long long spins) {
+    glm_pdl::trigger();
+    const long long t0 = clock64();
+    while (clock64() - t0 < spins) {
+    }
+    for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x; i < n16; i += (long long)gridDim.x * blockDim.x)
+        dst[i] = src[i];
+}
+
+// glm-pdl-order's planted control: reads `in` before its wait (no GLM kernel may), keeps what thread 0 saw in `seen`.
+extern "C" __global__ void tf_probe_pdl_early_read(const unsigned* in, unsigned* out, unsigned* seen, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned v = i < n ? in[i] : 0u;
+    if (i == 0) seen[0] = v;
+    glm_pdl::wait();
+    if (i < n) out[i] = v * 2u + 1u;
+}
+
+// glm-pdl-order: the same read after glm_pdl::enter(), as every GLM kernel opens.
+extern "C" __global__ void tf_probe_pdl_enter_read(const unsigned* in, unsigned* out, int n) {
+    glm_pdl::enter();
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = in[i] * 2u + 1u;
 }

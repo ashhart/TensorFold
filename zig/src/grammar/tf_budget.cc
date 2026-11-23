@@ -38,7 +38,7 @@ using Names = std::unordered_map<std::vector<int32_t>, int32_t, VecHash>;
 struct Uncovered {};
 
 // Exploring took all the work it may: the grammar is refused, with no mask from the states walked so far.
-struct Spent {};
+struct Spent { Status reason; };
 
 int32_t Find(Names& names, std::vector<int32_t>&& key, bool add) {
   auto it = names.find(key);
@@ -124,8 +124,8 @@ class Probe;
 // One grammar's states: named by their chart, their byte steps, token successors and fewest tokens to complete.
 class Tables {
  public:
-  Tables(Grammar g, std::shared_ptr<const Trie> trie, Limits limits)
-      : grammar(std::move(g)), trie(std::move(trie)), limits(limits) {}
+  Tables(Grammar g, std::shared_ptr<const Trie> trie, Limits limits, const std::atomic<bool>* cancel = nullptr)
+      : grammar(std::move(g)), trie(std::move(trie)), limits(limits), cancel(cancel) {}
 
   Grammar grammar;
   std::shared_ptr<const Trie> trie;
@@ -139,8 +139,12 @@ class Tables {
   std::vector<int32_t> need, worst;             // fewest tokens to complete; the most any one token leaves
   int32_t most = 0;
   bool ok = false;
-  bool spent = false;  // exploring passed limits.work: refused, never masked in part
+  Status reason = Status::uncovered;
+  bool spent = false;  // a resource or cancellation stopped exploration: never publish a partial mask
   std::once_flag once;
+  const std::atomic<bool>* cancel;
+  uint64_t polls = 0;
+  uint64_t edges = 0, bytes = 0;
 
   // The state named by `key` ({complete, items...}), -1 unknown, kUnknown past kMaxStates.
   int32_t State(std::vector<int32_t>&& key, bool add, int32_t prev = -1, uint8_t byte = 0) {
@@ -148,6 +152,9 @@ class Tables {
     if (it != states.end()) return it->second;
     if (!add) return -1;
     if (static_cast<int32_t>(states.size()) >= kMaxStates) return kUnknown;
+    const uint64_t charge = key.size() * sizeof(int32_t) + 256 * sizeof(uint16_t) + 128;
+    if (charge > static_cast<uint64_t>(limits.bytes) || bytes > static_cast<uint64_t>(limits.bytes) - charge) throw Spent{Status::bytes};
+    bytes += charge;
     int32_t id = static_cast<int32_t>(states.size());
     done.push_back(key[0] != 0);
     states.emplace(std::move(key), id);
@@ -259,8 +266,9 @@ bool Tables::Covered() const {
 
 // Count n steps of exploring, Spent past limits.work. No clock is read: a grammar's count is the same on every machine.
 void Tables::Spend(int64_t n) {
+  if (cancel && (polls++ & 1023) == 0 && cancel->load(std::memory_order_acquire)) throw Spent{Status::timeout};
   work += n;
-  if (work > limits.work) throw Spent{};
+  if (work > limits.work) throw Spent{Status::work};
 }
 
 // One byte into the probe, counted: a parser step costs about what 64 walk steps do, and 4 more for each row state.
@@ -335,11 +343,19 @@ void Tables::Explore() {
         }
       });
       std::sort(ends.begin(), ends.end());
+      const auto last = std::unique(ends.begin(), ends.end());
+      const uint64_t added = static_cast<uint64_t>(last - ends.begin());
+      if (added > static_cast<uint64_t>(limits.edges) || edges > static_cast<uint64_t>(limits.edges) - added) throw Spent{Status::edges};
+      edges += added;
+      const uint64_t charge = added * sizeof(int32_t);
+      if (charge > static_cast<uint64_t>(limits.bytes) || bytes > static_cast<uint64_t>(limits.bytes) - charge) throw Spent{Status::bytes};
+      bytes += charge;
       // copied at its own size: moved, every state would keep the room `ends` has for one entry a token
-      succ[c].assign(ends.begin(), std::unique(ends.begin(), ends.end()));
+      succ[c].assign(ends.begin(), last);
       explored[c] = 1;
     }
-  } catch (const Spent&) {
+  } catch (const Spent& stopped) {
+    reason = stopped.reason;
     spent = true;  // partial tables would loosen masks where main's are exact: none go live
     return Drop();
   } catch (const Uncovered&) {
@@ -390,23 +406,48 @@ void Tables::Need() {
   }
 }
 
-int Ready(Tables& t) {
+int Ready(Tables& t, const std::atomic<bool>* cancel) {
   std::call_once(t.once, [&] { t.Explore(); });
-  return t.ok ? 1 : t.spent ? 2 : 0;
+  return t.ok ? static_cast<int>(Status::ready) : t.spent ? static_cast<int>(t.reason) : 0;
 }
 
-std::shared_ptr<Tables> Cache::Get(const xgrammar::CompiledGrammar& g) {
+std::shared_ptr<Tables> Cache::Get(const xgrammar::CompiledGrammar& g, Origin origin) {
+  const bool fixed = origin == Origin::fixed_json;
   std::call_once(once_, [&] { trie_ = std::make_shared<const Trie>(info_); });
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto it = recent_.begin(); it != recent_.end(); ++it) {
-    if (it->first.ImplPtr() != g.ImplPtr()) continue;
-    recent_.splice(recent_.begin(), recent_, it);
-    return it->second;
+  auto owner = std::make_shared<const xgrammar::CompiledGrammar>(g);
+  const std::string key = std::string(fixed ? "fixed:" : "client:") + std::to_string(reinterpret_cast<uintptr_t>(g.ImplPtr()));
+  std::shared_ptr<const Trie> trie;
+  Limits limits;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fixed && fixed_json_) return fixed_json_;
+    if (!fixed) for (auto it = recent_.begin(); it != recent_.end(); ++it) {
+      if (it->first.ImplPtr() != g.ImplPtr()) continue;
+      recent_.splice(recent_.begin(), recent_, it);
+      return it->second;
+    }
+    trie = trie_;
+    limits = fixed ? Limits{int64_t{1} << 32} : limits_;
   }
-  auto t = std::make_shared<Tables>(g.GetGrammar(), trie_, limits_);
-  recent_.emplace_front(g, t);
+  auto cancel = std::make_shared<tfc::Cache<ReadyResult>::Cancel>(false);
+  auto ready = compiles_.Compile(0, key, [owner, trie, limits, cancel](const std::string&) {
+    auto t = std::make_shared<Tables>(owner->GetGrammar(), trie, limits, cancel.get());
+    Ready(*t, cancel.get());
+    t->cancel = nullptr;
+    return ReadyResult{t, owner};
+  }, fixed ? tfc::fixed_grammar_time_limit_ms : tfc::time_limit_ms, cancel,
+     fixed ? tfc::WaitLimit::fixed_grammar : tfc::WaitLimit::client);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (fixed) {
+    if (!fixed_json_) { fixed_json_ = ready.tables; fixed_owner_ = owner; }
+    return fixed_json_;
+  }
+  for (auto it = recent_.begin(); it != recent_.end(); ++it) {
+    if (it->first.ImplPtr() == g.ImplPtr()) return it->second;
+  }
+  recent_.emplace_front(g, ready.tables);
   if (recent_.size() > 8) recent_.pop_back();
-  return t;
+  return ready.tables;
 }
 
 void Cache::Limit(Limits limits) {

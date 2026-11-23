@@ -1,4 +1,4 @@
-//! A slot's states: allocation on first use, and the prompt cache's snapshots (save, restore, drop).
+//! A slot's states across TP={1,2,4}: allocation on first use, and the prompt cache's snapshots (save, restore, drop).
 const q = @import("qwen27.zig");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");
@@ -7,86 +7,117 @@ const copy = dev.copy;
 const kvBytes = fwd.kvBytes;
 const off = dev.off;
 
-/// Bytes a slot's states take: GDN and convolution states, and the K/V cache of `context` positions.
-pub fn slotBytes(r: *const Runner) usize {
-    _ = r;
-    return 48 * (2 * 48 * 128 * 128 * 4 + 2 * 3 * 10240 * 2) + 16 * 2 * kvBytes();
+/// Per-card bytes a slot's states take: GDN and convolution states, and the K/V cache of `context` positions.
+pub fn slotBytes(_: *const Runner) usize {
+    const sh = q.tpShape();
+    const rec_b = @as(usize, sh.gv) * 128 * 128 * 4;
+    const conv_b = 3 * @as(usize, sh.nconv) * 2;
+    return 48 * (2 * rec_b + 2 * conv_b) + 16 * 2 * kvBytes();
 }
 
-/// A slot's state after `at` prompt tokens (prompt cache): GDN and convolution states, K/V rows 0 .. at, one buffer.
-pub const Snap = struct { at: u32, buf: *anyopaque, bytes: usize };
+/// A slot's state after `at` prompt tokens (prompt cache): one device buffer per TP rank.
+pub const Snap = struct { at: u32, bufs: [4]?*anyopaque = @splat(null), bytes: usize };
 
-pub const REC_BYTES = 48 * 128 * 128 * 4;
-pub const CONV_BYTES = 3 * 10240 * 2;
+pub fn recBytes() usize {
+    return @as(usize, q.tpShape().gv) * 128 * 128 * 4;
+}
+
+pub fn convBytes() usize {
+    return 3 * @as(usize, q.tpShape().nconv) * 2;
+}
+
 pub fn kvRow() usize {
-    return if (q.kv_i8) 4 * 256 else 4 * 256 * 2;
+    const akv: usize = q.tpShape().akv;
+    return if (q.kv_i8) akv * 256 else akv * 256 * 2;
 }
 
-/// The bytes saveSlot takes at `at` tokens.
+pub fn kvScalesRow() usize {
+    return @as(usize, q.tpShape().akv) * 4;
+}
+
+/// Per-rank bytes saveSlot takes at `at` tokens.
 pub fn snapBytes(r: *const Runner, at: u32) usize {
     var n: usize = 0;
-    for (&r.model.layers) |*l| n += if (l.attn) 2 * @as(usize, at) * (kvRow() + if (q.kv_i8) @as(usize, 16) else 0) else REC_BYTES + CONV_BYTES;
+    for (&r.model.layers) |*l| n += if (l.attn) 2 * @as(usize, at) * (kvRow() + if (q.kv_i8) kvScalesRow() else 0) else recBytes() + convBytes();
     return n;
 }
 
-/// Copies `slot`'s state standing at `at` tokens into new device memory.
+/// Copies `slot`'s state standing at `at` tokens into new device memory on each TP rank.
 pub fn saveSlot(r: *Runner, slot: u32, at: u32) !Snap {
     try r.select(slot);
     if (r.pos != at or r.multi_count != 0) return error.SlotNotThere;
-    const d = &r.d;
     const bytes = r.snapBytes(at);
-    const buf = try d.alloc_(bytes);
-    errdefer freeAfterQueue(d, buf); // copies into it may be queued
-    var o: usize = 0;
-    for (&r.model.layers) |*l| {
-        if (l.attn) {
-            for ([_]*anyopaque{ l.kc.?, l.vc.? }) |c| {
-                try copy(d, off(buf, o), c, @as(usize, at) * kvRow());
-                o += @as(usize, at) * kvRow();
-                if (q.kv_i8) { // the scales after the cap's rows
-                    try copy(d, off(buf, o), off(c, @as(usize, q.MAX_CTX) * 1024), @as(usize, at) * 16);
-                    o += @as(usize, at) * 16;
+    const rb = recBytes();
+    const cb = convBytes();
+    const kvr = kvRow();
+    const kvs = kvScalesRow();
+    var snap: Snap = .{ .at = at, .bytes = bytes };
+    errdefer r.dropSnap(snap);
+
+    for (0..r.tp) |rk| {
+        const d = r.devAt(rk);
+        const m = r.modelAt(rk);
+        const buf = try d.alloc_(bytes);
+        snap.bufs[rk] = buf;
+        var o: usize = 0;
+        for (&m.layers) |*l| {
+            if (l.attn) {
+                for ([_]*anyopaque{ l.kc.?, l.vc.? }) |c| {
+                    try copy(d, off(buf, o), c, @as(usize, at) * kvr);
+                    o += @as(usize, at) * kvr;
+                    if (q.kv_i8) {
+                        try copy(d, off(buf, o), off(c, @as(usize, q.MAX_CTX) * kvr), @as(usize, at) * kvs);
+                        o += @as(usize, at) * kvs;
+                    }
                 }
+                continue;
             }
-            continue;
+            try copy(d, off(buf, o), l.rec.?, rb);
+            try copy(d, off(buf, o + rb), l.conv[l.conv_cur].?, cb);
+            o += rb + cb;
         }
-        try copy(d, off(buf, o), l.rec.?, REC_BYTES);
-        try copy(d, off(buf, o + REC_BYTES), l.conv[l.conv_cur].?, CONV_BYTES);
-        o += REC_BYTES + CONV_BYTES;
     }
-    return .{ .at = at, .buf = buf, .bytes = bytes };
+    return snap;
 }
 
 /// Makes `slot` stand where `snap` was taken (its prompt pass goes on from snap.at).
 pub fn restoreSlot(r: *Runner, slot: u32, snap: Snap) !void {
     try r.select(slot);
-    const d = &r.d;
     const at = snap.at;
-    var o: usize = 0;
-    for (&r.model.layers) |*l| {
-        if (l.attn) {
-            for ([_]*anyopaque{ l.kc.?, l.vc.? }) |c| {
-                try copy(d, c, off(snap.buf, o), @as(usize, at) * kvRow());
-                o += @as(usize, at) * kvRow();
-                if (q.kv_i8) {
-                    try copy(d, off(c, @as(usize, q.MAX_CTX) * 1024), off(snap.buf, o), @as(usize, at) * 16);
-                    o += @as(usize, at) * 16;
+    const rb = recBytes();
+    const cb = convBytes();
+    const kvr = kvRow();
+    const kvs = kvScalesRow();
+    for (0..r.tp) |rk| {
+        const d = r.devAt(rk);
+        const m = r.modelAt(rk);
+        const buf = snap.bufs[rk].?;
+        var o: usize = 0;
+        for (&m.layers) |*l| {
+            if (l.attn) {
+                for ([_]*anyopaque{ l.kc.?, l.vc.? }) |c| {
+                    try copy(d, c, off(buf, o), @as(usize, at) * kvr);
+                    o += @as(usize, at) * kvr;
+                    if (q.kv_i8) {
+                        try copy(d, off(c, @as(usize, q.MAX_CTX) * kvr), off(buf, o), @as(usize, at) * kvs);
+                        o += @as(usize, at) * kvs;
+                    }
                 }
+                continue;
             }
-            continue;
+            try copy(d, l.rec.?, off(buf, o), rb);
+            try copy(d, l.conv[l.conv_cur].?, off(buf, o + rb), cb);
+            o += rb + cb;
         }
-        try copy(d, l.rec.?, off(snap.buf, o), REC_BYTES);
-        try copy(d, l.conv[l.conv_cur].?, off(snap.buf, o + REC_BYTES), CONV_BYTES);
-        o += REC_BYTES + CONV_BYTES;
     }
     r.pos = at;
     r.block_rows = 0;
     r.tree_on = false;
-    try d.sync();
+    try r.syncAll();
 }
 
 pub fn dropSnap(r: *Runner, snap: Snap) void {
-    freeAfterQueue(&r.d, snap.buf);
+    for (0..r.tp) |rk| if (snap.bufs[rk]) |p| freeAfterQueue(r.devAt(rk), p);
 }
 
 /// Frees `p` once the queue has drained; kept (until the device closes) when the queue cannot be waited for.
@@ -104,37 +135,42 @@ pub fn unallocatedSlots(r: *const Runner, slots: u32) u32 {
     return n;
 }
 
-/// `slot`'s states, allocated (zero) on its first use: all of them, or none when an allocation fails.
+/// `slot`'s states, allocated (zero) on its first use across all TP ranks.
 pub fn ensure(r: *Runner, slot: u32) !void {
-    const d = &r.d;
-    var had: [q.LAYERS]bool = undefined;
-    for (&r.model.layers, &had) |*l, *h| h.* = if (l.attn) l.slot_kc[slot] != null else l.slot_rec[slot] != null;
-    errdefer {
-        for (&r.model.layers, had) |*l, h| {
-            if (h) continue;
-            const c = &l.slot_conv[slot];
-            for ([_]*?*anyopaque{ &l.slot_kc[slot], &l.slot_vc[slot], &l.slot_rec[slot], &l.slot_save[slot], &c[0], &c[1] }) |pp| if (pp.*) |p| {
-                freeAfterQueue(d, p);
-                pp.* = null;
-            };
-        }
-    }
-    for (&r.model.layers) |*l| {
-        if (l.attn) {
-            if (l.slot_kc[slot] != null) continue;
-            l.slot_kc[slot] = try d.alloc_(kvBytes());
-            l.slot_vc[slot] = try d.alloc_(kvBytes());
-        } else {
-            if (l.slot_rec[slot] != null) continue;
-            l.slot_rec[slot] = try d.alloc_(48 * 128 * 128 * 4);
-            l.slot_save[slot] = try d.alloc_(48 * 128 * 128 * 4);
-            try d.fill(l.slot_rec[slot].?, @as(u32, 0), 48 * 128 * 128 * 4);
-            for (&l.slot_conv[slot]) |*cv| {
-                cv.* = try d.alloc_(3 * 10240 * 2);
-                try d.fill(cv.*.?, @as(u16, 0), 3 * 10240 * 2);
+    const rb = recBytes();
+    const cb = convBytes();
+    for (0..r.tp) |rk| {
+        const d = r.devAt(rk);
+        const m = r.modelAt(rk);
+        var had: [q.LAYERS]bool = undefined;
+        for (&m.layers, &had) |*l, *h| h.* = if (l.attn) l.slot_kc[slot] != null else l.slot_rec[slot] != null;
+        errdefer {
+            for (&m.layers, had) |*l, h| {
+                if (h) continue;
+                const c = &l.slot_conv[slot];
+                for ([_]*?*anyopaque{ &l.slot_kc[slot], &l.slot_vc[slot], &l.slot_rec[slot], &l.slot_save[slot], &c[0], &c[1] }) |pp| if (pp.*) |p| {
+                    freeAfterQueue(d, p);
+                    pp.* = null;
+                };
             }
-            l.slot_cur[slot] = 0;
         }
+        for (&m.layers) |*l| {
+            if (l.attn) {
+                if (l.slot_kc[slot] != null) continue;
+                l.slot_kc[slot] = try d.alloc_(kvBytes());
+                l.slot_vc[slot] = try d.alloc_(kvBytes());
+            } else {
+                if (l.slot_rec[slot] != null) continue;
+                l.slot_rec[slot] = try d.alloc_(rb);
+                l.slot_save[slot] = try d.alloc_(rb);
+                try d.fill(l.slot_rec[slot].?, @as(u32, 0), rb);
+                for (&l.slot_conv[slot]) |*cv| {
+                    cv.* = try d.alloc_(cb);
+                    try d.fill(cv.*.?, @as(u16, 0), cb);
+                }
+                l.slot_cur[slot] = 0;
+            }
+        }
+        try d.sync();
     }
-    try d.sync();
 }

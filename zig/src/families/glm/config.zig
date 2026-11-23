@@ -36,6 +36,7 @@ pub const Config = struct {
     v_dim: u32 = 256,
     q_lora: u32 = 1536,
     kv_lora: u32 = 512,
+    rope: u32 = 0, // qk_rope_head_dim: the roped key dims a latent row carries past kv_lora (none on GLM-5.3-Flash)
     i_heads: u32 = 32,
     i_dim: u32 = 128,
     i_topk: u32 = 2048,
@@ -81,6 +82,11 @@ pub const Config = struct {
     /// The stacked projection of the normed q_a: q_b and the indexer's queries.
     pub fn qrProj(c: *const Config) u32 {
         return c.mla_heads * c.nope + c.i_heads * c.i_dim;
+    }
+
+    /// A latent cache row's values: the kv_lora latent, then its roped key dims.
+    pub fn latentRow(c: *const Config) u32 {
+        return c.kv_lora + c.rope;
     }
 
     /// Keys a sparse row attends: index_topk from whole blocks plus the tail of its partial block.
@@ -217,15 +223,14 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
         c.eos_n = @intCast(v.array.items.len);
         for (v.array.items, 0..) |e, i| c.eos[i] = @intCast(e.integer);
     };
-    const rope = t.get("qk_rope_head_dim");
+    if (t.get("qk_rope_head_dim")) |v| c.rope = if (v == .integer and v.integer >= 0) @intCast(v.integer) else return error.NotGlm53Flash;
     const plain = (if (t.get("n_group")) |v| v.integer else 1) == 1 and (if (t.get("topk_group")) |v| v.integer else 1) == 1;
     const widths = c.hidden == want.hidden and c.dense_inter == want.dense_inter and c.topk == want.topk and
         c.moe_inter == want.moe_inter and c.shared_inter == want.shared_inter and c.mla_heads == want.mla_heads and
         c.nope == want.nope and c.v_dim == want.v_dim and c.q_lora == want.q_lora and c.kv_lora == want.kv_lora and
         c.i_heads == want.i_heads and c.i_dim == want.i_dim and c.i_topk == want.i_topk and c.kpool == want.kpool and
         c.hc == want.hc and c.sinkhorn == want.sinkhorn and c.kda_heads == want.kda_heads and
-        c.kda_dim == want.kda_dim and c.conv == want.conv and plain and
-        (rope == null or (rope.? == .integer and rope.?.integer == 0));
+        c.kda_dim == want.kda_dim and c.conv == want.conv and plain and c.rope == want.rope;
     var eos_in = true;
     for (c.eos[0..c.eos_n]) |id| eos_in = eos_in and id < c.vocab;
     const counts = c.layers >= 1 and c.layers <= want.layers and c.dense_layers <= c.layers and
@@ -332,6 +337,20 @@ test "the real counts parse to the defaults; smaller counts parse, other widths 
     const few = try textConfig(gpa, 2, 1, &.{1}, 4, 8192, 4096);
     defer gpa.free(few);
     try std.testing.expectError(error.NotGlm53Flash, parse(gpa, few));
+}
+
+test "qk_rope_head_dim: absent or 0 parses to a 512-wide latent row; GLM-5.3-Flash refuses roped latent dims" {
+    const gpa = std.testing.allocator;
+    const real = try textConfig(gpa, 45, 3, &.{ 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43 }, 288, 154880, 4096);
+    defer gpa.free(real);
+    try std.testing.expectEqual(@as(u32, 512), (try parse(gpa, real)).latentRow());
+    const zero = try std.mem.replaceOwned(u8, gpa, real, "\"kv_lora_rank\": 512", "\"kv_lora_rank\": 512, \"qk_rope_head_dim\": 0");
+    defer gpa.free(zero);
+    try std.testing.expectEqual(@as(u32, 512), (try parse(gpa, zero)).latentRow());
+    const roped = try std.mem.replaceOwned(u8, gpa, real, "\"kv_lora_rank\": 512", "\"kv_lora_rank\": 512, \"qk_rope_head_dim\": 64");
+    defer gpa.free(roped);
+    try std.testing.expectError(error.NotGlm53Flash, parse(gpa, roped));
+    try std.testing.expectEqual(@as(u32, 576), (Config{ .rope = 64 }).latentRow());
 }
 
 test "quantization_config: EXL3 at the top level or inside text_config parses as EXL3, the top level first" {

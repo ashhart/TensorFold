@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const api = @import("engine_api");
 const reuse = @import("cuda_reuse.zig");
 const engine = @import("cuda_engine.zig");
+const spares = @import("cuda_spares.zig");
 const rows = api.prompt_cache.rows;
 const Target = reuse.Target;
 const Copy = reuse.Copy;
@@ -64,16 +65,17 @@ fn gather(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.ima
 /// A host copy of `at` positions in the engine's cache format, filled by `scatter`, restored as any other.
 fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
     const t = target(ptr);
-    return @ptrCast(try blankCopy(t.e, at));
+    return @ptrCast(try blankCopy(t.e, at, &t.spares));
 }
 
-pub fn blankCopy(e: *engine.Engine, at: u32) !*Copy {
+/// A blank of `at` positions on pinned memory: a spare of its size from `kept` when given, else newly pinned.
+pub fn blankCopy(e: *engine.Engine, at: u32, kept: ?*spares.Spares) !*Copy {
     const n = reuse.layoutOf(e, at).total();
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
     const images = try e.gpa.alloc(reuse.Seen, 0);
     errdefer e.gpa.free(images);
-    copy.* = .{ .host = try cuda.HostBuffer.alloc(e.d, n), .len = n, .at = at, .delta = 0, .format = reuse.formatOf(e), .images = images };
+    copy.* = .{ .host = try spares.pin(kept, e.d, n), .len = n, .at = at, .delta = 0, .format = reuse.formatOf(e), .images = images, .spares = kept };
     return copy;
 }
 
@@ -114,7 +116,7 @@ pub fn bind(t: *Target, ctx: *const cuda.Context) void {
 
 /// A fixed prompt's state at the first chunk cut, hashed (a kernel or driver change moves it), and its prompt rate.
 pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !struct { hash: u64, rate: f64 } {
-    var toks: [engine.max_rows + 40 + 7]u32 = undefined;
+    var toks: [engine.grid_rows + 40 + 7]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
     const Hook = struct {
         t: *Target,
@@ -130,7 +132,7 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     };
     var hook: Hook = .{ .t = t };
     defer if (hook.saved) |saved| reuse.drop(t, saved);
-    const marks = [_]u32{engine.max_rows};
+    const marks = [_]u32{engine.grid_rows};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
     const ns = pass: {
@@ -146,6 +148,17 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     h.update(std.mem.asBytes(&wordsOf(c)));
     h.update(c.host.bytes[0..c.len]);
     return .{ .hash = h.final(), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+/// The execution witness's first path: the 2B's geometry, every module MLX affine 4-bit; null for any other checkpoint.
+pub fn witnessPath(t: *const Target) ?[]const u8 {
+    return pathOf(t.e.g);
+}
+
+/// `witnessPath` over a loaded geometry.
+pub fn pathOf(g: anytype) ?[]const u8 {
+    if (g.hidden != 2048 or g.layers != 24 or g.experts != 0 or g.exl3 or g.bf16 or g.kinds.modelopt or g.kinds.ct) return null;
+    return if (g.bits.mixed(g.layers)) null else "qwen3_5-2b/cuda/tp1/mlx-q4g64/text";
 }
 
 /// What else the states depend on: the cache format, target taps, int8 projections and rotary inputs.

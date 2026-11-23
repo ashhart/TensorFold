@@ -13,6 +13,30 @@ pub const gfx1100 = tuning.build(@import("gfx1100.zon"));
 pub const gfx1151 = tuning.build(@import("gfx1151.zon"));
 pub const gfx1201 = tuning.build(@import("gfx1201.zon"));
 
+/// The tables' documents, for the fields a table sets beside its rows.
+const docs = .{ @import("gfx1030.zon"), @import("gfx1100.zon"), @import("gfx1151.zon"), @import("gfx1201.zon") };
+
+/// The fewest rows a prompt's routed plan cuts at the GEMM tile on `chip`: its own table's, null where none sets it.
+pub fn promptBlockFrom(chip: []const u8) ?usize {
+    inline for (docs) |doc| {
+        // a generation's other chips share its costs, not this measured start
+        if (@hasField(@TypeOf(doc), "prompt_block_from") and std.mem.eql(u8, chip, doc.gfx)) return doc.prompt_block_from;
+    }
+    return null;
+}
+
+test "only gfx1151 starts a prompt's routed GEMM tile below 64 rows, and only on that chip" {
+    try std.testing.expectEqual(@as(?usize, 33), promptBlockFrom("gfx1151"));
+    // the generation's other chips and the other tables keep the default; so does a build without kernels
+    for ([_][]const u8{ "gfx1150", "gfx1152", "gfx1153", "gfx1030", "gfx1100", "gfx1101", "gfx1201", "" }) |chip| {
+        try std.testing.expectEqual(@as(?usize, null), promptBlockFrom(chip));
+    }
+    // a table's start lies past the decode tile's 8 rows and at most at the default's 64
+    inline for (docs) |doc| if (@hasField(@TypeOf(doc), "prompt_block_from")) {
+        try std.testing.expect(doc.prompt_block_from > 8 and doc.prompt_block_from <= 64);
+    };
+}
+
 test "only a routed prompt row bounds its pairs per item, by a finite number from 0 to 256" {
     for ([_]*const Table{ &gfx1030, &gfx1100, &gfx1151, &gfx1201 }) |t| for (t.rows) |r| {
         try std.testing.expect(std.math.isFinite(r.pairs_per_item) and r.pairs_per_item >= 0 and r.pairs_per_item <= 256);

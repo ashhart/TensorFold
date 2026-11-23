@@ -151,3 +151,7 @@ test "lookup scanner handles whitespace, comments and trailing commas but exclud
     try std.testing.expectEqualStrings("tf_one", names.items[0]);
     try std.testing.expectEqualStrings("tf_two", names.items[1]);
 }
+
+test {
+    _ = @import("prompt_attention_fold.zig");
+}

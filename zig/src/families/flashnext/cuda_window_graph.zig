@@ -1,4 +1,4 @@
-//! Drafted windows' passes, the draft head's pieces and rollback replays as CUDA graphs on one GPU, one key a graph.
+//! Drafted windows' passes (one GPU), the draft head's pieces and rollback replays (any rank) as CUDA graphs.
 const std = @import("std");
 const cuda = @import("cuda");
 const parts = @import("cuda_batch_state.zig");

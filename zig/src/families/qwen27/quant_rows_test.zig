@@ -146,6 +146,8 @@ test "half operands keep simd_qmm's fp32 bits; planted inputs past half's range 
     x.slice(u16, r * k)[20 * k + 64 + 3] = toBf(0x1p20); // tile 1, group 1: past half's range
     const flags = try device.buffer(sq.fitsBytes(k, r), opts);
     try owned.append(a, flags);
+    const prep = try device.buffer(sq.prepBytes(k, r, true), opts);
+    try owned.append(a, prep);
     var outs: [3]mtl.Buffer = undefined;
     for (&outs) |*o| {
         o.* = try device.buffer(r * n * 2, opts);
@@ -157,9 +159,10 @@ test "half operands keep simd_qmm's fp32 bits; planted inputs past half's range 
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         if (pass == 0) sq.encodeFits(e, &p, k, r, x, 0, flags, 0) else @memset(flags.slice(u32, 2 * (k / 64)), 1);
+        sq.encodePrep(e, &p, k, r, true, x, 0, prep, 0);
         e.barrier();
         if (pass == 0) sq.encode(e, try sq.call(&p, n, k, r, false, false, 0), m, x, 0, outs[0], 0);
-        sq.encodeHalf(e, (try sq.callHalf(&p, n, k, r, 0)).?, m, x, 0, outs[1 + pass], 0, flags, 0);
+        sq.encodeHalf(e, (try sq.callHalf(&p, n, k, r, 0)).?, m, x, 0, outs[1 + pass], 0, flags, 0, prep, 0);
         e.end();
         cb.commit();
         cb.wait();
@@ -168,4 +171,55 @@ test "half operands keep simd_qmm's fp32 bits; planted inputs past half's range 
     try std.testing.expectEqualSlices(u16, outs[0].slice(u16, r * n), outs[1].slice(u16, r * n));
     // the control: every tile marked as fitting, so the planted row's group runs in half and its outputs move
     try std.testing.expect(!std.mem.eql(u16, outs[0].slice(u16, r * n)[20 * n ..][0..n], outs[2].slice(u16, r * n)[20 * n ..][0..n]));
+}
+
+test "chunk pairs on the prepass's sums keep simd_qmm's bits at an odd row count; without the prepass the bits turn" {
+    const a = std.testing.allocator;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (device.tensorUnits()) return error.SkipZigTest; // tensor units take lane kernels, never these tiles
+    const sq = @import("core").row_projection.simd;
+    var p = try sq.Pipelines.load(device);
+    defer p.deinit();
+    var owned: std.ArrayList(mtl.Buffer) = .empty;
+    defer {
+        for (owned.items) |b| b.deinit();
+        owned.deinit(a);
+    }
+    const n = 512; // 16 chunks at four column tiles: chunk pairs
+    const t = try synth(device, &owned, n, 4, 0x2089);
+    const m = sq.Matrix{ .w = t.weight.buffer, .scales = t.scales.buffer, .biases = t.biases.buffer, .n = n, .k = k };
+    try std.testing.expect(try sq.summedExact(&p, device, m));
+    const r = 65; // odd: the prepass pads a zero row
+    const x = try device.buffer(r * k * 2, opts);
+    try owned.append(a, x);
+    var prng = std.Random.DefaultPrng.init(9);
+    for (x.slice(u16, r * k)) |*v| v.* = toBf(prng.random().float(f32) * 2 - 1);
+    const sums = try device.buffer(sq.prepBytes(k, r, false), opts);
+    try owned.append(a, sums);
+    var outs: [3]mtl.Buffer = undefined;
+    for (&outs) |*o| {
+        o.* = try device.buffer(r * n * 2, opts);
+        try owned.append(a, o.*);
+    }
+    const c = try sq.call(&p, n, k, r, false, true, 0);
+    const summed = sq.callSums(&p, c) orelse return error.SkipZigTest; // M1 and M2 keep the plain tiles
+    const queue = try device.queue();
+    defer queue.deinit();
+    for (0..2) |pass| {
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.serial);
+        if (pass == 0) {
+            sq.encode(e, try sq.call(&p, n, k, r, false, false, 0), m, x, 0, outs[0], 0);
+            sq.encodePrep(e, &p, k, r, false, x, 0, sums, 0);
+        } else @memset(sums.slice(u8, sq.prepBytes(k, r, false)), 0);
+        e.barrier();
+        sq.encodeSums(e, summed, m, x, 0, outs[1 + pass], 0, sums, 0);
+        e.end();
+        cb.commit();
+        cb.wait();
+    }
+    try std.testing.expectEqualSlices(u16, outs[0].slice(u16, r * n), outs[1].slice(u16, r * n));
+    // the control: the sums left at zero, so every output loses its bias term
+    try std.testing.expect(!std.mem.eql(u16, outs[0].slice(u16, r * n), outs[2].slice(u16, r * n)));
 }

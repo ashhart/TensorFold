@@ -5,7 +5,7 @@ profile also names the context, reply reserve, request capacity, cache policy an
 exact runtime. Measure those together before recommending a RAM class.
 
 This guide separates the Python/MLX server, frozen at 0.6.6, from the
-[native Zig preview](../ZIG-PREVIEW.md). The MLX details below were checked against
+[native Zig preview](zig-preview.md). The MLX details below were checked against
 [v0.6.6](https://github.com/ashhart/TensorFold/tree/v0.6.6) and describe that engine. They do not qualify the
 native engine's models, kernels or memory admission.
 
@@ -114,7 +114,7 @@ The Zig preview uses its own native Metal allocations and cache policy. In its
 Flash Next server, `--prompt-cache-gib` controls retained prompt states, not a
 whole-process memory budget. Flash Next serves one reply at a time under the default `auto` and
 `--parallel 1`; an explicit `--parallel` above one shares sessions. Nemotron's prompt reuse has a different status. Consult
-[the preview's current limitations](../ZIG-PREVIEW.md#known-gaps) before building
+[the preview's current limitations](zig-preview.md#known-gaps) before building
 a matrix. Python 0.6.6 MLX measurements are not preview performance or exactness results.
 
 A public receipt should contain synthetic or public prompts, generic hardware

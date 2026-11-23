@@ -35,6 +35,8 @@ pub fn run(gpa: std.mem.Allocator, d: *mtp.Mtp, tap: u64, ids: []const u32) !boo
     const kw = d.kvWidth();
     const raw = try gpa.alloc(u16, rows * kw);
     defer gpa.free(raw);
+    const key = try gpa.alloc(u16, kw);
+    defer gpa.free(key);
     try (cuda.DeviceBuffer{ .d = e.d, .ptr = d.kraw, .len = raw.len * 2 }).download(0, std.mem.sliceAsBytes(raw));
     var w: [head_dim]u16 = undefined;
     try (cuda.DeviceBuffer{ .d = e.d, .ptr = d.w.k_norm, .len = head_dim * 2 }).download(0, std.mem.sliceAsBytes(&w));
@@ -42,8 +44,7 @@ pub fn run(gpa: std.mem.Allocator, d: *mtp.Mtp, tap: u64, ids: []const u32) !boo
     var worst: f64 = 0;
     for (0..rows) |r| {
         const pos = start + r;
-        var key: [2 * head_dim]u16 = undefined; // a ring slot's keys: kv_heads (2) of head_dim
-        try (cuda.DeviceBuffer{ .d = e.d, .ptr = d.ringK(ctx) + (pos % d.capacity) * kw * 2, .len = kw * 2 }).download(0, std.mem.sliceAsBytes(key[0..kw]));
+        try (cuda.DeviceBuffer{ .d = e.d, .ptr = d.ringK(ctx) + (pos % d.capacity) * kw * 2, .len = kw * 2 }).download(0, std.mem.sliceAsBytes(key));
         for (0..kw / head_dim) |h| {
             const row = raw[r * kw + h * head_dim ..][0..head_dim];
             var ss: f64 = 0;

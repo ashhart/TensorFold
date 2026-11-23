@@ -436,4 +436,5 @@ test "draft chains fit one verify window while the default stays six" {
 
 test {
     _ = @import("cuda_mtp_nonfinite_test.zig");
+    _ = @import("cuda_mtp_load.zig");
 }

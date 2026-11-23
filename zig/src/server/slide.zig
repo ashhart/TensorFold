@@ -309,7 +309,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 };
                 committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
-                if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
+                if (srv.config.slide_take_out_check) { // TF_SLIDE_TAKE_OUT_CHECK, read at start
                     takeOut(srv, a, &out, id, "taken out to check that a take-out puts the facts before it back (TF_SLIDE_TAKE_OUT_CHECK)");
                     afterTakeOut(srv, cx, o, id, before, &.{}, gone);
                     asked_after = true;

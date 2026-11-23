@@ -161,7 +161,8 @@ pub const Media = struct {
         try @import("qwen_completion.zig").upload(rope, 0, std.mem.sliceAsBytes(p.pos));
         return .{ .plan = p, .features = f, .src = src, .rope = rope, .width = enc.config.out_hidden, .splice = enc.splice };
     }
-    pub fn init(a: std.mem.Allocator, enc: Encoder, ids: []const u32, images: []const lanes.stream.Image, l: Limits) !Media {
+    /// The plan from every image; the tower skips images ending by `from`, rows a kept state holds (never spliced).
+    pub fn init(a: std.mem.Allocator, enc: Encoder, ids: []const u32, images: []const lanes.stream.Image, l: Limits, from: usize) !Media {
         const plan = try placeholders(a, enc.config, ids, images, l);
         var m = try allocate(plan, enc);
         errdefer m.deinit();
@@ -169,7 +170,7 @@ pub const Media = struct {
         var row: usize = 0;
         // One bounded image per call, using the one shared tower and its reused scratch.
         for (images) |im| {
-            try enc.encode(enc.ctx, im.pixels, &.{.{ .h = im.gh, .w = im.gw }}, m.features.ptr + row * m.width * 2);
+            if (@as(usize, im.at) + im.tokens > from) try enc.encode(enc.ctx, im.pixels, &.{.{ .h = im.gh, .w = im.gw }}, m.features.ptr + row * m.width * 2);
             row += im.tokens;
         }
         try enc.stream.synchronize();

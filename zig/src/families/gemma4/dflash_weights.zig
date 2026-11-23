@@ -63,6 +63,7 @@ pub const Config = struct {
             for (kinds.array.items, 0..) |k, i| c.sliding[i] = k == .string and std.mem.eql(u8, k.string, "sliding_attention");
         }
         if (o.get("is_causal") != null) return error.UnsupportedDraftMask; // the vendored default decides the block's mask
+        if (c.heads == 0 or c.kv_heads == 0) return error.BadDraftConfig; // a count below 1, as CUDA's twin refuses it
         if (c.head_dim != 128 or c.heads % c.kv_heads != 0 or c.heads > 128 or c.block != 16 or c.window < 32) return error.UnsupportedDraftShape;
         if (c.hidden % 64 != 0 or c.intermediate % 64 != 0 or (c.heads * c.head_dim) % 32 != 0 or (c.kv_heads * c.head_dim) % 64 != 0) return error.UnsupportedDraftShape;
         if (c.mask >= cfg.vocab) return error.BadDraftConfig;
@@ -298,6 +299,16 @@ test "the stock drafter config is admitted and others refused with a reason" {
     defer std.testing.allocator.free(causal);
     try std.testing.expectError(error.UnsupportedDraftMask, Config.parse(std.testing.allocator, causal, cfg.dense31b));
     try std.testing.expectError(error.DraftForAnotherTarget, Config.parse(std.testing.allocator, stock, cfg.unified12b));
+    // a head count of 0, refused as CUDA's twin refuses it, before heads % kv_heads
+    const zeros = [_][2][]const u8{
+        .{ "\"num_attention_heads\":64", "\"num_attention_heads\":0" },
+        .{ "\"num_key_value_heads\":8", "\"num_key_value_heads\":0" },
+    };
+    for (zeros) |row| {
+        const zero = try std.mem.replaceOwned(u8, std.testing.allocator, stock, row[0], row[1]);
+        defer std.testing.allocator.free(zero);
+        try std.testing.expectError(error.BadDraftConfig, Config.parse(std.testing.allocator, zero, cfg.dense31b));
+    }
 }
 
 test "4-bit quantization keeps the larger edge exact and zero within the scale's bf16 rounding, as MLX does" {

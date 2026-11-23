@@ -80,17 +80,29 @@ pub const Adapter = struct {
 
     fn begin(ctx: *anyopaque, q: hooks.Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!hooks.Plan {
         const x = of(ctx);
-        const p = try x.store.begin(x.gpa, query(q), history_len, shared, owner, adopt);
+        const ids = try identities(x.gpa, q.images);
+        defer x.gpa.free(ids);
+        const p = try x.store.begin(x.gpa, query(q, ids), history_len, shared, owner, adopt);
         return .{ .from = p.from, .marks = p.marks };
     }
 
     fn keep(ctx: *anyopaque, q: hooks.Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
-        return of(ctx).store.keep(query(q), at, owner, mine, path).shared;
+        const x = of(ctx);
+        const ids = identities(x.gpa, q.images) catch return 0; // nothing kept: a later turn prefills it
+        defer x.gpa.free(ids);
+        return x.store.keep(query(q, ids), at, owner, mine, path).shared;
     }
 
-    /// The family's query as the store takes it.
-    fn query(q: hooks.Query) radix.Query {
-        return .{ .key = q.key, .prompt_len = q.prompt_len };
+    /// The family's query as the store takes it, its images as `ids`.
+    fn query(q: hooks.Query, ids: []const radix.Identity) radix.Query {
+        return .{ .key = q.key, .prompt_len = q.prompt_len, .images = ids, .frame = q.frame, .namespace = q.namespace, .starts = q.starts, .prefilled = q.prefilled };
+    }
+
+    /// The images' identities in the store's type (none allocated for text).
+    fn identities(gpa: Allocator, images: []const hooks.Image) ![]radix.Identity {
+        const out = try gpa.alloc(radix.Identity, images.len);
+        for (images, out) |i, *o| o.* = .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash };
+        return out;
     }
 
     fn report(ctx: *anyopaque, prompt: usize, from: u32, kept: u64) void {
@@ -159,6 +171,41 @@ test "TF_KV_SHARE's adapter: a kept prompt's pages resume a later one, adopted; 
     for (adopt.items) |id| f.pool.release(id);
     x.close();
     try testing.expect(f.prompts == null and f.pool.idle() and f.pool.available() == 8);
+}
+
+test "TF_KV_SHARE's adapter: a picture under the same key words reaches the store, so text pages share and image pages don't" {
+    var f: Fake = .{ .pool = try kv.Pool.init(testing.allocator, 8, 1) };
+    defer f.pool.deinit();
+    const x = (try Adapter.open(Fake, testing.allocator, &f, 4, 4)).?;
+    defer x.close();
+    const p = f.prompts.?;
+    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // rows 4..8 an image's, its key words alike for any picture
+    const a = [_]hooks.Image{.{ .at = 4, .tokens = 4, .gh = 2, .gw = 2, .hash = 0xa }};
+    const b = [_]hooks.Image{.{ .at = 4, .tokens = 4, .gh = 2, .gw = 2, .hash = 0xb }};
+    var qa: hooks.Query = .of(&prompt);
+    qa.images = &a;
+    var qb: hooks.Query = .of(&prompt);
+    qb.images = &b;
+    var la: kv.Lease = .{};
+    defer f.pool.finish(&la);
+    try f.pool.promise(&la, 2);
+    try f.pool.cover(&la, 2, null);
+    var lb: kv.Lease = .{};
+    defer f.pool.finish(&lb);
+    try f.pool.promise(&lb, 2);
+    try f.pool.cover(&lb, 2, null);
+    var path: [2]u32 = undefined;
+    var owner: u8 = 0;
+    try testing.expectEqual(@as(usize, 2), p.keep(qa, 8, &owner, la.ids.items, &path));
+    try testing.expectEqual(@as(usize, 2), p.keep(qb, 8, &owner, lb.ids.items, &path));
+    try testing.expectEqual(la.ids.items[0], path[0]); // the text page: a's
+    try testing.expectEqual(lb.ids.items[1], path[1]); // the image's page: b's own
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    const plan = try p.begin(qa, 10, &.{}, &owner, &adopt); // a again resumes a's pages
+    defer p.free(plan.marks);
+    try testing.expectEqualSlices(u32, la.ids.items, adopt.items);
+    for (adopt.items) |id| f.pool.release(id);
 }
 
 test "TF_KV_SHARE: a state past the unpaged cache's whole budget names it where the family on pages could keep it" {

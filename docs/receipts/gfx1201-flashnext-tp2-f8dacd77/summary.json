@@ -1,0 +1,260 @@
+{
+ "measured_at": "2026-11-13T22:45:00+01:00 to 2026-11-13T23:17:00+01:00",
+ "benchmark_openai": [
+  {
+   "label": "flashnext-tp2-decode",
+   "prompt": "fibonacci-raw",
+   "temperature": 0.0,
+   "tokens": 256,
+   "thinking": "not applicable",
+   "thinking_off_requested": false,
+   "thinking_switch": true,
+   "thinking_applicable": true,
+   "decode_tps_median": 121.2099182020188,
+   "decode_tps_all": [
+    120.79,
+    121.21,
+    121.33
+   ],
+   "ttft_s_median": 0.05374725300043792,
+   "prompt_ttft_tps_median": 260.478,
+   "prefill_tps_median": 260.478,
+   "itl_mean_ms_median": null,
+   "itl_p50_ms_median": null,
+   "itl_p95_ms_median": null,
+   "tpot_ms_median": null,
+   "chunk_tpot_estimate_ms_median": 8.25,
+   "round_gap_p50_ms_median": 20.802,
+   "round_gap_p95_ms_median": 24.386,
+   "tokens_per_chunk_median": 2.485,
+   "headers_s_median": 0.002,
+   "first_payload_s_median": 0.054,
+   "first_content_s_median": 0.054,
+   "first_reasoning_s_median": null,
+   "first_tool_s_median": null,
+   "first_output_s_median": 0.054,
+   "last_output_s_median": 2.157,
+   "evidence": [
+    {
+     "prompt_tokens": 14,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "f4a5dddbe1e3",
+     "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+     "completion": "truncated",
+     "tool_sha256": null
+    },
+    {
+     "prompt_tokens": 14,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "f4a5dddbe1e3",
+     "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+     "completion": "truncated",
+     "tool_sha256": null
+    },
+    {
+     "prompt_tokens": 14,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "f4a5dddbe1e3",
+     "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+     "completion": "truncated",
+     "tool_sha256": null
+    }
+   ],
+   "sample": "\n\nHere's the code:\n```python\ndef fibonacci(n):\n    \"\"\"\n    Compute the nth Fibonacci number using an iterative approach.\n    \"\"\"\n    if n <= 0:\n        return 0",
+   "deprecated_keys": {
+    "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+    "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+   }
+  },
+  {
+   "label": "flashnext-tp2-decode",
+   "prompt": "gpu-chat-no-think",
+   "temperature": 0.0,
+   "tokens": 256,
+   "thinking": "off",
+   "thinking_off_requested": true,
+   "thinking_switch": true,
+   "thinking_applicable": true,
+   "decode_tps_median": 103.64492248773014,
+   "decode_tps_all": [
+    103.62,
+    103.64,
+    103.77
+   ],
+   "ttft_s_median": 0.08953773200028081,
+   "prompt_ttft_tps_median": 346.223,
+   "prefill_tps_median": 346.223,
+   "itl_mean_ms_median": null,
+   "itl_p50_ms_median": null,
+   "itl_p95_ms_median": null,
+   "tpot_ms_median": null,
+   "chunk_tpot_estimate_ms_median": 9.648,
+   "round_gap_p50_ms_median": 18.135,
+   "round_gap_p95_ms_median": 22.915,
+   "tokens_per_chunk_median": 2.0,
+   "headers_s_median": 0.002,
+   "first_payload_s_median": 0.002,
+   "first_content_s_median": 0.09,
+   "first_reasoning_s_median": null,
+   "first_tool_s_median": null,
+   "first_output_s_median": 0.09,
+   "last_output_s_median": 2.55,
+   "evidence": [
+    {
+     "prompt_tokens": 31,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "97545dcbff41",
+     "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+     "completion": "truncated",
+     "tool_sha256": null
+    },
+    {
+     "prompt_tokens": 31,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "97545dcbff41",
+     "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+     "completion": "truncated",
+     "tool_sha256": null
+    },
+    {
+     "prompt_tokens": 31,
+     "cached_tokens": 0,
+     "tokens": 256,
+     "cache_state": "cold",
+     "complete": true,
+     "token_sha": "97545dcbff41",
+     "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+     "completion": "truncated",
+     "tool_sha256": null
+    }
+   ],
+   "sample": "### How Matrix Multiplication Uses a GPU (In Plain English)\n\nImagine you have a giant spreadsheet with thousands of rows and columns. In a standard computer (a ",
+   "deprecated_keys": {
+    "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+    "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+   }
+  }
+ ],
+ "benchmark_concurrent_cells": [
+  {
+   "prompt": "code",
+   "streams": 1,
+   "aggregate_tps": 121.5,
+   "per_stream_tps": 121.5,
+   "alone_equal": 3,
+   "alone_unequal": 0,
+   "serial_equal": 1,
+   "serial_unequal": 0
+  },
+  {
+   "prompt": "code",
+   "streams": 4,
+   "aggregate_tps": 213.2,
+   "per_stream_tps": 54.0,
+   "alone_equal": 12,
+   "alone_unequal": 0,
+   "serial_equal": 1,
+   "serial_unequal": 0
+  },
+  {
+   "prompt": "chat",
+   "streams": 1,
+   "aggregate_tps": 103.5,
+   "per_stream_tps": 103.5,
+   "alone_equal": 3,
+   "alone_unequal": 0,
+   "serial_equal": 1,
+   "serial_unequal": 0
+  },
+  {
+   "prompt": "chat",
+   "streams": 4,
+   "aggregate_tps": 171.0,
+   "per_stream_tps": 43.5,
+   "alone_equal": 12,
+   "alone_unequal": 0,
+   "serial_equal": 1,
+   "serial_unequal": 0
+  }
+ ],
+ "cold_prefill": [
+  {
+   "tokens": 2048,
+   "rep": 1,
+   "seconds": 1.9,
+   "tok_s": 1075,
+   "cached": 0
+  },
+  {
+   "tokens": 2048,
+   "rep": 2,
+   "seconds": 1.72,
+   "tok_s": 1193,
+   "cached": 0
+  },
+  {
+   "tokens": 2048,
+   "rep": 3,
+   "seconds": 1.72,
+   "tok_s": 1191,
+   "cached": 0
+  },
+  {
+   "tokens": 8192,
+   "rep": 1,
+   "seconds": 7.55,
+   "tok_s": 1085,
+   "cached": 0
+  },
+  {
+   "tokens": 8192,
+   "rep": 2,
+   "seconds": 7.28,
+   "tok_s": 1125,
+   "cached": 0
+  },
+  {
+   "tokens": 8192,
+   "rep": 3,
+   "seconds": 7.31,
+   "tok_s": 1121,
+   "cached": 0
+  },
+  {
+   "tokens": 32768,
+   "rep": 1,
+   "seconds": 31.53,
+   "tok_s": 1039,
+   "cached": 0
+  },
+  {
+   "tokens": 32768,
+   "rep": 2,
+   "seconds": 30.89,
+   "tok_s": 1061,
+   "cached": 0
+  },
+  {
+   "tokens": 32768,
+   "rep": 3,
+   "seconds": 30.96,
+   "tok_s": 1058,
+   "cached": 0
+  }
+ ]
+}

@@ -32,6 +32,7 @@ pub const status = @import("status.zig");
 pub const cli = @import("cli.zig");
 pub const cli_model = @import("cli_model.zig");
 pub const bringup = @import("bringup.zig");
+pub const validate = @import("validate.zig");
 
 test {
     std.testing.refAllDecls(@This());

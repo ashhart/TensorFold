@@ -570,6 +570,7 @@ test "a stream cannot end while it holds the last pin of a dirty page, its own t
     try expect(try endsWithForeignDirty(.ignore_dirty));
 }
 
+
 test "a stream ends cleanly once the dirty pages it pins are flushed, and one that shares a dirty page of its own cannot" {
     var r: Rig = undefined;
     try r.open(4, 2);

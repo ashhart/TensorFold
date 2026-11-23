@@ -18,18 +18,20 @@ const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
 const kv_pages = @import("kv_pages.zig");
+const prompt_tail = @import("prompt_tail.zig");
+const slot_pages = @import("slot_pages.zig");
 pub const pagesOn = kv_pages.on;
 pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
 const kvp = kv_pages.kvp;
-
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     const msg = cb.failure() orelse return false;
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
 }
-
+/// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
+pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
@@ -52,8 +54,12 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    /// The last tapped pass's rows by slot: their cache start, first frame row and count (0: none held).
+    tapped: [attn.planning.max_streams]Tapped = @splat(.{}),
     tail: ?forward.Tail = null,
     accepted_chain: bool = false,
+    /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
+    tail_from: ?u32 = null,
     last_gpu_seconds: f64 = 0,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
     trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
@@ -88,14 +94,15 @@ pub const Runner = struct {
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
-        const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
+        const geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
-        const attention_index = try a.alloc(u32, m.config.layers);
+        // with the MTP head loaded, its block is one more attention layer past the last (forward.layerAt)
+        const attention_index = try a.alloc(u32, m.config.layers + @intFromBool(m.weights.mtp != null));
         errdefer a.free(attention_index);
         var ng: u32 = 0;
         var na: u32 = 0;
-        for (linear_index, attention_index, 0..) |*g, *v, block| {
+        for (linear_index, attention_index[0..m.config.layers], 0..) |*g, *v, block| {
             g.* = std.math.maxInt(u32);
             v.* = std.math.maxInt(u32);
             if (m.config.kind(block) == .linear) {
@@ -106,7 +113,11 @@ pub const Runner = struct {
                 na += 1;
             }
         }
-        var pool = try GdnPool.init(m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
+        if (m.weights.mtp != null) {
+            attention_index[m.config.layers] = na;
+            na += 1;
+        }
+        var pool = try GdnPool.init(a, m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
@@ -126,6 +137,7 @@ pub const Runner = struct {
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
         errdefer attention.deinit();
+        attention.join = try @import("attention_join.zig").build(a, m.device, units, geometry.group(), geometry.kv_heads, paged);
         pipelines.end();
         const allocation_timing = @import("core").startup_receipt.span(.runtime_allocation);
         defer allocation_timing.end();
@@ -161,11 +173,10 @@ pub const Runner = struct {
         return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity, .kv = kv };
     }
 
-    /// Slot `slot` holds the pages of its first `rows` rows before a pass or a copy writes them (paged runners).
-    pub fn cover(r: *Runner, slot: u32, rows: u32) !void {
-        const k = r.kv orelse return;
-        try k.pages.cover(slot, @min(rows, r.capacity));
-    }
+    pub const cover = slot_pages.cover;
+    pub const promise = slot_pages.promiseRows;
+    pub const release = slot_pages.release;
+    pub const reset = slot_pages.reset;
 
     /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
     fn trimSlot(r: *Runner, slot: u32) void {
@@ -298,12 +309,20 @@ pub const Runner = struct {
             r.current_attention = null;
             r.current_placed = .{};
         }
-        if (r.capture_taps) r.taps.begin();
+        if (r.capture_taps) {
+            r.taps.begin();
+            r.tapped = @splat(.{});
+        }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (r.keysOnly(head)) keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
+        const tail_facts = @import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null);
+        r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
+        defer r.tail_from = null;
+        if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
+        const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -321,10 +340,18 @@ pub const Runner = struct {
             r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
             t.round();
         }
-        if (r.capture_taps) try r.taps.complete();
+        if (r.capture_taps) {
+            try r.taps.complete();
+            for (round.slots, round.windows, round.firsts) |slot, w, first| r.tapped[slot] = .{ .start = w.start, .first = first, .rows = @intCast(w.parents.len) };
+        }
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
+    }
+
+    /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
+    pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
+        return @import("mtp.zig").pass(r, round, sc, hidden, head);
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
@@ -456,7 +483,8 @@ pub const Runner = struct {
         r.reading[slot] = cb.retain();
     }
 
-    pub fn reset(r: *Runner, slot: u32) !void {
+    /// `reset` that keeps the slot's pages: a rewind writes its K/V rows again only from its rewind point on.
+    pub fn clearState(r: *Runner, slot: u32) !void {
         r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
@@ -487,32 +515,40 @@ pub const Runner = struct {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
 
-    fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
+    pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
-        return attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
+        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
+        if (r.attention.join != null) plan.pair(&.{}); // a stream's rows in pairs over the keys below its window
+        return plan;
     }
 
-    fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {
+    pub fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {
         for (round.slots, 0..) |slot, i| views[i] = r.caches[layer * r.slots + slot];
         return views[0..round.slots.len];
     }
 
-    fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
+    pub fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
-    fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
+    pub fn attentionForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         const plan = (r.current_attention orelse return error.RoundNotReady).*;
         const layer = r.attention_index[block];
         var views: [attn.planning.max_streams]attn.Cache = undefined;
         const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
         try r.bindings[layer].upload(plan, caches);
-        try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);
+        // the tail's other rows' queries reach only rows its o projection skips: their q rows stay unwritten
+        const t0: u32 = if (block + 1 == r.model.config.layers) r.tail_from orelse 0 else 0;
+        var q_sums = forward.sums(f, .sums, rows);
+        q_sums.ref.offset += @as(usize, t0) * 4;
+        const q_in: Ref = .{ .buffer = f.get(.input).buffer, .offset = f.get(.input).offset + @as(usize, t0) * weights.q.k * 2 };
+        const q_out: Ref = .{ .buffer = f.get(.q_gate).buffer, .offset = f.get(.q_gate).offset + @as(usize, t0) * weights.q.n * 2 };
+        try r.model.kernels.quant(e, weights.q, q_in, q_sums, f.get(.dims), q_out, rows - t0);
         try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
         e.barrier();
         const kv: u32 = @intCast(r.model.config.kvDim());
@@ -521,35 +557,6 @@ pub const Runner = struct {
         e.barrier();
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
-    }
-
-    /// Whether a pass at `head` runs its last layer's keys and values alone (prompt_tail.zig's facts on this runner).
-    fn keysOnly(r: *const Runner, head: forward.Head) bool {
-        const last = r.model.config.layers - 1;
-        return @import("prompt_tail.zig").keysOnly(.{
-            .keeps_none = head == .none,
-            .last_tapped = r.capture_taps and std.mem.indexOfScalar(usize, r.taps.ids[0..r.taps.count], last) != null,
-            .pair = r.reduce != null,
-            .ane = r.model.ane != null,
-            .last_attention = r.model.weights.layers[last].mixer == .attention,
-        });
-    }
-
-    /// The last layer of a pass that keeps no row: k and v into the cache, as attentionForward writes them.
-    fn keysForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
-        const r: *Runner = @ptrCast(@alignCast(ptr));
-        const plan = (r.current_attention orelse return error.RoundNotReady).*;
-        const layer = r.attention_index[block];
-        var views: [attn.planning.max_streams]attn.Cache = undefined;
-        const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
-        try r.bindings[layer].upload(plan, caches);
-        try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
-        e.barrier();
-        const kv: u32 = @intCast(r.model.config.kvDim());
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
-        e.barrier();
-        try r.attention.keysOnly(e, &r.scratch, &r.bindings[layer], plan, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry }, f.get(.value), caches);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {

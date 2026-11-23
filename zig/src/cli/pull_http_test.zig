@@ -3,6 +3,7 @@ const http = @import("pull_http.zig");
 const Io = std.Io;
 const net = Io.net;
 const Error = net.IpAddress.ConnectError;
+const fake_handle: net.Socket.Handle = if (@import("builtin").os.tag == .windows) @ptrFromInt(7) else 7;
 
 const Fake = struct {
     var first: std.posix.E = .INTR;
@@ -28,7 +29,7 @@ const Fake = struct {
     }
 
     pub fn open(_: Io, _: *const net.IpAddress) Error!std.posix.socket_t {
-        return 7;
+        return fake_handle;
     }
     pub fn begin(_: std.posix.socket_t, _: *const net.IpAddress) std.posix.E {
         begins += 1;
@@ -59,8 +60,8 @@ const address: net.IpAddress = .{ .ip4 = .loopback(80) };
 
 test "pull connect: an interrupted connect waits without reconnecting the connected socket" {
     Fake.reset();
-    const socket = try http.connectWith(Fake, std.testing.io, &address);
-    try std.testing.expectEqual(@as(std.posix.socket_t, 7), socket.handle);
+    const socket = try http.connectWith(Fake, std.testing.io, &address, 30_000);
+    try std.testing.expectEqual(fake_handle, socket.handle);
     try std.testing.expectEqual(@as(usize, 1), Fake.begins);
     try std.testing.expectEqual(@as(usize, 2), Fake.waits);
     try std.testing.expectEqual(@as(usize, 0), Fake.closes);
@@ -72,14 +73,14 @@ test "pull connect: pending completion preserves refusal and cancellation with o
         Fake.reset();
         Fake.first = first;
         Fake.last = .CONNREFUSED;
-        try std.testing.expectError(error.ConnectionRefused, http.connectWith(Fake, std.testing.io, &address));
+        try std.testing.expectError(error.ConnectionRefused, http.connectWith(Fake, std.testing.io, &address, 30_000));
         try std.testing.expectEqual(@as(usize, 1), Fake.begins);
         try std.testing.expectEqual(@as(usize, 1), Fake.closes);
         try std.testing.expect(!Fake.restored);
         Fake.reset();
         Fake.first = first;
         Fake.cancel = true;
-        try std.testing.expectError(error.Canceled, http.connectWith(Fake, std.testing.io, &address));
+        try std.testing.expectError(error.Canceled, http.connectWith(Fake, std.testing.io, &address, 30_000));
         try std.testing.expectEqual(@as(usize, 1), Fake.closes);
     }
 }
@@ -87,12 +88,12 @@ test "pull connect: pending completion preserves refusal and cancellation with o
 test "pull connect: immediate success and refusal do not wait, and unrelated I/O is retained" {
     Fake.reset();
     Fake.first = .SUCCESS;
-    _ = try http.connectWith(Fake, std.testing.io, &address);
+    _ = try http.connectWith(Fake, std.testing.io, &address, 30_000);
     try std.testing.expectEqual(@as(usize, 0), Fake.waits);
     try std.testing.expect(Fake.restored);
     Fake.reset();
     Fake.first = .CONNREFUSED;
-    try std.testing.expectError(error.ConnectionRefused, http.connectWith(Fake, std.testing.io, &address));
+    try std.testing.expectError(error.ConnectionRefused, http.connectWith(Fake, std.testing.io, &address, 30_000));
     try std.testing.expectEqual(@as(usize, 0), Fake.waits);
     try std.testing.expectEqual(@as(usize, 1), Fake.closes);
     var table = std.testing.io.vtable.*;
@@ -102,12 +103,13 @@ test "pull connect: immediate success and refusal do not wait, and unrelated I/O
     try std.testing.expectEqual(custom.userdata, kept.userdata);
 }
 
-test "pull connect: the macOS adapter changes only the threaded TCP connector" {
+test "pull connect: the adapter changes only the threaded TCP connector, lookups and socket reads" {
     const original = std.testing.io;
     const adapted = http.forClient(original);
     try std.testing.expectEqual(original.userdata, adapted.userdata);
     inline for (@typeInfo(Io.VTable).@"struct".field_names) |name| {
-        if (comptime std.mem.eql(u8, name, "netConnectIp") and @import("builtin").os.tag == .macos) {
+        const ours = comptime std.mem.eql(u8, name, "netConnectIp") or std.mem.eql(u8, name, "netLookup") or std.mem.eql(u8, name, "operate");
+        if (ours) {
             try std.testing.expect(@field(original.vtable, name) != @field(adapted.vtable, name));
         } else {
             try std.testing.expect(@field(original.vtable, name) == @field(adapted.vtable, name));
@@ -116,7 +118,6 @@ test "pull connect: the macOS adapter changes only the threaded TCP connector" {
 }
 
 test "pull connect: real TCP returns a blocking close-on-exec socket and preserves refusal" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const io = http.forClient(std.testing.io);
     const loopback: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try loopback.listen(io, .{});
@@ -125,12 +126,14 @@ test "pull connect: real TCP returns a blocking close-on-exec socket and preserv
     defer stream.close(io);
     const accepted = try server.accept(io);
     defer accepted.close(io);
-    const c = std.c;
-    const flags = c.fcntl(stream.socket.handle, c.F.GETFL);
-    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
-    try std.testing.expect(flags >= 0 and flags & nonblock == 0);
-    const fd_flags = c.fcntl(stream.socket.handle, c.F.GETFD);
-    try std.testing.expect(fd_flags >= 0 and fd_flags & c.FD_CLOEXEC != 0);
+    if (@import("builtin").os.tag != .windows) {
+        const c = std.c;
+        const flags = c.fcntl(stream.socket.handle, c.F.GETFL);
+        const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
+        try std.testing.expect(flags >= 0 and flags & nonblock == 0);
+        const fd_flags = c.fcntl(stream.socket.handle, c.F.GETFD);
+        try std.testing.expect(fd_flags >= 0 and fd_flags & c.FD_CLOEXEC != 0);
+    }
     try std.testing.expect(stream.socket.address.getPort() != 0);
     var refused = try loopback.listen(io, .{});
     const closed_address = refused.socket.address;
@@ -141,11 +144,11 @@ test "pull connect: real TCP returns a blocking close-on-exec socket and preserv
 test "pull connect: completion cleanup keeps one owner on restoration or address failure" {
     Fake.reset();
     Fake.fail_restore = true;
-    try std.testing.expectError(error.Unexpected, http.connectWith(Fake, std.testing.io, &address));
+    try std.testing.expectError(error.Unexpected, http.connectWith(Fake, std.testing.io, &address, 30_000));
     try std.testing.expectEqual(@as(usize, 1), Fake.closes);
     Fake.reset();
     Fake.fail_local = true;
-    try std.testing.expectError(error.Unexpected, http.connectWith(Fake, std.testing.io, &address));
+    try std.testing.expectError(error.Unexpected, http.connectWith(Fake, std.testing.io, &address, 30_000));
     try std.testing.expectEqual(@as(usize, 1), Fake.closes);
 }
 
@@ -171,14 +174,107 @@ test "pull connect: a pending attempt observes real I/O cancellation and closes 
             _ = closes.fetchAdd(1, .monotonic);
         }
         fn run(io: Io) Error!net.Socket {
-            return http.connectWith(@This(), io, &address);
+            return http.connectWith(@This(), io, &address, 30_000);
         }
     };
     Pending.entered.store(false, .monotonic);
     Pending.closes.store(0, .monotonic);
-    const io = std.testing.io;
+    var client_io: @import("pull_test_client.zig").Client = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    const io = client_io.io();
     var future = try io.concurrent(Pending.run, .{io});
     while (!Pending.entered.load(.acquire)) try Io.sleep(io, .fromMilliseconds(1), .awake);
     try std.testing.expectError(error.Canceled, future.cancel(io));
     try std.testing.expectEqual(@as(usize, 1), Pending.closes.load(.monotonic));
+}
+
+test "pull connect: a connect that never completes gives up at its limit with error.Timeout and one close" {
+    const Never = struct {
+        var closes: usize = 0;
+        pub fn open(_: Io, _: *const net.IpAddress) Error!std.posix.socket_t {
+            return fake_handle;
+        }
+        pub fn begin(_: std.posix.socket_t, _: *const net.IpAddress) std.posix.E {
+            return .INPROGRESS;
+        }
+        pub fn wait(_: Io, _: std.posix.socket_t) Error!bool {
+            return false; // the peer never answers
+        }
+        pub fn finish(_: Io, _: std.posix.socket_t) Error!std.posix.E {
+            return .SUCCESS;
+        }
+        pub fn blocking(_: Io, _: std.posix.socket_t) Error!void {}
+        pub fn local(_: Io, fd: std.posix.socket_t) Error!net.Socket {
+            return .{ .handle = fd, .address = .{ .ip4 = .loopback(1) } };
+        }
+        pub fn close(_: std.posix.socket_t) void {
+            closes += 1;
+        }
+    };
+    const io = std.testing.io;
+    const start = Io.Clock.awake.now(io);
+    try std.testing.expectError(error.Timeout, http.connectWith(Never, io, &address, 200));
+    const ms = @divTrunc(start.durationTo(Io.Clock.awake.now(io)).toNanoseconds(), std.time.ns_per_ms);
+    try std.testing.expect(ms >= 200 and ms < 5000);
+    try std.testing.expectEqual(@as(usize, 1), Never.closes);
+}
+const BlockedLookup = struct {
+    var release: Io.Event = .unset;
+    var finished: bool = false;
+    var active_io: Io = undefined;
+
+    fn reset(io: Io) void {
+        release = .unset;
+        finished = false;
+        active_io = io;
+    }
+
+    fn lookup(_: ?*anyopaque, _: net.HostName, results: *Io.Queue(net.HostName.LookupResult), options: net.HostName.LookupOptions) net.HostName.LookupError!void {
+        defer results.close(active_io);
+        release.wait(active_io) catch |err| {
+            if (options.canonical_name_buffer) |buf| buf[0] = 'D';
+            finished = true;
+            return err;
+        };
+        finished = true;
+    }
+};
+
+test "pull connect: a blocked direct lookup is canceled and drained before timeout return" {
+    var client: @import("pull_test_client.zig").Client = undefined;
+    client.init();
+    defer client.deinit();
+    const io = client.io();
+    BlockedLookup.reset(io);
+    var canonical: [net.HostName.max_len]u8 = undefined;
+    var buf: [16]net.HostName.LookupResult = undefined;
+    var results: Io.Queue(net.HostName.LookupResult) = .init(&buf);
+    const deadline: Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    try std.testing.expectError(error.Timeout, http.lookupTimed(BlockedLookup.lookup, null, io, try net.HostName.init("blocked.test"), &results, .{ .port = 80, .canonical_name_buffer = &canonical }, deadline));
+    try std.testing.expect(BlockedLookup.finished);
+    try std.testing.expectEqual(@as(u8, 'D'), canonical[0]);
+}
+
+test "pull connect: a blocked proxy lookup is canceled and drained before timeout return" {
+    var client: @import("pull_test_client.zig").Client = undefined;
+    client.init();
+    defer client.deinit();
+    const io = client.io();
+    BlockedLookup.reset(io);
+    const proxy: @import("pull_route.zig").Proxy = .{ .host = "blocked-proxy.test", .port = 8080, .from = "HTTPS_PROXY" };
+    const deadline: Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    try std.testing.expectError(error.Timeout, @import("pull_tunnel.zig").reachWith(BlockedLookup.lookup, null, io, proxy, deadline));
+    try std.testing.expect(BlockedLookup.finished);
+}
+
+test "pull connect: DNS elapsed time is deducted once from every TCP attempt" {
+    const io = std.testing.io;
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    const deadline = start.addDuration(.{ .raw = .fromMilliseconds(1000), .clock = .awake });
+    const during_tcp = start.addDuration(.{ .raw = .fromMilliseconds(250), .clock = .awake });
+    try std.testing.expectEqual(@as(?u64, 750), http.remainingMsAt(deadline, during_tcp));
+    try std.testing.expectEqual(@as(?u64, null), http.remainingMsAt(deadline, deadline));
+    const expired = start.subDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake });
+    try std.testing.expectError(error.Timeout, http.timed(io, &address, null, expired));
 }

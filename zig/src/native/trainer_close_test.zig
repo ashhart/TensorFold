@@ -145,7 +145,7 @@ pub fn close(comptime Host: type, comptime serve: anytype, comptime closeHost: a
     defer backend.deinit();
     const h = try a.create(Host);
     h.* = .{ .gpa = a, .gpu = null, .family = e, .release = F.family, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .served = .{ .backend = backend.backend(), .facts = .{ .exact_width = 8 }, .stream_bytes = 0 } };
-    try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 1 }, null);
+    try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 1 }, null, 0);
     adapter.learner.pockets.save_pending = true;
     const hook = adapter.hook();
     try std.testing.expect(hook.step(hook.ctx).stale);

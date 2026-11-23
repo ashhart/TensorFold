@@ -13,12 +13,18 @@ const limit = 1280;
 
 test {
     _ = @import("ref.zig");
+    _ = @import("experts_rows_test.zig");
     _ = @import("forward_test.zig");
     _ = @import("zerocopy_test.zig");
+    _ = @import("metal4_test.zig");
     _ = @import("prompt_test.zig");
     _ = @import("dspark_test.zig");
+    _ = @import("early_test.zig");
+    _ = @import("markov_test.zig");
     _ = @import("multi_test.zig");
     _ = @import("units_test.zig");
+    _ = @import("tile_test.zig");
+    _ = @import("vision_test.zig");
 }
 
 test "dsv41 metal: every stage of every layer kind within its float64 bound" {

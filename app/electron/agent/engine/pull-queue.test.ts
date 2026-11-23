@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { hasCachedSnapshot } from './paths'
 import { PullQueue } from './pull'
 import { makeHarness, waitFor } from './test-fixtures/harness'
 
@@ -22,6 +23,8 @@ async function main() {
     assert.equal((await cancelled.done).state, 'cancelled')
     assert.equal(second.progress().queuePosition, 1, 'positions update after cancelling a queued item')
     await waitFor(() => first.progress().state === 'verifying', 10_000, 'durable completion boundary')
+    first.cancel()
+    assert.equal(first.progress().state, 'verifying')
     assert.deepEqual((await h.records()).filter((r) => r.kind === 'pull').map((r) => r.repo), ['Org/First', 'Org/Drafter'], 'next job never overlaps model, companion or finalization')
     finish()
     assert.equal((await first.done).state, 'done')
@@ -42,6 +45,25 @@ async function main() {
     running.cancel()
     assert.equal((await running.done).state, 'cancelled')
     assert.equal((await successor.done).state, 'done', 'cancelling the current item respects the separate next-item consent')
+
+    const repo = 'Org/FinalSample'
+    const total = 65536
+    let cancelledFromSample = false
+    let finalized = false
+    const late = queue.enqueue({
+      ...options(repo), totalBytes: total, pollMs: 60_000,
+      onUpdate: ({ state, receivedBytes }) => {
+        if (cancelledFromSample || state !== 'running' || receivedBytes !== total) return
+        cancelledFromSample = true
+        late.cancel()
+      },
+    }, async (progress) => { finalized = true; return progress })
+    const afterLateCancel = queue.enqueue(options('Org/AfterLateCancel'))
+    assert.equal((await late.done).state, 'cancelled')
+    assert.equal(cancelledFromSample, true)
+    assert.equal(finalized, false)
+    assert.equal(await hasCachedSnapshot(h.hub, repo), true, 'the cancelled job keeps its downloaded bytes')
+    assert.equal((await afterLateCancel.done).state, 'done')
 
     const stopFirst = queue.enqueue(options('Org/ShutdownFirst'))
     const stopNext = queue.enqueue(options('Org/ShutdownNeverStarted'))

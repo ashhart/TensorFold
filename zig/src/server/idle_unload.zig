@@ -273,6 +273,7 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
     m.last_activity_ns = now(m.io);
     srv.engine = opened.engine;
     srv.info = info;
+    if (srv.witness) |w| w.bump(info); // the new engine's facts and epoch publish under one lock; its hashing starts
     srv.load.attach(opened.engine); // only the engine that serves publishes: a failed candidate never attached
     srv.keepalive = keepalive;
     m.re.replace(m.re.ctx, opened, scratch); // shutdown closes this engine, not the long-gone startup one

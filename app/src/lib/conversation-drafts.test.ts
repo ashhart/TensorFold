@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { ConversationDrafts, draftAttachmentReferences } from './conversation-drafts'
+import { ConversationDrafts, draftAttachmentReferences, restoreDraftAttachments } from './conversation-drafts'
 import { composerDraftKey, emptyComposerDraft } from '../../shared/composer-drafts'
 import type { ComposerDraftPort, ComposerDraftScope, ComposerDraftSnapshot, ComposerDraftWrite, ComposerDraftWriteResult } from '../../shared/composer-drafts'
 import type { Attachment } from './types'
@@ -146,6 +146,44 @@ function memoryPort() {
   assert.equal(refs[0].acceptedText, 'User corrected this.')
   assert.equal((refs[0] as any).source, undefined)
   drafts.dispose(); restarted.dispose()
+}
+
+{
+  const { port, saved } = memoryPort()
+  const reason = 'The synthetic PDF is password-protected.'
+  const attachment: Attachment = {
+    id: 'fixture', name: 'fixture.pdf', kind: 'document', mime: 'application/pdf',
+    status: 'error', error: reason,
+  }
+  const seed = new ConversationDrafts(port, 60_000)
+  seed.update(a, { attachments: [attachment] })
+  await seed.flush(a)
+  seed.dispose()
+  const key = composerDraftKey(a)
+  const display = 'Select this file again after restarting TensorFold; its contents were not stored with the draft.'
+  const prefix = `${display} Previous file error: `
+  for (let i = 0; i < 3; i++) {
+    const reopened = new ConversationDrafts(port, 60_000)
+    reopened.get(a)
+    await tick()
+    assert.equal(reopened.get(a).attachments[0].error, prefix + reason)
+    reopened.update(a, { text: `Unrelated edit ${i}` })
+    await reopened.flush(a)
+    assert.equal(saved.get(key)!.attachments[0].error, reason)
+    reopened.dispose()
+  }
+
+  const ref = saved.get(key)!.attachments[0]
+  const recoverable = restoreDraftAttachments([{ ...ref, error: prefix.repeat(2) + reason }])
+  assert.equal(recoverable[0].error, prefix + reason)
+  assert.equal(draftAttachmentReferences(recoverable)[0].error, reason)
+
+  const clipped = restoreDraftAttachments([{ ...ref, error: prefix.repeat(12).slice(0, 1000) }])
+  assert.equal(clipped[0].error, display)
+  const longError = 'x'.repeat(999) + 'YZ'
+  const long = draftAttachmentReferences([{ ...attachment, error: longError }])
+  assert.equal(long[0].error, longError.slice(0, 1000))
+  assert.deepEqual(draftAttachmentReferences(restoreDraftAttachments(long)), long)
 }
 
 {

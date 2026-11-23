@@ -134,10 +134,10 @@ pub fn kvPool(p: *anyopaque) ?kv.Source {
 pub const Place = struct { rank: usize, world: usize };
 
 pub fn place() !Place {
-    const r = std.c.getenv("TF_GLM_RANK") orelse return error.NoRank;
-    const w = std.c.getenv("TF_GLM_WORLD") orelse return error.NoRank;
-    const p: Place = .{ .rank = std.fmt.parseInt(usize, std.mem.span(r), 10) catch return error.NoRank, .world = std.fmt.parseInt(usize, std.mem.span(w), 10) catch return error.NoRank };
-    return checked(p);
+    const settings = @import("sys").environment;
+    const r = (try settings.read(?u64, "TF_GLM_RANK", null)) orelse return error.NoRank;
+    const w = (try settings.read(?u64, "TF_GLM_WORLD", null)) orelse return error.NoRank;
+    return checked(.{ .rank = @intCast(r), .world = @intCast(w) });
 }
 
 /// A place the family serves: a rank inside its world, and at most `ranks.max_world` ranks.
@@ -199,7 +199,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try @import("cuda_env.zig").startup();
     try @import("cuda_env.zig").requestStartsAlone(o.learn_conversations); // before any rank opens
     const p = try place();
-    const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
+    const roce_bytes = try roceBytes((@import("sys").environment.Process{}).get("TF_ROCE_MAX_KB"));
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     var problem: []const u8 = "";
     var set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
@@ -208,7 +208,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     try @import("cuda_roce_multi.zig").validate(p.world, p.rank, set.roce_multi);
     set.kv8 = o.kv8;
-    if (share_mod.moved(if (std.c.getenv("TF_GLM_KV_SHARE")) |v| std.mem.span(v) else "")) return error.GlmKvShareMoved; // before any rank opens
+    if (share_mod.moved((@import("sys").environment.Process{}).get("TF_GLM_KV_SHARE") orelse "")) return error.GlmKvShareMoved; // before any rank opens
     const share_snaps = try kp.sharing();
     if (share_mod.tooMany(share_snaps)) {
         std.log.err("TF_KV_SHARE={d} asks more kept states than the {d} it keeps: set {d} or fewer", .{ share_snaps, kv.most_snaps, kv.most_snaps });
@@ -336,7 +336,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     errdefer own.link.deinit();
     try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
-    try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
+    try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.latentRow() * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
@@ -523,11 +523,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
         error.InvalidEnvironment => "a TF_GLM_* setting is malformed: the error line before this one names it, its value and the accepted form",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
-        error.TooManyRanks => std.fmt.comptimePrint(
-            "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
-            .{ ranks.max_world, ranks.max_world },
-        ),
-        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 and MIXED_PRECISION checkpoints (the log names what config.json has)",
+        error.TooManyRanks => std.fmt.comptimePrint("GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer", .{ ranks.max_world, ranks.max_world }),
+        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4, MIXED_PRECISION and EXL3 mcg checkpoints (the log names what config.json has)",
+        error.UnreadableExl3 => "an EXL3 routed expert is not an mcg trellis of 1 to 8 bits with its marker and fp16 scales (the log names the tensor)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
         else => null,
     };
@@ -541,7 +539,7 @@ test "a place inside its world of at most 16 ranks serves; a larger world is ref
 }
 
 test "a checkpoint refused for its format, at the entry or by the loader, is explained" {
-    for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat }) |e| try std.testing.expect(explain(null, e) != null);
+    for ([_]anyerror{ error.NotModelOpt, error.UnsupportedQuant, error.UnreadableFormat, error.UnreadableExl3 }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "TF_KV_SHARE past the slots a startup plan holds is refused, and the refusal is explained" {

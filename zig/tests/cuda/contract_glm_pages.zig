@@ -284,7 +284,7 @@ pub const PoolKeys = struct {
     pub fn run(self: *PoolKeys) !void {
         var a: cuda.Args = .{};
         const pk = self.arena + part_bytes + rows_a_page * lw * 2; // the cache's pooled keys in page 0
-        inline for (.{ self.in[0], self.in[1], self.in[2], pk, self.pos, @as(i64, @intCast(self.shape.rows)), self.pt, @as(i64, page_bytes) }) |v| a.add(v);
+        inline for (.{ self.in[0], self.in[1], self.in[2], pk, self.pos, @as(i64, @intCast(self.shape.rows)), self.pt, @as(i64, page_bytes), @as(c_int, 4) }) |v| a.add(v);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows / 4 + 2) }, .block = .{ .x = 32 } }, self.rig.s, &a);
         var i: usize = 0;
         while (i < self.pools) { // the pools back from their pages, a page's run at a time

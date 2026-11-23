@@ -104,6 +104,13 @@ test "Responses socket: a turn equals its SSE twin; the cache continues store:fa
     try expectError(try c.turn(a, try create(a, "\"input\":\"x\",\"store\":false,\"previous_response_id\":\"resp_missing\"")), 400, "previous_response_not_found");
     const stored = try client.http(a, io, f.port, "POST", "/v1/responses", null, "{\"input\":\"kept\",\"store\":true}");
     try testing.expectEqual(@as(u16, 200), stored.status);
+    for ([_][]const u8{ "\"yes\"", "1", "[]", "{}" }) |store| {
+        const wrong_store = try client.http(a, io, f.port, "POST", "/v1/responses", null, try std.fmt.allocPrint(a, "{{\"input\":\"x\",\"store\":{s}}}", .{store}));
+        try testing.expectEqual(@as(u16, 400), wrong_store.status);
+        try testing.expect(std.mem.indexOf(u8, wrong_store.body, "store") != null);
+    }
+    const null_store = try client.http(a, io, f.port, "POST", "/v1/responses", null, "{\"input\":\"x\",\"store\":null}");
+    try testing.expectEqual(@as(u16, 200), null_store.status);
     const stored_id = (try json.parse(a, stored.body)).ok.strField("id").?;
     const miss = try c.turn(a, try create(a, try std.fmt.allocPrint(a, "\"input\":\"x\",\"store\":false,\"previous_response_id\":\"{s}\"", .{stored_id})));
     try expectError(miss, 400, "previous_response_not_found");
@@ -276,6 +283,70 @@ test "Responses socket: the lifetime ends with websocket_connection_limit_reache
     f.thread.join();
     f.env.deinit();
     try testing.expectEqual(@as(u8, 0), f.x.code);
+}
+
+test "Responses socket: a namespace tool is offered on the turn and kept through the cached continuation" {
+    const log_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = log_level;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fixture = undefined;
+    try f.start(testing.allocator, testing.io, .{});
+    errdefer f.stop() catch {};
+    const io = f.io;
+
+    // 9. one level of namespacing over the socket, then a continuation from the cache on the same lane
+    const ns_tools = "\"tools\":[{\"type\":\"namespace\",\"name\":\"weather\",\"description\":\"weather tools\",\"tools\":[{\"type\":\"function\",\"name\":\"get_weather\"}]}]";
+    const body = "\"input\":\"x\",\"store\":false,\"reasoning\":{\"effort\":\"none\"}," ++ ns_tools;
+    const sse = try client.http(a, io, f.port, "POST", "/v1/responses", null, try std.fmt.allocPrint(a, "{{\"stream\":true,{s}}}", .{body}));
+    try testing.expectEqual(@as(u16, 200), sse.status);
+    const over_http = try client.sseEvents(a, sse.body);
+    var c: Client = undefined;
+    try c.open(a, io, f.port, null);
+    const over_socket = try c.turn(a, try create(a, body));
+    try expectCompleted(over_socket);
+    try expectKinds(a, try kinds(a, over_http), over_socket);
+    try testing.expect(json.equal(try client.normalized(a, client.final(over_http)), try client.normalized(a, client.final(over_socket))));
+    for ([_][]const u8{ "token_sha", "token_sha256" }) |k| {
+        const want = client.final(over_http).get("tensorfold").?.strField(k).?;
+        try testing.expectEqualStrings(want, client.final(over_socket).get("tensorfold").?.strField(k).?);
+    }
+
+    // the whole final response echoes the namespace as it was offered, with its child under it
+    const offered = client.final(over_socket).get("tools").?.array;
+    try testing.expectEqual(@as(usize, 1), offered.len);
+    try testing.expectEqualStrings("namespace", offered[0].strField("type").?);
+    try testing.expectEqualStrings("weather", offered[0].strField("name").?);
+    try testing.expectEqualStrings("weather tools", offered[0].strField("description").?);
+    const children = offered[0].get("tools").?.array;
+    try testing.expectEqual(@as(usize, 1), children.len);
+    try testing.expectEqualStrings("function", children[0].strField("type").?);
+    try testing.expectEqualStrings("get_weather", children[0].strField("name").?);
+    // this fixture's engine answers in plain text: it ignores the @script marker, so no call item is written
+    const items = client.final(over_socket).get("output").?.array;
+    const said = items[items.len - 1];
+    try testing.expectEqualStrings("message", said.strField("type").?);
+    try testing.expect(std.mem.startsWith(u8, std.mem.trim(u8, said.get("content").?.array[0].strField("text").?, " \t\r\n"), "ok"));
+    for (items) |item| try testing.expect(!std.mem.eql(u8, item.strField("type").?, "function_call"));
+
+    // the cache continues that turn; its history names the namespace child and keeps the namespace offered
+    const first = client.final(over_socket).strField("id").?;
+    const history = "\"input\":[" ++
+        "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"get_weather\",\"namespace\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Rome\\\"}\"}," ++
+        "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"sunny\"}," ++
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":\"and later?\"}]";
+    const next = try c.turn(a, try create(a, try std.fmt.allocPrint(a, "{s},\"store\":false,{s},\"previous_response_id\":\"{s}\"", .{ history, ns_tools, first })));
+    try expectCompleted(next);
+    try testing.expect(client.usage(next, "input_tokens") > client.usage(over_socket, "input_tokens"));
+    try testing.expectEqualStrings(first, client.final(next).strField("previous_response_id").?);
+    const kept = client.final(next).get("tools").?.array;
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("weather", kept[0].strField("name").?);
+    try testing.expectEqualStrings("get_weather", kept[0].get("tools").?.array[0].strField("name").?);
+    c.close();
+    try f.stop();
 }
 
 test {

@@ -260,7 +260,7 @@ pub const Probe = struct {
         p.c.mtp_len = kept;
     }
 
-    /// The head's last step's `k` best draft tokens (draft logits ranked on the host, ids through the draft vocabulary).
+    /// The head's last step's `k` best draft tokens (logits ranked on the host, ids via the draft vocabulary).
     pub fn topDrafts(p: *Probe, k: usize, out: []u32) void {
         const h = &p.b.head.?;
         const logits = h.scratch.logits.slice(u16, h.w.vocab);

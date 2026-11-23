@@ -232,9 +232,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer for (&mx) |*m| m.deinit();
     for (&mx) |*m| try kernels.append(a, m.kernel());
     var half_lane = lane;
-    var halves: [6]half_k.Half = undefined;
-    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| {
-        halves[i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format };
+    var halves: [12]half_k.Half = undefined; // half tiles, then the same kinds and formats on the fused split-K form
+    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| for (0..2) |f| {
+        halves[f * 6 + i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format, .fused = f == 1 };
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
@@ -304,11 +304,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
     defer h3_topk.deinit();
     try kernels.append(a, h3_topk.kernel());
-    var d3_mod = try cuda.Module.load(gpu.d, kk.drama3);
-    defer d3_mod.unload();
-    var d3_norm = try drama3_k.Norm.init(gpu, s, d3_mod);
-    defer d3_norm.deinit();
-    try kernels.append(a, d3_norm.kernel());
+    const d3 = try drama3_k.Group.create(a, gpu, s, &kernels);
+    defer d3.destroy();
     var ck: ?cuda.ck.Ck = null;
     var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
     if (cap >= 120) {
@@ -415,6 +412,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer q35_mod.unload();
     const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
     defer norm_shift.destroy();
+    const q35_taps = try @import("contract_qwen35_tap.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer q35_taps.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
@@ -582,8 +581,3 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     try g.runAll(a, kernels.items, 0x6b63, &t);
     return t;
 }
-
-/// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.
-pub const image = @import("contract_limits.zig").image;
-pub const live = @import("contract_limits.zig").live;
-pub const fatbins = @import("contract_limits.zig").fatbins;

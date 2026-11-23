@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const xq = @import("xpu_qwen27");
 const be = lanes.backend;
 const Drafter = xq.drafter.Drafter;
+const logrow = @import("xpu_logrow.zig");
 const Allocator = std.mem.Allocator;
 
 const ring = 64;
@@ -19,11 +20,14 @@ pub const Lanes = struct {
     drafter: ?*Drafter,
     pick: *const fn (ctx: *anyopaque, row: []const f32, position: u64, s: api.Sampling) anyerror!u32,
     pick_ctx: *anyopaque,
+    /// The draw from a row's card top_k (values, ids, whether the row holds a non-finite value); null: the host draws.
+    pick_cand: ?*const fn (ctx: *anyopaque, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) anyerror!u32 = null,
     slots: u32,
     block: u32 = 8,
     nodes: u32 = 15,
     owners: [xq.MAX_SLOTS]?*lanes.Stream = @splat(null),
-    first_logits: [xq.MAX_SLOTS]?[]f32 = @splat(null), // a sampled or structured stream's prompt-row logits, for `first`
+    first_logits: [xq.MAX_SLOTS]?[]f32 = @splat(null), // a sampled, structured or logprobs stream's prompt-row logits
+    first_pick: [xq.MAX_SLOTS]u32 = @splat(0), // the token `first` drew from them, for the logprob row
     mask_rows: [16]u32 = undefined, // a verify's greedy structured rows (argmaxMasked on the device)
     mask_bits: ?[]u32 = null, // and their grammar bits, gathered
     masked_vals: ?[]f64 = null, // a structured sampled row's allowed candidates
@@ -55,12 +59,28 @@ pub const Lanes = struct {
     /// Rows [start, start + rows) of a prompt pass in `slot`, their taps in acts.taps.
     pub const Tail = struct { slot: u32, start: u64, rows: u32 };
 
+    /// The candidates the card keeps for a sampled row: its top_k when that is 1 to 64 and it is not greedy, else 0.
+    pub fn candidateK(sp: api.Sampling) u32 {
+        return if (sp.temperature > 0 and sp.top_k >= 1 and sp.top_k <= xq.cand.TOPK_MAX) sp.top_k else 0;
+    }
+
+    /// The candidates the next forward keeps for a stream sampling with `sp`: none without the host's rule for them.
+    fn candK(b: *const Lanes, sp: ?api.Sampling) u32 {
+        return if (b.pick_cand != null) (if (sp) |x| candidateK(x) else 0) else 0;
+    }
+
+    /// Row `row` of the last forward drawn at `position`: from its card top_k when it kept them, else from its logits.
+    fn drawRow(b: *Lanes, row: u32, position: u64, sp: api.Sampling) !u32 {
+        if (b.pick_cand) |f| if (b.runner.candidates(row, candidateK(sp))) |c| return f(b.pick_ctx, c.vals, c.ids, c.bad, position, sp);
+        return b.pick(b.pick_ctx, try b.runner.rowLogits(row), position, sp);
+    }
+
     fn self(ptr: *anyopaque) *Lanes {
         return @ptrCast(@alignCast(ptr));
     }
 
     pub fn backend(b: *Lanes) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_features = prefillFeaturesFn, .features = featuresFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_features = prefillFeaturesFn, .features = featuresFn, .first = firstFn, .first_masked = firstMaskedFn, .first_row = firstRowFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     /// What the round loop reads: chains of up to 16 rows, all streams' windows in one shared forward, DFlash2 drafts
@@ -237,7 +257,7 @@ pub const Lanes = struct {
             at = end;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
         }
-        if (s.sampling != null or s.grammar != null) {
+        if (s.sampling != null or s.grammar != null or s.logprobs != null) {
             const row = try r.logits();
             const keep = b.first_logits[slot] orelse try b.gpa.alloc(f32, row.len);
             @memcpy(keep, row);
@@ -311,7 +331,16 @@ pub const Lanes = struct {
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const b = self(ptr);
         const slot = b.slotOf(s) orelse return error.UnknownStream;
-        return b.push(try b.draw(s, slot, b.first_logits[slot], position));
+        const token = try b.draw(s, slot, b.first_logits[slot], position);
+        b.first_pick[slot] = token;
+        return b.push(token);
+    }
+
+    /// The prompt's last row for a logprobs stream: the raw distribution the first token was drawn from.
+    fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
+        const b = self(ptr);
+        const slot = b.slotOf(s) orelse return error.UnknownStream;
+        return logrow.row(b.first_logits[slot] orelse return error.NoLogits, b.first_pick[slot], s.logprobs orelse 0);
     }
 
     /// Structured output: the stream's draw among the tokens `mask` allows, greedy (first argmax) or sampled (keyed)
@@ -350,7 +379,9 @@ pub const Lanes = struct {
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const b = self(ptr);
         const slot = b.slotOf(s) orelse return error.UnknownStream;
-        return b.push(try b.drawMasked(s, b.first_logits[slot] orelse return error.NoLogits, position, mask));
+        const token = try b.drawMasked(s, b.first_logits[slot] orelse return error.NoLogits, position, mask);
+        b.first_pick[slot] = token;
+        return b.push(token);
     }
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -363,8 +394,10 @@ pub const Lanes = struct {
         defer r.taps_on = false;
         b.tapped = 0;
         b.tail = null;
+        r.cand.k = b.candK(s.sampling);
+        defer r.cand.k = 0;
         try r.step(try b.value(feed));
-        return b.push(try b.draw(s, slot, if (s.sampling != null) try r.logits() else null, position));
+        return b.push(if (s.sampling) |sp| try b.drawRow(0, position, sp) else b.lastOf(slot));
     }
 
     fn readFn(ptr: *anyopaque, handle: u64) anyerror!u32 {
@@ -396,6 +429,11 @@ pub const Lanes = struct {
         defer r.taps_on = false;
         b.tapped = 0;
         b.tail = null;
+        r.cand.k = 0;
+        for (windows) |w| if (w.masks.len == 0) {
+            r.cand.k = @max(r.cand.k, b.candK(w.stream.sampling));
+        };
+        defer r.cand.k = 0;
         try r.verifyMulti(wins[0..windows.len]);
         b.tapped = windows.len;
         // structured greedy rows: their tokens among their grammars' on the device, all in one pass
@@ -432,12 +470,12 @@ pub const Lanes = struct {
                     row += 1;
                     continue;
                 }
-                const logits = if (w.stream.sampling != null) try r.rowLogits(row) else null;
-                o.sampled[j] = if (w.stream.sampling) |sp| try b.pick(b.pick_ctx, logits.?, w.positions[j], sp) else r.block[row];
+                o.sampled[j] = if (w.stream.sampling) |sp| try b.drawRow(row, w.positions[j], sp) else r.block[row];
                 row += 1;
             }
             @memcpy(o.drafts, w.tokens);
         }
+        try logrow.windowRows(r, windows, out, b.widths[0..windows.len]); // logprobs, for the streams that asked
         b.count = windows.len;
     }
 
@@ -482,7 +520,10 @@ pub const Lanes = struct {
         defer b.direct = false;
         try b.prefillSlot(s, 0);
         const pending = try b.draw(s, 0, b.first_logits[0], s.prompt_len);
-        _ = try s.commit(b.gpa, &.{pending}, &.{});
+        b.first_pick[0] = pending;
+        var first_row: [1]lanes.LogprobRow = undefined;
+        if (s.logprobs) |k| first_row[0] = logrow.row(b.first_logits[0] orelse return error.NoLogits, pending, k);
+        _ = try s.commit(b.gpa, &.{pending}, if (s.logprobs != null) &first_row else &.{});
         hooks.committed(hooks.ctx);
         handed = try b.alone(s, 0, pending, hooks);
         return handed;
@@ -523,9 +564,13 @@ pub const Lanes = struct {
             if (s.isCancelled()) return error.Cancelled;
             r.taps_on = true;
             defer r.taps_on = false;
+            r.cand.k = b.candK(s.sampling);
+            defer r.cand.k = 0;
             var sampled: Sampled = .{ .b = b, .s = s.sampling orelse .{ .seed = 0 } };
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
-            const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, &out);
+            var logged: logrow.Logged = .{ .runner = b.runner, .k = s.logprobs orelse 0 };
+            const note: ?xq.drafter.Note = if (s.logprobs != null) .{ .ctx = &logged, .f = logrow.Logged.take } else null;
+            const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, note, &out);
             s.rounds += 1;
             s.drafted += round.drafted;
             s.accepted += round.accepted;
@@ -533,7 +578,7 @@ pub const Lanes = struct {
             const n = round.tokens.len - 1;
             @memcpy(landed[0..n], round.tokens[1..]);
             landed[n] = round.terminal;
-            _ = try s.commit(b.gpa, landed[0 .. n + 1], &.{});
+            _ = try s.commit(b.gpa, landed[0 .. n + 1], if (s.logprobs != null) logged.rows[0 .. n + 1] else &.{});
             pending = round.terminal;
             hooks.committed(hooks.ctx);
         }
@@ -545,7 +590,7 @@ pub const Lanes = struct {
         s: api.Sampling,
         fn row(c_: *anyopaque, row_: u32, position: u64) !u32 {
             const c: *@This() = @ptrCast(@alignCast(c_));
-            return c.b.pick(c.b.pick_ctx, try c.b.runner.rowLogits(row_), position, c.s);
+            return c.b.drawRow(row_, position, c.s);
         }
         fn gumbel(c_: *anyopaque, position: u64, id: u64) f64 {
             const c: *@This() = @ptrCast(@alignCast(c_));

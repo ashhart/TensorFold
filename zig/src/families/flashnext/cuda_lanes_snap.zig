@@ -11,7 +11,7 @@ pub fn keepInPass() bool {
 }
 
 /// Size, save, restore and drop over the lane owner `of` finds behind a target pointer.
-pub fn Copies(comptime of: anytype) type {
+pub fn Snaps(comptime of: anytype) type {
     return struct {
         /// The n-gram history (the last two tokens) at position `to` of a pass from `from` that began at `old`.
         pub fn historyAt(old: [2]i64, ids: []const u32, from: usize, to: usize) [2]i64 {
@@ -74,6 +74,21 @@ pub fn Copies(comptime of: anytype) type {
             if (l.draft) |*d| try self.ops().flushLate(&l.seq, d);
             if (self.ranks) |r| return try r.save(&l.seq, if (l.draft) |*d| d else null);
             return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
+        }
+
+        /// The kept state the stream's reuse names, restored when it fits: the prompt pass starts there.
+        pub fn resumeKept(self: *of, s: *lanes.Stream, l: anytype, len: usize) !void {
+            const saved = s.reuse.saved orelse return;
+            const kept: *snap.Snap = @ptrCast(@alignCast(saved));
+            if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= len) {
+                s.reuse_failed = true;
+            } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
+                l.filled = kept.at;
+                s.cached = @intCast(kept.at);
+            } else |err| switch (err) {
+                error.SequenceTooShort, error.NoHeadState => s.reuse_failed = true,
+                else => return err,
+            }
         }
 
         pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {

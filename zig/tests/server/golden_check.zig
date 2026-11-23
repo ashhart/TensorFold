@@ -76,7 +76,7 @@ const Conn = struct {
         if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
         const fd: posix.socket_t = @intCast(rc);
         errdefer _ = posix.system.close(fd);
-        // sin_addr is network byte order: on the wire 127.0.0.1 is bytes 7f 00 00 01, which a little-endian u32 stores as 0x0100007f
+        // sin_addr is network byte order: 127.0.0.1 is bytes 7f 00 00 01, stored as 0x0100007f in a little-endian u32.
         const addr: posix.sockaddr.in = .{ .family = posix.AF.INET, .port = std.mem.nativeToBig(u16, port), .addr = 1 << 24 | 127 };
         const crc = posix.system.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
         if (posix.errno(crc) != .SUCCESS) return error.ConnectFailed;
@@ -170,7 +170,7 @@ const Conn = struct {
         }
     }
 
-    /// The closed probe: an event within 300 ms says the server kept the connection or tore it down; silence says open. poll, because a second setsockopt can fail on a reset socket.
+    /// Closed probe: event within 300 ms = kept/dropped, silence = open. Poll; a second setsockopt can fail on reset.
     fn probeClosed(self: *Conn) ![]const u8 {
         var pfd: [1]posix.pollfd = .{.{ .fd = self.fd, .events = posix.POLL.IN, .revents = 0 }};
         const n = posix.poll(&pfd, 300) catch return "open";

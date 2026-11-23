@@ -256,10 +256,16 @@ fn toolRanges(a: A, answer: []const u8, tools: []const V, count: usize, offset_a
     try envelopes.appendSlice(a, try tp.envelopes(a, answer));
     const lfm = rt.calls[3];
     var pos: usize = 0;
+    var code: @import("reply_code.zig").Scanner = .{};
     while (std.mem.indexOfPos(u8, answer, pos, lfm[0])) |at| {
+        if (code.check(answer, at, true) == .skip) {
+            pos = code.skip_end;
+            continue;
+        }
         const end = if (std.mem.indexOfPos(u8, answer, at + lfm[0].len, lfm[1])) |e| e + lfm[1].len else answer.len;
         try envelopes.append(a, .{ .start = at, .end = end, .payload = answer[at..end] });
         pos = end;
+        code.jumpTo(pos);
     }
     if (tp.openCall(answer)) |at| try envelopes.append(a, .{ .start = at, .end = answer.len, .payload = answer[at..] });
     std.mem.sort(tp.Envelope, envelopes.items, {}, struct {

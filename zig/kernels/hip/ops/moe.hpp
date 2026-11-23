@@ -6,9 +6,11 @@
 
 namespace {
 
-// Stable-sorts the pairs by expert into members and cuts items of at most `tile` pairs; one block, counted per segment.
-extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts, int tile, int* members, int* items,
-                                 int capacity) {
+// Stable-sorts the pairs by expert into members and cuts items of at most `tile` pairs, the `shared_expert`'s of at
+// most `shared_tile` (-1: none); one block, counted per segment.
+extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts, int tile, int shared_expert,
+                                 int shared_tile, int* members, int* items, int capacity) {
+    const auto cut = [=](int e) { return e == shared_expert ? shared_tile : tile; };
     extern __shared__ int shared[];
     int* counts = shared;
     int* starts = shared + experts;
@@ -42,7 +44,7 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     int own_c = 0, own_n = 0;
     for (int e = lo; e < hi; ++e) {
         own_c += counts[e];
-        own_n += (counts[e] + tile - 1) / tile;
+        own_n += (counts[e] + cut(e) - 1) / cut(e);
     }
     scan_c[t] = own_c;
     scan_n[t] = own_n;
@@ -58,7 +60,7 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
     for (int e = lo; e < hi; ++e) {
         starts[e] = start;
         start += counts[e];
-        end += (counts[e] + tile - 1) / tile;
+        end += (counts[e] + cut(e) - 1) / cut(e);
         ends[e] = end;
     }
     __syncthreads();
@@ -77,12 +79,13 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
             else hi = mid;
         }
         int e = lo < experts - 1 ? lo : experts - 1;
-        int reps = (counts[e] + tile - 1) / tile;
+        const int te = cut(e);
+        int reps = (counts[e] + te - 1) / te;
         int within = slot - (ends[e] - reps);
-        int count = counts[e] - within * tile;
+        int count = counts[e] - within * te;
         items[slot * 3] = e;
-        items[slot * 3 + 1] = starts[e] + within * tile;
-        items[slot * 3 + 2] = count < 0 ? 0 : (count > tile ? tile : count);
+        items[slot * 3 + 1] = starts[e] + within * te;
+        items[slot * 3 + 2] = count < 0 ? 0 : (count > te ? te : count);
     }
 }
 

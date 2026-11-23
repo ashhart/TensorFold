@@ -194,6 +194,8 @@ pub const Metrics = struct {
         if (status.prompt_cache) |c| {
             try gauge(w, "prompt_cache_states", "gauge", "All retained prompt states, including long-message interior cuts.", c.states);
             try gauge(w, "prompt_cache_bytes", "gauge", "Storage held by retained prompt states and spare buffers, inside their budget.", c.bytes);
+            for (@TypeOf(c).miss_reason_names, c.miss_reasons) |reason, v| if (v > 0)
+                try w.print("{s}prompt_cache_miss_total{{reason=\"{s}\"}} {d}\n", .{ prefix, reason, v });
         }
         const keeps = info.prompt_cache;
         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states.", snap.cached);

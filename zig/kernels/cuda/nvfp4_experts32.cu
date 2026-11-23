@@ -17,8 +17,16 @@ using tf_common::ld_nc;
 using tf_common::ld_nc2;
 using tf_common::ld_nc32;
 using tf_common::fp4pair;
+using tf_common::fp4pair_nz5;
 
 using tf_common::e4m3f;
+
+// Two codes as a bf16 pair: E2M1's values, or NVFP4_NZ5's (0b1000 is +5) when NZ.
+template <bool NZ>
+__device__ __forceinline__ uint32_t e2m1pair(uint32_t w, int s) {
+  if constexpr (NZ) return fp4pair_nz5(w, s);
+  else return fp4pair(w, s);
+}
 
 template <int M>
 struct Stage {
@@ -45,7 +53,7 @@ __device__ __forceinline__ void load_stage(Stage<M>& st, const uint4* blk, int g
   }
 }
 
-template <int M>
+template <int M, bool NZ>
 __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const Stage<M>& st, const uint2* bq, bool hi) {
 #pragma unroll
   for (int m = 0; m < M; ++m) {
@@ -64,7 +72,7 @@ __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const 
       for (int j = 0; j < NTW; ++j) {
         const uint32_t word = comp(st.w[m], j);
         float p[4] = {0.f, 0.f, 0.f, 0.f};
-        mma(p, a0, a1, a2, a3, fp4pair(word, 8 * h), fp4pair(word, 8 * h + 4));
+        mma(p, a0, a1, a2, a3, e2m1pair<NZ>(word, 8 * h), e2m1pair<NZ>(word, 8 * h + 4));
         float(&a)[4] = acc[m][0][j];
         a[0] = fmaf(p[0], sf[j][0], a[0]);
         a[1] = fmaf(p[1], sf[j][1], a[1]);
@@ -77,7 +85,7 @@ __device__ __forceinline__ void compute_stage(float (&acc)[M][1][NTW][4], const 
   }
 }
 
-template <int M>
+template <int M, bool NZ>
 __device__ __forceinline__ void k_loop(float (&acc)[M][1][NTW][4], const uint4* blk, const uint2* bq, int KG, int lane,
                                        int t, const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
   constexpr int D = 2;
@@ -90,7 +98,7 @@ __device__ __forceinline__ void k_loop(float (&acc)[M][1][NTW][4], const uint4* 
     for (int d = 0; d < D; ++d) {
       const int g = g0 + d;
       if (g < KG) {
-        compute_stage<M>(acc, st[d], bq, v1);
+        compute_stage<M, NZ>(acc, st[d], bq, v1);
         if (g + D < KG) load_stage<M>(st[d], blk, g + D, d, lane, t, x0, x1, v0, v1);
       }
     }
@@ -98,7 +106,7 @@ __device__ __forceinline__ void k_loop(float (&acc)[M][1][NTW][4], const uint4* 
 }
 
 // One unit of the decode form: a warp's 32 columns of item `unit / NB` over all K, then the epilogue.
-template <int M, int EPI>
+template <int M, int EPI, bool NZ>
 __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, const __nv_bfloat16* __restrict__ X,
                                           int x_stride, int slots, const uint4* __restrict__ W,
                                           const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
@@ -124,7 +132,7 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, con
     for (int m = 0; m < M; ++m)
 #pragma unroll
       for (int j = 0; j < NTW; ++j) acc[m][0][j][0] = acc[m][0][j][1] = acc[m][0][j][2] = acc[m][0][j][3] = 0.f;
-    k_loop<M>(acc, blk, bq, KG, lane, t, x0, x1, v0, v1);
+    k_loop<M, NZ>(acc, blk, bq, KG, lane, t, x0, x1, v0, v1);
 #pragma unroll
     for (int m = 0; m < M; ++m) {
       const float g = __ldg(scale + e * M + m);
@@ -137,7 +145,7 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, con
   }
 }
 
-template <int M, int EPI, int WARPS>
+template <int M, int EPI, int WARPS, bool NZ>
 __device__ __forceinline__ void decode_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
                                             const int* __restrict__ items, const int* __restrict__ counts,
@@ -146,7 +154,7 @@ __device__ __forceinline__ void decode_body(const __nv_bfloat16* __restrict__ X,
   const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int units = __ldg(counts) * NB;
   for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS)
-    unit_full<M, EPI>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
+    unit_full<M, EPI, NZ>(unit, lane, gq, t, X, x_stride, slots, W, scale, KG, NB, items, members, out, N, limit, skip);
 }
 
 // The prompt form's tile: 16 RT rows a warp, WM x WN warps (BM pairs of one item by WN 32-column blocks a CTA).
@@ -168,7 +176,7 @@ __device__ __forceinline__ uint32_t e4m3x2(uint32_t x) {
   return r;
 }
 
-// a * b in bf16 pairs; exact for e2m1 codes times e4m3 scales (six significant bits at most).
+// a * b in bf16 pairs; exact for e2m1 codes and NZ5's 5 times e4m3 scales (seven significant bits at most).
 __device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
   uint32_t r;
   asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(0x80008000u));
@@ -176,7 +184,7 @@ __device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
 }
 
 // Prompt rows, 64 inputs a stage, NT row tiles a warp.
-template <int M, int EPI, int RT, int WM, int WN, int NT>
+template <int M, int EPI, int RT, int WM, int WN, int NT, bool NZ>
 __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                              const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                              int NB, const int* __restrict__ members, void* __restrict__ out, int N,
@@ -273,7 +281,7 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
 #pragma unroll
           for (int j = 0; j < NTW; ++j) {
             const uint32_t word = comp(wv[m], j);
-            const uint32_t b0 = mul2(fp4pair(word, 8 * h), sv[m][j]), b1 = mul2(fp4pair(word, 8 * h + 4), sv[m][j]);
+            const uint32_t b0 = mul2(e2m1pair<NZ>(word, 8 * h), sv[m][j]), b1 = mul2(e2m1pair<NZ>(word, 8 * h + 4), sv[m][j]);
 #pragma unroll
             for (int r = 0; r < NT; ++r) mma(acc[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
           }
@@ -302,7 +310,7 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   }
 }
 
-template <int M, int EPI, int RT, int WM, int WN>
+template <int M, int EPI, int RT, int WM, int WN, bool NZ>
 __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                             int NB, const int* __restrict__ items, const int* __restrict__ counts,
@@ -315,7 +323,7 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
   if (e == skip) return;  // an expert the family computes itself, left alone as the decode form does
   const int nt = max(0, min(RT, (cnt - 16 * RT * ((threadIdx.x >> 5) / WN) + 15) >> 4));
 #define TF_TILES(NT) \
-  prompt_tiles<M, EPI, RT, WM, WN, NT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
+  prompt_tiles<M, EPI, RT, WM, WN, NT, NZ>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
   switch (nt) {
     case 4: TF_TILES(4); break;
     case 3: TF_TILES(3); break;
@@ -327,27 +335,32 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
 }
 }
 
-// The decode form's entries, 4 warps a CTA: SwiGLU gate-up, fp32 and bf16 sums down.
-#define TF_NVFP4_DECODE32(NAME, M, EPI)                                                                                \
+// The decode form's entries, 4 warps a CTA: SwiGLU gate-up, fp32 and bf16 sums down; NZ reads NVFP4_NZ5's codes.
+#define TF_NVFP4_DECODE32(NAME, M, EPI, NZ)                                                                            \
   extern "C" __global__ void __launch_bounds__(4 * 32) NAME(                                                           \
       const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,                       \
       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items, const int* __restrict__ counts,  \
       const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {                         \
-    tf_nvfp4_experts32::decode_body<M, EPI, 4>(X, x_stride, slots, W, scale, KG, NB, items, counts, members, out, N,   \
-                                               limit, skip);                                                           \
+    tf_nvfp4_experts32::decode_body<M, EPI, 4, NZ>(X, x_stride, slots, W, scale, KG, NB, items, counts, members, out,  \
+                                                   N, limit, skip);                                                    \
   }
-TF_NVFP4_DECODE32(tf_nvfp4_decode32_swiglu, 2, 2)
-TF_NVFP4_DECODE32(tf_nvfp4_decode32_down_f32, 1, 0)
-TF_NVFP4_DECODE32(tf_nvfp4_decode32_down_bf16, 1, 3)
+TF_NVFP4_DECODE32(tf_nvfp4_decode32_swiglu, 2, 2, false)
+TF_NVFP4_DECODE32(tf_nvfp4_decode32_down_f32, 1, 0, false)
+TF_NVFP4_DECODE32(tf_nvfp4_decode32_down_bf16, 1, 3, false)
+TF_NVFP4_DECODE32(tf_nvfp4_nz5_decode32_swiglu, 2, 2, true)
+TF_NVFP4_DECODE32(tf_nvfp4_nz5_decode32_down_f32, 1, 0, true)
+TF_NVFP4_DECODE32(tf_nvfp4_nz5_decode32_down_bf16, 1, 3, true)
 
 // The prompt form's entries, 4 row tiles a warp in one row of WN warps: SwiGLU gate-up, bf16 sums down.
-#define TF_NVFP4_PROMPT32(NAME, M, EPI, WN)                                                                            \
+#define TF_NVFP4_PROMPT32(NAME, M, EPI, WN, NZ)                                                                        \
   extern "C" __global__ void __launch_bounds__(WN * 32) NAME(                                                          \
       const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,                       \
       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items, const int* __restrict__ counts,  \
       const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {                         \
-    tf_nvfp4_experts32::prompt_body<M, EPI, 4, 1, WN>(X, x_stride, slots, W, scale, KG, NB, items, counts, members,    \
-                                                      out, N, limit, skip);                                            \
+    tf_nvfp4_experts32::prompt_body<M, EPI, 4, 1, WN, NZ>(X, x_stride, slots, W, scale, KG, NB, items, counts,         \
+                                                          members, out, N, limit, skip);                               \
   }
-TF_NVFP4_PROMPT32(tf_nvfp4_prompt32_swiglu, 2, 2, 4)
-TF_NVFP4_PROMPT32(tf_nvfp4_prompt32_down, 1, 3, 8)
+TF_NVFP4_PROMPT32(tf_nvfp4_prompt32_swiglu, 2, 2, 4, false)
+TF_NVFP4_PROMPT32(tf_nvfp4_prompt32_down, 1, 3, 8, false)
+TF_NVFP4_PROMPT32(tf_nvfp4_nz5_prompt32_swiglu, 2, 2, 4, true)
+TF_NVFP4_PROMPT32(tf_nvfp4_nz5_prompt32_down, 1, 3, 8, true)

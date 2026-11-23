@@ -1,4 +1,4 @@
-//! FZ_CALL_LOG: a prompt pass's calls (rows, parts, wall and GPU milliseconds), logged in one line after its first token.
+//! FZ_CALL_LOG: a prompt pass's calls (rows, parts, wall and GPU ms), logged in one line after its first token.
 const std = @import("std");
 const platform = @import("sys");
 
