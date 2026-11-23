@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lanes: the opt-in shared price log also covers the shared-drafts grant path (#4686). Thanks @eXsoR65.
+
 - Docs: the credits say the native CUDA engine serves EXL3 packs (#4743). Thanks @Bizuayeu.
 
 - Metal: Nemotron's offline build uses the shared expert kernel sources, and two duplicate files are gone; the kernels are unchanged (#4738). Thanks @jschmied.
