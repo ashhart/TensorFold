@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Host status: the lane host's status read copies a snapshot the engine thread publishes, so a monitoring client polling the status no longer holds the lock every decode round takes; a torn read retries and the round waits for no reader (#3200).
+
 - Docs: the runbook says GLM-5.3-Flash on Metal shares 16 rows between streams, so drafts fill only the rows left over (#4722). Thanks @SashaMIT.
 
 - Docs: the credits say the native CUDA engine serves EXL3 packs (#4743). Thanks @Bizuayeu.
