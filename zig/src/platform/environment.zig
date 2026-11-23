@@ -350,6 +350,7 @@ const stock_rules = [_]Rule{
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
+    .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
     .{ .name = "FZ_BATCH_MTP_CHAIN", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 chains a batch's MTP drafts; default 0)" },
     .{ .name = "FZ_BATCH_MTP_SERIAL", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 gives each stream its own draft buffers; default 0)" },
     .{ .name = "FZ_VERIFY_OVERLAP", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 verifies on a serial encoder; default 1)" },
