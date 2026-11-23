@@ -109,7 +109,7 @@ def fetch(base, spec, api_key, timeout):
         if finish not in ("stop", "length"):
             raise ValueError("reply carried no valid finish reason")
         speculative = reply.get("speculative") or {}
-        content = (choice.get("message") or {}).get("content") or ""
+        content = ((choice.get("message") or {}).get("content") if "messages" in body else choice.get("text")) or ""
         return {"ok": True, "ids": ids, "cached": cached, "prompt": prompt, "finish": finish, "wall": wall,
                 "drafted": speculative.get("drafted") or 0, "accepted": speculative.get("accepted") or 0,
                 "content": content}

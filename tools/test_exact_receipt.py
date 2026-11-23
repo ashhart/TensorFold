@@ -22,6 +22,10 @@ PROMPT = {"name": "near-tie", "kind": "chat", "prompt": "Choose one and explain.
           "followup": "Now give the other one.", "expected_token_ids": list(range(8)),
           "near_tie_offset": 0, "recording_sha256": "a" * 64,
           "near_tie": {"ids": [0, 1], "logits": [16.0, 15.9375], "position": 0}}
+
+TEXT_PROMPT = {"name": "text", "kind": "completion", "prompt": "Question?", "followup": "Continue.",
+               "expected_token_ids": list(range(8)), "near_tie_offset": 0, "recording_sha256": "a" * 64,
+               "near_tie": {"ids": [0, 1], "logits": [16.0, 15.9375], "position": 0}}
 BASE = [11, 12, 13, 14, 15, 16]
 
 
@@ -42,6 +46,7 @@ class Fake(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.fault, self.active, self.seen, self.lock = fault, 0, {}, threading.Lock()
         self.cache_disabled = disabled
+        self.requests = []
     @property
     def url(self):
         return f"http://127.0.0.1:{self.server_port}"
@@ -65,6 +70,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         server = self.server
+        server.requests.append(body)
         messages = body.get("messages") or []
         key = json.dumps(messages, sort_keys=True)
         with server.lock:
@@ -101,7 +107,12 @@ class Handler(BaseHTTPRequestHandler):
             out["finish"] = "stop"
         drafted = 0 if server.fault == "no_draft" or (not body["draft"] and server.fault != "plain_drafts") else 3
         acknowledged = body["draft"] if server.fault != "bad_draft_ack" else not body["draft"]
-        response = {"choices": [{"message": {"content": out["text"]}, "finish_reason": out["finish"]}],
+        choice = {"finish_reason": out["finish"]}
+        if messages:
+            choice["message"] = {"content": out["text"]}
+        else:
+            choice["text"] = out["text"]
+        response = {"choices": [choice],
                     "tensorfold": {"token_ids": ids, "drafts": acknowledged, "token_sha256": hashlib.sha256(
                         json.dumps(ids, separators=(",", ":")).encode()).hexdigest()},
                     "speculative": {"drafted": drafted, "accepted": min(2, drafted)},
@@ -125,10 +136,10 @@ class Running:
         self.thread.join()
 
 
-def invoke(url, fresh, fault, tmp, full=False, stops=("budget",)):
+def invoke(url, fresh, fault, tmp, full=False, stops=("budget",), item=PROMPT):
     prompts = Path(tmp) / "prompts.json"
     output = Path(tmp) / f"{fault}.json"
-    prompts.write_text(json.dumps([PROMPT]))
+    prompts.write_text(json.dumps([item]))
     argv = ["exact_restarts.py", "--base", url, "--fresh-base", fresh, "--prompts", str(prompts),
             "--output", str(output), "--build-id", "public-build", "--checkpoint-id", "public-checkpoint",
             "--checkpoint-sha256", "b" * 64, "--family", "public-family", "--quant", "public-quant",
@@ -160,6 +171,15 @@ class ReceiptTests(unittest.TestCase):
             self.assertNotIn(private, text)
         kinds = {r["kind"] for r in report["comparisons"]}
         self.assertTrue({"cold_vs_warm", "fresh_vs_resumed", "drafted_vs_plain", "solo_vs_concurrent"} <= kinds)
+
+    def test_text_completion_followup_includes_the_first_reply(self):
+        base_runner, fresh_runner = Running(), Running(disabled=True)
+        with tempfile.TemporaryDirectory() as tmp, base_runner as url, fresh_runner as fresh:
+            code, report = invoke(url, fresh, "clean", tmp, item=TEXT_PROMPT)
+            requests = base_runner.server.requests + fresh_runner.server.requests
+        self.assertEqual(code, 0, report["failures"])
+        followups = [body["prompt"] for body in requests if body.get("prompt", "").endswith("Continue.")]
+        self.assertEqual(followups, ["Question?\npublic reply\nContinue."] * 4)
 
     def test_warm_and_resumed_divergences_name_the_exact_requests(self):
         for fault, kind in (("warm", "cold_vs_warm"), ("resumed", "fresh_vs_resumed")):
