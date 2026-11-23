@@ -119,6 +119,6 @@ test "dsv41 metal early picks: greedy picks are the host's first maximum" {
         cb.wait();
     }
     var bad: usize = 0;
-    for (out.slice(u32, rows), 0..) |g, r| bad += @intFromBool(g != pkg.target.Target.argmax(logits[r * vocab ..][0..vocab]));
+    for (out.slice(u32, rows), 0..) |g, r| bad += @intFromBool(g != pkg.pick.argmax(logits[r * vocab ..][0..vocab]));
     try testing.expectEqual(@as(usize, 0), bad);
 }
