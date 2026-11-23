@@ -118,6 +118,7 @@ pub fn Replay(comptime d3: type) type {
             for (diffs) |diff| if (diff) |d| {
                 pcm_only = true;
                 if (report) std.debug.print("Drama replay PCM only: codec chunk {d} against 1, max abs {e:.3}, RMS {e:.3}; every exact check passed\n", .{ d.chunk, d.max_abs, d.rms });
+                if (!(d.max_abs <= 1.0 / 32768.0)) return error.ReplayPcmBound;
             };
             if (pcm_only) return error.ReplayPcmOnly;
             if (!report) return;
