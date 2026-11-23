@@ -328,7 +328,10 @@ pub const Forward = struct {
         const S: usize = c.hc;
         const D: usize = c.hidden;
         const x = b.x + lo * S * D * 2;
-        if (c.dsa) return glue.residualAdd(f.set(), f.stream, x, x, g, hi - lo, D, r.w.share.world); // one stream (S 1)
+        if (c.dsa) { // one stream (S 1): a plain residual
+            if (own != 0) return glue.residualAddOwn(f.set(), f.stream, x, x, g, hi - lo, D, r.w.share.world, own, r.w.share.rank);
+            return glue.residualAdd(f.set(), f.stream, x, x, g, hi - lo, D, r.w.share.world);
+        }
         if (own != 0) return glue.hcPostOwn(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world, own, r.w.share.rank);
         return glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
     }
