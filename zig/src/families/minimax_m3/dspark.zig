@@ -275,7 +275,6 @@ pub const Drafter = struct {
         return d.fixed;
     }
 
-
     pub fn drafter(d: *Drafter) dr.Drafter {
         return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
