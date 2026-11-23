@@ -326,7 +326,7 @@ pub fn leave(b: *Metal, s: *lanes.Stream) void {
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
 pub fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
-    if (slot != 0 or b.rewind == null or !slotResume(b) or replay.holds(at)) return 0;
+    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s) or replay.holds(at)) return 0;
     return b.standing.point(s, at);
 }
 
