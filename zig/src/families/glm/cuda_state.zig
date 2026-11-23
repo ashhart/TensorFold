@@ -54,7 +54,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 }
 
 /// Rows a KV page holds: one dense latent chunk (latent.chunk), and the keys of its 128 pools.
-pub const page_rows = latent.chunk;
+pub const page_rows = @import("cuda_cache_shape.zig").page_rows;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
 pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
@@ -66,44 +66,9 @@ pub fn mlaLayers(w: *const weights.Weights) usize {
     return nd;
 }
 
-/// The latent caches' shape: their count (DSA layers and the MTP layer's), a row's values, index key dims, pool rows.
-pub const Shape = struct {
-    caches: usize,
-    row: usize, // kv_lora + qk_rope: 512 on GLM-5.3-Flash
-    i_dim: usize,
-    pool: usize, // rows a pooled key sums: 4 on GLM-5.3-Flash
-    keys: usize, // index key and gate rows a cache holds: a ring of index_ring, or maxInt for a whole sequence's
+pub const Shape = @import("cuda_cache_shape.zig").Shape;
 
-    pub fn of(c: anytype, caches: usize) Shape {
-        return .{ .caches = caches, .row = c.latentRow(), .i_dim = c.i_dim, .pool = c.kpool, .keys = index_ring };
-    }
-
-    /// One cache's latent rows on a page, and their pooled keys.
-    pub fn latentBytes(s: Shape) usize {
-        return page_rows * s.row * 2;
-    }
-
-    pub fn pkBytes(s: Shape) usize {
-        return page_rows / s.pool * s.i_dim * 2;
-    }
-
-    /// One cache's part of a page: its latent rows, then their pools' keys.
-    pub fn cacheBytes(s: Shape) usize {
-        return s.latentBytes() + s.pkBytes();
-    }
-
-    /// A page's bytes: every cache's part, padded to whole latent rows (page_rows a page) and whole token bytes.
-    pub fn pageBytes(s: Shape) u64 {
-        const unit = s.row * 2 / std.math.gcd(s.row * 2, page_rows) * page_rows;
-        return (s.caches * s.cacheBytes() + unit - 1) / unit * unit;
-    }
-
-    /// TF_GLM_KV_HOST: every cache's pooled keys on a device page of their own.
-    pub fn pkPageBytes(s: Shape) u64 {
-        return s.caches * s.pkBytes();
-    }
-};
-
+/// The loaded DSA layers' caches and the MTP layer's; a shared indexer layer's keeps no index keys.
 pub fn shapeOf(w: *const weights.Weights) Shape {
     return Shape.of(&w.config, mlaLayers(w) + 1);
 }
@@ -119,8 +84,8 @@ pub fn pageBytes(w: *const weights.Weights) u64 {
 
 /// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through the table.
 fn onPages(x: *dsa_block.Caches, s: Shape, p: Paged, table: u64, j: usize) void {
-    x.lc = p.kv + j * s.cacheBytes();
-    x.pk = if (p.pk != 0) p.pk + j * s.pkBytes() else x.lc + s.latentBytes();
+    x.lc = p.kv + s.cacheAt(j);
+    x.pk = if (!s.pooled(j)) 0 else if (p.pk != 0) p.pk + s.pooledBefore(j) * s.pkBytes() else x.lc + s.latentBytes();
     x.pks = p.pk_page;
     x.pt = table;
     x.ps = p.page_bytes;
@@ -142,7 +107,11 @@ fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize
     try sizes.appendSlice(gpa, &.{ 4, nk * 3 * 3 * n * 2, 2 * nk * s.kda.len() * kda.dk * kda.dv * 4, nk * window_rows * kw * 2 });
     try sizes.appendSlice(gpa, &.{ nk * window_rows * n * 4, nk * window_rows * n * 2, nk * window_rows * n * 4, nk * window_rows * s.kda.len() * 4 });
     const lc_bytes = try latent.cacheBytes(capacity, c.latentRow(), kv8);
-    for (0..nd + 1) |_| try sizes.appendSlice(gpa, &.{ rows * lc_bytes, ring_rows * c.i_dim * 2, ring_rows * c.i_dim * 2, rows * pk_rows * c.i_dim * 2 });
+    const shape = shapeOf(w);
+    for (0..nd + 1) |j| { // a shared layer's cache: its latent rows alone
+        const k: usize = @intFromBool(shape.pooled(j));
+        try sizes.appendSlice(gpa, &.{ rows * lc_bytes, k * ring_rows * c.i_dim * 2, k * ring_rows * c.i_dim * 2, k * rows * pk_rows * c.i_dim * 2 });
+    }
     try sizes.appendSlice(gpa, &.{ 4, c.hidden * 2 }); // MTP position and sequence-owned first-draft row
     if (table) |t| try sizes.append(gpa, t * 4);
     return sizes.toOwnedSlice(gpa);
@@ -487,7 +456,8 @@ pub const State = struct {
         @memset(cur, 0);
         const caches = try gpa.alloc(dsa_block.Caches, nd);
         errdefer gpa.free(caches);
-        for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ls = if (kv8) p[8 + 4 * j] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
+        const shape = shapeOf(w);
+        for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ls = if (kv8) p[8 + 4 * j] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = if (shape.pooled(j)) pk_rows else 0 };
         const rings = try gpa.alloc(u64, 2 * (nd + 1));
         for (0..nd + 1) |j| rings[2 * j ..][0..2].* = .{ p[9 + 4 * j], p[10 + 4 * j] };
         const ring_rows = @min(capacity, shapeOf(w).keys);
@@ -572,8 +542,9 @@ pub const State = struct {
         const d = st.arena.buf.d;
         const first: usize = if (mtp) st.caches.len else 0;
         const last: usize = if (mtp) st.caches.len + 1 else st.caches.len;
-        if (keep > 0) for (st.rings[2 * first .. 2 * last]) |r| {
-            try d.check(d.api.cuMemcpyDtoDAsync_v2(r, r + (nb - old) * st.ring_row, keep, stream.handle), "cuMemcpyDtoDAsync");
+        if (keep > 0) for (first..last) |j| {
+            if (j < st.caches.len and st.caches[j].pk_rows == 0) continue; // a shared layer's cache: no rings
+            for (st.rings[2 * j ..][0..2]) |r| try d.check(d.api.cuMemcpyDtoDAsync_v2(r, r + (nb - old) * st.ring_row, keep, stream.handle), "cuMemcpyDtoDAsync");
         };
         if (mtp) st.setBases(st.base, nb) else st.setBases(nb, st.mtp_base);
     }
