@@ -288,21 +288,25 @@ test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing
     try std.testing.expectEqual(@as(usize, 1), f.count());
 }
 
-test "chat CLI: a streamed reply uses Latin-1 bearer bytes and refuses unsupported keys" {
+test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and refuses unsupported keys" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const token = "fixture-caf\u{e9}";
+    const key_file = try std.fs.path.join(a, &.{ try fake.tmpPath(a, &tmp), "caller-key" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = key_file, .data = token });
     const replies = [_]Write{
         .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream") },
         .{ .bytes = try fake.event(a, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Ready.\"},\"finish_reason\":\"stop\"}]}") },
         .{ .bytes = try fake.event(a, "[DONE]") },
     };
     const responses = [_][]const Write{&replies};
-    const f = try fake.Fake.start(a, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &responses }});
+    const f = try fake.Fake.startKeyed(a, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &responses }}, key_file);
     defer f.stop();
     var h: history.History = .{ .a = a };
     var out: std.Io.Writer.Allocating = .init(a);
-    const token = "fixture-caf\u{e9}";
     const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
     switch (ended) {
         .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
@@ -316,6 +320,9 @@ test "chat CLI: a streamed reply uses Latin-1 bearer bytes and refuses unsupport
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).path, token) == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), token) == null);
 }
 
 test "an https exchange is never sent through a proxy that refuses to tunnel" {

@@ -116,7 +116,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     // A failed same-revision repair must not leave its old completion marker behind.
     const ref_path = try std.fs.path.join(a, &.{ refs_dir, "main" });
     var ref_buf: [128]u8 = undefined;
-    const published: ?[]const u8 = w.readFile(io, ref_path, &ref_buf) catch null;
+    const published: ?[]const u8 = w.readFile(io, ref_path, &ref_buf) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
     if (published) |text| if (std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), sha))
         try w.deleteFile(io, ref_path);
 

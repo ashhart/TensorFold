@@ -442,3 +442,42 @@ test "start CLI: persistent caller keys preserve the child list and send only th
     for ([_][]const u8{ caller_key, second_key, key_list }) |secret|
         for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
+
+test "start CLI: a managed first reply authenticates a Latin-1 caller key" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const caller_key = "fixture-caf\u{e9}";
+    const second_key = "fixture-second-caller-key";
+    const key_list = " , " ++ caller_key ++ "," ++ second_key;
+    try r.env.put("TENSORFOLD_API_KEY", key_list);
+    try r.env.put("START_TEST_SHORT_LIVED", "1");
+    try r.cache();
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = caller_key });
+    const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
+    defer f.stop();
+    try r.standIn(f.port);
+
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Serving Model at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Ready.") != null);
+    try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
+    try std.testing.expect(r.childGone());
+    const child_key = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("child-key"), a, .limited(256));
+    try std.testing.expectEqualStrings(key_list, child_key);
+    try std.testing.expect(f.count() > 0);
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(f.count() - 1, "authorization") orelse "");
+    try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    const args = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("args"), a, .limited(4096));
+    for ([_][]const u8{ caller_key, second_key, key_list }) |secret| {
+        for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text|
+            try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+        for (0..f.count()) |i| {
+            try std.testing.expect(std.mem.indexOf(u8, f.request(i).path, secret) == null);
+            try std.testing.expect(std.mem.indexOf(u8, f.request(i).head, secret) == null);
+        }
+    }
+}
