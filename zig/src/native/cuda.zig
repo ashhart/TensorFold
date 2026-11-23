@@ -176,7 +176,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .opened => |engine| return engine,
     }
     const at = @import("cuda_alias.zig").which(o.model_type);
-    inline for (registry, 0..) |F, i| if (at == i and ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry, 0..) |F, i| if (at == i and open_family.ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
     inline for (registry, 0..) |F, i| if (comptime @hasDecl(F, "ranks")) if (at == i) {
         problem.* = F.ranks_refusal; // a family that serves only at its own --tp, and no other family took this one
         return null;
@@ -185,10 +185,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 
-/// A family that names its `ranks` (--tp) opens only at them; another family of its model_type takes the rest.
-fn ranked(comptime F: type, o: api.Open) bool {
-    return !@hasDecl(F, "ranks") or o.tp == F.ranks;
-}
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
     const resolved = (try @import("cuda_launch.zig").resolve(F, a, asked, problem)) orelse return null; // resolved and placed, before admission
@@ -530,13 +526,7 @@ test {
     _ = prompt_pages;
     _ = cuda_device; // the device and variable tests
     _ = windows;
-}
-
-test "a family that names its ranks opens only at them; one that names none at any" {
-    const Two = struct {
-        pub const ranks: u32 = 2;
-    };
-    try std.testing.expect(ranked(Two, .{ .dir = "d", .model_type = "m", .tp = 2 }) and !ranked(Two, .{ .dir = "d", .model_type = "m" }) and ranked(struct {}, .{ .dir = "d", .model_type = "m", .tp = 2 }) and ranked(struct {}, .{ .dir = "d", .model_type = "m" }));
+    _ = open_family;
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
