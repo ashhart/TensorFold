@@ -1,6 +1,8 @@
 // latent.py's BF16 absorb, expand and cache write by hand (the MLA layers' 512-wide latent, 256-wide heads).
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 using namespace glm_triton;
@@ -9,6 +11,7 @@ using namespace glm_triton;
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_absorb_q(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa, int64_t rows, int64_t heads,
                     int64_t rb) {
+  glm_pdl::enter();
   constexpr int D = 256, LW = 512;
   __shared__ float smem[128];
   const int t = threadIdx.x, k0 = t >> 2, nq = t & 3, warp = t >> 5;
@@ -39,6 +42,7 @@ extern "C" __global__ void __launch_bounds__(128)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_expand_v(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out, int64_t rows,
                     int64_t heads, int64_t rb) {
+  glm_pdl::enter();
   constexpr int DV = 256, LW = 512;
   __shared__ float smem[32];
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5, kb = (warp & 1) * 256 + lane * 8, nb = warp >> 1;
@@ -79,6 +83,7 @@ __device__ __forceinline__ int64_t at(const int* pt, int64_t page_elems, int64_t
 // latent._lat_write (BF16 cache): row r of `lat` into cache slot pos + r (on pages, through the stream's table).
 extern "C" __global__ void tf_glm_lat_write(const __nv_bfloat16* lat, int64_t lat_stride, __nv_bfloat16* cache,
                                             const int* pos, int64_t lw, const int* pt, int64_t ps) {
+  glm_pdl::enter();
   const int64_t r = blockIdx.x, at = glm_pages::at<512>(pt, ps / 2, (int64_t)pos[0] + r, lw);
   for (int64_t k = threadIdx.x; k < lw; k += blockDim.x) cache[at + k] = lat[r * lat_stride + k];
 }
@@ -88,6 +93,7 @@ extern "C" __global__ void tf_glm_lat_write(const __nv_bfloat16* lat, int64_t la
 // One 512-wide latent row as E4M3 and its FP32 scale, with the same row-wise rounding as other FP8 caches.
 extern "C" __global__ void __launch_bounds__(512)
     tf_glm_lat_write_fp8(const __nv_bfloat16* lat, int64_t stride, unsigned char* cache, float* scales, const int* pos) {
+  glm_pdl::enter();
   const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
   const int d = threadIdx.x;
   __shared__ float red[16];

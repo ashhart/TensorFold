@@ -40,6 +40,17 @@ interface Entry {
 }
 
 const RESELECT = 'Select this file again after restarting TensorFold; its contents were not stored with the draft.'
+const PREVIOUS_ERROR = `${RESELECT} Previous file error: `
+const ATTACHMENT_ERROR_LIMIT = 1_000
+
+function attachmentDiagnostic(error = ''): string {
+  let diagnostic = error
+  while (diagnostic.startsWith(PREVIOUS_ERROR)) diagnostic = diagnostic.slice(PREVIOUS_ERROR.length)
+  if (diagnostic === RESELECT) return ''
+  // Older drafts could fill the storage limit with repeated guidance and no diagnostic.
+  if (error.length === ATTACHMENT_ERROR_LIMIT && diagnostic !== error && PREVIOUS_ERROR.startsWith(diagnostic)) return ''
+  return diagnostic
+}
 
 /** Strictly omit payloads, paths and source objects from durable references. */
 export function draftAttachmentReferences(attachments: Attachment[]): DraftAttachmentReference[] {
@@ -47,26 +58,29 @@ export function draftAttachmentReferences(attachments: Attachment[]): DraftAttac
   return attachments.map((attachment) => {
     const extraction = (attachment as Attachment & { extraction?: { state: string; text: string } }).extraction
     if (extraction?.state === 'accepted' && extraction.text.length > MAX_DRAFT_ACCEPTED_TEXT_CHARS) throw new Error('Accepted extracted text exceeds the draft storage limit; copy it to a document before restarting.')
-    const rawError = (attachment as Attachment & { error?: string }).error
+    const error = attachment.status === 'needs-reselection' ? attachmentDiagnostic(attachment.error) : attachment.error
     return {
       id: attachment.id, name: attachment.name, kind: attachment.kind, mime: attachment.mime,
       ...(attachment.bytes === undefined ? {} : { bytes: attachment.bytes }),
-      status: 'needs-reselection', error: rawError ? rawError.slice(0, 1_000) : RESELECT,
+      status: 'needs-reselection', error: error ? error.slice(0, ATTACHMENT_ERROR_LIMIT) : RESELECT,
       ...(extraction?.state === 'accepted' && typeof extraction.text === 'string' && extraction.text.length <= MAX_DRAFT_ACCEPTED_TEXT_CHARS ? { acceptedText: extraction.text } : {}),
     }
   })
 }
 
 export function restoreDraftAttachments(references: DraftAttachmentReference[]): Attachment[] {
-  return references.map((reference) => ({
-    id: reference.id, name: reference.name, kind: reference.kind, mime: reference.mime,
-    ...(reference.bytes === undefined ? {} : { bytes: reference.bytes }),
-    status: 'needs-reselection', error: reference.error && reference.error !== RESELECT ? `${RESELECT} Previous file error: ${reference.error}` : RESELECT,
-    ...(reference.acceptedText === undefined ? {} : {
-      text: reference.acceptedText,
-      extraction: { method: 'apple-vision', state: 'accepted', text: reference.acceptedText, confidence: null, warnings: ['Original file must be selected again before sending. Previously accepted extracted text was retained.'], pageCount: 0, processedPages: 0, truncated: false },
-    }),
-  }))
+  return references.map((reference) => {
+    const diagnostic = attachmentDiagnostic(reference.error)
+    return {
+      id: reference.id, name: reference.name, kind: reference.kind, mime: reference.mime,
+      ...(reference.bytes === undefined ? {} : { bytes: reference.bytes }),
+      status: 'needs-reselection', error: diagnostic ? PREVIOUS_ERROR + diagnostic : RESELECT,
+      ...(reference.acceptedText === undefined ? {} : {
+        text: reference.acceptedText,
+        extraction: { method: 'apple-vision', state: 'accepted', text: reference.acceptedText, confidence: null, warnings: ['Original file must be selected again before sending. Previously accepted extracted text was retained.'], pageCount: 0, processedPages: 0, truncated: false },
+      }),
+    }
+  })
 }
 
 function detached(attachments: Attachment[]): Attachment[] {

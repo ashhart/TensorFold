@@ -96,6 +96,9 @@ pub fn slot(kept: *[2][bands]?Kept, s: anytype) *?Kept {
 /// A finished lone stream's calibration, so the next stream starts priced instead of probing every width again.
 pub const Kept = struct {
     ms: Table = .{},
+    copy_ms: Table = .{}, // a lone stream's copy rounds' times (keepCopies)
+    copied_landed: [2]f64 = .{ -1, -1 }, // and its copies' landing history, by source (Stream.copied_landed)
+    copied_broke: [2]f64 = .{ 0, 0 },
     probes: [129]Cooldown = @splat(.{}),
     after: u64 = 8,
     spacing: u64 = 8,
@@ -103,6 +106,7 @@ pub const Kept = struct {
 
     pub fn deinit(k: *Kept, gpa: std.mem.Allocator) void {
         k.ms.deinit(gpa);
+        k.copy_ms.deinit(gpa);
     }
 };
 
@@ -128,6 +132,42 @@ pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
     for (&s.cost_probes, k.probes) |*cd, old| cd.* = .{ .after = s.rounds + @min(carry_most, old.after -| k.rounds), .spacing = @min(carry_most, old.spacing), .retry = old.retry };
     s.cost_probe_after = s.rounds + @min(carry_most, k.after -| k.rounds);
     s.cost_probe_spacing = @min(carry_most, k.spacing);
+}
+
+/// A lone stream's copy prices (lanes/lone_copy.zig), kept as keep keeps a head's; `own_plain`: its plain times too.
+pub fn keepCopies(gpa: std.mem.Allocator, kept: *?Kept, s: anytype, own_plain: bool) !void {
+    if (s.shared_round) return;
+    const state = s.depth orelse return;
+    const copies = state.copy_ms orelse return;
+    if (copies.empty()) return;
+    const copy_ms: Table = .{ .slots = try gpa.dupe(?f64, copies.slots) };
+    errdefer gpa.free(copy_ms.slots);
+    const ms: Table = if (own_plain) .{ .slots = try gpa.dupe(?f64, observed(s).slots) } else .{};
+    if (kept.*) |*k| k.deinit(gpa);
+    kept.* = .{ .ms = ms, .copy_ms = copy_ms, .copied_landed = s.copied_landed, .copied_broke = s.copied_broke, .rounds = s.rounds };
+}
+
+/// Start a stream's copy prices from the newest kept ones, each table only while the stream has timed none of its own.
+pub fn seedCopies(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
+    const k = kept orelse return;
+    const state = if (s.depth) |*d| d else return;
+    try fill(gpa, &state.copy_ms, k.copy_ms);
+    try fill(gpa, &state.ms, k.ms);
+    // the landing rate a copy's rows are priced by, a source's only while the stream has seen none of its own copies
+    for (&s.copied_landed, &s.copied_broke, k.copied_landed, k.copied_broke) |*landed, *broke, was, broken| {
+        if (landed.* >= 0 or was < 0) continue;
+        landed.* = was;
+        broke.* = broken;
+    }
+}
+
+fn fill(gpa: std.mem.Allocator, own: *?Table, from: Table) !void {
+    if (from.empty()) return;
+    if (own.*) |*t| {
+        if (!t.empty()) return;
+        t.deinit(gpa);
+    }
+    own.* = .{ .slots = try gpa.dupe(?f64, from.slots) };
 }
 
 pub const Trial = struct {

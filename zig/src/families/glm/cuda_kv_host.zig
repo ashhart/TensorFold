@@ -1,6 +1,7 @@
 //! TF_GLM_KV_HOST=1: the DSA layers' latent rows on pinned host pages, each call's picked rows gathered to the device.
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const posix = std.posix;
 
 pub fn onHost() bool {
@@ -26,8 +27,8 @@ fn pagesOf(gib: ?f64, page: u64, capacity: usize) usize {
 
 /// TF_GLM_KV_HOST_GIB's host pages, else one full window's.
 pub fn hostPages(page: u64, capacity: usize) usize {
-    const v = std.c.getenv("TF_GLM_KV_HOST_GIB") orelse return pagesOf(null, page, capacity);
-    return pagesOf(std.fmt.parseFloat(f64, std.mem.span(v)) catch null, page, capacity);
+    const gib = @import("sys").environment.read(?f64, "TF_GLM_KV_HOST_GIB", null) catch null;
+    return pagesOf(gib, page, capacity);
 }
 
 /// The plan's `pages` (counted by their device keys alone), held to the host pages when the pages are in host memory.
@@ -174,7 +175,7 @@ pub const Gather = struct {
 fn launch(ops: cuda.Module, stream: cuda.Stream, name: [:0]const u8, blocks: usize, args: anytype) !void {
     var a: cuda.Args = .{};
     inline for (args) |v| a.add(v);
-    try cuda.launch.launch(try ops.function(name), .{ .grid = .{ .x = @intCast(blocks) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(try ops.function(name), .{ .grid = .{ .x = @intCast(blocks) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// The shared pages' file for an NCCL id (`host:port`), the same name on every rank.

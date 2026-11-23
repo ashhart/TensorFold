@@ -36,7 +36,7 @@ test "Flash Next memory: the loader guards every entry before compilation, packs
     const pack_at = std.mem.indexOfPos(u8, source, entry, "pack_cache.ensure(").?;
     try std.testing.expect(pack_at < std.mem.indexOfPos(u8, source, entry, "gpa.create(Engine)").?);
     try std.testing.expect(pack_at < std.mem.indexOfPos(u8, source, entry, "device.queue()").?);
-    try std.testing.expect(std.mem.indexOf(u8, source, "memory.budgetLive(weights, window.capacity, inventory, extra, existing)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "memory.budgetLiveFor(weights, window.capacity, inventory, extra, existing, window.sibling(paired))") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "memory.admitBudget(limit, startup, route.needs_build)") != null);
     const single = @embedFile("src/native/flashnext_host.zig");
     const batch = @embedFile("src/native/flashnext_batch_host.zig");

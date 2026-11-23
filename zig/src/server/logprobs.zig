@@ -92,7 +92,11 @@ pub fn offered(srv: *Server, a: Allocator) Allocator.Error!bool {
 /// ``reply.logprobs`` from its captured rows, once the route's tool policy has settled its content and calls.
 pub fn project(srv: *Server, cx: *Cx, reply: *@import("chat.zig").Reply, tools: []const Value, calls: ?[]Value) errors.Refused!void {
     const captured = reply.probability_rows orelse return;
-    reply.logprobs = try @import("logprob_parts.zig").project(srv, cx, captured, reply.content, reply.reasoning, tools, calls);
+    const parts = @import("logprob_parts.zig");
+    // a recovered answer repeats the reasoning: its tokens' entries stay under reasoning, where the model wrote them
+    const content = if (reply.reasoning_recovered) "" else reply.content;
+    reply.logprobs = try parts.project(srv, cx, captured, content, reply.reasoning, tools, calls, .entries);
+    if (captured.positions) reply.logprob_positions = try parts.project(srv, cx, captured, content, reply.reasoning, tools, calls, .positions);
 }
 
 /// One token's entry; a token the reply shows only part of keeps its row but shows those `bytes` and its ``token_id``.

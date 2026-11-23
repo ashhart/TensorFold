@@ -40,10 +40,22 @@ pub const Model = struct {
         m.dir = try allocator.dupeSentinel(u8, dir, 0);
         errdefer allocator.free(m.dir);
         m.device = try mtl.Device.init();
-        m.queue = try m.device.queue();
+        errdefer m.device.deinit();
+        // making a queue and asking the generation leave autoreleased objects: drained here, whatever the caller holds
+        const tensor_units = units: {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            m.queue = try m.device.queue();
+            break :units m.device.tensorUnits();
+        };
+        errdefer m.queue.deinit();
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
+        cfg.checkDevice(m.config, tensor_units) catch |e| {
+            std.log.err("Nemotron 3.5 Bolt runs on Apple GPUs without tensor units (M1 to M4); its M5 lane kernels are not built yet", .{});
+            return e;
+        };
         if (m.config.dt_min != 0 or !std.math.isInf(m.config.dt_max)) return error.UnsupportedTimeStepLimit;
 
         // compile the kernels while the weights load
@@ -122,7 +134,7 @@ pub const Model = struct {
         p.* = try row.simd_bits.Pipelines.load(m.device);
         errdefer p.deinit();
         var it = m.weights.linears.valueIterator();
-        while (it.next()) |lin| if (lin.tiles == null) {
+        while (it.next()) |lin| if (!lin.lane()) {
             for (lin.stack[0..lin.stacked]) |s| if (fwd.tiled(s.rows)) {
                 _ = try row.simd_bits.call(p, s.rows.bits, s.rows.n, s.rows.k, prefill.lane_rows + 1, lin.n, false, 0);
             };
@@ -172,4 +184,29 @@ test "a load that fails after its kernels compile releases them" {
     var path: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try std.testing.expectError(error.ShortRead, Model.load(std.testing.allocator, io, dir, false));
+}
+
+test "a config refused after the device opens releases the device and its queue" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    // refused by its time-step clamp, next after the tensor-unit check and under the same release
+    const dt = try std.mem.replaceOwned(u8, a, cfg.lightning, "\"layer_norm_epsilon\"", "\"time_step_limit\": [0.001, 0.1], \"layer_norm_epsilon\"");
+    defer a.free(dt);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = dt });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // a chip's first load can leave Metal's own one-time objects holding the device: the count starts after it
+    try std.testing.expectError(error.UnsupportedTimeStepLimit, Model.load(a, io, dir, false));
+    const held = mtl.objc.msg(usize, device.id, "retainCount", .{});
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        for (0..4) |_| try std.testing.expectError(error.UnsupportedTimeStepLimit, Model.load(a, io, dir, false));
+    }
+    // the queue holds its device, so the device's count covers both
+    try std.testing.expectEqual(held, mtl.objc.msg(usize, device.id, "retainCount", .{}));
 }

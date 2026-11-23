@@ -6,6 +6,9 @@ pub fn steps(b: *std.Build) void {
     if (b.graph.host.result.os.tag == .macos) metal.linkSystemLibrary("objc", .{});
     const run = b.addRunArtifact(b.addTest(.{ .root_module = metal, .filters = &.{ "residency", "a set is built", "buffers made later", "a join whose", "an operator load ceiling" } }));
     b.step("test-metal-residency-host", "Unique residency allocations, limits, flags and lifetimes without devices").dependOn(&run.step);
+    const timeline_module = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal4_timeline.zig"), .target = b.graph.host, .link_libc = true });
+    const timeline = b.addRunArtifact(b.addTest(.{ .root_module = timeline_module, .filters = &.{ "timeline stage records:", "timeline rounds:", "timeline init:", "timeline kernels:", "timeline labels:" } }));
+    b.step("test-metal-timeline-host", "Metal 4 timeline allocation failure boundaries without a device").dependOn(&timeline.step);
     const recording = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = b.graph.host });
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     // the prompt cache's budget over the same residency limits, so its no-footprint branch runs off macOS too
@@ -30,7 +33,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const bytes = b.createModule(.{ .root_source_file = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = b.graph.host });
-    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
+    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\npub const torch_pth = @import(\"tensorfold\").torch_pth;\npub const wav = @import(\"tensorfold\").wav;\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = b.graph.host, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
     const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } } });
     host.addImport("core", core);

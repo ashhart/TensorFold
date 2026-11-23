@@ -1,4 +1,10 @@
 /** Renderer-safe local benchmark contracts. No process paths, credentials or generated text. */
+import suites from './benchmark-suites.json'
+
+/** The engine's benchmark suites by id and manifest sha256: community-v2 now, community-v1 from older engines. */
+export type ModelBenchmarkSuiteId = 'community-v2' | 'community-v1'
+export const BENCHMARK_SUITES: Readonly<Record<ModelBenchmarkSuiteId, string>> = suites
+export const BENCHMARK_SUITE_CURRENT: ModelBenchmarkSuiteId = 'community-v2'
 export type ModelBenchmarkState = 'preparing' | 'running' | 'restoring' | 'complete' | 'cancelled' | 'failed'
 export type ModelBenchmarkFixture = 'code' | 'chat'
 export type ModelBenchmarkSampleStatus = 'ok' | 'early_eos' | 'error' | 'unmeasured'
@@ -69,10 +75,10 @@ export interface ModelBenchmarkSample {
   token_sha: string | null
   error_code: string | null
 }
-/** Exact community-v1 export schema. Supplemental GUI state stays outside this object. */
+/** Exact community benchmark export schema (BENCHMARK_SUITES). Supplemental GUI state stays outside this object. */
 export interface ModelBenchmarkReceipt {
   schema_version: 1
-  suite: { id: 'community-v1'; sha256: string }
+  suite: { id: ModelBenchmarkSuiteId; sha256: string }
   run_id: string
   created_at: string
   runtime: { tensorfold_version: string; backend: 'mlx' | 'cuda' | 'rocm'; python_version: string; platform: 'macos' | 'linux'; dependencies: Record<string, string | null> }

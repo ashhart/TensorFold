@@ -61,14 +61,14 @@ const inference_routes = [_][]const u8{
     "/responses",      "/v1/messages", "/messages",            "/messages/count_tokens", "/v1/messages/count_tokens",
     "/v1/tokenize",    "/tokenize",    "/v1/detokenize",       "/detokenize",            "/v1/audio/speech",
     "/v1/embeddings",  "/decisions",   "/v1/decisions",        "/systemone",             "/v1/systemone",
-};
+} ++ [_][]const u8{ "/apply-template", "/v1/apply-template", "/rerank", "/v1/rerank", "/v2/rerank", "/score", "/v1/score" };
 const read_routes = [_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard", "/v1/benchmark/manifest" };
 const private_routes = [_][]const u8{
     "/v1/slide/learn",   "/v1/slide/graph",     "/v1/slide/fact/1",  "/v1/recall",           "/v1/imprint",
     "/v1/imprint/load",  "/v1/imprint/resume",  "/v1/responses/id",  "/responses/id",        "/x/models",
     "/x/completions",    "/x/chat/completions", "/x/systemone",      "/v1/completions/more", "/v1/../imprint/load",
     "/v1/%63ompletions", "/V1/COMPLETIONS",     "/v1/completions#x", "http://h/v1/models",   "/future/private",
-    "/slide/unknown.js", "/v1/completions/..",  "/./v1/completions",
+    "/slide/unknown.js", "/v1/completions/..",  "/./v1/completions", "/v2/score",            "/v1/v2/rerank",
 };
 
 test "auth scopes: route grants are exact and every other method or resource is refused" {
@@ -105,6 +105,23 @@ test "auth scopes: route grants are exact and every other method or resource is 
     try t.expect(!scope.allows(.{}, "GET", "/v1/models"));
 }
 
+test "auth scopes: one model's entry is granted with the listing, by GET only, and a /models suffix stays refused" {
+    const infer: scope.Scopes = .{ .inference = true };
+    const read: scope.Scopes = .{ .read = true };
+    const both: scope.Scopes = .{ .inference = true, .read = true };
+    for ([_][]const u8{ "/v1/models/m", "/models/m", "/v1/models/org/m", "/v1/models/org%2Fm", "/models/m/?x=1" }) |path| {
+        try t.expect(scope.allows(read, "GET", path) and scope.allows(infer, "GET", path));
+        for ([_][]const u8{ "POST", "DELETE", "PUT", "HEAD", "OPTIONS" }) |method| try t.expect(!scope.allows(both, method, path));
+        try t.expect(!scope.allows(.{}, "GET", path));
+    }
+    for ([_][]const u8{ "/v1/models/m/models", "/models/models", "/x/models/m", "/v2/models/m" }) |path|
+        try t.expect(!scope.allows(both, "GET", path));
+    try t.expectEqualStrings("org/m", scope.modelId("/v1/models/org/m").?);
+    try t.expectEqualStrings("org%2Fm", scope.modelId("/models/org%2Fm").?);
+    for ([_][]const u8{ "/v1/models", "/models", "/v1/models/", "/v1/models/m/models", "/v1/modelsx" }) |route|
+        try t.expect(scope.modelId(route) == null);
+}
+
 fn denial(scopes: scope.Scopes, text: []const u8) !?scope.Denial {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -122,6 +139,16 @@ test "auth scopes: restricted Responses requests must be stateless and full keys
         try t.expectEqual(@as(?scope.Denial, .response_history), try denial(.{ .inference = true, .read = true }, body));
     for ([_][]const u8{ "{\"input\":\"x\"}", "{\"previous_response_id\":\"resp_1\"}" }) |body|
         try t.expectEqual(@as(?scope.Denial, null), try denial(scope.full, body));
+}
+
+test "auth scopes: a reply's execution witness needs read beside inference; admin and full keys keep it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const asked = (try json.parse(arena.allocator(), "{\"prompt\":\"x\",\"execution_witness\":true}")).ok;
+    try t.expectEqual(@as(?scope.Denial, .execution_witness), scope.witnessDenial(.{ .inference = true }, asked));
+    for ([_]scope.Scopes{ .{ .inference = true, .read = true }, scope.full }) |s| try t.expectEqual(@as(?scope.Denial, null), scope.witnessDenial(s, asked));
+    for ([_][]const u8{ "{\"prompt\":\"x\"}", "{\"execution_witness\":false}", "{\"execution_witness\":1}", "[1]" }) |body|
+        try t.expectEqual(@as(?scope.Denial, null), scope.witnessDenial(.{ .inference = true }, (try json.parse(arena.allocator(), body)).ok));
 }
 
 test "auth scopes: flags, environment and plain file lines keep every route; the first configured key wins" {

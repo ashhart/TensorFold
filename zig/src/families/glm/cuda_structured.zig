@@ -1,5 +1,6 @@
 //! Whole-vocabulary grammar draws and prompt redraws.
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const std = @import("std");
 const sampler = @import("cuda_sampler.zig");
 const projection = @import("cuda_proj.zig");
@@ -24,7 +25,7 @@ pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, ou
         a.add(@as(i64, @intCast(e.c.vocab)));
         a.add(@as(u32, 0));
         a.add(e.pairs.ptr);
-        try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
+        try cuda_pdl.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
         var pick: [2]u32 = undefined;
         try e.stream.synchronize();
         try e.checkGathers();

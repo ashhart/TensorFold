@@ -1,5 +1,5 @@
 #!/bin/bash
-# The Python engine's oracle run for the Zig Nemotron engine: Triton cubins, weight digests, dumps, tokens and timings. Usage: TF_NEMO=<work dir: src/ out/> TF_MODEL=<checkpoint dir> [TF_JOURNAL=<file>] flock <GPU lock> bash -u capture.sh RUN [--bench|--record] [capture.py options]
+# Python oracle for Zig Nemotron: cubins, dumps, tokens, timings. Usage: TF_NEMO=<dir> TF_MODEL=<ckpt> capture.sh RUN
 set -u
 RUN="${1:?run id}"
 MODE="${2:-}"

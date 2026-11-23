@@ -40,6 +40,7 @@ export function signedUpdatesRequired(): boolean {
 }
 
 let updateTimer: ReturnType<typeof setInterval> | null = null
+let initialUpdateTimer: ReturnType<typeof setTimeout> | null = null
 let updateCheckInFlight: Promise<AppUpdateStatus> | null = null
 let updateDownloadInFlight: Promise<{ ok: boolean }> | null = null
 let downloadController: AbortController | null = null
@@ -118,11 +119,18 @@ export async function checkForAppUpdate(): Promise<AppUpdateStatus> {
 
 export function startUpdateChecks() {
   if (updateTimer) { clearInterval(updateTimer); updateTimer = null }
+  if (initialUpdateTimer) { clearTimeout(initialUpdateTimer); initialUpdateTimer = null }
   const feedUrl = updateFeedUrl()
   if (!busy()) setUpdateStatus(emptyUpdateStatus(app.getVersion(), feedUrl || null))
   if (!store.settings?.autoCheckUpdates || !feedUrl) return
-  setTimeout(() => { void checkForAppUpdate() }, 1500)
-  updateTimer = setInterval(() => { void checkForAppUpdate() }, 6 * 60 * 60_000)
+  const checkIfEnabled = () => {
+    if (store.settings?.autoCheckUpdates) void checkForAppUpdate()
+  }
+  initialUpdateTimer = setTimeout(() => {
+    initialUpdateTimer = null
+    checkIfEnabled()
+  }, 1500)
+  updateTimer = setInterval(checkIfEnabled, 6 * 60 * 60_000)
 }
 
 export async function openUpdateDownload(): Promise<{ ok: boolean }> {

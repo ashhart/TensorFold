@@ -1,7 +1,6 @@
 //! DFlash2 configuration and validated kernel widths.
 const std = @import("std");
 const engine = @import("cuda_engine.zig");
-const max_rows = engine.max_rows;
 const lp_top = 20;
 pub const Config = struct {
     hidden: usize,
@@ -99,7 +98,7 @@ pub const Config = struct {
         if (c.hidden != target.hidden or c.vocab != target.vocab or c.hidden % 256 != 0 or c.hidden % c.group != 0 or c.heads % c.kv_heads != 0 or c.layers > 8) return error.UnsupportedDraftConfig;
         _ = std.math.mul(usize, c.heads, c.head_dim) catch return error.UnsupportedDraftConfig;
         _ = std.math.mul(usize, c.kv_heads, c.head_dim) catch return error.UnsupportedDraftConfig;
-        if (c.window < 16 or c.window > engine.tap_rows - max_rows) return error.UnsupportedDraftConfig;
+        if (c.window < 16 or c.window > @import("cuda_cache.zig").tap_window) return error.UnsupportedDraftConfig;
         c.block = 16;
         return c;
     }

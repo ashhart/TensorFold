@@ -10,6 +10,7 @@ test {
     _ = @import("lane_init_test.zig");
     _ = @import("lane_failure_review_test.zig");
     _ = @import("lane_host_first_test.zig");
+    _ = @import("lane_host_prefix_join_test.zig");
 }
 
 test {
@@ -32,4 +33,17 @@ test {
     _ = @import("lane_remote_test.zig");
     _ = @import("lane_remote_provenance_test.zig");
     _ = @import("lane_remote_cut_test.zig");
+    _ = @import("lane_host_flush_test.zig");
+    _ = @import("lane_trace.zig");
+    _ = @import("lane_host_decode_share_test.zig");
+    _ = @import("lane_host_srpt.zig");
+    _ = @import("lane_host_env.zig");
+    _ = @import("lane_host_frame_test.zig");
+    _ = @import("lane_host_fetch.zig");
+    _ = @import("lane_host_cache_queue_test.zig");
+}
+
+test {
+    _ = @import("lane_wait_reason_test.zig");
+    _ = @import("wait_reason.zig");
 }

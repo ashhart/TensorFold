@@ -106,6 +106,8 @@ test "GLM FP8 KV: real launchers preserve BF16 ABI and pass FP8 scale pointers f
     const latent = @import("cuda_latent.zig");
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Launch.run;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Launch.run);
+    d.func_name = null;
     var ks: glue.Kernels = undefined;
     ks.lat_write = .{ .d = &d, .handle = @ptrFromInt(1) };
     ks.lat_write_fp8 = .{ .d = &d, .handle = @ptrFromInt(2) };
@@ -141,6 +143,8 @@ test "GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refu
     const latent = @import("cuda_latent.zig");
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Launch.run;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Launch.run);
+    d.func_name = null;
     var ks: glue.Kernels = undefined;
     inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
     const set: glue.Set = .{ .glue = &ks };
@@ -177,6 +181,8 @@ test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned s
     const dsa = @import("cuda_dsa_block.zig");
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Launch.run;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Launch.run);
+    d.func_name = null;
     d.api.cuModuleGetFunction = Ops.function;
     var ks: glue.Kernels = undefined;
     inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
@@ -191,6 +197,7 @@ test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned s
     l.qk = 256;
     l.index.heads = 32;
     l.index.d = 128;
+    l.index.geom = .{};
     var scratch = std.mem.zeroes(dsa.Scratch);
     scratch.tokens = 500;
     scratch.counts = 600;
@@ -223,6 +230,8 @@ test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, 
     try t.expectEqual(@as(u64, 17), ps / pks);
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Launch.run;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Launch.run);
+    d.func_name = null;
     d.api.cuModuleGetFunction = Ops.function;
     var ks: glue.Kernels = undefined;
     inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
@@ -240,6 +249,7 @@ test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, 
     l.dims = 4096;
     l.index.heads = 32;
     l.index.d = 128;
+    l.index.geom = .{};
     l.dense_limit = 1;
     const pages: u64 = 145;
     for ([_]u64{ pks, 0 }) |own| { // TF_GLM_KV_HOST's MTP cache (the second), then pooled keys inside the pages

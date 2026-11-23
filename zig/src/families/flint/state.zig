@@ -44,6 +44,9 @@ pub const Cache = struct {
     capacity: usize,
     len: usize = 0,
     follow: ?mtl.ResidencySet.Follow = null,
+    taps: ?mtl.Buffer = null,
+    tap_start: u64 = 0,
+    tap_rows: u32 = 0,
 
     pub fn setResident(self: *Cache, hook: ?mtl.ResidencySet.Follow) void {
         if (self.follow) |f| mtl.resident.fields.apply(self, f, false);
@@ -84,6 +87,7 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache) void {
         self.setResident(null);
+        if (self.taps) |taps| taps.deinit();
         self.kv.deinit();
         self.logits.deinit();
     }

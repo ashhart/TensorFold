@@ -299,3 +299,67 @@ test "Flash Next fused prompt prep: one segment through linear() leaves the unfu
 test "Flash Next fused prompt prep: two segments through linear() leave the unfused chain's bytes" {
     try check(&.{ 45, 19 });
 }
+
+/// Kept rows at `at` in one chunk of `n` rows: its bytes as without them, each side's state as after its rows alone.
+fn checkMarks(n: usize, at: []const usize) !void {
+    var g: Gpu = undefined;
+    try g.open(64 << 20);
+    defer g.close();
+    var prng: std.Random.DefaultPrng = .init(0x6b70);
+    const rng = prng.random();
+    var w: Layer = undefined;
+    try w.init(&g, rng);
+    defer w.deinit();
+    const d = w.m.dims;
+    const hx = try gpa.alloc(u16, n * d.hidden);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = bits(g.act, unit(rng));
+    var dx = try hip.DeviceBuffer.fromHost(&g.r, std.mem.sliceAsBytes(hx));
+    defer dx.free();
+    const x: hip.ops.Tensor = .{ .ptr = dx.base(), .kind = g.act };
+    const tokens = try gpa.alloc(u32, n);
+    defer gpa.free(tokens);
+    @memset(tokens, 0);
+    var c = try cache.Caches.init(gpa, &g.r, d, &.{true}, 64, g.act, 0);
+    defer c.deinit(gpa);
+    const start = try gpa.alloc(f32, (c.layout.conv_bytes + c.layout.state_bytes) / 4);
+    defer gpa.free(start);
+    const taps = c.layout.conv_bytes / 4;
+    for (start[0..taps]) |*v| v.* = unit(rng);
+    for (start[taps..]) |*v| v.* = 0.1 * unit(rng);
+    const starts = [_][]f32{start};
+    // each kept row's side buffer, laid out as the caches past the sparse layers
+    const rest = std.mem.alignForward(usize, c.layout.restBytes(), 256);
+    var sides = try hip.DeviceBuffer.alloc(&g.r, at.len * rest);
+    defer sides.free();
+    var marks: [4]forward.Mark = undefined;
+    for (at, 0..) |row, i| marks[i] = .{ .row = row, .side = sides.base() + i * rest };
+    for ([_]*const hip.Launcher{ &g.on, &g.off }) |l| {
+        var taken: usize = 0;
+        try sides.fill8(0x3c);
+        var marked = try run(&g, &w, l, x, &.{.{ .c = &c, .tokens = tokens, .pos = 0, .marks = marks[0..at.len] }}, &starts, 0xa5, &taken);
+        defer freeParts(&marked);
+        var plain = try run(&g, &w, l, x, &.{.{ .c = &c, .tokens = tokens, .pos = 0 }}, &starts, 0x5a, &taken);
+        defer freeParts(&plain);
+        for (marked.items, plain.items) |a, b| {
+            if (std.mem.indexOfDiff(u8, a.bytes, b.bytes)) |i| std.debug.print("{s} with kept rows differs at byte {d}\n", .{ a.name, i });
+            try std.testing.expectEqualSlices(u8, b.bytes, a.bytes);
+        }
+        for (at, 0..) |row, i| {
+            var before = try run(&g, &w, l, x, &.{.{ .c = &c, .tokens = tokens[0..row], .pos = 0 }}, &starts, 0x77, &taken);
+            defer freeParts(&before);
+            const view = c.sideLinear(marks[i].side, 0);
+            const conv = try fetch(sides, view.conv, c.layout.conv_bytes);
+            defer gpa.free(conv);
+            const state = try fetch(sides, view.state, c.layout.state_bytes);
+            defer gpa.free(state);
+            // the parts end with the stream's live conv tail and state
+            try std.testing.expectEqualSlices(u8, before.items[before.items.len - 2].bytes, conv);
+            try std.testing.expectEqualSlices(u8, before.items[before.items.len - 1].bytes, state);
+        }
+    }
+}
+
+test "Flash Next fused prompt prep: kept rows inside a chunk leave its bytes, each side the state of the rows before it" {
+    try checkMarks(150, &.{ 64, 100, 128 });
+}

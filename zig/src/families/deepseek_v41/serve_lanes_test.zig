@@ -10,6 +10,10 @@ const serve_lanes = @import("serve_lanes.zig");
 const gpa = std.testing.allocator;
 const io = std.testing.io;
 
+test {
+    _ = @import("serve_steps_test.zig");
+}
+
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.
 const Box = struct {
     mutex: std.Io.Mutex = .init,
@@ -54,13 +58,19 @@ const TwinModel = struct {
     t: *twin.Twin,
     d: *twin.Drafter,
 
+    var calibrations: u32 = 0;
+
     fn open(slots: u32) !serve_lanes.Model {
+        return openWith(slots, "default");
+    }
+
+    fn openWith(slots: u32, mode: []const u8) !serve_lanes.Model {
         const b = try gpa.create(TwinModel);
         errdefer gpa.destroy(b);
         b.t = try twin.Twin.init(gpa, .{}, slots);
         errdefer b.t.deinit();
         b.d = try twin.Drafter.init(gpa, b.t, slots);
-        return .{ .ptr = b, .name = "dsv41-twin", .slots = slots, .limit = 4096, .world = 1, .prefill_step = 16, .forward_rows = 16, .shape = b.d.shape, .target = target, .pass = pass, .calibrate = calibrate, .close = close, .calib = .{ .mode = "default" } };
+        return .{ .ptr = b, .name = "dsv41-twin", .slots = slots, .limit = 4096, .world = 1, .prefill_step = 16, .forward_rows = 16, .shape = b.d.shape, .target = target, .pass = pass, .calibrate = calibrate, .close = close, .calib = .{ .mode = mode } };
     }
 
     fn target(ctx: *anyopaque) iface.Target {
@@ -74,7 +84,11 @@ const TwinModel = struct {
     }
 
     fn calibrate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, _: []const u8, _: calib_env.Knobs, _: calib_env.Shape) anyerror!calib_lanes.Boot {
-        return error.Unmeasured; // mode "default" never measures
+        calibrations += 1;
+        // a table a mode that measures would return: a 1-row window of 1 ms
+        const verify = try gpa.alloc(f64, 64);
+        for (verify, 0..) |*v, r| v.* = 1.0 + 0.1 * @as(f64, @floatFromInt(r));
+        return .{ .costs = .{ .verify = verify, .draft = 0.2 }, .path = null };
     }
 
     fn close(ctx: *anyopaque) void {
@@ -141,4 +155,22 @@ test "serve lanes: replies through LaneHost over the twin, concurrent == solo ==
     }
     try t.expect(drafted > 0); // the DSpark pass drafted: the drafted replies were not one token a round
     try t.expectEqual(@as(u64, 0), plain_drafted);
+}
+
+test "serve lanes: the default mode times nothing and prices by the defaults; measure times once and prices by the table" {
+    const t = std.testing;
+    var defaults = try @import("draft/costs.zig").defaults(gpa, 64);
+    defer defaults.deinit(gpa);
+    TwinModel.calibrations = 0;
+    const plain = try serve_lanes.Served.open(gpa, io, try TwinModel.openWith(2, "default"), ".", null);
+    defer serve_lanes.Served.close(plain);
+    try t.expectEqual(@as(u32, 0), TwinModel.calibrations);
+    try t.expectEqualSlices(f64, defaults.verify, plain.costs.verify);
+    try t.expectEqualSlices(f64, defaults.verify, plain.x.policy.depth.costs.verify);
+    const timed = try serve_lanes.Served.open(gpa, io, try TwinModel.openWith(2, "measure"), ".", null);
+    defer serve_lanes.Served.close(timed);
+    try t.expectEqual(@as(u32, 1), TwinModel.calibrations);
+    try t.expectEqual(@as(f64, 0.2), timed.costs.draft);
+    try t.expectEqual(@as(f64, 1.0), timed.costs.verify[0]);
+    try t.expectEqual(@as(f64, 1.0), timed.x.policy.depth.costs.verify[0]);
 }

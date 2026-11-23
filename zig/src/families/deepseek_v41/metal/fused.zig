@@ -9,7 +9,7 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const mix_sums = 25;
 pub const mix_parts = 8;
 
-const names = [_][:0]const u8{ "tf_dsv41_f_hcmix_part", "tf_dsv41_f_hcmix_fin", "tf_dsv41_f_kv", "tf_dsv41_f_swiglu", "tf_dsv41_f_joinpost", "tf_dsv41_f_actq" };
+const names = [_][:0]const u8{ "tf_dsv41_f_hcmix_part", "tf_dsv41_f_hcmix_fin", "tf_dsv41_f_kv", "tf_dsv41_f_swiglu", "tf_dsv41_f_joinpost", "tf_dsv41_f_actq", "tf_dsv41_f_kv_segs" };
 
 /// The norm kernels' widths: values a thread holds; a row of `dim` takes the first NV with 256 NV >= dim.
 const nvs = [_]u32{ 1, 2, 5, 8, 20, 32 };
@@ -26,6 +26,8 @@ pub const Pipelines = struct {
     swiglu: mtl.Pipeline,
     joinpost: mtl.Pipeline,
     actq: mtl.Pipeline,
+    /// `kv` over several slots, each row into its slot's ring (segs.zig's table)
+    kv_segs: mtl.Pipeline,
     prenorm: [nvs.len]mtl.Pipeline,
     normq: [nvs.len]mtl.Pipeline,
     /// the wide rows' prenorm in two launches: a simdgroup a group for the sums (20 or 32 steps), then a thread a value
@@ -174,8 +176,20 @@ pub fn kv(p: *const Pipelines, e: mtl.ComputeEncoder, b: Kv, rows: u32, dim: u32
     if (dim != 512) return error.BadKvShape;
     e.setPipeline(p.kv);
     bind(e, &.{ b.kv, b.w, b.kvn, b.kvr, b.kvq, b.ring, b.pos, b.table, b.dest });
+    kvLaunch(e, b, rows, dim, eps);
+}
+
+fn kvLaunch(e: mtl.ComputeEncoder, b: Kv, rows: u32, dim: u32, eps: f32) void {
     e.setValue(extern struct { dim: u32, rows: u32, reps: u32, eps: f32 }{ .dim = dim, .rows = rows, .reps = b.reps, .eps = eps }, 9);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// `kv` over the rows of several slots, row r into its slot's ring (`segs` table, `slots` [rows]); b.ring unused.
+pub fn kvSegs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Kv, segs: Ref, slots: Ref, rows: u32, dim: u32, eps: f32) !void {
+    if (dim != 512) return error.BadKvShape;
+    e.setPipeline(p.kv_segs);
+    bind(e, &.{ b.kv, b.w, b.kvn, b.kvr, b.kvq, b.kv, b.pos, b.table, b.dest, b.kv, segs, slots });
+    kvLaunch(e, b, rows, dim, eps);
 }
 
 /// The clamped SwiGLU of n gate and up values into y and its act_quant round trip into yq; n a multiple of 32.

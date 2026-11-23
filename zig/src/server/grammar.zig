@@ -5,10 +5,59 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const pyrepr = @import("pyrepr.zig");
 const tool_specs = @import("tool_specs.zig");
+const structural_tag = @import("structural_tag.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
 pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_regex", "guided_choice", "guided_grammar", "structured_outputs" };
+
+/// The most bytes a grammar's text may be: xgrammar compiles it under one lock, in time that grows with its square.
+pub const max_text = 512 * 1024;
+pub const max_nesting = 128;
+
+/// Reject recursive-descent inputs before they reach xgrammar's fixed-size compile-thread stack.
+pub fn checkNesting(cx: *Cx, kind: Kind, text_value: []const u8, field: []const u8) errors.Refused!void {
+    if (kind != .grammar and kind != .regex) return;
+    var depth: usize = 0;
+    var quote: ?u8 = null;
+    var escaped = false;
+    var character_class = false;
+    for (text_value) |ch| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (quote) |q| {
+            if (ch == q) quote = null;
+            continue;
+        }
+        if (kind == .grammar and (ch == '"' or ch == '\'')) {
+            quote = ch;
+            continue;
+        }
+        if (kind == .regex) {
+            if (ch == '[' and !character_class) {
+                character_class = true;
+                continue;
+            }
+            if (ch == ']' and character_class) {
+                character_class = false;
+                continue;
+            }
+            if (character_class) continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+            if (depth > max_nesting) return cx.fail(.request, "{s}: nesting exceeds the {d}-level limit", .{ field, max_nesting });
+        } else if (ch == ')') {
+            depth -|= 1;
+        }
+    }
+}
 
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
@@ -30,6 +79,11 @@ fn bareMessage(full: []const u8) []const u8 {
 }
 
 fn schemaText(cx: *Cx, raw: Value, where: []const u8) errors.Refused![]const u8 {
+    return json.stringify(cx.a, try schemaValue(cx, raw, where), .{ .ascii = false });
+}
+
+/// A schema field as its object: JSON text parsed, true as {}, anything else but an object refused.
+pub fn schemaValue(cx: *Cx, raw: Value, where: []const u8) errors.Refused!Value {
     var value = raw;
     if (raw == .string) value = switch (try json.parseText(cx.a, raw.string)) {
         .ok => |v| v,
@@ -37,7 +91,7 @@ fn schemaText(cx: *Cx, raw: Value, where: []const u8) errors.Refused![]const u8 
     };
     if (value == .bool) value = if (value.bool) .{ .object = try json.newObject(cx.a) } else .null;
     if (value != .object) return cx.fail(.request, "{s} must be a JSON schema object", .{where});
-    return json.stringify(cx.a, value, .{ .ascii = false });
+    return value;
 }
 
 fn text(cx: *Cx, v: Value, where: []const u8) errors.Refused![]const u8 {
@@ -73,6 +127,7 @@ pub fn spec(cx: *Cx, body: Value) errors.Refused!?Spec {
             if (js == null or js.? != .object or js.?.field("schema") == null) return cx.refuse("response_format json_schema needs json_schema.schema (a JSON schema object)");
             return .{ .kind = .json_schema, .text = try schemaText(cx, js.?.get("schema").?, "response_format json_schema.schema") };
         }
+        if (kind != null and kind.? == .string and std.mem.eql(u8, name, "structural_tag")) return .{ .kind = .structural_tag, .text = try structural_tag.build(cx, rf) };
         if (!(kind != null and kind.? == .string and std.mem.eql(u8, name, "text")))
             return cx.fail(.request, "response_format type must be text, json_object or json_schema, not {s}", .{try pyrepr.repr(cx.a, kind)});
     }
@@ -148,4 +203,19 @@ test "grammar vocabulary preserves nested text and root precedence" {
         const cfg = (try json.parse(a, c[0])).ok;
         try std.testing.expectEqual(c[1], vocabSize(cfg));
     }
+}
+
+test "grammar and regex nesting is refused before compiler recursion" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    var deep: [max_nesting + 1]u8 = @splat('(');
+    try std.testing.expectError(error.Refused, checkNesting(&cx, .grammar, &deep, "grammar"));
+    try checkNesting(&cx, .json_schema, &deep, "schema");
+    var bounded: [max_nesting]u8 = @splat('(');
+    try checkNesting(&cx, .regex, &bounded, "regex");
+    const literals = "root ::= \"((((((((\"";
+    try checkNesting(&cx, .grammar, literals, "grammar");
+    const regex_class = "[()\\\\(]{2}";
+    try checkNesting(&cx, .regex, regex_class, "regex");
 }

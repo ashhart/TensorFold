@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     options.defines = defines[0..used];
-    const model = try h3.Model.load(gpa, args[1], try std.fmt.parseInt(usize, args[2], 10), &case, options);
+    const model = try h3.Model.load(gpa, init.io, args[1], try std.fmt.parseInt(usize, args[2], 10), &case, options);
     model.dense = dense or model.base;
     var steps = (case.names.get("video_step") orelse return error.MissingTensor).shape[0];
     const nv = model.video * model.video_in;

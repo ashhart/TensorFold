@@ -90,7 +90,7 @@ test "memory pressure: settings, the watermark and the kernel's levels" {
     try std.testing.expectEqual(Level.critical, mp.ofKernel(4));
     try std.testing.expect(mp.Governor.fromEnv() == null); // host tests never read the kernel's level
     const raw = platform.memory_policy.pressure();
-    if (builtin.os.tag == .macos) try std.testing.expect(raw != null) else try std.testing.expect(raw == null);
+    if (builtin.os.tag == .macos) try std.testing.expect(raw != null) else if (builtin.os.tag != .linux) try std.testing.expect(raw == null);
 }
 
 const c1 = [_]u32{ 1, 1, 1, 1, 9 };
@@ -180,4 +180,8 @@ test "memory pressure: a held store keeps nothing new and plans no marks, yet st
     try std.testing.expectEqualSlices(u32, &.{6}, q.marks);
     try std.testing.expectEqual(fresh(&c2), f.pass(&s, &c2, q));
     try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+}
+
+test {
+    _ = @import("memory_pressure_linux_test.zig");
 }

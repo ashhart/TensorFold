@@ -10,9 +10,10 @@ fn depth(shape: c.Shape) usize {
 
 const served = blk: {
     const widths = [_]usize{ 31, 1, 32, 33, 1023, 1024, 1025, 79_591, 248_320 };
-    var shapes: [widths.len + 1]c.Shape = undefined;
+    var shapes: [widths.len + 2]c.Shape = undefined;
     for (widths, 0..) |k, i| shapes[i] = .{ .rows = 12, .n = 4, .k = k };
     shapes[widths.len] = .{ .rows = 33, .n = 4, .k = 1025 };
+    shapes[widths.len + 1] = .{ .rows = 64, .n = 4, .k = 248_320 };
     break :blk shapes;
 };
 

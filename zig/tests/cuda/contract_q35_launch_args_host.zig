@@ -395,3 +395,26 @@ test "the launch scanner follows local choices and direct engine handles" {
     try std.testing.expectEqual(@as(usize, 2), sites.items[0].handles.len);
     try std.testing.expectEqualStrings("attn_rows8", sites.items[0].named.?);
 }
+
+test "Qwen3.5 prompt tiles predicate padded rows against the actual forward total" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const common = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/qwen35.cuh", a, .limited(1 << 20));
+    defer a.free(common);
+    const qwen = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/qwen35.cu", a, .limited(8 << 20));
+    defer a.free(qwen);
+    const int8 = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/cuda/w4a8_prefill.cu", a, .limited(4 << 20));
+    defer a.free(int8);
+
+    // Qwen3.5 row kernels return when their block's row reaches P[2] (the forward's total).
+    try std.testing.expect(std.mem.indexOf(u8, common, "return P != nullptr && m >= P[2];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.x)) return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, w)) return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.z)) return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.x / heads)) return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, qwen, "if (past_rows(P, blockIdx.y)) return;") != null);
+
+    // W4A8 rounds its row tiles up, but masks loads and stores against M; padded rows never write out.
+    try std.testing.expect(std.mem.indexOf(u8, int8, "m0 + r < M") != null);
+    try std.testing.expect(std.mem.indexOf(u8, int8, "if (row >= M || col >= N) continue;") != null);
+}

@@ -19,11 +19,11 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
     if (comptime T == qwen35.native.vision.Vision) {
         // the template writes Qwen's vision_start and vision_end around the image token itself
         const image = x.shared.image_token;
-        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     }
     // a template that writes each image's begin and end itself: the server expands the image token alone
     const wrap: ?[2]u32 = if (@hasDecl(T, "template_wraps")) null else .{ x.marks.open, x.marks.close };
-    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     if (comptime @hasDecl(T, "part_type")) out.part_type = T.part_type; // the template's name for an image part
     if (comptime T == nemotron.native.vision.Vision) {
         // video: the checkpoint's temporal projection, and a reserved token for the template's `<video>`
@@ -156,6 +156,8 @@ test "a tower whose template writes its own markers gets no wrapper; other tower
 }
 
 test "actual offer prepares bounded video and plans mixed rows through the shared Vision owner" {
+    const Vision = nemotron.native.vision.Vision;
+    const Span = @typeInfo(@FieldType(Vision, "spans")).pointer.child;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -178,6 +180,7 @@ test "actual offer prepares bounded video and plans mixed rows through the share
             const pixels: [64 * 64 * 3]u8 = @splat(1);
             for (indices, 0..) |_, i| try sink.take(sink.ctx, i, &pixels, 64, 64, 64 * 3);
         }
+        fn encode(_: *anyopaque, _: @FieldType(nemotron.Engine, "stream"), _: []const api.Image, _: []const Span, _: *const @FieldType(Vision, "rows")) anyerror!void {}
     };
     var dummy: u8 = 0;
     const prepared = try held.video.?.prepare(held.ctx, a, .{ .frames = 30, .rate_num = 30, .rate_den = 1, .width = 64, .height = 64, .ctx = &dummy, .decode = Fake.decode }, 512, 256);
@@ -191,13 +194,19 @@ test "actual offer prepares bounded video and plans mixed rows through the share
         .{ .pixels = group.pixels, .gh = group.gh, .gw = group.gw, .tokens = group.tokens, .at = 10 },
         .{ .pixels = group.pixels, .gh = group.gh, .gw = group.gw, .tokens = group.tokens, .at = 400 },
     };
-    try std.testing.expectError(error.RowShape, v.begin(undefined, &images, 0));
+    v.encoder = .{ .ctx = &dummy, .encode = Fake.encode };
+    try v.begin(undefined, &images, 0);
     try std.testing.expectEqual(@as(usize, 2), v.spans.len);
     try std.testing.expectEqual(@as(u32, 256), v.spans[1].row);
-    try std.testing.expectError(error.RowShape, v.begin(undefined, &images, 300));
+    try v.begin(undefined, &images, 300);
     try std.testing.expectEqual(@as(usize, 1), v.spans.len);
     try std.testing.expectEqual(@as(u32, 1), v.spans[0].image);
     try std.testing.expectEqual(@as(u32, 0), v.spans[0].row);
+    v.encoder = null;
+    for ([_]usize{ 0, 300 }) |from| {
+        try std.testing.expectError(error.RowShape, v.begin(undefined, &images, from));
+        try std.testing.expectEqual(@as(usize, 0), v.spans.len);
+    }
     try std.testing.expect(offer(@as(?*nemotron.native.vision.Vision, null), null) == null);
 }
 

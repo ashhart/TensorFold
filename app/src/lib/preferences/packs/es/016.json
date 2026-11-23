@@ -71,7 +71,7 @@
   "The community page could not open; try again in your browser.": "No se pudo abrir la página comunitaria; prueba en tu navegador.",
   "The comparison could not finish.": "No se pudo completar la comparación.",
   "The comparison stopped before changing the engine.": "La comparación se detuvo antes de cambiar el motor.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "No se cumplió el protocolo community-v1 completo; las celdas incompletas no puntúan rendimiento.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "No se cumplió el protocolo community-v2 completo; las celdas incompletas no puntúan rendimiento.",
   "The conversation could not be renamed.": "No se pudo renombrar la conversación.",
   "The document worker is not installed.": "El trabajador documental no está instalado.",
   "The download action could not complete. Try again.": "No se pudo completar la descarga. Reintenta.",

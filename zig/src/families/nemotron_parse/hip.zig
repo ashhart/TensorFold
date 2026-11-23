@@ -90,7 +90,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     const startup = try std.fmt.allocPrint(gpa, "HIP Nemotron Parse BF16: {d} streams, {d} context rows including image; native RADIO and mBART, one-step MTP", .{ e.streams, e.window });
     own.* = .{ .a = gpa, .e = e, .h = h, .startup = startup, .image_tokens = @min(o.vision.?.image_tokens, engine.max_image_rows) };
     return .{ .backend = h.backend(), .facts = h.facts(), .rows = @import("backend.zig").max_window, .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .offer = .{
-        .vision = .{ .ctx = own, .prepare = prepare, .image_token = 1, .markers = &.{1}, .image_tokens = own.image_tokens, .max_images = 1 },
+        .vision = .{ .ctx = own, .prepare = prepare, .image_token = 1, .markers = &.{1}, .image_tokens = own.image_tokens, .max_images = 1, .image_share = o.vision.?.image_share },
         .cache = if (h.cache.budget > 0) &h.cache else null,
     } };
 }

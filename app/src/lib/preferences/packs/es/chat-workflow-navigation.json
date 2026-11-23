@@ -1,5 +1,8 @@
 {
   "Outline item opened.": "Se ha abierto el elemento del esquema.",
   "Quoted message opened.": "Se ha abierto el mensaje citado.",
-  "Search match opened.": "Se ha abierto el resultado de búsqueda."
+  "Search match opened.": "Se ha abierto el resultado de búsqueda.",
+  "Conversation unavailable": "Conversación no disponible",
+  "This conversation was archived or deleted, or it has not loaded yet.": "Esta conversación se archivó o se eliminó, o aún no se ha cargado.",
+  "Back to Home": "Volver a Inicio"
 }

@@ -50,7 +50,7 @@ pub fn step(self: anytype, stream: *lanes.Stream, max_rows: u32) !bool {
     if (!self.readout.open.contains(stream)) try begin(self, r, stream);
     const o = self.readout.open.getPtr(stream).?;
     const ids = stream.prompt();
-    const piece: usize = @min(E.max_rows, if (max_rows > 0) max_rows else piece_rows);
+    const piece: usize = @min(E.grid_rows, if (max_rows > 0) max_rows else piece_rows);
     const end = @min(ids.len, o.at + piece);
     try self.e.forward(&.{.{ .cache = try self.cacheOf(stream), .rows = end - o.at }}, ids[o.at..end], .rows);
     try r.vtable.consume(r.ctx, o.state, self.e.x, o.at, end - o.at, self.e.stream);

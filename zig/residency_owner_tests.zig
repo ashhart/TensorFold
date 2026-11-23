@@ -8,6 +8,7 @@ pub const checkpoint_host = @import("src/core/checkpoint.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 pub const tree_slots = @import("src/core/tree_slots.zig");
+pub const recurrent_workspace = @import("src/core/recurrent_workspace.zig");
 pub const draft_ops = @import("draft_ops");
 pub const row_projection = @import("src/core/row_projection.zig");
 pub const lane_projection = @import("src/core/lane_projection.zig");
@@ -57,6 +58,7 @@ test "residency owner GLM: actual arena slots tower and snapshots match live uni
             e.k = &kernels;
             e.fused_route = true;
             e.draft_vocab = 8;
+            e.dflash = null;
             e.ep = null;
             e.ev = 0;
             e.event = .{};
@@ -142,6 +144,7 @@ test "residency owner GLM: zero and a failed bound never publish a set or keepal
             e.arena = .{ .device = device, .gpa = a };
             defer e.arena.deinit();
             e.vision = null;
+            e.dflash = null;
             e.residency = null;
             e.residency_enabled = try glm.residency.policy.flag(if (enabled) "1" else "0");
             e.limit = std.mem.zeroes(@TypeOf(e.limit));

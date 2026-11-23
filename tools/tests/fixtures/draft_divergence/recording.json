@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "identity": {
+    "checkpoint": "Org/RecordedFixture@0000000000000000000000000000000000000000",
+    "tokenizer": "fixture-tokenizer",
+    "backend": "recorded-unit-fixture"
+  },
+  "traces": [
+    {
+      "name": "fixture",
+      "prompt": [
+        1,
+        2
+      ],
+      "tokens": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "top2": [
+        {
+          "ids": [
+            10,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 2
+        },
+        {
+          "ids": [
+            11,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 3
+        },
+        {
+          "ids": [
+            12,
+            99
+          ],
+          "logits": [
+            16.0,
+            15.9375
+          ],
+          "position": 4
+        },
+        {
+          "ids": [
+            13,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 5
+        },
+        {
+          "ids": [
+            14,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 6
+        },
+        {
+          "ids": [
+            15,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 7
+        },
+        {
+          "ids": [
+            16,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 8
+        },
+        {
+          "ids": [
+            17,
+            99
+          ],
+          "logits": [
+            16.0,
+            14.0
+          ],
+          "position": 9
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-// bf16 matrix-vector products (fp32 sums), bit-identical to MLX 0.32.3's gemv (bm1 bn8 sn32 tm4 tn4) and gemv_wide.
+// bf16 matrix-vector products (fp32 sums), bit-identical to MLX 0.32.3's gemv (bn8, or bm4/8 bn1) and gemv_wide.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -45,6 +45,43 @@ inline void tf_gemv_rows(const device bfloat* mat, const device bfloat* vec, dev
       for (int t = 0; t < TM; ++t) acc[t] += part[s * (2 * TM) + t];
     for (int t = 0; t < TM; ++t) out[first + t] = static_cast<bfloat>(acc[t]);
   }
+}
+
+// gemv at bn 1: simdgroup g of BM takes rows TM g.., its 32 lanes K in runs of 4 (fma chains), shuffle-down 16..1.
+template <int BM>
+inline void tf_gemv_sn32(const device bfloat* mat, const device bfloat* vec, device bfloat* out, int K, int rows,
+                         int ld, uint tgx, uint sg, uint lane) {
+  constexpr int TM = 4, TN = 4, BLOCK = 32 * TN;
+  int first = int(tgx) * (BM * TM) + int(sg) * TM;
+  if (first >= rows) return;
+  first = first + TM <= rows ? first : rows - TM;
+  const device bfloat* m = mat + long(first) * ld;
+  int col = int(lane) * TN;
+  float acc[TM];
+  for (int t = 0; t < TM; ++t) acc[t] = 0.0f;
+  const int full = K / BLOCK;
+  for (int i = 0; i < full; ++i, col += BLOCK) {
+    float v[TN];
+    for (int j = 0; j < TN; ++j) v[j] = static_cast<float>(vec[col + j]);
+    for (int t = 0; t < TM; ++t) {
+      bfloat w[TN];
+      for (int j = 0; j < TN; ++j) w[j] = m[t * ld + col + j];
+      for (int j = 0; j < TN; ++j) acc[t] += w[j] * v[j];
+    }
+  }
+  if (K - full * BLOCK > 0) {
+    float v[TN];
+    for (int j = 0; j < TN; ++j) v[j] = col + j < K ? static_cast<float>(vec[col + j]) : 0.0f;
+    for (int t = 0; t < TM; ++t) {
+      bfloat w[TN];
+      for (int j = 0; j < TN; ++j) w[j] = col + j < K ? m[t * ld + col + j] : bfloat(0);
+      for (int j = 0; j < TN; ++j) acc[t] += w[j] * v[j];
+    }
+  }
+  for (int t = 0; t < TM; ++t)
+    for (ushort d = 16; d >= 1; d >>= 1) acc[t] += simd_shuffle_down(acc[t], d);
+  if (lane == 0)
+    for (int t = 0; t < TM; ++t) out[first + t] = static_cast<bfloat>(acc[t]);
 }
 
 // gemv_wide: KL lanes a row take float4 runs KL apart, each a dot(); shuffle-down KL/2..1; batch z = (outer, inner).
@@ -105,6 +142,34 @@ inline void tf_gemv_wide(const device bfloat* mat, const device bfloat* x, devic
   tf_gemv_rows<4>(MAT, VEC + long(threadgroup_position_in_grid.z) * P[0],
                   OUT + long(threadgroup_position_in_grid.z) * P[1], P[0], P[1], P[2],
                   threadgroup_position_in_grid.x, simdgroup_index_in_threadgroup, thread_index_in_simdgroup, part);
+}
+
+// tf:kernel tf_gemv_bf16_bm4_tm4 inputs=MAT,VEC,P outputs=OUT
+[[kernel]] void tf_gemv_bf16_bm4_tm4(
+  const device bfloat16_t* MAT [[buffer(0)]],
+  const device bfloat16_t* VEC [[buffer(1)]],
+  const constant int32_t* P [[buffer(2)]],
+  device bfloat16_t* OUT [[buffer(3)]],
+  uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
+  uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+  uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
+  tf_gemv_sn32<4>(MAT, VEC + long(threadgroup_position_in_grid.z) * P[0],
+                    OUT + long(threadgroup_position_in_grid.z) * P[1], P[0], P[1], P[2],
+                    threadgroup_position_in_grid.x, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+}
+
+// tf:kernel tf_gemv_bf16_bm8_tm4 inputs=MAT,VEC,P outputs=OUT
+[[kernel]] void tf_gemv_bf16_bm8_tm4(
+  const device bfloat16_t* MAT [[buffer(0)]],
+  const device bfloat16_t* VEC [[buffer(1)]],
+  const constant int32_t* P [[buffer(2)]],
+  device bfloat16_t* OUT [[buffer(3)]],
+  uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
+  uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+  uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
+  tf_gemv_sn32<8>(MAT, VEC + long(threadgroup_position_in_grid.z) * P[0],
+                    OUT + long(threadgroup_position_in_grid.z) * P[1], P[0], P[1], P[2],
+                    threadgroup_position_in_grid.x, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 }
 
 // tf:kernel tf_gemv_wide_bf16_v4_kl32 inputs=MAT,X,P,BATCH outputs=OUT

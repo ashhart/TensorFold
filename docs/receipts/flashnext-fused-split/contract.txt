@@ -1,0 +1,47 @@
+runner: /opt/tensorfold/bin/tf-cuda-test
+N/A  cuda affine4 MLP128 replacement bits: cluster path needs sm_90 or newer, this GPU is sm_121
+N/A  cuda affine4 MLP128 FP64: cluster path needs sm_90 or newer, this GPU is sm_121
+PASS nonfinite cuda MXFP8 lane half tiles (32 columns, 16 rows): 2560 non-finite and 640 finite outputs match the float64 classes
+PASS repeat cuda MXFP8 lane half tiles (32 columns, 16 rows): five runs byte-identical (1280 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda MXFP8 lane half tiles (32 columns, 16 rows): 15 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda MXFP8 lane half tiles (32 columns, 16 rows): exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 25011x
+PASS nonfinite cuda MXFP8 lane half tiles (32 columns, 16 rows), fp32 out: 2560 non-finite and 640 finite outputs match the float64 classes
+PASS repeat cuda MXFP8 lane half tiles (32 columns, 16 rows), fp32 out: five runs byte-identical (2560 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda MXFP8 lane half tiles (32 columns, 16 rows), fp32 out: 15 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda MXFP8 lane half tiles (32 columns, 16 rows), fp32 out: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 1905445909x
+PASS nonfinite cuda BF16 lane half tiles (32 columns, 16 rows): 2560 non-finite and 640 finite outputs match the float64 classes
+PASS repeat cuda BF16 lane half tiles (32 columns, 16 rows): five runs byte-identical (1280 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda BF16 lane half tiles (32 columns, 16 rows): 15 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda BF16 lane half tiles (32 columns, 16 rows): exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 17220x
+PASS nonfinite cuda BF16 lane half tiles (32 columns, 16 rows), fp32 out: 2560 non-finite and 640 finite outputs match the float64 classes
+PASS repeat cuda BF16 lane half tiles (32 columns, 16 rows), fp32 out: five runs byte-identical (2560 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda BF16 lane half tiles (32 columns, 16 rows), fp32 out: 15 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda BF16 lane half tiles (32 columns, 16 rows), fp32 out: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 887426425x
+FAIL shapes control: MXFP8 half tiles at a 1.5x tensor scale posing as the 64-column tile: at 1x640x2560 its bytes differ from the 64-column 16-row tile's from byte 0
+CONTROL control: MXFP8 half tiles at a 1.5x tensor scale posing as the 64-column tile: red at shapes, as planted
+FAIL shapes control: MXFP8 fp32-out half tiles at a 1.5x tensor scale posing as the 64-column tile: at 1x640x2560 its bytes differ from the 64-column 16-row tile's from byte 0
+CONTROL control: MXFP8 fp32-out half tiles at a 1.5x tensor scale posing as the 64-column tile: red at shapes, as planted
+PASS nonfinite cuda MXFP8 lane split-K calls on the fused form: 10240 non-finite and 2560 finite outputs match the float64 classes
+PASS repeat cuda MXFP8 lane split-K calls on the fused form: five runs byte-identical (5120 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda MXFP8 lane split-K calls on the fused form: 16 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda MXFP8 lane split-K calls on the fused form: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 25476x
+PASS nonfinite cuda MXFP8 lane split-K calls on the fused form, fp32 out: 10240 non-finite and 2560 finite outputs match the float64 classes
+PASS repeat cuda MXFP8 lane split-K calls on the fused form, fp32 out: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda MXFP8 lane split-K calls on the fused form, fp32 out: 16 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda MXFP8 lane split-K calls on the fused form, fp32 out: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 1477124452x
+PASS nonfinite cuda BF16 lane split-K calls on the fused form: 10240 non-finite and 2560 finite outputs match the float64 classes
+PASS repeat cuda BF16 lane split-K calls on the fused form: five runs byte-identical (5120 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda BF16 lane split-K calls on the fused form: 16 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda BF16 lane split-K calls on the fused form: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 18469x
+PASS nonfinite cuda BF16 lane split-K calls on the fused form, fp32 out: 10240 non-finite and 2560 finite outputs match the float64 classes
+PASS repeat cuda BF16 lane split-K calls on the fused form, fp32 out: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda BF16 lane split-K calls on the fused form, fp32 out: 16 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda BF16 lane split-K calls on the fused form, fp32 out: exact sums at k 10240, where fp16 sums would miss by infx and bf16 by 1304751183x
+FAIL shapes control: MXFP8 fused form at a 1.5x tensor scale posing as the cluster kernel: at 1x2560x6144 its bytes differ from the cluster kernel's K slices's from byte 0
+CONTROL control: MXFP8 fused form at a 1.5x tensor scale posing as the cluster kernel: red at shapes, as planted
+FAIL shapes control: MXFP8 fp32-out fused form at a 1.5x tensor scale posing as the cluster kernel: at 1x2560x6144 its bytes differ from the cluster kernel's K slices's from byte 0
+CONTROL control: MXFP8 fp32-out fused form at a 1.5x tensor scale posing as the cluster kernel: red at shapes, as planted
+PASS limits live sm_121 most shared bytes a block (opt-in): the driver says 101376, the table 101376
+PASS limits live sm_121 threads a block: the driver says 1024, the table 1024
+(filtered) SUMMARY 8 kernels: 8 pass gates 1-4, 0 fail, 0 known findings; 4 controls: 4 red as planted, 0 missed; 0 limit problems; gates 10632 ms, limits 0 ms
+exit 0

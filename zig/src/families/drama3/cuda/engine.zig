@@ -142,6 +142,7 @@ pub const Engine = struct {
             e.w.deinit();
             gpa.destroy(e.w);
         }
+        if (e.w.nvfp4_layers > 0) try e.k.loadNvfp4();
         errdefer e.freeState();
         try e.allocState();
         errdefer {

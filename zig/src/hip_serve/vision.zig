@@ -19,6 +19,7 @@ pub fn offer(tower: anytype) ?api.Vision {
         .image_token = x.c.image_token,
         .image_tokens = x.limits.image_tokens,
         .max_images = x.limits.max_images,
+        .image_share = if (comptime @hasField(@TypeOf(x.limits), "image_share")) x.limits.image_share else .request,
         .explain = T.explain,
     };
     if (comptime @hasField(T, "markers")) {

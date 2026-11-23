@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { syntheticBenchmarkReceipt } from './fixtures'
-import { parseBenchmarkReceipt, benchmarkCells, benchmarkProtocolComplete } from './receipt'
+import { parseBenchmarkReceipt, benchmarkCells, benchmarkProtocolComplete, parseBenchmarkDetails, checkedBenchmarkDetails } from './receipt'
+import { BENCHMARK_SUITES } from '../../../../shared/model-benchmark'
 import { assertBundledBenchmarkVersion, BENCHMARK_ENGINE_VERSION } from './version'
 
 const receipt = syntheticBenchmarkReceipt()
@@ -54,3 +55,44 @@ assert.equal(benchmarkCells(parseBenchmarkReceipt(JSON.stringify(buffered)))[0].
 const unknown = structuredClone(receipt); unknown.hardware.gpus = []; unknown.hardware.gpu_count = null; unknown.hardware.source = 'unavailable'
 assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(unknown))), false)
 console.log('Benchmark strict receipt, privacy, exact samples, complete-only aggregates, earlyEOS, warmup errors and unknown metrics passed')
+
+for (const family of [null, 'Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'] as const) {
+  const withFamily = structuredClone(receipt)
+  Object.assign(withFamily.hardware, { form_factor: family })
+  const result = parseBenchmarkReceipt(JSON.stringify(withFamily), { model: receipt.model.repo_id, serial: false })
+  assert.equal(result.hardware.form_factor, family)
+  assert.deepEqual(result, withFamily, 'The app preserves the accepted metadata for storage and export')
+  assert.deepEqual(benchmarkCells(result), benchmarkCells(parsed), 'A product family cannot alter measured benchmark cells')
+  assert.equal(benchmarkProtocolComplete(result), true)
+}
+assert.equal(Object.hasOwn(parsed.hardware, 'form_factor'), false, 'Old receipts keep the field absent')
+for (const family of ['', 'Mac17,16', 'mac mini', 'Mac mini M5 Pro', 'Mac mini\n', true, 7, [], {}, ['Mac mini']]) {
+  const invalid = structuredClone(receipt) as any
+  invalid.hardware.form_factor = family
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(invalid)), /invalid|unsupported/)
+}
+for (const formFactor of [undefined, null, 'Mac mini']) {
+  const invalid = structuredClone(receipt) as any
+  if (formFactor !== undefined) invalid.hardware.form_factor = formFactor
+  invalid.hardware.model_identifier = 'Mac17,16'
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(invalid)), /invalid|unsupported/, 'The optional key cannot admit unrelated hardware fields')
+}
+console.log('Studio accepts absent, null and six coarse product families, preserves metadata and rejects raw IDs, extra keys and invalid values.')
+
+assert.equal(parsed.suite.id, 'community-v2', 'the synthetic receipt is the engine\'s current suite')
+const legacy = structuredClone(receipt); legacy.suite = { id: 'community-v1', sha256: BENCHMARK_SUITES['community-v1'] }
+assert.equal(parseBenchmarkReceipt(JSON.stringify(legacy)).suite.id, 'community-v1', 'older engines\' community-v1 receipts still parse')
+for (const suite of [{ id: 'community-v3', sha256: BENCHMARK_SUITES['community-v2'] }, { id: 'community-v2', sha256: BENCHMARK_SUITES['community-v1'] }, { id: 'community-v1', sha256: BENCHMARK_SUITES['community-v2'] }, { id: 'community-v2', sha256: '0'.repeat(64) }]) {
+  const wrong = structuredClone(receipt) as any; wrong.suite = suite
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(wrong)), /invalid|unsupported/, `suite ${suite.id} with the wrong or unknown hash is refused`)
+}
+const broken = structuredClone(receipt) as any; broken.suite.id = 'community-v9'; broken.samples[0].seed = 999
+assert.throws(() => parseBenchmarkReceipt(JSON.stringify(broken)), /invalid|unsupported/)
+const kept = parseBenchmarkDetails(JSON.stringify(broken), { model: receipt.model.repo_id, serial: false })
+assert.deepEqual(kept, { runtime: receipt.runtime, model: receipt.model, hardware: receipt.hardware, settings: receipt.settings }, 'a failed receipt keeps its checked details')
+const leaky = structuredClone(broken); leaky.hardware.cpu_model = 'person@example.com'
+assert.equal(parseBenchmarkDetails(JSON.stringify(leaky)), null, 'details that fail their privacy checks are not kept')
+assert.equal(parseBenchmarkDetails(JSON.stringify(broken), { model: 'example-org/other-model', serial: false }), null)
+assert.deepEqual(checkedBenchmarkDetails(kept), kept, 'saved details re-check')
+assert.equal(checkedBenchmarkDetails({ ...kept, extra: 1 }), null)
+console.log('Benchmark suites: community-v2 and legacy community-v1 accepted, unknown suites and wrong hashes refused; failed runs keep checked details')
