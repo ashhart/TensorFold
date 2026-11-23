@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const exl3 = @import("../../core/exl3_projection.zig");
 const mv = @import("../deepseek_v41/metal/mv.zig");
 const mv_mma = @import("../deepseek_v41/metal/mv_mma.zig");
+const dense = @import("metal_dense.zig");
 
 /// A GPU buffer and the byte offset of a tensor in it (the type ExpertStorage and the EXL3 projections use).
 pub const View = exl3.View;
@@ -30,15 +31,14 @@ pub const attn_partial_floats = 132;
 /// Rows of a tile of attention_rows.metal's kernel, which full-attention calls of `attn_rows_min` rows or more use.
 pub const attn_rows_tile = 8;
 pub const attn_rows_min = 8;
-/// The dense MMA tile (kernels/metal/inkling2/dense_mma.metal): outputs a side, and the K step a staging round covers.
-const dense_tile = 16;
-const dense_chunk = 256;
 /// Rows from which a projection runs on MMA tiles (bit-equal to the matvec): the matvec re-reads its weights per row.
 pub const mma_min_rows = 3;
 
 pub const Options = struct {
     /// Scratch for attention partials and router logits; one buffer, reused by consecutive dispatches.
     scratch_bytes: usize = 64 << 20,
+    /// Bytes the dense tile permutes X into (rows * k * 2 a slice; more rows run in slices).
+    dense_bytes: usize = 8 << 20,
 };
 
 const Kernel = enum {
@@ -62,6 +62,7 @@ const Kernel = enum {
     attn_res_stats,
     attn_res_mix,
     attn_res_norm,
+    dense_perm,
     dense_mma_bf16,
     dense_mma_f32,
 };
@@ -176,7 +177,6 @@ pub const AttnResArgs = struct {
 pub const LinearArgs = struct { x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool = false };
 /// One existing weight and its existing output. The fused launch writes `y` and allocates nothing.
 pub const Fused = struct { w: View, y: View, n: u32 };
-const DenseArgs = extern struct { k: u32, n: u32, rows: u32 };
 const FuseArgs = extern struct { k: u32, count: u32, n0: u32, n1: u32, n2: u32, n3: u32, n4: u32, n5: u32, n6: u32, n7: u32 };
 /// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32, weights f32 per row.
 pub const RouteArgs = struct {
@@ -259,6 +259,9 @@ pub const Ops = struct {
     mma: mv_mma.Pipelines,
     scratch: mtl.Buffer,
     scratch_bytes: usize,
+    /// X in the dense tile's fragment order (metal_dense.zig).
+    stage: mtl.Buffer,
+    stage_bytes: usize,
     /// Rows from which `linear` takes an MMA tile; the contract's controls raise it to keep faulted matvecs in reach.
     mma_min_rows: u32,
 
@@ -284,6 +287,9 @@ pub const Ops = struct {
         o.scratch_bytes = options.scratch_bytes;
         o.mma_min_rows = mma_min_rows;
         o.scratch = try device.buffer(options.scratch_bytes, mtl.ResourceOptions.private);
+        errdefer o.scratch.deinit();
+        o.stage_bytes = options.dense_bytes;
+        o.stage = try device.buffer(options.dense_bytes, mtl.ResourceOptions.private);
         return o;
     }
 
@@ -292,6 +298,7 @@ pub const Ops = struct {
         o.dense.deinit();
         o.mma.deinit();
         o.scratch.deinit();
+        o.stage.deinit();
     }
 
     fn pipe(o: *const Ops, k: Kernel) mtl.Pipeline {
@@ -407,11 +414,9 @@ pub const Ops = struct {
 
     fn denseRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool) !void {
         if (rows == 0 or n == 0 or k == 0) return error.InvalidInkling2Op;
-        if (rows >= o.mma_min_rows and k % dense_chunk == 0 and (x.offset | w.offset) % 16 == 0) {
-            e.setPipeline(o.pipe(if (f32_out) .dense_mma_f32 else .dense_mma_bf16));
-            bind(e, &.{ x, w, y });
-            e.setValue(DenseArgs{ .k = k, .n = n, .rows = rows }, 3);
-            e.dispatchGroups(mtl.Size.of((n + dense_tile - 1) / dense_tile, (rows + dense_tile - 1) / dense_tile, 1), mtl.Size.of(128, 1, 1));
+        if (rows >= o.mma_min_rows and k % dense.chunk == 0 and (x.offset | w.offset) % 16 == 0) {
+            const call = dense.Call{ .x = x, .w = w, .y = y, .rows = rows, .n = n, .k = k, .f32_out = f32_out };
+            try dense.encode(e, o.pipe(.dense_perm), o.pipe(if (f32_out) .dense_mma_f32 else .dense_mma_bf16), o.stage, o.stage_bytes, call);
         } else if (rows >= o.mma_min_rows and k >= 32) {
             const xr = mv_mma.Ref{ .buf = x.buffer, .off = x.offset };
             const wr = mv_mma.Ref{ .buf = w.buffer, .off = w.offset };

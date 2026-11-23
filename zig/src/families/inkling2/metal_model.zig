@@ -228,7 +228,7 @@ pub const Model = struct {
 
     /// Shared mapped weights plus graph and expert scratch, excluding per-stream state.
     pub fn fixedBytes(m: *const Model) u64 {
-        var total = m.weightBytes() + Scratch.bytes(&m.config.text, m.options.rows) + m.ops.scratch.length() + m.loop_ops.scratch.length() + m.store.scratchBytes() + m.logits.length();
+        var total = m.weightBytes() + Scratch.bytes(&m.config.text, m.options.rows) + m.ops.scratch.length() + m.ops.stage_bytes + m.loop_ops.scratch.length() + m.store.scratchBytes() + m.logits.length();
         if (m.taps) |b| total += b.length();
         return total;
     }
@@ -259,6 +259,7 @@ pub const Model = struct {
         for (m.checkpoint.shards.items) |sh| mtl.resident.fields.one(sh.buffer, f, joining);
         inline for (Scratch.names) |name| mtl.resident.fields.one(@field(m.scratch, name), f, joining);
         mtl.resident.fields.one(m.ops.scratch, f, joining);
+        mtl.resident.fields.one(m.ops.stage, f, joining);
         mtl.resident.fields.one(m.loop_ops.scratch, f, joining);
         mtl.resident.fields.one(m.logits, f, joining);
         if (m.taps) |b| mtl.resident.fields.one(b, f, joining);
