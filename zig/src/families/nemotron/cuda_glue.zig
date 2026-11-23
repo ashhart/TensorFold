@@ -200,6 +200,7 @@ pub const Glue = struct {
 
     /// The Mamba conv of a window: the last window's kept rows replay from RAW, then the window's rows.
     pub fn conv(g: Glue, proj: u64, base: u64, raw: u64, xc: u64, cw: u64, cb: u64, meta: u64, rows: usize, m: Shape) !void {
+        if (rows > m.rmax) return error.ScanShape; // a stream's rows stride at rmax, as the scan's
         if (g.tri()) |t| return t.conv(proj, base, raw, xc, cw, cb, meta, rows, m);
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, base, raw, xc, cw, cb, meta });

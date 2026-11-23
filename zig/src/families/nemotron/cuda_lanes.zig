@@ -409,7 +409,7 @@ pub const Cuda = struct {
     /// Several windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
     fn verifyShared(self: *Cuda, windows: []const be.Window, out: []be.Verified) !void {
         const e = self.e;
-        if (windows.len > engine.max_streams) return error.WindowTooWide;
+        if (windows.len > @import("cuda_wide.zig").streams(self.e.c)) return error.WindowTooWide; // 8 with the switch off
         var parts: [engine.max_streams]engine.Shared = undefined;
         var ids: [engine.max_streams][state.max_rows]u32 = undefined;
         var bits_row: usize = 0;
