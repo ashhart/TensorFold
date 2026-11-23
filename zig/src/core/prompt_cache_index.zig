@@ -21,6 +21,8 @@ pub fn add(s: *pc.Store, entry: *pc.Entry) !void {
     try s.entries.ensureUnusedCapacity(s.gpa, 1);
     try s.by_position.ensureUnusedCapacity(s.gpa, 1);
     s.entries.appendAssumeCapacity(entry);
+    s.serials += 1; // every entry the store holds is named by its own serial, never 0 (Store.reborrow)
+    entry.serial = s.serials;
     s.by_position.insertAssumeCapacity(below(s, entry.at), entry); // after every state as long: insertion order
 }
 

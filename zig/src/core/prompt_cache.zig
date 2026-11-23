@@ -205,6 +205,7 @@ pub const Store = struct {
 
     /// The live entry `serial` names, borrowed again; null when it has been evicted or expired since.
     pub fn reborrow(s: *Store, serial: u64) ?*Entry {
+        if (serial == 0) return null; // no entry the index holds has it: an unnumbered one is never lent
         for (s.entries.items) |e| if (e.serial == serial and !e.expired) {
             e.borrowers += 1;
             return e;
@@ -496,8 +497,6 @@ pub const Store = struct {
         if (bytes > s.budget) return have;
         const e = s.gpa.create(Entry) catch return have;
         e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .seen = .of(s, m.tokens, &.{}, m.starts, m.at), .last = &.{}, .shared = true };
-        s.serials += 1;
-        e.serial = s.serials;
         e.tokens = s.gpa.dupe(u32, m.tokens) catch return s.drop(e, have, false);
         e.last = s.gpa.dupe(u32, prompt) catch return s.drop(e, have, false);
         const key = m.key;
