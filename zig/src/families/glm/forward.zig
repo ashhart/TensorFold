@@ -570,7 +570,6 @@ pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, l
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }
-
 /// A judged window's first `keep` of `rows` in each KDA layer, replayed from the round's entry state on a rejection.
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     keepKdaAt(x, e, 0, rows, keep);
