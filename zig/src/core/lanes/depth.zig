@@ -185,7 +185,7 @@ pub const Rule = struct {
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         if (r.geometric and !r.sharing) return forward + (if (drafts > 0) r.mtp_step_ms else 0.0); // one draft pass
-        var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
+        var modeled = forward + r.draftHeadMs(drafts);
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
