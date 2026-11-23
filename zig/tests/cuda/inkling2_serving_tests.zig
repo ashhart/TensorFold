@@ -152,6 +152,94 @@ fn crossPrompt(gpu: Gpu, loaded: *native.Loaded, ids: []const u32) !void {
     };
 }
 
+/// A history on the chunk grid is kept at its end and decoded on; after another prompt, its next turn resumed == fresh.
+fn turnAfterHistory(gpu: Gpu, loaded: *native.Loaded, ids: []const u32) !void {
+    const Saved = @TypeOf(loaded.target.model).Saved;
+    const Keeper = struct {
+        b: *Backend,
+        saved: ?*Saved = null,
+        fn at(ptr: *anyopaque, s: *lanes.Stream, mark: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ptr));
+            k.saved = k.b.saveState(s, mark) catch null;
+        }
+    };
+    const t = target(loaded);
+    const b = loaded.backend;
+    const history = native.prompt_rows;
+    var turn: [history + 16]u32 = undefined;
+    @memcpy(turn[0..history], ids[0..history]);
+    @memcpy(turn[history..], ids[6000..6016]);
+    var keeper: Keeper = .{ .b = t };
+    defer if (keeper.saved) |x| t.dropState(x);
+    {
+        var s = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-history", .prompt = ids[0..history], .max_new = 24, .reuse = .{ .marks = &.{history} } });
+        defer s.deinit(gpu.gpa);
+        defer b.release(&s);
+        s.reuse.hook = .{ .ptr = &keeper, .at = Keeper.at };
+        try b.prefill(&s);
+        if (keeper.saved == null) return error.MiniSnapshotNotSaved;
+        var h = try b.first(&s, history);
+        for (0..23) |i| h = try b.queue(&s, .{ .handle = h }, history + i + 1);
+    }
+    for ([_]?lanes.Sampling{ null, sampled }, 0..) |sampling, case| {
+        var other = try trace(gpu, loaded, ids[3000 .. 3000 + history + 100], null, 2, false, .{});
+        other.deinit(gpu.gpa);
+        var resumed = try trace(gpu, loaded, &turn, sampling, 24, false, .{ .saved = keeper.saved.?, .at = history });
+        defer resumed.deinit(gpu.gpa);
+        if (resumed.cached != history or resumed.failed) return error.MiniSnapshotNotRestored;
+        var fresh = try trace(gpu, loaded, &turn, sampling, 24, false, .{});
+        defer fresh.deinit(gpu.gpa);
+        if (fresh.cached != 0) return error.MiniFreshTurnCached;
+        sameTrace(&fresh, &resumed) catch |err| {
+            std.debug.print("RESULT mini-serving turn after history case={d} mismatch={s}\n", .{ case, @errorName(err) });
+            return err;
+        };
+    }
+}
+
+/// A state saved from one capacity restores into a cache of another: each head's kept rows land at their positions.
+fn otherCapacity(gpu: Gpu, loaded: *native.Loaded) !void {
+    const Model = @TypeOf(loaded.target.model);
+    const ks = mini.kept_state;
+    const a = &loaded.target.model;
+    const s = loaded.target.stream;
+    a.slot = 0;
+    const window = a.w.c.text.window;
+    const from = try gpu.gpa.alloc(u8, a.layout.bytes);
+    defer gpu.gpa.free(from);
+    // At context 3500 B's sliding rings are A's and wrap by 3300, its global ones shorter; at 1500 all are shorter.
+    for ([_][2]u32{ .{ 3500, 3300 }, .{ 1500, 1400 } }) |case| {
+        var b = try Model.init(gpu.gpa, a.d, s, a.w, case[0]);
+        defer b.deinit();
+        const to = try gpu.gpa.alloc(u8, b.layout.bytes);
+        defer gpu.gpa.free(to);
+        var prng = std.Random.DefaultPrng.init(case[0]);
+        prng.random().bytes(from);
+        prng.random().bytes(to);
+        try cuda.copy_source.enqueue(a.d, a.slots[0].cache.ptr, from, s);
+        try cuda.copy_source.enqueue(a.d, b.slots[0].cache.ptr, to, s);
+        const saved = try a.save(s, case[1]);
+        defer a.drop(s, saved);
+        try b.restore(s, saved);
+        try s.synchronize();
+        try cuda.memory.download(a.d, b.slots[0].cache.ptr, to);
+        var va: [a.w.p.visits.len]ks.Visit = undefined;
+        var vb: [a.w.p.visits.len]ks.Visit = undefined;
+        const at = case[1];
+        for (a.keptVisits(&va), b.keptVisits(&vb), 0..) |x, y, visit| for (0..2) |side| for (0..x.heads) |h| {
+            for (at - ks.kept(x.global, window, at)..at) |p| {
+                const ra = (if (side == 0) x.k else x.v) - a.slots[0].cache.ptr + (h * x.ring + p % x.ring) * x.row;
+                const rb = (if (side == 0) y.k else y.v) - b.slots[0].cache.ptr + (h * y.ring + p % y.ring) * y.row;
+                if (!std.mem.eql(u8, from[ra..][0..x.row], to[rb..][0..y.row])) {
+                    std.debug.print("RESULT mini-serving other capacity {d}: visit {d} side {d} head {d} position {d} moved\n", .{ case[0], visit, side, h, p });
+                    return error.MiniKeptRowMoved;
+                }
+            }
+        };
+        if (!std.mem.eql(u8, from[a.layout.at(0).conv_offset..], to[b.layout.at(0).conv_offset..])) return error.MiniKeptConvMoved;
+    }
+}
+
 fn freshAndResumed(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32) !void {
     for ([_]?lanes.Sampling{ null, sampled }, 0..) |sampling, case| {
         var fresh = try trace(gpu, loaded, prompt, sampling, 8, false, .{});
@@ -388,10 +476,14 @@ pub fn run(gpu: Gpu, model: []const u8, ids_path: []const u8) !void {
     check.pass("Mini CUDA fresh and resumed prompts produce identical logits and tokens", .{});
     try crossPrompt(gpu, &loaded, ids);
     check.pass("Mini CUDA a state resumed after another prompt resumed its prefix equals the fresh prompt", .{});
+    try turnAfterHistory(gpu, &loaded, ids);
+    check.pass("Mini CUDA a turn after a history kept at the chunk grid resumes equal to fresh, after another prompt", .{});
     try admission(gpu, &loaded, ids[0..257], ids[17..1042]);
     check.pass("Mini CUDA one-slot admission serializes concurrent requests without changing tokens", .{});
     try concurrent(gpu, &loaded, ids);
     check.pass("Mini CUDA four slots: concurrent greedy and seeded replies equal solo, a fifth is refused", .{});
     try copiedDrafts(gpu, &loaded, ids[0..64]);
     check.pass("Mini CUDA opt-in copy drafting preserves target tokens and rolls back exactly", .{});
+    try otherCapacity(gpu, &loaded);
+    check.pass("Mini CUDA a kept state restores each head's rows into a cache of another capacity", .{});
 }
