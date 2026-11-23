@@ -3,6 +3,7 @@ const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Window = @import("backend.zig").Window;
 const Penalties = @import("sampling.zig").Penalties;
+const logit_bias = @import("logit_bias.zig");
 
 /// A window's rows at most here: its pending row and its drafts.
 pub const most_rows = 256;
@@ -14,6 +15,8 @@ pub const Entries = struct {
     subs: std.ArrayList(f32) = .empty,
     /// The current window's counts: the reply's tokens before it, then its pending token.
     counts: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty,
+    /// Set when a staged row carries a request bias; the CUDA draw then uses the bias kernel.
+    biased: bool = false,
 
     pub fn deinit(self: *Entries, gpa: std.mem.Allocator) void {
         self.rows.deinit(gpa);
@@ -30,6 +33,7 @@ pub const Entries = struct {
         self.rows.clearRetainingCapacity();
         self.toks.clearRetainingCapacity();
         self.subs.clearRetainingCapacity();
+        self.biased = false;
     }
 
     /// A window's reply so far: `stream`'s committed tokens before `cache_len`, then `next`, the token at `cache_len`.
@@ -54,6 +58,30 @@ pub const Entries = struct {
             self.toks.appendAssumeCapacity(t);
             self.subs.appendAssumeCapacity(p.of(c));
         };
+    }
+
+    /// Row `at`'s entries under `p` and `bias`; an empty list stages exactly `row`'s entries.
+    pub fn rowBias(self: *Entries, gpa: std.mem.Allocator, at: u32, p: Penalties, path: []const u32, bias: []const logit_bias.Entry) !void {
+        if (bias.len == 0) return self.row(gpa, at, p, path);
+        for (path) |t| try bump(gpa, &self.counts, t, 1);
+        defer for (path) |t| bump(gpa, &self.counts, t, -1) catch unreachable;
+        const n = self.counts.count() + bias.len;
+        self.biased = true;
+        try self.rows.ensureUnusedCapacity(gpa, n);
+        try self.toks.ensureUnusedCapacity(gpa, n);
+        try self.subs.ensureUnusedCapacity(gpa, n);
+        for (self.counts.keys(), self.counts.values()) |t, c| if (c > 0 and p.active()) {
+            self.rows.appendAssumeCapacity(at);
+            self.toks.appendAssumeCapacity(t);
+            self.subs.appendAssumeCapacity(logit_bias.subtract(p.of(c), logit_bias.find(bias, t)));
+        };
+        for (bias) |b| {
+            const count = self.counts.get(b.token) orelse 0;
+            if (p.active() and count > 0) continue;
+            self.rows.appendAssumeCapacity(at);
+            self.toks.appendAssumeCapacity(b.token);
+            self.subs.appendAssumeCapacity(logit_bias.subtract(0, b));
+        }
     }
 
     /// A verify window's rows from row `first`: `drafts` are its rows 1.. (held or host), drawn at `w.positions`.
