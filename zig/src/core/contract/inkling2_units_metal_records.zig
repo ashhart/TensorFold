@@ -3,8 +3,8 @@ const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 
 pub const records = [_]M{
-    .{ .name = "metal inkling2 units tf_ink2_nvfp4_gu_units", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
-    .{ .name = "metal inkling2 units tf_ink2_nvfp4_down_units", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 units tf_ink2_nvfp4_gu_units", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "metal inkling2 units tf_ink2_nvfp4_down_units", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "metal inkling2 units tf_ink2_mxfp8_gu_units", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 units tf_ink2_mxfp8_down_units", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
 };

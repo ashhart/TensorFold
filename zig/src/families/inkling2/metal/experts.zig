@@ -266,14 +266,15 @@ pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: 
             for ([_]Ref{ x, w, scales, g.amax, g.denominator, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 8);
             e.setPipeline(pipes[@intFromBool(down)]);
+            e.dispatchGroups(mtl.Size.of((weight_rows + 127) / 128, c.experts, 1), mtl.Size.of(128, 1, 1));
         },
         .mxfp8 => {
             for ([_]Ref{ x, w, scales, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 6);
             e.setPipeline(pipes[2 + @as(usize, @intFromBool(down))]);
+            e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
         },
     }
-    e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// Single-row tensor-unit launch over only the `topk` active route slots.
