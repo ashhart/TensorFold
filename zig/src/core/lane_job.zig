@@ -23,6 +23,7 @@ pub const Job = struct {
     started: bool = false,
     prefill_sent: bool = false, // a lone driver's prefilled event went out
     fill_began: bool = false, // its first prompt chunk ran
+    prefill_cached_hint: u32 = 0, // at admission, for ranking only until the first fill
     submitted: i96 = 0,
     admitted_ns: ?i96 = null, // first admission only, retained if a background pass later yields
     fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
@@ -47,6 +48,15 @@ pub const Job = struct {
     wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
     fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
     backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
+
+    /// Fill work at admission. The first fill replaces the estimate with the actually restored prefix.
+    pub fn estimatedPassRows(job: *const Job) u64 {
+        var cached = job.stream.cached;
+        if (!job.fill_began and !job.stream.reuse_failed) {
+            cached = @max(cached, job.prefill_cached_hint);
+        }
+        return job.stream.prompt_len -| cached;
+    }
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
