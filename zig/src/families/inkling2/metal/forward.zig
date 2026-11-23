@@ -16,11 +16,12 @@ pub const Ref = state.Ref;
 pub const Segment = struct { cache: *state.Cache, rows: usize };
 pub const LogitMode = enum(u32) { logits = 0, argmax = 1, both = 2 };
 pub const Meta = extern struct { seg: ap.Seg, pos: i32, seg_of: i32 };
+pub const Flight = struct { cbs: [cuts.len + 1]mtl.CommandBuffer = undefined, len: usize = 0 };
 pub const Options = struct {
     all: bool = false,
     ids: ?Ref = null,
     meta: ?Ref = null,
-    flight: ?*mtl.CommandBuffer = null,
+    flight: ?*Flight = null,
     taps: ?state.Ref = null,
     logits_mode: LogitMode = .logits,
     argmax_out: ?Ref = null,
@@ -490,7 +491,10 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     e.end();
     cb.commit();
     if (options.flight) |flight| {
-        flight.* = cb.retain();
+        for (parts[0..n_parts], 0..) |part, i| flight.cbs[i] = part;
+        flight.cbs[n_parts] = cb.retain();
+        flight.len = n_parts + 1;
+        n_parts = 0;
         return;
     }
     cb.wait();

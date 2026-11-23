@@ -16,7 +16,7 @@ pub const BatchPlan = logits_.BatchPlan;
 pub const planVerifyBatch = logits_.planVerifyBatch;
 const ring = logits_.ring;
 const meta_slots = 64;
-const Flight = struct { end: u64, cb: mtl.CommandBuffer };
+const Flight = struct { end: u64, work: fwd.Flight };
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
 pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
@@ -68,8 +68,8 @@ pub const Metal = struct {
     pub fn deinit(self: *Metal) void {
         while (self.flights.items.len > 0) {
             const f = self.flights.orderedRemove(0);
-            f.cb.wait();
-            f.cb.release();
+            for (f.work.cbs[0..f.work.len]) |cb| cb.wait();
+            for (f.work.cbs[0..f.work.len]) |cb| cb.release();
         }
         self.flights.deinit(self.gpa);
         var it = self.caches.valueIterator();
@@ -200,13 +200,10 @@ pub const Metal = struct {
 
     fn land(self: *Metal) !void {
         const f = self.flights.orderedRemove(0);
-        defer f.cb.release();
-        f.cb.wait();
-        if (f.cb.failure()) |msg| {
+        if (logits_.settleFlight(f.work.cbs[0..f.work.len], &self.landed, f.end)) |msg| {
             std.log.err("inkling2_loop step: {s}", .{msg});
             return error.GpuFailed;
         }
-        self.landed = @max(self.landed, f.end);
     }
 
     fn drain(self: *Metal) !void {
@@ -367,9 +364,9 @@ pub const Metal = struct {
             const out = self.take();
             const meta_slot = self.meta_cursor % meta_slots;
             self.meta_cursor +%= 1;
-            var cb: mtl.CommandBuffer = undefined;
-            try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in_h), .meta = self.metaOf(meta_slot), .taps = taps, .logits_mode = .argmax, .argmax_out = self.slotOf(out), .flight = &cb });
-            self.flights.appendAssumeCapacity(.{ .end = out + 1, .cb = cb });
+            var work: fwd.Flight = .{};
+            try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in_h), .meta = self.metaOf(meta_slot), .taps = taps, .logits_mode = .argmax, .argmax_out = self.slotOf(out), .flight = &work });
+            self.flights.appendAssumeCapacity(.{ .end = out + 1, .work = work });
             if (self.prepared) cache.tap = .{ .buf = self.scratch.taps, .start = @intCast(cache.len), .rows = 1, .gen = generation };
             cache.len += 1;
             return out;

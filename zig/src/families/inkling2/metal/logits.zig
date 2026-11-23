@@ -7,6 +7,15 @@ pub const ring = 4096;
 pub const SlotReq = struct { rows: usize, sampling: ?lanes.Sampling, has_masks: bool, has_logprobs: bool };
 pub const BatchPlan = struct { mode: fwd.LogitMode, write_logits: bool };
 
+/// Waits and releases every command buffer in a flight, advancing `landed` only when all succeed.
+pub fn settleFlight(cbs: anytype, landed: *u64, end: u64) ?[*:0]const u8 {
+    defer for (cbs) |cb| cb.release();
+    for (cbs) |cb| cb.wait();
+    for (cbs) |cb| if (cb.failure()) |msg| return msg;
+    landed.* = @max(landed.*, end);
+    return null;
+}
+
 pub fn sampled(sampling: ?lanes.Sampling) ?lanes.Sampling {
     const t = sampling orelse return null;
     return if (t.temperature > 0) t else null;
@@ -121,4 +130,47 @@ test "sampled first-token logprob uses the last written handle, not argmax" {
     try std.testing.expect(std.math.isFinite(row.logprob));
     const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
     try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
+}
+
+test "settleFlight checks every earlier command buffer before advancing landed and releases all parts" {
+    const Mock = struct {
+        const Self = @This();
+        msg: ?[*:0]const u8 = null,
+        waits: usize = 0,
+        releases: usize = 0,
+        const Ref = struct {
+            m: *Self,
+            pub fn wait(r: @This()) void {
+                r.m.waits += 1;
+            }
+            pub fn release(r: @This()) void {
+                r.m.releases += 1;
+            }
+            pub fn failure(r: @This()) ?[*:0]const u8 {
+                return r.m.msg;
+            }
+        };
+    };
+    const slots = @typeInfo(@TypeOf(@as(fwd.Flight, undefined).cbs)).array.len;
+    try std.testing.expectEqual(@as(usize, 5), slots);
+    var landed: u64 = 10;
+    var mocks: [slots]Mock = @splat(.{});
+    var refs: [slots]Mock.Ref = undefined;
+    for (&mocks, &refs) |*m, *r| r.* = .{ .m = m };
+
+    mocks[1].msg = "earlier part failed";
+    try std.testing.expectEqualStrings("earlier part failed", std.mem.span(settleFlight(&refs, &landed, 11).?));
+    try std.testing.expectEqual(@as(u64, 10), landed);
+    for (mocks) |m| try std.testing.expect(m.waits == 1 and m.releases == 1);
+
+    mocks[1].msg = null;
+    mocks[slots - 1].msg = "final part failed";
+    try std.testing.expectEqualStrings("final part failed", std.mem.span(settleFlight(&refs, &landed, 11).?));
+    try std.testing.expectEqual(@as(u64, 10), landed);
+    for (mocks) |m| try std.testing.expect(m.waits == 2 and m.releases == 2);
+
+    mocks[slots - 1].msg = null;
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), settleFlight(&refs, &landed, 11));
+    try std.testing.expectEqual(@as(u64, 11), landed);
+    for (mocks) |m| try std.testing.expect(m.waits == 3 and m.releases == 3);
 }
