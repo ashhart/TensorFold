@@ -182,6 +182,7 @@ pub const Gemm = struct {
     mutation: controls.Mutation,
     name: []const u8,
     served: [3]c.Shape,
+    shapes: usize = 3, // served shapes in use: a retargeted family registers two
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     d: ?dense_in.Dense = null,
     w16: []u16 = &.{},
@@ -224,13 +225,14 @@ pub const Gemm = struct {
         const name = try std.fmt.allocPrint(p.a, "{s} ll_gemm_{d}{d}", .{ label, @intFromBool(p.am), @intFromBool(p.an) });
         p.a.free(p.name);
         p.name = name;
-        p.served = served;
+        p.served[0..2].* = served;
+        p.shapes = 2;
     }
 
     const vt = g.hooks(Gemm);
 
     pub fn kernel(p: *Gemm) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = if (p.wide) .f32 else .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = if (p.wide) .f32 else .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = p.served[0..p.shapes] }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// The shape the kernel runs at: whole tiles where its form assumes them (the padded rows are the probe's too).

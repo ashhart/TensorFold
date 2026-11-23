@@ -148,7 +148,7 @@ pub const Set = struct {
             try functions.append(a, fun);
             var buf: [48]u8 = undefined;
             if (!wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ label, fun }))) continue;
-            var m = try dense.Matvec.init(a, device, queue, per, .none);
+            var m = try dense.Matvec.init(a, device, queue, per, false, .none);
             m.retarget(label, matvecShapes(per)) catch |err| {
                 m.deinit();
                 return err;
@@ -161,7 +161,7 @@ pub const Set = struct {
             if (!tensor or !wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ label, fun }))) continue;
             const am = i / 2 == 1;
             const an = i % 2 == 1;
-            var m = try dense.Gemm.init(a, device, queue, am, an, .none);
+            var m = try dense.Gemm.init(a, device, queue, am, an, false, .none);
             m.retarget(label, gemmShapes(am, an)) catch |err| {
                 m.deinit();
                 return err;
@@ -215,7 +215,7 @@ pub const Set = struct {
         var buf: [48]u8 = undefined;
         for (matvec_rows, family.llama_names[0..matvec_rows.len]) |per, fun| {
             if (!wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ o_label, fun }))) continue;
-            var m = try dense.Matvec.init(a, device, queue, per, .none);
+            var m = try dense.Matvec.init(a, device, queue, per, false, .none);
             m.retarget(o_label, oMatvecShapes(per)) catch |err| {
                 m.deinit();
                 return err;
@@ -226,7 +226,7 @@ pub const Set = struct {
             if (!tensor or !wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ o_label, fun }))) continue;
             const am = i / 2 == 1;
             const an = i % 2 == 1;
-            var m = try dense.Gemm.init(a, device, queue, am, an, .none);
+            var m = try dense.Gemm.init(a, device, queue, am, an, false, .none);
             m.retarget(o_label, oGemmShapes(am, an)) catch |err| {
                 m.deinit();
                 return err;
