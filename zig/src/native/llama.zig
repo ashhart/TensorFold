@@ -353,3 +353,22 @@ test "llama host: drafted window prices one stream before automatic lanes are fi
     const auto: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 64 };
     try std.testing.expectEqual(@as(usize, 4096), longestWindow(&c, &c, budget, 4096, auto));
 }
+
+test "llama host: explicit 13 omitted context admits every pair at the default window" {
+    const a = std.testing.allocator;
+    const c: fl.config.Config = .{ .hidden = 256, .intermediate = 512, .layers = 2, .heads = 4, .kv_heads = 2, .vocab = 1024, .eps = 0.00001, .theta = 10000, .context = 4096 };
+    const fixed: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 13, .lanes_fixed = true };
+    const short: usize = 256;
+    const short_pair = fl.state.cacheBytes(&c, short + 1) + fl.state.cacheBytes(&c, short + fl.state.window_rows);
+    const budget = 13 * @as(u64, @intCast(short_pair));
+    const one: fl.budget.Drafted = .{ .c = &c, .streams = 1 };
+    const one_pair_max = fl.budget.longestWith(&c, one, budget, 4096);
+    try std.testing.expect(one_pair_max > short);
+    const window = longestWindow(&c, &c, budget, 4096, fixed);
+    const pair = fl.state.cacheBytes(&c, window + 1) + fl.state.cacheBytes(&c, window + fl.state.window_rows);
+    var why: []const u8 = "";
+    defer if (why.len > 0) a.free(why);
+    const admitted = try admitStreams(a, @intCast(pair), budget, fixed, @intCast(window), &why);
+    try std.testing.expectEqual(@as(?u32, 13), admitted);
+    try std.testing.expectEqual(short, window);
+}
