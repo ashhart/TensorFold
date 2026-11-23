@@ -29,7 +29,6 @@ const low = wt.low;
 const eps = wt.eps;
 const vocab = wt.vocab;
 const experts_n = wt.experts_n;
-const slots = wt.slots;
 const moe_w = wt.moe_w;
 const tile = wt.tile;
 const head_dim = wt.head_dim;
@@ -129,6 +128,15 @@ pub fn Pass(comptime Tri: type) type {
 
         /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
+            if (w.tail) |t| {
+                // the FP8G rows over the whole output, its zero rows where the tail goes, then the tail copied in
+                if (sk != 1) return error.UnexpectedTensor;
+                const used = try tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
+                if (used != 1) return error.UnexpectedTensor;
+                try self.k.nativeMatmul(self.stream, x, w.k, m, t.native, self.s.tail, self.s.native_part, .bf16);
+                try ops.copyCols(self.k, self.stream, self.s.tail, t.n, out + t.at * 2, w.n, t.n, m);
+                return 1;
+            }
             if (try zs.lane(self.k, self.stream, self.s, self.zero_slices, x, w, part, m, sk)) |one| return one;
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
@@ -180,9 +188,9 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 4, 1, 1, 1);
                 return;
             }
-            const y = s.y + r0 * slots * dims * 4;
-            const wts = s.wts + r0 * slots * 4;
-            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
+            const y = s.y + r0 * s.slots * dims * 4;
+            const wts = s.wts + r0 * s.slots * 4;
+            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, s.slots - 1, s.slots, 1);
         }
 
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
@@ -441,10 +449,10 @@ pub fn Pass(comptime Tri: type) type {
         pub fn moeBlockKeep(self: *Self, lw: *const Layer, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
-            const pairs = n * slots;
+            const pairs = n * s.slots;
             try self.copy(keep.moe_x, s.mixed, n * dims * 2);
             try self.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
-            try self.tri.topkMany(s.router_l, s.picks, s.wts, n);
+            try self.tri.topkMany(s.router_l, s.picks, s.wts, n, s.slots);
             try self.copy(keep.moe_ids, s.picks, pairs * 4);
             try self.copy(keep.moe_wts, s.wts, pairs * 4);
             const e = experts_n + 1;
@@ -454,13 +462,13 @@ pub fn Pass(comptime Tri: type) type {
                 // prompt rows on 64-pair factored tiles, expert_rows' bits
                 try self.k.router.route(self.stream, s.picks, pairs, e, tk.fexp_tile, plan);
                 const items64 = cdiv(pairs, tk.fexp_tile) + e;
-                try tiles.experts(self.stream, self.k.tiles.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
+                try tiles.experts(self.stream, self.k.tiles.fexp_up, 2, s.mixed, dims, s.slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
                 try tiles.experts(self.stream, self.k.tiles.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);
             const items = cdiv(pairs, rows_tile) + e;
-            try self.k.moe.run(self.stream, true, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items);
+            try self.k.moe.run(self.stream, true, s.mixed, dims, s.slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items);
             try self.k.moe.run(self.stream, false, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items);
         }
 

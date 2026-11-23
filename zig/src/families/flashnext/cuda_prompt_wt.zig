@@ -28,6 +28,8 @@ pub const index_heads: usize = 4;
 pub const index_dim: usize = 128;
 pub const half: usize = 32;
 pub const proj_n: usize = 13952;
+/// The attention indexer's own projection rows: the widest BF16 tail a block-FP8 projection carries.
+pub const tail_n: usize = (index_heads + 1) * index_dim;
 pub const out_k: usize = 6144;
 /// Chunks of 512 keys a row's attention reads at most: 2,048 selected keys plus a tail, or 2,051 dense keys.
 pub const nch: usize = 5;

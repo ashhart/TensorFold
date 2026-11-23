@@ -19,6 +19,15 @@ contract receipts. Compile success and host tests do not establish checkpoint fi
 limits must be measured with the exact checkpoint, binary, device topology and request settings. Prefix retention
 with MTP is outside this path's qualified scope; evaluate with `--prompt-cache-gib 0`.
 
+A projection whose parts are block FP8 (e4m3 codes with an fp32 `weight_scale_inv` a 128 x 128 block) loads as stored
+on the FP8G lane: its leading parts stack row for row into one packed weight whose rows past them are zero codes with
+a scale of one, and a trailing BF16 part, such as an indexer projection stored beside block-FP8 q, k and v or the
+DeltaNet in-projection's 48-row `in_proj_b` and `in_proj_a` beside its block-FP8 qkv and z, is held as the exact rows
+a second BF16 matmul computes and copied into their columns after the lane's. The tail's rows need not fill a 128-row
+block: a tail row is a zero code on the lane, so its product there is a zero that the copy replaces, and the
+packers zero and one-fill the rows past the projection's own. A projection storing an MXFP8 `weight_scale` or affine
+words is not this arm and takes the reader it took before.
+
 ### NVIDIA's NVFP4 checkpoint on two GB10s
 
 `nvidia/Qwen3.8-Flash-Next-NVFP4` (the checkpoint SGLang's Flash Next recipes serve) loads as stored: NVFP4 routed
