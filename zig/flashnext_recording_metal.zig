@@ -54,6 +54,9 @@ pub const Device = struct {
     pub fn generation(_: Device) u32 {
         return 14;
     }
+    pub fn name(_: Device) [*:0]const u8 {
+        return ""; // no chip the cutover table lists
+    }
 };
 pub const CompileOptions = struct {
     pub fn mlx() @This() {
