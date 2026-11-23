@@ -39,7 +39,6 @@ fn shared(b: anytype, io: std.Io, comptime width: usize, probe: bool, seed: ?lan
     const profile = b.pass_profile;
     const costs = b.costs;
     const timed = b.timed;
-    if (draft) |d| try d.generation.settle();
     b.window = width;
     b.draft = null;
     b.pass_profile = false;
@@ -48,7 +47,6 @@ fn shared(b: anytype, io: std.Io, comptime width: usize, probe: bool, seed: ?lan
         b.draft = draft;
         b.pass_profile = profile;
         @memcpy(b.costs[0..window], costs[0..window]);
-        if (draft) |d| d.reset() catch {};
     }
     errdefer {
         b.costs = costs;
