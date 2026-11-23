@@ -38,6 +38,10 @@ const Host = struct {
     }
 };
 
+fn admittedStreams(_: std.mem.Allocator, _: u64, _: u64, o: api.Open, _: u64, _: *[]const u8) !?u32 {
+    return o.lanes;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (o.drafts and o.drafter != null and (o.lanes > 4 or (o.drafter_bits != 0 and o.drafter_bits != 4))) {
         problem.* = "--drafter: Flint DFlash2 is qualified for --parallel 1 to 4 and --drafter-bits 0 or 4 on Metal M5";
@@ -77,6 +81,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    const served = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)), budget, o, @intCast(window), problem) orelse {
+        if (draft) |d| d.deinit();
+        model.deinit();
+        return null;
+    };
     std.log.info("flint: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -86,7 +95,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.resident = null;
     h.drafter = draft;
     h.drafted = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(served, 1), .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
     if (draft != null) try h.metal.calibrate();
@@ -102,7 +111,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.drafted) |*d| d.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter.? } else null } });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter.? } else null } });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -214,4 +223,17 @@ test "Flint DFlash2 refuses an unqualified parallel count and bit width by name 
         try std.testing.expectEqual(null, try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem));
         try std.testing.expectStringStartsWith(problem, "--drafter: Flint DFlash2");
     }
+}
+
+test "Metal capabilities: Flint admission fits automatic 64 and refuses explicit over-capacity" {
+    const a = std.testing.allocator;
+    const auto: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 3, .lanes_fixed = true };
+    const over: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 64, .lanes_fixed = true };
+    var why: []const u8 = "";
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
 }

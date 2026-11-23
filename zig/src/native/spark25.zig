@@ -34,6 +34,10 @@ const Host = struct {
     }
 };
 
+fn admittedStreams(_: std.mem.Allocator, _: u64, _: u64, o: api.Open, _: u64, _: *[]const u8) !?u32 {
+    return o.lanes;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
@@ -65,6 +69,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    const served = try admittedStreams(a, fl.state.cacheBytes(@intCast(window)), budget, o, @intCast(window), problem) orelse {
+        model.deinit();
+        return null;
+    };
     std.log.info("spark2_5: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -72,7 +80,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.resident = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(served, 1), .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
@@ -80,7 +88,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -181,4 +189,17 @@ test "spark metal host: cache callback with no configured cache leaves no state 
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+test "Metal capabilities: Spark25 admission fits automatic 64 and refuses explicit over-capacity" {
+    const a = std.testing.allocator;
+    const auto: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 3, .lanes_fixed = true };
+    const over: api.Open = .{ .dir = "", .model_type = "spark2_5", .lanes = 64, .lanes_fixed = true };
+    var why: []const u8 = "";
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
 }

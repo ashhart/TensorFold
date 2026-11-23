@@ -41,6 +41,10 @@ const Host = struct {
     }
 };
 
+fn admittedStreams(_: std.mem.Allocator, _: u64, _: u64, o: api.Open, _: u64, _: *[]const u8) !?u32 {
+    return o.lanes;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
@@ -99,7 +103,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     } else null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget, .drafts = dspark != null or df2 != null });
+    const served = try admittedStreams(a, fl.state.cacheBytes(&model.config, @intCast(window)), budget, o, @intCast(window), problem) orelse {
+        model.deinit();
+        return null;
+    };
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(served, 1), .budget = budget, .drafts = dspark != null or df2 != null });
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.draft = null;
@@ -128,7 +136,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.markers = .{ fl.vision.image_start, model.config.image_token, fl.vision.image_end };
     // the template writes the image token alone: the server adds start and end around each image's rows
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .image_share = v.image_share, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, servedInfo(h, o.lanes, @intCast(window), vis));
+    h.host = api.LaneHost.init(gpa, io, &h.core, servedInfo(h, served, @intCast(window), vis));
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -257,4 +265,17 @@ test "MiniMax capabilities: logprobs match the actual plain or external-draft ba
     try std.testing.expect(drafted.structures and wrapped.vtable.first_masked != null);
     try std.testing.expectEqual(plain.context_window, drafted.context_window);
     try std.testing.expectEqual(plain.prefill_step, drafted.prefill_step);
+}
+
+test "Metal capabilities: MiniMax admission fits automatic 64 and refuses explicit over-capacity" {
+    const a = std.testing.allocator;
+    const auto: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3, .lanes_fixed = true };
+    const over: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 64, .lanes_fixed = true };
+    var why: []const u8 = "";
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
 }
