@@ -17,6 +17,12 @@ pub const StartupLine = struct {
     }
 };
 
+test "qwen27 startup: the adaptive block hooks are analyzed" {
+    _ = &lb.Metal.init;
+    _ = &lb.Metal.backend;
+    _ = &lb.Metal.lone;
+}
+
 test "qwen27 startup: draft stream count, singular text and optional suffixes" {
     const limit = try lb.draftSlots();
     const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
