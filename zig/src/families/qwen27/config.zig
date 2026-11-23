@@ -11,7 +11,7 @@ pub const max_layers = 128;
 pub const max_eos = 8;
 pub const Problem = fields.Problem;
 comptime {
-    std.debug.assert(eos_ids.qwen27_metal.max.? == max_eos);
+    std.debug.assert(eos_ids.qwen35.max.? == max_eos);
 }
 
 pub const Config = struct {
@@ -331,7 +331,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
     const gen = if (generation) |text| try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) else null;
     defer if (gen) |g| g.deinit();
     const gen_doc: std.json.Value = if (gen) |g| .{ .object = try object(g.value) } else .null;
-    const ids = eos_ids.collect(&c.eos, eos_ids.qwen27_metal, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
+    const ids = eos_ids.collect(&c.eos, eos_ids.qwen35, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
         error.BadEosValue => error.BadConfig,
         else => e,
     };

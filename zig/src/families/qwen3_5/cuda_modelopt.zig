@@ -249,6 +249,7 @@ pub const Kernels = struct {
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
         var lane = try cuda.qmmf.Lane.load(d, capability / 10);
+        lane.pdl = @import("cuda_pdl.zig").on(); // 1A: the qmmf image already prefetches weights before its wait
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();

@@ -96,11 +96,11 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const layer: c_int = @intCast(di);
                 try e.projManyPrompt(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
-                try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                try e.runPdl(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
                 if (!(record and nseg == 1 and total > 1)) try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
-                try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
+                try e.runPdl(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
                 di += 1;
             },
@@ -112,9 +112,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 const head_norm = if (g.bf16) e.fns.head_norm_shift else e.fns.head_norm;
-                try e.run(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
-                try e.run(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
+                try e.runPdl(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
+                try e.runPdl(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
+                try launchPdl(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (unread and last_layer) return; // the keys, values and their rotary rows are all this chunk keeps
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
@@ -140,7 +140,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const mix0 = e.mix + t0 * aw * 2;
                 const gate_args = .{ geo, y0, e.qraw + t0 * 2 * aw * 2, mix0, @as(c_int, @intCast(rows)), gp, sums };
                 const gate_grid = .{ (rows * aw + 255) / 256, 1, 1 };
-                try launch(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
+                try launchPdl(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
                 if (e.learning) |k| try k.gated(i, e.mix, total);
                 try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
                 ai += 1;
@@ -186,6 +186,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
 fn launch(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
     sig.check(s, @TypeOf(args));
     return e.run(f, grid, block, args);
+}
+
+/// A glue launch with a qwen_pdl::enter() prologue, dependent under TF_QWEN_PDL.
+fn launchPdl(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
+    sig.check(s, @TypeOf(args));
+    return e.runPdl(f, grid, block, args);
 }
 
 /// A bf16 decode attention launch with its two tile buffers of dynamic shared memory.

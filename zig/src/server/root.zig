@@ -340,6 +340,7 @@ test {
     _ = @import("quoted_markers_test.zig");
     _ = @import("request_cost_test.zig");
     _ = @import("prompt_tool_turn_test.zig");
+    _ = @import("tool_conformance_test.zig");
 }
 
 test {

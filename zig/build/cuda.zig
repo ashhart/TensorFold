@@ -78,8 +78,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // check-pdl-loads: no global read above a dependent launch's wait (tools/pdl_early_loads.py)
     if (nvcc) |tool| {
         const check = b.addSystemCommand(&.{ "python3", "tools/pdl_early_loads.py", b.pathJoin(&.{ std.fs.path.dirname(tool) orelse ".", "cuobjdump" }) });
-        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf")) check.addFileArg(file);
-        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images and qmmf (needs -Dnvcc)").dependOn(&check.step);
+        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf") or std.mem.eql(u8, k.name, "qwen35")) check.addFileArg(file);
+        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images, qwen35 glue and qmmf (needs -Dnvcc)").dependOn(&check.step);
     }
     // MiniMax H3's kernel image: its library and the contract's runner take it
     const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
@@ -310,11 +310,16 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     b.step("test-qwen-grants-host", "Qwen MTP head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"shared head costs:"} })).step);
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);
+    b.step("test-nemotron-cuda-steps-host", "Nemotron CUDA's stepped prompt pass on the lanes, stopped before GPU work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"nemotron cuda steps:"} })).step);
+    b.step("test-nemotron-wide-walk-host", "A 32-row Nemotron wide round through every row limit, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{ "wide round walk:", "wide rounds:" } })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
     const prompt_rows = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA startup:", "Qwen prompt rows:", "slide admission: cuda" } }));
     prompt_rows.has_side_effects = true;
     b.step("test-qwen35-prompt-rows-host", "Loaded Qwen prompt rows and unchanged planned cache behavior without devices").dependOn(&prompt_rows.step);
+    const pool_after_warmup = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA pool after warmup:"} }));
+    pool_after_warmup.has_side_effects = true;
+    b.step("test-cuda-pool-after-warmup-host", "CUDA pool sizing, empty arena ownership and calibration without devices").dependOn(&pool_after_warmup.step);
     b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);

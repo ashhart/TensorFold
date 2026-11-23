@@ -364,18 +364,21 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
+    var counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const held = served.stream_bytes * (streams -| free);
     const cache_room = @import("cuda_streams.zig").cacheRoom(room, served.stream_bytes, free, counted);
     const final_host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib, cache_room.room, cache_room.streams, after.unified) else 0;
     const layout = counted.layout;
-    const paged = counted.paged;
+    var paged = counted.paged;
     if (!try kv_pages.attach(F, a, loaded.ctx, paged, counted.planned, problem) or !try drafted.price(F, a, io, &g.ctx, o.dir, loaded.ctx, &served, problem)) return null;
     served.reserve(streams) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
         return null;
     };
+    var pool_sizing: ?api.CudaPoolSizing = null;
+    if (!try @import("cuda_pool_after_warmup.zig").apply(F, a, gpa, io, &g.ctx, loaded, o, &served, weights, held0, after, &counted, &pool_sizing, problem)) return null;
+    paged = counted.paged;
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
@@ -390,8 +393,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     if (counted.ledger) |lp| shown[0] = try @import("cuda_ledger.zig").text(a, lp, window);
     const cache_text = try kv_pages.cacheText(a, kv_pages.ownCache(loaded) or share, counted.slots, paged, layout, counted.planned, shown[1]);
     h.startup = try std.fmt.allocPrint(gpa, @import("cuda_startup.zig").format, .{
-        capability, device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learn_bytes)}) else "", streams, if (streams == 1) "" else "s", shown[0], toGib(room), toGib(after.reserve), @import("cuda_startup.zig").rows(F, loaded), if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        cache_text, if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+        capability, device,                                                                                                       name,                                                           if (after.unified) ", memory shared with the host" else "", toGib(model), if (learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learn_bytes)}) else "", streams, if (streams == 1) "" else "s", shown[0], toGib(room), toGib(after.reserve), @import("cuda_startup.zig").rows(F, loaded), if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        cache_text, if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels", try @import("cuda_pool_after_warmup.zig").text(a, pool_sizing),
     });
     errdefer gpa.free(h.startup);
     if (@hasDecl(F, "snap_save") and cache > 0 and !kv_pages.ownCache(loaded) and !share) {
@@ -467,6 +470,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .prefill_step = snaps.requestStep(F),
         .prefill_min_chunk = snaps.requestMinimum(F),
         .startup = h.startup,
+        .cuda_pool_after_warmup = pool_sizing,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
         .decode_share = o.decode_share,
@@ -557,6 +561,7 @@ test {
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
     _ = @import("cuda_disk_identity_test.zig");
     _ = cuda_witness;
+    _ = @import("cuda_pool_after_warmup.zig");
 }
 test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
     try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);

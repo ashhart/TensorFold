@@ -11,27 +11,23 @@ pub const simd_bits = @import("simd_qmm_bits.zig");
 /// The narrow kernel's rows per weight read; wide windows use 8, 4, 2 and 1.
 pub const batch = 2;
 
-/// The narrowest window that takes the wide kernels on a GPU generation and later (tf-row-cutover measures it).
-pub const Cutover = struct { generation: u32, wide_from: usize };
-
-/// Tensor-unit chips by GPU generation, oldest first; earlier generations never take the wide kernels.
-pub const cutovers = [_]Cutover{.{ .generation = 17, .wide_from = 8 }};
-
-/// The table's cutover for a GPU generation, or null before the first tensor-unit generation.
-pub fn wideFrom(generation: u32) ?usize {
-    var out: ?usize = null;
-    for (cutovers) |c| {
-        if (generation >= c.generation) out = c.wide_from;
-    }
-    return out;
-}
+/// The cutover table and its chip key (row_cutover.zig, host-tested without Metal).
+pub const cut = @import("row_cutover.zig");
+pub const Tier = cut.Tier;
+pub const Chip = cut.Chip;
+pub const chipOf = cut.chipOf;
+pub const never = cut.never;
+pub const Cutover = cut.Cutover;
+pub const cutovers = cut.cutovers;
+pub const wideFrom = cut.wideFrom;
+pub const keyLine = cut.keyLine;
 
 /// Output columns a simdgroup and simdgroups a threadgroup (the kernel's RPS and SG).
 pub const columns = 4;
 pub const groups = 2;
 
 /// The code widths the kernels unpack.
-pub const bit_widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
+pub const bit_widths = cut.bit_widths;
 
 /// A group's input sum for the bias: fp32 in order (tensor path's xsum), or bf16-rounded per add (Nemotron's experts).
 pub const Sum = enum { f32, bf16 };
@@ -92,11 +88,11 @@ pub const Pipelines = struct {
     wide_relu2: [variants]mtl.Pipeline,
     wide_strided: [variants]mtl.Pipeline,
     wide: bool = false, // the 8-row kernels are built only on chips with tensor units (the M5 path)
-    wide_from: usize = std.math.maxInt(usize), // the narrowest window that takes them
+    wide_from: [bit_widths.len]usize = @splat(never), // the narrowest window that takes them, a code width each
 
-    /// Whether a window of `rows` takes the wide kernels.
-    pub fn takesWide(p: *const Pipelines, rows: usize) bool {
-        return p.wide and rows >= p.wide_from;
+    /// Whether a window of `rows` of `w` takes the wide kernels.
+    pub fn takesWide(p: *const Pipelines, w: Weights, rows: usize) bool {
+        return p.wide and cut.takes(&p.wide_from, w.bits, rows);
     }
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -107,7 +103,8 @@ pub const Pipelines = struct {
         defer lib.deinit();
         var p: Pipelines = undefined;
         p.wide = wide;
-        p.wide_from = if (wide) wideFrom(device.generation()) orelse std.math.maxInt(usize) else std.math.maxInt(usize);
+        const chip = chipOf(device.generation(), std.mem.span(device.name()));
+        for (&p.wide_from, bit_widths) |*from, bits| from.* = if (wide) wideFrom(chip, bits) orelse never else never;
         inline for (bit_widths, 0..) |bits, b| inline for (.{ "f32", "bf16" }, 0..) |sum, m| {
             const i = b * 2 + m;
             p.plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_q{d}_{s}", .{ bits, sum }), false);
@@ -151,7 +148,7 @@ pub fn call(p: *const Pipelines, w: Weights, rows: usize, relu2: bool) !Call {
     try w.validate();
     if (rows == 0) return error.NoRows;
     const i = w.variant();
-    const pipeline = if (p.takesWide(rows)) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
+    const pipeline = if (p.takesWide(w, rows)) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
     return .{ .pipeline = pipeline, .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, .groups = w.n / (columns * groups) };
 }
 
@@ -160,7 +157,7 @@ pub fn callStrided(p: *const Pipelines, w: Weights, rows: usize, stride: usize) 
     try w.validate();
     if (rows == 0) return error.NoRows;
     if (stride < w.n or stride > std.math.maxInt(i32)) return error.UnsupportedRowStride;
-    return .{ .pipeline = if (p.takesWide(rows)) p.wide_strided[w.variant()] else p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
+    return .{ .pipeline = if (p.takesWide(w, rows)) p.wide_strided[w.variant()] else p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
 }
 
 /// y[slots, n] = x[slot / repeat] W[ids[slot]]^T; the grid's y is the slot.
@@ -228,18 +225,14 @@ test "a strided call writes rows at least a matrix wide" {
 
 const pipelines_have_ids = @import("builtin").os.tag == .macos and (@typeInfo(mtl.Pipeline) != .@"struct" or @hasField(mtl.Pipeline, "id"));
 
-// Fake pipelines carry a distinct id in both the real Metal struct and the recording stub's u32.
+// Real Metal uses a pointer id. Recording pipelines can use an integer id or be integers.
 fn testPipeline(id: usize) mtl.Pipeline {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") .{ .id = @ptrFromInt(id) } else @intCast(id);
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(id);
+    return .{ .id = if (comptime @typeInfo(@FieldType(mtl.Pipeline, "id")) == .pointer) @ptrFromInt(id) else @intCast(id) };
 }
 fn testPipelineId(p: mtl.Pipeline) usize {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") @intFromPtr(p.id) else @intCast(p);
-}
-
-test "the cutover table covers tensor-unit generations only" {
-    for ([_]u32{ 0, 13, 14, 15, 16 }) |generation| try std.testing.expectEqual(@as(?usize, null), wideFrom(generation));
-    try std.testing.expectEqual(@as(?usize, 8), wideFrom(17));
-    try std.testing.expectEqual(@as(?usize, 8), wideFrom(18));
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(p);
+    return if (comptime @typeInfo(@TypeOf(p.id)) == .pointer) @intFromPtr(p.id) else @intCast(p.id);
 }
 
 test "row dispatch takes the wide pipelines from the cutover at each width" {
@@ -249,11 +242,13 @@ test "row dispatch takes the wide pipelines from the cutover at each width" {
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
         for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }
-    for ([_]usize{ 4, 8, 16, wideFrom(17).? }) |from| {
-        p.wide_from = from;
+    const max = [bit_widths.len]usize{ 32, never, never, never, never, never }; // an M5 Max's: each width its own
+    for ([_]?usize{ 4, 8, 16, 32, never, null }) |uniform| {
+        p.wide_from = if (uniform) |u| @splat(u) else max;
         for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
             const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
             const i = w.variant();
+            const from = uniform orelse max[i / 2];
             for (1..33) |rows| {
                 for ([_]bool{ false, true }) |relu2| {
                     const expected = if (rows >= from) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
@@ -270,7 +265,7 @@ test "row dispatch without tensor units keeps main's pipelines at every row coun
     if (comptime !pipelines_have_ids) return error.SkipZigTest; // inert stand-ins carry no id to compare
     var p: Pipelines = undefined;
     p.wide = false;
-    p.wide_from = 1; // a stale cutover must not matter without the wide pipelines
+    p.wide_from = @splat(1); // a stale cutover must not matter without the wide pipelines
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
         for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }

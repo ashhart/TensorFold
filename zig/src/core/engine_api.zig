@@ -87,6 +87,19 @@ pub const Benchmark = @import("benchmark_info.zig").Snapshot;
 /// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
 pub const Rerank = struct { yes: u32, no: u32 };
 
+/// Free bytes are sampled at different phases: before pool allocation, then with the old pool still resident.
+pub const CudaPoolSizing = struct {
+    estimated_free_bytes: u64,
+    measured_free_bytes: u64,
+    final_free_bytes: u64,
+    reserve_bytes: u64,
+    growth_room_bytes: u64,
+    estimated_pages: u64,
+    measured_pages: u64,
+    page_bytes: u64,
+    page_tokens: u32,
+};
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
     /// The loaded world; multi-rank engines override the local engine's one before publication.
@@ -141,6 +154,8 @@ pub const Info = struct {
     policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
+    /// Frozen CUDA pool sizing inputs; the device report reads these without entering a device context.
+    cuda_pool_after_warmup: ?CudaPoolSizing = null,
     /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
     warm_turns: bool = false,
     /// The engine decodes plain whatever a request asks: no drafter loaded, or this chip is faster plain.

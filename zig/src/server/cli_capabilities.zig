@@ -94,6 +94,22 @@ test "capability audit: environment list is a subset beside the complete profile
     try std.testing.expect(additional > 0);
 }
 
+fn declaredEnv(name: []const u8) bool {
+    for (cli.env) |listed| if (std.mem.eql(u8, listed, name)) return true;
+    return false;
+}
+
+test "capability audit: environment declares every variable serve reads" {
+    // The app's variables page accepts only this list (#3684): common rules plus serve's direct reads.
+    const e = @import("sys").environment;
+    for (e.rules) |r| {
+        if (r.scope != .common) continue;
+        try std.testing.expect(declaredEnv(r.name));
+    }
+    const direct = [_][]const u8{ "TENSORFOLD_LOG_TIME", "TENSORFOLD_TOOL_GRAMMAR", "TF_DSV41_TOOL_GRAMMAR", "TF_GLM_WORLD", "TF_GLM_CLEAR_THINKING", "TF_DSV41_SCHEMA_PROMPT", "TF_SLIDE_TAKE_OUT_CHECK" };
+    for (direct) |name| try std.testing.expect(declaredEnv(name));
+}
+
 test "capability audit: decision-only formats are listed apart from the formats a family chats in" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
