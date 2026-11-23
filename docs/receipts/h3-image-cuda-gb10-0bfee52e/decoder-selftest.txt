@@ -1,4 +1,4 @@
-CUDA decoder: 24 synthetic blocks made in 1.9 s
+CUDA decoder: 24 synthetic blocks made in 1.8 s
 6 x 10 cells: 1 tiles of 6 x 10 cells, 65 tokens each
   embedding: 66560 values, 99.997% identical, worst 1.00 ULP, relative 1.91e-5 (pass)
   block 0: 66560 values, 96.946% identical, worst 2.00 ULP, relative 5.73e-4 (pass)
@@ -41,5 +41,5 @@ CUDA decoder: 24 synthetic blocks made in 1.9 s
   decode in passes of 3: bit-identical to the staged tiles assembled
   decode in passes of 4: bit-identical to the staged tiles assembled
   picture bytes: 92.164% identical, at most 1 apart (pass)
-timing: 25 tiles of 16 x 16, 24 blocks: 1.09 s in passes, 1.09 s on the GPU, 43.6 ms a tile
+timing: 25 tiles of 16 x 16, 24 blocks: 1.09 s in passes, 1.09 s on the GPU, 43.5 ms a tile
 selftest: pass
