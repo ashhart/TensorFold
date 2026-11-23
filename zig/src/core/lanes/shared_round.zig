@@ -140,7 +140,7 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
                 if (try price_log.enabled(e)) try price_log.round(e, plans, windows, .{ .trial = calibration, .sampled = sampled, .ms = ms, .head_ms = head_ms, .heads = heads.items, .depths = budgets });
                 try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, head_ms, plain, calibration);
             }
-            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+            try e.rule.observeOverhead(@intCast(plans.len), total, ms - takeVerifyHostMs(windows), sampled, e.rule.headMs(budgets));
         }
     }
     if (e.backend.round_observer != null) e.backend.observed(paths);
