@@ -67,7 +67,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
-| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C open [#2257] | done [#1779] | done [#768] |
+| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; sampled CUDA windows share a logit gather; cap C open [#2257] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
 | 22. Direct load | done [#2282] | done [#1901] | yes | done [#2282] | done [#458] |

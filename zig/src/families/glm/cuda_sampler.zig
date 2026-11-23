@@ -1,4 +1,4 @@
-//! Sampled draws on upstream's sample.cu (#542 option C): every rank runs tf_draw.
+//! Sampled draws on gathered GLM logits. Each rank uses the sequence's keyed CUDA rule.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -15,6 +15,23 @@ pub fn check(s: ?Sampling) ?Sampling {
 }
 
 pub const Rule = cuda.sample.Rule;
+const window_rows = @import("cuda_state.zig").window_rows;
+
+/// Each verification row draws under its own sequence's seed and position.
+pub const RowRules = struct {
+    rules: [window_rows]Rule = undefined,
+    meta: [window_rows]i32 = undefined,
+    len: usize = 0,
+
+    pub fn append(plan: *RowRules, rows: usize, first: u64, r: Rule) void {
+        std.debug.assert(first >= 1 and plan.len + rows <= window_rows);
+        for (0..rows) |i| {
+            plan.rules[plan.len] = r;
+            plan.meta[plan.len] = @intCast(first - 1 + i);
+            plan.len += 1;
+        }
+    }
+};
 
 /// The rule sample.cu reads for `s` (cuda.sample.rule over lanes.gpu_rule).
 pub fn rule(s: Sampling) Rule {
@@ -29,10 +46,17 @@ pub fn stagingBytes(vocab: usize, rows: usize) usize {
     return rows * vocab * @sizeOf(u16);
 }
 
+/// Gather the packed forward's vocabulary shards and draw all sampled rows on each rank.
+pub fn drawShared(e: *@import("cuda_engine.zig").Engine, logits: u64, plan: *const RowRules, out: []u32) !void {
+    try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, plan.len, e.smp.stage.ptr, e.smp.full.ptr);
+    try e.smp.drawRows(e.stream, plan, out);
+    try e.checkGathers();
+}
+
 pub const Sampler = struct {
     d: *const cuda.Driver,
     module: cuda.Module,
-    tf_draw: cuda.Function,
+    draws: cuda.sample.Draws,
     tf_logprob_rows: cuda.Function,
     tf_grammar_mask: cuda.Function,
     vocab: usize,
@@ -47,21 +71,21 @@ pub const Sampler = struct {
     pub fn init(d: *const cuda.Driver, vocab: usize, rows: usize) !Sampler {
         var m = try cuda.Module.load(d, cuda.kernels.sample);
         errdefer m.unload();
-        const f = try m.function("tf_draw");
+        const draws = try cuda.sample.Draws.resolve(m);
         const lp = try m.function("tf_logprob_rows");
         const gm = try m.function("tf_grammar_mask");
         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
         errdefer full.free();
         var stage = try cuda.DeviceBuffer.alloc(d, stagingBytes(vocab, rows));
         errdefer stage.free();
-        var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
+        var r = try cuda.DeviceBuffer.alloc(d, rows * @sizeOf(Rule));
         errdefer r.free();
-        var meta = try cuda.DeviceBuffer.alloc(d, 16);
+        var meta = try cuda.DeviceBuffer.alloc(d, @max(rows, 4) * @sizeOf(i32));
         errdefer meta.free();
         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
         errdefer tok.free();
         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .stage = stage, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+        return .{ .d = d, .module = m, .draws = draws, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .stage = stage, .rule = r, .meta = meta, .tok = tok, .prob = prob };
     }
 
     pub fn deinit(s: *Sampler) void {
@@ -77,7 +101,11 @@ pub const Sampler = struct {
     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
         try s.gather(stream, exchange, spans, mine, rows, s.stage.ptr, s.full.ptr);
-        try s.drawFull(stream, rows, first, r, out);
+        // Structured draws use drawFull after applying their per-row masks.
+        if (r.top_k == 0) return s.drawFull(stream, rows, first, r, out);
+        var plan: RowRules = .{};
+        plan.append(rows, first, r);
+        try s.drawRows(stream, &plan, out);
     }
 
     /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1, ...
@@ -95,7 +123,19 @@ pub const Sampler = struct {
         args.add(@as(i32, 0));
         args.add(s.tok.ptr);
         args.add(s.prob.ptr);
-        try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
+        try cuda.launch.launch(s.draws.draw_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
+        try stream.synchronize();
+        try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
+    }
+
+    pub fn drawRows(s: *Sampler, stream: cuda.Stream, plan: *const RowRules, out: []u32) !void {
+        const rows = plan.len;
+        std.debug.assert(rows <= s.rows and out.len >= rows);
+        try s.rule.uploadAsync(0, std.mem.sliceAsBytes(plan.rules[0..rows]), stream.handle);
+        try s.meta.uploadAsync(0, std.mem.sliceAsBytes(plan.meta[0..rows]), stream.handle);
+        // The rank-block staging rows are free once gather's strided copies run on this stream.
+        const scratch = if (s.stage.len >= rows * cuda.sample.Draws.row_scratch) s.stage.ptr else null;
+        try s.draws.drawRows(stream, s.full.ptr, s.vocab, s.rule.ptr, s.meta.ptr, s.tok.ptr, rows, scratch);
         try stream.synchronize();
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
     }
