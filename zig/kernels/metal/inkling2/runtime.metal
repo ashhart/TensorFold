@@ -34,21 +34,32 @@ kernel void tf_ink2_stage_conv(
     device bfloat* hist0 [[buffer(0)]], const device bfloat* raw0 [[buffer(1)]], device bfloat* staged0 [[buffer(2)]],
     device bfloat* hist1 [[buffer(3)]], const device bfloat* raw1 [[buffer(4)]], device bfloat* staged1 [[buffer(5)]],
     constant InkStageConvArgs& a [[buffer(6)]], uint tid [[thread_position_in_grid]]) {
-  const uint total = a.pairs * a.width;
-  if (tid >= total) return;
-  const uint p = tid / a.width;
-  const uint c = tid % a.width;
+  const uint stride = a.pairs * a.width;
+  uint block = 0u, rem = tid;
+  if (a.rows > 16u) {
+    const uint blocks = (a.rows + 15u) / 16u;
+    if (tid >= stride * blocks) return;
+    block = tid / stride;
+    rem = tid - block * stride;
+  } else if (tid >= stride) {
+    return;
+  }
+  const uint p = (a.pairs == 1u) ? 0u : (rem >= a.width ? 1u : 0u);
+  const uint c = (p == 0u) ? rem : (rem - a.width);
   device bfloat* hist = (p == 0) ? hist0 : hist1;
   const device bfloat* raw = (p == 0) ? raw0 : raw1;
   device bfloat* staged = (p == 0) ? staged0 : staged1;
   const size_t w = a.width;
+  const uint r0 = block * 16u;
+  const uint r1 = min(r0 + 16u, a.rows);
+  for (uint r = r0; r < r1; ++r) staged[(size_t)(3 + r) * w + c] = raw[(size_t)r * w + c];
+  if (block != 0u) return;
   const bfloat h0 = hist[c];
   const bfloat h1 = hist[w + c];
   const bfloat h2 = hist[2 * w + c];
   staged[c] = h0;
   staged[w + c] = h1;
   staged[2 * w + c] = h2;
-  for (uint r = 0; r < a.rows; ++r) staged[(size_t)(3 + r) * w + c] = raw[(size_t)r * w + c];
   if (a.commit != 0) {
     if (a.rows == 1u) {
       hist[c] = h1;

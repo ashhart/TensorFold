@@ -191,7 +191,7 @@ fn stageConv(m: *const Model, e: mtl.ComputeEncoder, hist0: Ref, raw0: Ref, stag
     e.setBuffer(raw1.buf, raw1.off, 4);
     e.setBuffer(staged1.buf, staged1.off, 5);
     e.setValue(StageConvArgs{ .rows = @intCast(rows), .width = @intCast(width), .commit = @intFromBool(commit), .pairs = @intCast(pairs) }, 6);
-    e.dispatchThreads(mtl.Size.of(pairs * width, 1, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchThreads(mtl.Size.of(pairs * width * ((rows + 15) / 16), 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 pub fn commitHistories(m: *const Model, e: mtl.ComputeEncoder, cache: *const state.Cache, offset: usize) void {
@@ -378,17 +378,25 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
     const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
     if (m.experts.units != null) {
+        const gu_nv: ?experts.NvGlobals = if (precision == .nvfp4) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null;
+        const down_nv: ?experts.NvGlobals = if (precision == .nvfp4) .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) } else null;
         // On the tensor units a row's sums are the same at every width, so every chunk and window takes this path.
-        try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
-        e.barrier();
-        if (precision == .nvfp4) {
-            try experts.units(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.gu, 0)), gu_call);
+        if (rows == 1 and m.experts.units1 != null) {
+            try experts.unitsOne(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_nv, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
             e.barrier();
-            try experts.units(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) }, x(at(s.down, 0)), down_call);
+            try experts.unitsOne(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_nv, x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call);
+        } else if (rows <= 8 and m.experts.units_active != null) {
+            try experts.groupCompact(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
+            e.barrier();
+            try experts.unitsActive(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_nv, x(at(s.gu, 0)), gu_call);
+            e.barrier();
+            try experts.unitsActive(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_nv, x(at(s.down, 0)), down_call);
         } else {
-            try experts.units(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.gu, 0)), gu_call);
+            try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
             e.barrier();
-            try experts.units(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), null, x(at(s.down, 0)), down_call);
+            try experts.units(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_nv, x(at(s.gu, 0)), gu_call);
+            e.barrier();
+            try experts.units(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_nv, x(at(s.down, 0)), down_call);
         }
         e.barrier();
         return experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
