@@ -45,7 +45,7 @@ const Snaps = struct {
 
 const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
 
-test "a lent state evicted before the first call: the job fills cold, marks and promise planned again, counted (REV80 2)" {
+test "a lent state evicted before the first call: the job fills cold, marks and promise planned again, counted" {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 4 };
@@ -83,7 +83,10 @@ test "a lent state evicted before the first call: the job fills cold, marks and 
         if (x.serial == job.lent.?) break x;
     } else return error.NotKept;
     store.remove(std.mem.indexOfScalar(*pc.Entry, store.entries.items, e).?);
-    _ = fill.step(&h, 0);
+    const rows = fill.step(&h, 0);
+    // its first call filled from the start: the step counts the rows it ran, not none
+    try std.testing.expect(rows != std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(u64, job.stream.fill_at.load(.monotonic)), rows);
     try std.testing.expectEqual(@as(u32, 0), job.stream.reuse.at);
     try std.testing.expect(job.load.sure and job.load.hint == 0); // the load ledger counts its chunks
     try std.testing.expect(std.mem.indexOfScalar(u32, job.marks, 16) != null); // a cold pass keeps its state again

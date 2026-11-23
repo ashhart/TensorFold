@@ -112,3 +112,8 @@ pub const Job = struct {
         @import("lane_stream.zig").lookAgain(job.host, job); // gone since: marks, promise and fill as a fresh admission's
     }
 };
+
+/// Whether a stream's kept state is restored or refused (or none was offered): its lookup can be reported.
+pub fn restoreSettled(s: *const lanes.Stream) bool {
+    return s.reuse.saved == null or s.reuse_failed or s.cached > 0;
+}
