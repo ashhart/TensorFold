@@ -51,11 +51,20 @@ struct Raw {
 
 constexpr int kRowBytes = 144;  // a staged row: 128 code bytes + 16, so the 8 rows a load touches use distinct banks
 
-// A warp's tile in registers: up to 128 code bytes of its 32 rows (8 lanes a row), the lane's row's scales; K % 64 == 0
+// A warp's tile in registers: up to 128 code bytes of its 32 rows (8 lanes a row), the lane's row's scales; K % 32 == 0
 struct Tile {
   uint4 codes[8];
   uint32_t scales[4];
 };
+
+// Up to four scale bytes as one little-endian word, none read past `n`: a tail or an unaligned row's scales.
+__device__ __forceinline__ uint32_t scale_word(const uint8_t* p, int n) {
+  uint32_t v = 0;
+#pragma unroll
+  for (int b = 0; b < 4; ++b)
+    if (b < n) v |= (uint32_t)__ldg(p + b) << (8 * b);
+  return v;
+}
 
 __device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int g0, int steps, int lane, Tile& t) {
   const int bytes = steps * (w.format ? 32 : 16);
@@ -69,11 +78,14 @@ __device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int 
   }
   const long long row = w.row0 + w.row_step * (cb * 32 + lane);
   const long long z = (e * w.N + row) * w.K + 32LL * g0;
-  const int words = w.format ? 1 : (2 * steps + 3) / 4;
-  const uint32_t* src = reinterpret_cast<const uint32_t*>(w.scales + z / w.G);
+  const int n = w.format ? steps : 2 * steps;  // the row's scale bytes in this tile; unpadded, the last ends the data
+  const uint8_t* src = w.scales + z / w.G;
+  const bool words = (reinterpret_cast<uintptr_t>(src) & 3) == 0;
 #pragma unroll
   for (int i = 0; i < 4; ++i)
-    if (i < words) t.scales[i] = __ldg(src + i);
+    if (4 * i < n)
+      t.scales[i] = words && 4 * i + 4 <= n ? __ldg(reinterpret_cast<const uint32_t*>(src) + i)
+                                            : scale_word(src + 4 * i, n - 4 * i);
 }
 
 __device__ __forceinline__ void put(const Weight& w, int steps, int lane, const Tile& t, uint8_t* __restrict__ codes,
