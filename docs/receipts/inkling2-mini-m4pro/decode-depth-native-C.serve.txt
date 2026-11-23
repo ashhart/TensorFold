@@ -1,0 +1,17 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 1 streams, 65552-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.96 GiB; DSpark off, images off, prompt cache 0.00 GiB; demand 21.24 GiB (18.97 GiB fixed, 1 x 2.27 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8311/v1 (sampling: temperature 1.0; drafts: off; context: 65552; loaded in 7.4s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-d146f090ac71ded4f93f30aab3c4f0b3 prompt=1 cached=0 thinking=False effort=none tokens=4 sha=1a39ea904076 finish=length rounds=3 accepted=0/0 ttft=0.057 decode=0.095 elapsed=0.151 queued=0.000 tok/s=31.7
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-154ffa877311c74728e32de61e187249 prompt=65344 cached=0 thinking=False effort=none tokens=192 sha=5bcbd959f1ac finish=length rounds=191 accepted=0/0 ttft=223.827 decode=8.213 elapsed=232.040 queued=0.000 tok/s=23.3
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-7f643596714ffcfe480f0c04f6ffd9b5 prompt=65536 cached=0 thinking=False effort=none tokens=16 sha=29be787b3e10 finish=length rounds=15 accepted=0/0 ttft=222.386 decode=0.648 elapsed=223.035 queued=0.000 tok/s=23.1
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

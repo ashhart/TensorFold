@@ -1,0 +1,38 @@
+# Decode attention kernel (zig/kernels/metal/inkling2/attention.metal) at 57de097873, one query row, 24 heads over 8 KV heads of 128.
+# Harness: attn_decode_bench.swift (swiftc -O). Each line: GPU time of one visit in ms, from NV visits (own K/V buffers) in one
+# command buffer, median of 15; base and cand are the same kernel here (equal=true compares output bytes).
+# Command: NV=8 attn_decode_bench KERNEL_DIR KERNEL_DIR POS0 1 0 15   (global, NV=40 and WINDOW 1024 for a sliding layer)
+# Two passes, M4 Pro, under the shared GPU lock:
+pos0=2047 rows=1 win=0 chunks=1 base_ms=0.100 cand_ms=0.100 equal=true
+pos0=8191 rows=1 win=0 chunks=4 base_ms=0.143 cand_ms=0.144 equal=true
+pos0=32767 rows=1 win=0 chunks=16 base_ms=0.626 cand_ms=0.626 equal=true
+pos0=65535 rows=1 win=0 chunks=32 base_ms=1.158 cand_ms=1.157 equal=true
+pos0=65535 rows=1 win=1024 chunks=1 base_ms=0.057 cand_ms=0.057 equal=true
+pos0=2047 rows=1 win=1024 chunks=1 base_ms=0.056 cand_ms=0.056 equal=true
+pos0=2047 rows=1 win=0 chunks=1 base_ms=0.101 cand_ms=0.101 equal=true
+pos0=8191 rows=1 win=0 chunks=4 base_ms=0.143 cand_ms=0.143 equal=true
+pos0=32767 rows=1 win=0 chunks=16 base_ms=0.632 cand_ms=0.632 equal=true
+pos0=65535 rows=1 win=0 chunks=32 base_ms=1.151 cand_ms=1.151 equal=true
+pos0=65535 rows=1 win=1024 chunks=1 base_ms=0.057 cand_ms=0.057 equal=true
+pos0=2047 rows=1 win=1024 chunks=1 base_ms=0.056 cand_ms=0.056 equal=true
+# Tried and dropped: I2_V_BATCH 8 and 16 in place of 4 (base is the committed kernel, cand the variant; same bytes, slower):
+== V_BATCH 8
+pos0=2047 rows=1 win=0 chunks=1 base_ms=0.099 cand_ms=0.120 equal=true
+pos0=32767 rows=1 win=0 chunks=16 base_ms=0.622 cand_ms=0.646 equal=true
+pos0=65535 rows=1 win=0 chunks=32 base_ms=1.147 cand_ms=1.171 equal=true
+pos0=65535 rows=1 win=1024 chunks=1 base_ms=0.057 cand_ms=0.067 equal=true
+pos0=2047 rows=1 win=1024 chunks=1 base_ms=0.054 cand_ms=0.064 equal=true
+== V_BATCH 16
+pos0=2047 rows=1 win=0 chunks=1 base_ms=0.100 cand_ms=0.231 equal=true
+pos0=32767 rows=1 win=0 chunks=16 base_ms=0.625 cand_ms=0.700 equal=true
+pos0=65535 rows=1 win=0 chunks=32 base_ms=1.152 cand_ms=1.207 equal=true
+pos0=65535 rows=1 win=1024 chunks=1 base_ms=0.058 cand_ms=0.124 equal=true
+pos0=2047 rows=1 win=1024 chunks=1 base_ms=0.056 cand_ms=0.122 equal=true
+# Also tried, same harness, same bytes (equal=true), no change worth a kernel edit (ms a visit, base then candidate):
+#   K row loads hoisted in groups of 16 uint4: 2,048 keys 0.102 -> 0.113, 8,192 0.144 -> 0.155, 65,536 1.154 -> 1.154, window 0.058 -> 0.065
+#   in groups of 8:                            2,048 keys 0.102 -> 0.096, 8,192 0.145 -> 0.148, 65,536 1.155 -> 1.110, window 0.057 -> 0.057
+#   in groups of 4:                            2,048 keys 0.101 -> 0.100, 8,192 0.149 -> 0.152, 65,536 1.148 -> 1.101, window 0.058 -> 0.059
+#   the query read from threadgroup memory as float4 (the compiler already did):                 all within 0.001
+#   value rows double-buffered (next batch loaded before this batch's fmas): 2,048 keys 0.134 -> 0.205, 65,536 1.153 -> 1.140, window 0.058 -> 0.089
+# Ablations (output not equal, timing only; window 1024 at 65,535, base 0.057): without the value phase 0.033, without the
+# key dot product 0.038 (65,536 keys: 1.148 -> 0.721 with half the bytes), without the relative bias 0.054.
