@@ -187,5 +187,7 @@ host-test line at `e90ecce19a`.
 - Admission by state bytes was tested on a 48 GiB Mac only; a 36 GB Mac (where an earlier head serialized four streams
   under memory pressure) has not run it.
 - With temperatures above 0 a plain token costs about 15 ms more than a greedy one (21 against 31 tokens a second at one
-  stream, 34 against 67 at four), and four drafted code streams are 23 % under plain; serve sampled traffic that
-  matters for speed with `--no-drafts` until the sampled path is faster.
+  stream, 34 against 67 at four), and four drafted code streams are 23 % under plain. The cost is the host sampler's
+  full sort of the 201,058-token row; #4744 keeps only the best 1,024 candidates, with identical tokens, and on a shared
+  machine took plain sampled code from 21 to 29 tokens a second at one stream and from 34 to 56 at four. Until it lands,
+  serve sampled traffic that matters for speed with `--no-drafts`.
