@@ -161,6 +161,7 @@ pub fn start(gpa: std.mem.Allocator, rank: u32) !void {
     const s = try gpa.create(Session);
     errdefer gpa.destroy(s);
     s.* = .{ .gpa = gpa, .ring = try Ring.init(gpa, ring_slots, max_ids), .threaded = threaded, .file = file };
+    errdefer s.ring.deinit(gpa);
     s.thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, writerMain, .{s});
     g_session = s;
 }
