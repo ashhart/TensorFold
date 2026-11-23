@@ -87,6 +87,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 36. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
 | 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | open H[#4673] | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -128,6 +129,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 36. Qwen normalization and head | ? | ? | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -169,6 +171,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 36. Qwen normalization and head | ? | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -216,6 +219,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 36. Qwen normalization and head | ? | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -257,6 +261,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 36. Qwen normalization and head | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -312,6 +317,7 @@ below; these are estimates for planning a port, not results.
 | 36. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
 | 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
 | 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
+| 39. Drafted rows share the walk | none | medium | none | HIP qwen3_5: decode at one stream with drafts at 131K-258K, score half +1.0–5.1 %, values' half +0.4–6.9 % more |
 
 ## The optimizations
 
@@ -642,6 +648,18 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | dots_mocr | +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) at one greedy stream, but −0.68 % paired at four greedy streams (absolute 52.61 → 52.26 tok/s a stream); tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
 
+39. **Drafted rows share the walk.** A decode round's drafted rows of one stream sit at consecutive positions and
+    read the same keys and values. On HIP at d = 256 over spans of 16,384 keys or more, a multi-row round scores a
+    slot's rows in chunks of two from one read of the keys ([#4673]) and weighs them in chunks of four from one read of
+    the values ([#3811]'s second half), each row keeping its sums and their order, so the bits are unchanged. One-row
+    rounds keep their kernels, and a second launch keeps one-row slots at the one-row kernels' occupancy. The depth rule
+    weighs timed rounds, so faster multi-row rounds can change how deep a stream drafts.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (35B-A3B) | score half +0.96 % to +3.27 % decode at one stream with drafts at 131,072 and 258,048 kept tokens; the values' half +3.86 % to +6.94 % on top of it; `"draft": false` and four streams without drafts level; tokens equal | [#4673] and [#3811], gfx1151 |
+    | qwen3_5 (27B) | score half +2.59 % to +5.11 %; the values' half +0.43 % to +4.91 % on top of it; the same checks | [#4673] and [#3811], gfx1151 |
+
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
@@ -805,3 +823,5 @@ below; these are estimates for planning a port, not results.
 [#2941]: https://github.com/ashhart/TensorFold/issues/2941
 [#2971]: https://github.com/ashhart/TensorFold/pull/2971
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
+[#3811]: https://github.com/ashhart/TensorFold/issues/3811
+[#4673]: https://github.com/ashhart/TensorFold/pull/4673
