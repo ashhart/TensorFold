@@ -21,6 +21,10 @@ const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
+const helpers = @import("qwen27_served_helpers.zig");
+const room = helpers.room;
+const drafterRefusal = helpers.drafterRefusal;
+const gibBytes = helpers.gibBytes;
 
 pub const Options = struct {
     context: u32,
@@ -199,12 +203,6 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
     return share_fit.room(cache_fit.ram(), cache_fit.footprint(), try laterFootprint(h), guards);
 }
 
-/// Room left beside the weights and an 8 GiB margin.
-fn room(model: *const q.model.Model) usize {
-    const dev = model.device;
-    return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), cap()) catch 0;
-}
-
 /// TF_QWEN27_WORKING_SET_BYTES: a development cap on the device's reported working set.
 const cap = reserve.cap;
 
@@ -307,12 +305,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     return h;
 }
 
-/// Why --drafter is refused before the target or the drafter loads.
-fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyerror) ![]const u8 {
-    if (err == error.DraftForAnotherTarget) return std.fmt.allocPrint(a, "--drafter {s} drafts for another target: its width, vocabulary or tapped layers do not fit {s} (DraftForAnotherTarget)", .{ drafter, dir });
-    return std.fmt.allocPrint(a, "--drafter {s} is not a drafter the native Qwen engine serves for {s} ({s}): it takes z-lab/Qwen3.8-27B-DFlash2 as released for Qwen3.8-27B, or a DFlash drafter (DFlashDraftModel) made for this target", .{ drafter, dir, @errorName(err) });
-}
-
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
 pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const setup = tf.startup_receipt.span(.runtime_setup);
@@ -379,9 +371,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null; const paged = try q.decode_round.pagesOn();
-    const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| { why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16"; return err; };
-    h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step); if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
+    h.trace = null;
+    const paged = try q.decode_round.pagesOn();
+    const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| {
+        why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
+        return err;
+    };
+    h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step);
+    if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -394,8 +391,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer h.back.deinit();
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
-    h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added }; h.runner.grown = .{ .ctx = h, .added = Host.added };
-    h.back.vision = o.images; if (h.draft != null or mtp_on) try h.back.measure(io);
+    h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
+    h.runner.grown = .{ .ctx = h, .added = Host.added };
+    h.back.vision = o.images;
+    if (h.draft != null or mtp_on) try h.back.measure(io);
     h.mtp = null;
     h.wrap = null;
     if (mtp_on) {
@@ -502,11 +501,6 @@ fn profileEvery() ?u64 {
 fn laterRoom(h: *const Host) u64 {
     const guards = share_fit.Guards.read() catch return 0;
     return share_fit.room(cache_fit.ram(), cache_fit.footprint(), laterFootprint(h) catch return 0, guards);
-}
-
-/// --prompt-cache-gib's bytes (0 or less: none).
-fn gibBytes(gib: f64) u64 {
-    return if (gib > 0) std.math.lossyCast(u64, gib * cache_fit.GiB) else 0;
 }
 
 /// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.
