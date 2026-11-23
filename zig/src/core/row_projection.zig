@@ -225,12 +225,14 @@ test "a strided call writes rows at least a matrix wide" {
 
 const pipelines_have_ids = @import("builtin").os.tag == .macos and (@typeInfo(mtl.Pipeline) != .@"struct" or @hasField(mtl.Pipeline, "id"));
 
-// Fake pipelines carry a distinct id in both the real Metal struct and the recording stub's u32.
+// Real Metal uses a pointer id. Recording pipelines can use an integer id or be integers.
 fn testPipeline(id: usize) mtl.Pipeline {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") .{ .id = @ptrFromInt(id) } else @intCast(id);
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(id);
+    return .{ .id = if (comptime @typeInfo(@FieldType(mtl.Pipeline, "id")) == .pointer) @ptrFromInt(id) else @intCast(id) };
 }
 fn testPipelineId(p: mtl.Pipeline) usize {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") @intFromPtr(p.id) else @intCast(p);
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(p);
+    return if (comptime @typeInfo(@TypeOf(p.id)) == .pointer) @intFromPtr(p.id) else @intCast(p.id);
 }
 
 test "row dispatch takes the wide pipelines from the cutover at each width" {
