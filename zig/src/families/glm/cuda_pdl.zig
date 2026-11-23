@@ -3,14 +3,24 @@ const std = @import("std");
 const cuda = @import("cuda");
 
 var state: std.atomic.Value(u8) = .init(0); // 0 unread, 1 off, 2 on
+var supported: std.atomic.Value(bool) = .init(true);
+
+fn bindMajor(major: c_int) void {
+    supported.store(major >= 9, .release);
+}
+
+/// Bind the process-wide launch policy to a context before loading any GLM modules.
+pub fn bind(ctx: *const cuda.Context) !void {
+    bindMajor(try ctx.attribute(.compute_capability_major));
+}
 
 /// TF_GLM_PDL, read once: exact 0 launches GLM's kernels plain (the environment refuses malformed values at startup).
 pub fn on() bool {
     const v = state.load(.monotonic);
-    if (v != 0) return v == 2;
+    if (v != 0) return v == 2 and supported.load(.acquire);
     const want = @import("sys").environment.value(bool, "TF_GLM_PDL", @import("profile").lookup("TF_GLM_PDL"), true) catch true;
     state.store(if (want) 2 else 1, .monotonic);
-    return want;
+    return want and supported.load(.acquire);
 }
 
 /// `cfg` as a GLM launch makes it: dependent when `pdl`.
@@ -40,4 +50,20 @@ test "a GLM launch keeps its config and sets only pdl" {
     const c = config(base, true);
     try std.testing.expect(c.pdl and c.grid.x == 7 and c.grid.y == 2 and c.block.x == 128 and c.shared == 4096);
     try std.testing.expect(!config(c, false).pdl);
+}
+
+test "GLM PDL policy: pre-sm90 devices disable the default and sm90 retains it" {
+    state.store(2, .monotonic);
+    supported.store(true, .release);
+    defer {
+        state.store(0, .monotonic);
+        supported.store(true, .release);
+    }
+    bindMajor(8);
+    try std.testing.expect(!on());
+    supported.store(true, .release);
+    bindMajor(9);
+    try std.testing.expect(on());
+    state.store(1, .monotonic);
+    try std.testing.expect(!on());
 }

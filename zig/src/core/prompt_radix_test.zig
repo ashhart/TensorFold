@@ -83,16 +83,20 @@ fn seq(comptime n: usize, from: u32) [n]u32 {
 
 /// A pass over `prompt` as a backend runs it: begin, then a keep at each mark, the stream taking the tree's pages.
 fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, shared: []const u32, mine: *std.ArrayList(u32)) !Plan {
+    return passQuery(f, s, a, .of(prompt), history, shared, mine);
+}
+
+fn passQuery(f: *Fake, s: *Store, a: Allocator, q: radix.Query, history: u32, shared: []const u32, mine: *std.ArrayList(u32)) !Plan {
     mine.clearRetainingCapacity();
-    const plan = try s.begin(a, .of(prompt), history, shared, null, mine);
+    const plan = try s.begin(a, q, history, shared, null, mine);
     var fresh: [32]u32 = undefined;
-    const more = (prompt.len + 3) / 4 - mine.items.len;
+    const more = (q.key.len + 3) / 4 - mine.items.len;
     f.lane(fresh[0..more]);
     try mine.appendSlice(a, fresh[0..more]);
     for (plan.marks) |m| {
         var path: [32]u32 = undefined;
         const n = m / 4;
-        const kept = s.keep(.of(prompt), m, null, mine.items[0..n], path[0..n]);
+        const kept = s.keep(q, m, null, mine.items[0..n], path[0..n]);
         for (path[0..kept.shared], 0..) |id, i| if (mine.items[i] != id) {
             f.refs[id] += 1;
             f.refs[mine.items[i]] -= 1;
@@ -104,6 +108,27 @@ fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, sh
 
 fn newStore(f: *Fake, r: radix.Rules) !Store {
     return Store.init(std.testing.allocator, f.family(), f.pages(), r);
+}
+
+test "one salt isolates identical paged cache keys" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, rules);
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 8 });
+    var mine: std.ArrayList(u32) = .empty;
+    const tokens = seq(24, 0);
+    var plan = try passQuery(&f, &s, a, .salted(&tokens, 1), 20, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 0), plan.from);
+    f.leave(mine.items);
+    plan = try passQuery(&f, &s, a, .salted(&tokens, 2), 20, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 0), plan.from);
+    f.leave(mine.items);
+    plan = try passQuery(&f, &s, a, .salted(&tokens, 1), 20, &.{}, &mine);
+    try std.testing.expectEqual(@as(u32, 20), plan.from);
+    f.leave(mine.items);
 }
 
 test "a conversation resumes where its history ended, and the pages below the resume point are shared" {

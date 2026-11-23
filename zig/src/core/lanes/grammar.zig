@@ -21,6 +21,7 @@ const Fns = struct {
     // grammar_budget's entries: optional, so a library built before them still serves everything else
     budget: ?*const fn (*anyopaque, [*]i32, c_int, c_int) callconv(.c) c_int = null,
     budget_ready: ?*const fn (*anyopaque) callconv(.c) c_int = null,
+    budget_status: ?*const fn (*anyopaque) callconv(.c) c_int = null,
     // compiles holding a slot, for tests: a library built before it compiles the same, with no time limit
     compiling: ?*const fn (*anyopaque) callconv(.c) c_int = null,
 };
@@ -120,8 +121,8 @@ pub const Compiler = struct {
     }
 };
 
-/// tfg_budget_ready's answer: explored and masked, not covered, or past the work limit (refused, never masked in part).
-pub const Readiness = enum { ready, uncovered, over_work };
+/// Budget readiness, with optional resource/deadline causes from a current runtime.
+pub const Readiness = @import("grammar_readiness.zig").Status;
 
 pub const Compiled = struct {
     f: Fns,
@@ -140,15 +141,10 @@ pub const Compiled = struct {
         return try g.budgetReadiness() == .ready;
     }
 
-    /// The same, saying why not: rules the budget mask does not cover, or exploring past the library's work limit.
+    /// The same, retaining extended resource, deadline and slot causes when the runtime supports them.
     pub fn budgetReadiness(g: Compiled) !Readiness {
-        const ready = g.f.budget_ready orelse return .uncovered;
-        return switch (ready(g.h)) {
-            1 => .ready,
-            0 => .uncovered,
-            2 => .over_work,
-            else => error.Grammar,
-        };
+        const ready = g.f.budget_status orelse g.f.budget_ready orelse return .uncovered;
+        return @import("grammar_readiness.zig").decode(ready(g.h));
     }
 };
 
@@ -593,4 +589,8 @@ test {
     _ = @import("grammar_compile_test.zig");
     _ = @import("grammar_handoff_test.zig");
     _ = @import("grammar_budget_test.zig");
+}
+
+test {
+    _ = @import("grammar_readiness.zig");
 }

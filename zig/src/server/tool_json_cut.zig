@@ -155,7 +155,7 @@ fn cutString(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
 fn offered(a: Allocator, name: []const u8, tools: []const Value) Allocator.Error!?[]const u8 {
     for (tools) |tool| {
         const spelled = try tool_specs.toolName(a, tool);
-        if (spelled.len > 0 and std.mem.eql(u8, spelled, name)) return spelled;
+        if (spelled.len > 0 and std.ascii.eqlIgnoreCase(spelled, name)) return spelled;
     }
     return null;
 }

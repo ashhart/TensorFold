@@ -1,4 +1,4 @@
-//! A witness reader racing idle park and reload cycles sees each engine only with its own epoch, never a closed one.
+//! A witness reader racing idle park and reload sees each engine only with its own epoch; each engine hashes anew.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("server.zig");
@@ -25,7 +25,10 @@ const Gen = struct {
         return @ptrCast(@alignCast(ptr));
     }
     fn info(ptr: *anyopaque) api.Info {
-        return .{ .context_window = 4096, .witness = .{ .ctx = ptr, .read = read } };
+        return .{ .context_window = 4096, .witness = .{ .ctx = ptr, .read = read, .begin = begin } };
+    }
+    fn begin(ptr: *anyopaque) void {
+        _ = cast(ptr).owner.begins.fetchAdd(1, .acq_rel);
     }
     fn read(ptr: *anyopaque) Facts {
         const g = cast(ptr);
@@ -53,6 +56,7 @@ const Race = struct {
     opened: u64 = 1,
     closer: Closer = undefined,
     closed_reads: std.atomic.Value(u32) = .init(0),
+    begins: std.atomic.Value(u32) = .init(0),
     mixed: std.atomic.Value(u32) = .init(0),
     known: std.atomic.Value(u32) = .init(0),
     away: std.atomic.Value(u32) = .init(0),
@@ -123,7 +127,7 @@ test "execution witness: a reader through park and reload cycles never sees a mi
     const state = try witness.State.init(t.allocator, t.io, srv, .{ .execution_witness = true }, binary, text);
     defer state.deinit();
     srv.witness = state;
-    state.start();
+    state.start(srv);
     try t.expect(fixture.settled(state, srv).result == .known);
     try t.expectEqual(idle.Startup.enabled, idle.startServer(srv, .{ .idle_unload = 3600 }, race.reopen(), "d", "t"));
     defer idle.stopServer(srv);
@@ -152,4 +156,5 @@ test "execution witness: a reader through park and reload cycles never sees a mi
     const last = state.read(srv);
     try t.expectEqual(@as(u64, cycles + 1), last.epoch);
     try t.expectEqual(@as(u64, cycles + 1), std.mem.readInt(u64, last.result.known.parts[0][0..8], .little));
+    try t.expectEqual(@as(u32, cycles + 1), race.begins.load(.acquire)); // each engine's hashing starts once, after ready
 }

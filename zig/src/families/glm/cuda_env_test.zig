@@ -17,6 +17,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_SHARED", .default = true },
     .{ .name = "TF_GLM_DSEL", .default = true },
     .{ .name = "TF_GLM_DSCORES", .default = true },
+    .{ .name = "TF_GLM_MOE_DIRECT" },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
@@ -25,7 +26,7 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
-const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
+const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_INDEX_SPLIT", "TF_GLM_KV_HOST_GIB" };
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -72,6 +73,19 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
         n += 1;
     };
     try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+}
+test "GLM strict env: INDEX_SPLIT accepts the 32K local-indexer opt-in and refuses malformed positions" {
+    const name = "TF_GLM_INDEX_SPLIT";
+    try t.expectEqual(e.Kind.u32, (try row(name)).kind);
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| {
+        try t.expectEqual(@as(?u32, null), try e.value(?u32, name, raw, null));
+        if (raw) |v| try check(name, v, true);
+    }
+    for ([_][]const u8{ "0", "2048", "32768", "4294967295" }) |raw| {
+        try t.expectEqual(@as(?u32, try std.fmt.parseInt(u32, raw, 10)), try e.value(?u32, name, raw, null));
+        try check(name, raw, true);
+    }
+    for ([_][]const u8{ "64k", "-1", "4294967296", " 2048", "2048 " }) |raw| try check(name, raw, false);
 }
 
 test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {

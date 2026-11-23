@@ -1,0 +1,18 @@
+Linux <GPU_HOST> 6.17.0-35-generic #35~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 19:30:42 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.5 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/+filebug"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms/policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu
+AMD EPYC 7543 32-Core Processor, 64 threads, 1 NUMA node
+MemTotal:       263754876 kB
+3 x AMD Radeon AI PRO R9700 (gfx1201, 32 GiB) + 1 x AMD Radeon RX 9070 XT (gfx1201, 16 GiB); ranks on two R9700
+ROCm 7.2.4, HIP 7.2.53211-97f5574fe, AMD clang 22.0.0git (/opt/rocm)

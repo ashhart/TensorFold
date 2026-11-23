@@ -5,6 +5,7 @@
 #include <libavutil/ffversion.h>
 #include <libswscale/swscale.h>
 #include <stdint.h>
+#include "mem_seek.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,8 +57,9 @@ static int64_t mem_seek(void* o, int64_t off, int whence) {
     mem_t* m = (mem_t*)o;
     if (whence == AVSEEK_SIZE) return (int64_t)m->len;
     whence &= ~AVSEEK_FORCE;
-    int64_t at = whence == SEEK_SET ? off : whence == SEEK_CUR ? (int64_t)m->pos + off : (int64_t)m->len + off;
-    if (at < 0 || at > (int64_t)m->len) return -1;
+    int64_t base = whence == SEEK_CUR ? (int64_t)m->pos : whence == SEEK_END ? (int64_t)m->len : 0;
+    int64_t at = tf_mem_seek_at(m->len, off, base);
+    if (at < 0) return -1;
     m->pos = (size_t)at;
     return at;
 }

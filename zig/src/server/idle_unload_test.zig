@@ -169,10 +169,9 @@ pub const Harness = struct {
         h.tick_seen.set(h.io);
     }
 
+    /// Waits for an event its source always sets (the ticker, the fake's callbacks): a loaded host is slower, not red.
     pub fn waitEvent(self: *Harness, event: *std.Io.Event) !void {
-        var waited: u32 = 0;
-        while (!event.isSet() and waited < 2000) : (waited += 10) self.sleepMs(10);
-        try std.testing.expect(event.isSet());
+        event.waitUncancelable(self.io);
     }
 
     pub fn deinit(self: *Harness) void {
@@ -214,10 +213,15 @@ pub const Harness = struct {
         m.cond.broadcast(self.io);
     }
 
+    /// Waits on the manager's condition for the unload `expire` makes due; a zero `timeout_ms` checks once.
     pub fn waitParked(self: *Harness, timeout_ms: u32) !void {
-        var waited: u32 = 0;
-        while (self.state() != .unloaded and waited < timeout_ms) : (waited += 10) self.sleepMs(10);
-        if (self.state() != .unloaded) return error.CloseNotComplete;
+        const m = self.man.?;
+        m.mutex.lockUncancelable(self.io);
+        defer m.mutex.unlock(self.io);
+        if (m.state != .unloaded) {
+            if (timeout_ms == 0) return error.CloseNotComplete;
+            while (m.state != .unloaded) m.cond.waitUncancelable(self.io, &m.mutex);
+        }
     }
 
     /// Waits for completed park under the same lock the timer uses to publish the state.

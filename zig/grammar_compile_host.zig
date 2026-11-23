@@ -30,3 +30,10 @@ test "grammar compile: a failure is not cached and is reported without waiting f
 test "grammar compile: compile threads have the request threads' 8 MiB stack" {
     try run(7);
 }
+test "grammar compile: four abandoned workers cancel, clean up, and admit a fifth caller" {
+    try run(8);
+}
+
+test "grammar compile: only the fixed-grammar category can extend the bounded wait" {
+    try run(9);
+}

@@ -39,8 +39,8 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             try addProj(list, gpa, &x.o, x.dims, n);
         },
         .mla => |*x| {
-            try addProj(list, gpa, &x.proj, x.q_lora + x.lw, x.dims);
-            try addProj(list, gpa, &x.q_b, x.heads * x.qk, x.q_lora);
+            try addProj(list, gpa, &x.proj, x.q_lora + x.row(), x.dims);
+            try addProj(list, gpa, &x.q_b, x.heads * x.qHead(), x.q_lora);
             try addProj(list, gpa, &x.index.kw, x.index.d + x.index.heads, x.dims);
             try addProj(list, gpa, &x.index.qb, x.index.heads * x.index.d, x.q_lora);
             try addProj(list, gpa, &x.o, x.dims, x.heads * x.dv);

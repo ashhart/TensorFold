@@ -173,17 +173,18 @@ fn testTapCapture(a: std.mem.Allocator, h: *Harness) !void {
     var sc: glm.state.Scratch = undefined;
     sc.x = .{ streams_ref, streams_ref };
     sc.raw = .{ .buf = raw, .off = 0 };
-    var x: fwd.Ctx = .{ .k = h.k, .c = &target_config, .w = undefined, .s = undefined, .sc = &sc, .taps = &taps };
+    var dummy_state: glm.state.State = undefined;
+    taps_mut.setRoute(0, &dummy_state, ring);
+    var x: fwd.Ctx = .{ .k = h.k, .c = &target_config, .w = undefined, .s = &dummy_state, .sc = &sc, .taps = &taps_mut };
     const cb = h.queue.commandBuffer();
     const e = cb.compute(.serial);
-    taps.after(&x, e, 5, rows, pos);
+    taps_mut.after(&x, e, 5, rows, pos);
     e.end();
     cb.commit();
     cb.wait();
     const ring_bytes = ring.contents();
-    const stage_bytes = taps.stage.contents();
     for (0..rows) |r| {
-        const off = taps.offset(5, pos + @as(u32, @intCast(r))).?;
+        const off = taps_mut.offset(5, pos + @as(u32, @intCast(r))).?;
         for (0..D) |d| {
             var sum: f32 = 0;
             for (0..4) |s| {
@@ -192,10 +193,19 @@ fn testTapCapture(a: std.mem.Allocator, h: *Harness) !void {
             }
             const want = bf16FromF32(sum * 0.25);
             const got = @as(*const u16, @ptrCast(@alignCast(ring_bytes + off + d * 2))).*;
-            const staged = @as(*const u16, @ptrCast(@alignCast(stage_bytes + r * D * 2 + d * 2))).*;
-            if (want != got or want != staged) return error.TapMismatch;
+            if (want != got) return error.TapMismatch;
         }
     }
+    @memset(ring_bytes[0..ring.length()], 0);
+    taps_mut.setActive(0, false);
+    const cb2 = h.queue.commandBuffer();
+    const e2 = cb2.compute(.serial);
+    taps_mut.after(&x, e2, 5, rows, pos);
+    e2.end();
+    cb2.commit();
+    cb2.wait();
+    const first_off = taps_mut.offset(5, pos).?;
+    if (@as(*const u16, @ptrCast(@alignCast(ring_bytes + first_off))).* != 0) return error.TapMismatch;
 }
 
 /// The keeps go ahead of a DFlash2 pass without a wait, and stay for the window when no stream drafts with it.
@@ -312,6 +322,59 @@ fn testBatch(a: std.mem.Allocator, h: *Harness, q4: bool) !void {
     try std.testing.expectError(error.BadDraftOptions, m.proposeBatch(&mixed, &none));
 }
 
+/// Active-row slicing in single and batched passes matches full 8-row block prefixes identically.
+fn testSlicedActive(a: std.mem.Allocator, h: *Harness) !void {
+    const m = try create(a, h, false);
+    defer m.deinit();
+    const Context = glm.metal_dflash_model.Context;
+    const Tree = tf.qwen27.dflash.selector.Tree;
+    var taps: [2]mtl.Buffer = undefined;
+    for (0..2) |k| {
+        taps[k] = try h.device.buffer(@as(usize, 64) * config.tapWidth() * 2, mtl.ResourceOptions.shared);
+        var random: std.Random.DefaultPrng = .init(131 + k);
+        for (taps[k].slice(u16, 64 * config.tapWidth())) |*v| v.* = bf16FromF32((random.random().float(f32) * 2 - 1) * 2);
+    }
+    defer for (taps) |t| t.deinit();
+    var ctx: [3][2]*Context = undefined; // [full, solo_sliced, batch_sliced][stream]
+    for (0..3) |set| for (0..2) |k| {
+        ctx[set][k] = try Context.init(a, m);
+        try ctx[set][k].reset(config, 0);
+        try feedStream(m, ctx[set][k], taps[k], 0, 12 + @as(u32, @intCast(k)) * 7);
+    };
+    defer for (0..3) |set| for (0..2) |k| ctx[set][k].deinit(a);
+    const depths = [2]u32{ 1, 3 };
+    const pendings = [2]u32{ 11, 22 };
+    var full: [2]Tree = undefined;
+    var solo: [2]Tree = undefined;
+    for (0..2) |k| {
+        try m.swap(ctx[0][k]);
+        full[k] = try m.proposeOptions(pendings[k], .{ .nodes = 7, .children = 1 });
+        try m.swap(ctx[0][k]);
+        try m.swap(ctx[1][k]);
+        solo[k] = try m.proposeBlock(pendings[k], 8, .{ .nodes = depths[k], .children = 1 });
+        try m.swap(ctx[1][k]);
+        const d = depths[k];
+        try std.testing.expectEqual(d, @as(u32, @intCast(solo[k].tokens.len)));
+        try std.testing.expectEqualSlices(u32, full[k].tokens[0..d], solo[k].tokens);
+        try std.testing.expectEqualSlices(i32, full[k].parents[0..d], solo[k].parents);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(full[k].scores[0..d]), std.mem.sliceAsBytes(solo[k].scores));
+    }
+    defer for (&full) |*t| t.deinit();
+    defer for (&solo) |*t| t.deinit();
+    var entries = [2]Model.Proposal{
+        .{ .context = ctx[2][0], .pending = pendings[0], .options = .{ .nodes = depths[0], .children = 1 }, .block = 8 },
+        .{ .context = ctx[2][1], .pending = pendings[1], .options = .{ .nodes = depths[1], .children = 1 }, .block = 8 },
+    };
+    var batch: [2]Tree = undefined;
+    try m.proposeBatch(&entries, &batch);
+    defer for (&batch) |*t| t.deinit();
+    for (0..2) |k| {
+        try std.testing.expectEqualSlices(u32, solo[k].tokens, batch[k].tokens);
+        try std.testing.expectEqualSlices(i32, solo[k].parents, batch[k].parents);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(solo[k].scores), std.mem.sliceAsBytes(batch[k].scores));
+    }
+}
+
 /// A stream back on DFlash2 after MTP rounds catches its taps up: its tree is that of a stream drafting every round.
 fn testCatchUp(a: std.mem.Allocator, h: *Harness) !void {
     const m = try create(a, h, true);
@@ -359,6 +422,7 @@ pub fn main(init: std.process.Init) !void {
     try testFourBit(a, &h);
     try testBatch(a, &h, false);
     try testBatch(a, &h, true);
+    try testSlicedActive(a, &h);
     try testCatchUp(a, &h);
     try @import("glm_metal_dflash_ahead.zig").run(a, &h);
     try @import("glm_metal_dflash_follow.zig").run(a, &h);

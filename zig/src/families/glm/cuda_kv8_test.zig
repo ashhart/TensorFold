@@ -197,6 +197,7 @@ test "GLM FP8 KV: actual DSA dense and sparse passes retain the sequence-owned s
     l.qk = 256;
     l.index.heads = 32;
     l.index.d = 128;
+    l.index.geom = .{};
     var scratch = std.mem.zeroes(dsa.Scratch);
     scratch.tokens = 500;
     scratch.counts = 600;
@@ -248,6 +249,7 @@ test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, 
     l.dims = 4096;
     l.index.heads = 32;
     l.index.d = 128;
+    l.index.geom = .{};
     l.dense_limit = 1;
     const pages: u64 = 145;
     for ([_]u64{ pks, 0 }) |own| { // TF_GLM_KV_HOST's MTP cache (the second), then pooled keys inside the pages

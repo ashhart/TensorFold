@@ -6,34 +6,40 @@ const st = @import("state.zig");
 const wts = @import("weights.zig");
 const draft = @import("metal_dflash_config.zig");
 
+const TapRingArgs = extern struct {
+    hidden: u32,
+    rows: u32,
+    skip: u32,
+    pos: u32,
+    window: u32,
+    plane_off: u32,
+    ring_stride: u32,
+};
+
 /// A tap capture writes selected layer residuals into the drafter's ring-shaped pending buffer; null disables it.
 pub const Taps = struct {
     layers: [5]u32 = draft.tap_ids,
     ring: mtl.Buffer,
     window: u32,
     hidden: u32,
-    /// Scratch [window][hidden] bf16 for stream_mean output before scattering into the strided ring.
-    stage: mtl.Buffer,
     /// Each drafting stream's own ring and state: a shared window's seg rows capture into their stream's.
     routes: []Route = &.{},
 
-    /// One stream's route: the target state identifying it, and the ring its taps land in.
+    /// One stream's route: the target state identifying it, the ring its taps land in, and active capture switch.
     pub const Route = struct {
         s: ?*const st.State,
         ring: mtl.Buffer,
+        active: bool = true,
     };
 
     /// A capture over `ring` (the drafter's pending buffer), one row per window slot, with `streams` per-stream routes.
-    pub fn init(device: mtl.Device, ring: mtl.Buffer, window: u32, hidden: u32, gpa: std.mem.Allocator, streams: usize) !Taps {
-        const stage = try device.buffer(@as(usize, window) * hidden * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer stage.deinit();
+    pub fn init(_: mtl.Device, ring: mtl.Buffer, window: u32, hidden: u32, gpa: std.mem.Allocator, streams: usize) !Taps {
         const routes = try gpa.alloc(Route, streams);
         @memset(routes, .{ .s = null, .ring = ring });
         return .{
             .ring = ring,
             .window = window,
             .hidden = hidden,
-            .stage = stage,
             .routes = routes,
         };
     }
@@ -49,7 +55,7 @@ pub const Taps = struct {
     pub fn after(t: *const Taps, x: *fwd.Ctx, e: mtl.ComputeEncoder, layer: usize, rows: u32, pos: u32) void {
         const i = t.index(layer) orelse return;
         if (x.segs.len == 0) {
-            const ring = t.ringFor(x.s) orelse return; // a stream with no route (capped, or drafting with the head)
+            const ring = t.ringFor(x.s) orelse return;
             t.route(x, e, ring, x.sc.x[x.xi], rows, pos, i);
             return;
         }
@@ -66,31 +72,31 @@ pub const Taps = struct {
         return t.routeRing(s);
     }
 
-    /// The stream's routed ring, or null when it drafts no chain (its seg is skipped).
+    /// The stream's routed ring when active, or null when inactive or drafting no chain.
     pub fn routeRing(t: *const Taps, s: ?*const st.State) ?mtl.Buffer {
-        for (t.routes) |rt| if (rt.s == s) return rt.ring;
+        for (t.routes) |rt| if (rt.s == s and rt.active) return rt.ring;
         return null;
     }
 
-    /// The streams scratch's mean over `rows` from `pos`, scattered into `ring`'s plane `i` (null: t.ring).
+    /// Mean of the four HC streams from `src` scattered directly into `ring`'s plane `i` in one launch.
     fn route(t: *const Taps, x: *fwd.Ctx, e: mtl.ComputeEncoder, ring: ?mtl.Buffer, src: wts.Ref, rows: u32, pos: u32, i: usize) void {
         const D = t.hidden;
         const n = @min(rows, t.window);
+        if (n == 0) return;
         const skip = rows - n;
-        e.setPipeline(x.k.stream_mean);
-        fwd.bind(e, 0, .{ src.at(@as(usize, skip) * 4 * D * 2), .{ .buf = t.stage, .off = 0 } });
-        e.setValue([2]u32{ D, n }, 2);
-        e.dispatchThreads(fwd.size(D, n, 1), fwd.size(256, 1, 1));
-        const words = D / 2;
-        e.setPipeline(x.k.copy_u32);
         const dst = ring orelse t.ring;
-        for (0..n) |r| {
-            const slot: u32 = @intCast((pos + skip + r) % t.window);
-            const dst_off = @as(usize, slot) * t.stride() + @as(usize, i) * D * 2;
-            fwd.bind(e, 0, .{ .{ .buf = t.stage, .off = r * D * 2 }, .{ .buf = dst, .off = dst_off } });
-            e.setValue(words, 2);
-            e.dispatchThreads(fwd.size(words, 1, 1), fwd.size(256, 1, 1));
-        }
+        e.setPipeline(x.k.tap_mean_ring);
+        fwd.bind(e, 0, .{ src, .{ .buf = dst, .off = 0 } });
+        e.setValue(TapRingArgs{
+            .hidden = D,
+            .rows = n,
+            .skip = skip,
+            .pos = pos,
+            .window = t.window,
+            .plane_off = @intCast(i * D),
+            .ring_stride = @intCast(t.layers.len * D),
+        }, 2);
+        e.dispatchThreads(fwd.size(D, n, 1), fwd.size(256, 1, 1));
     }
 
     pub fn stride(t: *const Taps) usize {
@@ -100,7 +106,13 @@ pub const Taps = struct {
     /// The stream's route into its own ring (null: no ring, its seg rows are skipped).
     pub fn setRoute(t: *Taps, slot: usize, s: *const st.State, ring: mtl.Buffer) void {
         if (slot >= t.routes.len) return;
-        t.routes[slot] = .{ .s = s, .ring = ring };
+        t.routes[slot] = .{ .s = s, .ring = ring, .active = true };
+    }
+
+    /// Toggle whether `slot`'s route writes taps during verify forwards.
+    pub fn setActive(t: *Taps, slot: usize, active: bool) void {
+        if (slot >= t.routes.len or t.routes[slot].s == null) return;
+        t.routes[slot].active = active;
     }
 
     /// The stream's route gone: its rows capture into nothing.
@@ -108,13 +120,13 @@ pub const Taps = struct {
         for (t.routes) |*rt| {
             if (rt.s != s) continue;
             rt.s = null;
+            rt.active = false;
         }
     }
 
-    /// The routes and the stage scratch go; the caller frees its ring.
+    /// The routes go; the caller frees its ring.
     pub fn deinit(t: *Taps, gpa: std.mem.Allocator) void {
         gpa.free(t.routes);
-        t.stage.deinit();
         t.routes = &.{};
     }
 

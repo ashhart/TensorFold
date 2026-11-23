@@ -39,6 +39,10 @@ export class ModelRevisions {
     return sha ? this.snapshot(repo, sha) : null
   }
 
+  async revision(repo: string): Promise<string | null> {
+    return (await this.read())[assertRepoId(repo)] ?? null
+  }
+
   async snapshot(repo: string, sha: string, boundHub?: string): Promise<string> {
     assertRepoId(repo)
     if (!SHA.test(sha)) throw new Error(INVALID)

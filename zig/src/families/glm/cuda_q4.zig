@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 
 /// qmm_group.cu's tile-2 instantiation (LaneTile<64, 16, 64, 1, 4, 8>, bf16 out), as zig/kernels/cuda exports it.
 const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
@@ -96,7 +97,7 @@ pub fn matmul(ks: *const Kernels, stream: cuda.Stream, x: u64, ldx: usize, xs: u
         .block = .{ .x = 128 },
         .shared = group_smem,
         .cluster = if (sk > 1) .{ .x = @intCast(sk) } else null,
-        .pdl = ks.gb10,
+        .pdl = ks.gb10 and cuda_pdl.on(),
     };
     try cuda.launch.launch(ks.group, cfg, stream, &a);
 }

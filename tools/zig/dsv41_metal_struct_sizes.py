@@ -17,6 +17,8 @@ JOINS = [
 JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "csa2_rows.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal", "experts_units.metal"}
 # The sources `sources.zig` embeds as `segs_h ++ @embedFile(...)`: the slot table's record first.
 SEGS_PREPEND = {"csa2_attn.metal", "fused.metal", "compress.metal", "cand.metal", "index.metal"}
+# The units the engine compiles after keyed.metal (early_picks.zig, markov.zig): its tf_key_* helpers first.
+KEYED_PREPEND = {"early.metal", "markov.metal"}
 
 STRUCT_DEF = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{")
 TEMPLATE_DEF = re.compile(r"\btemplate\s*<[^>]*>\s*struct\s+([A-Za-z_]\w*)\s*\{")
@@ -33,11 +35,13 @@ def unit_texts(directory):
         body = "".join(open(os.path.join(directory, p), encoding="utf-8").read() for p in parts)
         texts[name] = (prefix or "") + body
     segs = open(os.path.join(directory, "segs.h"), encoding="utf-8").read()
+    keyed = open(os.path.join(directory, "keyed.metal"), encoding="utf-8").read()
     for entry in sorted(os.listdir(directory)):
         if not entry.endswith(".metal") or entry in JOIN_ONLY:
             continue
         body = open(os.path.join(directory, entry), encoding="utf-8").read()
-        texts[entry[:-6]] = (segs if entry in SEGS_PREPEND else "") + body
+        prefix = segs if entry in SEGS_PREPEND else (keyed if entry in KEYED_PREPEND else "")
+        texts[entry[:-6]] = prefix + body
     return texts
 
 

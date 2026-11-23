@@ -1,17 +1,19 @@
-// qwen35.cu's row-wise kernels: the tap ring's residuals and the MLP activation, eight entries a thread.
+// qwen35.cu's row-wise kernels: the tap ring's residuals and the MLP activation.
 #pragma once
 
-// A tapped layer's residual bf16(h + r) into the segment's tap ring at the row's position; grid (rows, D / 2048).
+// Write bf16(h + r) into the tap ring at each row's position, bounded by keep_rows during prefill.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                               const Seg* __restrict__ segs, const int* __restrict__ rowseg, int tap, int D,
+                                                              int keep_rows,
                                                               const int* __restrict__ P) {
     if (past_rows(P, blockIdx.x)) return;
     const size_t m = blockIdx.x;
     const Seg sg = segs[rowseg[m]];
     if (sg.tap == 0) return;
     const long long pos = sg.len + (long long)m - sg.row0;
+    if (keep_rows > 0 && pos < (long long)sg.len + sg.rows - keep_rows) return;
     __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(sg.tap) + ((size_t)(pos % sg.tap_rows) * sg.taps + tap) * D;
-    const int i = (blockIdx.y * blockDim.x + threadIdx.x) * 8;  // eight entries a thread, grid (rows, D / 2048)
+    const int i = (blockIdx.y * blockDim.x + threadIdx.x) * 8;
     if (i >= D) return;
     const uint4 hw = *reinterpret_cast<const uint4*>(H + m * D + i), rw = *reinterpret_cast<const uint4*>(R + m * D + i);
     const __nv_bfloat16* hb = reinterpret_cast<const __nv_bfloat16*>(&hw);

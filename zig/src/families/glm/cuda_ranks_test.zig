@@ -477,7 +477,7 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
             return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "0" else null;
         }
         fn from(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "65536" else null;
+            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "32768" else null;
         }
         fn bad(key: [:0]const u8) ?[]const u8 {
             return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "64k" else null;
@@ -486,7 +486,7 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
     var problem: []const u8 = "";
     try std.testing.expectEqual(@as(u32, 2048), (try Settings.read(Reader.absent, &problem)).index_split);
     try std.testing.expectEqual(@as(u32, 0), (try Settings.read(Reader.never, &problem)).index_split);
-    try std.testing.expectEqual(@as(u32, 65536), (try Settings.read(Reader.from, &problem)).index_split);
+    try std.testing.expectEqual(@as(u32, 32768), (try Settings.read(Reader.from, &problem)).index_split);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
 }

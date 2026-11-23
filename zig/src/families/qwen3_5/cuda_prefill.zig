@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
 const prompt_tail = @import("cuda_prompt_tail.zig");
+const tap_window = @import("cuda_cache.zig").tap_window;
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const readout = @import("cuda_readout.zig");
 const cuda_solo = @import("cuda_solo.zig");
@@ -39,6 +40,72 @@ test "a pass resumes only where a cold pass cuts: every grid_rows rows from 0 or
 
 /// The rows a capped step's cuts keep: the prompt tile's rows, a multiple of the delta rule's 64-row chunks.
 pub const cap_grid = 128;
+
+/// MTP absorbs this many ordinary prompt rows; the final prompt row is absorbed separately.
+pub fn mtpPromptTapFrom(prompt_len: usize, held_rows: usize) ?usize {
+    const needed = held_rows + 1;
+    return if (prompt_len > needed) prompt_len - needed else null;
+}
+
+fn initialMtpPromptRows(direct_mtp_norm: bool, configured_rows: usize) usize {
+    return if (direct_mtp_norm) configured_rows else tap_window;
+}
+
+fn stepEndAtMtpSuffix(at: usize, end: usize, from: ?usize) usize {
+    const boundary = from orelse return end;
+    return if (at < boundary and boundary < end) boundary else end;
+}
+
+fn targetForwardEnd(at: usize, end: usize, from: ?usize, stepped: bool, direct_mtp_norm: bool) usize {
+    return if (stepped and !direct_mtp_norm) stepEndAtMtpSuffix(at, end, from) else end;
+}
+
+pub fn onlySkippedMtpPrefix(start: u64, count: u32, from: ?usize) bool {
+    const boundary = from orelse return false;
+    const limit: u64 = @intCast(boundary);
+    return start < limit and count <= limit - start;
+}
+
+test "MTP prompt tap boundary includes 2048 ordinary rows and the separately absorbed final row" {
+    try std.testing.expectEqual(@as(?usize, null), mtpPromptTapFrom(2048, 2048));
+    try std.testing.expectEqual(@as(?usize, null), mtpPromptTapFrom(2049, 2048));
+    const from4k = mtpPromptTapFrom(4096, 2048).?;
+    try std.testing.expectEqual(@as(usize, 2047), from4k);
+    try std.testing.expectEqual(@as(usize, 2048), (4096 - 1) - from4k);
+    try std.testing.expectEqual(@as(usize, 1), 4096 - (4096 - 1));
+    const from8k = mtpPromptTapFrom(8192, 2048).?;
+    try std.testing.expectEqual(@as(usize, 6143), from8k);
+    try std.testing.expectEqual(@as(usize, 2048), (8192 - 1) - from8k);
+    try std.testing.expectEqual(@as(usize, 1), 8192 - (8192 - 1));
+    try std.testing.expectEqual(@as(?usize, 4095), mtpPromptTapFrom(6144, 2048));
+    try std.testing.expectEqual(@as(?usize, 4096), mtpPromptTapFrom(6145, 2048));
+}
+
+test "qualified 256-row MTP history applies only to direct-normalized input" {
+    const rows: usize = @intCast(@import("cuda_mtp_types.zig").default_initial_prompt_rows);
+    try std.testing.expectEqual(rows, initialMtpPromptRows(true, rows));
+    const needed = mtpPromptTapFrom(8192, rows).?;
+    try std.testing.expectEqual(@as(usize, 8192 - rows - 1), needed);
+    try std.testing.expectEqual(tap_window, initialMtpPromptRows(false, rows));
+    try std.testing.expectEqual(@as(?usize, 7935), mtpPromptTapFrom(8192, rows));
+}
+
+test "stepped MTP prefill cuts at the suffix and identifies discarded prefix rows" {
+    try std.testing.expectEqual(@as(usize, 6143), stepEndAtMtpSuffix(4096, 8192, 6143));
+    try std.testing.expectEqual(@as(usize, 6143), stepEndAtMtpSuffix(4096, 6143, 6143));
+    try std.testing.expectEqual(@as(usize, 8192), stepEndAtMtpSuffix(6143, 8192, 6143));
+    try std.testing.expectEqual(@as(usize, 8192), stepEndAtMtpSuffix(4096, 8192, null));
+    try std.testing.expect(onlySkippedMtpPrefix(4096, 2047, 6143));
+    try std.testing.expect(!onlySkippedMtpPrefix(4096, 2048, 6143));
+    try std.testing.expect(!onlySkippedMtpPrefix(6143, 1024, 6143));
+}
+
+test "direct-normalized MTP keeps the target's original stepped chunk boundary" {
+    try std.testing.expectEqual(@as(usize, 6143), targetForwardEnd(4096, 8192, 6143, true, false));
+    try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, 6143, true, true));
+    try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, null, true, true));
+    try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, 6143, false, false));
+}
 
 /// The end of `f`'s next step under `max_rows` (0: the cold cut), its cold cut renewed once the last one landed.
 fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
@@ -90,7 +157,7 @@ test "a yielded pass keeps its completed prefix and stops before the next chunk,
         }
     };
     const FakePrefix = struct {
-        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) !void {}
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: ?u64, _: usize) !void {}
     };
     const FakePages = struct {
         fn log(_: *@This(), _: usize, _: usize) void {}
@@ -182,7 +249,7 @@ test "a solo pass merges cold chunks of 2048 rows or more up to its rows; marks 
 }
 
 pub fn run(self: anytype, stream: *lanes.Stream) !void {
-    var f = try opening(self, stream);
+    var f = try opening(self, stream, false);
     defer f.deinit();
     while (!try chunk(self, stream, &f, 0)) {}
 }
@@ -200,7 +267,7 @@ pub fn whole(self: anytype, stream: *lanes.Stream) !void {
 pub fn step(self: anytype, stream: *lanes.Stream, max_rows: u32) !bool {
     const got = try self.fills.getOrPut(self.gpa, stream);
     if (!got.found_existing) {
-        got.value_ptr.* = opening(self, stream) catch |err| {
+        got.value_ptr.* = opening(self, stream, true) catch |err| {
             self.fills.removeByPtr(got.key_ptr);
             return err;
         };
@@ -229,8 +296,12 @@ pub fn endFill(self: anytype, stream: *lanes.Stream) void {
 /// A prompt pass under way: where its next cut starts, an image prompt's encoded images, TF_QWEN_KV_SHARE's marks.
 pub const Fill = struct {
     at: usize,
+    stepped: bool = false,
     cold: usize = 0, // the cold pass's cut that ends the chunk in flight; a capped step cuts inside it (lanes.step_cap)
     media: ?vision_prompt.Media,
+    mtp_tap_from: ?usize = null,
+    mtp_prompt_taps: bool = false,
+    direct_mtp_norm: bool = false,
     kept: ?struct { gpa: std.mem.Allocator, marks: []const u32 } = null,
 
     pub fn deinit(f: *Fill) void {
@@ -240,25 +311,21 @@ pub const Fill = struct {
 };
 
 /// A prompt pass begins: its images encoded, a cache, a kept state restored where a cold pass cuts.
-fn opening(self: anytype, stream: *lanes.Stream) !Fill {
+fn opening(self: anytype, stream: *lanes.Stream, stepped: bool) !Fill {
     const ids = stream.prompt();
     if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
-    // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
-    var media: ?vision_prompt.Media = null;
-    if (stream.images.len > 0) {
-        const v = self.vision orelse return error.QwenServedWithoutVision;
-        media = try vision_prompt.Media.init(self.gpa, v, ids, stream.images);
-    }
-    errdefer if (media) |*m| m.deinit();
+    // an image prompt: its images through the tower once the resume is known, then every chunk at its t, h, w positions
+    if (stream.images.len > 0 and self.vision == null) return error.QwenServedWithoutVision;
     const seen = try self.seenOf(stream.images);
     self.seen.put(self.gpa, stream, seen) catch |err| {
         self.gpa.free(seen);
         return err;
     };
     errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
-    // TF_QWEN_KV_SHARE: the kept pages this prompt resumes, adopted; images and request cuts keep their own grid
-    const share = self.prefix != null and media == null and stream.chunks.len == 0;
-    const shared = if (share) try self.prefix.?.open(ids, stream.max_new, stream.history_len, stream.shared_prefixes) else null;
+    // TF_QWEN_KV_SHARE: snapshots use the request's effective key, not raw prompt ids
+    const cache_key = if (stream.key.len != 0) stream.key else ids;
+    const share = self.prefix != null and stream.images.len == 0 and stream.chunks.len == 0;
+    const shared = if (share) try self.prefix.?.open(cache_key, stream.max_new, stream.history_len, stream.shared_prefixes, stream.cache_salt) else null;
     errdefer if (shared) |x| self.gpa.free(x.plan.marks);
     const cache = if (shared) |x| x.cache else try self.take(ids.len, stream.max_new);
     errdefer self.give(cache);
@@ -285,13 +352,39 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         } else stream.reuse_failed = true;
     }
     cache.untaught = stream.untaught;
+    // the images a kept state holds skip the tower (their rows are never spliced); positions still come from all
+    const media: ?vision_prompt.Media = if (stream.images.len > 0) try vision_prompt.Media.init(self.gpa, self.vision.?, ids, stream.images, at) else null;
     stream.fill_at.store(@intCast(at), .monotonic);
-    return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
+    const mtp_prompt_taps = self.mtp != null;
+    // MTP reuses normalized rows only before the next target forward overwrites the shared buffer.
+    const direct_mtp_norm = if (comptime @TypeOf(self.e) == *E.Engine)
+        stepped and mtp_prompt_taps and stream.drafts and !self.e.g.bf16 and self.e.learning == null and
+            self.e.mlp == null and !self.e.pockets.any() and !self.e.int8.on and at == 0 and media == null and
+            stream.readout == null and stream.chunks.len == 0 and stream.reuse.saved == null and stream.reuse.marks.len == 0 and
+            stream.reuse.hook == null and self.prefix == null
+    else
+        false;
+    const optimize_mtp_prefix = mtp_prompt_taps and at == 0 and media == null and
+        stream.chunks.len == 0 and stream.reuse.saved == null and stream.reuse.marks.len == 0 and stream.reuse.hook == null and self.prefix == null;
+    const configured_mtp_rows = if (comptime @TypeOf(self.e) == *E.Engine) blk: {
+        const configured = if (self.mtp) |mtp| mtp.initial_prompt_rows else tap_window;
+        break :blk @as(usize, configured);
+    } else tap_window;
+    const initial_mtp_rows = initialMtpPromptRows(direct_mtp_norm, configured_mtp_rows);
+    const mtp_tap_from = if (optimize_mtp_prefix)
+        (if (stream.drafts) mtpPromptTapFrom(ids.len, initial_mtp_rows) else ids.len)
+    else
+        null;
+    return .{ .at = at, .stepped = stepped, .media = media, .mtp_tap_from = mtp_tap_from, .mtp_prompt_taps = mtp_prompt_taps, .direct_mtp_norm = direct_mtp_norm, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
 }
 
 /// The pass's next cut; true once the prompt is in. A cap cuts inside the cold chunk (on cap_grid): cold cuts all land.
 pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !bool {
     const ids = stream.prompt();
+    const EngineType = if (@typeInfo(@TypeOf(self.e)) == .pointer)
+        @typeInfo(@TypeOf(self.e)).pointer.child
+    else
+        @TypeOf(self.e);
     // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
     if (stream.isCancelled()) {
         stream.keepInterruptedPrefill(@intCast(f.at));
@@ -302,6 +395,10 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
         return error.Yielded;
     }
     const cache = try self.cacheOf(stream);
+    if (comptime @TypeOf(self.e) == *E.Engine and @hasField(@TypeOf(self.*), "last_mtp_normed")) {
+        self.last_mtp_normed = null;
+        if (comptime @hasField(@TypeOf(self.*), "last_mtp_direct_expected")) self.last_mtp_direct_expected = null;
+    }
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
     // TF_QWEN35_CHUNK_SOLO: a lone uncapped text pass merges cold chunks; a yield-checked (warm) pass keeps the grid
     const rows = self.e.scratch_rows;
@@ -309,24 +406,41 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
         !cuda_solo.othersDecode(self, stream);
     const marks = if (f.kept) |k| k.marks else stream.reuse.marks;
     const end = if (solo) soloEnd(ids.len, stream.chunks, f, rows, marks) else capped(ids.len, stream.chunks, f, max_rows);
-    // a non-final chunk's rows feed only a head nobody reads: its last layer stops at its keys and values
-    const unread = end < ids.len and prompt_tail.unread(self.e, images != null);
-    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], if (unread) .none else .last);
-    lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
-    f.at = end;
-    stream.fill_at.store(@intCast(end), .monotonic);
+    const forward_end = targetForwardEnd(f.at, end, f.mtp_tap_from, f.stepped, f.direct_mtp_norm);
+    if (comptime @hasField(EngineType, "mtp_prompt")) {
+        const previous_tap = self.e.mtp_prompt.setForPrompt(f.mtp_tap_from, forward_end, f.direct_mtp_norm, f.mtp_prompt_taps);
+        defer self.e.mtp_prompt.restoreTapConfig(previous_tap);
+        // A chunk without readers stops its last layer at the state writes.
+        const unread = forward_end < ids.len and prompt_tail.unread(self.e, images != null);
+        try self.e.forward(&.{.{ .cache = cache, .rows = forward_end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..forward_end], if (unread) .none else .last);
+    } else {
+        const unread = forward_end < ids.len and prompt_tail.unread(self.e, images != null);
+        try self.e.forward(&.{.{ .cache = cache, .rows = forward_end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..forward_end], if (unread) .none else .last);
+    }
+    if (comptime @TypeOf(self.e) == *E.Engine and @hasField(@TypeOf(self.*), "last_mtp_normed")) {
+        if (f.direct_mtp_norm) {
+            const valid_from = @min(forward_end, @max(f.at, f.mtp_tap_from orelse f.at));
+            self.last_mtp_normed = .{ .stream = stream, .chunk_start = f.at, .end = forward_end, .valid_from = valid_from, .epoch = self.e.mtp_prompt.epoch };
+            if (comptime @hasField(@TypeOf(self.*), "last_mtp_direct_expected")) {
+                self.last_mtp_direct_expected = .{ .stream = stream, .chunk_start = f.at, .end = forward_end, .valid_from = valid_from, .epoch = self.e.mtp_prompt.epoch };
+            }
+        }
+    }
+    lanes.prefill_widths.completed(self.gpa, stream, forward_end - f.at);
+    f.at = forward_end;
+    stream.fill_at.store(@intCast(forward_end), .monotonic);
     // a mark the store asked for, where the cold pass cuts (a resume's only place): the lane host copies the state here
-    const cold = end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
+    const cold = forward_end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
     if (f.kept) |k| {
-        if (cold and end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
-            self.prefix.?.keep(cache, ids, end) catch |err| {
+        if (cold and forward_end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(forward_end)) != null)
+            self.prefix.?.keep(cache, if (stream.key.len != 0) stream.key else ids, stream.cache_salt, forward_end) catch |err| {
                 if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
                 std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
             };
-    } else if (cold and end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
-        if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
+    } else if (cold and forward_end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(forward_end)) != null) {
+        if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(forward_end));
     }
-    if (end < ids.len) return false;
+    if (forward_end < ids.len) return false;
     // the reply's rows rotate past the image prompt's positions (rope_delta)
     if (f.media) |m| cache.delta = m.delta;
     if (self.pages) |p| p.log(ids.len, stream.cached);
