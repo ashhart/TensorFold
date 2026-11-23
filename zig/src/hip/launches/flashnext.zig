@@ -117,7 +117,9 @@ pub fn hcNormShares(
         world,
         stride,
     }) |v| try a.add(v);
-    try l.go(l.fnx.hc_norm, dim(streams, rows, 1), dim(1024, 1, 1), 0, s, &a);
+    // a prompt's rows: a block a row over its streams (the branch read once); a few rows: a block a stream, for width
+    const across: c_int = if (rows >= 64) 1 else streams;
+    try l.go(l.fnx.hc_norm, dim(across, rows, 1), dim(1024, 1, 1), 0, s, &a);
 }
 
 /// act = silu(z / streams) and inject = 2 sigmoid(z / streams) from the down projection's fp32 sums (no inject: null).

@@ -62,9 +62,19 @@ pub fn planRows(o: Ops, exact: bool, rows: usize) usize {
     return if (exact or (o.window and o.l.affine.caps.generation == .rdna3_5)) rows else bucket(rows);
 }
 
+/// The items a compacted plan of `pairs` over `experts` fills at `tile` rows an item: a launch covers these of `cap`.
+pub fn live(pairs: usize, experts: usize, tile: usize, cap: usize) usize {
+    return @min(cap, maxItems(pairs, experts, tile));
+}
+
 /// max_items(pairs, experts, min(TILE, LANE_ROWS)): an item a used expert plus one a tile of pairs past its first.
 pub fn capacity(pairs: usize, experts: usize) usize {
-    return @min(pairs, experts) + pairs / @min(TILE, LANE_ROWS);
+    return maxItems(pairs, experts, @min(TILE, LANE_ROWS));
+}
+
+/// The most items a plan of `pairs` over `experts` fills with `tile` rows an item.
+fn maxItems(pairs: usize, experts: usize, tile: usize) usize {
+    return @min(pairs, experts) + pairs / @max(tile, 1);
 }
 
 /// The fewest rows a prompt pass cuts at the GEMM tile on this build's card: its tuning table's, else BLOCK_FROM.
@@ -136,19 +146,21 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         try o.moeRoute(local, pairs, r.rows, tile, null, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
         const expert_rows = expertRows(rows, r.top_k, r.count());
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
+        const n = live(pairs, r.rows, @min(tile, rows), count);
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows, n);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const act_t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, act_t, pairs, ex.width, ex.limit);
-        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
+        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows, n);
         // the shared pair's id is another rank's here: its row reads zero, and rank 0 adds its own gate's branch
-        try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         const share = try o.arena.of(f32, rows * ex.dims);
         if (ex.shared) |sh| {
             const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
-            try o.moeCombineGate(y, wts, s, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
+            // another rank's pairs read zero in the combine itself
+            try o.moeCombineGate(y, wts, s, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims, local, ex.count);
             return .{ .ptr = share, .kind = .f32 };
         }
+        try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
@@ -156,7 +168,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const out = try o.arena.take(rows * ex.dims * kind.size());
     if (ex.shared) |sh| {
         const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
-        try o.moeCombineGate(p.y, wts, s, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
+        try o.moeCombineGate(p.y, wts, s, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims, 0, 0);
         return .{ .ptr = out, .kind = kind };
     }
     try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
@@ -197,6 +209,8 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     const pairs = rows * slots;
     var count: usize = cap;
     var tile: usize = undefined;
+    // the tile the plan cuts the routed experts at: what bounds the items it fills
+    var cut: usize = 1;
     if (rows == 1) {
         try o.moeSelect(logits, pick, wts, .{ .items = items, .members = members }, cap, 1, r.count(), r.top_k);
         tile = 1;
@@ -204,6 +218,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     } else {
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         tile = tileFor(o, rows);
+        cut = tile;
         // the stacked shared expert is the last id; beside the stack its items are zeroed below, so it keeps the tile
         const shared: ?usize = if (ex.shared == null) r.count() else null;
         try o.moeRoute(pick, pairs, r.rows, tile, shared, sharedTileFor(o, rows), members, items, cap);
@@ -214,14 +229,15 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
     const expert_rows = expertRows(rows, r.top_k, r.count());
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
+    const n = live(pairs, r.rows, @min(cut, rows), count);
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows, n);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, t, pairs, ex.width, ex.limit);
         break :blk t;
     };
-    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
+    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows, n);
     return .{ .y = y };
 }
 
@@ -304,5 +320,26 @@ test "a card's start moves a prompt pass's GEMM tile to 33 rows; decode, lane ro
         try std.testing.expectEqual(@as(usize, BLOCK_ROWS), itemRowsOf(rows, false, true, true, 33));
         try std.testing.expectEqual(gemm_at_64, itemRowsOf(rows, false, false, true, 33));
         try std.testing.expectEqual(@as(usize, LANE_ROWS), itemRowsOf(rows, true, true, true, 33));
+    }
+}
+
+test "live covers every item a route of any expert counts can fill" {
+    var rng = std.Random.DefaultPrng.init(0x11FE);
+    const r = rng.random();
+    var counts: [64]usize = undefined;
+    for (0..2000) |_| {
+        const experts = 1 + r.uintLessThan(usize, counts.len);
+        const tile = 1 + r.uintLessThan(usize, 32);
+        // a skewed spread: most pairs on a few experts, as a router's are
+        var pairs: usize = 0;
+        for (counts[0..experts]) |*c| {
+            c.* = if (r.boolean()) 0 else r.uintLessThan(usize, 1 + r.uintLessThan(usize, 200));
+            pairs += c.*;
+        }
+        var filled: usize = 0; // tf_moe_route: an item a tile of each used expert's pairs
+        for (counts[0..experts]) |c| filled += std.math.divCeil(usize, c, tile) catch unreachable;
+        const cap = filled + r.uintLessThan(usize, 8);
+        try std.testing.expect(filled <= live(pairs, experts, tile, cap));
+        try std.testing.expect(live(pairs, experts, tile, cap) <= cap);
     }
 }

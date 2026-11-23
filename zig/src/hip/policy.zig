@@ -42,6 +42,8 @@ pub const Policy = struct {
     prefill_step: u32 = 1024,
     /// Prompt rows a chunk while other streams decode: a multiple of 64 dividing 1024 (the idle chunk).
     fill_rows: u32 = 512,
+    /// gfx12's matrix prompt tiles (TF_HIP_GFX12_WMMA=1): faster, but they change a prompt's bytes, so off by default.
+    gfx12_wmma: bool = false,
     /// Set from the serve flags, not keys: rank 0's travel to the other ranks.
     mtp: Mtp = .{},
     /// Snapshots the radix prompt cache keeps (`--checkpoint-slots`).
@@ -80,7 +82,7 @@ pub const Policy = struct {
             .on => .on,
             .off => .off,
         };
-        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn() } };
+        return .{ .fuse = p.fused(), .wide = p.wideAttention(), .products = .{ .matrix = matrix, .stream = p.streamOn(), .gemm = p.gemmOn(), .gfx12 = p.gfx12_wmma } };
     }
 
     /// Whether the 64-row prefill attention tile is on.
@@ -132,6 +134,7 @@ pub const Policy = struct {
         if (p.stream != .auto) try w.print(",stream={t}", .{p.stream});
         if (p.gemm != .auto) try w.print(",gemm={t}", .{p.gemm});
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
+        if (p.gfx12_wmma) try w.writeAll(",gfx12_wmma=1");
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
         if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
@@ -144,7 +147,7 @@ pub const Policy = struct {
         const conf: u64 = @bitCast(p.mtp.confidence);
         const pack = [_]u32{
             @backingInt(p.matrix), @backingInt(p.attention), @backingInt(p.kernels), @backingInt(p.graphs),
-            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),
+            @backingInt(p.stream), @backingInt(p.gemm),      @backingInt(p.fuse),    @intFromBool(p.gfx12_wmma),
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
@@ -154,7 +157,7 @@ pub const Policy = struct {
     /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
     pub fn fromWords(w: [word_count]u32, local: Policy) Policy {
         var p = local;
-        var vals: [7]u32 = undefined;
+        var vals: [8]u32 = undefined;
         for (&vals, 0..) |*v, i| v.* = (w[i / 8] >> @intCast(4 * (i % 8))) & 0xf;
         p.matrix = @fromBackingInt(@intCast(vals[0]));
         p.attention = @fromBackingInt(@intCast(vals[1]));
@@ -163,6 +166,7 @@ pub const Policy = struct {
         p.stream = @fromBackingInt(@intCast(vals[4]));
         p.gemm = @fromBackingInt(@intCast(vals[5]));
         p.fuse = @fromBackingInt(@intCast(vals[6]));
+        p.gfx12_wmma = vals[7] != 0;
         p.mtp = .{ .drafts = @truncate(w[1] >> 24), .confidence = @bitCast(@as(u64, w[3]) | @as(u64, w[4]) << 32) };
         p.prefill_step = w[2];
         p.slots = w[5];
@@ -170,7 +174,7 @@ pub const Policy = struct {
         return p;
     }
 
-    /// Where TF_POLICY is read from, once, at resolution.
+    /// Where TF_POLICY and TF_HIP_GFX12_WMMA are read from, once, at resolution.
     pub const Env = struct {
         /// Read the process's variables after `vars`.
         process: bool = false,
@@ -201,7 +205,7 @@ pub const Policy = struct {
         }
     };
 
-    /// The policy: defaults, then `flags` (`--policy`), then TF_POLICY; `notes` says when TF_POLICY acted.
+    /// The policy: defaults, `flags` (`--policy`), TF_POLICY, then TF_HIP_GFX12_WMMA; `notes` says when they acted.
     pub fn resolve(flags: []const u8, env: Env, notes: *Notes) Error!Policy {
         return resolveFrom(.{}, flags, env, notes);
     }
@@ -214,6 +218,10 @@ pub const Policy = struct {
             notes.add("TF_POLICY={s}; ", .{text});
             try p.apply(text);
         }
+        if (env.get("TF_HIP_GFX12_WMMA")) |text| if (text.len != 0) {
+            notes.add("TF_HIP_GFX12_WMMA={s}; ", .{text});
+            p.gfx12_wmma = if (std.mem.eql(u8, text, "1")) true else if (std.mem.eql(u8, text, "0")) false else return error.BadValue;
+        };
         return p;
     }
 };
@@ -248,7 +256,7 @@ test "the RDNA 3.5 iGPUs default to larger prompt chunks and every flag still ov
 }
 
 test "a policy survives its words" {
-    var p: Policy = .{ .mtp = .{ .drafts = 2, .confidence = 0.25 }, .slots = 4, .graph_fail = 1 };
+    var p: Policy = .{ .mtp = .{ .drafts = 2, .confidence = 0.25 }, .slots = 4, .graph_fail = 1, .gfx12_wmma = true };
     try p.apply("matrix=on,attention=f32,graphs=off,fuse=reference,fill_rows=128");
     const back = Policy.fromWords(p.words(), .{ .graph_fail = 1 });
     try std.testing.expectEqualDeep(p, back);
@@ -274,4 +282,15 @@ test "graphs are on at any world size unless the policy turns them off" {
     try std.testing.expect(p.graphsOn());
     try p.apply("graphs=off");
     try std.testing.expect(!p.graphsOn());
+}
+
+test "TF_HIP_GFX12_WMMA turns gfx12's matrix prompt tiles on, only as 1, and they stay off by default" {
+    var notes: Policy.Notes = .{};
+    try std.testing.expect(!(try Policy.resolve("", .none, &notes)).gfx12_wmma);
+    try std.testing.expect(!(try Policy.resolve("", .{ .vars = &.{.{ "TF_HIP_GFX12_WMMA", "" }} }, &notes)).gfx12_wmma);
+    try std.testing.expect(!(try Policy.resolve("", .{ .vars = &.{.{ "TF_HIP_GFX12_WMMA", "0" }} }, &notes)).gfx12_wmma);
+    const on = try Policy.resolve("", .{ .vars = &.{.{ "TF_HIP_GFX12_WMMA", "1" }} }, &notes);
+    try std.testing.expect(on.gfx12_wmma and on.choices().products.gfx12);
+    try std.testing.expect(!(Policy{}).choices().products.gfx12);
+    try std.testing.expectError(error.BadValue, Policy.resolve("", .{ .vars = &.{.{ "TF_HIP_GFX12_WMMA", "on" }} }, &notes));
 }

@@ -45,6 +45,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_GEMM` | Exactly `narrow`; default the 128x128 tiles |
 | `TENSORFOLD_MEMORY_RESERVE_GIB` | A finite GiB amount; the HIP admission's floor (0.5, or 2 on shared memory) and the memory's size still bound it |
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
+| `TF_HIP_GFX12_WMMA` | Exactly `0` or `1`; default off. `1` runs the prompt products of MLX affine weights on gfx12's (gfx1200, gfx1201) matrix-core tiles, which are faster. These tiles add up each group's products in another order than the default dot2 tiles, so some prompt values change by 1 fp32 ULP and **output tokens can differ** from the default, also at temperature 0. `--policy matrix=off` still keeps the dot2 tiles. Other GPUs ignore it; blank keeps the default; other values are refused at server startup |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |

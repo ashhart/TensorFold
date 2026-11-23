@@ -1,4 +1,4 @@
-// The kernel registry's costs on RDNA4 (bf16 activations, dot2 tiles; gfx12's matrix cores have no tile yet).
+// The kernel registry's costs on RDNA4 (bf16 activations, dot2 tiles and gfx12's matrix-core affine GEMM tile).
 //
 // An entry is `mlx.<op>.<path>.<kernel>`. Among the entries that take a product the cheapest one runs; an entry
 // not listed here is not tuned for this GPU and never runs on it. Beside its `cost` an entry says what it takes:
@@ -8,43 +8,62 @@
 //   pairs_per_item  the most pairs a routed plan holds per item (0: any)
 //   max_bits    the most bits a weight code holds (0: any)
 //   plain, routed   whether it takes plain products, routed plans (both by default)
-// The decode rows are gfx1100's, so decode choices are the same; the matrix rows are gfx1100's too, and never run here.
-// The prompt rows keep gfx1100's bounds, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
+// The decode rows are gfx1100's without its matrix rows: gfx12's matrix tile takes a decode call nowhere until its
+// 16-64-row decode shapes are measured, so decode choices are the dot2 ones.
+// gfx12's matrix tiles (matrix12, rows64, rows32, rows16) sum one fp32 ULP off the dot2 tiles on some outputs, so a
+// prompt takes them at every row count where they fit, or a row's bytes would change with the prompt's length.
+// Measured on gfx1201 by `zig build hip-affine-tune`: rows16, whose 8 waves split k by groups, is the fastest of them
+// on plain products of up to 32 rows (35B o_proj at 16 rows 20 us, rows64 60, dot2's kp3 63; at 1-2 rows kp3's 17
+// against 19 is what the family rule gives up) and on routed plans of few rows an item (Flash Next's gate_up and down
+// at 128 tokens 4.2 ms, rows32 6.8, kp3 7.4). The tuner's uniform router has it ahead up to 6 rows an item; Flash
+// Next's own router fills some items more, and served prompts were faster with rows32 at its 1,024-token chunks (5.9
+// rows an item), so the bound is 5.5. rows64 beats matrix12 by 2-14 % on plain products up to 64 rows, and rows32
+// takes routed plans of more rows an item, up to 6.3 pairs; past that rows64 decodes an item's weights once for
+// its rows (Flash Next served at 2,048-row chunks, 6.8 pairs an item: 8K prompt 1,826 -> 1,868 tok/s; at 1,024-row
+// chunks, 5.9 pairs, the two were even).
+// Pairs per item count a bucketed plan's capacity, which doubles past each power of two of rows, so rows16 and
+// rows32 also stop at 16 and 27 rows an expert (mlx_entries.zig), Flash Next's cuts by pairs.
+// The dot2 rows below serve what the matrix tiles do not fit (unaligned words or tables) and runs with the matrix
+// cores off. Their bounds are gfx1100's, which `zig build hip-affine-tune` measures against on a gfx1201 card, but
 // the routed K-parallel tile's: its items are the tuner's, its pairs per item lowered from the tuner's 4.14 to 3.5 by
 // served runs on Qwen3.6 and Nemotron, whose routers fill items more than the tuner's uniform picks.
 .{
     .gfx = "gfx1201",
     .entries = .{
-        // a lane round, or a call of few rows: the stream tile takes every product it can; matrix cores take 16 rows on
-        .{ .id = "mlx.project.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        // a lane round, or a call of few rows: the stream tile takes every product it can, up to 16 rows
+        .{ .id = "mlx.project.decode.stream", .cost = 1, .rows = 16 },
         .{ .id = "mlx.project.decode.row", .cost = 2 },
         .{ .id = "mlx.project.decode.lanes", .cost = 3, .rows = 8 },
-        .{ .id = "mlx.project.decode.matrix", .cost = 5, .min_rows = 16 },
         .{ .id = "mlx.project.decode.gemm", .cost = 6, .min_rows = 9 },
         .{ .id = "mlx.project.decode.block", .cost = 7, .min_rows = 9 },
 
-        .{ .id = "mlx.group.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
-        .{ .id = "mlx.routed.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        .{ .id = "mlx.group.decode.stream", .cost = 1, .rows = 16 },
+        .{ .id = "mlx.routed.decode.stream", .cost = 1, .rows = 16 },
         .{ .id = "mlx.routed.decode.row", .cost = 2 },
         .{ .id = "mlx.routed.decode.lanes", .cost = 3, .rows = 8 },
-        .{ .id = "mlx.routed.decode.matrix", .cost = 5, .min_rows = 16 },
         .{ .id = "mlx.routed.decode.gemm", .cost = 6, .min_rows = 9 },
         .{ .id = "mlx.routed.decode.block", .cost = 7, .min_rows = 9 },
-        .{ .id = "mlx.routed_act.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        .{ .id = "mlx.routed_act.decode.stream", .cost = 1, .rows = 16 },
 
-        // a prompt: the K-parallel tiles for a few rows or a short plan, the 128-row tile past them
+        // a prompt: gfx12's matrix tiles wherever they fit, few-row blocks first
+        .{ .id = "mlx.project.prefill.rows16", .cost = 0.4, .rows = 32 },
+        .{ .id = "mlx.project.prefill.rows64", .cost = 0.5 },
+        .{ .id = "mlx.project.prefill.matrix12", .cost = 0.6 },
+        .{ .id = "mlx.routed.prefill.rows16", .cost = 0.4, .pairs_per_item = 5.5 },
+        .{ .id = "mlx.routed.prefill.rows32", .cost = 0.5, .pairs_per_item = 6.3 },
+        .{ .id = "mlx.routed.prefill.rows64", .cost = 0.55 },
+        .{ .id = "mlx.routed.prefill.matrix12", .cost = 0.6 },
+        // else the K-parallel tiles for a few rows or a short plan, the dot2 GEMM tile past them
         .{ .id = "mlx.project.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
         .{ .id = "mlx.project.prefill.kp3", .cost = 2, .items = 300, .plain = false },
         .{ .id = "mlx.project.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
         .{ .id = "mlx.project.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
-        .{ .id = "mlx.project.prefill.matrix", .cost = 10 },
         .{ .id = "mlx.project.prefill.gemm", .cost = 11 },
         .{ .id = "mlx.project.prefill.block", .cost = 12 },
         .{ .id = "mlx.routed.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
         .{ .id = "mlx.routed.prefill.kp3", .cost = 2, .items = 507, .pairs_per_item = 3.5, .plain = false },
         .{ .id = "mlx.routed.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
         .{ .id = "mlx.routed.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
-        .{ .id = "mlx.routed.prefill.matrix", .cost = 10 },
         .{ .id = "mlx.routed.prefill.gemm", .cost = 11 },
         .{ .id = "mlx.routed.prefill.block", .cost = 12 },
     },

@@ -60,9 +60,10 @@ pub const Rig = struct {
         errdefer t.ctx.deinit();
         t.stream = try Stream.init(&t.r);
         errdefer t.stream.deinit();
-        t.on = try Launcher.load(&t.r, .{}, kernels.images);
+        // gfx12's matrix tiles on (TF_HIP_GFX12_WMMA=1), so their tests run
+        t.on = try Launcher.load(&t.r, .{ .products = .{ .gfx12 = true } }, kernels.images);
         errdefer t.on.unload();
-        t.off = try Launcher.load(&t.r, .{ .fuse = false }, kernels.images);
+        t.off = try Launcher.load(&t.r, .{ .fuse = false, .products = .{ .gfx12 = true } }, kernels.images);
         errdefer t.off.unload();
         t.arena = try Arena.init(&t.r, arena_bytes);
         t.bf16 = caps.Caps.of(kernels.arch).?.act == .bf16;

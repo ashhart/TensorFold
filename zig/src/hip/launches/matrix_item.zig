@@ -70,6 +70,7 @@ test "a prompt launch carries its entry's cut from the tuning table, and none fo
     var k: affine.Kernels = undefined;
     k.wmma = true;
     k.matrix = true;
+    k.matrix_item = true;
     k.mode = .auto;
     k.tile = .gemm;
     k.stream_on = true;
@@ -78,9 +79,9 @@ test "a prompt launch carries its entry's cut from the tuning table, and none fo
     var a = std.mem.zeroes(affine.Arg);
     a.m, a.n, a.k, a.bits, a.group = .{ 4, 128, 128, 4, 32 };
     a.route = .{ .items = 0x1000, .few = 3 };
-    try k.prefillLaunch(undefined, a, util.counting, 2, 4, 2);
+    try k.prefillLaunch(undefined, a, util.counting, 2, 4, 2, 2);
     try std.testing.expectEqual(@as(c_int, few_rows), cut_launched);
     a.route = .{ .few = 3 };
-    try k.prefillLaunch(undefined, a, util.counting, 1, 0, 0);
+    try k.prefillLaunch(undefined, a, util.counting, 1, 0, 0, 1);
     try std.testing.expectEqual(@as(c_int, 0), cut_launched);
 }

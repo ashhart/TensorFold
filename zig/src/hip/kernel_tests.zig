@@ -38,7 +38,7 @@ test "the code objects load on this device and every kernel the launchers use re
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
     try std.testing.expectEqualStrings(kernels.arch, arch);
-    var l = try Launcher.load(&r, .{}, kernels.images);
+    var l = try Launcher.load(&r, .{ .products = .{ .gfx12 = true } }, kernels.images);
     defer l.unload();
 }
 
@@ -79,6 +79,7 @@ test {
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");
     _ = @import("kernel_tests/moe_gate.zig");
+    _ = @import("kernel_tests/moe_live.zig");
     _ = @import("kernel_tests/flashnext_sparse.zig");
     _ = @import("kernel_tests/nemotron/moe.zig");
     _ = @import("kernel_tests/nemotron/pick.zig");

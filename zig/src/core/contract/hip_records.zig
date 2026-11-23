@@ -247,10 +247,10 @@ const own_records = [own_count]Record{
             .threads = 256,
         },
         .usage = .{
-            .{ .vgprs = 9, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 10, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 9, .sgprs = 23, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
     .{

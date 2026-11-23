@@ -348,8 +348,8 @@ fn sumDist(a: [routed_bounds.len]f64, b: [routed_bounds.len]f64) f64 {
 // ---- the search on synthetic times, no device
 
 const t = std.testing;
-/// RDNA4's environment: bf16, no matrix tile, the stream and GEMM tiles on; searches start from gfx1100's rows.
-const rdna4: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_on = false, .stream_on = true, .gemm_on = true };
+/// RDNA4 with matrix cores off (`--policy matrix=off`): searches start from gfx1100's rows; the tuner uses the real env
+const rdna4: registry.Env = .{ .bf16 = true, .matrix = false, .matrix_item = false, .matrix_on = false, .stream_on = true, .gemm_on = true };
 
 fn entryOf(id: []const u8) usize {
     for (&mlx_entries.all, 0..) |*e, i| if (std.mem.eql(u8, e.id, id)) return i;

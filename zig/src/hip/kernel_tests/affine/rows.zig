@@ -5,6 +5,7 @@ const base = @import("../rig.zig");
 const affine = @import("../../launches/affine.zig");
 const registry = @import("core").registry;
 const mlx_entries = @import("../../launches/mlx_entries.zig");
+const matrix_rows = @import("../../launches/matrix_rows.zig");
 const runtime = @import("../../runtime.zig");
 const Buffer = base.Buffer;
 const gpa = base.gpa;
@@ -285,8 +286,12 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
     const plan_pairs: usize = if (routed) m else 0;
     const expert_rows: u32 = if (routed) moe.expertRows(m, 1, experts) else 0;
     try prod.pickable(k_ptr, arg, item_count, plan_pairs, expert_rows, .prefill, k_ptr.env(), &set, gpa);
-    // the few-row and skewed matrix tiles take a plan only under a pairs or depth bound: the sweep may miss them
-    if (routed) for (&mlx_entries.all) |*e| if ((std.mem.indexOf(u8, e.id, ".prefill.item") != null or std.mem.indexOf(u8, e.id, ".prefill.skew") != null) and std.mem.indexOfScalar(*const Entry, set.items, e) == null) try set.append(gpa, e);
+    // few-row, skewed and gfx12's few-row tiles (pairs or depth bound) join when of the family the registry picks
+    const family: ?registry.Family = if (set.items.len > 0) set.items[0].family else null;
+    for (&mlx_entries.all) |*e| {
+        const few = (routed and (std.mem.indexOf(u8, e.id, ".prefill.item") != null or std.mem.indexOf(u8, e.id, ".prefill.skew") != null)) or std.mem.indexOf(u8, e.id, ".prefill.rows") != null;
+        if (few and e.family == family and std.mem.indexOfScalar(*const Entry, set.items, e) == null) try set.append(gpa, e);
+    }
     var ids: [registry.max_entries]*const Entry = undefined;
     var n_ids: usize = 0;
     for (set.items) |e| if (prod.takesArg(k_ptr, e, arg, item_count, plan_pairs, expert_rows, .prefill)) {
@@ -308,7 +313,8 @@ fn tierProduct(t: *Rig, m: usize, n: usize, k: usize, bits: c_int, group: c_int,
         try ids[i % n_ids].launch(k_ptr, .{ .r = &t.base.r, .s = t.base.stream.handle, .arg = arg, .items = @intCast(item_count) });
     }
     arg.out = outs[2 * n_ids].ptr;
-    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs), @intCast(expert_rows));
+    // the engine launches only the items a plan fills: a routed plan's trailing empty item is left out
+    try k_ptr.prefillLaunch(&t.base.r, arg, t.base.stream.handle, @intCast(item_count), @intCast(plan_pairs), @intCast(expert_rows), @intCast(if (routed) item_count - 1 else item_count));
     try t.base.stream.synchronize();
     const written = try gpa.alloc(u8, bytes);
     defer gpa.free(written);
@@ -443,6 +449,28 @@ fn fewRowTiers(t: *Rig) !usize {
     return ran;
 }
 
+/// Plain prompt products past 64 rows whose 128-row blocks leave compute units idle: prefillGo's 64- and 32-row tiers.
+const fill_cases = [_]struct { m: usize, n: usize, tier: ?usize }{
+    .{ .m = 65, .n = 4096, .tier = 0 },
+    .{ .m = 100, .n = 4096, .tier = 0 },
+    .{ .m = 128, .n = 4096, .tier = 0 },
+    .{ .m = 200, .n = 4096, .tier = null },
+    .{ .m = 100, .n = 288, .tier = 1 },
+    .{ .m = 200, .n = 288, .tier = 1 },
+};
+
+/// Each fill case through the engine's pick against the 128-row block; on gfx1201 each takes the tier it names.
+fn fill(t: *Rig) !usize {
+    const on = matrix_rows.fillTier(1, 128) != null;
+    for (fill_cases) |c| {
+        const got = matrix_rows.fillTier(@intCast(c.m), @intCast(c.n));
+        if (on) try base.expect(got == c.tier, "fillTier m{d} n{d}: {?d}, not {?d}", .{ c.m, c.n, got, c.tier });
+        const diff = try tierProduct(t, c.m, c.n, 1024, 4, 64, false);
+        try base.expect(diff == 0, "fill m{d} n{d}: {d} words differ from the 128-row block", .{ c.m, c.n, diff });
+    }
+    return fill_cases.len;
+}
+
 /// Decode: the rows of a lane round's launch against each row alone, plain products and routed plans.
 pub fn decode(t: *Rig) !void {
     var rng: data.Rng = .{ .state = 0x9E3779B97F4A7C15 };
@@ -458,7 +486,7 @@ pub fn decode(t: *Rig) !void {
 
 /// Prefill: every tile the registry picks between by rows, at every row count, width and group.
 pub fn prefill(t: *Rig) !void {
-    try base.expect(try tiers(t) > 0, "rows prefill: no product ran", .{});
+    try base.expect(try tiers(t) + try fill(t) > 0, "rows prefill: no product ran", .{});
 }
 
 test "a decode row writes the same bytes alone and in a round of 2 to 32, dense and routed, fp32 and rounded" {

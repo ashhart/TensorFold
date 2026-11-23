@@ -51,8 +51,8 @@ pub fn moeCombine(o: Ops, y: u64, wts: u64, out: Tensor, r: usize, slots: usize,
     try o.l.tf_moe_combine(f(y), f(wts), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
 }
 
-/// The same sum with a shared expert run beside the stack: `shared` (rows, d) fp32, or 0 where it adds nothing.
-pub fn moeCombineGate(o: Ops, y: u64, wts: u64, shared: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
+/// The sum with a shared expert beside the stack (`shared` fp32, 0: none); pairs picking `skip` read zero, not y.
+pub fn moeCombineGate(o: Ops, y: u64, wts: u64, shared: u64, out: Tensor, r: usize, slots: usize, d: usize, picks: u64, skip: usize) Error!void {
     if (slots < 2) return error.BadShape;
-    try o.l.tf_moe_combine_gate(f(y), f(wts), if (shared == 0) null else f(shared), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
+    try o.l.tf_moe_combine_gate(f(y), f(wts), if (shared == 0) null else f(shared), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), if (picks == 0) null else @ptrFromInt(picks), int(skip), o.stream);
 }

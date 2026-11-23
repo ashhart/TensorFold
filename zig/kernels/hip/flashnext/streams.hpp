@@ -27,45 +27,55 @@ __device__ float fn_block_sum(float v, float* scratch) {
     return total;
 }
 
-// Block (s, r): h_s += round(branch * inject[s]) (tp: `world` fp32 shares, summed in order), then x = h rinv scale.
+// Block (x, r): for streams s = x, x + gridDim.x, ...: h_s += round(branch * inject[s]) (tp: `world` fp32 shares,
+// summed in order), then x = h rinv scale. A block takes all of a row's streams on a grid one wide, so the branch's
+// shares are read once a row; each stream keeps its own thread-to-value map and sum tree, so its bits do not depend
+// on the grid.
 extern "C" __global__ void __launch_bounds__(kNormThreads)
 tf_fn_hc_norm(const void* h, const void* branch, const void* inject, void* h_out, void* x_out, const float* scale,
               int kind, int streams, int dims, float eps, int world, long long stride) {
     __shared__ float scratch[kNormThreads / 32];
-    const int s = blockIdx.x, r = blockIdx.y;
-    const long long base = (static_cast<long long>(r) * streams + s) * dims;
-    float v[kNormPer];
-    float sum = 0.f;
+    const int r = blockIdx.y;
+    // the branch's value at each of a thread's dims, rounded as one add would round it
+    float b[kNormPer];
 #pragma unroll
     for (int j = 0; j < kNormPer; ++j) {
         const int d = threadIdx.x + j * kNormThreads;
-        v[j] = 0.f;
-        if (d >= dims) continue;
-        float x = load(h, kind, base + d);
-        if (branch != nullptr) {
-            const long long at = static_cast<long long>(r) * dims + d;
-            float b;
-            if (world > 0) {
-                b = 0.f;
-                for (int w = 0; w < world; ++w) b += static_cast<const float*>(branch)[w * stride + at];
-                b = rounded(b, kind);
-            } else {
-                b = load(branch, kind, at);
-            }
-            const float add = rounded(b * load(inject, kind, static_cast<long long>(r) * streams + s), kind);
-            x = rounded(x + add, kind);
+        b[j] = 0.f;
+        if (branch == nullptr || d >= dims) continue;
+        const long long at = static_cast<long long>(r) * dims + d;
+        if (world > 0) {
+            float t = 0.f;
+            for (int w = 0; w < world; ++w) t += static_cast<const float*>(branch)[w * stride + at];
+            b[j] = rounded(t, kind);
+        } else {
+            b[j] = load(branch, kind, at);
         }
-        v[j] = x;
-        sum += x * x;
     }
-    sum = fn_block_sum(sum, scratch);
-    const float rinv = rsqrtf(sum / static_cast<float>(dims) + eps);
+    for (int s = blockIdx.x; s < streams; s += gridDim.x) {
+        const long long base = (static_cast<long long>(r) * streams + s) * dims;
+        const float g = branch != nullptr ? load(inject, kind, static_cast<long long>(r) * streams + s) : 0.f;
+        float v[kNormPer];
+        float sum = 0.f;
 #pragma unroll
-    for (int j = 0; j < kNormPer; ++j) {
-        const int d = threadIdx.x + j * kNormThreads;
-        if (d >= dims) continue;
-        if (h_out != nullptr) store(h_out, kind, base + d, v[j]);
-        store(x_out, kind, base + d, (v[j] * rinv) * scale[s * dims + d]);
+        for (int j = 0; j < kNormPer; ++j) {
+            const int d = threadIdx.x + j * kNormThreads;
+            v[j] = 0.f;
+            if (d >= dims) continue;
+            float x = load(h, kind, base + d);
+            if (branch != nullptr) x = rounded(x + rounded(b[j] * g, kind), kind);
+            v[j] = x;
+            sum += x * x;
+        }
+        sum = fn_block_sum(sum, scratch);
+        const float rinv = rsqrtf(sum / static_cast<float>(dims) + eps);
+#pragma unroll
+        for (int j = 0; j < kNormPer; ++j) {
+            const int d = threadIdx.x + j * kNormThreads;
+            if (d >= dims) continue;
+            if (h_out != nullptr) store(h_out, kind, base + d, v[j]);
+            store(x_out, kind, base + d, (v[j] * rinv) * scale[s * dims + d]);
+        }
     }
 }
 

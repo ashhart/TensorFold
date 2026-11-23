@@ -33,6 +33,7 @@ const router_k = @import("contract_router.zig");
 const route_k = @import("contract_route.zig");
 const kit = @import("contract_kit.zig");
 const item_k = @import("contract_wmma_item.zig");
+const affine12_k = @import("contract_affine_wmma12.zig");
 const embed_k = @import("contract_embed.zig");
 const columns_k = @import("contract_columns.zig");
 const vision_k = @import("contract_vision.zig");
@@ -146,7 +147,7 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     }
     var s = try hip.Stream.init(&r);
     defer s.deinit();
-    var l = try hip.Launcher.load(&r, .{}, hip.kernels.images);
+    var l = try hip.Launcher.load(&r, .{ .products = .{ .gfx12 = true } }, hip.kernels.images);
     defer l.unload();
     var ctl = try hip.Module.load(&r, &controls.bytes);
     defer ctl.unload();
@@ -329,6 +330,19 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
         items[item_k.cases.len].planted = try ctl.function(item_k.control.symbol);
         for (&items) |*x| try kernels.append(a, x.kernel());
     }
+    // gfx12's matrix-core affine tiles: each width and block, then their controls (4-bit)
+    const plants = [_]affine12_k.Plant{ .unordered, .stale_sums, .kp_unordered, .kp_stale_sums };
+    var affine12: [affine12_k.cases.len + plants.len]affine12_k.Affine12 = undefined;
+    for (&affine12, 0..) |*x, i| x.* = .init(a, &r, s, &l, if (i < affine12_k.cases.len) i else plants[i - affine12_k.cases.len].case());
+    defer for (&affine12) |*x| x.deinit();
+    const wmma12 = if (hip.Caps.of(arch)) |v| v.matrix == .wmma12 else false;
+    if (wmma12) {
+        for (plants, affine12[affine12_k.cases.len..]) |p, *x| {
+            x.plant = p;
+            x.planted = try ctl.function(p.symbol());
+        }
+        for (&affine12) |*x| try kernels.append(a, x.kernel());
+    } else std.debug.print("N/A  hip affine_wmma12_gemm: not served off gfx12\n", .{});
     var embeds: [4]embed_k.Embed = undefined;
     var nembeds: usize = 0;
     defer for (embeds[0..nembeds]) |*x| x.deinit();
