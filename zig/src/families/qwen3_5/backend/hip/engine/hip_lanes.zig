@@ -197,7 +197,7 @@ pub const Hip = struct {
             .max_streams = @intCast(h.e.o.batch_rows),
             .draft_streams = drafting,
             .plain_guard = plain_guard,
-            .copy_guard = plain_guard and h.head == null,
+            .copy_guard = plain_guard,
             .window_costs = h.costs.window[0..h.costs.windows],
             .shared_costs = h.costs.shared[0..h.costs.shareds],
             .mtp_step_ms = h.costs.step_ms,
@@ -552,10 +552,10 @@ test "Qwen HIP facts price plain rounds for a copies-only engine" {
     try std.testing.expect(!facts.mtp and !facts.speculate and !facts.draft_streams);
     h.head = @ptrFromInt(@alignOf(mtp.Head));
     const with_head = h.facts();
-    try std.testing.expect(with_head.mtp and !with_head.copy_guard);
+    try std.testing.expect(with_head.mtp and with_head.copy_guard);
     test_engine.o.policy.mtp.drafts = 0;
     const disabled_head = h.facts();
-    try std.testing.expect(!disabled_head.mtp and !disabled_head.copy_guard);
+    try std.testing.expect(!disabled_head.mtp and disabled_head.copy_guard);
     h.head = null;
     h.costs.windows = 0;
     try std.testing.expect(!h.facts().copy_guard);

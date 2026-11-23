@@ -41,6 +41,7 @@ pub fn configure(a: std.mem.Allocator, env: ?*const std.process.Environ.Map) !vo
 }
 
 pub fn fromEnv(a: std.mem.Allocator, env: ?*const std.process.Environ.Map) !Settings {
+    refused = "";
     const get = struct {
         fn get(m: ?*const std.process.Environ.Map, names: []const []const u8) ?struct { []const u8, []const u8 } {
             for (names) |n| if (m) |map| if (map.get(n)) |v| if (std.mem.trim(u8, v, " \t").len > 0) return .{ n, v };
@@ -75,7 +76,10 @@ fn usable(a: std.mem.Allocator, s: *Settings, from: []const u8, value: []const u
             s.skipped = from;
             return null;
         },
-        else => e,
+        else => {
+            refused = from;
+            return e;
+        },
     };
 }
 
@@ -83,7 +87,6 @@ fn usable(a: std.mem.Allocator, s: *Settings, from: []const u8, value: []const u
 fn parse(a: std.mem.Allocator, from: []const u8, value: []const u8) !Proxy {
     const text = std.mem.trim(u8, value, " \t/");
     const full = if (std.mem.indexOf(u8, text, "://") == null) try std.fmt.allocPrint(a, "http://{s}", .{text}) else text;
-    refused = from;
     const uri = std.Uri.parse(full) catch return error.ProxyUrl;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.ProxyScheme;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
@@ -95,7 +98,6 @@ fn parse(a: std.mem.Allocator, from: []const u8, value: []const u8) !Proxy {
         const buf = try a.alloc(u8, basic.valueLengthFromUri(uri));
         break :blk basic.value(uri, buf);
     } else null;
-    refused = "";
     return .{ .host = try a.dupe(u8, host), .port = uri.port orelse 80, .auth = auth, .from = from };
 }
 
