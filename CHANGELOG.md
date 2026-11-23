@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Unlimited-OCR-2: a cancelled request now stops before image encoding, between images and between decoder prefill chunks instead of running the whole prefill; uncancelled replies are unchanged (#N).
+
 - Lane host: under stepped prefill, a waiting stream no longer pins its kept prompt state, so another stream's cache can't be allocated past the budget; an evicted state is looked up again before the first call. Tokens unchanged (#4751).
 
 - Tests: a per-template tool-call conformance test renders tool definitions, round-trips calls and results, keeps multi-call order and rejects malformed calls for every chat template family we ship (#N).
