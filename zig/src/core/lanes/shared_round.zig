@@ -122,12 +122,12 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
     };
     try e.backend.keep(windows, paths);
     if (e.cfg.timed) {
-        // Actual timing includes every head step; only the modeled path removes budgeted extra steps here.
+        // Actual timing includes every head step; the modeled path also removes the steps past a hold's grid.
         const extra = if (e.backend.draft_timing == null)
             @import("hold_price.zig").extraStepMs(budgets, e.cfg.draft_step_ms, e.cfg.draft_step_ms != 0 and e.cfg.draft_streams and depth.pricedBatched())
         else
             0;
-        const ms = e.clock.elapsedMs(.overhead) - (if (hold_round) 0 else extra);
+        const ms = e.clock.elapsedMs(.overhead) - extra;
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
         if (hold_round) {
             const head_ms = @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, budgets);
