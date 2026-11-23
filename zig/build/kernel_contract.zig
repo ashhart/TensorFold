@@ -320,5 +320,8 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     const prefill_many_bench = b.addRunArtifact(runner);
     prefill_many_bench.addArg("qmm-prefill-many-bench");
     b.step("qmm-prefill-many-bench", "Same-process A-B-A screening for the GB10 prompt launch fusion").dependOn(&prefill_many_bench.step);
+    const int4 = b.addRunArtifact(runner);
+    int4.addArg("int4-contract");
+    b.step("int4-contract", "The GPTQ int4 experts and head through gates 1-4 on this GPU, each planted control red").dependOn(&int4.step);
     return install;
 }
