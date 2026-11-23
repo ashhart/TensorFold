@@ -298,8 +298,43 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_vocab(const uint16
     out[v] = v < valid ? bfr(tanhf(x / cap) * cap) : -INFINITY;
 }
 
+// tf_ink2_dsp_vocab for `rows` streams at once (base rows base_ld apart): each fold row read once, sums as its order.
+extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_vocab_rows(const uint16_t* __restrict__ base, long long base_ld,
+                                                                         const uint16_t* __restrict__ latent,
+                                                                         const uint16_t* __restrict__ fold,
+                                                                         const uint16_t* __restrict__ fbias, float cap, int valid,
+                                                                         int nv, int rows, float* __restrict__ out) {
+    using namespace ink2d;
+    const int v = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (v >= nv) return;
+    const uint16_t* f = fold + static_cast<size_t>(v) * 256;
+    float w[8];
+    for (int q = 0; q < 8; ++q) w[q] = bf(f[lane + 32 * q]);
+    const float fb = bf(fbias[v]);
+    for (int r = 0; r < rows; ++r) {
+        const uint16_t* lt = latent + static_cast<size_t>(r) * 256;
+        float s = 0.0f;
+        for (int q = 0; q < 8; ++q) s += bf(lt[lane + 32 * q]) * w[q];
+        s = tf_common::warp_sum(s);
+        if (lane == 0) {
+            const float b = bfr(s + fb);
+            const float x = bfr(bf(base[r * base_ld + v]) + b);
+            out[static_cast<size_t>(r) * nv + v] = v < valid ? bfr(tanhf(x / cap) * cap) : -INFINITY;
+        }
+    }
+}
+
+// tf_ink2_dsp_pick_merge for `rows` streams, a block a stream: rank q's pick of row r at (q * rows + r) * 16 bytes.
+extern "C" __global__ void tf_ink2_dsp_pick_rows(const unsigned char* __restrict__ picks, int world, int rows,
+                                                 int* __restrict__ walk, int T, int j) {
+    const int r = blockIdx.x;
+    tf_common::dspark_pick<0x7fffffff>(picks + (size_t)r * 16, world, rows * 16, walk + (size_t)r * T, j);
+}
+
 // The ranks' (value, id) picks to walk[j + 1]: MiniMax M3's merge, with 0x7fffffff when no value beats -Inf.
 extern "C" __global__ void tf_ink2_dsp_pick_merge(const unsigned char* __restrict__ picks, int world, int stride,
                                                   int* __restrict__ walk, int j) {
     tf_common::dspark_pick<0x7fffffff>(picks, world, stride, walk, j);
 }
+
+#include "inkling2/dspark_many.cuh"

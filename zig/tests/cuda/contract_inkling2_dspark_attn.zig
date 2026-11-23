@@ -26,9 +26,11 @@ fn attnDepth(s: c.Shape) usize {
 }
 
 /// T rows x 24 heads x 128 dims x the keys every row sees: a first block, a sliding window, a global prefix, 1M's edge.
-pub fn attnSpec(late: bool) c.Spec {
+pub fn attnSpec(late: bool, many: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = T, .n = hq * D, .k = 8 }, .{ .rows = T, .n = hq * D, .k = 1032 }, .{ .rows = T, .n = hq * D, .k = 3000 }, .{ .rows = T, .n = hq * D, .k = 2500 } };
-    const name = if (late) "inkling2 dspark control: block attention starts a key late" else "inkling2 dspark tf_ink2_dsp_attn + tf_ink2_dsp_merge (a block over keys [lo, hi])";
+    const one = if (late) "inkling2 dspark control: block attention starts a key late" else "inkling2 dspark tf_ink2_dsp_attn + tf_ink2_dsp_merge (a block over keys [lo, hi])";
+    const batched = if (late) "inkling2 dspark control: tf_ink2_dsp_attn_many starts a key late" else "inkling2 dspark tf_ink2_dsp_attn_many + tf_ink2_dsp_merge_many (a stream's block from the table)";
+    const name = if (many) batched else one;
     return .{ .name = name, .accum = .f32, .depth = attnDepth, .ops = 8, .out = .bf16, .served = served, .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = soft_why } };
 }
 
@@ -49,6 +51,9 @@ pub const Attend = struct {
     k: *const dk.Kernels,
     /// control: the window starts one key late on the device (the reference keeps its first key)
     late: bool = false,
+    /// tf_ink2_dsp_attn_many + tf_ink2_dsp_merge_many: one stream's block, its window and caches from a table
+    many: bool = false,
+    tab: u64 = 0,
     shape: c.Shape = undefined,
     win: Window = undefined,
     q: []u16 = &.{},
@@ -76,7 +81,7 @@ pub const Attend = struct {
     }
 
     pub fn kernel(self: *Attend) g.Kernel {
-        return .{ .spec = attnSpec(self.late), .ctx = self, .vt = &vt, .control = if (self.late) .shapes else null };
+        return .{ .spec = attnSpec(self.late, self.many), .ctx = self, .vt = &vt, .control = if (self.late) .shapes else null };
     }
 
     const vt = g.hooks(Attend);
@@ -107,6 +112,13 @@ pub const Attend = struct {
         self.po = try self.rig.scratch(n * shape.rows * hq * D * 4);
         self.pml = try self.rig.scratch(n * shape.rows * hq * 2 * 4);
         self.out = try self.rig.output(shape.rows * hq * D * 2);
+        if (self.many) {
+            var st: dk.Stream = .{ .p = @intCast(self.win.hi + 1 - shape.rows) };
+            st.kc[0] = self.in[1];
+            st.vc[0] = self.in[2];
+            st.lo[0] = @intCast(self.win.lo + @intFromBool(self.late));
+            self.tab = try self.rig.input(std.mem.asBytes(&st));
+        }
         return true;
     }
 
@@ -117,6 +129,10 @@ pub const Attend = struct {
 
     pub fn run(self: *Attend) !void {
         const w = self.win;
+        if (self.many) {
+            try dk.attendMany(self.k, self.rig.s, .{ .q = self.in[0], .kc = 0, .vc = 0, .po = self.po, .pml = self.pml, .T = @intCast(self.shape.rows), .hq = hq, .hk = hk, .ring = @intCast(w.ring), .lo = 0, .hi = 0, .c0 = 0, .scale = scale }, self.tab, 0, 1, dk.chunks(w.lo, w.hi), self.out);
+            return self.rig.s.synchronize();
+        }
         try dk.attend(self.k, self.rig.s, .{ .q = self.in[0], .kc = self.in[1], .vc = self.in[2], .po = self.po, .pml = self.pml, .T = @intCast(self.shape.rows), .hq = hq, .hk = hk, .ring = @intCast(w.ring), .lo = @intCast(w.lo + @intFromBool(self.late)), .hi = @intCast(w.hi), .c0 = 0, .scale = scale }, self.out);
         try self.rig.s.synchronize();
     }

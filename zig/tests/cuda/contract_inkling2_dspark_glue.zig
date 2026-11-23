@@ -93,7 +93,11 @@ const pick_rule = "walk[j + 1]: the largest value over the ranks, the lowest id 
     "a NaN never wins; with every value NaN the id is 0x7fffffff";
 
 /// Drafts (a launch each) x ranks (TP=2) x 1: every rank's (value, id) 16 bytes apart.
-pub fn pickSpec(alone: bool) c.Spec {
+pub fn pickSpec(alone: bool, rows: bool) c.Spec {
+    if (rows) {
+        const rname = if (alone) "inkling2 dspark control: tf_ink2_dsp_pick_rows reads rank 0's entries alone" else "inkling2 dspark tf_ink2_dsp_pick_rows (every stream's best into its walk)";
+        return .{ .name = rname, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = pick_rule }, .served = &.{ .{ .rows = 8, .n = 2, .k = 1 }, .{ .rows = 2, .n = 2, .k = 1 }, .{ .rows = 5, .n = 2, .k = 1 } } };
+    }
     const name = if (alone) "inkling2 dspark control: the pick reads rank 0's entry alone" else "inkling2 dspark tf_ink2_dsp_pick_merge (the ranks' best into the walk)";
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = pick_rule }, .served = &.{ .{ .rows = 7, .n = 2, .k = 1 }, .{ .rows = 1, .n = 2, .k = 1 } } };
 }
@@ -105,6 +109,8 @@ pub const Pick = struct {
     kern: *const dk.Kernels,
     /// control: launched with one rank
     alone: bool = false,
+    /// tf_ink2_dsp_pick_rows: the shape's rows as streams (rank q's row r at (q * rows + r) * 16 bytes), one launch
+    rows: bool = false,
     shape: c.Shape = undefined,
     vals: []f32 = &.{},
     ids: []i32 = &.{},
@@ -112,7 +118,7 @@ pub const Pick = struct {
     out: u64 = 0,
 
     pub fn spec(self: *const Pick) c.Spec {
-        return pickSpec(self.alone);
+        return pickSpec(self.alone, self.rows);
     }
 
     pub fn control(self: *const Pick) ?g.Gate {
@@ -152,8 +158,9 @@ pub const Pick = struct {
         defer a.free(bytes);
         @memset(bytes, 0x5a);
         for (self.vals, self.ids, 0..) |v, id, i| {
-            std.mem.writeInt(u32, bytes[i * stride ..][0..4], @bitCast(v), .little);
-            std.mem.writeInt(i32, bytes[i * stride + 4 ..][0..4], id, .little);
+            const at = if (self.rows) (i % 2 * shape.rows + i / 2) * stride else i * stride;
+            std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(v), .little);
+            std.mem.writeInt(i32, bytes[at + 4 ..][0..4], id, .little);
         }
         self.dev = try rig.input(bytes);
         self.out = try rig.output((shape.rows + 1) * 4);
@@ -162,6 +169,7 @@ pub const Pick = struct {
 
     pub fn run(self: *Pick, rig: *rig_.Rig) !void {
         const world: usize = if (self.alone) 1 else 2;
+        if (self.rows) return dk.pickRows(self.kern, rig.s, self.dev, world, self.shape.rows, self.out, 1, 0);
         for (0..self.shape.rows) |j| try dk.pick(self.kern, rig.s, self.dev + j * 2 * stride, world, self.out, j);
     }
 

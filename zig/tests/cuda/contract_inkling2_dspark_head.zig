@@ -80,9 +80,11 @@ fn ctxDepth(s: c.Shape) usize {
 }
 
 /// Rows (a block's 7 drafting rows) x 3R outputs x 2 hidden inputs: rnn_proj's last columns on [hidden_row, f_rnn].
-pub fn ctxSpec(early: bool) c.Spec {
+pub fn ctxSpec(early: bool, many: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 7, .n = 3 * R, .k = 2 * hidden }, .{ .rows = 1, .n = 3 * R, .k = 2 * hidden }, .{ .rows = 8, .n = 3 * R, .k = 2 * hidden } };
-    const name = if (early) "inkling2 dspark control: the Markov context reads rnn_proj from column 0" else "inkling2 dspark tf_ink2_dsp_ctx (bias + rnn_proj[:, 2R:] . [hidden, f_rnn])";
+    const one = if (early) "inkling2 dspark control: the Markov context reads rnn_proj from column 0" else "inkling2 dspark tf_ink2_dsp_ctx (bias + rnn_proj[:, 2R:] . [hidden, f_rnn])";
+    const batched = if (early) "inkling2 dspark control: tf_ink2_dsp_ctx_many reads rnn_proj from column 0" else "inkling2 dspark tf_ink2_dsp_ctx_many (a stream's context, its f_rnn from the table)";
+    const name = if (many) batched else one;
     return .{ .name = name, .accum = .f32, .depth = ctxDepth, .out = .f32, .served = served, .sums = .{} };
 }
 
@@ -90,6 +92,9 @@ pub const Ctx = struct {
     kern: *const dk.Kernels,
     /// control: the device's weight pointer 2R columns early, so it reads rnn_proj[:, 0:2C]
     early: bool = false,
+    /// tf_ink2_dsp_ctx_many: one stream, its f_rnn read from a stream table
+    many: bool = false,
+    tab: u64 = 0,
     shape: c.Shape = undefined,
     h: []u16 = &.{},
     frnn: []u16 = &.{},
@@ -101,7 +106,7 @@ pub const Ctx = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Ctx) c.Spec {
-        return ctxSpec(self.early);
+        return ctxSpec(self.early, self.many);
     }
 
     pub fn control(self: *const Ctx) ?g.Gate {
@@ -145,11 +150,13 @@ pub const Ctx = struct {
         }
         self.in = .{ try ref.input(rig, self.h), try ref.input(rig, self.frnn), try ref.input(rig, self.w), try ref.input(rig, self.bias) };
         self.out = try rig.output(rows * 3 * R * 4);
+        if (self.many) self.tab = try rig.input(std.mem.asBytes(&dk.Stream{ .frnn = self.in[1] }));
         return true;
     }
 
     pub fn run(self: *Ctx, rig: *rig_.Rig) !void {
         const w = self.in[2] - @as(u64, if (self.early) 2 * R * 2 else 0);
+        if (self.many) return dk.ctxMany(self.kern, rig.s, self.in[0], 0, self.tab, w, self.in[3], self.out, 1, self.shape.rows, hidden, R);
         try dk.ctx(self.kern, rig.s, self.in[0], self.in[1], w, self.in[3], self.out, self.shape.rows, hidden, R);
     }
 
@@ -177,9 +184,11 @@ fn rnnDepth(_: c.Shape) usize {
 }
 
 /// Steps (one launch each, the state carried) x R x 2R: one step (gate 4's exact sums), a block's 7.
-pub fn rnnSpec(late: bool) c.Spec {
+pub fn rnnSpec(late: bool, many: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 1, .n = R, .k = 2 * R }, .{ .rows = 7, .n = R, .k = 2 * R } };
-    const name = if (late) "inkling2 dspark control: the recurrence reads the walk one pick late" else "inkling2 dspark tf_ink2_dsp_rnn (a GRU-style step at the bf16 points)";
+    const one = if (late) "inkling2 dspark control: the recurrence reads the walk one pick late" else "inkling2 dspark tf_ink2_dsp_rnn (a GRU-style step at the bf16 points)";
+    const batched = if (late) "inkling2 dspark control: tf_ink2_dsp_rnn_many reads the walk one pick late" else "inkling2 dspark tf_ink2_dsp_rnn_many (a stream's step, a block a stream)";
+    const name = if (many) batched else one;
     return .{ .name = name, .accum = .f32, .depth = rnnDepth, .out = .bf16, .in_place = true, .served = served, .sums = .{} };
 }
 
@@ -188,6 +197,8 @@ pub const Rnn = struct {
     kern: *const dk.Kernels,
     /// control: launched on the walk one entry on, so each step reads the next pick's w1 row
     late: bool = false,
+    /// tf_ink2_dsp_rnn_many: one stream a launch, as the batched pass launches it
+    many: bool = false,
     shape: c.Shape = undefined,
     ctx: []f32 = &.{},
     w: []u16 = &.{},
@@ -201,7 +212,7 @@ pub const Rnn = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Rnn) c.Spec {
-        return rnnSpec(self.late);
+        return rnnSpec(self.late, self.many);
     }
 
     pub fn control(self: *const Rnn) ?g.Gate {
@@ -255,6 +266,10 @@ pub const Rnn = struct {
     pub fn run(self: *Rnn, rig: *rig_.Rig) !void {
         try ref.restore(rig, self.st, std.mem.sliceAsBytes(self.state)); // updated in place: every run starts the same
         const walk = self.in[3] + @as(u64, @intFromBool(self.late)) * 4;
+        if (self.many) {
+            for (0..self.shape.rows) |j| try dk.rnnMany(self.kern, rig.s, self.in[0] + j * 3 * R * 4, 0, self.in[1], self.in[2], walk, 0, j, self.st, self.out + j * R * 2, 1, R, hidden);
+            return;
+        }
         for (0..self.shape.rows) |j| try dk.rnn(self.kern, rig.s, self.in[0] + j * 3 * R * 4, self.in[1], self.in[2], walk, j, self.st, self.out + j * R * 2, R, hidden);
     }
 
@@ -301,9 +316,14 @@ fn validOf(n: usize) usize {
 }
 
 /// Steps (one launch each) x the rank's vocabulary rows x the rank-256 latent.
-pub fn vocabSpec(short: bool) c.Spec {
+pub fn vocabSpec(short: bool, rows: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 7, .n = 100_608, .k = R }, .{ .rows = 1, .n = 100_480, .k = R }, .{ .rows = 2, .n = 3000, .k = R } };
+    const streams = &[_]c.Shape{ .{ .rows = 8, .n = 100_608, .k = R }, .{ .rows = 2, .n = 100_480, .k = R }, .{ .rows = 5, .n = 3000, .k = R } };
     const name = if (short) "inkling2 dspark control: the vocabulary's last real row taken as padding" else "inkling2 dspark tf_ink2_dsp_vocab (softcap(base + fold . latent), -Inf past the real rows)";
+    if (rows) {
+        const rname = if (short) "inkling2 dspark control: tf_ink2_dsp_vocab_rows told one real row fewer" else "inkling2 dspark tf_ink2_dsp_vocab_rows (every stream's step in one launch)";
+        return .{ .name = rname, .accum = .f32, .depth = vocabDepth, .out = .f32, .served = streams, .sums = .{} };
+    }
     return .{ .name = name, .accum = .f32, .depth = vocabDepth, .out = .f32, .served = served, .sums = .{} };
 }
 
@@ -312,6 +332,8 @@ pub const Vocab = struct {
     kern: *const dk.Kernels,
     /// control: launched with one real row fewer
     short: bool = false,
+    /// tf_ink2_dsp_vocab_rows: the shape's rows as streams, in one launch
+    rows: bool = false,
     shape: c.Shape = undefined,
     base: []u16 = &.{},
     latent: []u16 = &.{},
@@ -323,7 +345,7 @@ pub const Vocab = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Vocab) c.Spec {
-        return vocabSpec(self.short);
+        return vocabSpec(self.short, self.rows);
     }
 
     pub fn control(self: *const Vocab) ?g.Gate {
@@ -377,6 +399,7 @@ pub const Vocab = struct {
     pub fn run(self: *Vocab, rig: *rig_.Rig) !void {
         const n = self.shape.n;
         const valid = validOf(n) - @intFromBool(self.short);
+        if (self.rows) return dk.vocabRows(self.kern, rig.s, self.in[0], n, self.in[1], self.in[2], self.in[3], cap, valid, n, self.shape.rows, self.out);
         for (0..self.shape.rows) |j| try dk.vocab(self.kern, rig.s, self.in[0] + j * n * 2, self.in[1] + j * R * 2, self.in[2], self.in[3], cap, valid, n, self.out + j * n * 4);
     }
 

@@ -285,18 +285,24 @@ const dw = width(.draft);
 const aw = width(.absorb);
 const draft_served = [_]c.Shape{ .{ .rows = 8, .n = dw, .k = 3007 }, .{ .rows = 8, .n = dw, .k = 70_008 }, .{ .rows = 8, .n = dw, .k = 1_048_576 }, .{ .rows = 8, .n = dw, .k = 8 } };
 const absorb_served = [_]c.Shape{ .{ .rows = 16, .n = aw, .k = 2016 }, .{ .rows = 2048, .n = aw, .k = 4096 }, .{ .rows = 2048, .n = aw, .k = 1_048_576 }, .{ .rows = 1, .n = aw, .k = 70_001 } };
+/// The batched pass's absorbs: up to 16 streams' kept rows (7 each at most past the anchor) in one launch.
+const absorb_many = [_]c.Shape{ .{ .rows = 16, .n = aw, .k = 2016 }, .{ .rows = 112, .n = aw, .k = 4096 }, .{ .rows = 56, .n = aw, .k = 1_048_576 }, .{ .rows = 1, .n = aw, .k = 70_001 } };
 
 /// Rows x the row's heads x the call's end position (pos0 + rows): early, deep in a ring, and at the 1M edge.
-pub fn qkSpec(f: Form, late: bool) c.Spec {
+pub fn qkSpec(f: Form, late: bool, many: bool) c.Spec {
     const served: []const c.Shape = switch (f) {
         .draft => &draft_served,
-        .absorb => &absorb_served,
+        .absorb => if (many) &absorb_many else &absorb_served,
     };
     const name = if (late) "inkling2 dspark control: q/k prep rotates its rows one position late" else switch (f) {
         .draft => "inkling2 dspark tf_ink2_dsp_qk, a draft block's q, k, v",
         .absorb => "inkling2 dspark tf_ink2_dsp_qk, an absorb's context k, v",
     };
-    return .{ .name = name, .accum = .f32, .depth = headDepth, .out = .bf16, .served = served, .sums = .{} };
+    const batched = if (late) "inkling2 dspark control: tf_ink2_dsp_qk_many rotates its rows one position late" else switch (f) {
+        .draft => "inkling2 dspark tf_ink2_dsp_qk_many, every stream's block q, k, v",
+        .absorb => "inkling2 dspark tf_ink2_dsp_qk_many, every stream's absorbed k, v",
+    };
+    return .{ .name = if (many) batched else name, .accum = .f32, .depth = headDepth, .out = .bf16, .served = served, .sums = .{} };
 }
 
 /// Per (row, head): RMSNorm * w rounded to bf16, then neox RoPE at pos0 + row; key and value heads to the caches.
@@ -305,6 +311,9 @@ pub const Qk = struct {
     form: Form,
     /// control: the device rotates every row one position late (its cache rows land where they are due)
     late: bool = false,
+    /// tf_ink2_dsp_qk_many: the rows' positions and the caches from a one-stream table
+    many: bool = false,
+    tabs: [2]u64 = @splat(0),
     shape: c.Shape = undefined,
     pos: usize = 0,
     x: []u16 = &.{},
@@ -315,7 +324,7 @@ pub const Qk = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Qk) c.Spec {
-        return qkSpec(self.form, self.late);
+        return qkSpec(self.form, self.late, self.many);
     }
 
     pub fn control(self: *const Qk) ?g.Gate {
@@ -334,7 +343,7 @@ pub const Qk = struct {
     /// Heads in [-2, 2) (one in 64 ten times larger); stress: integers in [-64, 64] (the squares pass 2^16).
     pub fn prepare(self: *Qk, a: std.mem.Allocator, rig: *rig_.Rig, shape: c.Shape, fill: g.Fill, rng: std.Random) !bool {
         const wd = width(self.form);
-        if (shape.n != wd or shape.rows == 0 or shape.k < shape.rows) return false;
+        if (shape.n != wd or shape.rows == 0 or shape.k < shape.rows or (self.many and shape.rows > 128)) return false;
         const ring = ringOf(shape.k);
         self.pos = shape.k - shape.rows;
         const shift: usize = @intFromBool(self.late);
@@ -356,12 +365,21 @@ pub const Qk = struct {
         self.outs[0] = if (hq > 0) try rig.output(rows * hq * D * 2) else 0;
         self.outs[1] = try rig.output(rows * kv_heads * D * 2) - slot * kv_heads * D * 2;
         self.outs[2] = try rig.output(rows * kv_heads * D * 2) - slot * kv_heads * D * 2;
+        if (self.many) {
+            var st: dk.Stream = .{};
+            st.kc[0] = self.outs[1];
+            st.vc[0] = self.outs[2];
+            var at: [128][2]i32 = undefined;
+            for (at[0..rows], 0..) |*x, r| x.* = .{ 0, @intCast(self.pos + shift + r) };
+            self.tabs = .{ try rig.input(std.mem.asBytes(&st)), try rig.input(std.mem.sliceAsBytes(at[0..rows])) };
+        }
         return true;
     }
 
     pub fn run(self: *Qk, rig: *rig_.Rig) !void {
         const hq = qHeads(self.form);
         const d = self.dev;
+        if (self.many) return dk.qkMany(self.kern, rig.s, .{ .x = d[0], .qw = if (hq > 0) d[1] else 0, .kw = d[2], .q = self.outs[0], .kc = 0, .vc = 0, .ld = @intCast(width(self.form)), .hq = @intCast(hq), .hk = kv_heads, .ring = @intCast(ringOf(self.shape.k)), .pos0 = 0, .eps = eps, .theta = theta }, self.tabs[0], self.tabs[1], 0, self.shape.rows);
         try dk.qk(self.kern, rig.s, .{ .x = d[0], .qw = if (hq > 0) d[1] else 0, .kw = d[2], .q = self.outs[0], .kc = self.outs[1], .vc = self.outs[2], .ld = @intCast(width(self.form)), .hq = @intCast(hq), .hk = kv_heads, .ring = @intCast(ringOf(self.shape.k)), .pos0 = @intCast(self.pos + @intFromBool(self.late)), .eps = eps, .theta = theta }, self.shape.rows);
     }
 
