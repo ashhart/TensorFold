@@ -1,0 +1,66 @@
+{
+ "tokenizer_class": "PreTrainedTokenizerFast",
+ "model_max_length": 1048576,
+ "added_tokens_decoder": {
+  "199999": {
+   "content": "<|endoftext|>",
+   "special": true
+  },
+  "200000": {
+   "content": "<|message_user|>",
+   "special": true
+  },
+  "200001": {
+   "content": "<|message_model|>",
+   "special": true
+  },
+  "200002": {
+   "content": "<|message_system|>",
+   "special": true
+  },
+  "200003": {
+   "content": "<|message_tool|>",
+   "special": true
+  },
+  "200004": {
+   "content": "<|content_text|>",
+   "special": true
+  },
+  "200005": {
+   "content": "<|content_image|>",
+   "special": true
+  },
+  "200006": {
+   "content": "<|content_model_end_sampling|>",
+   "special": true
+  },
+  "200008": {
+   "content": "<|content_thinking|>",
+   "special": true
+  },
+  "200010": {
+   "content": "<|end_message|>",
+   "special": true
+  },
+  "200022": {
+   "content": "<|content_tool_error|>",
+   "special": true
+  },
+  "200024": {
+   "content": "<|content_xml|>",
+   "special": true
+  },
+  "200049": {
+   "content": "<|content_invoke_tool_json|>",
+   "special": true
+  },
+  "200054": {
+   "content": "<|unused_200054|>",
+   "special": true
+  },
+  "200057": {
+   "content": "<|content_invoke_tool_text|>",
+   "special": true
+  }
+ }
+}
