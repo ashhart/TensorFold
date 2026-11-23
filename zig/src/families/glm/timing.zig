@@ -35,8 +35,7 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
     };
     const cold = try e.agree(kept == null); // the leader decides whether both ranks measure or heal
     var scratch: Scratch = .{ .sl = sl, .io = io };
-    try scratch.start();
-    defer sl.release(0);
+    defer if (scratch.started) sl.release(0);
     if (!cold) {
         var costs: Costs = if (kept) |c| c else undefined;
         var values: [st.max_rows]f64 = @splat(0);
@@ -45,16 +44,18 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
         if (lead) for (costs.window, &values) |w, *m| {
             m.* = w.ms;
         };
-        const cursor_key = if (key) |k| lanes.cost_cache.buildKey(&k, &.{"metal-heal-v1"}) else null;
+        const cursor_key = if (key) |k| lanes.cost_cache.buildKey(&k, &.{"metal-heal-v2"}) else null;
         var cursor: u64 = if (cursor_key) |k| lanes.cost_cache.load(u64, gpa, io, k) orelse 0 else 0;
-        _ = try cost_rule.warm_prices.synced(WindowTimer{ .s = &scratch }, &values, &widths, &cursor, Agree{ .slots = sl }, lead);
+        var timer: WarmTimer = .{ .s = &scratch, .wall = .{ .io = io } };
+        const stats = try cost_rule.warm_prices.prepared(&timer, &values, &widths, &cursor, 0, Agree{ .slots = sl }, lead);
         if (!lead) return null;
         for (&costs.window, values) |*w, m| w.ms = m;
-        if (key) |k| lanes.cost_cache.save(Costs, gpa, io, k, costs);
-        if (cursor_key) |k| lanes.cost_cache.save(u64, gpa, io, k, cursor);
+        if (stats.lowered > 0) if (key) |k| lanes.cost_cache.save(Costs, gpa, io, k, costs);
+        if (stats.reads > 0) if (cursor_key) |k| lanes.cost_cache.save(u64, gpa, io, k, cursor);
         report(costs, "checked");
         return costs;
     }
+    try scratch.start();
     const ref_key = lanes.cost_cache.referenceKey(&parts);
     const reference = if (lead) lanes.cost_cache.load(Timed, gpa, io, ref_key) else null;
     const t = try schedule(WindowTimer{ .s = &scratch }, HeadTimer{ .s = &scratch }, Agree{ .slots = sl }, lead, e.hasMtp(), reference);
@@ -109,10 +110,12 @@ const Scratch = struct {
     sl: *Slots,
     io: std.Io,
     tokens: [prompt_len]u32 = undefined,
+    started: bool = false,
 
     fn start(s: *Scratch) !void {
         for (&s.tokens, 0..) |*t, i| t.* = @intCast(1000 + i * 7919 % 50000);
         try s.sl.begin(0, &s.tokens, true);
+        s.started = true;
         var at: u32 = 0;
         while (at < prompt_len) {
             const n = s.sl.chunkRows(at, prompt_len);
@@ -146,6 +149,19 @@ const WindowTimer = struct {
     pub fn time(t: WindowTimer, i: usize) !f64 {
         const ms = try t.s.window(i + 1);
         if (t.s.sl.slots[0].mtp) try t.s.sl.draftAll(&.{.{ .slot = 0, .prompt = false, .follow = t.s.tokens[1..2], .depth = 0 }});
+        return ms;
+    }
+};
+
+const WarmTimer = struct {
+    s: *Scratch,
+    wall: lanes.backend.WallClock,
+    pub fn start(t: *WarmTimer) void { t.wall.clock().start(); }
+    pub fn elapsedMs(t: *WarmTimer) f64 { return t.wall.clock().elapsedMs(.cost); }
+    pub fn prepare(t: *WarmTimer, _: anytype, _: []const u32) !void { try t.s.start(); }
+    pub fn time(t: *WarmTimer, i: usize) !f64 {
+        const ms = try (WindowTimer{ .s = t.s }).time(i);
+        try t.s.sl.flush();
         return ms;
     }
 };
