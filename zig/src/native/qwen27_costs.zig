@@ -138,10 +138,9 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     }
     try b.refill(prompt);
     for (0..5) |_| _ = try timer.time(width - 1); // the widest window first, while the GPU's clocks ramp up
-    try lanes.cost_rule.measureWindows(timer, &ms, false);
-    try lanes.cost_rule.smooth(timer, &ms);
+    try lanes.cost_rule.serialWindows(timer, &ms);
     const ref = lanes.cost_cache.referenceKey(&parts);
-    if (lanes.cost_cache.load([width]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.measureWindows(timer, &ms, true);
+    if (lanes.cost_cache.load([width]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.again(timer, &ms);
     try resetProbe(b);
     for (b.costs[0..width], ms, 0..) |*cost, m, i| cost.* = .{ .width = @intCast(i + 1), .ms = m };
     b.timed = width;
