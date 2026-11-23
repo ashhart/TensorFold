@@ -44,7 +44,10 @@ function checkDetails(value: any, expected?: { model: string; serial: boolean; e
   for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
   if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
   const settings = value.settings
-  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count'])
+  const hasKvCache = settings != null && Object.hasOwn(settings, 'kv_cache')
+  const hasThinkingMode = settings != null && Object.hasOwn(settings, 'thinking_mode')
+  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count', ...(hasKvCache ? ['kv_cache'] : []), ...(hasThinkingMode ? ['thinking_mode'] : [])])
+  if (hasKvCache && settings.kv_cache !== null && !['bf16', 'fp8'].includes(settings.kv_cache) || hasThinkingMode && settings.thinking_mode !== 'server_default') invalid()
   if (settings.tokens !== 256 || settings.repetitions !== 5 || settings.context_tokens !== 4096 || settings.managed !== true || settings.rank_count !== 1 || typeof settings.serial !== 'boolean' || !Array.isArray(settings.temperatures) || settings.temperatures.length !== 2 || settings.temperatures[0] !== 1 || settings.temperatures[1] !== 0) invalid()
   if (expected && (model.repo_id !== expected.model || settings.serial !== expected.serial)) invalid()
 }
@@ -61,7 +64,10 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
   for (const sample of value.samples) {
-    object(sample, SAMPLE_KEYS)
+    const hasFinishReason = sample != null && Object.hasOwn(sample, 'finish_reason')
+    const hasRoute = sample != null && Object.hasOwn(sample, 'route')
+    object(sample, [...SAMPLE_KEYS, ...(hasFinishReason ? ['finish_reason'] : []), ...(hasRoute ? ['route'] : [])])
+    if (hasFinishReason && sample.finish_reason !== null && !['stop', 'length'].includes(sample.finish_reason) || hasRoute && !['/v1/chat/completions', '/v1/completions'].includes(sample.route)) invalid()
     if (!['code', 'chat'].includes(sample.fixture_id) || ![0, 1].includes(sample.temperature) || !Number.isInteger(sample.repeat) || sample.repeat < -1 || sample.repeat > 4 || sample.seed !== 1234 + Math.max(0, sample.repeat) || !['ok', 'early_eos', 'error', 'unmeasured'].includes(sample.status) || sample.repeat === -1 && sample.status !== 'error') invalid()
     const key = `${sample.fixture_id}:${sample.temperature}:${sample.repeat}`
     if (seen.has(key)) invalid(); seen.add(key)

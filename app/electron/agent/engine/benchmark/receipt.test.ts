@@ -4,10 +4,15 @@ import { parseBenchmarkReceipt, benchmarkCells, benchmarkProtocolComplete, parse
 import { BENCHMARK_SUITES } from '../../../../shared/model-benchmark'
 import { assertBundledBenchmarkVersion, BENCHMARK_ENGINE_VERSION } from './version'
 
-const receipt = syntheticBenchmarkReceipt()
+const receipt = syntheticBenchmarkReceipt(); receipt.settings.thinking_mode = 'server_default'
 assert.equal(assertBundledBenchmarkVersion(BENCHMARK_ENGINE_VERSION), BENCHMARK_ENGINE_VERSION)
 for (const version of ['1.0.12', '9.9.9', null]) assert.throws(() => assertBundledBenchmarkVersion(version), /bundled TensorFold/, 'live benchmark admission requires the approved pinned engine')
 const parsed = parseBenchmarkReceipt(JSON.stringify(receipt), { model: receipt.model.repo_id, serial: false })
+assert.deepEqual(parsed, receipt, 'the current receipt preserves cache, thinking, finish reason and route')
+for (const [kvCache, finishReason] of [['fp8', 'stop'], [null, null]] as const) {
+  const variant = structuredClone(receipt); variant.settings.kv_cache = kvCache; variant.samples[0].finish_reason = finishReason
+  assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(variant)), variant)
+}
 assert.equal(benchmarkProtocolComplete(parsed), true)
 assert.equal(benchmarkCells(parsed)[0].successful, 5)
 assert.equal(benchmarkCells(parsed)[0].deliveryTokensPerSecond?.median, 100)
@@ -16,7 +21,12 @@ assert.equal(parsed.samples[0].server_decode_seconds, null, 'missing engine dura
 const current = structuredClone(receipt); current.runtime.tensorfold_version = BENCHMARK_ENGINE_VERSION
 assert.equal(parseBenchmarkReceipt(JSON.stringify(current), { model: current.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }).runtime.tensorfold_version, BENCHMARK_ENGINE_VERSION)
 const historical = structuredClone(receipt); historical.runtime.tensorfold_version = '1.0.12'
-assert.equal(parseBenchmarkReceipt(JSON.stringify(historical)).runtime.tensorfold_version, '1.0.12', 'reviewed historical receipts remain readable after the engine update')
+delete historical.settings.kv_cache; delete historical.settings.thinking_mode
+for (const sample of historical.samples) { delete sample.finish_reason; delete sample.route }
+for (const version of ['1.0.12', '1.1.0']) {
+  historical.runtime.tensorfold_version = version
+  assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(historical)), historical, 'reviewed historical receipts without the new fields remain readable')
+}
 assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
 for (const mutate of [
   (value: any) => { value.prompt = 'SYNTHETIC_PRIVATE_PROMPT' },
@@ -29,6 +39,12 @@ for (const mutate of [
   (value: any) => { value.created_at = '2026-02-30T00:00:00Z' },
   (value: any) => { value.suite.sha256 = '0'.repeat(64) },
   (value: any) => { value.settings.managed = false },
+  (value: any) => { value.settings.kv_cache = 'int8' },
+  (value: any) => { value.settings.thinking_mode = 'disabled' },
+  (value: any) => { value.settings.extra = true },
+  (value: any) => { value.samples[0].finish_reason = 'tool_calls' },
+  (value: any) => { value.samples[0].route = '/v1/models' },
+  (value: any) => { value.samples[0].extra = true },
   (value: any) => { value.settings.context_tokens = 8192 },
   (value: any) => { value.runtime.dependencies.private_path = '/private/operator' },
   (value: any) => { value.runtime.tensorfold_version = '9.9.9' },
