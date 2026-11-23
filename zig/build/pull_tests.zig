@@ -21,7 +21,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         test_step.dependOn(&journal_log.step);
     }
     const mod = b.createModule(.{
-        .root_source_file = b.path("zig/src/cli/pull_test.zig"),
+        .root_source_file = b.path("zig/src/cli/pull_host_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -51,7 +51,7 @@ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.
     const mods = cuda.family(b, target, .debug, runtime, draft_ids);
     const native = @import("cuda_engines.zig").engines(b, target, .debug, runtime, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const tests = b.addTest(.{ .name = "tf-pull-host-tests", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/src/cli/pull_test.zig"),
+        .root_source_file = b.path("zig/src/cli/pull_host_test.zig"),
         .target = target,
         .optimize = .debug,
         .link_libc = true,
