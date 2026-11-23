@@ -602,6 +602,4 @@ pub const Metal = struct {
 };
 
 /// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
-pub fn draftSlots() !u32 {
-    return std.math.clamp(try @import("sys").environment.read(u32, "TF_Q27_DRAFT_SLOTS", 8), 1, max_streams);
-}
+pub const draftSlots = draft_fns.draftSlots;
