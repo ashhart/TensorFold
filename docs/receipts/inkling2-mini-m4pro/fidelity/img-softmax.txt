@@ -1,0 +1,80 @@
+Image tower softmax and bf16 scores: what the softmax cost, what was tried, the fix and its bits (Apple M4 Pro 48 GiB, 2026-11-23, one model process at a time under /tmp/tf-gpu.lock, --context 8192 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking --vision, the pinned libjpeg-turbo release for JPEG)
+
+Binaries (zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast):
+  A  238f688b59 (the branch head before this change, tiled fp32 dots, fp32 scores)    plain SHA-256 df76d42064adbebefcc73b454f656db23711ef1fa18d3a6ef262a9c96bbaea5e
+  B  perf/vision-softmax (bf16 scores, one softmax over them)                         plain SHA-256 e9d2d7830a688db54466c5451cc2509206a63d61fbf94db558b65edd3cc75ce9
+     B final: the same code after three comment-only edits (kernel and doc comments), the build the commit makes: 6705f6ff929570ca676c01ded171fdfc3daa78aa3eae8c3d3b5c09d2e7bb94c7
+  Hash builds (not committed): A and B with one extra log line in Tower.run, `VHASH tokens=N <Wyhash of the tower's bf16 output>`:
+     A bd3115ba74fb94877ce0b67138794a47e6028b2ea6a42aea6ffb4ae0dc4560d1, B d6657fff036ffb5aa837e590e956b17c54bb9b165679f3248c1b05d8bdf45c53
+  The first-token sessions use the plain binaries; the hash builds serve the equality sessions only.
+
+1. The softmax was at its floor, not slow
+   Shape the tower ran: 16 heads x a 256-row chunk x 6,121 keys, an fp32 score matrix of 100.3 MB (one chunk, 24 a layer).
+   Standalone (img-sm-bench.m with img-sm-bench.metal: the committed kernels' text, random bf16 q, k, v, GPU time of one dispatch,
+   median of 25), quiet machine (load 2.8), three runs, ms: q k^T 1.337 1.337 1.338, softmax 0.883 0.854 0.858, p v 1.765 1.768 1.765.
+   The softmax reads and writes the matrix once from DRAM (its three passes over a 24 KB row hit the caches): 200.6 MB at
+   250 GB/s is 0.802 ms, so it ran at 1.06 to 1.10 times its floor. 23 layers x 24 chunks x 0.86 ms is 0.47 s of the 0.54 s
+   the stage table of img-ttft.txt gave it (that profile ran under load). q k^T and p v are ALU-bound (1.2 and 0.9 TFMA/s over 1.6 GFMA a chunk).
+
+2. What was tried, with the bits of each
+   (a) A faster standalone softmax with the same max, exp and sum order: nothing to gain at the floor. One simdgroup a row
+       (eight virtual simdgroups of lanes, eight simd_sums, so each of the 256 threads' partial sums and both reduction steps
+       are the old ones) is bit-equal and no faster (0.90 ms on bf16). More threads or vector loads either cannot go under the
+       floor or regroup the per-thread sum (thread t adds elements t, t + 256, ...), which changes bits; online max-and-sum
+       changes the sum order too and was not built.
+   (b) Fusing max-subtract, exp and 1/sum into p v's operand fetch, with a row-stats kernel that keeps the old sum order:
+       bit-equal (same O hash) but slower: stats 0.22 to 0.23 ms (one read of the bf16 scores) plus p v with the exp in the
+       fetch 2.42 ms, against the separate softmax 0.449 plus p v 1.711 ms. The exp costs 0.7 ms inside a compute-bound
+       kernel, more than the write and read it saves. Dropped.
+   (c) Applied: store the scores as bf16. The softmax's first step rounds q k^T and then q k^T * scale to bf16, and its
+       result is rounded to bf16, so every value the matrix holds between the kernels is a bf16 number. q k^T's epilogue now
+       stores bf16(bf16(sum) * scale) (as bf16), the softmax reads that and writes bf16(exp(s - max) / sum) in place, and
+       p v reads the bf16 probabilities (exact in fp32) as the A operand. Max, the fp32 exps (recomputed in the store pass,
+       not kept), the sum's order (a stride of 256 threads, then simd_sum twice) and each p v output's fma chain over k are
+       untouched. The matrix is half the bytes, so the scratch holds 512 rows a chunk instead of 256 in the same 256 MiB.
+       Per chunk, ms, same runs: q k^T 1.337 -> 1.313, softmax 0.86 -> 0.449 (floor 0.40), p v 1.766 -> 1.711. A layer of the
+       invoice (6,121 rows): 24 chunks of 256 rows fp32 = 95 ms; 12 chunks of 512 rows bf16 (2.578 + 0.857 + 2.746) = 74 ms.
+
+3. Bits
+   Standalone, scores, probabilities and the p v output compared bitwise between the fp32 path (A's kernels, copied) and the
+   bf16 path (img-sm-bench.txt, n keys x lc rows, 16 heads): 6121 x 256, 6121 x 512, 4093 x 513, 2081 x 100, 1001 x 77,
+   130 x 129, 65 x 64: 0 of 25,071,616 / 50,143,232 / 33,595,344 / 3,329,600 / 1,233,232 / 268,320 / 66,560 scores differ from
+   bf16(bf16(fp32 dot) * scale), 0 probabilities differ from the fp32 softmax's, and every O hash is equal (also with the
+   fused variant of 2b and the one-simdgroup variant of 2a).
+   Tower output hash (Wyhash of the bf16 tower output, VHASH in img-sm-eq-*.serve.txt), four sessions A, B, B, A over the seven
+   images, two requests each, all 14 requests of each session: the same seven values in all four (426bb20346d4bb0f for the
+   56-token text, 6d5ca418edcf7e06 shapes, d355a93afc2593b9 chart PNG, 1ad18b422483ada chart JPEG, 5dee538e1ef7c759 scene,
+   f22ac81ecaa4d511 invoice JPEG, 6d64bb00397b5445 invoice PNG).
+   Replies (img-sm-eq-{1-A,2-B,3-B,4-A}.json, img_client.py, 160 tokens, greedy): the 8 replies of each of the seven images
+   are one text, byte for byte, usage included. The sha= lines of the four servers are the same 15 values in the same
+   order (14f57c547eab for the warm-up, then twice each 972e00c69dd8 39a47b4fb9c2 56bd7447a620 901bdc9d6903 95c18a954ff3
+   accdb7fc3284 30e811256ffb), the values of img-ttft.txt. The final build (6705f6ff...) reproduced A's replies for the scene
+   and both invoices (img-sm-final-B.json) and the four text hashes below.
+   The four text hashes of chat_hashes.py at --context 8192, B and B final (hash-sm-text.txt, hash-sm-final-text.txt):
+   0b037128ee78 b37d8a0e39c4 77bf7c99cc66 538175732cc7.
+   Contract (zig build native tf-kernel-contract test-inkling2-host -Dcpu=apple_m1 -Doptimize=ReleaseFast;
+   tf-kernel-contract --only inkling2, img-sm-contract.txt): SUMMARY 86 kernels: 86 pass gates 1-4, 0 fail, 0 known findings;
+   134 controls: 134 red as planted, 0 missed; 0 limit problems (before: 86 and 133). The media GEMM kinds f32_nt and f32_nn
+   became score_nt (fp32 q and k, bf16 scaled out; its probe stores at scale 1/8 and the reference scales its f64 sums) and
+   prob_nn (bf16 p, fp32 v, fp32 out); the softmax's probe now feeds bf16 scores and checks bf16 probabilities in place; the
+   new control "inkling2 media gemm control drops the score scale" goes red at shapes. test-inkling2-media-metal with
+   TF_INKLING2_MINI set (the 23-layer tower against its FP64 oracle on the real checkpoint): 88 of 88 pass.
+
+4. First token, A-B-B-A on a quiet machine (load 2.86 before, 2.97 after; img-sm-abba-{1-A,2-B,3-B,4-A}.json, img_client3.py via
+   img_session.sh, plain binaries), seconds, two requests each:
+
+   image (prompt tokens)           A (1)          B (2)          B (3)          A (4)
+   scene.jpg (546)                 1.96, 1.95     1.93, 1.92     1.93, 1.92     1.96, 1.95
+   invoice-large.jpg (1,561)       6.94, 6.94     6.54, 6.54     6.54, 6.53     6.94, 6.94
+   invoice-large.png (1,561)       6.95, 6.95     6.54, 6.55     6.54, 6.54     6.95, 6.94
+
+   The invoice's first token drops by 0.40 s (5.8 %): the tower from about 3.2 s to about 2.8 s (the first-token difference;
+   the earlier stage profile read 3.2 s with the softmax at 0.54 s). The scene's drops by 0.03 s (1.5 %, a repeatable 0.02
+   to 0.03 s on its 546 tokens but inside this machine's noise on a single run). The final build, one session alone with
+   another job on the machine (load 16): scene 1.93, 1.92, invoice JPEG 6.54, 6.53, PNG 6.58, 6.55 (img-sm-final-B.json).
+   The equality sessions ran with other jobs about (load 3 to 14); their first tokens are not used.
+
+5. What is left in the invoice's 6.5 s: the text prefill of its 1,561 rows (about 3.7 s) and the tower (about 2.8 s), whose
+   q k^T and p v are now 2.6 + 2.7 ms of the 6.2 ms a 512-row chunk and ALU-bound (about 1.2 TFMA/s of an M4 Pro's roughly
+   4 TFMA/s [INFERENCE: from the chip's published fp32 rate]); a better 4 x 4 or 8 x 8 register tile that keeps each output's
+   fma chain over k from zero is the next lever and was not tried here.

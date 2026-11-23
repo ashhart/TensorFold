@@ -17,7 +17,7 @@ pub const gemm = gm;
 
 const Ref = gm.Ref;
 const chunk_rows: u32 = 1024; // sequence rows a projection pass multiplies at once (the fp32 sums' scratch)
-const score_bytes: usize = 256 << 20; // the attention scores' fp32 scratch
+const score_bytes: usize = 256 << 20; // the attention scores' bf16 scratch
 
 pub const Options = struct {
     /// The most image tokens one encode takes (--vision's image budget): the scratch is sized for it.
@@ -98,7 +98,7 @@ pub const Tower = struct {
         defer gpa.free(src);
         t.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer t.lib.deinit();
-        t.gemm = try gm.Gemm.init(device, t.lib, &.{ .bf16_nt, .bf16f_nt, .f32_nt, .f32_nn });
+        t.gemm = try gm.Gemm.init(device, t.lib, &.{ .bf16_nt, .bf16f_nt, .score_nt, .prob_nn });
         errdefer t.gemm.deinit();
         var made: usize = 0;
         errdefer for (t.glue[0..made]) |p| p.deinit();
@@ -224,13 +224,13 @@ pub const Tower = struct {
         const ff = h * v.mlp_ratio;
         const q: usize = t.qchunk;
         const rows = @min(S, chunk_rows);
-        return .{ P * image.patch_width * 4, P * image.patch_width * 2, P * h * 2, P * 4 * 4, P * 4 * 4, S * hd * 4, S * hd * 4, S * h * 2, S * h * 2, S * h * 2, rows * @max(3 * h, ff) * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * q * S * 4, @as(usize, v.heads) * q * hd * 4, rows * ff * 2, tokens * v.proj_hidden * 2 };
+        return .{ P * image.patch_width * 4, P * image.patch_width * 2, P * h * 2, P * 4 * 4, P * 4 * 4, S * hd * 4, S * hd * 4, S * h * 2, S * h * 2, S * h * 2, rows * @max(3 * h, ff) * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * S * hd * 4, @as(usize, v.heads) * q * S * 2, @as(usize, v.heads) * q * hd * 4, rows * ff * 2, tokens * v.proj_hidden * 2 };
     }
 
     fn allocate(t: *Tower) !void {
         const v = t.cfg;
         const S: usize = @as(usize, t.max_tokens) * v.merge * v.merge + 1;
-        const per_query = @as(usize, v.heads) * S * 4;
+        const per_query = @as(usize, v.heads) * S * 2;
         t.qchunk = @intCast(@min(S, @max(64, score_bytes / per_query / 64 * 64)));
         var made: usize = 0;
         errdefer for (t.scratch[0..made]) |b| b.deinit();
@@ -356,13 +356,12 @@ pub const Tower = struct {
             while (q0 < S) : (q0 += t.qchunk) {
                 const lc = @min(t.qchunk, S - q0);
                 const stride: u32 = S * hd;
-                t.gemm.run(e, .f32_nt, t.ref("q").at(@as(usize, q0) * hd * 4), t.ref("k"), t.ref("s"), .{ .m = lc, .n = S, .k = hd, .lda = hd, .ldb = hd, .ldd = S, .batch = v.heads, .sa = stride, .sb = stride, .sd = lc * S });
+                t.gemm.run(e, .score_nt, t.ref("q").at(@as(usize, q0) * hd * 4), t.ref("k"), t.ref("s"), .{ .m = lc, .n = S, .k = hd, .lda = hd, .ldb = hd, .ldd = S, .batch = v.heads, .sa = stride, .sb = stride, .sd = lc * S, .scale = scale });
                 e.setPipeline(t.pipe(.softmax));
                 e.setBuffer(t.buf("s"), 0, 0);
                 e.setValue(S, 1);
-                e.setValue(scale, 2);
                 e.dispatchGroups(mtl.Size.of(@as(usize, v.heads) * lc, 1, 1), mtl.Size.of(256, 1, 1));
-                t.gemm.run(e, .f32_nn, t.ref("s"), t.ref("v"), t.ref("o"), .{ .m = lc, .n = hd, .k = S, .lda = S, .ldb = hd, .ldd = hd, .batch = v.heads, .sa = lc * S, .sb = stride, .sd = lc * hd });
+                t.gemm.run(e, .prob_nn, t.ref("s"), t.ref("v"), t.ref("o"), .{ .m = lc, .n = hd, .k = S, .lda = S, .ldb = hd, .ldd = hd, .batch = v.heads, .sa = lc * S, .sb = stride, .sd = lc * hd });
                 e.setPipeline(t.pipe(.heads));
                 e.setBuffer(t.buf("o"), 0, 0);
                 e.setBuffer(att.buf, att.off, 1);

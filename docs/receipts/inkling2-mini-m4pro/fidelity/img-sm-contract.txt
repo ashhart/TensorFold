@@ -1,0 +1,18 @@
+PASS nonfinite inkling2 media gemm score_nt: 68 non-finite and 204 finite outputs match the float64 classes
+PASS repeat inkling2 media gemm score_nt: five runs byte-identical (1156 bytes), inputs and guards untouched, no overlap
+PASS shapes inkling2 media gemm score_nt: 17 shapes within the float64 bound (worst 0.962 of the bound), 0 edges refused by the kernel
+PASS sums inkling2 media gemm score_nt: exact sums at k 257, where fp16 sums would miss by 256x and bf16 by 256x
+PASS nonfinite inkling2 media gemm prob_nn: 256 non-finite and 768 finite outputs match the float64 classes
+PASS repeat inkling2 media gemm prob_nn: five runs byte-identical (8704 bytes), inputs and guards untouched, no overlap
+PASS shapes inkling2 media gemm prob_nn: 17 shapes within the float64 bound (worst 0.353 of the bound), 0 edges refused by the kernel
+PASS sums inkling2 media gemm prob_nn: exact sums at k 257, where fp16 sums would miss by 16777216x and bf16 by 16777216x
+PASS nonfinite inkling2 vision ik2v_softmax: 3075 non-finite and 5125 finite outputs match the float64 classes
+PASS repeat inkling2 vision ik2v_softmax: five runs byte-identical (18450 bytes), inputs and guards untouched, no overlap
+PASS shapes inkling2 vision ik2v_softmax: 8 shapes within the float64 bound (worst 0.992 of the bound), 0 edges refused by the kernel
+PASS sums inkling2 vision ik2v_softmax: within its bound at k 16385; fp16 sums would miss 0x, bf16 1.4x (BF16 store limits discrimination in normalized outputs; exp terms are not dyadic)
+FAIL nonfinite inkling2 vision softmax control ignores NaN exp: 1024 of 8200 outputs differ in class; first at 1: finite where float64 gives nan
+CONTROL inkling2 vision softmax control ignores NaN exp: red at nonfinite, as planted
+FAIL shapes inkling2 draft alpha control omits the last tap from the softmax sum: at 4x4x4 output 0 is 8.359375e-1 where float64 gives 1.760659e-1: 958.90 of its bound
+CONTROL inkling2 draft alpha control omits the last tap from the softmax sum: red at shapes, as planted
+PASS sums inkling2 draft ik2d_attn_split + ik2d_attn_merge: within its bound at k 1170; fp16 sums would miss 256x, bf16 256.0x (BF16 stores hide short positive softmax sums; stress isolates signed value cancellation)
+SUMMARY 86 kernels: 86 pass gates 1-4, 0 fail, 0 known findings; 134 controls: 134 red as planted, 0 missed; 0 limit problems; gates 22007 ms, limits 856 ms
