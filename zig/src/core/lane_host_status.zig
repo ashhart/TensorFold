@@ -13,10 +13,17 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     var s: Snapshot = undefined;
     var n: usize = 0;
+    var now: i96 = undefined;
+    var tokens: u64 = 0;
     while (true) {
         const v1 = h.st.seq.load(.acquire);
         if (v1 % 2 == 0) {
             s = h.st.snap;
+            now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+            tokens = 0;
+            for (h.st.decode_slots[s.decode_slot].items) |m| {
+                if (m.at >= now - window_ns) tokens += m.tokens;
+            }
             if (s.live_len > 0) {
                 const buf = h.st.live_slots[s.live_slot].items;
                 n = @min(stream_tokens.len, s.live_len);
@@ -25,12 +32,11 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
             if (h.st.seq.load(.acquire) == v1) break;
         }
     }
-    const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
     out.* = .{
         .healthy = !h.closing.load(.acquire) and !h.stale.load(.acquire) and (if (h.health) |source| source.read(source.ctx) else true),
         .running = @intCast(s.running),
         .waiting = @intCast(s.waiting),
-        .decode_tokens_per_second = @as(f64, @floatFromInt(s.decode_tokens)) / 2.0,
+        .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
         .prefill_tokens_per_second = if (now - s.prefill_at <= window_ns) s.prefill_rate else 0,
         .streams = n,
         .generation_tokens = s.generation_tokens,
@@ -49,6 +55,7 @@ pub const State = struct {
     snap: Snapshot = .{},
     seq: std.atomic.Value(u32) = .init(0), // odd while the engine thread publishes
     live_slots: [2]std.ArrayList(u32) = .{ .empty, .empty },
+    decode_slots: [2]std.ArrayList(Mark) = .{ .empty, .empty },
     live_tokens: std.ArrayList(u32) = .empty,
     live_generated: u64 = 0,
     cache_status: ?api.Status.PromptCache = null,
@@ -79,6 +86,7 @@ pub fn takeEngineLock(h: *LaneHost) bool {
 pub fn freeSlots(h: *LaneHost) void {
     h.st.live_tokens.deinit(h.gpa);
     for (&h.st.live_slots) |*slot| slot.deinit(h.gpa);
+    for (&h.st.decode_slots) |*slot| slot.deinit(h.gpa);
 }
 
 /// The lane host's status state: the published snapshot, its seqlock, the live slots and the round-wait counter.
@@ -87,7 +95,7 @@ pub const Snapshot = struct {
     live_len: usize = 0,
     running: usize = 0,
     waiting: usize = 0,
-    decode_tokens: u64 = 0,
+    decode_slot: usize = 0,
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     generation_tokens: u64 = 0,
@@ -103,14 +111,10 @@ pub const Snapshot = struct {
 pub fn publish(h: *LaneHost) void {
     h.lock();
     defer h.unlock();
-    const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
-    var tokens: u64 = 0;
-    for (h.decoded.items) |m| {
-        if (m.at >= now - window_ns) tokens += m.tokens;
-    }
     var tmp: api.Status = .{};
     fillTotals(h, &tmp);
     const slot = (h.st.snap.live_slot + 1) % 2;
+    const decode_slot = (h.st.snap.decode_slot + 1) % 2;
     h.st.seq.store(h.st.seq.load(.monotonic) | 1, .release); // odd: a reader retries
     var len: usize = 0;
     if (h.st.live_tokens.items.len > 0) {
@@ -118,12 +122,14 @@ pub fn publish(h: *LaneHost) void {
         h.st.live_slots[slot].appendSlice(h.gpa, h.st.live_tokens.items) catch {};
         len = h.st.live_slots[slot].items.len;
     }
+    h.st.decode_slots[decode_slot].clearRetainingCapacity();
+    h.st.decode_slots[decode_slot].appendSlice(h.gpa, h.decoded.items) catch {};
     h.st.snap = .{
         .live_slot = slot,
         .live_len = len,
         .running = h.admitted.items.len,
         .waiting = h.queued.items.len,
-        .decode_tokens = tokens,
+        .decode_slot = decode_slot,
         .prefill_rate = h.st.prefill_rate,
         .prefill_at = h.st.prefill_at,
         .generation_tokens = h.st.live_generated,
