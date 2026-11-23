@@ -40,6 +40,36 @@ pub const Row = struct {
     }
 };
 
+/// A bf16 word as its f32 value.
+fn bf16(word: u16) f32 {
+    return @bitCast(@as(u32, word) << 16);
+}
+
+/// The row of bf16 logits `l` for `pick`: an fp64 normalizer, `count` best ids, ties to the lower id.
+pub fn bf16Row(l: []const u16, pick: u32, count: u8) Row {
+    var most: f64 = -std.math.inf(f64);
+    for (l) |w| most = @max(most, bf16(w));
+    var sum: f64 = 0;
+    for (l) |w| sum += @exp(@as(f64, bf16(w)) - most);
+    const lse: f32 = @floatCast(most + @log(sum));
+    var r: Row = .{ .token = pick, .logprob = bf16(l[pick]) - lse, .count = max_top };
+    var filled: usize = 0;
+    for (l, 0..) |w, id| {
+        const x = bf16(w);
+        if (filled == max_top and x <= r.logprobs[max_top - 1] + lse) continue;
+        var at = @min(filled, max_top - 1);
+        while (at > 0 and x > r.logprobs[at - 1] + lse) : (at -= 1) {
+            r.ids[at] = r.ids[at - 1];
+            r.logprobs[at] = r.logprobs[at - 1];
+        }
+        r.ids[at] = @intCast(id);
+        r.logprobs[at] = x - lse;
+        filled = @min(filled + 1, max_top);
+    }
+    r.count = @min(count, max_top);
+    return r;
+}
+
 test "a row reads the normalizer, the pick and the best ids from the backend's words" {
     var w: [words]u32 = @splat(0);
     w[0] = @bitCast(@as(f32, 2.5));
@@ -54,4 +84,13 @@ test "a row reads the normalizer, the pick and the best ids from the backend's w
     try std.testing.expectEqual(@as(f32, -1.5), r.logprobs[1]);
     try std.testing.expectEqual(@as(f32, -1.5), r.forToken(9).logprob);
     try std.testing.expect(std.math.isNan(r.forToken(3).logprob));
+}
+
+test "a bf16 row: the normalizer, the best ids in order, ties to the lower id" {
+    var l: [40]u16 = undefined;
+    for (&l, 0..) |*w, i| w.* = @intCast(@as(u32, @bitCast(@as(f32, @floatFromInt(i % 7)))) >> 16);
+    const r = bf16Row(&l, 6, 20);
+    try std.testing.expectEqual(@as(u32, 6), r.ids[0]);
+    try std.testing.expectEqual(@as(u32, 13), r.ids[1]);
+    try std.testing.expect(r.logprobs[0] == r.logprob and r.logprobs[19] <= r.logprobs[18]);
 }
