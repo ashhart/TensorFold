@@ -330,6 +330,22 @@ pub const Fetched = struct {
     failed: enum { none, network, too_large, stopped, deadline } = .none,
 };
 
+/// Python's raw Authorization header: Unicode scalar values encoded as Latin-1, never raw UTF-8.
+fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
+    const prefix = "Bearer ";
+    if (prefix.len + token.len > buf.len) return null;
+    @memcpy(buf[0..prefix.len], prefix);
+    var view = std.unicode.Utf8View.init(token) catch return null;
+    var it = view.iterator();
+    var n = prefix.len;
+    while (it.nextCodepoint()) |cp| {
+        if (cp > 0xff or cp < 0x20 or cp == 0x7f) return null;
+        buf[n] = @intCast(cp);
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 const FetchTask = struct {
     a: Allocator,
     client: *std.http.Client,
@@ -341,7 +357,7 @@ const FetchTask = struct {
         x.out.failed = .network;
         const uri = std.Uri.parse(x.f.url) catch return;
         var auth_buf: [300]u8 = undefined;
-        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{tok}) catch return } else .omit;
+        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = rawHeader(&auth_buf, tok) orelse return } else .omit;
         var req = x.client.request(x.f.method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
