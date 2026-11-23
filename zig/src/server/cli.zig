@@ -413,10 +413,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
 
-/// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
+/// ``--parallel``: "auto" is up to 64 requests at once; a number caps it.
 pub fn parallel(text: []const u8) ?u32 {
     const t = std.mem.trim(u8, text, " ");
-    if (std.ascii.eqlIgnoreCase(t, "auto")) return 8;
+    if (std.ascii.eqlIgnoreCase(t, "auto")) return 64;
     const n = std.fmt.parseInt(i64, t, 10) catch return null;
     return @intCast(@max(1, @min(n, 4096)));
 }
