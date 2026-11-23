@@ -56,12 +56,12 @@ pub const PleModel = struct { table_w: u64, table_s: u64, table_b: u64, table_bi
 pub const Weights = struct {
     gpa: std.mem.Allocator,
     config: cfg.Config,
-    /// The embedding table as MLX stores it: words u32 [V, H bits / 32], scales and biases [V, H / 64].
+    /// The embedding table as MLX stores it: words u32 [V, H bits / 32], scales and biases [V, H / 64]; 0 at 4 bits.
     embed_w: u64 = 0,
     embed_bits: u8 = 4,
     embed_s: u64 = 0,
     embed_b: u64 = 0,
-    /// The same table as the tied head's tiles.
+    /// The same table as the tied head's tiles; at 4 bits the token rows read these (the table is held once).
     head: Proj = undefined,
     final_norm: u64 = 0,
     layers: []Layer = &.{},
@@ -72,6 +72,13 @@ pub const Weights = struct {
     /// The 31B's image tower (--vision), null without.
     tower: ?Tower = null,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
+
+    /// Token rows at ids into out [rows, hidden], each value times `scale` as MLX rounds it.
+    pub fn embed(w: *const Weights, e: *const cuda.embed_rows.EmbedRows, s: cuda.Stream, ids: u64, out: u64, rows: usize, scale: f32) !void {
+        const h = w.config.geo.hidden;
+        if (w.head == .a4) return e.tiles4(s, ids, w.head.a4, out, rows, scale);
+        return e.affine(s, ids, w.embed_w, w.embed_s, w.embed_b, out, rows, h, .{ .bits = @intCast(w.embed_bits), .group = cfg.group, .scale = scale });
+    }
 
     pub fn deinit(w: *Weights) void {
         for (w.buffers.items) |*b| b.free();
@@ -216,10 +223,12 @@ fn loadConfig(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda
     defer stage.free();
     var x: Ctx = .{ .w = &w, .d = d, .s = s, .k = k, .ck = &ck, .stage = stage };
     w.embed_bits = c.widths.embed.bits;
-    w.embed_w = try x.tensor(lm ++ "embed_tokens.weight", .u32, &.{ cfg.vocab, h * w.embed_bits / 32 });
-    w.embed_s = try x.tensor(lm ++ "embed_tokens.scales", .bf16, &.{ cfg.vocab, h / 64 });
-    w.embed_b = try x.tensor(lm ++ "embed_tokens.biases", .bf16, &.{ cfg.vocab, h / 64 });
     w.head = try x.linear(lm ++ "embed_tokens", cfg.vocab, h, w.embed_bits);
+    if (w.head != .a4) { // the token rows read the 4-bit tiles; other widths keep the table as stored too
+        w.embed_w = try x.tensor(lm ++ "embed_tokens.weight", .u32, &.{ cfg.vocab, h * w.embed_bits / 32 });
+        w.embed_s = try x.tensor(lm ++ "embed_tokens.scales", .bf16, &.{ cfg.vocab, h / 64 });
+        w.embed_b = try x.tensor(lm ++ "embed_tokens.biases", .bf16, &.{ cfg.vocab, h / 64 });
+    }
     w.final_norm = try x.tensor(lm ++ "norm.weight", .bf16, &.{h});
     if (geo.layer_input != 0) {
         const stacked = geo.layers * geo.layer_input;

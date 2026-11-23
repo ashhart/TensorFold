@@ -81,11 +81,16 @@ const Rank = struct {
     /// Every stored row of the slot's pages below pos equals what write() put there.
     fn check(r: *Rank, s: *const Slot, chat: u32, pos: u64) !void {
         const n = pool_mod.pagesFor(pos, page);
+        var want: std.ArrayList(u8) = .empty;
+        defer want.deinit(r.host.gpa);
         for (s.mapped()[0..n], 0..) |pg, k| for (fams, 0..) |f, fi| {
             if (f.split and !r.pool.owns(pg)) continue;
             const v = r.host.pageOf(@intCast(fi), r.pool.familyPage(f, pg));
             const rows: usize = if (k + 1 == n and pos % page != 0) (pos % page) / f.ratio * f.row_bytes else v.len;
-            for (v[0..rows], 0..) |b, i| try testing.expectEqual(@as(u8, @truncate(i *% 13 +% k *% 101 +% chat *% 7 +% fi)), b);
+            // a slice at a time, not an expect a byte: loaded CI hosts get through this in memory order
+            try want.resize(r.host.gpa, rows);
+            for (want.items, 0..) |*b, i| b.* = @truncate(i *% 13 +% k *% 101 +% chat *% 7 +% fi);
+            try testing.expectEqualSlices(u8, want.items, v[0..rows]);
         };
     }
 };
@@ -185,6 +190,7 @@ fn tmpRoot(gpa: std.mem.Allocator, tmp: *std.testing.TmpDir, sub: []const u8) ![
     return tmp.dir.realPathFileAlloc(testing.io, sub, gpa);
 }
 
+// About 0.5 s on a quiet host; every wait is signalled or a bounded syscall, so a timeout means a frozen host.
 test "chats over turns: residency to NVMe, bit-identical resumes, deltas, older turns dropped (sync and async)" {
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});

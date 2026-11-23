@@ -95,7 +95,7 @@ class Collector:
               **{f"first_{k}_s": self.first[k] for k in KINDS},
               "first_output_s": times[0] if times else None, "last_output_s": times[-1] if times else None}
         return {**{k: v - self.sent if done and v is not None else None for k, v in at.items()},
-                "completion": self.completion(), "choices": len(self.finish),
+                "completion": self.completion(), "choices": len(self.finish), "speculative": self.speculative,
                 "finish_reasons": [self.finish[i] for i in sorted(self.finish)],
                 "output_times": times if len({i for _, i in self.outputs}) <= 1 else None}
 

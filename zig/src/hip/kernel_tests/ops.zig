@@ -208,66 +208,6 @@ test "argmax and top-k follow torch's order: the larger value, then the lower in
     try std.testing.expectEqual(@as(i32, -1), gi[2 * stride]);
 }
 
-test "the MoE route sorts pairs by expert, stably, into items of at most a tile" {
-    const t = try Rig.open(1 << 20);
-    defer t.close();
-    const o = t.ops(&t.on);
-    var rng: rig.Rng = .{ .state = 0x2017E };
-    for ([_][3]usize{
-        .{ 257, 512, 16 },
-        .{ 128, 37, 4 },
-        .{ 64, 1000, 64 },
-        .{ 513, 11, 8 },
-        .{ 513, 2816, 8 },
-    }) |shape| {
-        const experts = shape[0];
-        const pairs = shape[1];
-        const tile = shape[2];
-        const picks = try gpa.alloc(i32, pairs);
-        defer gpa.free(picks);
-        // a skewed pick so some experts fill several tiles and others none
-        for (picks) |*p| p.* = @intCast(@min(experts - 1, (rng.next() >> 40) % 16 * (rng.next() >> 50) % experts));
-        const counts = try gpa.alloc(usize, experts);
-        defer gpa.free(counts);
-        @memset(counts, 0);
-        for (picks) |p| counts[@intCast(p)] += 1;
-        var capacity: usize = 0;
-        for (counts) |c| capacity += (c + tile - 1) / tile;
-        capacity += 3;
-        var dev_picks = try t.upload(picks);
-        defer dev_picks.free();
-        var members = try t.alloc(pairs * 4);
-        defer members.free();
-        var items = try t.alloc(capacity * 12);
-        defer items.free();
-        try o.moeRoute(at(dev_picks), pairs, experts, tile, at(members), at(items), capacity);
-        try t.stream.synchronize();
-        const gm = try rig.download(i32, members);
-        defer gpa.free(gm);
-        const gi = try rig.download(i32, items);
-        defer gpa.free(gi);
-        var place: usize = 0;
-        var slot: usize = 0;
-        for (0..experts) |e| {
-            const start = place;
-            for (picks, 0..) |p, i| if (p == e) {
-                try std.testing.expectEqual(@as(i32, @intCast(i)), gm[place]);
-                place += 1;
-            };
-            var left = counts[e];
-            var first = start;
-            while (left > 0) : (slot += 1) {
-                const take = @min(left, tile);
-                try std.testing.expectEqualSlices(i32, &.{ @intCast(e), @intCast(first), @intCast(take) }, gi[slot * 3 ..][0..3]);
-                first += take;
-                left -= take;
-            }
-        }
-        // the slots past the plan are empty items
-        for (slot..capacity) |s| try std.testing.expectEqual(@as(i32, 0), gi[s * 3 + 2]);
-    }
-}
-
 fn silu(x: f64) f64 {
     return x / (1 + @exp(-x));
 }

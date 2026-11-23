@@ -184,7 +184,7 @@ test "logprob combinations: a call past parallel_tool_calls false is dropped, no
     const parsed = try @import("tool_parse.zig").parse(a, reply, tools, 1);
     try std.testing.expectEqualStrings("ab", parsed.content);
     var cx: errors.Cx = .{ .a = a };
-    const lp = try @import("logprob_parts.zig").project(srv, &cx, .{ .tokens = ids, .rows = rows, .thinking = false, .stops = .{ .strings = &.{} } }, parsed.content, null, tools, parsed.calls);
+    const lp = try @import("logprob_parts.zig").project(srv, &cx, .{ .tokens = ids, .rows = rows, .thinking = false, .stops = .{ .strings = &.{} } }, parsed.content, null, tools, parsed.calls, .entries);
     const prose = lp.get("content").?.array;
     try std.testing.expectEqualStrings("ab", try spell(a, lp.get("content").?));
     try std.testing.expectEqual(-@as(f64, @floatFromInt(reply.len)), prose[1].get("logprob").?.float);

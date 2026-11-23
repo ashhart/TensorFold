@@ -7,6 +7,7 @@ const g = contract.gates;
 const dsv41_route = @import("metal_dsv41_route.zig");
 const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
+const dsv41_fp8_tile = @import("metal_dsv41_fp8_tile.zig");
 const dsv41_topk512 = @import("metal_dsv41_topk512.zig");
 const dsv41_cand = @import("metal_dsv41_cand.zig");
 const dsv41_attn = @import("metal_dsv41_attn.zig");
@@ -17,6 +18,8 @@ const dsv41_engram = @import("metal_dsv41_engram.zig");
 const dsv41_glue = @import("metal_dsv41_glue.zig");
 const dsv41_compress = @import("metal_dsv41_compress.zig");
 const dsv41_mv = @import("metal_dsv41_mv.zig");
+const dsv41_mv_mma = @import("metal_dsv41_mv_mma.zig");
+const dsv41_vision = @import("metal_dsv41_vision.zig");
 const dsv41_hc = @import("metal_dsv41_hc.zig");
 const dsv41_fold = @import("metal_dsv41_fold.zig");
 const dsv41_glue_tmp = @import("metal_dsv41_glue_tmp.zig");
@@ -26,6 +29,8 @@ const dsv41_fused2 = @import("metal_dsv41_fused2.zig");
 const dsv41_fused3 = @import("metal_dsv41_fused3.zig");
 const dsv41_fused4 = @import("metal_dsv41_fused4.zig");
 const dsv41_fused5 = @import("metal_dsv41_fused5.zig");
+const dsv41_segs = @import("metal_dsv41_segs.zig");
+const dsv41_segs_ix = @import("metal_dsv41_segs_ix.zig");
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
     const text = only orelse return true;
@@ -50,6 +55,11 @@ pub const Routes = struct {
         .{ .v = .{ .kind = .drafter, .ctl = 3 }, .name = "metal dsv41 route drafter control: the bias in the weight" },
         .{ .v = .{ .kind = .backbone, .ctl = 4 }, .name = "metal dsv41 route backbone control: a write past k" },
         .{ .v = .{ .kind = .drafter, .ctl = 4 }, .name = "metal dsv41 route drafter control: a write past k" },
+        .{ .v = .{ .plan = true }, .name = "metal dsv41 route backbone plan tf_dsv41_route_gate_plan" },
+        .{ .v = .{ .plan = true, .ctl = 1 }, .name = "metal dsv41 route backbone plan control: a higher id wins a tie" },
+        .{ .v = .{ .plan = true, .ctl = 2 }, .name = "metal dsv41 route backbone plan control: a NaN key wins" },
+        .{ .v = .{ .plan = true, .ctl = 3 }, .name = "metal dsv41 route backbone plan control: the bias in the weight" },
+        .{ .v = .{ .plan = true, .ctl = 4 }, .name = "metal dsv41 route backbone plan control: a write past k" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Routes {
@@ -75,6 +85,7 @@ pub const Routes = struct {
 pub const Suites = struct {
     fp8: *dsv41_fp8_rows.Suite,
     fp8_mma: *dsv41_fp8_mma.Suite,
+    fp8_tile: *dsv41_fp8_tile.Suite,
     topk: *dsv41_topk512.Suite,
     cand: *dsv41_cand.Suite,
     attn: *dsv41_attn.Suite,
@@ -85,6 +96,8 @@ pub const Suites = struct {
     glue: *dsv41_glue.Suite,
     compress: *dsv41_compress.Suite,
     mv: *dsv41_mv.Suite,
+    mv_mma: *dsv41_mv_mma.Suite,
+    vision: *dsv41_vision.Suite,
     hc: *dsv41_hc.Suite,
     fold: *dsv41_fold.Suite,
     glue_tmp: *dsv41_glue_tmp.Suite,
@@ -94,12 +107,16 @@ pub const Suites = struct {
     fused3: *dsv41_fused3.Suite,
     fused4: *dsv41_fused4.Suite,
     fused5: *dsv41_fused5.Suite,
+    segs: *dsv41_segs.Suite,
+    segs_ix: *dsv41_segs_ix.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
         errdefer fp8.destroy();
         const fp8_mma = try dsv41_fp8_mma.Suite.create(a, device, queue, kernels, only);
         errdefer fp8_mma.destroy();
+        const fp8_tile = try dsv41_fp8_tile.Suite.create(a, device, queue, kernels, only);
+        errdefer fp8_tile.destroy();
         const topk = try dsv41_topk512.Suite.create(a, device, queue, kernels, only);
         errdefer topk.destroy();
         const cand = try dsv41_cand.Suite.create(a, device, queue, kernels, only);
@@ -120,6 +137,10 @@ pub const Suites = struct {
         errdefer compress.destroy();
         const mv = try dsv41_mv.Suite.create(a, device, queue, kernels, only);
         errdefer mv.destroy();
+        const mv_mma = try dsv41_mv_mma.Suite.create(a, device, queue, kernels, only);
+        errdefer mv_mma.destroy();
+        const vision = try dsv41_vision.Suite.create(a, device, queue, kernels, only);
+        errdefer vision.destroy();
         const hc = try dsv41_hc.Suite.create(a, device, queue, kernels, only);
         errdefer hc.destroy();
         const fold = try dsv41_fold.Suite.create(a, device, queue, kernels, only);
@@ -138,10 +159,16 @@ pub const Suites = struct {
         errdefer fused5.destroy();
         const glue_tmp2 = try dsv41_glue_tmp2.Suite.create(a, device, queue, kernels, only);
         errdefer glue_tmp2.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2 };
+        const segs = try dsv41_segs.Suite.create(a, device, queue, kernels, only);
+        errdefer segs.destroy();
+        const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
+        errdefer segs_ix.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.segs_ix.destroy();
+        s.segs.destroy();
         s.glue_tmp2.destroy();
         s.fused5.destroy();
         s.fused4.destroy();
@@ -151,7 +178,9 @@ pub const Suites = struct {
         s.glue_tmp.destroy();
         s.fold.destroy();
         s.hc.destroy();
+        s.mv_mma.destroy();
         s.mv.destroy();
+        s.vision.destroy();
         s.compress.destroy();
         s.glue.destroy();
         s.engram.destroy();
@@ -161,6 +190,7 @@ pub const Suites = struct {
         s.attn.destroy();
         s.cand.destroy();
         s.topk.destroy();
+        s.fp8_tile.destroy();
         s.fp8_mma.destroy();
         s.fp8.destroy();
     }
@@ -176,6 +206,7 @@ pub const Suites = struct {
         t.failed += try s.fp8_mma.invariance(seed);
         t.failed += try s.fp8_mma.accuracy(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
+        t.failed += try s.fp8_tile.equality(seed);
         t.failed += try s.topk.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.topk.timing(io);
         t.failed += try s.cand.invariance(seed);
@@ -191,7 +222,13 @@ pub const Suites = struct {
             t.failed += try s.mv.equality(seed);
             t.failed += try s.mv.head(io, seed, std.c.getenv("TF_DSV41_TIME") != null);
         }
+        if (s.mv_mma.probes.items.len > 0) {
+            t.failed += try s.mv_mma.invariance(seed);
+            t.failed += try s.mv_mma.equality(seed);
+            if (std.c.getenv("TF_DSV41_TIME") != null) try s.mv_mma.timing(io);
+        }
         t.failed += try s.glue.tables();
+        t.failed += try s.vision.invariance(seed);
         t.failed += try s.compress.invariance(seed);
         t.failed += try s.compress.equality(seed);
         t.failed += try s.hc.invariance(seed);
@@ -204,5 +241,8 @@ pub const Suites = struct {
         t.failed += try s.fused4.invariance(seed);
         t.failed += try s.fused5.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.ix.timing(io);
+        t.failed += try s.segs.layout();
+        t.failed += try s.segs.base(seed);
+        t.failed += try s.segs_ix.base(seed);
     }
 };

@@ -49,3 +49,28 @@ test('actual workspace components render the desktop hierarchy and retained feat
     await server.close()
   }
 })
+
+test('browser startup ignores durable URL tokens and redeems one-time codes', async () => {
+  const saved = { fetch: globalThis.fetch, location: globalThis.location, history: globalThis.history, localStorage: globalThis.localStorage }
+  const stored = new Map()
+  const server = await createServer({ server: { middlewareMode: true, watch: null }, appType: 'custom' })
+  let requests = 0
+  let cleaned = ''
+  globalThis.localStorage = { getItem: (k) => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v) }
+  globalThis.history = { replaceState: (_state, _unused, url) => { cleaned = String(url) } }
+  globalThis.fetch = async () => { requests += 1; return { ok: true, json: async () => ({ token: 'one-session-token' }) } }
+  try {
+    const { redeemFromAddress, webToken } = await server.ssrLoadModule('/src/api.ts')
+    globalThis.location = new URL('http://localhost/?token=durable-secret')
+    await redeemFromAddress()
+    assert.equal(requests, 0)
+    assert.equal(webToken(), null)
+    globalThis.location = new URL('http://localhost/?code=one-use')
+    await redeemFromAddress()
+    assert.equal(requests, 1)
+    assert.equal(webToken(), 'one-session-token')
+    assert.doesNotMatch(cleaned, /code=|token=/)
+  } finally {
+    try { await server.close() } finally { Object.assign(globalThis, saved) }
+  }
+})

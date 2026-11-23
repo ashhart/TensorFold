@@ -29,7 +29,7 @@ pub const Budget = struct {
 };
 
 /// The streams served, the page plan and layout or the KV ledger plan, and TF_KV_SHARE's count when states take slots.
-pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null, planned: ?kv_pool.Budget = null };
+pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null, slots: ?usize = null, planned: ?kv_pool.Budget = null, extra_device: u64 = 0 };
 
 pub const CacheRoom = struct { room: u64, streams: u64 };
 
@@ -39,7 +39,7 @@ pub fn cacheRoom(room: u64, stream_bytes: u64, free: u32, counted: Count) CacheR
         .room = room -| p.cost.each.scratch,
         .streams = p.one_full *| (counted.streams -| p.standing.streams),
     };
-    return .{ .room = room, .streams = stream_bytes *| (counted.streams -| free) };
+    return .{ .room = room -| counted.extra_device, .streams = stream_bytes *| (counted.streams -| free) };
 }
 
 /// TF_KV_SHARE: the cache's part made pool pages, all of it unless the family keeps its states' rest elsewhere (GLM).
@@ -65,9 +65,16 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
     if (wrapped.layout) |l| {
         const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state
-        const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
+        const host = if (comptime @hasDecl(F, "kvHostRoom")) F.kvHostRoom(loaded.ctx) catch |err| {
+            problem.* = if (comptime @hasDecl(F, "explain")) F.explain(null, err) orelse @errorName(err) else @errorName(err);
+            return null;
+        } else 0;
+        const paged = if (host > 0)
+            try @import("cuda_kv_host.zig").plan(a, l, wrapped.room, o, host, problem) orelse return null
+        else
+            try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
         const planned = kv_pages.budgetOf(F, l, wrapped.room, o, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
-        return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots, .planned = if (slots != null) planned else null };
+        return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots, .planned = if (slots != null) planned else null, .extra_device = if (host > 0) try @import("cuda_kv_host.zig").deviceBytes(l) else 0 };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
     if (ledger.wanted(F, loaded, b.stream_bytes)) {
@@ -119,6 +126,36 @@ test "TF_KV_SHARE's states take slots only with share on, a layout slot and the 
     try std.testing.expect(try shareSlots(false, 1, false) == null);
     try std.testing.expect(try shareSlots(true, 0, false) == null);
     try std.testing.expect(try shareSlots(true, 1, true) == null);
+}
+
+test "TF_KV_SHARE unset or empty plans as before: no slot, and GLM's copies take what the windows leave" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const env = @import("sys").env;
+    const name = "TF_KV_SHARE";
+    const before = if (std.c.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            std.testing.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    const Glm = struct {
+        pub const share_kept_ppm: u32 = 0;
+        pub const window_rows = 8;
+    };
+    const mib: u64 = 1 << 20;
+    // GLM at TP=3 without the share (327 MiB fixed, no slot), --parallel 8, a 1M window, Jammed XSFP4's 42.0 GiB
+    const l: kv_pool.Layout = .{ .fixed_bytes = 327 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "g", .lanes = 8, .lanes_fixed = true };
+    for ([_]?[:0]const u8{ null, "", " " }) |v| {
+        _ = if (v) |s| env.setenv(name, s, 1) else env.unsetenv(name);
+        const share = try @import("core").kv_prompts.sharing() > 0;
+        const slots = try shareSlots(share, l.snap_bytes, false);
+        try std.testing.expectEqual(@as(?usize, null), slots);
+        const b = kv_pages.budgetOf(Glm, l, (41 << 30) + 992 * mib, o, 1_048_576, false, true, keptPpm(Glm, share), slots);
+        try std.testing.expect(!b.slots_only);
+        try std.testing.expectEqual(kv_pool.Plan{ .lanes = 8, .snaps = 0, .copied = 1572732928, .pages = 6147 }, try kv_pool.plan(l, b));
+    }
 }
 
 test "CUDA cache default uses the declared request ledger windows and scratch" {

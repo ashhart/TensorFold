@@ -51,6 +51,7 @@ pub fn PromptCache(s: *const pc.Store) status.PromptCache {
         .bytes = s.held + s.spare(),
         .hits = s.counts.hits,
         .misses = s.counts.misses,
+        .miss_reasons = s.miss_counts,
         .kept = s.counts.kept,
         .evicted = s.counts.evicted,
         .refused = s.counts.refused,

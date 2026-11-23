@@ -20,8 +20,6 @@ pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     m.addImport("mesh", @import("mesh.zig").module(b, target, optimize, canon)); // shares declared over that canon
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
-    m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda)); // over the engine's own cuda module
-    m.addImport("engine_api", api); // TF_KV_SHARE's prompt_radix store: family()'s, the server's
     m.addImport("tp", @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)); // over the engine's own cuda module
     m.addImport("engine_api", api); // TF_GLM_KV_SHARE's prompt_radix store: family()'s, the server's
     return m;
@@ -93,9 +91,13 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "lfm2_moe_cuda", .module = @import("lfm2_moe_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dory", .module = @import("dory.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dots_mocr_cuda", .module = @import("dots_mocr_cuda.zig").module(b, target, optimize, cuda, core, lanes, @import("cuda_dense.zig").module(b, target, optimize, cuda, core, lanes)) },
+            .{ .name = "muse_spark", .module = @import("muse.zig").moduleOver(b, target, optimize, cuda, core, lanes, @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)) },
         },
     });
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
     mod.addImport("fabric", fabric);
+    // MOSS-Image's picture host: the family module (denoiser, encoder, decoder, noise, schedule, PNG) and tokenizer
+    mod.addImport("moss_image", b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } }));
+    mod.addImport("tokenizer", core.import_table.get("tokenizer").?);
     return .{ .api = api, .engines = mod, .canon = canon, .verbs = verbs, .fabric = fabric };
 }

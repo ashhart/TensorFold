@@ -10,6 +10,7 @@ const Target = @import("../model.zig").Model;
 const Session = @import("session.zig").Session;
 const op = @import("operators.zig");
 const execution = @import("execution.zig");
+const absorb_batch = @import("absorb_batch.zig");
 const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
 const Cache = backend_mod.Cache;
@@ -25,7 +26,20 @@ pub const Model = struct {
     tree_block: u32 = 16,
     pending: mtl.Buffer,
     committed_end: u64 = 0,
+    absorb_batch: bool = false, // TF_Q27_DFLASH_ABSORB_BATCH: a shared round's streams absorb in one pass
+    absorb_batches: u64 = 0, // stacked absorb passes
+    absorb_batch_rows: u64 = 0, // rows those passes took
+    absorb_passes_saved: u64 = 0, // per-stream weight passes they replaced
     pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode) !*Model {
+        return optIn(try loadBound(a, io, backend_mod.Target.qwen(target), dir, mode));
+    }
+    /// The 27B's own switch: a family that shares this drafter through a bound target keeps the per-stream absorb.
+    fn optIn(m: *Model) !*Model {
+        errdefer m.deinit();
+        m.absorb_batch = try @import("sys").environment.read(bool, "TF_Q27_DFLASH_ABSORB_BATCH", false);
+        return m;
+    }
+    pub fn loadBound(a: std.mem.Allocator, io: std.Io, target: backend_mod.Target, dir: []const u8, mode: op.Mode) !*Model {
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
@@ -35,22 +49,30 @@ pub const Model = struct {
         try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
-        return open(a, target, c, shards, mode);
+        return openBound(a, target, c, shards, mode);
     }
     /// The draft model of config `c` from its checkpoint `shards`, prepared for `mode`.
     pub fn open(a: std.mem.Allocator, target: *Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        return optIn(try openBound(a, backend_mod.Target.qwen(target), c, shards, mode));
+    }
+    pub fn openBound(a: std.mem.Allocator, target: backend_mod.Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const model = try a.create(Model);
         errdefer a.destroy(model);
         model.allocator = a;
         model.tree_block = 16;
         model.committed_end = 0;
+        model.absorb_batch = false;
+        model.absorb_batches = 0;
+        model.absorb_batch_rows = 0;
+        model.absorb_passes_saved = 0;
         model.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer model.checkpoint.deinit();
         // q4 drafts read their linears only through prepared copies: those stay in the file until prepare reads them
         const later: ?core.checkpoint_metal.Later = if (mode == .prepared_q4_reference) Backend.linear else null;
         for (shards) |file| try model.checkpoint.addFileSplit(target.device, file, "", null, later);
-        model.backend = try Backend.init(a, target, &model.checkpoint, c);
+        model.backend = try Backend.initBound(a, target, &model.checkpoint, c);
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
@@ -63,6 +85,7 @@ pub const Model = struct {
         return model;
     }
     pub fn deinit(m: *Model) void {
+        if (m.absorb_batches > 0) std.log.info("qwen27: DFlash2 absorb batches {d}, rows {d}, weight passes saved {d}", .{ m.absorb_batches, m.absorb_batch_rows, m.absorb_passes_saved });
         m.graph.deinit();
         m.backend.deinit();
         m.pending.deinit();
@@ -132,12 +155,18 @@ pub const Model = struct {
         costs: []const f64 = &.{},
         overhead_ms: f64 = 0,
         defer_price: bool = true,
+        chain: bool = false,
+        noise: ?selector.Noise = null, // a sampled stream's keyed draw noise for a token at a position
+        temperature: f64 = 1,
     };
     /// The lane core prices complete candidate prefixes with its calibrated landing rates.
     pub fn selection(p: Proposal) selector.Options {
         var options = if (p.costs.len > 0) loneSelection(p.nodes) else selector.Options{ .nodes = p.nodes };
+        if (p.chain) options.children = 1;
         options.costs = if (p.defer_price) &.{} else p.costs;
         options.overhead_ms = if (p.defer_price) 0 else p.overhead_ms;
+        options.noise = p.noise;
+        options.temperature = p.temperature;
         return options;
     }
     /// A lone lane's full candidate tree, before the core prices its prefixes.
@@ -182,8 +211,16 @@ pub const Model = struct {
             for (positions[k][0..x.rows], 0..) |*p, i| p.* = x.first + i;
             a.* = .{ .taps = try m.backend.frame.add(.{ .buf = x.ring, .off = @as(usize, x.slot) * stride }, x.rows, c.tapWidth(), c.tapWidth(), .bf16), .positions = positions[k][0..x.rows] };
         };
+        var spans: [8]absorb_batch.Span = undefined;
+        var stacked_positions: [absorb_batch.max_rows]u64 = undefined;
+        const stacked = if (m.absorb_batch) try m.stackAbsorbs(news[0..n], &spans, &stacked_positions) else null;
         var lattices: [8]op.Lattice = undefined;
-        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], stacked, streams[0..n], block, lattices[0..n]);
+        if (stacked) |s| {
+            m.absorb_batches += 1;
+            m.absorb_batch_rows += s.positions.len;
+            m.absorb_passes_saved += s.spans.len - 1;
+        }
         defer for (lattices[0..n]) |*l| l.deinit();
         // the frame completed, so an absorbing stream's context now covers its new taps
         for (entries, news[0..n]) |en, f| if (f) |x| {
@@ -203,6 +240,27 @@ pub const Model = struct {
             t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, selection(en));
             made += 1;
         }
+    }
+    /// The streams' new taps copied into one frame view, in stream order; null keeps the per-stream absorb.
+    fn stackAbsorbs(m: *Model, news: []const ?Fresh, spans: *[8]absorb_batch.Span, positions: *[absorb_batch.max_rows]u64) !?execution.Stacked {
+        var counts: [8]u32 = @splat(0);
+        for (news, 0..) |f, k| if (f) |x| {
+            counts[k] = x.rows;
+        };
+        const plan = absorb_batch.plan(counts[0..news.len], spans) orelse return null;
+        const last = plan[plan.len - 1];
+        const rows = last.first + last.rows;
+        const width = m.graph.config.tapWidth();
+        const stride = @as(usize, width) * 2;
+        const taps = try m.backend.frame.alloc(rows, width, .bf16);
+        const out = try m.backend.frame.ref(taps);
+        for (plan) |span| {
+            const x = news[span.stream].?;
+            const size = @as(usize, span.rows) * stride;
+            @memcpy(out.buf.contents()[out.off + @as(usize, span.first) * stride ..][0..size], x.ring.contents()[@as(usize, x.slot) * stride ..][0..size]);
+            for (positions[span.first..][0..span.rows], 0..) |*p, i| p.* = x.first + i;
+        }
+        return .{ .taps = taps, .positions = positions[0..rows], .spans = plan };
     }
     /// A short run of committed taps the session lacks, for a batched frame to absorb (null: none, or flush first).
     const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
@@ -307,9 +365,9 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     while (later.next()) |name| try names.append(local, name.*);
     return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
-fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
+fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });
-    const w = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" })));
+    const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
     return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);

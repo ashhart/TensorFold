@@ -304,7 +304,10 @@ pub const Engine = struct {
         if (start >= ids.len or start % prompt_rows != 0 or start != e.cur.st.pos) return error.BadChunk;
         if (cancel) |x| if (x.check(x.ptr)) return error.Cancelled;
         const rows = @min(ids.len - start, prompt_rows);
-        const f = e.forward(&e.bp);
+        var f = e.forward(&e.bp);
+        // the last layer's rows nothing reads stop at their cache writes: every rank derives the same rows from these
+        const reach: ?usize = if (e.drafter) |dr| dr.w.c.window + window_rows else null;
+        f.tail = @import("cuda_prompt_tail.zig").first(.{ .rows = rows, .start = start, .len = ids.len, .draft = reach, .watched = f.watch != null });
         const seg = [_]fw.Seg{.{ .st = &e.cur.st, .row0 = 0, .rows = rows }};
         try f.run(@ptrCast(ids[start..][0..rows]), &seg);
         try fw.Forward.commit(&seg, &.{rows});
@@ -470,10 +473,11 @@ pub const Engine = struct {
         try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, e.stream.handle), "cuMemcpyDtoDAsync");
     }
 
-    /// Each request's kept rows absorbed (their positions just below its committed length), then its block's drafts.
+    /// Each request's kept rows absorbed below its committed length, then the blocks, as many to a pass as it holds.
     pub fn draftBlock(e: *Engine, reqs: []const Req) !void {
         const dr = e.drafter orelse return error.NoDrafter;
-        for (reqs) |r| {
+        var blocks: [max_shared]dspark.Block = undefined;
+        for (reqs, blocks[0..reqs.len]) |r, *blk| {
             try e.bind(r.slot);
             const f = e.forward(&e.bd);
             const draft = &e.cur.draft.?;
@@ -485,8 +489,11 @@ pub const Engine = struct {
                 q.drafted[1] = at;
             }
             if (q.drafted[1] != at) q.drafted = .{ at, at };
-            try dr.block(&f, draft, r.anchor, at, q.drafted[0], r.out.len, r.out);
+            blk.* = .{ .caches = draft, .anchor = r.anchor, .p = at, .from = q.drafted[0], .out = r.out };
         }
+        const f = e.forward(&e.bd);
+        var i: usize = 0;
+        while (i < reqs.len) : (i += dr.perPass()) try dr.blocks(&f, blocks[i..@min(reqs.len, i + dr.perPass())]);
     }
 
     /// The last window's first `n` rows kept on the bound sequence (the rest of its writes are past pos: harmless).

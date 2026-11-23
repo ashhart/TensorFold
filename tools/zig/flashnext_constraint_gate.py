@@ -1,4 +1,5 @@
 """Flash Next Metal gate: run under the shared GPU lock with baseline and candidate native binaries."""
+# Fails by name per server: a temperature whose drafted cases accept no draft, plain drafting, or seeds 7/1904 equal.
 
 import argparse
 import contextlib
@@ -69,6 +70,29 @@ def validate(name, reply):
         if function["name"] != "choose" or args != {"n": 7} or type(args.get("n")) is not int:
             raise AssertionError("strict arguments or named function were not enforced")
     return ids
+
+
+def drafts(row, key):
+    """A case row's speculative count; 0 when the server reported none."""
+    value = (row.get("speculative") or {}).get(key)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def exercised(rows, answers):
+    """Raises unless every server's drafts landed per temperature, plain drafted none and the two seeds differed."""
+    for label, replies in answers.items():
+        mine = [r for r in rows if r["server"] == label]
+        for temperature in sorted({r["request"]["temperature"] for r in mine}):
+            at = [r for r in mine if r["request"]["temperature"] == temperature]
+            if not sum(drafts(r, "accepted") for r in at if r["request"]["draft"]):
+                raise AssertionError(f"{label}: no draft accepted at t{temperature} (drafted/plain compared nothing)")
+        plain = sum(drafts(r, "drafted") for r in mine if not r["request"]["draft"])
+        if plain:
+            raise AssertionError(f"{label}: plain cases drafted {plain} tokens (\"draft\": false not honoured)")
+        seeded = [(ids, replies.get(key.replace("-s7-", "-s1904-")))
+                  for key, ids in replies.items() if "-t0.7-s7-" in key]
+        if not any(a != b for a, b in seeded):
+            raise AssertionError(f"{label}: seeds 7 and 1904 gave the same tokens in every case (seed never sampled)")
 
 
 def post(base, body):
@@ -172,7 +196,8 @@ def main():
                     manifest["cases"].append({"server": label, "case": key, "rep": rep,
                                               "request": body, "token_ids": ids,
                                               "cached_tokens": reply["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0),
-                                              "runtime": reply["tensorfold"], "wall_seconds": elapsed})
+                                              "runtime": reply["tensorfold"], "speculative": reply.get("speculative"),
+                                              "wall_seconds": elapsed})
                     (args.output / "receipt.json").write_text(json.dumps(manifest, indent=2) + "\n")
     for key, name, _ in all_cases:
         left = answers["baseline1" if name == "plain" else "candidate2"][key]
@@ -185,6 +210,7 @@ def main():
                 if ids != replies[key[:-1] + "0"]:
                     raise AssertionError(f"{label}/{key}: drafted/plain token ids differ")
                 manifest["checks"].append({"server": label, "case": key, "draft_plain_equal": True})
+    exercised(manifest["cases"], answers)
     if args.cache_gib > 0 and args.prefix_repeats:
         for c in manifest["cases"]:
             if c["server"] == "candidate1" and not c["case"].startswith("plain-") and c["cached_tokens"] != 0:

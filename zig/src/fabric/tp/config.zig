@@ -2,6 +2,7 @@
 const std = @import("std");
 const log = @import("log.zig");
 const graph_cache = @import("cuda").graph_cache;
+const nccl = @import("cuda").nccl;
 
 pub const Backend = enum {
     /// NCCL for everything (the default).
@@ -116,7 +117,7 @@ pub const Config = struct {
         if (get("TF_TP_FAILFAST")) |v| c.failfast = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
         c.grace_ns = try seconds(get, "TF_TP_FAILFAST_GRACE_S", 1.0, 0, 60);
         c.report_ns = try seconds(get, "TF_TP_PEER_MEM_S", 0.5, 0.01, 60);
-        if (get("TF_NCCL_LIB")) |p| c.nccl_lib = p;
+        c.nccl_lib = nccl.Library.pathFrom(get("TF_NCCL_LIB")) catch return error.BadSetting;
         c.roce_hca = get("TF_TP_ROCE_HCA");
         c.link = get("TF_TP_LINK");
         c.roce_hcas = try int(u8, get, "TF_TP_ROCE_HCAS", 2, 1, 2);
@@ -263,6 +264,15 @@ test "defaults: the plan link 7 ports past the rendezvous, NCCL, fail-fast on" {
     try std.testing.expectEqual(Backend.nccl, c.backend);
     try std.testing.expectEqual(std.time.ns_per_s, c.grace_ns);
     try std.testing.expectEqual(std.time.ns_per_s / 2, c.report_ns);
+}
+
+test "TF_NCCL_LIB follows the loader's rule: a path is kept, blank keeps libnccl.so.2, a control byte is refused" {
+    Fake.pairs = &.{.{ "TF_NCCL_LIB", "/fixture/nccl/libnccl.so.2" }};
+    try std.testing.expectEqualStrings("/fixture/nccl/libnccl.so.2", (try Config.parse(&Fake.get)).nccl_lib);
+    Fake.pairs = &.{.{ "TF_NCCL_LIB", " \t" }};
+    try std.testing.expectEqualStrings("libnccl.so.2", (try Config.parse(&Fake.get)).nccl_lib);
+    Fake.pairs = &.{.{ "TF_NCCL_LIB", "libnccl.so.2\n" }};
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
 }
 
 test "bad settings are refused and the digest ignores the rank" {

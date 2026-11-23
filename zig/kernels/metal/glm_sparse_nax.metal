@@ -106,7 +106,7 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
     TF_UNROLL
     for (short i = 0; i < 16; i++) {
       const short e = i & 7, h = e >> 2, kb = i < 8 ? 0 : 1;
-      const float p = sc[i] > NO_SCORE ? fast::exp(sc[i] - m[h]) : 0.0f;
+      const float p = (sc[i] > NO_SCORE || isnan(sc[i])) ? fast::exp(sc[i] - m[h]) : 0.0f;
       bsum[h] += p;
       const bfloat a = bfloat(p);
       const float r1 = p - float(a);
@@ -148,6 +148,10 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
           v1[e] = keys[long(k) * RANK + d + 16];
         }
 #endif
+        TF_UNROLL
+        for (short e = 0; e < 8; e++) {
+          if (keyrow[16 * kb + p_row(e, home)] < 0) v0[e] = v1[e] = bfloat(0);
+        }
         mma_16x32<false, false>(acc[c][0], acc[c][1], p1[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p2[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p3[kb], v0, v1);
@@ -198,7 +202,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   }
 }
 
-// Decode rows: block b's `span` list entries of each row, unnormalized, into po [rows, blocks, 64, 512] fp32 and its max and sum into pm, pl [rows, blocks, 64]; grid (4 head groups, blocks, rows).
+// Decode b's unnormalized `span` rows: po [rows,blocks,64,512], max pm, sum pl [rows,blocks,64]; grid (4,blocks,rows).
 [[kernel]] void glm_sparse_split(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                  const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
                                  constant int4& meta [[buffer(4)]], device float* po [[buffer(5)]], device float* pm [[buffer(6)]],

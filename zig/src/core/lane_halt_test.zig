@@ -45,7 +45,7 @@ fn haltCase(release_at_stop: ?*bool) !void {
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
             const p = self(ctx);
-            for (p.seqs.items) |x| if (!x.decoding) return .wait;
+            for (p.seqs.items) |x| if (!x.decoding) return .{ .wait = .engine_busy };
             p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
             return .admit;
         }
@@ -154,7 +154,7 @@ fn haltCase(release_at_stop: ?*bool) !void {
     const halter = try std.Thread.spawn(.{}, LaneHost.halt, .{ &host, "server restarting: retry shortly" });
     // Observe the real request under the host's lock before allowing the in-flight round to finish.
     host.mutex.lockUncancelable(std.testing.io);
-    while (host.halt_reason == null) host.wake.waitUncancelable(std.testing.io, &host.mutex);
+    while (host.halt_reason == null) host.wake.waitTimeout(std.testing.io, &host.mutex, .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } }) catch {}; // timed: the lane thread also waits on wake
     const admitted = host.admitted.items.len;
     const queued = host.queued.items.len;
     host.mutex.unlock(std.testing.io);

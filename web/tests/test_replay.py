@@ -1,8 +1,14 @@
+import json
+import threading
 import time
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tensorfold_web import conversations, replay, server_chat
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.catalog import Catalog
 from tensorfold_web.engine import Engine
@@ -90,3 +96,66 @@ def test_a_replay_uses_the_settings_each_reply_was_written_with(tmp_path, monkey
     assert body["temperature"] == 0.0 and body["draft"] is False
     cur = client.get("/api/replay").json()["current"]                   # what a watching page read as it was written
     assert cur["turn"] == 0 and cur["question"] == "First question" and cur["live_text"]
+
+
+def _reply_event(text):
+    msg = {"choices": [{"delta": {"content": text}, "finish_reason": None}]}
+    return f"data: {json.dumps(msg)}\n\n".encode()
+
+
+class _PausedReply(httpx.SyncByteStream):
+    def __init__(self, waiting):
+        self.waiting = waiting
+        self.closed = threading.Event()
+
+    def __iter__(self):
+        yield _reply_event("Partial reply")
+        self.waiting.set()
+        self.closed.wait(3)
+
+    def close(self):
+        self.closed.set()
+
+
+@pytest.mark.parametrize("completed", [0, 1])
+def test_stop_during_final_turn_keeps_only_completed_turns(tmp_path, monkeypatch, completed):
+    waiting = threading.Event()
+    calls = 0
+
+    def respond(request):
+        nonlocal calls
+        assert request.url.path == "/v1/chat/completions"
+        calls += 1
+        if calls <= completed:
+            return httpx.Response(200, content=_reply_event("Completed reply") + b"data: [DONE]\n\n")
+        return httpx.Response(200, stream=_PausedReply(waiting))
+
+    monkeypatch.setattr(replay, "httpx", SimpleNamespace(
+        Client=lambda **kwargs: httpx.Client(transport=httpx.MockTransport(respond), **kwargs),
+        Timeout=httpx.Timeout,
+    ))
+    chats = conversations.Conversations(tmp_path / "chat.sqlite")
+    replays = replay.Replays(chats, lambda: ("http://fixture.test", None, "model", "engine"))
+    app = FastAPI()
+    server_chat.install(app, chats, None, replays)
+    client = TestClient(app)
+    messages = []
+    for i in range(completed + 1):
+        messages.extend([{"role": "user", "content": f"Question {i}"},
+                         {"role": "assistant", "content": "Original"}])
+    orig = client.post("/api/conversations", json={"messages": messages}).json()
+    run = client.post(f"/api/conversations/{orig['id']}/replay", json={}).json()
+    assert waiting.wait(3)
+    assert client.get("/api/replay").json()["current"]["live_text"] == "Partial reply"
+    assert client.post("/api/replay/cancel").json() == {"cancelling": True}
+    replays._thread.join(5)
+    progress = client.get("/api/replay").json()
+    saved = client.get(f"/api/conversations/{run['id']}").json()
+    assert not progress["busy"]
+    assert progress["current"]["status"] == "cancelled"
+    assert progress["current"]["done"] == completed
+    assert saved["settings"]["replay_status"] == "cancelled"
+    expected = []
+    for i in range(completed):
+        expected.extend((f"Question {i}", "Completed reply"))
+    assert [message["content"] for message in saved["messages"]] == expected

@@ -58,6 +58,7 @@ const linux_compile = [_][]const u8{
     "compile-h3-library",
     "compile-modelopt-startup",
     "compile-moss-teacher-cuda",
+    "compile-native-cuda-windows",
     "compile-omni-video-host",
     "compile-proposal-metal-host",
     "compile-qwen35-learn",
@@ -69,6 +70,7 @@ const linux_compile = [_][]const u8{
 const linux_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -88,6 +90,7 @@ const linux_fast = [_][]const u8{
     "test-native-options-host",
     "test-template-limits-host",
     "test-originals-host",
+    "test-tokenizer-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -112,6 +115,7 @@ const linux_hip = [_][]const u8{
     "test-hip-blas-host",
     "test-hip-contract-select-host",
     "test-hip-family-offers-host",
+    "test-hip-followers-host",
     "test-hip-native-options-host",
     "test-hip-pair-contract-host",
     "test-lighton-hip-contract-host",
@@ -159,8 +163,10 @@ const linux_host = [_][]const u8{
     "test-flashnext-loader-host",
     "test-flashnext-memory-host",
     "test-flashnext-nonfinite-host",
+    "test-flashnext-penalties-host",
     "test-flashnext-precise-host",
     "test-flashnext-prefill-pairs-host",
+    "test-flashnext-cancel-host",
     "test-flashnext-proposal-host",
     "test-flashnext-proposal-pack-host",
     "test-flashnext-rotary-bound-host",
@@ -186,9 +192,11 @@ const linux_host = [_][]const u8{
     "test-inc4-round-host",
     "test-inc4-rows-host",
     "test-kernel-seed-host",
+    "test-lane-explore-host",
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
+    "test-lane-strand-host",
     "test-lfm2-load-host",
     "test-living-shards-host",
     "test-merge",
@@ -263,6 +271,7 @@ const macos_adapters = [_][]const u8{
     "compile-gemma4-contract-host",
     "compile-gemma4-host",
     "compile-h3-host",
+    "compile-h3-image-decoder-host",
     "compile-http-limits-windows-host",
     "compile-metal-residency-host",
     "compile-moss-teacher-metal",
@@ -277,13 +286,19 @@ const macos_adapters = [_][]const u8{
     "test-flashnext-pack-cache",
     "test-gguf-linux-compile",
     "test-h3-modulation-bf16",
+    "test-h3-read-ahead",
+    "test-lfm3-metal-steps-host",
+    "test-lfm2-moe-metal-steps-host",
     "test-masked-values-host",
     "test-metal-counters-host",
     "test-minimax-info-host",
+    "test-minimax-m3-metal-steps-host",
+    "test-moss-image-rotary-host",
     "test-qwen-dense-geometry-host",
     "test-qwen-dense-route-host",
     "test-qwen27-draft-tree-host",
     "test-qwen27-facts-host",
+    "test-qwen35-metal-steps-host",
     "test-recurrent-forks",
     "test-shared-head-cost-metal-host",
     "test-slide-metal-host",
@@ -297,6 +312,7 @@ const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-draft",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -313,6 +329,7 @@ const macos_fast = [_][]const u8{
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
     "test-template-limits-host",
+    "test-tokenizer-host",
 };
 
 const macos_lanes = [_][]const u8{

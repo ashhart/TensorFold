@@ -6,6 +6,7 @@ const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const ref = @import("dsv41_experts_ref.zig");
 const pipe = @import("metal_dsv41_experts_pipe.zig");
+const rows = @import("metal_dsv41_experts_rows.zig");
 
 const c = contract.spec;
 const g = contract.gates;
@@ -16,7 +17,7 @@ const base = "dsv41_experts ";
 
 pub const Which = enum { up, down };
 /// What a registration varies: the kernel, the real fixture, the full E8M0 range, a fault; `coded`: the decode gate/up.
-pub const Variant = struct { which: Which, fixture: bool = false, wide: bool = false, ctl: u8 = 0, coded: bool = false };
+pub const Variant = struct { which: Which, fixture: bool = false, wide: bool = false, ctl: u8 = 0, coded: bool = false, routing: ref.Routing = .random };
 
 /// experts_kimi's text edited to plant a fault in the down chains (controls 1-3); the rest use a TF_CTL define.
 fn edits(ctl: u8) []const [2][]const u8 {
@@ -133,6 +134,7 @@ pub const Proj = struct {
             2 => .shapes,
             3 => .sums,
             4 => .repeat,
+            6 => .shapes,
             else => null,
         };
         return .{ .spec = spec(p.v, p.name), .ctx = p, .vt = &vt, .control = control };
@@ -162,7 +164,7 @@ pub const Proj = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         const a = p.a;
-        p.plan = try ref.Plan.init(a, shape.rows, backing_experts, rng);
+        p.plan = try ref.Plan.routed(a, shape.rows, backing_experts, rng, p.v.routing);
         const np = p.pairs();
         p.x = try a.alloc(u16, (if (up) shape.rows else np) * shape.k);
         p.m1 = try ref.Mats.init(a, backing_experts, shape.n, shape.k);
@@ -379,6 +381,8 @@ pub const Suite = struct {
         .{ .v = .{ .which = .up, .coded = true, .ctl = 2 }, .name = base ++ "control: up coded bf16 step before act_quant dropped" },
         .{ .v = .{ .which = .up, .coded = true, .ctl = 3 }, .name = base ++ "control: up coded sums rounded to fp16" },
         .{ .v = .{ .which = .up, .coded = true, .ctl = 4 }, .name = base ++ "control: up coded writes past its output" },
+        .{ .v = .{ .which = .up, .coded = true, .routing = .same }, .name = base ++ "up coded: every row on the same six experts" },
+        .{ .v = .{ .which = .up, .coded = true, .ctl = 6 }, .name = base ++ "control: up coded rows read their pass's first row" },
         .{ .v = .{ .which = .down }, .name = base ++ "down: experts_kimi's chains a slot of one row or of more, at V4.1 shapes" },
         .{ .v = .{ .which = .down, .wide = true }, .name = base ++ "down: full E8M0 range" },
         .{ .v = .{ .which = .down, .fixture = true }, .name = base ++ "down: release expert fixture" },
@@ -386,6 +390,8 @@ pub const Suite = struct {
         .{ .v = .{ .which = .down, .ctl = 2 }, .name = base ++ "control: down last K group dropped" },
         .{ .v = .{ .which = .down, .ctl = 3 }, .name = base ++ "control: down sums rounded to fp16" },
         .{ .v = .{ .which = .down, .ctl = 4 }, .name = base ++ "control: down writes past its output" },
+        .{ .v = .{ .which = .down, .routing = .same }, .name = base ++ "down: every row on the same six experts" },
+        .{ .v = .{ .which = .down, .ctl = 6 }, .name = base ++ "control: down rows read their pass's first row" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
@@ -411,7 +417,7 @@ pub const Suite = struct {
     }
 
     pub fn pipeline(s: *Suite, seed: u64) !usize {
-        return pipe.run(s.a, s.device, s.queue, seed);
+        return try pipe.run(s.a, s.device, s.queue, seed) + try rows.run(s.a, s.device, s.queue, seed);
     }
 
     pub fn timing(s: *Suite, io: std.Io) !void {

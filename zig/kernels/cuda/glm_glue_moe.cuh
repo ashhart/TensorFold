@@ -1,6 +1,8 @@
 // GLM's MLP and MoE glue by hand: glue._topk and qmm._group_sums (SwiGLU: glm_swiglu.cuh; router dot: glm_glue_router).
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 using namespace glm_triton;
@@ -12,6 +14,7 @@ TF_GLM_SWIGLU_64(tf_glm_swiglu_64, false)
 // qmm._group_sums: row blockIdx.x's 64-input sums, 8 lanes a group of 8 consecutive inputs each, 16 groups a block.
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_group_sums(const __nv_bfloat16* x, float* xs, int64_t x_stride, int64_t kg) {
+  glm_pdl::enter();
   const int64_t m = blockIdx.x, g = blockIdx.y * 16 + threadIdx.x / 8;
   float q[8];
   for (int j = 0; j < 8; ++j) q[j] = g < kg ? bf(x[m * x_stride + g * 64 + (threadIdx.x & 7) * 8 + j]) : 0.0f;
@@ -22,7 +25,8 @@ extern "C" __global__ void __launch_bounds__(128)
 // glue._topk, a warp a row: top_k by sigmoid + bias (ties to lower id), normed if `norm`, x scale; then shared expert.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_topk(const float* logits, const float* bias, int* pick, float* wts, float scale, int ne, int top_k,
-                int norm) {
+                int norm, int* flat) {
+  glm_pdl::enter();
   constexpr int MAXE = 16;  // 512 experts a row
   const int64_t r = blockIdx.x;
   const int lane = threadIdx.x;
@@ -58,6 +62,7 @@ extern "C" __global__ void __launch_bounds__(32)
   if (lane < top_k) {
     const float v = norm ? div_full(mine, total + 1e-20f) : mine;
     pick[r * (top_k + 1) + lane] = mine_id;
+    if (flat) flat[r * top_k + lane] = mine_id;  // the EXL3 grouper's [rows][top_k] picks (#3570)
     wts[r * (top_k + 1) + lane] = __fmul_rn(v, scale);
   } else if (lane == top_k) {
     pick[r * (top_k + 1) + lane] = ne;

@@ -113,6 +113,7 @@ const Heads = struct {
     }
     fn score(d: *cuda.Driver, output: Output, rank_: usize) !void {
         d.api.cuLaunchKernel = launch;
+        d.api.cuLaunchKernelEx = glm.pdl.forwardEx(launch);
         d.api.cuMemcpyDtoDAsync_v2 = copy;
         d.api.cuMemcpy2DAsync_v2 = copy2d;
         var lib: cuda.nccl.Library = undefined;

@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const nemotron = @import("nemotron");
+const qwen35 = @import("qwen35");
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
@@ -9,13 +10,22 @@ const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_ty
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
-    if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
+    const qwen_mtp = std.mem.eql(u8, o.model_type, "qwen3_5") or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
+    if (o.mtp_drafts) |n| {
+        if (qwen_mtp) {
+            const max = @import("qwen35").native.max_mtp_drafts;
+            if (n > max) return std.fmt.comptimePrint("--mtp-drafts: Qwen CUDA drafts at most {d}", .{max});
+        } else if (n > nemotron.native.max_drafts) {
+            return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
+        }
+    }
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (std.mem.eql(u8, o.model_type, glm_model_type)) {
         if (o.mtp_drafts != null) return "--mtp-drafts: GLM-5.3-Flash's MTP head drafts at the lanes' depth; serve it without --mtp-drafts (--mtp-confidence stops its chains)";
         if (o.mtp_confidence != null and o.drafter != null) return "--mtp-confidence stops the MTP head's chains, and with --drafter DFlash2 drafts instead: serve without one of them";
     } else if (o.mtp_drafts != null or o.mtp_confidence != null) {
-        if (!std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
+        if (qwen_mtp and o.mtp_confidence != null) return "--mtp-confidence is not supported by the Qwen CUDA MTP head";
+        if (!qwen_mtp and !std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
             !std.mem.eql(u8, o.model_type, nemotron.omni.model_type))
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }
@@ -39,29 +49,38 @@ pub fn lfm2(o: api.Open) ?[]const u8 {
     return if (o.vision != null) lfm2_vision else unranked(o);
 }
 
-pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp";
+pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp and --rank";
 
-/// --tp for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
+/// --tp or --rank for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
 pub fn unranked(o: api.Open) ?[]const u8 {
-    return if (o.tp != 1) no_ranks else null;
+    return if (o.tp != 1 or (o.given.rank and o.rank != 0)) no_ranks else null;
 }
 
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
     "serve it without --vision";
 
+/// A given --rank below the world, as main's CLI refused it, and a world in the family's `worlds` when it lists them.
+pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
+    if (o.given.rank and o.rank >= o.tp) return try std.fmt.allocPrint(a, "argument --rank: {d} is not below --tp {d}", .{ o.rank, o.tp });
+    if (comptime @hasDecl(F, "worlds")) if (std.mem.indexOfScalar(u32, &F.worlds.ids, o.tp) == null) return F.worlds.refusal;
+    return null;
+}
+
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    if (comptime @hasDecl(F, "kvHostRefusal")) if (F.kvHostRefusal(o)) |why| return why;
+    if (qwen35Tp(F, o)) |why| return why; // ahead of every flag's own refusal: no rank of this family serves yet
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
-    if (o.tp != 1 and !ranked) return no_ranks;
+    if ((o.tp != 1 or (o.given.rank and o.rank != 0)) and !ranked) return no_ranks;
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
-    if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     }
-    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
+    if (o.learn_conversations and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--learn-conversations keeps conversation states on disk for Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     if (o.learn_conversations and o.tp > 1) if (@import("cuda_disk.zig").keptDisk(F)) |K| if (@hasDecl(K, "one_rank") and K.one_rank) return "--learn-conversations keeps one rank's states on disk for this CUDA family: serve without --tp or without --learn-conversations";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
@@ -71,6 +90,17 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
 }
 
 pub const no_prompts = "--prompt-cache-gib: this CUDA family keeps no prompt states; serve without it";
+pub const qwen35_plan_only = "--tp: the dense Qwen3.5 CUDA family plans its tensor-parallel shards but serves no rank yet: serve without --tp";
+pub const qwen35_moe_no_ranks = "--tp: qwen3_5_moe has no tensor-parallel plan and no ranks: serve without --tp";
+pub const qwen35_learn_ranks = "--learn-conversations: the Qwen3.5 CUDA family keeps no per-rank states yet: serve without --tp or without --learn-conversations";
+
+/// --tp on the Qwen3.5 CUDA families: the dense one has a shard plan, no rank serves yet; the MoE shares its options.
+fn qwen35Tp(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.tp == 1) return null;
+    if (F == qwen35.native_moe) return qwen35_moe_no_ranks;
+    if (F != qwen35.native) return null;
+    return if (o.learn_conversations) qwen35_learn_ranks else qwen35_plan_only;
+}
 
 test "a family must consume rank options before tensor parallelism is admitted" {
     const Single = struct {
@@ -85,6 +115,10 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     // the families past family(): one rank opens, two are refused by the same words
     try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 1 }) == null);
     try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 2 }).?);
+    try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 1, .given = .{ .rank = true } }).?);
+    try std.testing.expectEqualStrings(no_ranks, family(Single, .{ .dir = "d", .model_type = "m", .rank = 1, .given = .{ .rank = true } }).?);
+    try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 0, .given = .{ .tp = true, .rank = true } }) == null);
+    try std.testing.expect(family(Single, .{ .dir = "d", .model_type = "m", .rank = 0, .given = .{ .rank = true } }) == null);
     try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
     for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
@@ -98,6 +132,69 @@ test "the CUDA server serves --tp, and Flash Next's two ranks pass family admiss
     } else false);
     const flashnext = @import("flashnext").native;
     try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2 }) == null); // kept prompt states and drafts together
+}
+
+test "the dense Qwen3.5 family has its shard plan and serves no rank: --tp is refused by name, one rank opens as before" {
+    const dense = qwen35.native;
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .tp = 2 };
+    try std.testing.expectEqualStrings(qwen35_plan_only, family(dense, two).?);
+    try std.testing.expect(!std.mem.eql(u8, no_ranks, family(dense, two).?));
+    try std.testing.expect(family(dense, .{ .dir = "d", .model_type = "qwen3_5" }) == null);
+    try std.testing.expect(family(dense, .{ .dir = "d", .model_type = "qwen3_5", .tp = 1, .rank = 0 }) == null);
+    // the plan's stop comes before each flag's own check, so none of these reaches its own refusal at two ranks
+    const flags = [_]api.Open{
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .drafter = "x" },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .kv8 = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .prompt_int8 = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .vision = .{} },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .slide = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .spill = .evicted },
+    };
+    for (flags) |o| try std.testing.expectEqualStrings(qwen35_plan_only, family(dense, o).?);
+    for (flags) |o| {
+        var one = o;
+        one.tp = 1;
+        try std.testing.expect(family(dense, one) == null);
+    }
+}
+
+test "the MoE family shares the dense options' rank fields and is still refused --tp by name" {
+    const moe = qwen35.native_moe;
+    try std.testing.expect(@hasField(moe.Options, "rank"));
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5_moe", .tp = 2 };
+    try std.testing.expectEqualStrings(qwen35_moe_no_ranks, family(moe, two).?);
+    var learn = two;
+    learn.learn_conversations = true;
+    try std.testing.expectEqualStrings(qwen35_moe_no_ranks, family(moe, learn).?);
+    try std.testing.expect(family(moe, .{ .dir = "d", .model_type = "qwen3_5_moe" }) == null);
+}
+
+test "--learn-conversations at --tp names the Qwen3.5 family's states, and without --tp opens as before" {
+    const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/s", .learn_conversations = true };
+    try std.testing.expect(family(qwen35.native, learn) == null);
+    var two = learn;
+    two.tp = 2;
+    try std.testing.expectEqualStrings(qwen35_learn_ranks, family(qwen35.native, two).?);
+    two.drafter = "x"; // the flag's own sentence wins over the plan's stop, as it will when the stop is lifted
+    try std.testing.expectEqualStrings(qwen35_learn_ranks, family(qwen35.native, two).?);
+}
+
+test "the Qwen3.5 options carry the rank flags, and an unset master stays null" {
+    const F = qwen35.native;
+    const options = @import("cuda_options.zig");
+    var opts: F.Options = .{ .context = 4096, .drafts = false };
+    var why: []const u8 = "";
+    const asked: api.Open = .{ .dir = "", .model_type = "qwen3_5", .tp = 2, .rank = 1, .master = "node0", .master_port = 29600 };
+    try std.testing.expect(options.set(F, asked, &opts, &why));
+    try std.testing.expectEqual(@as(usize, 2), opts.tp);
+    try std.testing.expectEqual(@as(usize, 1), opts.rank);
+    try std.testing.expectEqualStrings("node0", opts.master.?);
+    try std.testing.expectEqual(@as(u16, 29600), opts.master_port);
+    try std.testing.expect(options.set(F, .{ .dir = "", .model_type = "qwen3_5" }, &opts, &why));
+    try std.testing.expectEqual(@as(usize, 1), opts.tp);
+    try std.testing.expectEqual(@as(usize, 0), opts.rank);
+    try std.testing.expect(opts.master == null);
+    try std.testing.expectEqual(@as(u16, 29551), opts.master_port);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
@@ -321,4 +418,15 @@ pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
         return true;
     }
     return false;
+}
+
+test "a rank outside its world and a world the family does not serve refuse by name before admission" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fnx = @import("flashnext").native;
+    try std.testing.expectEqualStrings(fnx.worlds.refusal, (try place(fnx, a, .{ .dir = "d", .model_type = "m", .tp = 3, .given = .{ .tp = true } })).?);
+    try std.testing.expectEqualStrings("argument --rank: 1 is not below --tp 1", (try place(fnx, a, .{ .dir = "d", .model_type = "m", .rank = 1, .given = .{ .rank = true } })).?);
+    try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m", .tp = 2, .rank = 1, .given = .{ .tp = true, .rank = true } }) == null);
+    try std.testing.expect(try place(fnx, a, .{ .dir = "d", .model_type = "m" }) == null);
 }

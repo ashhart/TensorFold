@@ -17,13 +17,14 @@ const Fake = struct {
     sum: u64 = 0,
     saves: usize = 0,
     minimum: u32,
+    step: u32 = 4096,
     const Saved = struct { at: u32, sum: u64 };
     fn engine(f: *@This()) api.Engine {
         return .{ .ctx = f, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(ptr: *anyopaque) api.Info {
         const f: *@This() = @ptrCast(@alignCast(ptr));
-        var out: api.Info = .{ .context_window = 32768, .prefill_step = 4096, .prompt_cache = true };
+        var out: api.Info = .{ .context_window = 32768, .prefill_step = f.step, .prompt_cache = true };
         if (@hasField(api.Info, "prefill_min_chunk")) out.prefill_min_chunk = f.minimum;
         return out;
     }
@@ -174,4 +175,96 @@ test "turn starts: dropped reasoning shares the user end but not the reply endpo
     }
     const same = std.mem.indexOfDiff(u32, endpoints[0], endpoints[1]).?;
     try t.expect(same >= before.history_len and same < endpoints[1].len);
+}
+
+fn replay(f: *Fake, store: *pc.Store, r: *const api.Request, marks: []const u32) !void {
+    // A fresh pass stops at every mark; a resumed one starts with the state kept there.
+    while (f.at < r.prompt.len) {
+        f.sum = f.sum *% 31 +% r.prompt[f.at];
+        f.at += 1;
+        if (std.mem.indexOfScalar(u32, marks, f.at) != null) try t.expect(store.keep(r.prompt, f.at, null, r.chunks, r.decode_spans));
+    }
+    try t.expectEqual(fresh(r.prompt), f.sum);
+}
+
+test "turn starts: a six-turn edit resumes at the edited message in the fake engine" {
+    const step: u32 = 2048;
+    const minimum: u32 = 1;
+    // Model invariant-family metadata here; native contract tests check its actual declaration.
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var files = try fixture.Fixture.init(alloc, 0);
+    defer files.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(alloc, t.io, files.path, null, alloc, &problem);
+    defer hf.deinit();
+    var f: Fake = .{ .minimum = minimum, .step = step };
+    const srv = try Server.init(alloc, t.io, f.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    try t.expectEqual(step, srv.info.prefill_step);
+    const rules: pc.Rules = .{ .planned = true, .grid = step, .min_prompt = 0, .chunk_starts = true };
+    const budget = @sizeOf(Fake.Saved) * 8;
+    var store = pc.Store.init(a, f.snapshots(), rules, budget);
+    defer store.deinit();
+    store.most = 8;
+    var baseline = pc.Store.init(a, f.snapshots(), rules, budget);
+    defer baseline.deinit();
+    baseline.most = 8;
+
+    const document = try alloc.alloc(u8, 1450);
+    @memset(document, 'x');
+    const q = [_][]const u8{ "Q1", "Q2 about a note", "Q3", "Q4", "Q5" };
+    var messages: std.ArrayList(json.Value) = .empty;
+    try messages.append(alloc, try message(alloc, "user", document));
+    var cx: errors.Cx = .{ .a = alloc };
+    var unedited: []const u32 = &.{};
+    for (0..6) |turn| {
+        if (turn > 0) {
+            try messages.append(alloc, try message(alloc, "assistant", "Fixed reply."));
+            try messages.append(alloc, try message(alloc, "user", q[turn - 1]));
+        }
+        const body = try json.newObject(alloc);
+        try body.put(alloc, "messages", .{ .array = messages.items });
+        try body.put(alloc, "max_tokens", try json.intValue(alloc, 1));
+        const input = try openai.chatInput(srv, &cx, .{ .object = body });
+        const prepared = try chat.prepare(srv, &cx, input, Never{});
+        defer srv.release(prepared.preparing, prepared.request);
+        const r = prepared.request;
+        if (turn == 5) unedited = try alloc.dupe(u32, r.prompt);
+        const plan = try store.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
+        if (plan.from == 0) {
+            f.at = 0;
+            f.sum = 0;
+        }
+        try replay(&f, &store, &r, plan.marks);
+    }
+
+    // Edit turn 2's user content, the way a harness trims a tool result or deletes a note.
+    messages.items[4] = try message(alloc, "user", "Z2 a different note");
+    const body = try json.newObject(alloc);
+    try body.put(alloc, "messages", .{ .array = messages.items });
+    try body.put(alloc, "max_tokens", try json.intValue(alloc, 1));
+    const input = try openai.chatInput(srv, &cx, .{ .object = body });
+    const prepared = try chat.prepare(srv, &cx, input, Never{});
+    defer srv.release(prepared.preparing, prepared.request);
+    const r = prepared.request;
+    // Require message starts for the explicitly configured fake engine.
+    try t.expect(r.chunks.len > 0);
+    const first_diff: u32 = @intCast(std.mem.indexOfDiff(u32, unedited, r.prompt).?);
+    var edit_start: u32 = 0;
+    for (r.chunks) |start| {
+        if (start > 0 and start <= first_diff and start > edit_start) edit_start = start;
+    }
+    try t.expect(edit_start > 0);
+
+    const plan = try store.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
+    try t.expectEqual(edit_start, plan.from);
+    // An empty store plans the cold prompt without restoring a state.
+    const fresh_plan = try baseline.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
+    try t.expectEqual(@as(u32, 0), fresh_plan.from);
+    // The request retains starts even when the store marks only history and rewind points.
+    try t.expect(std.mem.indexOfScalar(u32, r.chunks, plan.from) != null);
+    try replay(&f, &store, &r, plan.marks); // the fake state equals direct token-sum evaluation
 }

@@ -68,7 +68,7 @@ const Fixture = struct {
 
     /// A kept state at `at` whose bytes are a function of position and piece: a longer state extends a shorter one.
     fn kept(f: *Fixture, at: u32) !*Copy {
-        const c = try disk.blankCopy(&f.e, at);
+        const c = try disk.blankCopy(&f.e, at, null);
         const l = reuse.layoutOf(&f.e, at);
         var off: usize = 0;
         for (0..l.count()) |i| {
@@ -117,6 +117,7 @@ test "gather and scatter give back the copy byte for byte; a copy kept with imag
     const a = std.testing.allocator;
     var f: Fixture = .{ .d = undefined, .e = undefined };
     f.init(true);
+    defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
     const c = try f.kept(512);
     defer reuse.dropCopy(&f.e, c);
     c.delta = -3;
@@ -167,7 +168,8 @@ fn writeBoth(a: std.mem.Allocator, f: *Fixture, o: rows.Options, prompt: []u32, 
     defer r.deinit();
     rows.write.queued(r, try entry(a, short, prompt), &.{ 0, 512 });
     rows.write.queued(r, try entry(a, long, prompt), &.{ 0, 512 });
-    _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the write worker publishes the states
+    // Wait for the worker to publish every queued state: a wall-clock bound fails on a loaded host.
+    _ = rows.write.drain(r, std.math.maxInt(i128));
     try std.testing.expectEqual(@as(usize, 2), r.states.items.len);
     try std.testing.expectEqual(@as(usize, 4), r.blocks.count()); // 512 and 1024 tokens on a 512-row chunk grid: two blocks shared
 }
@@ -188,6 +190,7 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(kv8);
+        defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
         const short = try f.kept(512);
         defer reuse.dropCopy(&f.e, short);
         const long = try f.kept(1024);
@@ -208,6 +211,7 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(true);
+        defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
         const short = try f.kept(512);
         defer reuse.dropCopy(&f.e, short);
         const long = try f.kept(1024);
@@ -267,6 +271,7 @@ const backend = @import("lanes").backend;
 test "the probe releases its stream once whether its prompt pass, its wait or its mark fails" {
     var f: Fixture = undefined;
     f.init(false);
+    defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
     const io = std.testing.io;
     for ([_]struct { fail: bool, sync: bool, err: anyerror }{
         .{ .fail = true, .sync = false, .err = error.Injected },

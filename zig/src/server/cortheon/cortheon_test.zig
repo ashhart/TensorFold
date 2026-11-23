@@ -88,6 +88,7 @@ pub const Eng = struct {
     refuse_at: ?usize = null,
     refusal: api.SubmitError = error.Closed,
     prompts: std.ArrayList([]u8) = .empty,
+    salted: std.ArrayList(bool) = .empty, // each request's Request.salted, beside its prompt
 
     pub fn sample(e: *Eng) void {
         if (e.observer) |o| o.call(o.ctx);
@@ -97,7 +98,7 @@ pub const Eng = struct {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
-        return .{ .context_window = 0, .name = "fake" };
+        return .{ .context_window = 0, .name = "fake", .cache_salt = true };
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Eng = @ptrCast(@alignCast(ctx));
@@ -105,6 +106,7 @@ pub const Eng = struct {
         if (e.refuse_at == e.next) return e.refusal;
         const buf = decoded(gpa, request.prompt) catch return error.Busy;
         e.prompts.append(gpa, buf) catch {};
+        e.salted.append(gpa, request.salted) catch {};
         const reply = if (e.next < e.script.len) e.script[e.next] else "OK";
         e.next += 1;
         const toks = gpa.alloc(u32, reply.len) catch return error.Busy;
@@ -124,6 +126,7 @@ pub const Eng = struct {
     fn deinit(e: *Eng) void {
         for (e.prompts.items) |p| gpa.free(p);
         e.prompts.deinit(gpa);
+        e.salted.deinit(gpa);
     }
     fn saw(e: *const Eng, i: usize, needle: []const u8) bool {
         return i < e.prompts.items.len and std.mem.indexOf(u8, e.prompts.items[i], needle) != null;
@@ -312,6 +315,18 @@ test "a fresh question on current facts is researched before the model starts" {
     // no URL in the answer: one more round for its sources, appended after it
     try std.testing.expect(rig.eng.saw(2, checks.sources_note));
     try std.testing.expectEqualStrings("The latest is 0.17.\n\nOK", message(got.body.?).strField("content").?);
+}
+
+test "a salted research turn salts the planner's own request as well as the turn's" {
+    var rig: Rig = .{ .eng = .{ .script = &.{ "1. Zig latest release notes\n2. Zig 0.17 changelog\n", "The latest is 0.17." } } };
+    try rig.start(true);
+    defer rig.stop();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    _ = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"What is the latest release of Zig?\"}], \"cache_salt\": \"tenant-a\"}");
+    try std.testing.expect(rig.eng.saw(0, "You write web search queries")); // the planner's request came first
+    try std.testing.expect(rig.eng.salted.items.len == rig.eng.prompts.items.len and rig.eng.salted.items.len >= 2);
+    for (rig.eng.salted.items) |salted| try std.testing.expect(salted);
 }
 
 test "research progress cannot open a stream before its final request is admitted" {

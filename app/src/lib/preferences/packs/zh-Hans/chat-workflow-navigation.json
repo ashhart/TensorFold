@@ -1,5 +1,8 @@
 {
   "Outline item opened.": "已打开大纲条目。",
   "Quoted message opened.": "已打开引用来源消息。",
-  "Search match opened.": "已打开搜索结果。"
+  "Search match opened.": "已打开搜索结果。",
+  "Conversation unavailable": "对话不可用",
+  "This conversation was archived or deleted, or it has not loaded yet.": "此对话已归档或删除，或尚未加载。",
+  "Back to Home": "返回主页"
 }

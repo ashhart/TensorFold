@@ -81,6 +81,8 @@ test "proposal rows: qlinear packs exact selected BF16 bits and full view launch
     d.api.cuLaunchKernel = Trace.launch;
     var lane: qmmf.Lane = undefined;
     lane.clusters = false;
+    lane.pdl = false;
+    lane.fuse_split_n = 0;
     for (&lane.fns) |*set| {
         for (set, 0..) |*f, i| f.* = Trace.function(&d, i + 1);
     }

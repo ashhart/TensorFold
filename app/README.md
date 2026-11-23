@@ -4,8 +4,9 @@ An agentic AI coding app for the Mac, with the TensorFold engine built in. It al
 any OpenAI‑compatible LLM endpoint, local or cloud. The look comes from the TensorFold brand:
 graphite and navy surfaces, an electric-blue primary and the fold gradient.
 
-The current desktop release is [beta 9](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.9).
-It launches the bundled native Zig engine directly.
+Download [TensorFold for Mac 1.0.0](https://github.com/ashhart/TensorFold/releases/tag/app-v1.0.0),
+the current Desktop release. It launches the bundled native Zig engine directly.
+See the [Desktop changelog](CHANGELOG.md) for shipped and unreleased app changes.
 
 It reads, edits, and runs your code through a tool‑use loop, with streaming responses,
 live diffs, and per‑action approval.
@@ -69,6 +70,15 @@ local-only conversation restrictions apply. In the built-in agent loop, Parallel
 an opaque conversation ID across search, fetch and follow-up turns; a new chat gets a new ID. MCP requests time out
 after 20 seconds and stop when the owning run is cancelled. Fetches return excerpts rather
 than a complete page; `max_chars` still caps the displayed text.
+
+### Optional Keenable web research
+
+Ask the built-in agent to “Use Keenable to search the web” or “Use Keenable to read this URL.”
+The `web_search` and `web_fetch` tools accept `provider: "keenable"` for the
+[Keenable API](https://docs.keenable.ai/api-reference): general web results with page text,
+and pages as Markdown, with no account or API key. Anonymous use has service rate limits.
+Queries and requested URLs, with the app name `TensorFold`, go to Keenable when this provider is selected.
+The same defaults, permissions, local-only restrictions, 20-second timeout and cancellation apply as above.
 
 ### Browser demo mode
 

@@ -16,6 +16,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
     const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
     const tools = b.step("test-grammar-tools", "tool_grammar's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
+    // Declared before the early returns, so every target lists it (tools/zig/build_options_test.py).
+    const real_tokenizer = b.option([]const u8, "grammar-real-tokenizer", "Real Qwen3.8 tokenizer.json for the CPU budget regression");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
         budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);
@@ -36,7 +38,21 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     options.addOptionPath("library", host.getEmittedBin());
     const check = b.createModule(.{ .root_source_file = b.path("zig/grammar_budget_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     check.addOptions("grammar_budget_library", options);
-    budget.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check })).step);
+    const mask_checks = b.addRunArtifact(b.addTest(.{ .root_module = check }));
+    budget.dependOn(&mask_checks.step);
+    // Optional real-checkpoint CPU regression; ordinary host checks need neither tokenizer files nor xgrammar.
+    if (real_tokenizer) |tokenizer| {
+        const real_options = b.addOptions();
+        real_options.addOptionPath("library", host.getEmittedBin());
+        real_options.addOption([]const u8, "tokenizer", tokenizer);
+        const real = @import("server.zig").plain(b, "zig/src/server/grammar_real_budget_host.zig", b.graph.host, .debug, lanes);
+        real.addOptions("grammar_real_budget", real_options);
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = real, .filters = &.{"real grammar budget:"} }));
+        run.has_side_effects = true;
+        const real_step = b.step("test-grammar-real-budget-host", "Real Qwen3.8 fixed/client budget policy, cache isolation, masks and server refusals, CPU only");
+        real_step.dependOn(&run.step);
+        real_step.dependOn(&mask_checks.step);
+    }
     const walk = @import("server.zig").plain(b, "zig/src/server/tool_grammar_xgrammar_test.zig", b.graph.host, .debug, lanes);
     walk.addOptions("grammar_library", options);
     tools.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = walk })).step);
@@ -46,8 +62,8 @@ fn installNative(b: *std.Build, lib: *std.Build.Step.Compile) *std.Build.Step.In
     return b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "native/lib" } } });
 }
 
-/// Inspect the production installers without compiling a grammar library or fetching its sources.
-pub fn hostTests(b: *std.Build, all: *std.Build.Step) void {
+/// Host checks with no grammar library or its sources: the production installers and the compile runner.
+pub fn hostTests(b: *std.Build, all: *std.Build.Step, lanes: *std.Build.Module) void {
     const options = b.addOptions();
     var server_dir: ?std.Build.InstallDir = null;
     if (b.top_level_steps.get("native")) |native| for (native.step.dependencies.items) |dep| {
@@ -65,6 +81,13 @@ pub fn hostTests(b: *std.Build, all: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
     b.step("test-grammar-install-host", "Grammar installs beside the native server on every OS and prefix").dependOn(&run.step);
     all.dependOn(&run.step);
+    const runner = b.createModule(.{ .root_source_file = b.path("zig/grammar_compile_host.zig"), .target = b.graph.host, .link_libc = true, .link_libcpp = true });
+    runner.addCSourceFile(.{ .file = b.path("zig/src/grammar/tf_compile_test.cc"), .flags = &.{ "-std=c++17", "-fexceptions" } });
+    const compiles = b.addRunArtifact(b.addTest(.{ .root_module = runner }));
+    all.dependOn(&compiles.step);
+    const step = b.step("test-grammar-compile-host", "Grammar compile deadlines, slots, shared jobs and the lock-free caller without xgrammar");
+    step.dependOn(&compiles.step);
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"grammar compile:"} })).step);
 }
 
 /// libtfgrammar for `target` from the checkout at `dir`; null unless `dir` is a git checkout at the pinned tag.

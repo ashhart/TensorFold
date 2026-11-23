@@ -106,7 +106,7 @@
   "After this change": "この変更後",
   "All": "すべて",
   "All assistant sources": "助手の全ソース",
-  "All community-v1 cells meet the complete protocol.": "community-v1 の全セルが完全な測定手順を満たしています。",
+  "All community-v2 cells meet the complete protocol.": "community-v2 の全セルが完全な測定手順を満たしています。",
   "Allow Kokoro watch replies for {value0}": "{value0} の Kokoro Watch 返信を許可",
   "Allow private network for {value0}": "{value0} のプライベートネットワークを許可",
   "Allowed": "許可済み",

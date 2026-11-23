@@ -147,3 +147,32 @@ test "queued cache: admission refuses a promised slot deficit without evicting" 
     try std.testing.expectEqual(@as(usize, 0), l.marks.len);
     try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
 }
+
+test "queued cache: spares: an exact-byte reuse hook cannot evict before a futile guarded keep" {
+    var f: Fake = .{ .gpa = a };
+    var family = f.snapshots();
+    var vtable = family.vtable.*;
+    const Reuse = struct {
+        fn available(_: *anyopaque, _: u32) bool {
+            return false;
+        }
+    };
+    vtable.reuses = Reuse.available;
+    family.vtable = &vtable;
+    var s = pc.Store.init(a, family, .{ .min_prompt = 0 }, 330);
+    defer s.deinit();
+    const idle = fill(100);
+    const q1 = fill(500);
+    const q2 = fill(600);
+    const incoming = fill(300);
+    try put(&f, &s, &idle, 4);
+    try put(&f, &s, &q1, 12);
+    try put(&f, &s, &q2, 12);
+    s.reservation_guard = .{ .ctx = &f, .needed = Protect.needed, .exact = true };
+    defer s.reservation_guard = null;
+    _ = f.pass(&s, incoming[0..16], .{});
+    try std.testing.expect(!s.keepBorn(&incoming, 16, 16, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 3), s.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted);
+    try std.testing.expect(s.find(&idle, &.{}, &.{}) != null);
+}

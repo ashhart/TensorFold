@@ -107,7 +107,7 @@ pub const Slow = struct {
 
 /// Bytes as tokens; a prompt renders as its messages' JSON, so the engine sees the client's marker.
 pub const TestText = struct {
-    fn text(t: *@This()) model_text.Text {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 

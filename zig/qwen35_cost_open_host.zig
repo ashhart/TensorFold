@@ -62,7 +62,7 @@ fn open(root: []const u8, expected: usize, capacity: usize) ![64]f64 {
     h.* = .{ .gpa = a, .gpu = null, .family = &probe, .release = Probe.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .served = .{ .backend = backend.backend(), .facts = facts, .stream_bytes = 0, .prepare = .{ .ctx = &probe, .run = Probe.run } } };
     Probe.opening = true;
     defer Probe.opening = false;
-    try h.serve(io, facts, 64, .{ .lanes = 1 }, null);
+    try h.serve(io, facts, 64, .{ .lanes = 1 }, null, 0);
     defer {
         h.host.stop();
         h.core.deinit();

@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
+const gather_lanes = @import("cuda_ple_gather_lanes.zig");
 const tk = @import("cuda_tile_kernels.zig");
 const load = @import("cuda_prompt_load.zig");
 const shared = @import("cuda_batch_side.zig");
@@ -53,7 +54,7 @@ pub const attn_lanes: usize = 32;
 pub const lanes_ptrs: usize = (wt.layers_n / 4) * attn_lanes * 4 * 8;
 pub const lanes_bytes: usize = lanes_ptrs + (4 * attn_lanes + att_rows) * 4;
 /// Rows a pass holds at most unless asked for more.
-pub const default_chunk: usize = 1536;
+pub const default_chunk: usize = 3072;
 /// The most rows TF_FLASHNEXT_CHUNK may ask for (the largest measured pass; its scratch is about 13 GiB more).
 pub const max_chunk: usize = 16384;
 const ratio = wt.index_ratio;
@@ -575,6 +576,7 @@ pub const Gather = struct {
             };
             return;
         }
+        if (gather_lanes.early(g)) return;
         var row0: usize = 0;
         for (g.lanes) |l| {
             g.ngram.rows(l.seq.history[0..], g.ids[row0..][0..l.rows], g.emb[row0 * dims ..][0 .. l.rows * dims], g.xs[row0 * (dims / 32) ..][0 .. l.rows * (dims / 32)]) catch |err| {

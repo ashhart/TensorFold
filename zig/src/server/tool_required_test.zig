@@ -13,17 +13,17 @@ const parse = @import("tool_parse.zig");
 const a = std.testing.allocator;
 const specs = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]";
 
-const Text = struct {
+pub const Text = struct {
     form: enum { xml, json, gemma, lfm2, unknown } = .json,
-    fn text(t: *Text) mt.Text {
+    pub fn text(t: *Text) mt.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocab, .eos_ids = eos, .render = render, .template_source = source } };
     }
-    fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
+    pub fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
         const ids = try g.alloc(u32, s.len);
         for (s, ids) |ch, *id| id.* = if (ch == '\n') 95 else @as(u32, ch) - 32;
         return ids;
     }
-    fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
+    pub fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         for (ids) |id| if (id < 95) try out.append(g, @intCast(id + 32)) else if (id == 95) try out.append(g, '\n');
         return out.toOwnedSlice(g);
@@ -54,8 +54,8 @@ const Text = struct {
         })) };
     }
 };
-const Stub = struct {
-    fn engine(s: *Stub) api.Engine {
+pub const Stub = struct {
+    pub fn engine(s: *Stub) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
@@ -74,12 +74,11 @@ const Stub = struct {
 };
 
 // The compiler boundary records the production grammar; no xgrammar library or GPU is loaded in this fixture.
-const Compile = struct {
-    fn compiler(c: *Compile) api.grammar.Compiler {
+pub const Compile = struct {
+    pub fn compiler(c: *Compile) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;
-        out.mutex = .init;
         out.f.compile = compile;
         out.f.free = free;
         out.f.close = free;
@@ -91,7 +90,7 @@ const Compile = struct {
     }
     fn free(_: *anyopaque) callconv(.c) void {}
 };
-fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
+pub fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
     return (try json.parse(g, s)).ok;
 }
 
@@ -163,7 +162,7 @@ test "required tools: an LFM2 template gets the Pythonic grammar, one call or se
     };
 }
 
-fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
+pub fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
     const History = struct {
         pub fn conversation(_: @This(), c: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
             return c.refuse("this fixture has no stored response");
@@ -363,12 +362,93 @@ test "a request's compiled grammar is kept for the engine, freed once at release
     try std.testing.expectEqual(@as(usize, 4), fake.frees);
 }
 
+test "security: a grammar over the size limit is refused before the compiler sees it, and one at the limit compiles" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const most = @import("grammar.zig").max_text;
+    const letters = try g.alloc(u8, most + 1);
+    @memset(letters, 'x');
+    for ([_]usize{ most, most + 1 }) |len| {
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        const fields = try value(g, try std.fmt.allocPrint(g, "{{\"guided_regex\":\"{s}\"}}", .{letters[0..len]}));
+        const result = srv.checkFeatures(&cx, fields, false, false, &.{1}, &.{}, &request);
+        if (len <= most) {
+            try result;
+            srv.release(false, request);
+            continue;
+        }
+        try std.testing.expectError(error.Refused, result);
+        try std.testing.expectEqual(@as(u16, 400), cx.status());
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, "guided_regex: the grammar is 524289 bytes, more than the 512 KiB") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.compiles); // the grammar over the limit never reached the compiler
+    try std.testing.expectEqual(@as(usize, 1), fake.frees);
+}
+
 fn never(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
 fn overWork(_: *anyopaque) callconv(.c) c_int {
     return 2;
+}
+
+test "security: tools count once against the grammar size limit: 300 KiB of required tools is served, 600 KiB refused" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    const fake = lanes.grammar_fake;
+    const old = fake.install();
+    defer _ = lanes.grammar.swapLibrary(old);
+    var compiler = fake.compiler();
+    var text: Text = .{};
+    var stub: Stub = .{};
+    const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    const filler = try g.alloc(u8, 600 * 1024);
+    @memset(filler, 'x');
+    const schema = "[{{\"type\":\"function\",\"function\":{{\"name\":\"lookup\",\"parameters\":{{\"type\":\"object\",\"properties\":{{\"q\":{{\"type\":\"string\",\"description\":\"{s}\"}}}},\"required\":[\"q\"]}}}}}}]";
+    const named = "[{{\"type\":\"function\",\"function\":{{\"name\":\"{s}\",\"parameters\":{{\"type\":\"object\",\"properties\":{{}}}}}}}}]";
+    // a long description, then a long name: the grammar holds both, so both count
+    const cases = [_]struct { kib: usize, list: []const u8 }{
+        .{ .kib = 300, .list = try std.fmt.allocPrint(g, schema, .{filler[0 .. 300 * 1024]}) },
+        .{ .kib = 600, .list = try std.fmt.allocPrint(g, schema, .{filler[0 .. 600 * 1024]}) },
+        .{ .kib = 600, .list = try std.fmt.allocPrint(g, named, .{filler[0 .. 600 * 1024]}) },
+    };
+    for (cases) |case| {
+        const offered = (try value(g, case.list)).array;
+        const before = fake.compiles;
+        var cx: errors.Cx = .{ .a = g };
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };
+        // parallel calls: the structural tag holds the call twice, for the first call and the further ones
+        const result = srv.checkFeatures(&cx, try value(g, "{\"tool_call_required\":true}"), true, false, &.{1}, offered, &request);
+        if (case.kib == 300) {
+            try result;
+            try std.testing.expect(request.structure.?.text.len > 2 * 300 * 1024); // over 512 KiB, and served
+            try std.testing.expectEqual(before + 1, fake.compiles);
+            srv.release(false, request);
+            continue;
+        }
+        try std.testing.expectError(error.Refused, result);
+        try std.testing.expectEqual(@as(u16, 400), cx.status());
+        try std.testing.expect(std.mem.startsWith(u8, cx.message, "tools: the tools' names and schemas make a "));
+        try std.testing.expect(std.mem.endsWith(u8, cx.message, "-byte grammar, more than the 512 KiB a grammar may be"));
+        try std.testing.expectEqual(before, fake.compiles); // refused before the compiler saw it
+    }
 }
 
 test "grammar_budget: a boolean that marks a covered grammar, refused when malformed, unbuilt or not covered" {
@@ -409,7 +489,7 @@ test "grammar_budget: a boolean that marks a covered grammar, refused when malfo
         if (c.budget) |want| try std.testing.expectEqual(want, request.structure.?.budget) else try std.testing.expect(request.structure == null);
     }
     // a grammar past the library's work limit (2) is refused by name, never served with a partial mask
-    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "passes the fixed work limit" }) |ready, why| {
+    for ([_]?*const fn (*anyopaque) callconv(.c) c_int{ null, never, overWork }, [_][]const u8{ "libtfgrammar", "token-level, budgeted", "exceeded its work limit" }) |ready, why| {
         compiler.f.budget_ready = ready;
         var cx: errors.Cx = .{ .a = g };
         var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 64 };

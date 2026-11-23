@@ -71,7 +71,7 @@
   "The community page could not open; try again in your browser.": "Nie otwarto strony społeczności; spróbuj w przeglądarce.",
   "The comparison could not finish.": "Porównanie nie zakończyło się.",
   "The comparison stopped before changing the engine.": "Porównanie zatrzymano przed zmianą silnika.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "Pełny protokół community-v1 niespełniony; niepełne komórki nie są oceną wydajności.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "Pełny protokół community-v2 niespełniony; niepełne komórki nie są oceną wydajności.",
   "The conversation could not be renamed.": "Nie zmieniono nazwy rozmowy.",
   "The document worker is not installed.": "Nie zainstalowano modułu dokumentów.",
   "The download action could not complete. Try again.": "Pobieranie nie zakończyło się. Ponów.",

@@ -23,6 +23,15 @@ function toLauncher(c: CliDefinition): Launcher {
 }
 
 const EMPTY_SESSIONS: CliSession[] = []
+const EMPTY_LAUNCHERS: Launcher[] = []
+
+function matchesLaunchTarget(projectId: string, hostId: string | null): boolean {
+  const { settings, projects } = useStore.getState()
+  const project = projects.find((candidate) => candidate.id === projectId)
+  if (!project) return false
+  const target = resolveExecutionTarget(settings, project)
+  return !target.unavailableReason && target.hostId === hostId
+}
 
 // The Terminal tab. Sessions are listed in the left sidebar (renameable, click to open); this view
 // shows the active one, with a compact top row to start a new terminal or split the screen.
@@ -46,7 +55,11 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
   const killTerminal = useStore((s) => s.killTerminal)
   const loadTerminals = useStore((s) => s.loadTerminals)
   const listTerminalClis = useStore((s) => s.listTerminalClis)
-  const [installed, setInstalled] = useState<Launcher[]>([])
+  const [catalog, setCatalog] = useState<{ projectId: string; hostId: string | null; launchers: Launcher[] } | null>(null)
+  const hostId = decision.hostId
+  const canLaunch = project !== null && !decision.unavailableReason
+  const installed = canLaunch && catalog?.projectId === projectId && catalog.hostId === hostId
+    ? catalog.launchers : EMPTY_LAUNCHERS
   const [customOpen, setCustomOpen] = useState(false)
   const [customCmd, setCustomCmd] = useState('')
   const remoteTerminal = !!decision.hostId
@@ -59,16 +72,21 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
   useEffect(() => { void loadTerminals(projectId) }, [projectId, loadTerminals])
   // Only offer CLIs really installed where this project's terminal will run.
   useEffect(() => {
+    if (!canLaunch || !matchesLaunchTarget(projectId, hostId)) return
     let live = true
-    setInstalled([])
-    listTerminalClis(projectId).then((clis) => { if (live) setInstalled(clis.map(toLauncher)) }).catch(() => { if (live) setInstalled([]) })
+    void listTerminalClis(projectId).then((clis) => {
+      if (live) setCatalog({ projectId, hostId, launchers: clis.map(toLauncher) })
+    }).catch(() => { if (live) setCatalog({ projectId, hostId, launchers: EMPTY_LAUNCHERS }) })
     return () => { live = false }
-  }, [projectId, listTerminalClis])
+  }, [projectId, hostId, canLaunch, listTerminalClis])
 
-  const launch = (l: Launcher) => { void startTerminal(projectId, l.cliId, l.command ? { command: l.command, label: l.label } : undefined) }
+  const launch = (l: Launcher) => {
+    if (!canLaunch || !matchesLaunchTarget(projectId, hostId)) return
+    void startTerminal(projectId, l.cliId, !remoteTerminal && l.command ? { command: l.command, label: l.label } : undefined)
+  }
   // Electron has no window.prompt, so a custom command opens an inline input instead.
   const launchCustom = () => {
-    if (remoteTerminal) return
+    if (!canLaunch || remoteTerminal) return
     setCustomCmd('')
     setCustomOpen(true)
   }
@@ -99,7 +117,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
                     <Icon name={l.icon} size={14} className="text-ink-3" /> {l.label}
                   </button>
                 ))}
-                {!remoteTerminal && (
+                {canLaunch && !remoteTerminal && (
                   <>
                     <div className="my-1 border-t border-line" />
                     <button onClick={() => { closeMenu(); launchCustom() }}
@@ -142,7 +160,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
           )}
         </div>
       )}
-      {customOpen && !remoteTerminal && (
+      {customOpen && canLaunch && !remoteTerminal && (
         <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
           <Icon name="terminal" size={13} className="shrink-0 text-ink-3" />
           <input
@@ -162,7 +180,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
       )}
       <div className="min-h-0 flex-1 p-2">
         {sessions.length === 0
-          ? <EmptyState installed={installed} onPick={launch} onCustom={launchCustom} allowCustom={!remoteTerminal} remoteName={remoteTerminal ? host?.name ?? 'Orchestrator' : null} />
+          ? <EmptyState installed={installed} onPick={launch} onCustom={launchCustom} allowCustom={canLaunch && !remoteTerminal} remoteName={remoteTerminal ? host?.name ?? 'Orchestrator' : null} />
           : <SplitGrid sessions={sessions} onClose={close} activeId={activeId} layout={layout} />}
       </div>
     </div>

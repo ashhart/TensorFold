@@ -130,8 +130,8 @@ pub fn wanted(only: ?[]const u8, name: []const u8) bool {
 /// A launch's two texts: this GPU's and the pre-M5 one (equal unless the source includes nax.h).
 pub const Texts = struct { here: []const u8, pre_m5: []const u8 };
 
-const groups = .{ @import("metal_flint_glue.zig"), @import("metal_flint_rows.zig"), @import("metal_flint_route.zig"), @import("metal_flint_prep.zig"), @import("metal_flint_decode.zig"), @import("metal_flint_prompt.zig") };
-const fields = .{ "glue", "rows", "route", "prep", "decode", "prompt" };
+const groups = .{ @import("metal_flint_glue.zig"), @import("metal_flint_rows.zig"), @import("metal_flint_route.zig"), @import("metal_flint_prep.zig"), @import("metal_flint_decode.zig"), @import("metal_flint_prompt.zig"), @import("metal_flint_tap.zig") };
+const fields = .{ "glue", "rows", "route", "prep", "decode", "prompt", "taps" };
 
 pub const Suite = struct {
     a: std.mem.Allocator,
@@ -144,6 +144,7 @@ pub const Suite = struct {
     prep: groups[3].Suite = undefined,
     decode: groups[4].Suite = undefined,
     prompt: groups[5].Suite = undefined,
+    taps: groups[6].Suite = undefined,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         inline for (fields) |f| {

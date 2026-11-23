@@ -16,7 +16,8 @@ export function projectDefaultModel(project: Project | null | undefined, provide
   const allowed = allowedProviders(providers, project)
   const p = allowed.find((x) => x.id === project?.defaultProviderId) || allowed[0] || null
   const accounts = p ? providerAccountChoices(p) : []
-  const requestedAccountId = project?.defaultProviderAccountId ?? p?.defaultAccountId ?? null
+  const usesProjectBaseAccount = project?.defaultProviderAccountId === null && project.defaultProviderId === p?.id
+  const requestedAccountId = usesProjectBaseAccount ? null : project?.defaultProviderAccountId ?? p?.defaultAccountId ?? null
   const account = accounts.find((choice) => choice.id === requestedAccountId) ?? accounts[0] ?? null
   const models = account?.models?.length ? account.models : (p?.models ?? [])
   const model = project?.defaultModel && models.includes(project.defaultModel) ? project.defaultModel : (models[0] ?? null)
