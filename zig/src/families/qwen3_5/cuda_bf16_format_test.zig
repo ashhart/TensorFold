@@ -45,8 +45,9 @@ test "BF16 scoring: actual native open refuses vision and input quantization bef
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = fixture });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(path);
-    try std.testing.expectError(error.QwenBf16VisionUnqualified, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .vision = .{ .image_tokens = 4096, .max_images = 1 } }));
-    try std.testing.expectError(error.UnsupportedQwenBf16Mode, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .prompt_int8 = true }));
+    try std.testing.expectError(error.QwenBf16DecisionOnly, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .vision = .{ .image_tokens = 4096, .max_images = 1 } }));
+    try std.testing.expectError(error.QwenBf16VisionUnqualified, native.openLanes(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .vision = .{ .image_tokens = 4096, .max_images = 1 } }));
+    try std.testing.expectError(error.UnsupportedQwenBf16Mode, native.openLanes(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .prompt_int8 = true }));
     try std.testing.expect(native.explain(null, error.QwenBf16VisionUnqualified) != null);
 }
 
