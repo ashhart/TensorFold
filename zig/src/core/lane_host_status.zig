@@ -101,6 +101,8 @@ pub fn freeSlots(h: *LaneHost) void {
     h.st.live_tokens.deinit(h.gpa);
     for (&h.st.live_slots) |*slot| slot.deinit(h.gpa);
     for (&h.st.decode_slots) |*slot| slot.deinit(h.gpa);
+    h.st.snap = .{};
+    h.st.seq.store(h.st.seq.load(.monotonic) +% 1, .release); // a late reader sees the empty terminal snapshot
 }
 
 /// The lane host's status state: the published snapshot, its seqlock, the live slots and the round-wait counter.
