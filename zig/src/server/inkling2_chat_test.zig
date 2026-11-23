@@ -15,17 +15,29 @@ const Fixture = struct {
     tmp: std.testing.TmpDir,
     path: [:0]u8,
 
+    /// `kind` "release": the Mini checkpoint's own config.json, tokenizer_config.json and chat template.
     fn init(a: std.mem.Allocator, kind: []const u8) !Fixture {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        for ([_][2][]const u8{
-            .{ "zig/src/families/inkling2/fixtures/mini_tokenizer.json", "tokenizer.json" },
-            .{ "zig/src/families/inkling2/fixtures/chat_template.jinja", "chat_template.jinja" },
-        }) |file| {
+        const release = std.mem.eql(u8, kind, "release");
+        const at = "zig/src/families/inkling2/fixtures/";
+        const files = [_][2][]const u8{
+            .{ at ++ "mini_tokenizer.json", "tokenizer.json" },
+            .{ if (release) at ++ "release_chat_template.jinja" else at ++ "chat_template.jinja", "chat_template.jinja" },
+            .{ at ++ "release_tokenizer_config.json", "tokenizer_config.json" },
+            .{ at ++ "mini_config.json", "config.json" },
+        };
+        for (files[0..if (release) 3 else 2]) |file| {
             const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, file[0], a, .limited(1 << 20));
             try tmp.dir.writeFile(t.io, .{ .sub_path = file[1], .data = bytes });
         }
-        try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\"}}", .{kind}) });
+        // the release config's model_type and architectures; its EOS 200006 is past the cut tokenizer's base vocabulary
+        const config = if (release) blk: {
+            const v = (try json.parseText(a, try std.Io.Dir.cwd().readFileAlloc(t.io, files[3][0], a, .limited(1 << 20)))).ok;
+            const arch = try json.stringify(a, v.get("architectures").?, .{ .ascii = false });
+            break :blk try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\",\"architectures\":{s}}}", .{ v.get("model_type").?.string, arch });
+        } else try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\"}}", .{kind});
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = config });
         // The cut tokenizer's base vocabulary ends below the release EOS id; id 2 only drives the fake engine's finish.
         try tmp.dir.writeFile(t.io, .{ .sub_path = "generation_config.json", .data = "{\"eos_token_id\":2}" });
         return .{ .tmp = tmp, .path = try tmp.dir.realPathFileAlloc(t.io, ".", a) };
@@ -99,6 +111,7 @@ const Seen = struct {
     names: []const u8,
     arguments: []const u8,
     rejected: i64 = 0, // the tensorfold block's rejected_tool_calls
+    finish: []const u8 = "",
 };
 
 fn rejectedOf(v: json.Value) i64 {
@@ -134,11 +147,15 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
     var names: std.ArrayList(u8) = .empty;
     var arguments: std.ArrayList(u8) = .empty;
     var rejected: i64 = 0;
+    var finish: []const u8 = "";
     if (!stream) {
         try t.expectEqual(@as(u16, 200), got.status);
         const v = (try json.parseText(a, got.body)).ok;
         rejected = rejectedOf(v);
         const first = v.get("choices").?.array[0];
+        if (first.get("finish_reason")) |f| if (f == .string) {
+            finish = f.string;
+        };
         const m = if (first.get("message")) |message| message else first;
         if (m.get("reasoning_content")) |r| if (r == .string) try reasoning.appendSlice(a, r.string);
         if (m.get("content")) |c| if (c == .string) try content.appendSlice(a, c.string);
@@ -151,12 +168,15 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
         if (choices != .array or choices.array.len == 0) continue;
         const first = choices.array[0];
         const d = if (first.get("delta")) |delta| delta else first;
+        if (first.get("finish_reason")) |f| if (f == .string) {
+            finish = f.string;
+        };
         if (d.get("reasoning_content")) |r| if (r == .string) try reasoning.appendSlice(a, r.string);
         if (d.get("content")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish };
 }
 
 fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
@@ -178,15 +198,19 @@ fn encodeReply(a: std.mem.Allocator, raw: []const u8) ![]const u32 {
 
 /// Compare the whole body with streams at several engine chunk widths.
 fn probe(a: std.mem.Allocator, raw: []const u8, extra: []const u8) !Seen {
-    const reply = try encodeReply(a, raw);
-    const whole = try ask(a, "inkling2", reply, extra, false, 1);
+    return probeIds(a, "inkling2", try encodeReply(a, raw), extra);
+}
+
+fn probeIds(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8) !Seen {
+    const whole = try ask(a, kind, reply, extra, false, 1);
     for ([_]usize{ 1, 2, 3, 256 }) |stride| {
-        const s = try ask(a, "inkling2", reply, extra, true, stride);
+        const s = try ask(a, kind, reply, extra, true, stride);
         try t.expectEqualStrings(whole.content, s.content);
         try t.expectEqualStrings(whole.reasoning, s.reasoning);
         try t.expectEqualStrings(whole.ids, s.ids);
         try t.expectEqualStrings(whole.names, s.names);
         try t.expectEqualStrings(whole.arguments, s.arguments);
+        try t.expectEqualStrings(whole.finish, s.finish);
     }
     return whole;
 }
@@ -251,8 +275,8 @@ test "Inkling 2 reply: raw completions keep control spellings literal whole and 
 test "Inkling 2 reply: the tokenizer's other special tokens inside blocks never reach the client" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const raw = "<|message_model|><|content_thinking|>a<|message_system|>b<|end_message|>" ++
-        "<|message_model|><|content_text|>A<|message_user|>B<|endoftext|>C<|content_xml|>D<|end_message|>";
+    const raw = "<|message_model|><|content_thinking|>a<|endoftext|>b<|end_message|>" ++
+        "<|message_model|><|content_text|>A<|begin_of_text|>B<|endoftext|>C<|content_xml|>D<|end_message|>";
     const got = try probe(arena.allocator(), raw, "");
     try t.expectEqualStrings("ab", got.reasoning);
     try t.expectEqualStrings("ABCD", got.content);
@@ -270,4 +294,73 @@ test "Inkling 2 reply: a refused call is counted for the client, whole and strea
     try t.expectEqualStrings("", whole.content);
     const streamed = try ask(a, "inkling2", reply, tools, true, 2);
     try t.expectEqual(@as(i64, 1), streamed.rejected);
+}
+
+const lookup = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
+
+test "Inkling 2 reply: the Mini checkpoint's own files (model_type inkling2_loop) route chat through the split" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try probeIds(a, "release", try encodeReply(a, sample), "");
+    try t.expectEqualStrings(thought, got.reasoning);
+    try t.expectEqualStrings("391", got.content);
+    // cut inside thinking, and cut on the next header: the parts shown, never a marker
+    const cut = try probeIds(a, "release", try encodeReply(a, "<|message_model|><|content_thinking|>The user asks"), "");
+    try t.expectEqualStrings("The user asks", cut.reasoning);
+    try t.expectEqualStrings("", cut.content);
+    try t.expectEqualStrings("length", cut.finish);
+    const header = try probeIds(a, "release", try encodeReply(a, "<|message_model|><|content_thinking|>Ensure.<|end_message|><|message_model|>"), "");
+    try t.expectEqualStrings("Ensure.", header.reasoning);
+    try t.expectEqualStrings("", header.content);
+}
+
+test "Inkling 2 reply: a grammar's bare JSON is the content, and its bare call envelope a call" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const json_reply = try probeIds(a, "release", try encodeReply(a, "{\"city\":\"Paris\"}"), "");
+    try t.expectEqualStrings("{\"city\":\"Paris\"}", json_reply.content);
+    try t.expectEqualStrings("", json_reply.reasoning);
+    const raw = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}</tool_call>";
+    const call = try probeIds(a, "release", try encodeReply(a, raw), lookup);
+    try t.expectEqualStrings("lookup", call.names);
+    try t.expectEqualStrings("{\"q\":\"x\"}", call.arguments);
+    try t.expectEqualStrings("", call.content);
+    try t.expectEqualStrings("tool_calls", call.finish);
+}
+
+test "Inkling 2 reply: a stop string matches the raw reply, not text joined across removed controls" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const raw = "<|message_model|><|content_text|>left<|end_message|><|message_model|><|content_text|>RIGHT<|end_message|>";
+    const got = try probe(arena.allocator(), raw, ",\"stop\":\"tR\"");
+    try t.expectEqualStrings("leftRIGHT", got.content);
+}
+
+test "Inkling 2 reply: a raw stop after a finished call keeps the call and cuts only what follows" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const raw = "<|message_model|>lookup<|content_invoke_tool_json|>{\"name\":\"lookup\",\"args\":{\"q\":1}}<|end_message|>" ++
+        "<|message_model|><|content_text|>done STOP more<|end_message|>";
+    const got = try probe(arena.allocator(), raw, lookup ++ ",\"stop\":\"STOP\"");
+    try t.expectEqualStrings("lookup", got.names);
+    try t.expectEqualStrings("{\"q\":1}", got.arguments);
+    try t.expectEqualStrings("done ", got.content);
+    try t.expectEqualStrings("tool_calls", got.finish);
+}
+
+test "Inkling 2 reply: a special token between a character's byte tokens leaves the character whole" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 138 and 110 are the byte tokens of CE B2, beta; the fixture's own ids for the controls and a special between them
+    const special = try encodeReply(a, "<|endoftext|>");
+    try t.expectEqual(@as(usize, 1), special.len);
+    for ([_][]const u8{ "<|content_text|>", "<|content_thinking|>" }, 0..) |opener, i| {
+        const head = try encodeReply(a, try std.mem.concat(a, u8, &.{ "<|message_model|>", opener }));
+        const reply = try std.mem.concat(a, u32, &.{ head, &.{138}, special, &.{110}, try encodeReply(a, "<|end_message|>") });
+        const got = try probeIds(a, "release", reply, "");
+        try t.expectEqualStrings("\u{3b2}", if (i == 0) got.content else got.reasoning);
+    }
 }
