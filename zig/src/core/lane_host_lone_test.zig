@@ -310,14 +310,17 @@ const LogBox = struct {
         }
     }
 
-    fn wait(b: *@This()) Reason {
-        while (true) {
+    /// The reply's end within a minute: a stall fails by name here, not at the step's 20-minute bound.
+    fn wait(b: *@This()) !Reason {
+        const deadline = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + 60 * std.time.ns_per_s;
+        while (std.Io.Clock.awake.now(std.testing.io).toNanoseconds() < deadline) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
             b.mutex.unlock(std.testing.io);
             if (d) |r| return r;
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
         }
+        return error.ReplyNeverFinished;
     }
 
     fn deinit(b: *@This()) void {
@@ -326,20 +329,55 @@ const LogBox = struct {
     }
 };
 
+/// The fake target holding shared rounds at a gate: no lane frees, so a queued request stays queued until it opens.
+const Gated = struct {
+    target: lanes.fake.Fake = .{ .gpa = gpa },
+    vtable: lanes.backend.Backend.VTable = undefined,
+    held: std.Io.Event = .unset, // a shared round waits at the gate
+    open: std.Io.Event = .unset,
+
+    fn backend(g: *Gated) lanes.backend.Backend {
+        var b = g.target.backend();
+        g.vtable = b.vtable.*;
+        g.vtable.verify = verify;
+        b.vtable = &g.vtable;
+        return b;
+    }
+
+    fn verify(ptr: *anyopaque, windows: []const lanes.backend.Window, out: []lanes.backend.Verified) anyerror!void {
+        const g: *Gated = @fieldParentPtr("target", @as(*lanes.fake.Fake, @ptrCast(@alignCast(ptr))));
+        if (windows.len >= 2 and !g.open.isSet()) {
+            g.held.set(std.testing.io);
+            g.open.waitUncancelable(std.testing.io);
+        }
+        return g.target.backend().vtable.verify(ptr, windows, out);
+    }
+};
+
+/// `e` set within `seconds`, else a named failure: no wait in these tests runs to the step's bound.
+fn within(e: *std.Io.Event, seconds: i64) !void {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + seconds * std.time.ns_per_s;
+    while (!e.isSet()) {
+        if (std.Io.Clock.awake.now(std.testing.io).toNanoseconds() >= deadline) return error.GateNeverReached;
+        e.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } }) catch {};
+    }
+}
+
 test "lone driver: a third tiny prompt at two lanes starts within two rounds and shares later rounds" {
     const Wait = @import("wait_reason.zig").Wait;
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
     var cfg = try draftedConfig(&costs);
     defer cfg.deinit(gpa);
-    var target: lanes.fake.Fake = .{ .gpa = gpa };
-    defer target.deinit();
+    var gated: Gated = .{};
+    defer gated.target.deinit();
+    const target = gated.backend();
     var clock: lanes.fake.FixedClock = .{};
-    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    var core = lanes.Engine.init(gpa, &cfg, target, clock.clock());
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     // its opening waits for A, B and C: a fake reply takes microseconds and could otherwise end before B arrives
-    var driver: Lone = .{ .be = target.backend(), .hold_open = true };
+    var driver: Lone = .{ .be = target, .hold_open = true };
     host.lone = .{ .ctx = &driver, .run = Lone.run, .resumes = true };
     try host.start();
     defer host.stop();
@@ -364,25 +402,30 @@ test "lone driver: a third tiny prompt at two lanes starts within two rounds and
     try host.engine().submit(3, &rc, .{ .ctx = &c, .event = LogBox.event });
     driver.open.set(std.testing.io);
 
-    // A and B hold both lanes; C waits with a named reason; the loop waits on the state alone, not a time bound.
-    while (true) {
+    // A and B's first shared round waits at the gate: both lanes held, C queued alone, whenever this thread runs.
+    try within(&gated.held, 60);
+    {
         host.mutex.lockUncancelable(std.testing.io);
-        const reason: ?Wait = if (host.queued.items.len > 0) host.queued.items[0].wait_reason else null;
-        host.mutex.unlock(std.testing.io);
-        if (reason == .engine_busy) break;
-        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        defer host.mutex.unlock(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 1), host.queued.items.len);
+        try std.testing.expectEqual(@as(Id, 3), host.queued.items[0].id);
+        try std.testing.expectEqual(Wait.engine_busy, host.queued.items[0].wait_reason);
     }
-    host.mutex.lockUncancelable(std.testing.io);
-    try std.testing.expect(host.queued.items.len > 0);
-    try std.testing.expectEqual(Wait.engine_busy, host.queued.items[0].wait_reason);
-    host.mutex.unlock(std.testing.io);
 
-    // A fourth request joins behind C and must not pass it.
+    // A fourth request joins behind C (submit queues it under the host's lock) and must not pass it.
     try host.engine().submit(4, &rd, .{ .ctx = &d, .event = LogBox.event });
-    try std.testing.expectEqual(Reason.length, a.wait());
-    try std.testing.expectEqual(Reason.length, c.wait());
-    try std.testing.expectEqual(Reason.length, d.wait());
-    try std.testing.expectEqual(Reason.length, b.wait());
+    {
+        host.mutex.lockUncancelable(std.testing.io);
+        defer host.mutex.unlock(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 2), host.queued.items.len);
+        try std.testing.expectEqual(@as(Id, 3), host.queued.items[0].id);
+        try std.testing.expectEqual(@as(Id, 4), host.queued.items[1].id);
+    }
+    gated.open.set(std.testing.io);
+    try std.testing.expectEqual(Reason.length, try a.wait());
+    try std.testing.expectEqual(Reason.length, try c.wait());
+    try std.testing.expectEqual(Reason.length, try d.wait());
+    try std.testing.expectEqual(Reason.length, try b.wait());
     try std.testing.expect(c.stats.queued_seconds > 0);
     try std.testing.expect(c.stats.rounds > 0);
     try std.testing.expect(c.order < d.order);
@@ -433,8 +476,8 @@ test "lone driver: a stream it hands back after tokens of its own goes on from t
     driver.paused.waitUncancelable(std.testing.io);
     try host.engine().submit(2, &rb, .{ .ctx = &b, .event = LogBox.event });
     driver.go.set(std.testing.io); // its next check sees B waiting: A goes back to the lane core mid-reply
-    try std.testing.expectEqual(Reason.length, a.wait());
-    try std.testing.expectEqual(Reason.length, b.wait());
+    try std.testing.expectEqual(Reason.length, try a.wait());
+    try std.testing.expectEqual(Reason.length, try b.wait());
     try std.testing.expect(driver.resumed >= 1 and driver.commits >= 5);
     try expectRule(&ra, a.tokens.items);
     try expectRule(&rb, b.tokens.items);
