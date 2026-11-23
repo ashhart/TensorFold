@@ -185,6 +185,7 @@ pub const Set = struct {
         var ctl = try cuda.Module.load(gpu.d, &controls.bytes);
         errdefer ctl.unload();
         set.* = .{ .gpa = gpu.gpa, .mod = mod, .ctl = ctl, .att = try cuda.vit.Attention.load(gpu.d) };
+        errdefer set.att.unload();
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         const f = try glm.vision.Funcs.load(mod);
         var broken = f;
