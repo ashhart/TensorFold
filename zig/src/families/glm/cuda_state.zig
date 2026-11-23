@@ -170,6 +170,11 @@ test "GLM buffers: a decode's ls holds its select's bit words for bits_rows rows
     }
 }
 
+test "GLM buffers: a paired chunk keeps its own token lists, which its shared indexer layers read sites later" {
+    for (Buffers.twin_lists) |i| try std.testing.expect(Buffers.twinHolds(i, false, true) and !Buffers.twinHolds(i, false, false));
+    try std.testing.expect(!Buffers.twinHolds(39, false, true)); // the select's position: used within the indexed layer's own site
+}
+
 /// Scratch for windows of up to `rows` rows (the Python family's Buffers): a prompt buffer (`prefill`) or a decode's.
 pub const Buffers = struct {
     arena: Arena,
@@ -222,8 +227,15 @@ pub const Buffers = struct {
 
     /// The fields a twin holds apart, by their index in make's sizes (make reads the fields from these indexes too).
     const twin_at = .{ .ids = 0, .x = 1, .normed = 2, .xs = 3, .post = 4, .comb = 5, .hcpart = 6, .gathered = 7, .hidden = 62, .fnormed = 63, .fxs = 64, .logits = 65, .part = 70 };
+    /// The DSA token lists and counts (dsa.tokens, dsa.counts): a shared indexer layer reads its chunk's sites later.
+    const twin_lists = [_]usize{ 40, 41 };
     /// make's size count when twin_at's indexes were last checked: adding or removing a size fails the build.
     const twin_checked = 76;
+
+    /// Whether a twin holds size `i` apart: the regular and joint ones; with `lists` (full GLM-5.3) the token lists.
+    fn twinHolds(i: usize, joint: bool, lists: bool) bool {
+        return pair_layout.twinHolds(twin_at, i, joint) or lists and std.mem.indexOfScalar(usize, &twin_lists, i) != null;
+    }
 
     /// `seg`: a stream's most attention rows; `own_proj`: its KDA projection rows are here, not in the state.
     fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool, twin: ?*const Buffers, joint: bool) !Buffers {
@@ -302,7 +314,7 @@ pub const Buffers = struct {
         };
         var held = sizes;
         if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
-            if (!pair_layout.twinHolds(twin_at, i, joint)) bytes.* = 0;
+            if (!twinHolds(i, joint, c.dsa)) bytes.* = 0;
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &held, &p);
@@ -366,6 +378,10 @@ pub const Buffers = struct {
                 t.moe.wts = out.moe.wts;
                 t.moe.eact = out.moe.eact;
                 t.moe.ey = out.moe.ey;
+            }
+            if (c.dsa) {
+                t.dsa.tokens = out.dsa.tokens;
+                t.dsa.counts = out.dsa.counts;
             }
             return t;
         }

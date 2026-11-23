@@ -25,6 +25,7 @@ pub const Index = struct {
     d: usize,
     geom: sparse.Geometry,
     own: bool = true, // false: a shared layer (full GLM-5.3) attends the token lists its indexed layer left in Scratch
+    apart: bool = false, // full GLM-5.3: each sequence's token lists at its own rows, for the shared layers after it
 };
 
 /// One DSA layer on a rank of `heads` heads: proj, norms, q_b, kv_b per head as wk/wv, o, indexer; shapes from config.
@@ -185,6 +186,10 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     v.qa += r0 * l.heads * l.row() * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
+    if (ix.apart) { // each sequence's token lists at its own rows: a shared layer reads them after every one has picked
+        v.tokens += r0 * ix.geom.width() * 4;
+        v.counts += r0 * 4;
+    }
     try writeKeys(k, stream, l, c, v, rows, pos);
     try ropeQueries(set, stream, l, v, rows, pos);
     const t, const tk = try tables(l, c);

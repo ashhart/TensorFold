@@ -75,13 +75,13 @@ fn index(L: anytype, i: u32, mtp: bool, inv: u64) !dsa_block.Index {
         ape = try L.put("layers.{d}.dsa.index.ape", .{i});
     }
     const g: sparse.Geometry = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool, .rope = if (c.dsa) c.rope else 0, .inv = if (c.dsa) inv else 0 };
-    return .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = g };
+    return .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = g, .apart = c.dsa };
 }
 
 /// A shared layer's indexer: none of its own; it attends the token lists its indexed layer left (Config.indexFrom).
 fn shared(c: anytype) dsa_block.Index {
     const g: sparse.Geometry = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool };
-    return .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0, .qb = .{ .bf16 = 0 }, .heads = c.i_heads, .d = c.i_dim, .geom = g, .own = false };
+    return .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0, .qb = .{ .bf16 = 0 }, .heads = c.i_heads, .d = c.i_dim, .geom = g, .own = false, .apart = true };
 }
 
 /// The roped dims' fp32 frequencies (rope_theta), uploaded once for every layer; 0 on GLM-5.3-Flash.
