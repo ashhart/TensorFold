@@ -25,6 +25,7 @@ pub const tile = @import("cuda_tile.zig");
 pub const forward = @import("cuda_forward.zig");
 pub const relay = @import("cuda_relay.zig");
 pub const config = @import("config.zig");
+pub const config_dsa = @import("config_dsa.zig");
 pub const quant = @import("cuda_quant.zig");
 pub const q4 = @import("cuda_q4.zig");
 pub const ranks = @import("cuda_ranks.zig");
