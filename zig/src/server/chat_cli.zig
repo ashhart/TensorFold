@@ -94,10 +94,10 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
     if (comptime windows) return fail(ctx, windows_child) else return served(ctx, args, message);
 }
 
-const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
+pub const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
 
 /// The key ``--url`` sends: TENSORFOLD_API_KEY's first, as serve splits the variable; null when it names none.
-fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
+pub fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
     const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
     var keys = std.mem.splitScalar(u8, text, ',');
     while (keys.next()) |raw| {
