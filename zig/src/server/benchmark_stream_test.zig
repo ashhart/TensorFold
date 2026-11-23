@@ -303,16 +303,14 @@ test "chat CLI: a streamed reply uses Latin-1 bearer bytes and refuses unsupport
     var h: history.History = .{ .a = a };
     var out: std.Io.Writer.Allocating = .init(a);
     const token = "fixture-caf\u{e9}";
-    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token,
-        try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
     switch (ended) {
         .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
-    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}",
-        try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
     switch (refused) {
         .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
         else => return error.TestUnexpectedResult,

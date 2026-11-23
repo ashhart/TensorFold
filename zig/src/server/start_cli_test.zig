@@ -169,6 +169,23 @@ test "start CLI: a missing fit or a refused download never invokes pull or serve
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
 }
 
+test "start CLI: an above-Latin-1 key is refused before model selection or pulls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const token = "fixture-\u{20ac}";
+    try r.env.put("TENSORFOLD_API_KEY", token);
+    try std.testing.expectEqual(@as(u8, 2), try r.command(&.{"--yes"}));
+    try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "Latin-1") != null);
+    for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
+        try std.testing.expect(std.mem.indexOf(u8, text, token) == null);
+}
+
 test "start CLI: explicit consent shows sizes and pulls both pinned specs before a failed pull stops" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -378,7 +395,7 @@ test "start CLI: persistent mode requires a valid environment credential before 
     for ([_][]const u8{ "\xc2\xa0", "good-key,bad key", "good-key,\xc2\xa0" }) |key| {
         try r.env.put("TENSORFOLD_API_KEY", key);
         try std.testing.expectEqual(@as(u8, 2), try r.command(&.{}));
-        try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "expected keys without spaces or control characters") != null);
+        try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null);
         try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
         try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
     }
