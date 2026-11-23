@@ -48,11 +48,14 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     return error.UnknownContractImage;
 }
 
-/// Gate 5 on this GPU, each record against the loaded function; `only`: the launches so named, no offline audit.
+/// Gate 5 on this GPU, each record against the loaded function; plain words in `only`: the launches so named, no
+/// offline audit. `-word`s leave every record in: they drop only a kernel's gates 1-4.
 pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
+    const after = @import("contract_after.zig");
+    const full = !after.filtered(only);
     var n: usize = 0;
-    if (only.len == 0) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
-    if (only.len == 0) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
+    if (full) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
+    if (full) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
     const t = limits.target(sm) orelse {
         std.debug.print("N/A  limits live: sm_{d} is not a target the records cover\n", .{sm});
@@ -73,9 +76,7 @@ pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
-        if (only.len > 0) for (only) |w| {
-            if (std.mem.indexOf(u8, r.launch.name, w) != null) break;
-        } else continue;
+        if (!full and !after.wanted(r.launch.name, only)) continue;
         if (!control and t.sm < r.launch.min_sm) continue;
         if (!control and at != null and registry.targetDecision(r, t, r.usage[at.?]) != .applicable) continue;
         const bytes = image(r.launch.image) catch |err| {
