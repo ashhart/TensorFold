@@ -463,22 +463,22 @@ test "a granted hold stays only while its stream's expected drafts pay for the v
     try rule.observeOverhead(4, 4, shared.get(4).? + 8.0, false, 0); // 8 ms measured: a hold grid assumes no overhead of its own
     // 8 ms overhead: plain 4 / 22; stream 0 then 3 raise the rate (5.8 / 25, 6.7 / 26.5), stream 1 would lower it
     var out = [_]i64{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
+    try rule.payHoldsBase(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
     try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     rule.gpa = failing.allocator();
     out = .{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
+    try rule.payHoldsBase(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
     rule.gpa = gpa;
     const dear = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 20.0 }};
     rule.k.hold_costs = &dear;
     out = .{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
+    try rule.payHoldsBase(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
     try std.testing.expectEqualSlices(i64, &.{ 0, 0, 0, 0 }, &out); // no gain pays a 20 ms pass
     whos[2].granted = 0;
     out = .{ 4, 4, 2, 3 };
-    try rule.payHolds(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
+    try rule.payHoldsBase(&whos, false, &out, @import("hold_price.zig").Base.pending(whos.len));
     try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
 }

@@ -319,12 +319,12 @@ test "row cost: confidence holds retain host and context prices when the shared 
     var base = @import("hold_price.zig").Base.pending(2);
     base.host_ms = 2;
     var out = [_]i64{ 1, 0 };
-    try rule.payHolds(&whos, false, &out, base);
+    try rule.payHoldsBase(&whos, false, &out, base);
     try t.expectEqualSlices(i64, &.{ 1, 0 }, &out);
     // Synthetic residuals exclude the separately quoted host draw and hold pass.
     for ([_]u64{ 2, 4, 6 }) |rows| try feed(&rule.row_cost, 2, rows, 3.8 * @as(f64, @floatFromInt(rows - 2)), 8);
     out = .{ 1, 0 };
-    try rule.payHolds(&whos, false, &out, base);
+    try rule.payHoldsBase(&whos, false, &out, base);
     try t.expectEqualSlices(i64, &.{ 0, 0 }, &out);
 }
 

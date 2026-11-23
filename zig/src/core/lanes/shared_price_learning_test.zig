@@ -75,7 +75,7 @@ test "shared combined prices: all three paired allocators reach the width being 
         }
         try win.allocate(&e, &plans);
         try t.expectEqual(@as(usize, 2), plans[0].count() + plans[1].count());
-        var who = [_]depth.Who{ win.who(&streams[0]), win.who(&streams[1]) };
+        var who = [_]depth.Who{ win.who(&streams[0], e.rule.k.hold_costs.len > 0), win.who(&streams[1], e.rule.k.hold_costs.len > 0) };
         var out: [2]i64 = undefined;
         var unused: u8 = 0;
         try e.rule.budgetsFor(&who, .{ .ptr = &unused, .copy = noCopy }, sampled, &out, 2);

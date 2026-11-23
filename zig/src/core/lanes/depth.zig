@@ -165,19 +165,9 @@ pub const Rule = struct {
     pub fn roundCost(r: *Rule, drafts: i64, who: ?Who) !?f64 {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
-        const base = r.roundCostIn(table, drafts, r.plain_guard) orelse return null;
-        if (drafts > 0) if (who) |w| {
-            return base + @import("hold_price.zig").contextMs(r.k.hold_context_costs, 1, w.hold_context_rows);
-        };
-        return base;
-    }
-
-    /// roundCost on `table`; `with_floor`: an untimed depth also pays the least excess a timed round's row showed.
-    pub fn roundCostIn(r: *const Rule, table: *const Table, drafts: i64, with_floor: bool) ?f64 {
-        if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         var modeled = forward + r.loneHeadMs(drafts);
-        if (with_floor) {
+        if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
             for (table.slots, 0..) |slot, d| {
@@ -189,6 +179,9 @@ pub const Rule = struct {
             const floor = least orelse 0.0;
             modeled += @as(f64, @floatFromInt(drafts + 1)) * (if (floor > 0.0) floor else 0.0);
         }
+        if (drafts > 0) if (who) |w| {
+            return modeled + @import("hold_price.zig").contextMs(r.k.hold_context_costs, 1, w.hold_context_rows);
+        };
         return modeled;
     }
 
@@ -270,16 +263,11 @@ pub const Rule = struct {
 
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
     pub fn probePlain(r: *Rule, st: *State) bool {
-        return r.backoff(&st.plain, &st.wait);
-    }
-
-    /// True on the pass reaching `wait` passes in a row; the count restarts, the wait doubles (to plain_wait_most).
-    fn backoff(r: *const Rule, passes: *?u64, wait: *?u64) bool {
-        passes.* = (passes.* orelse 0) + 1;
-        const w = wait.* orelse r.k.depth_probe_every;
-        if (passes.*.? < w) return false;
-        passes.* = 0;
-        wait.* = @min(2 * w, r.k.plain_wait_most);
+        st.plain = (st.plain orelse 0) + 1;
+        const w = st.wait orelse r.k.depth_probe_every;
+        if (st.plain.? < w) return false;
+        st.plain = 0;
+        st.wait = @min(2 * w, r.k.plain_wait_most);
         return true;
     }
 

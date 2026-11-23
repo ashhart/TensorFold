@@ -180,7 +180,7 @@ test "a profitable cheap hold survives an unprofitable higher-gain companion" {
     var out = [_]i64{ 1, 1 };
     var base = @import("hold_price.zig").Base.pending(2);
     base.host_ms = 20;
-    try rule.payHolds(&whos, true, &out, base);
+    try rule.payHoldsBase(&whos, true, &out, base);
     try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, &out);
 }
 
@@ -201,7 +201,7 @@ test "live host quotes change recovery funding across the strict boundary and ba
         var base = @import("hold_price.zig").Base.pending(2);
         base.host_ms = row_ms; // one host-drawn pending row and one GPU-only forced companion
         var out = [_]i64{ 1, 0 };
-        try rule.payHolds(&whos, true, &out, base);
+        try rule.payHoldsBase(&whos, true, &out, base);
         try std.testing.expectEqualSlices(i64, &.{ want, 0 }, &out);
     }
 }

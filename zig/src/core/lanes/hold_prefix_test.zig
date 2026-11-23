@@ -102,7 +102,7 @@ pub const Fixture = struct {
             };
             base.host_ms += ms;
         }
-        try f.engine.rule.payHolds(whos[0..prices.len], true, out, base);
+        try f.engine.rule.payHoldsBase(whos[0..prices.len], true, out, base);
     }
 };
 
@@ -424,7 +424,7 @@ test "a live host quote invalidates futile recovery while an unknown route prese
     head.verify_row_ms = null;
     whos[0] = win.who(&head, f.engine.rule.k.hold_costs.len > 0);
     out = .{ 0, 0 };
-    try f.engine.rule.payHolds(&whos, true, &out, @import("hold_price.zig").Base.pending(2));
+    try f.engine.rule.payHoldsBase(&whos, true, &out, @import("hold_price.zig").Base.pending(2));
     try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out); // no fresh rows means no trial, even with an optimistic quote
     try f.engine.rule.budgets(&whos, probe, true, &out);
     try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, &out);
