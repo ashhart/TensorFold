@@ -28,12 +28,21 @@ pub const function_names = [_][:0]const u8{
 const units_gu_k = 2304;
 const units_down_k = 1152;
 const units_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_units", "tf_ink2_nvfp4_down_units", "tf_ink2_mxfp8_gu_units", "tf_ink2_mxfp8_down_units", "tf_ink2_logits_units", "tf_ink2_dense_units", "tf_ink2_nvfp4_gu_units_t", "tf_ink2_nvfp4_down_units_t", "tf_ink2_mxfp8_gu_units_t", "tf_ink2_mxfp8_down_units_t" };
+/// The grouped products on simdgroup matrices, for GPUs without tensor units: their sums are the grouped kernels'.
+const mma_names = [_][:0]const u8{ "tf_ink2_nvfp4_gu_mma", "tf_ink2_nvfp4_down_mma", "tf_ink2_mxfp8_gu_mma", "tf_ink2_mxfp8_down_mma" };
+/// The weight rows a simdgroup-matrix threadgroup takes.
+const mma_tile_rows = 64;
 /// A chunk of more rows than this gives an expert enough pairs for the turned tiles, 32 pairs a band.
 const turned_rows: u32 = 512;
 
 /// A chunk of at least this many rows runs grouped by expert; a row's sums are the same either way.
 pub const grouped_rows: u32 = 8;
+/// A chunk of at least this many rows fills a band of an expert's pairs often enough for the simdgroup matrices.
+pub const mma_rows: u32 = 32;
 const group_cap: u32 = 1024;
+
+/// How a chunk's grouped products run; every path gives a row the same sums where it exists.
+pub const Path = enum { scalar, mma, units };
 
 pub const Pipelines = struct {
     entries: [function_names.len]mtl.Pipeline,
@@ -41,26 +50,37 @@ pub const Pipelines = struct {
     groups: mtl.Buffer,
     /// The gate-up and down products on the tensor units (NVFP4 then MXFP8), where the GPU has them.
     units: ?[units_names.len]mtl.Pipeline = null,
+    /// The grouped products on simdgroup matrices, where the GPU has no tensor units.
+    mma: ?[mma_names.len]mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         var out = try loadSource(device, src.experts);
         errdefer out.deinit();
-        if (device.tensorUnits()) try out.loadUnits(device, src.experts_units);
+        if (device.tensorUnits()) try out.loadUnits(device, src.experts_units) else try out.loadMma(device, src.experts_mma);
         return out;
     }
 
     /// The tensor-unit kernels from `text`; the contract's controls pass an edited one. The GPU must have the units.
     pub fn loadUnits(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
+        p.units = try compile(&units_names, device, text);
+    }
+
+    /// The simdgroup-matrix kernels from `text`; the contract's controls pass an edited one.
+    pub fn loadMma(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
+        p.mma = try compile(&mma_names, device, text);
+    }
+
+    fn compile(comptime names: []const [:0]const u8, device: mtl.Device, text: []const u8) ![names.len]mtl.Pipeline {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [units_names.len]mtl.Pipeline = undefined;
+        var pipes: [names.len]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for (units_names, &pipes) |name, *pipe| {
+        for (names, &pipes) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
         }
-        p.units = pipes;
+        return pipes;
     }
 
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
@@ -77,11 +97,13 @@ pub const Pipelines = struct {
         }
         out.groups = try device.buffer((plan.expert_count + plan.expert_count * group_cap) * @sizeOf(u32), mtl.ResourceOptions.shared);
         out.units = null;
+        out.mma = null;
         return out;
     }
 
     pub fn deinit(p: *Pipelines) void {
         if (p.units) |pipes| for (pipes) |pipe| pipe.deinit();
+        if (p.mma) |pipes| for (pipes) |pipe| pipe.deinit();
         p.groups.deinit();
         for (p.entries) |pipe| pipe.deinit();
     }
@@ -193,7 +215,7 @@ pub fn group(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !voi
 }
 
 /// gu after group: the same outputs, each expert's weight blocks decoded once a pass of four rows.
-pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, out: Ref, c: Call) !void {
+pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
     try plan.check(c);
     switch (c.format) {
         .nvfp4 => {
@@ -210,7 +232,7 @@ pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, sca
     }
 }
 
-const Globals = struct { amax: Ref, denominator: Ref };
+pub const Globals = struct { amax: Ref, denominator: Ref };
 
 /// gu, or the down products (`down`), after group on the tensor units: an op is 16 of an expert's pairs by 32 rows.
 pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
@@ -223,25 +245,56 @@ pub fn unitsTurned(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Re
 }
 
 fn launchUnits(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, turned: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
-    try plan.check(c);
     const pipes = p.units orelse return error.NoTensorUnits;
     // Gate and up rows interleave, so gu has two weight rows an output; the kernels fix the columns of each product.
     const weight_rows = if (down) c.n else 2 * c.n;
     if (c.k != @as(u32, if (down) units_down_k else units_gu_k) or weight_rows % 32 != 0) return error.BadExpertShape;
+    try bindGrouped(p, e, x, w, scales, nv_globals, out, c);
+    const first: usize = if (turned) 6 else 0;
+    e.setPipeline(pipes[first + (if (c.format == .nvfp4) @as(usize, 0) else 2) + @intFromBool(down)]);
+    e.dispatchGroups(mtl.Size.of(if (turned) weight_rows / 16 else (weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// gu, or the down products (`down`), after group on simdgroup matrices: 64 weight rows by bands of 32 pairs a group.
+pub fn mma(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    const pipes = p.mma orelse return error.NoSimdgroupMatrices;
+    const weight_rows = if (down) c.n else 2 * c.n;
+    if (weight_rows % mma_tile_rows != 0 or c.k % 32 != 0) return error.BadExpertShape;
+    try bindGrouped(p, e, x, w, scales, nv_globals, out, c);
+    e.setPipeline(pipes[(if (c.format == .nvfp4) @as(usize, 0) else 2) + @intFromBool(down)]);
+    e.dispatchGroups(mtl.Size.of(weight_rows / mma_tile_rows, c.experts, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// The path a chunk of `rows` rows takes after group, or null for the one-pair kernels.
+pub fn pathFor(p: *const Pipelines, rows: u32) ?Path {
+    if (p.units != null) return .units;
+    if (p.mma != null and rows >= mma_rows) return .mma;
+    return if (rows >= grouped_rows) .scalar else null;
+}
+
+/// The gate-up (or `down`) products of a chunk on `path`, after group.
+pub fn products(p: *const Pipelines, e: mtl.ComputeEncoder, path: Path, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    switch (path) {
+        .units => try units(p, e, down, x, w, scales, nv_globals, out, c),
+        .mma => try mma(p, e, down, x, w, scales, nv_globals, out, c),
+        .scalar => if (down) try downGrouped(p, e, x, w, scales, nv_globals, out, c) else try guGrouped(p, e, x, w, scales, nv_globals, out, c),
+    }
+}
+
+/// The buffers and arguments the grouped kernels of every path share, after group.
+fn bindGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    try plan.check(c);
     switch (c.format) {
         .nvfp4 => {
             const g = nv_globals orelse return error.MissingNvfp4Globals;
             for ([_]Ref{ x, w, scales, g.amax, g.denominator, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 8);
-            e.setPipeline(pipes[(if (turned) @as(usize, 6) else 0) + @intFromBool(down)]);
         },
         .mxfp8 => {
             for ([_]Ref{ x, w, scales, counts(p), members(p), out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
             e.setValue(groupedArgs(c), 6);
-            e.setPipeline(pipes[(if (turned) @as(usize, 6) else 0) + 2 + @as(usize, @intFromBool(down))]);
         },
     }
-    e.dispatchGroups(mtl.Size.of(if (turned) weight_rows / 16 else (weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
 const LogitArgs = extern struct { rows: u32, vocab: u32 };
@@ -266,7 +319,7 @@ pub fn denseUnits(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, ou
 }
 
 /// The down products after group, as guGrouped.
-pub fn downGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, out: Ref, c: Call) !void {
+pub fn downGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
     try plan.check(c);
     switch (c.format) {
         .nvfp4 => {
@@ -283,7 +336,7 @@ pub fn downGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref,
     }
 }
 
-pub fn gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, ids: Ref, out: Ref, c: Call) !void {
+pub fn gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, ids: Ref, out: Ref, c: Call) !void {
     switch (c.format) {
         .nvfp4 => if (nv_globals) |g| return nvfp4Gu(p, e, x, w, scales, g.amax, g.denominator, ids, out, c) else return error.MissingNvfp4Globals,
         .mxfp8 => return mxfp8Gu(p, e, x, w, scales, ids, out, c),
