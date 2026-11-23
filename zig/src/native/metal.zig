@@ -391,7 +391,6 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
 }
-
 test {
     _ = @import("kimi_metal.zig");
     _ = @import("lfm3.zig");

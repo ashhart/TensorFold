@@ -32,7 +32,7 @@ pub const Cut = struct {
     }
 };
 
-/// The chunk from `at` on a `rows` grid: the first `most` marks or message starts inside it are tapped, the next ends it.
+/// Chunk bounds and tap points: the first `most` marks/message starts are tapped; the next ends the chunk.
 pub fn cut(at: usize, len: usize, marks: []const u32, chunks: []const u32, rows: usize, most: usize) Cut {
     var c: Cut = .{ .end = @min(len, (at / rows + 1) * rows) };
     var from = at;
@@ -63,8 +63,7 @@ pub fn tapRows(at: usize, c: *const Cut, hook: bool, rows: *[tap_cap]usize) []co
     return rows[0..c.n];
 }
 
-/// `F` names the family's `cfg`, `mdl`, `kern`, `fwd` (Chain, forward, commit), `snap`, `text_only` (images' error),
-/// and `request_starts` (whether its cut-invariant prefill keeps message-start states).
+/// F supplies cfg, mdl, kern, fwd, snap, text_only and request_starts; the latter keeps message-start states.
 pub fn Backend(comptime F: type) type {
     return struct {
         const cfg = F.cfg;

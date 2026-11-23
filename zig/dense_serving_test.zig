@@ -12,7 +12,6 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
     // #2239 adds head-64 attention for Qwen3-ASR; #3790 reuses it for GLM; existing instances keep their SASS
-    // #1508 adds pattn_kernel<128, 8, 4, 8> over paged caches for LFM3; existing instances are unchanged.
     try std.testing.expectEqualStrings("9d9faedafd8e06afd667839a187118b6b220c794c2948532f0a849f901627a23", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
     const group = @embedFile("kernels/cuda/qmm_group.cu");
     try std.testing.expectEqualStrings("ceff4ee13e97b5aa93cbe7a1edc9a524c78aaa145dd1e5c82dcb05a3011aae23", &hash(group[0..16095]));
