@@ -640,7 +640,8 @@ the text part of that chat encoding in TensorFold's own code, written after read
 against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.
 ## Inkling 2 DSpark drafter kernels
 
-`zig/kernels/cuda/inkling2/dspark.cu` and `zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
+`zig/kernels/cuda/inkling2/dspark.cu`, `zig/kernels/cuda/inkling2/dspark_many.cuh` and
+`zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
 `vllm/models/inkling2/nvidia/dspark.py` at commit `abb8194dc35e` of
 [vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0): the tap mix and its RMS norm in
 `Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
