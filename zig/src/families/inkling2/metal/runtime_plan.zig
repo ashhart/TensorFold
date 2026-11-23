@@ -90,7 +90,7 @@ pub fn geometry(c: Call) Geometry {
 
 pub fn dispatchCount(kind: Kind, c: Call) usize {
     return switch (kind) {
-        .stage_conv => stagePairs(c.k) * c.n,
+        .stage_conv => stagePairs(c.k) * c.n * ((c.rows + 15) / 16),
         .commit_histories => c.rows * 3 * conv_row_values,
         else => c.rows * c.n,
     };

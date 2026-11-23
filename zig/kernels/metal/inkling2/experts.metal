@@ -179,19 +179,54 @@ struct Ink2GroupArgs { uint pairs, experts, cap; };
 struct Ink2GroupedArgs { uint k, n, topk, cap; };
 #define INK2_PASS 4u
 
-// Expert e's route pairs in pair order: counts[e], then members[e][0 .. counts[e]).
-kernel void tf_ink2_group(
+// Expert e's route pairs in pair order: one simdgroup per expert scans ids in coalesced 32-lane steps.
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_group(
     device const int* ids [[buffer(0)]], device uint* counts [[buffer(1)]],
     device uint* members [[buffer(2)]], constant Ink2GroupArgs& a [[buffer(3)]],
-    uint e [[thread_position_in_grid]]) {
+    uint e [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
   if (e >= a.experts) return;
   uint n = 0u;
-  for (uint p = 0u; p < a.pairs; ++p)
-    if (uint(ids[p]) == e) {
+  for (uint base = 0u; base < a.pairs; base += 32u) {
+    const uint p = base + lane;
+    const uint hit = (p < a.pairs && uint(ids[p]) == e) ? 1u : 0u;
+    const uint off = simd_prefix_exclusive_sum(hit);
+    if (hit != 0u && n + off < a.cap) members[e * a.cap + n + off] = p;
+    n += simd_sum(hit);
+  }
+  if (lane == 0u) counts[e] = min(n, a.cap);
+}
+
+// Small-batch (pairs <= 64) single-TG group + active-expert compaction: writes dense active[0..pairs-1].
+[[kernel, max_total_threads_per_threadgroup(128)]] void tf_ink2_group_compact(
+    device const int* ids [[buffer(0)]], device uint* counts [[buffer(1)]],
+    device uint* members [[buffer(2)]], device uint* active [[buffer(3)]],
+    constant Ink2GroupArgs& a [[buffer(4)]], uint e [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup uint s_ids[64];
+  threadgroup uint sg_cnt[4];
+  if (e < a.pairs) {
+    s_ids[e] = uint(ids[e]);
+    active[e] = 0xffffffffu;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint n = 0u;
+  for (uint p = 0u; p < a.pairs; ++p) {
+    if (s_ids[p] == e) {
       if (n < a.cap) members[e * a.cap + n] = p;
       ++n;
     }
+  }
   counts[e] = min(n, a.cap);
+  const uint act = n > 0u ? 1u : 0u;
+  const uint off_in_sg = simd_prefix_exclusive_sum(act);
+  const uint total_sg = simd_sum(act);
+  if (lane == 0u) sg_cnt[sg] = total_sg;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (act != 0u) {
+    uint base = 0u;
+    for (uint s = 0u; s < sg; ++s) base += sg_cnt[s];
+    active[base + off_in_sg] = e;
+  }
 }
 
 // Block b of a packed NVFP4 row as its 16 BF16 weights, each as ink2_dot_nv decodes it.
@@ -399,22 +434,43 @@ inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uin
   Y[at] = bfloat(ink2_mx_weight(W[at], S[row * (a.k / 32u) + col / 32u]));
 }
 
-// Threadgroup (x, y) is outputs 256x to 256x + 255 of token y, one thread an output.
+// Threadgroup (x, y) is outputs 256x to 256x + 255 of token y; route slots are sorted once per token.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_combine(
     device const bfloat* down [[buffer(0)]], device const int* ids [[buffer(1)]],
     device const float* weights [[buffer(2)]], device bfloat* Y [[buffer(3)]],
     constant Ink2MatrixArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
     uint t [[thread_index_in_threadgroup]]) {
   const uint n = tg.x * 256u + t, group = tg.y;
-  if (n >= a.n) return;
-  // Outer expert order, not route-slot order, fixes the reference's accumulation order.
   const uint base = group * a.topk;
+  // Outer expert order, not route-slot order, fixes the reference's accumulation order.
+  threadgroup uint order[32];
+  threadgroup float w_ord[32];
+  if (a.topk <= 32u) {
+    if (t < a.topk) {
+      const int id = ids[base + t];
+      uint rank = 0u;
+      for (uint o = 0u; o < a.topk; ++o) rank += (ids[base + o] < id || (ids[base + o] == id && o < t)) ? 1u : 0u;
+      const uint dst = rank;
+      order[dst] = uint(id) < a.experts ? t : 0xffffffffu;
+      w_ord[dst] = weights[base + t];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (n >= a.n) return;
+    float sum = 0.0f;
+    for (uint r = 0u; r < a.topk; ++r) {
+      const uint slot = order[r];
+      if (slot != 0xffffffffu) sum += w_ord[r] * float(down[ulong(base + slot) * a.n + n]);
+    }
+    Y[ulong(group) * a.n + n] = bfloat(sum);
+    return;
+  }
+  if (n >= a.n) return;
   float sum = 0.0f;
-  for (uint r = 0; r < a.topk; ++r)
-    for (uint slot = 0; slot < a.topk; ++slot) {
+  for (uint r = 0u; r < a.topk; ++r)
+    for (uint slot = 0u; slot < a.topk; ++slot) {
       const int id = ids[base + slot];
-      uint rank = 0;
-      for (uint o = 0; o < a.topk; ++o) rank += (ids[base + o] < id || (ids[base + o] == id && o < slot)) ? 1u : 0u;
+      uint rank = 0u;
+      for (uint o = 0u; o < a.topk; ++o) rank += (ids[base + o] < id || (ids[base + o] == id && o < slot)) ? 1u : 0u;
       if (rank == r && uint(id) < a.experts) sum += weights[base + slot] * float(down[ulong(base + slot) * a.n + n]);
     }
   Y[ulong(group) * a.n + n] = bfloat(sum);

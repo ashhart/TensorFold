@@ -149,8 +149,7 @@ kernel void tf_ink2_rel_table(const device bfloat* rel [[buffer(0)]], const devi
   }
 }
 
-inline float ink_attn_dot(const device bfloat* q, const device bfloat* kc, size_t prow, size_t at, uint lane) {
-  float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
+inline float ink_attn_dot(float4 qv, const device bfloat* kc, size_t at, uint lane) {
   float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4));
   return ink_warp_sum(dot(qv, kv));
 }
@@ -162,8 +161,13 @@ inline void ink_attn_step(float score, const device bfloat* vc_at, uint lane, th
     thread float& total, thread float* acc) {
   const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
   const bfloat p = bfloat(b0);
-  total = total * a0 + float(p);
-  for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(p) * float(vc_at[lane * 4 + i]);
+  const float pf = float(p);
+  const float4 vv = float4(*(const device bfloat4*)(vc_at + lane * 4));
+  total = total * a0 + pf;
+  acc[0] = acc[0] * a0 + pf * vv[0];
+  acc[1] = acc[1] * a0 + pf * vv[1];
+  acc[2] = acc[2] * a0 + pf * vv[2];
+  acc[3] = acc[3] * a0 + pf * vv[3];
   top = next;
 }
 inline void ink_attn_store(device float* part_o, device float2* part_ml, size_t slot, float top, float total,
@@ -189,11 +193,12 @@ kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const devi
   const InkSeg s = segs[rseg[row]];
   const size_t head = s.off + size_t(kvh) * a.ring * D;
   const size_t prow = rh;
+  const float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float top = -INFINITY, total = 0.0f;
   for (uint kp = from; kp < to; ++kp) {
     const size_t at = head + size_t(kp % a.ring) * D;
-    const float dot_score = ink_attn_dot(q, kc, prow, at, lane);
+    const float dot_score = ink_attn_dot(qv, kc, at, lane);
     const float bias = ink_attn_bias(tab, prow, pos, kp);
     const float score = (dot_score * a.scale + bias) * LOG2E;
     ink_attn_step(score, vc + at, lane, top, total, acc);
@@ -233,11 +238,12 @@ kernel void tf_ink2_attn_slots(const device bfloat* q [[buffer(0)]], const devic
   const device bfloat* vc_s = vc_arr[slot];
   const size_t head = size_t(kvh) * ring * D;
   const size_t prow = rh;
+  const float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float top = -INFINITY, total = 0.0f;
   for (uint kp = from; kp < to; ++kp) {
     const size_t at = head + size_t(kp % ring) * D;
-    const float dot_score = ink_attn_dot(q, kc_s, prow, at, lane);
+    const float dot_score = ink_attn_dot(qv, kc_s, at, lane);
     const float bias = ink_attn_bias(tab, prow, pos, kp);
     const float sc = (dot_score * a.scale + bias) * LOG2E;
     ink_attn_step(sc, vc_s + at, lane, top, total, acc);
