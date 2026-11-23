@@ -356,7 +356,7 @@ test "--device and --segments: CUDA builds serve them, values checked; --speed-u
     try std.testing.expect(try cudaFlag(a, &out, "--loops", "4", &u));
     try std.testing.expectEqual(@as(?u32, 4), (try request(a, "d", "dory", out)).loops);
     try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--loops", "-1", &u));
-    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
+    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x") and (try request(a, "d", "t", .{ .parallel = "auto" })).lanes == 64);
     // --rope-yarn: a factor that reaches the engine's request; the families and engines that lack YaRN refuse it
     try std.testing.expect(try cudaFlag(a, &out, "--rope-yarn", "4", &u));
     try std.testing.expectEqual(@as(?f64, 4), (try request(a, "d", "qwen3_5_moe", out)).rope_yarn);
