@@ -128,7 +128,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     out.model.w = &out.weights;
     out.backend.m = &out.model;
     out.backend.k = &out.kernels;
-    return .{ .backend = out.backend.backend(), .facts = out.backend.facts(), .rows = window_rows, .stream_bytes = out.model.layout.bytes, .ctx = out, .deinit = release, .target = out };
+    return .{ .backend = out.backend.backend(), .facts = out.backend.facts(), .rows = window_rows, .stream_bytes = backend.streamBytes(&out.model), .ctx = out, .deinit = release, .target = out };
 }
 
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
@@ -176,4 +176,45 @@ test "the complete prompt snapshot hooks match the store vtable" {
         drop: *const fn (*anyopaque, *anyopaque) void,
     } = .{ .bytes = snap_bytes, .save = snap_save, .restore = snap_restore, .drop = snap_drop };
     try std.testing.expect(@intFromPtr(pc.save) != 0);
+}
+
+test "stream_bytes is what an extra stream's slot and lane buffers allocate, 806,408 bytes past the cache on Mini" {
+    const Record = struct { // a DeviceBuffer hook that hands out addresses and sums what is asked
+        bytes: usize = 0,
+        next: u64 = 1 << 32,
+        fn alloc(ctx: *anyopaque, len: usize) ?u64 {
+            const r: *@This() = @ptrCast(@alignCast(ctx));
+            r.bytes += len;
+            r.next += std.mem.alignForward(u64, len, 512);
+            return r.next;
+        }
+        fn free(_: *anyopaque, _: u64) bool {
+            return true;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var why: config.Why = .{};
+    var w: @import("loop_weights.zig").Weights = undefined;
+    w.c = try config.parse(arena.allocator(), @import("config_test.zig").mini, &why);
+    var precisions: [24]plan_.Precision = @splat(.nvfp4);
+    w.p = try plan_.build(&w.c.text, &precisions);
+    var m: engine.Model = undefined;
+    m.d = @ptrFromInt(0x1000); // never called: the hook answers every allocation
+    m.w = &w;
+    m.layout = try loop.CacheLayout.init(&w.c.text, &w.p, 8192);
+    var b: backend.Backend = undefined;
+    b.d = m.d;
+    b.m = &m;
+    b.held = 1;
+    var rec: Record = .{};
+    const before = cuda.memory.currentHook();
+    cuda.memory.setHook(.{ .ctx = &rec, .alloc = Record.alloc, .free = Record.free });
+    defer cuda.memory.setHook(before);
+    var slot = try m.newSlot();
+    defer for ([2]*cuda.DeviceBuffer{ &slot.cache, &slot.sites }) |x| x.free();
+    try b.slotBuffers(2); // the second stream's lane buffers; the first already holds its own
+    defer for (&b.slot[1]) |*x| x.free();
+    try std.testing.expectEqual(@as(u64, rec.bytes), backend.streamBytes(&m));
+    try std.testing.expectEqual(@as(u64, 48 * 4 * 32 + 200_058 * 4 + 32), backend.streamBytes(&m) - m.layout.bytes);
 }

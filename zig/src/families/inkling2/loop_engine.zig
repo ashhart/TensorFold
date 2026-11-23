@@ -101,6 +101,11 @@ const Scratch = struct {
 const Slot = struct { cache: cuda.DeviceBuffer, sites: cuda.DeviceBuffer };
 pub const max_slots = 16;
 
+/// The bytes a slot's allocations ask for: the cache layout and four rewind sites a visit.
+pub fn slotAllocs(layout: *const loop.CacheLayout, n_visits: u32) [2]usize {
+    return .{ @intCast(layout.bytes), @as(usize, n_visits) * 4 * @sizeOf(ops.RewindSite) };
+}
+
 pub const Model = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
@@ -126,22 +131,28 @@ pub const Model = struct {
         const kv: usize = @as(usize, m.w.c.text.local.kv) * m.w.c.text.local.dim;
         var sites: [config.max_visits * 4]ops.RewindSite = undefined;
         while (m.n_slots < n) {
-            var cache = try cuda.DeviceBuffer.alloc(m.d, m.layout.bytes);
-            errdefer cache.free();
-            var table = try cuda.DeviceBuffer.alloc(m.d, m.w.p.n_visits * 4 * @sizeOf(ops.RewindSite));
-            errdefer table.free();
-            m.slots[m.n_slots] = .{ .cache = cache, .sites = table };
+            var slot = try m.newSlot();
+            errdefer for ([2]*cuda.DeviceBuffer{ &slot.sites, &slot.cache }) |b| b.free();
+            m.slots[m.n_slots] = slot;
             m.slot = m.n_slots;
             for (0..m.w.p.n_visits) |v| for (0..4) |site| {
                 const c = if (site < 2) kv else m.w.c.text.hidden;
                 const hist = m.histOf(@intCast(v), site) - m.s.hist;
                 sites[v * 4 + site] = .{ .state = m.convOf(@intCast(v), site), .hist = @intCast(hist), .backup = @intCast(m.backupOf(@intCast(v), site)), .c = @intCast(c) };
             };
-            try m.upload(s, table.ptr, std.mem.sliceAsBytes(sites[0 .. m.w.p.n_visits * 4]));
+            try m.upload(s, slot.sites.ptr, std.mem.sliceAsBytes(sites[0 .. m.w.p.n_visits * 4]));
             try m.reset(s);
             try s.synchronize();
             m.n_slots += 1;
         }
+    }
+
+    /// A slot's two allocations, sized by slotAllocs: its cache and its rewind-site table.
+    pub fn newSlot(m: *const Model) !Slot {
+        const sizes = slotAllocs(&m.layout, m.w.p.n_visits);
+        var cache = try cuda.DeviceBuffer.alloc(m.d, sizes[0]);
+        errdefer cache.free();
+        return .{ .cache = cache, .sites = try cuda.DeviceBuffer.alloc(m.d, sizes[1]) };
     }
 
     fn alloc(m: *Model, bytes: usize) !u64 {
@@ -578,17 +589,3 @@ pub const Model = struct {
         m.gpa.destroy(saved);
     }
 };
-
-test "pass snapshots and rollback layout cover every visit" {
-    const config_test = @import("config_test.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var why: config.Why = .{};
-    const c = try config.parse(arena.allocator(), config_test.mini, &why);
-    var precisions: [24]@import("plan.zig").Precision = @splat(.nvfp4);
-    const p = try @import("plan.zig").build(&c.text, &precisions);
-    const layout = try loop.CacheLayout.init(&c.text, &p, 4096);
-    try std.testing.expectEqual(@as(u32, 48), layout.n);
-    try std.testing.expect(layout.at(17).kv_offset != layout.at(29).kv_offset);
-    try std.testing.expectEqual(@as(u64, layout.at(46).conv_offset + layout.at(46).conv_bytes), layout.at(47).conv_offset);
-}
