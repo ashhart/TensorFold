@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const fl = tf.minimax_m3;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
+const metal_admit = @import("metal_admit.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -41,8 +42,8 @@ const Host = struct {
     }
 };
 
-fn admittedStreams(_: std.mem.Allocator, _: u64, _: u64, o: api.Open, _: u64, _: *[]const u8) !?u32 {
-    return o.lanes;
+fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return metal_admit.streams(a, "minimax_m3", stream_bytes, left, o, window, problem);
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -107,7 +108,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     };
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(served, 1), .budget = budget, .drafts = dspark != null or df2 != null });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget, .drafts = dspark != null or df2 != null });
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.draft = null;
