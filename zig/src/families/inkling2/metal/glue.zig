@@ -22,6 +22,7 @@ pub const Pipelines = struct {
     conv_dynamic: mtl.Pipeline,
     kv_conv_static: mtl.Pipeline,
     kv_conv_dynamic: mtl.Pipeline,
+    conv_dynamic_segs: mtl.Pipeline,
     router: mtl.Pipeline,
     route_scores: mtl.Pipeline,
     route_select: mtl.Pipeline,
@@ -40,7 +41,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [21]mtl.Pipeline = undefined;
+        var pipes: [22]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -65,7 +66,8 @@ pub const Pipelines = struct {
             "tf_inkling2_coalesced_logits_r8",
             "tf_inkling2_coalesced_logits_r16",
             "tf_inkling2_coalesced_logits_r32",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
+            "tf_inkling2_conv_dynamic_segs",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256, 256 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -81,6 +83,7 @@ pub const Pipelines = struct {
             .conv_dynamic = pipes[7],
             .kv_conv_static = pipes[8],
             .kv_conv_dynamic = pipes[9],
+            .conv_dynamic_segs = pipes[21],
             .router = pipes[10],
             .swiglu = pipes[11],
             .logits = pipes[12],
@@ -95,6 +98,7 @@ pub const Pipelines = struct {
         };
     }
     pub fn deinit(p: *Pipelines) void {
+        p.conv_dynamic_segs.deinit();
         inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
     }
 };
@@ -306,3 +310,16 @@ pub fn expertCombine(p: *const Pipelines, e: mtl.ComputeEncoder, picked: Ref, we
     e.setValue(ExpertArgs{ .rows = rows, .channels = channels }, 3);
     e.dispatchThreads(mtl.Size.of(channels, rows, 1), unit);
 }
+
+pub const InkConvDynSeg = extern struct { taps: u64, input: u64, out: u64, row0: u32, rows: u32 };
+const ConvDynSegsArgs = extern struct { n_segs: u32, total_rows: u32, channels: u32 };
+
+/// Dynamic convolution batched across segments with global row dispatch.
+pub fn convDynamicSegs(p: *const Pipelines, e: mtl.ComputeEncoder, segs: Ref, static_w: Ref, projection: Ref, n_segs: u32, total_rows: u32, channels: u32) void {
+    std.debug.assert(n_segs > 0 and total_rows > 0 and channels > 0 and channels <= 1024);
+    e.setPipeline(p.conv_dynamic_segs);
+    inline for (.{ segs, static_w, projection }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvDynSegsArgs{ .n_segs = n_segs, .total_rows = total_rows, .channels = channels }, 3);
+    e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
