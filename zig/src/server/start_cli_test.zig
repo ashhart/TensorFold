@@ -103,7 +103,7 @@ const Run = struct {
 
     fn standInAt(r: *Run, port: u16, name: []const u8) !void {
         const script = try r.path(name);
-        const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\nprintf '%s' \"$TENSORFOLD_API_KEY\" > {s}\nprintf '%s' \"$START_TEST_UNRELATED\" > {s}\nprintf '[tensorfold] serving Model at http://127.0.0.1:{d}/v1 (x)\\n'\nif [ \"$START_TEST_LOG_KEY\" = 1 ]; then printf 'error: %0250d%s\\n' 0 \"$TENSORFOLD_API_KEY\" >&2; fi\nif [ \"$START_TEST_SHORT_LIVED\" = 1 ]; then exec sleep 1; else exec sleep 30; fi\n", .{ try r.path("pid"), try r.path("args"), try r.path("child-key"), try r.path("unrelated"), port });
+        const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\nprintf '%s' \"$TENSORFOLD_API_KEY\" > {s}\nprintf '%s' \"$START_TEST_UNRELATED\" > {s}\nprintf '[tensorfold] serving Model at http://127.0.0.1:{d}/v1 (x)\\n'\nif [ \"$START_TEST_LOG_KEY\" = 1 ]; then printf 'error: %0250d%s\\n' 0 \"$TENSORFOLD_API_KEY\" >&2; fi\nif [ \"$START_TEST_LOG_ENCODED\" ]; then printf 'error: %s\\n' \"$START_TEST_LOG_ENCODED\" >&2; fi\nif [ \"$START_TEST_SHORT_LIVED\" = 1 ]; then exec sleep 1; else exec sleep 30; fi\n", .{ try r.path("pid"), try r.path("args"), try r.path("child-key"), try r.path("unrelated"), port });
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = script, .data = text, .flags = .{ .permissions = .fromMode(0o755) } });
         r.self_exe = script;
     }
@@ -567,4 +567,31 @@ test "start CLI: a managed first reply authenticates Latin-1 and removes termina
             try std.testing.expect(std.mem.indexOf(u8, f.request(i).head, secret) == null);
         }
     }
+}
+
+test "start CLI: managed logs redact percent-encoded ASCII and Latin-1 credentials" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const ascii = "fixture-ascii/token+part";
+    const latin = "fixture-caf\u{e9}/ol\u{f1}";
+    const encoded_ascii = "fixture-ascii%2Ftoken%2Bpart";
+    const encoded_latin = "fixture-caf%E9%2Fol%F1";
+    try r.env.put("TENSORFOLD_API_KEY", try std.mem.concat(a, u8, &.{ ascii, ",", latin, ",%25,a%25b" }));
+    try r.env.put("START_TEST_SHORT_LIVED", "1");
+    try r.env.put("START_TEST_LOG_KEY", "1");
+    try r.env.put("START_TEST_LOG_ENCODED", try std.mem.concat(a, u8, &.{ encoded_ascii, " ", encoded_latin, " %2525 a%25%62" }));
+    try r.cache();
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = ascii });
+    const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
+    defer f.stop();
+    try r.standIn(f.port);
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
+    try std.testing.expect(r.childGone());
+    for ([_][]const u8{ ascii, latin, encoded_ascii, encoded_latin, "%2525", "a%25%62", "%62", "[redacted]25" }) |secret|
+        for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
+            try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }

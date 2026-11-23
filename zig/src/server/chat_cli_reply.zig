@@ -31,7 +31,7 @@ pub const Reply = struct {
     failure: ?[]const u8 = null,
     done: bool = false,
 
-    /// Release a final non-secret prefix after the stream stops.
+    /// Redact a final ambiguous credential prefix after the stream stops.
     pub fn end(r: *Reply) Failure!void {
         try r.flush(.reasoning);
         try r.flush(.content);
@@ -48,7 +48,7 @@ pub const Reply = struct {
     fn flush(r: *Reply, kind: Kind) Failure!void {
         const state = streamFor(r, kind);
         if (state.pending.len == 0) return;
-        const text = state.pending;
+        const text = "[redacted]";
         state.pending = "";
         if (kind == .content) try r.content.appendSlice(r.a, text);
         try r.sink.piece(r.sink.ctx, kind, text);
@@ -96,6 +96,8 @@ pub const Reply = struct {
         };
         if (chunk != .object) return error.InvalidStream;
         if (chunk.field("error")) |e| {
+            try r.flush(.reasoning);
+            try r.flush(.content);
             r.failure = try errorText(r.a, e, r.secrets);
             return;
         }

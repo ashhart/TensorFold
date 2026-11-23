@@ -9,7 +9,7 @@ const fake = @import("benchmark_fake.zig");
 const stream = @import("benchmark_stream.zig");
 const Allocator = std.mem.Allocator;
 
-const Run = struct {
+pub const Run = struct {
     a: Allocator,
     env: std.process.Environ.Map,
     dir: []const u8,
@@ -22,14 +22,14 @@ const Run = struct {
     interactive: bool = false,
     self_exe: ?[]const u8 = null,
 
-    fn init(a: Allocator, tmp: *std.testing.TmpDir) !Run {
+    pub fn init(a: Allocator, tmp: *std.testing.TmpDir) !Run {
         var r: Run = .{ .a = a, .env = .init(a), .dir = try fake.tmpPath(a, tmp), .out = .init(a), .err = .init(a) };
         try r.env.put("PATH", "/usr/bin:/bin");
         for ([_][]const u8{ "TMPDIR", "HOME" }) |name| try r.env.put(name, r.dir);
         return r;
     }
 
-    fn command(r: *Run, argv: []const []const u8) !u8 {
+    pub fn command(r: *Run, argv: []const []const u8) !u8 {
         r.out.clearRetainingCapacity();
         r.err.clearRetainingCapacity();
         r.stdin = .fixed(r.input);
@@ -52,7 +52,7 @@ const Run = struct {
     }
 };
 
-const models_doc = "{\"object\": \"list\", \"data\": [{\"id\": \"example-model\", \"capabilities\": {\"thinking_switch\": true}}, {\"id\": \"other-model\"}]}";
+pub const models_doc = "{\"object\": \"list\", \"data\": [{\"id\": \"example-model\", \"capabilities\": {\"thinking_switch\": true}}, {\"id\": \"other-model\"}]}";
 
 fn chunk(a: Allocator, delta: []const u8) ![]const u8 {
     return fake.event(a, try std.fmt.allocPrint(a, "{{\"choices\": [{{\"index\": 0, \"delta\": {s}, \"finish_reason\": null}}]}}", .{delta}));
@@ -70,7 +70,7 @@ fn streamed(a: Allocator) ![]const fake.Write {
 }
 
 /// A server that lists ``models`` and answers the n-th chat request with ``replies[n]`` (the last one after).
-fn world(a: Allocator, models: []const u8, replies: []const []const fake.Write) !*fake.Fake {
+pub fn world(a: Allocator, models: []const u8, replies: []const []const fake.Write) !*fake.Fake {
     return worldKeyed(a, models, replies, null);
 }
 

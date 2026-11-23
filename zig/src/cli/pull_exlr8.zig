@@ -110,6 +110,7 @@ fn gib(n: u64) f64 {
 
 /// Every file the node needs whole, each equal to the hub's sha256 (LFS) or git blob sha1; returns how many.
 pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, auth: Auth, repo: []const u8, sha: []const u8, dir: []const u8, whole: []const single.Entry) !u32 {
+    for (whole) |e| if (!single.snapshotPathOk(e.path)) return error.SnapshotPath;
     const w = std.Io.Dir.cwd();
     const tmp = try std.fs.path.join(a, &.{ dir, ".pull" });
     try w.createDirPath(io, tmp);
