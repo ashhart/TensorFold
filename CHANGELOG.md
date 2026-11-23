@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Nemotron's offline build uses the shared expert kernel sources, and two duplicate files are gone; the kernels are unchanged (#4738). Thanks @jschmied.
+
 - Docs: a plan for Inkling 2 Mini on CUDA and Metal in slices a contributor can claim (#4274). Thanks @akol1.
 
 - Docs: the Flash Next HIP recipe adds the measured four-rank serve path and fixes its receipt link (#4669). Thanks @timmyit.
