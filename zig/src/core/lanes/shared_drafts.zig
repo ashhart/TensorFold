@@ -85,6 +85,8 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
     }
     if (limits) |l| if (e.cfg.granted_depth) {
         var base = @import("hold_price.zig").Base.pending(live);
+        // Without an independent plain price a mixed reservation keeps the head streams' own fixed price.
+        if (paired == null) base.fixed_streams = l.who.len;
         for (fixed, probs, neural, counts, 0..) |rows, chances, head, count, i| {
             const ms = if (row_ms.len > 0) row_ms[i] else 0;
             if (rows == 0) continue;

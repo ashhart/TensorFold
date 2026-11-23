@@ -146,6 +146,7 @@ pub const Base = struct {
     tokens: f64,
     host_ms: f64 = 0, // committed rows' host work, including copies and forced rows
     row_ms: f64 = 0, // learned shared-forward excess, below the table when rows cost less; host work stays separate
+    fixed_streams: usize = 0, // the streams whose measured overhead prices the holds (0: `streams`)
 
     /// The table's forward at `rows` plus the learned excess past a row a stream, never under the plain width.
     pub fn forwardMs(b: Base, costs: *const Table, rows: i64) ?f64 {

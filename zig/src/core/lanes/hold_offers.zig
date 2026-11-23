@@ -135,7 +135,7 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
         if (!funded) @memset(out, 0);
         return;
     };
-    const fixed = rule.fixedMs(base.streams, sampled);
+    const fixed = rule.fixedMs(if (base.fixed_streams > 0) base.fixed_streams else base.streams, sampled);
     const plain = base.tokens / (forward + fixed + base.host_ms);
     var normal: usize = 0;
     var probes: usize = 0;
