@@ -8,6 +8,14 @@ const ascii_key = "fixture-ascii/token+part";
 const ascii_encoded = "fixture-ascii%2Ftoken%2Bpart";
 const latin_key = "fixture-caf\u{e9}/ol\u{f1}";
 const latin_encoded = "fixture-caf%E9%2Fol%F1";
+const repeated_keys = "a/b,fixture-caf\u{e9}";
+const repeated_whole = "a%252Fb a%25252Fb fixture-caf%25E9 fixture-caf%2525E9 fixture-caf%25C3%25A9 fixture-caf%2525C3%2525A9";
+const repeated_leaks = [_][]const u8{
+    "a/b",               "a%252Fb",               "a%25252Fb",                 "%252Fb",             "%25252Fb", "%2Fb",    "2Fb",
+    "fixture-caf\u{e9}", "fixture-caf\xe9",       "fixture-caf%25E9",          "fixture-caf%2525E9", "%25E9",    "%2525E9", "%E9",
+    "E9",                "fixture-caf%25C3%25A9", "fixture-caf%2525C3%2525A9", "%25C3",              "%2525C3",  "%25A9",   "%2525A9",
+    "%C3",               "%A9",                   "C3",                        "A9",
+};
 
 fn postBody(f: *fake.Fake, wanted: usize) ![]const u8 {
     var seen: usize = 0;
@@ -272,4 +280,131 @@ test "chat CLI: KP50 discovered encoded IDs leave neither the banner nor the fol
     try shown.appendSlice(a, r.err.written());
     try absent(shown.items, &.{ ascii_encoded, latin_encoded, "%2525", "a%25%62", "%62", "[redacted]25" });
     try absent(try postBody(f, 0), &.{ ascii_encoded, latin_encoded, "%2525", "a%25%62", "%62", "[redacted]25" });
+}
+
+test "chat CLI: KR66 encoded overlapping keys retain the suffix across deltas and history" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try fixtures.Run.init(a, &tmp);
+    const split = try stream(a, try a.dupe([]const u8, &.{
+        try delta(a, "%41%42"),
+        try delta(a, "%43%44"),
+        try fake.event(a, "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}"),
+        try fake.event(a, "[DONE]"),
+    }));
+    const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{ split, try successful(a, "next") }));
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", "%41%42,ABCD");
+    r.interactive = true;
+    r.input = "first\nsecond\n/bye\n";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    for ([_][]const u8{ r.out.written(), r.err.written(), try postBody(f, 1) }) |text|
+        try absent(text, &.{ "%43%44", "[redacted]%43%44" });
+}
+
+test "chat CLI: KR66 encoded overlapping keys retain the suffix in HTTP and SSE errors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try fixtures.Run.init(a, &tmp);
+    const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{
+        try httpError(a, "%41%42%43%44"),
+        try sseError(a, "%41%42%43%44"),
+    }));
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", "%41%42,ABCD");
+    r.input = "hi";
+    var shown: std.ArrayList(u8) = .empty;
+    for (0..2) |_| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", try f.url(a, "") }));
+        try shown.appendSlice(a, r.out.written());
+        try shown.appendSlice(a, r.err.written());
+    }
+    for ([_][]const u8{ shown.items, try postBody(f, 0), try postBody(f, 1) }) |text|
+        try absent(text, &.{ "%43%44", "[redacted]%43%44" });
+}
+
+test "chat CLI: KR66 repeatedly encoded credentials leave neither content nor history" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try fixtures.Run.init(a, &tmp);
+    const split_ascii = try stream(a, try a.dupe([]const u8, &.{
+        try delta(a, "a%25"),
+        try delta(a, "2Fb"),
+        try fake.event(a, "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}"),
+        try fake.event(a, "[DONE]"),
+    }));
+    const split_latin = try stream(a, try a.dupe([]const u8, &.{
+        try delta(a, "fixture-caf%25"),
+        try delta(a, "E9"),
+        try fake.event(a, "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}"),
+        try fake.event(a, "[DONE]"),
+    }));
+    const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{
+        try successful(a, repeated_whole), split_ascii, split_latin, try successful(a, "done"),
+    }));
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", repeated_keys);
+    r.interactive = true;
+    r.input = "first\nsecond\nthird\nfourth\n/bye\n";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    for ([_][]const u8{ r.out.written(), r.err.written(), try postBody(f, 3) }) |text|
+        try absent(text, &repeated_leaks);
+}
+
+test "chat CLI: KR66 repeatedly encoded credentials are absent from HTTP and SSE errors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try fixtures.Run.init(a, &tmp);
+    const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{
+        try httpError(a, repeated_whole),
+        try sseError(a, repeated_whole),
+    }));
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", repeated_keys);
+    r.input = "hi";
+    var shown: std.ArrayList(u8) = .empty;
+    for (0..2) |_| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", try f.url(a, "") }));
+        try shown.appendSlice(a, r.out.written());
+        try shown.appendSlice(a, r.err.written());
+    }
+    try absent(shown.items, &repeated_leaks);
+}
+
+test "chat CLI: KR66 repeatedly encoded IDs leave neither banner nor follow-up POST" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try fixtures.Run.init(a, &tmp);
+    const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{repeated_whole});
+    const f = try fixtures.world(a, models, try a.dupe([]const fake.Write, &.{try successful(a, "ok")}));
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", repeated_keys);
+    var shown: std.ArrayList(u8) = .empty;
+    r.interactive = true;
+    r.input = "/bye\n";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    try shown.appendSlice(a, r.out.written());
+    try shown.appendSlice(a, r.err.written());
+    r.interactive = false;
+    r.input = "hi";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    try shown.appendSlice(a, r.out.written());
+    try shown.appendSlice(a, r.err.written());
+    try absent(shown.items, &repeated_leaks);
+    try absent(try postBody(f, 0), &repeated_leaks);
 }

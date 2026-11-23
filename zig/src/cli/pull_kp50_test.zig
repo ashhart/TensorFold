@@ -176,6 +176,14 @@ const Attack = struct {
     variants: [4][]const u8,
 };
 
+fn mixedDepthAttack() Attack {
+    return .{
+        .secret = literal_token,
+        .payload = "%2566ixture%2Ftoken",
+        .variants = .{ "%66ixture/token", "fixture/token", "%66ixture%2Ftoken", "%2566ixture/token" },
+    };
+}
+
 var attack_payload: []const u8 = "";
 var attack_requests: std.atomic.Value(u32) = .init(0);
 var request_log: [4096]u8 = undefined;
@@ -367,5 +375,83 @@ test "security KP50-6: percent-encoded credentials are redacted from model_type"
         try expectAbsent(text, encoded_percent);
         try expectAbsent(text, "[redacted]25");
     }
+    try std.testing.expect(std.mem.indexOf(u8, err_out.written(), "[redacted]") != null);
+}
+
+// KR66 finding 2: independent character depths must not defeat containment.
+test "security KR66-2: mixed-depth hub credentials are refused in automatic redirects" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = reflectedRedirectFixture;
+    fake.start();
+    defer fake.stopServer();
+    var client = @import("pull_http.zig").client(a, std.testing.io);
+    defer client.deinit();
+    const hub: Auth = .{ .endpoint = try fake.endpoint(a), .bearer = "Bearer " ++ literal_token, .source = "HF_TOKEN" };
+    try redirectAttack(a, &client, hub, mixedDepthAttack());
+}
+
+test "security KR66-2: mixed-depth hub credentials are refused in tree paths" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = reflectedTreeFixture;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr66-mixed-tree-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try treeAttack(a, io, &fake, root, mixedDepthAttack());
+}
+
+test "security KR66-2: mixed-depth hub credentials are refused in EXLR8 HEAD redirects" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = headRedirectFixture;
+    fake.start();
+    defer fake.stopServer();
+    const hub: Auth = .{ .endpoint = try fake.endpoint(a), .bearer = "Bearer " ++ literal_token, .source = "HF_TOKEN" };
+    var client = @import("pull_http.zig").client(a, std.testing.io);
+    defer client.deinit();
+    const attack = mixedDepthAttack();
+    resetAttack(attack.payload);
+    const authority = try std.fmt.allocPrint(a, "127.0.0.1:{d}", .{fake.port});
+    head_location = try std.fmt.allocPrint(a, "http://{s}/storage?credential={s}", .{ authority, attack.payload });
+    requests_after_head.store(0, .monotonic);
+    const result = runs.resolve(a, &client, hub, try std.fmt.allocPrint(a, "{s}/head", .{hub.endpoint}));
+    var caught: ?anyerror = null;
+    if (result) |_| {} else |err| caught = err;
+    try std.testing.expect(caught != null);
+    try std.testing.expectEqual(error.HubCredentialRedirect, caught.?);
+    try std.testing.expectEqual(@as(u32, 0), requests_after_head.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), attack_requests.load(.monotonic));
+    try expectAttackAbsent(attack, "", "");
+}
+
+test "security KR66-2: mixed-depth hub credentials are redacted from model_type" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const attack = mixedDepthAttack();
+    resetAttack(attack.payload);
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr66-mixed-model-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try envWithToken(a, &fake, literal_token);
+    fake.config = try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\"}}", .{attack.payload});
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try expectAttackAbsent(attack, out.written(), err_out.written());
+    try std.testing.expectEqual(@as(u32, 0), attack_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), fake.weight_requests.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, err_out.written(), "[redacted]") != null);
 }
