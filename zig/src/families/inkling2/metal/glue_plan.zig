@@ -7,6 +7,67 @@ pub const intermediate = 1152;
 pub const top_k = 8;
 pub const ar_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 
+pub const Launch = enum {
+    embed_norm,
+    ar,
+    conv_static,
+    conv_dynamic,
+    router,
+    swiglu,
+    logits,
+    expert_pick,
+    expert_combine,
+    route_scores,
+    route_select,
+
+    pub fn symbol(l: Launch) []const u8 {
+        return switch (l) {
+            .embed_norm => "tf_inkling2_embed_norm",
+            .ar => "tf_inkling2_ar",
+            .conv_static => "tf_inkling2_conv_static",
+            .conv_dynamic => "tf_inkling2_conv_dynamic",
+            .router => "tf_inkling2_router",
+            .swiglu => "tf_inkling2_swiglu",
+            .logits => "tf_inkling2_logits",
+            .expert_pick => "tf_inkling2_expert_pick",
+            .expert_combine => "tf_inkling2_expert_combine",
+            .route_scores => "tf_inkling2_route_scores",
+            .route_select => "tf_inkling2_route_select",
+        };
+    }
+    pub fn label(l: Launch) []const u8 {
+        return switch (l) {
+            .embed_norm => "metal inkling2 glue embed_norm tf_inkling2_embed_norm",
+            .ar => "metal inkling2 glue ar tf_inkling2_ar",
+            .conv_static => "metal inkling2 glue conv_static tf_inkling2_conv_static",
+            .conv_dynamic => "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
+            .router => "metal inkling2 glue router tf_inkling2_router",
+            .swiglu => "metal inkling2 glue swiglu tf_inkling2_swiglu",
+            .logits => "metal inkling2 glue logits tf_inkling2_logits",
+            .expert_pick => "metal inkling2 glue expert_pick tf_inkling2_expert_pick",
+            .expert_combine => "metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+            .route_scores => "metal inkling2 glue route_scores tf_inkling2_route_scores",
+            .route_select => "metal inkling2 glue route_select tf_inkling2_route_select",
+        };
+    }
+    pub fn threads(l: Launch) u32 {
+        return switch (l) {
+            .ar => 576,
+            .embed_norm, .conv_dynamic, .router, .route_scores => 256,
+            .conv_static, .swiglu, .logits, .expert_pick, .expert_combine, .route_select => 32,
+        };
+    }
+    pub fn tgMemory(l: Launch) u32 {
+        return switch (l) {
+            .embed_norm => 48,
+            .ar => 720,
+            .conv_dynamic => 128,
+            .router, .route_select => 512,
+            .conv_static, .swiglu, .logits, .expert_pick, .expert_combine, .route_scores => 0,
+        };
+    }
+};
+
 pub const Kind = enum {
     embed_norm,
     ar,

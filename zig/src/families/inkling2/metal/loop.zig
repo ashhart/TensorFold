@@ -29,15 +29,15 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var messages_rms = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_rms", false);
+        var messages_rms = try mtl.Pipeline.init(device, lib, plan.Launch.rms.symbol(), false);
         errdefer messages_rms.deinit();
-        var messages = try mtl.Pipeline.init(device, lib, plan.Kind.messages.symbol(), false);
+        var messages = try mtl.Pipeline.init(device, lib, plan.Launch.messages.symbol(), false);
         errdefer messages.deinit();
-        const gate_pipeline = try mtl.Pipeline.init(device, lib, plan.Kind.gates.symbol(), false);
+        const gate_pipeline = try mtl.Pipeline.init(device, lib, plan.Launch.gates.symbol(), false);
         errdefer gate_pipeline.deinit();
-        const zeta = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_zeta", false);
+        const zeta = try mtl.Pipeline.init(device, lib, plan.Launch.zeta.symbol(), false);
         errdefer zeta.deinit();
-        const blend = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_blend", false);
+        const blend = try mtl.Pipeline.init(device, lib, plan.Launch.blend.symbol(), false);
         errdefer blend.deinit();
         const rms_inv = try device.buffer(256 * 2 * @sizeOf(f32), mtl.ResourceOptions.shared);
         errdefer rms_inv.deinit();

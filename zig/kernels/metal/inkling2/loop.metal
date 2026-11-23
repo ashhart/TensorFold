@@ -155,6 +155,7 @@ kernel void tf_inkling2_loop_zeta(
 }
 
 // The third: each output's forget and gain dots over zeta in rank order, then the four-step blend.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_loop_blend(
     const device float* h [[buffer(0)]], const device float* m [[buffer(1)]],
     const device bfloat* zeta [[buffer(2)]], const device bfloat* forget [[buffer(3)]],

@@ -11,17 +11,25 @@ fn near(want: f64, got: f64) !void {
 }
 
 test "glue entries have one shader, symbol, unique launch record and honest scalar reservation" {
-    for (std.enums.values(p.Kind), records) |kind, record| {
-        try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+    const launches = std.enums.values(p.Launch);
+    try t.expectEqual(launches.len, records.len);
+    try t.expectEqual(records.len, std.mem.count(u8, shader, "kernel void "));
+    for (launches, records) |launch, record| {
+        try t.expectEqualStrings(launch.label(), record.name);
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, launch.symbol()));
+        try t.expectEqual(launch.threads(), record.threads);
         try t.expectEqual(record.threads, record.reserved);
+        try t.expectEqual(launch.tgMemory(), record.tg_memory);
     }
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
-    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
-    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
-    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.router)].threads);
-    try t.expectEqual(@as(u32, 512), records[@backingInt(p.Kind.router)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Launch.conv_dynamic)].threads);
+    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Launch.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Launch.router)].threads);
+    try t.expectEqual(@as(u32, 512), records[@backingInt(p.Launch.router)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Launch.route_scores)].threads);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Launch.route_select)].threads);
+    try t.expectEqual(@as(u32, 512), records[@backingInt(p.Launch.route_select)].tg_memory);
 }
 
 test "shape admission fixes Mini's hidden and routed dimensions" {

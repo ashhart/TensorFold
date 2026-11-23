@@ -11,20 +11,59 @@ pub const message_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const RowsArgs = extern struct { rows: u32 };
 
 pub const Role = enum(u8) { q, k, v, mlp };
+pub const Launch = enum {
+    rms,
+    messages,
+    gates,
+    zeta,
+    blend,
+
+    pub fn symbol(l: Launch) []const u8 {
+        return switch (l) {
+            .rms => "tf_inkling2_loop_rms",
+            .messages => "tf_inkling2_loop_messages",
+            .gates => "tf_inkling2_loop_gates",
+            .zeta => "tf_inkling2_loop_zeta",
+            .blend => "tf_inkling2_loop_blend",
+        };
+    }
+    pub fn label(l: Launch) []const u8 {
+        return switch (l) {
+            .rms => "metal inkling2 loop rms tf_inkling2_loop_rms",
+            .messages => "metal inkling2 loop messages tf_inkling2_loop_messages",
+            .gates => "metal inkling2 loop gates tf_inkling2_loop_gates",
+            .zeta => "metal inkling2 loop zeta tf_inkling2_loop_zeta",
+            .blend => "metal inkling2 loop blend tf_inkling2_loop_blend",
+        };
+    }
+    pub fn threads(l: Launch) u32 {
+        return switch (l) {
+            .blend => 32,
+            .rms, .messages, .gates, .zeta => 256,
+        };
+    }
+    pub fn tgMemory(l: Launch) u32 {
+        return switch (l) {
+            .rms => 64,
+            .messages, .gates => 80,
+            .zeta, .blend => 0,
+        };
+    }
+};
 pub const Kind = enum {
     messages,
     gates,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
-            .messages => "tf_inkling2_loop_messages",
-            .gates => "tf_inkling2_loop_gates",
+            .messages => Launch.messages.symbol(),
+            .gates => Launch.gates.symbol(),
         };
     }
     pub fn label(k: Kind) []const u8 {
         return switch (k) {
-            .messages => "metal inkling2 loop messages tf_inkling2_loop_messages",
-            .gates => "metal inkling2 loop gates tf_inkling2_loop_gates",
+            .messages => Launch.messages.label(),
+            .gates => Launch.gates.label(),
         };
     }
 };

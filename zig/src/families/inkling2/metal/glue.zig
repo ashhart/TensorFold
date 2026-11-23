@@ -32,37 +32,26 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [11]mtl.Pipeline = undefined;
+        const launches = std.enums.values(plan.Launch);
+        var pipes: [launches.len]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for ([_][]const u8{
-            "tf_inkling2_embed_norm",
-            "tf_inkling2_ar",
-            "tf_inkling2_conv_static",
-            "tf_inkling2_conv_dynamic",
-            "tf_inkling2_router",
-            "tf_inkling2_swiglu",
-            "tf_inkling2_logits",
-            "tf_inkling2_expert_pick",
-            "tf_inkling2_expert_combine",
-            "tf_inkling2_route_scores",
-            "tf_inkling2_route_select",
-        }, &pipes) |name, *pipe| {
-            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+        for (launches, &pipes) |launch, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, lib, launch.symbol(), false);
             made += 1;
         }
         return .{
-            .embed_norm = pipes[0],
-            .ar = pipes[1],
-            .conv_static = pipes[2],
-            .conv_dynamic = pipes[3],
-            .router = pipes[4],
-            .swiglu = pipes[5],
-            .logits = pipes[6],
-            .expert_pick = pipes[7],
-            .expert_combine = pipes[8],
-            .route_scores = pipes[9],
-            .route_select = pipes[10],
+            .embed_norm = pipes[@backingInt(plan.Launch.embed_norm)],
+            .ar = pipes[@backingInt(plan.Launch.ar)],
+            .conv_static = pipes[@backingInt(plan.Launch.conv_static)],
+            .conv_dynamic = pipes[@backingInt(plan.Launch.conv_dynamic)],
+            .router = pipes[@backingInt(plan.Launch.router)],
+            .swiglu = pipes[@backingInt(plan.Launch.swiglu)],
+            .logits = pipes[@backingInt(plan.Launch.logits)],
+            .expert_pick = pipes[@backingInt(plan.Launch.expert_pick)],
+            .expert_combine = pipes[@backingInt(plan.Launch.expert_combine)],
+            .route_scores = pipes[@backingInt(plan.Launch.route_scores)],
+            .route_select = pipes[@backingInt(plan.Launch.route_select)],
             .route_dots = try device.buffer((router_fused_min_rows - 1) * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }

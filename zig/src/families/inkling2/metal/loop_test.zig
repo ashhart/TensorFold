@@ -10,13 +10,20 @@ fn near(want: f64, got: f64) !void {
 }
 
 test "loop entries have unique symbols, launch records and disabled FP contraction" {
-    for (std.enums.values(p.Kind), records) |kind, record| {
-        try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
-        try t.expectEqual(@as(u32, 256), record.threads);
+    const launches = std.enums.values(p.Launch);
+    try t.expectEqual(launches.len, records.len);
+    try t.expectEqual(records.len, std.mem.count(u8, shader, "kernel void "));
+    for (launches, records) |launch, record| {
+        try t.expectEqualStrings(launch.label(), record.name);
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, launch.symbol()));
+        try t.expectEqual(launch.threads(), record.threads);
         try t.expectEqual(record.threads, record.reserved);
-        try t.expectEqual(p.geometry(kind, .{ .rows = 1, .n = 1, .k = 1 }).tg_memory, record.tg_memory);
+        try t.expectEqual(launch.tgMemory(), record.tg_memory);
     }
+    try t.expectEqualStrings(p.Launch.messages.label(), p.Kind.messages.label());
+    try t.expectEqualStrings(p.Launch.gates.label(), p.Kind.gates.label());
+    try t.expectEqual(p.geometry(.messages, .{ .rows = 1, .n = 1, .k = 1 }).tg_memory, records[@backingInt(p.Launch.messages)].tg_memory);
+    try t.expectEqual(p.geometry(.gates, .{ .rows = 1, .n = 1, .k = 1 }).tg_memory, records[@backingInt(p.Launch.gates)].tg_memory);
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_LOOP_SCALE = 0x1.555556p-6f") != null);
     try t.expect(std.mem.indexOf(u8, shader, "LoopMathSpecMissing") == null);
