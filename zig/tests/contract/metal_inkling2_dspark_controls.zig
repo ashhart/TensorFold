@@ -7,15 +7,15 @@ fn edit(kind: Kind) Edit {
     return switch (kind) {
         .init_rows => .{ .from = "rows[row * DSP_H + d] = src[d];", .to = "rows[row * DSP_H + d] = mask[d];" },
         .fuse_taps => .{ .from = "alpha[j] = float(bfloat(scores[j] / sum));", .to = "alpha[j] = scores[j] / sum;" },
-        .block_qkv => .{ .from = "const float rotated = d < 64 ? x * cs - other * sn : other * sn + x * cs;", .to = "const float rotated = d < 64 ? x * cs - other * sn : x * sn + other * cs;" },
-        .context_kv => .{ .from = "keys[at] = bfloat(d < 64 ? x * cs - other * sn : other * sn + x * cs);", .to = "keys[at] = bfloat(d < 64 ? x * cs - other * sn : x * sn + other * cs);" },
-        .attention => .{ .from = "const uint first = max(a.from, a.local && a.committed > 1024 ? a.committed - 1024 : 0);", .to = "const uint first = a.from;" },
+        .block_qkv => .{ .from = "const float rotated = d < 64u ? x * cs - other * sn : other * sn + x * cs;", .to = "const float rotated = d < 64u ? x * cs - other * sn : x * sn + other * cs;" },
+        .context_kv => .{ .from = "keys[at] = bfloat(d < 64u ? x * cs - other * sn : other * sn + x * cs);", .to = "keys[at] = bfloat(d < 64u ? x * cs - other * sn : x * sn + other * cs);" },
+        .attention => .{ .from = "const uint first = max(from, a.local && committed > 1024u ? committed - 1024u : 0u);", .to = "const uint first = from;" },
         .residual_norm => .{ .from = "normalized[at] = bfloat(sigma * scale * float(weight[d]));", .to = "normalized[at] = bfloat(float(new_residual[at]) * scale * float(weight[d]));" },
         .swiglu => .{ .from = "out[i] = bfloat((gate / (1.0f + exp(-gate))) * float(u[i]));", .to = "out[i] = bfloat(gate * float(u[i]));" },
-        .kappa => .{ .from = "sum += float(y[row * DSP_H + d]) * float(weight[channel * 5120 + 512 + d]);", .to = "sum += float(y[row * DSP_H + d]) * float(weight[channel * 5120 + d]);" },
-        .recurrent => .{ .from = "const bfloat left = bfloat(float(gamma) * float(state[i]));", .to = "const float left = float(gamma) * float(state[i]);" },
-        .base => .{ .from = "out[size_t(row) * a.vocab + id] = bfloat(sum);", .to = "out[size_t(row) * a.vocab + id] = bfloat(30.0f * tanh(sum / 30.0f));" },
-        .logits => .{ .from = "const bfloat bias = bfloat(float(beta[i]) + dot);", .to = "const float bias = float(beta[i]) + dot;" },
+        .kappa => .{ .from = "const float wy = float(w_kappa[uint64_t(d) * DSP_RNN + ch]);", .to = "const float wy = float(w_kappa[uint64_t(DSP_H + d) * DSP_RNN + ch]);" },
+        .recurrent => .{ .from = "const bfloat left = bfloat(float(gamma) * float(sh_s[i]));", .to = "const float left = float(gamma) * float(sh_s[i]);" },
+        .base => .{ .from = "static inline void dspark_store_base(device bfloat* out, uint64_t i, float val) { out[i] = bfloat(val); }", .to = "static inline void dspark_store_base(device bfloat* out, uint64_t i, float val) { out[i] = bfloat(30.0f * tanh(val / 30.0f)); }" },
+        .logits => .{ .from = "const bfloat bias = bfloat(bval + dots[s]);", .to = "const float bias = bval + dots[s];" },
     };
 }
 
