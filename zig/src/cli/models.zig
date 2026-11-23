@@ -90,7 +90,7 @@ pub fn chooseForStart(a: Allocator, io: std.Io, env: ?*const std.process.Environ
         .drafter = if (drafting) try pinned(e.drafter.?, e.drafter_revision.?, a) else null,
         .model_dir = main[0],
         .drafter_dir = if (drafting) draft[0] else null,
-        .download_bytes = e.download,
+        .download_bytes = if (drafting) e.download else e.download_main orelse e.download,
         .cached = main[1] and draft[1],
     };
 }

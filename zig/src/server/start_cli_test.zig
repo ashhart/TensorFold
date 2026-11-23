@@ -30,6 +30,7 @@ const Run = struct {
     self_exe: ?[]const u8 = null,
     machine: machine_mod.Machine = .{ .backend = .metal, .memory = 96 * gib, .gpu_limit = 64 * gib },
     pull_code: u8 = 0,
+    catalog: []const registry.Entry = &entries,
     cancel_in_pull: bool = false,
     pulls: std.ArrayList([]const u8) = .empty,
 
@@ -63,7 +64,7 @@ const Run = struct {
             .self_exe = r.self_exe,
             .signals = r.cancel_in_pull,
             .given = r.machine,
-            .registry = &entries,
+            .registry = r.catalog,
             .override = r.root,
             .pull = .{ .ctx = r, .run = fakePull },
         };
@@ -352,6 +353,39 @@ test "start CLI: pre-M5 Metal starts Gemma-style rows without resolving pulling 
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Drafter download") == null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Pulling Org/Model@" ++ revision) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), r.root) == null);
+}
+
+test "start CLI: pre-M5 Gemma consent counts only the selected model bytes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    r.machine.setChip("Apple M4 Max");
+    const gemma = for (registry.entries) |entry| {
+        if (std.mem.eql(u8, entry.title, "Gemma 4 31B")) break entry;
+    } else return error.TestUnexpectedResult;
+    const selected = [_]registry.Entry{gemma};
+    r.catalog = &selected;
+    try std.testing.expectEqual(@as(u8, 2), try r.command(&.{"--check"}));
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "18412016676 bytes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "17.1 GiB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "21483957916 bytes") == null);
+    try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
+
+    const plain = (try registry.choose(a, std.testing.io, &r.env, r.root, &selected, &r.machine)).?;
+    try std.testing.expect(plain.drafter == null);
+    try std.testing.expectEqual(@as(u64, 18_412_016_676), plain.download_bytes);
+    r.machine.setChip("Apple M5 Max");
+    const m5 = (try registry.choose(a, std.testing.io, &r.env, r.root, &selected, &r.machine)).?;
+    try std.testing.expect(m5.drafter != null);
+    try std.testing.expectEqual(@as(u64, 21_483_957_916), m5.download_bytes);
+    r.machine = .{ .backend = .cuda, .memory = 96 * gib, .gpu_limit = 64 * gib };
+    r.machine.setChip("NVIDIA GB10");
+    const cuda = (try registry.choose(a, std.testing.io, &r.env, r.root, &selected, &r.machine)).?;
+    try std.testing.expect(cuda.drafter != null);
+    try std.testing.expectEqual(@as(u64, 21_483_957_916), cuda.download_bytes);
 }
 
 test "start CLI: CUDA still resolves pulls and passes the selected drafter" {
