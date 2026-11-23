@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 on Metal: the EXL3 register-only decode body now serves every speculative window's fused gate+up call, up to the eight-token window; a four-draft window no longer switches to the tensor-unit compact body for its seventy rows, so a window's rows keep the rounding order a one-row decode has (one- to three-draft windows and the reference prompts keep their tokens).
 - Metal: the row projection picks its narrow or wide kernel per chip (generation plus Pro/Max/Ultra), so an M5 Max no longer runs 8-row and wider windows on the kernel that is slower there; M5 Ultra and unlisted chips are unchanged, tokens unchanged (refs #3396). Thanks to @Spectre056 for the M5 Max measurements.
 - Metal: a stream whose setup fails partway no longer leaves the prompt cache smaller by its bytes in Llama, Ripple, Spark2.5, Flint, Step-5 and MiniMax-M3.
 
