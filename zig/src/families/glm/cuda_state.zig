@@ -11,6 +11,7 @@ const sparse = @import("cuda_sparse.zig");
 const experts = @import("cuda_experts.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const moe = @import("cuda_moe.zig");
+const pair_layout = @import("cuda_pair_layout.zig");
 const glue = @import("cuda_glue.zig");
 const mlp = @import("cuda_mlp.zig");
 const kda_block = @import("cuda_kda_block.zig");
@@ -65,29 +66,61 @@ pub fn mlaLayers(w: *const weights.Weights) usize {
     return nd;
 }
 
-/// One cache's part of a page: its latent rows, then their pools' keys.
-fn pageCacheBytes(c: anytype) usize {
-    return page_rows * c.kv_lora * 2 + page_rows / sparse.pool * c.i_dim * 2;
-}
+/// The latent caches' shape: their count (DSA layers and the MTP layer's), a row's values, index key dims, pool rows.
+pub const Shape = struct {
+    caches: usize,
+    row: usize, // kv_lora + qk_rope: 512 on GLM-5.3-Flash
+    i_dim: usize,
+    pool: usize, // rows a pooled key sums: 4 on GLM-5.3-Flash
+    keys: usize, // index key and gate rows a cache holds: a ring of index_ring, or maxInt for a whole sequence's
 
-/// TF_GLM_KV_HOST: one cache's pooled keys on a device page of their own, and that page's bytes.
-fn pkCacheBytes(c: anytype) usize {
-    return page_rows / sparse.pool * c.i_dim * 2;
+    pub fn of(c: anytype, caches: usize) Shape {
+        return .{ .caches = caches, .row = c.latentRow(), .i_dim = c.i_dim, .pool = c.kpool, .keys = index_ring };
+    }
+
+    /// One cache's latent rows on a page, and their pooled keys.
+    pub fn latentBytes(s: Shape) usize {
+        return page_rows * s.row * 2;
+    }
+
+    pub fn pkBytes(s: Shape) usize {
+        return page_rows / s.pool * s.i_dim * 2;
+    }
+
+    /// One cache's part of a page: its latent rows, then their pools' keys.
+    pub fn cacheBytes(s: Shape) usize {
+        return s.latentBytes() + s.pkBytes();
+    }
+
+    /// A page's bytes: every cache's part, padded to whole latent rows (page_rows a page) and whole token bytes.
+    pub fn pageBytes(s: Shape) u64 {
+        const unit = s.row * 2 / std.math.gcd(s.row * 2, page_rows) * page_rows;
+        return (s.caches * s.cacheBytes() + unit - 1) / unit * unit;
+    }
+
+    /// TF_GLM_KV_HOST: every cache's pooled keys on a device page of their own.
+    pub fn pkPageBytes(s: Shape) u64 {
+        return s.caches * s.pkBytes();
+    }
+};
+
+pub fn shapeOf(w: *const weights.Weights) Shape {
+    return Shape.of(&w.config, mlaLayers(w) + 1);
 }
 
 pub fn pkPageBytes(w: *const weights.Weights) u64 {
-    return (mlaLayers(w) + 1) * pkCacheBytes(&w.config);
+    return shapeOf(w).pkPageBytes();
 }
 
-/// A page's bytes: every DSA layer's part, then the MTP layer's (13,056 a row on GLM-5.3-Flash).
+/// A page's bytes: every DSA layer's part, then the MTP layer's.
 pub fn pageBytes(w: *const weights.Weights) u64 {
-    return (mlaLayers(w) + 1) * pageCacheBytes(&w.config);
+    return shapeOf(w).pageBytes();
 }
 
 /// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through the table.
-fn onPages(x: *dsa_block.Caches, c: anytype, p: Paged, table: u64, j: usize) void {
-    x.lc = p.kv + j * pageCacheBytes(c);
-    x.pk = if (p.pk != 0) p.pk + j * pkCacheBytes(c) else x.lc + page_rows * c.kv_lora * 2;
+fn onPages(x: *dsa_block.Caches, s: Shape, p: Paged, table: u64, j: usize) void {
+    x.lc = p.kv + j * s.cacheBytes();
+    x.pk = if (p.pk != 0) p.pk + j * s.pkBytes() else x.lc + s.latentBytes();
     x.pks = p.pk_page;
     x.pt = table;
     x.ps = p.page_bytes;
@@ -101,14 +134,14 @@ fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize
     const nk = w.layers.len - nd;
     const n = s.kda.len() * c.kda_dim;
     const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
-    const pk_rows = capacity / sparse.pool + 2;
-    const ring_rows = @min(capacity, index_ring);
+    const pk_rows = capacity / c.kpool + 2;
+    const ring_rows = @min(capacity, shapeOf(w).keys);
     const rows: usize = @intFromBool(table == null); // on pages a cache's rows are the pool's
     var sizes: std.ArrayList(usize) = .empty;
     errdefer sizes.deinit(gpa);
     try sizes.appendSlice(gpa, &.{ 4, nk * 3 * 3 * n * 2, 2 * nk * s.kda.len() * kda.dk * kda.dv * 4, nk * window_rows * kw * 2 });
     try sizes.appendSlice(gpa, &.{ nk * window_rows * n * 4, nk * window_rows * n * 2, nk * window_rows * n * 4, nk * window_rows * s.kda.len() * 4 });
-    const lc_bytes = try latent.cacheBytes(capacity, c.kv_lora, kv8);
+    const lc_bytes = try latent.cacheBytes(capacity, c.latentRow(), kv8);
     for (0..nd + 1) |_| try sizes.appendSlice(gpa, &.{ rows * lc_bytes, ring_rows * c.i_dim * 2, ring_rows * c.i_dim * 2, rows * pk_rows * c.i_dim * 2 });
     try sizes.appendSlice(gpa, &.{ 4, c.hidden * 2 }); // MTP position and sequence-owned first-draft row
     if (table) |t| try sizes.append(gpa, t * 4);
@@ -121,10 +154,12 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
     const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
+    const row = c.latentRow(); // kv_a: the latent, then its roped key columns
+    const qh = c.nope + c.rope; // a q head
     return .{
-        .{ kw, c.hidden },                   .{ n, c.kda_dim },                    .{ c.hidden, n },
-        .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
-        .{ c.i_heads * c.i_dim, c.q_lora },  .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
+        .{ kw, c.hidden },                  .{ n, c.kda_dim },                    .{ c.hidden, n },
+        .{ c.q_lora + row, c.hidden },      .{ s.mla.len() * qh, c.q_lora },      .{ c.i_dim + c.i_heads, c.hidden },
+        .{ c.i_heads * c.i_dim, c.q_lora }, .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
         .{ c.hidden, 2 * c.hidden }, // the MTP head's eh_proj
         if (c.exl3) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
         if (c.exl3) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
@@ -198,17 +233,22 @@ pub const Buffers = struct {
     part: u64, // fp32 [rows][dims]: this rank's partial rows a split exchange sends from
 
     pub fn init(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize) !Buffers {
-        return make(d, w, rows, prefill, capacity, rows, prefill, null);
+        return make(d, w, rows, prefill, capacity, rows, prefill, null, false);
+    }
+
+    /// A paired step's first chunk with room for both chunks' picks and grouped plan.
+    pub fn initPairExperts(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
+        return make(d, w, rows, true, capacity, rows, true, null, true);
     }
 
     /// A shared window's scratch: `rows` rows of several streams, each one's attention and KDA chain on `window_rows`.
     pub fn initShared(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
-        return make(d, w, rows, false, capacity, window_rows, true, null);
+        return make(d, w, rows, false, capacity, window_rows, true, null, false);
     }
 
-    /// A paired step's second chunk: its own rows across sites and streams, and `of`'s scratch for one site's work.
-    pub fn initTwin(d: *const cuda.Driver, w: *const weights.Weights, of: *const Buffers, capacity: usize) !Buffers {
-        return make(d, w, of.rows, of.prefill, capacity, of.rows, of.prefill, of);
+    /// A paired step's second chunk; `joint` also owns routed weights and expert temporaries.
+    pub fn initTwin(d: *const cuda.Driver, w: *const weights.Weights, of: *const Buffers, capacity: usize, joint: bool) !Buffers {
+        return make(d, w, of.rows, of.prefill, capacity, of.rows, of.prefill, of, joint);
     }
 
     /// The fields a twin holds apart, by their index in make's sizes (make reads the fields from these indexes too).
@@ -216,14 +256,8 @@ pub const Buffers = struct {
     /// make's size count when twin_at's indexes were last checked: adding or removing a size fails the build.
     const twin_checked = 76;
 
-    /// Whether make's size `i` is one a twin holds apart.
-    fn twinHolds(i: usize) bool {
-        inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| if (@field(twin_at, f) == i) return true;
-        return false;
-    }
-
     /// `seg`: a stream's most attention rows; `own_proj`: its KDA projection rows are here, not in the state.
-    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool, twin: ?*const Buffers) !Buffers {
+    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool, twin: ?*const Buffers, joint: bool) !Buffers {
         const c = &w.config;
         const s = &w.share;
         const D: usize = c.hidden;
@@ -237,39 +271,46 @@ pub const Buffers = struct {
         const sh = s.shared.len();
         const slots: usize = c.topk + 1;
         const pairs = rows * slots;
+        const plan_pairs = if (joint) 2 * pairs else pairs;
         const count: usize = c.experts;
         const lw: usize = c.kv_lora;
+        const row: usize = c.latentRow(); // the latent, then its roped key columns
+        const qh: usize = c.nope + c.rope; // a q head
         const part_rows = if (prefill) @min(rows, dsa_block.prompt_att_rows) else seg;
         const nch = latent.chunksFor(@min(capacity, dense_reach) + seg);
-        const partial_rows = @max(nch * part_rows, latent.chunksFor(sparse.width) * seg); // dense calls, or one sparse
-        const np_max = capacity / sparse.pool;
+        const width: usize = c.keyWidth(); // a token list (sparse.Geometry.width)
+        const partial_rows = @max(nch * part_rows, latent.chunksFor(width) * seg); // dense calls, or one sparse
+        const np_max = capacity / c.kpool;
         const sel = selectLs(rows, prefill, seg, np_max);
         var mm: usize = 4;
         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
         for (b16Shapes(w)) |sh_| mm = @max(mm, b16.partBytes(@min(rows, b16.rows_from - 1), sh_[0], sh_[1]));
-        const x3: [4]usize = if (c.exl3) exl3.scratchBytes(rows, D, ew, prefill, w.exl3_shx) else @splat(4);
+        // EXL3 experts: each layer's path (the prompt kernels', or the grouped one) sizes it
+        var x3: [4]usize = @splat(4);
+        for (w.layers) |l| if (l.ffn == .moe) if (l.ffn.moe.exl3) |x| exl3.mostScratch(&x3, rows, D, ew, prefill, x);
+        if (w.mtp) |m| if (m.layer.ffn == .moe) if (m.layer.ffn.moe.exl3) |x| exl3.mostScratch(&x3, rows, D, ew, prefill, x);
         var split = false; // a KDA stack in two parts moves each part's rows through one more buffer
         for (w.layers) |l| split = split or (l.mixer == .kda and l.mixer.kda.proj == .split);
-        const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
+        const hist_len = if (plan_pairs > cuda.grouped.small) (plan_pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
         const sizes: [twin_checked]usize = .{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
             rows * S * 4, rows * S * S * 4, glue.hcPartBytes(rows), s.world * rows * D * 4,
             if (own_proj) rows * kw * 2 else 4, rows * n * 2, rows * n * 2, // kproj, ka, kg
             rows * n * 2, rows * n * 4, rows * n * 2, rows * n * 4, // saves out, k, v, g
             rows * LL * 4,                    rows * n * 4,               rows * n * 2, // saves b, wide q, y
-            rows * (c.q_lora + lw) * 2,       rows * c.q_lora * 2,        rows * (c.q_lora / 64) * 4,
-            rows * lw * 2,                    rows * (lw / 64) * 4,       rows * HL * c.nope * 2,
+            rows * (c.q_lora + row) * 2,      rows * c.q_lora * 2,        rows * (c.q_lora / 64) * 4,
+            rows * row * 2,                   rows * (lw / 64) * 4,       rows * HL * qh * 2,
             rows * (c.i_dim + c.i_heads) * 2, rows * c.i_dim * 4,         glue.router_ks * rows * @max(count, c.i_dim) * 4,
-            rows * HL * lw * 2,               rows * HL * lw * 2,         rows * HL * c.v_dim * 2,
+            rows * HL * row * 2,              rows * HL * lw * 2,         rows * HL * c.v_dim * 2,
             rows * c.i_heads * c.i_dim * 2,   partial_rows * HL * lw * 4, partial_rows * HL * 4,
             partial_rows * HL * 4,
             4, // dummy
             @min(seg, sparse.select_rows) * np_max * 4,
             sel.bytes, // ls: the list rows, and on a decode's buffers its select's bit words
             rows * sparse.select_list * 4,
-            (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
+            (if (prefill) rows + s.world else rows) * (c.i_topk / c.kpool) * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
-            rows * sparse.width * 4,
+            rows * width * 4,
             rows * 4,
             mm,
             4, // a prompt block's position
@@ -277,10 +318,10 @@ pub const Buffers = struct {
             rows * 2 * mw * 2,
             rows * mw * 2,
             rows * (mw / 64) * 4,
-            rows * count * 4, pairs * 4, pairs * 4, pairs * 4, // mlog, pick, wts, members
-            experts.maxItems(pairs, count + 1, experts.tile) * 3 * 4, // items (the decode tile's count bounds the prompt's)
-            8,              @max(1, pairs) * 4, hist_len * 4, // counts, rank, hist
-            pairs * ew * 2, pairs * D * 4,      rows * 2 * sh * 2,
+            rows * count * 4, plan_pairs * 4, pairs * 4, plan_pairs * 4, // mlog, pick, wts, members
+            experts.maxItems(pairs, count + 1, experts.tile) * 3 * 4, // items (one chunk's decode bound covers the joint 128-pair plan)
+            8,              @max(1, plan_pairs) * 4, hist_len * 4, // counts, rank, hist
+            pairs * ew * 2, pairs * D * 4,           rows * 2 * sh * 2,
             rows * sh * 2,
             rows * (sh / 64) * 4, rows * D * 4, // sxs, sy
             rows * D * 2,         rows * D * 2,
@@ -292,7 +333,7 @@ pub const Buffers = struct {
         };
         var held = sizes;
         if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
-            if (!twinHolds(i)) bytes.* = 0;
+            if (!pair_layout.twinHolds(twin_at, i, joint)) bytes.* = 0;
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &held, &p);
@@ -352,6 +393,11 @@ pub const Buffers = struct {
             var t = of.*;
             t.arena = out.arena;
             inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| @field(t, f) = @field(out, f);
+            if (joint) {
+                t.moe.wts = out.moe.wts;
+                t.moe.eact = out.moe.eact;
+                t.moe.ey = out.moe.ey;
+            }
             return t;
         }
         return out;
@@ -390,7 +436,8 @@ pub const State = struct {
     rec_layer: usize,
     proj_layer: usize,
     proj_row: usize,
-    ring_rows: usize, // index rows each ring holds: min(capacity, index_ring)
+    ring_rows: usize, // index rows each ring holds: min(capacity, Shape.keys)
+    pool: usize, // rows a pooled key sums: a rebase keeps whole pools
     ring_row: usize, // bytes of one index row
     rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
     base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
@@ -428,7 +475,7 @@ pub const State = struct {
         const nd = mlaLayers(w);
         const n = s.kda.len() * c.kda_dim;
         const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
-        const pk_rows = capacity / sparse.pool + 2;
+        const pk_rows = capacity / c.kpool + 2;
         const sizes = try stateSizes(gpa, w, capacity, kv8, if (paged) |q| q.pages else null);
         defer gpa.free(sizes);
         const p = try gpa.alloc(u64, sizes.len);
@@ -440,11 +487,11 @@ pub const State = struct {
         @memset(cur, 0);
         const caches = try gpa.alloc(dsa_block.Caches, nd);
         errdefer gpa.free(caches);
-        for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ls = if (kv8) p[8 + 4 * j] + capacity * c.kv_lora else 0, .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
+        for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ls = if (kv8) p[8 + 4 * j] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
         const rings = try gpa.alloc(u64, 2 * (nd + 1));
         for (0..nd + 1) |j| rings[2 * j ..][0..2].* = .{ p[9 + 4 * j], p[10 + 4 * j] };
-        const ring_rows = @min(capacity, index_ring);
-        var st: State = .{ .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ls = if (kv8) p[8 + 4 * nd] + capacity * c.kv_lora else 0, .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .prompt_hidden = p[13 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
+        const ring_rows = @min(capacity, shapeOf(w).keys);
+        var st: State = .{ .pool = c.kpool, .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ls = if (kv8) p[8 + 4 * nd] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .prompt_hidden = p[13 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
         if (paged) |q| {
             st.table = p[14 + 4 * nd];
             st.capacity = 0; // no rows until a stream's pages are mapped
@@ -455,8 +502,9 @@ pub const State = struct {
 
     /// A paged sequence's caches on the pages of `p` (the engine's own, made before its pool, placed when it is made).
     pub fn place(st: *State, w: *const weights.Weights, p: Paged) void {
-        for (st.caches, 0..) |*x, j| onPages(x, &w.config, p, st.table, j);
-        onPages(&st.mtp_caches, &w.config, p, st.table, st.caches.len);
+        const s = shapeOf(w);
+        for (st.caches, 0..) |*x, j| onPages(x, s, p, st.table, j);
+        onPages(&st.mtp_caches, s, p, st.table, st.caches.len);
     }
 
     pub fn deinit(st: *State) void {
@@ -519,7 +567,7 @@ pub const State = struct {
         const at = if (mtp) st.mtp_len else st.pos;
         const old = if (mtp) st.mtp_base else st.base;
         const floor = if (mtp) at -| window_rows else at;
-        const nb = floor / sparse.pool * sparse.pool;
+        const nb = floor / st.pool * st.pool;
         const keep = (at - nb) * st.ring_row;
         const d = st.arena.buf.d;
         const first: usize = if (mtp) st.caches.len else 0;

@@ -23,7 +23,7 @@ pub const Wait = enum {
     ledger_bytes,
     /// The family's own pool has no room for it now (Info.admit).
     pool_room,
-    /// It waits for its prefix's remote fill on another machine (lane_remote.zig).
+    /// It waits for another machine's fill of its prefix (lane_remote.zig).
     remote_fill,
 };
 

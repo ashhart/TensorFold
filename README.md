@@ -36,7 +36,7 @@ Needs glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0). The [run 
 lists the archive's requirements; Windows has [its own guide](docs/WINDOWS.md).
 
 ```sh
-V=1.3.2
+V=1.3.4
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;

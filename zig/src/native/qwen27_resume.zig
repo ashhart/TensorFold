@@ -2,6 +2,10 @@
 const std = @import("std");
 const modes = @import("engine_api").cache_modes;
 const pc = @import("engine_api").prompt_cache;
+/// A stream with no separate salt identity may use standing slot state.
+pub fn unsalted(salt: ?u64) bool {
+    return salt == null;
+}
 
 /// Where a prompt resumes in slot 0: where the slot stands (`here`), back at its rewind point (`back`), or not.
 pub const Resume = union(enum) { none, here: u32, back: u32 };
@@ -80,9 +84,14 @@ pub const Standing = struct {
 
     /// What stream `s` leaves in slot 0 at `at` (`stands`: the slot and its drafter stand there, nothing failed).
     pub fn left(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, stands: bool) void {
+        st.leftLanded(gpa, s, at, s.fill_at.load(.monotonic), stands);
+    }
+
+    /// As `left`, with the prompt rows the pass landed (`landed`): a rewound cancelled pass leaves its cut there.
+    pub fn leftLanded(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, landed: u32, stands: bool) void {
         if (!stands or !plain(s)) return st.deinit(gpa);
         const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
-        const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended, .remote = leftRemote(s) };
+        const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended, .remote = leftRemote(s) };
         st.leave(gpa, l, s.context.items, s.decode_spans);
     }
 
@@ -476,4 +485,9 @@ test "qwen27 resume: the history rewind is needed until two rounded full-context
     try t.expectEqual(@as(usize, 34078), rewindEnd(33792, 34083, 34078));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 0));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 33792));
+}
+
+test "qwen27 resume: a salted stream never uses standing slot state" {
+    try t.expect(unsalted(null));
+    try t.expect(!unsalted(1));
 }

@@ -25,20 +25,20 @@ pub fn cost(r: *Rule, rows: i64, who: Who) !?f64 {
 /// The plain round a copy must beat: roundCost's under plain_guard, else its model on the stream's own rounds.
 pub fn plain(r: *Rule, who: Who) !?f64 {
     if (r.plain_guard) return r.roundCost(0, who);
-    return r.roundCostIn(try r.ownCosts(who), 0, true);
+    return ownPlain(r, try ownCosts(r, who));
 }
 
 /// A lone copy round's time by its copied rows; a stream's first round stays out, as in observeCost.
 pub fn observeCopy(r: *Rule, rows: i64, ms: f64, initializing: bool, who: Who) !void {
     if (rows <= 0 or initializing) return;
-    try r.blend(try copies(r, who), rows, ms);
+    try blend(r, try copies(r, who), rows, ms);
     who.state.*.?.copy_rounds += 1;
 }
 
 /// A round the head's timing keeps out of the stream's own times (no plain_guard): plain's price reads it.
 pub fn observeOwn(r: *Rule, drafts: i64, ms: f64, initializing: bool, who: Who) !void {
     if (drafts < 0 or initializing) return;
-    try r.blend(try r.ownCosts(who), drafts, ms);
+    try blend(r, try ownCosts(r, who), drafts, ms);
 }
 
 fn copies(r: *Rule, who: Who) !*Table {
@@ -46,4 +46,30 @@ fn copies(r: *Rule, who: Who) !*Table {
     const st = &who.state.*.?;
     if (st.copy_ms == null) st.copy_ms = .{};
     return &st.copy_ms.?;
+}
+
+fn ownCosts(r: *Rule, who: Who) !*Table {
+    _ = try r.rates(who);
+    const st = &who.state.*.?;
+    if (st.ms == null) st.ms = .{};
+    return &st.ms.?;
+}
+
+fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
+    const before = table.get(drafts);
+    try table.put(r.gpa, drafts, if (before) |b| b + r.k.cost_rate * (ms - b) else ms);
+}
+
+/// Copy-only plain's old own-table floor model; the shared Rule.roundCost stays unchanged.
+fn ownPlain(r: *const Rule, table: *const Table) ?f64 {
+    if (table.get(0)) |v| return v;
+    const forward = r.family_costs.get(1) orelse return null;
+    var least: ?f64 = null;
+    for (table.slots, 0..) |slot, d| {
+        const ms = slot orelse continue;
+        const fc = r.family_costs.get(@intCast(d + 1)) orelse continue;
+        const beyond = (ms - fc - r.mtp_step_ms * @as(f64, @floatFromInt(d))) / @as(f64, @floatFromInt(d + 1));
+        least = if (least) |l| (if (beyond < l) beyond else l) else beyond;
+    }
+    return forward + @max(0.0, least orelse 0.0);
 }

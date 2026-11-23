@@ -9,6 +9,7 @@ const Ledger = api.load_ledger.Ledger;
 const Requests = api.load_ledger.Requests;
 const Wait = api.Rounds.Wait;
 const Request = api.Request;
+const remote = @import("lane_remote.zig");
 
 const Rig = struct {
     cfg: lanes.Config,
@@ -125,6 +126,48 @@ test "wait reason ledger: a fresh host publishes every reason, each at zero" {
     try std.testing.expectEqual(std.enums.values(Wait).len, r.waiting_by_reason.len);
     for (r.waiting_by_reason) |n| try std.testing.expectEqual(@as(u32, 0), n);
     try std.testing.expectEqual(@as(u32, 0), r.waiting);
+}
+
+/// Another machine's fill that never lands: the queued job's running ticket alone holds it.
+const Held = struct {
+    running: std.atomic.Value(u32) = .init(0),
+
+    fn wants(_: *anyopaque, _: u64, _: u64) bool {
+        return false;
+    }
+    fn fill(_: *anyopaque, _: []const u32, _: u64) anyerror!?remote.Filled {
+        return null;
+    }
+    fn drop(_: *anyopaque, _: @import("prompt_cache.zig").Saved) void {}
+    fn source(p: *Held) remote.Source {
+        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running };
+    }
+};
+
+test "wait reason ledger: a job waiting for another machine's fill is passed over as remote_fill" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 2 }, false);
+    defer rig.deinit();
+    var peer: Held = .{};
+    rig.host.remote = peer.source();
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    defer ledger.detach(false);
+    const ra: Request = .{ .prompt = &second, .max_tokens = 4 };
+    try rig.submit(1, &ra);
+    errdefer ends.closeAll(&rig.host);
+    const job = rig.host.queued.items[0];
+    var ticket: remote.Ticket = .{ .prompt = @constCast(&second), .cached = 0, .host = &rig.host, .source = rig.host.remote.? };
+    job.ticket = &ticket;
+    rig.host.lock();
+    const picked = admit.pick(&rig.host); // the only queued job waits for its fill: none is picked
+    rig.host.unlock();
+    try std.testing.expect(picked == null);
+    const r = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 1), at(r, .remote_fill));
+    try std.testing.expectEqual(@as(u32, 0), at(r, .engine_busy));
+    job.ticket = null;
+    ends.closeAll(&rig.host);
 }
 
 test "wait reason ledger: the reasons sum to waiting through an admission and a cancel while queued" {

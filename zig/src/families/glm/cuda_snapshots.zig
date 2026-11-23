@@ -45,6 +45,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
     if (e.cur.st.pending != 0 or e.cur.st.mtp_len > e.cur.st.pos + @import("cuda_state.zig").window_rows)
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    const profiled = e.prompt_profs[0] != null;
+    const started: i96 = if (profiled) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
     var lease = try pool.take(plan.len);
     errdefer {
@@ -56,6 +58,10 @@ pub fn keepAs(e: anytype, id: u64) !void {
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    if (profiled) {
+        const wall_ms: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(e.io).toNanoseconds() - started)) / 1e6;
+        std.log.info("glm prof snapshot rank={d} slot={d} id={d} pos={d} bytes={d} parts={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, id, e.cur.st.pos, plan.len, plan.count, wall_ms });
+    }
 }
 
 pub fn restore(e: anytype, id: u64) !void {

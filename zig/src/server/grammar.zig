@@ -13,6 +13,51 @@ pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_rege
 
 /// The most bytes a grammar's text may be: xgrammar compiles it under one lock, in time that grows with its square.
 pub const max_text = 512 * 1024;
+pub const max_nesting = 128;
+
+/// Reject recursive-descent inputs before they reach xgrammar's fixed-size compile-thread stack.
+pub fn checkNesting(cx: *Cx, kind: Kind, text_value: []const u8, field: []const u8) errors.Refused!void {
+    if (kind != .grammar and kind != .regex) return;
+    var depth: usize = 0;
+    var quote: ?u8 = null;
+    var escaped = false;
+    var character_class = false;
+    for (text_value) |ch| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (quote) |q| {
+            if (ch == q) quote = null;
+            continue;
+        }
+        if (kind == .grammar and (ch == '"' or ch == '\'')) {
+            quote = ch;
+            continue;
+        }
+        if (kind == .regex) {
+            if (ch == '[' and !character_class) {
+                character_class = true;
+                continue;
+            }
+            if (ch == ']' and character_class) {
+                character_class = false;
+                continue;
+            }
+            if (character_class) continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+            if (depth > max_nesting) return cx.fail(.request, "{s}: nesting exceeds the {d}-level limit", .{ field, max_nesting });
+        } else if (ch == ')') {
+            depth -|= 1;
+        }
+    }
+}
 
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
@@ -158,4 +203,19 @@ test "grammar vocabulary preserves nested text and root precedence" {
         const cfg = (try json.parse(a, c[0])).ok;
         try std.testing.expectEqual(c[1], vocabSize(cfg));
     }
+}
+
+test "grammar and regex nesting is refused before compiler recursion" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    var deep: [max_nesting + 1]u8 = @splat('(');
+    try std.testing.expectError(error.Refused, checkNesting(&cx, .grammar, &deep, "grammar"));
+    try checkNesting(&cx, .json_schema, &deep, "schema");
+    var bounded: [max_nesting]u8 = @splat('(');
+    try checkNesting(&cx, .regex, &bounded, "regex");
+    const literals = "root ::= \"((((((((\"";
+    try checkNesting(&cx, .grammar, literals, "grammar");
+    const regex_class = "[()\\\\(]{2}";
+    try checkNesting(&cx, .regex, regex_class, "regex");
 }

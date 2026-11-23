@@ -195,7 +195,7 @@ pub const Bench = struct {
             const j = blk: {
                 r.mutex.lockUncancelable(r.io);
                 defer r.mutex.unlock(r.io);
-                while (r.head == r.queue.items.len and !r.stop) r.cond.waitUncancelable(r.io, &r.mutex);
+                while (r.head == r.queue.items.len and !r.stop) r.work.waitUncancelable(r.io, &r.mutex);
                 if (r.head == r.queue.items.len) return;
                 r.head += 1;
                 break :blk r.queue.items[r.head - 1];
@@ -207,7 +207,7 @@ pub const Bench = struct {
             };
             j.state.store(if (j.err == null) .done else .failed, .release);
             r.mutex.lockUncancelable(r.io);
-            r.cond.broadcast(r.io);
+            r.finished.broadcast(r.io);
             r.mutex.unlock(r.io);
         }
     }

@@ -167,6 +167,7 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
 
 
     links = access_mod.Links()
+    app.state.access_links = links
 
     qd = quality.load()
 

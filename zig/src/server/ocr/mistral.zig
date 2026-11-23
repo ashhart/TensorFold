@@ -1,6 +1,7 @@
 //! POST /v1/ocr in Mistral's OCR contract: fields and document, then the page loop (docs/api.md OCR: Mistral).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("../errors.zig");
 const images = @import("../images.zig");
@@ -23,14 +24,15 @@ pub const Options = reply.Options;
 /// The most page entries a ``pages`` value may name before expansion (a range counts its length).
 pub const max_page_entries = 1024;
 
-/// What decoding needs from the server: the PDF switch, the URL fetcher and the page budget.
+/// What decoding needs from the server: the reader's geometry, the PDF switch, the URL fetcher and the page budget.
 pub const Facts = struct {
+    geometry: api.ocr.Geometry,
     pdf: bool,
     fetch: ?images.Fetch,
     pages_left: u32,
 
     pub fn of(srv: *const Server) Facts {
-        return .{ .pdf = srv.config.vision_pdf, .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, .pages_left = budget.Pages.init().left };
+        return .{ .geometry = srv.info.ocr.?.geometry, .pdf = srv.config.vision_pdf, .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, .pages_left = budget.Pages.init().left };
     }
 };
 
@@ -40,7 +42,8 @@ pub const Request = struct { options: Options, source: types.Source, doc_size: u
 /// Answers one POST /v1/ocr whose body has been read; a client that leaves gets nothing.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, body: []const u8, gone: anytype) void {
     var fault: Fault = .{ .class = .internal, .message = "" };
-    const out = handle(srv, a, body, gone, &fault) catch |e| switch (e) {
+    const salt = @import("../cache_salt.zig").ofRequest(srv, 0, conn.key_digest);
+    const out = handle(srv, a, body, gone, &fault, salt) catch |e| switch (e) {
         error.Faulted => return reply.sendFault(conn, a, fault),
         error.OutOfMemory => return reply.sendFault(conn, a, .{ .class = .internal, .message = "out of memory" }),
         error.Cancelled => {
@@ -56,7 +59,7 @@ pub fn refuseBody(conn: *Conn, a: Allocator, message: []const u8) void {
     reply.sendFault(conn, a, .{ .class = .bad_input, .message = message });
 }
 
-fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *Fault) Step![]const u8 {
+fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *Fault, salt: u64) Step![]const u8 {
     try run.gate(srv, a, fault);
     const raw = switch (try json.parse(a, body)) {
         .ok => |v| v,
@@ -64,7 +67,7 @@ fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *F
     };
     const req = try decode(a, raw, Facts.of(srv), fault);
     var enc: reply.Encoder = .{ .o = req.options, .gpa = srv.gpa };
-    try run.run(srv, a, &.{req.source}, enc.sink(), fault, gone);
+    try run.runSalted(srv, a, &.{req.source}, enc.sink(), fault, gone, salt);
     return enc.reply(a, openai.replyModel(srv, raw), req.doc_size);
 }
 
@@ -98,6 +101,8 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
         const ok = v == .string and (std.mem.eql(u8, v.string, "word") or std.mem.eql(u8, v.string, "page") or std.mem.eql(u8, v.string, "block"));
         if (!ok) return bad(a, fault, &.{ "body", "confidence_scores_granularity" }, "confidence_scores_granularity must be \"word\", \"page\", \"block\" or null", .{});
     }
+    if (facts.geometry == .none and (o.header or o.footer))
+        return bad(a, fault, &.{ "body", if (o.header) "extract_header" else "extract_footer" }, "this model does not mark page headers or footers", .{});
     const pages: ?[]const u32 = if (body.field("pages")) |v| try pageList(a, fault, v, facts.pages_left) else null;
     const bytes = try document(a, fault, body, facts);
     const image = switch (images.sniff(bytes)) {

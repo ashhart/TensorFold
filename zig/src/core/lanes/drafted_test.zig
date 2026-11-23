@@ -401,7 +401,7 @@ test "the depth rule reads the drafter's facts, not the target's" {
     head.facts_.copy_match = 20;
     try std.testing.expectEqual(@as(i64, 20), wrapped.facts(t).copy_match);
     head.facts_.stream_bytes = 4096;
-    try std.testing.expectEqual(@as(usize, 1000 + 4096), wrapped.streamBytes(1000)); // admission counts both
+    try std.testing.expectEqual(@as(usize, 1000 + 4096), try wrapped.streamBytes(1000)); // admission counts both
 }
 
 fn always(_: *anyopaque) bool {

@@ -42,6 +42,7 @@ fn check(boundary: usize, resumed: bool, rewind: usize) !void {
     st.capacity = boundary + 8192;
     st.ring_rows = keys.len;
     st.ring_row = 1;
+    st.pool = 4;
     st.rings = &rings;
     st.caches = &.{};
     st.cur = &.{};

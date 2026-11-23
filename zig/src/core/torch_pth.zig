@@ -116,7 +116,7 @@ pub const Archive = struct {
         while (i > 0) {
             i -= 1;
             if (t.shape[i] != 1 and t.stride[i] != numel) return error.NonContiguousTensor;
-            numel *= t.shape[i];
+            numel = std.math.mul(u64, numel, t.shape[i]) catch return error.BadArchive;
         }
         if (t.offset > t.storage_numel or numel > t.storage_numel - t.offset) return error.BadArchive;
         const width = elementBytes(dtype);
@@ -149,7 +149,7 @@ pub const Archive = struct {
         while (i > 0) {
             i -= 1;
             if (t.shape[i] != 1 and t.stride[i] != numel) return error.NonContiguousTensor;
-            numel *= t.shape[i];
+            numel = std.math.mul(u64, numel, t.shape[i]) catch return error.BadArchive;
         }
         if (t.offset > t.storage_numel or numel > t.storage_numel - t.offset) return error.BadArchive;
         const key = try std.fmt.allocPrint(gpa, "{s}data/{s}", .{ self.prefix, t.storage });
@@ -551,6 +551,26 @@ fn readWrapped() !void {
 // In a child: if readF32's `t.storage_numel * 4` is unchecked, a safe build panics and only this test fails
 test "a storage whose byte count wraps past 2^64 is refused, not sized by the wrapped count" {
     try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(readWrapped, .{}));
+}
+
+fn readShapeWrapped() !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "codec.pth", .data = "" });
+    var arc: Archive = .{ .arena = .init(gpa), .io = io, .file = try tmp.dir.openFile(io, "codec.pth", .{}), .members = .empty, .tensors = .empty, .prefix = "codec/" };
+    defer arc.close();
+    const a = arc.arena.allocator();
+    try arc.members.put(a, "codec/data/0", .{ .local = 0, .size = 0, .crc = 0 });
+    try arc.tensors.put(a, "w", .{ .dtype = .u8, .storage = "0", .storage_numel = 0, .offset = 0, .shape = &.{ 1 << 32, 1 << 32 }, .stride = &.{ 1 << 32, 1 } });
+    try arc.tensors.put(a, "f", .{ .dtype = .f32, .storage = "0", .storage_numel = 0, .offset = 0, .shape = &.{ 1 << 32, 1 << 32 }, .stride = &.{ 1 << 32, 1 } });
+    try std.testing.expectError(error.BadArchive, arc.readRaw(gpa, "w", .u8, &.{ 1 << 32, 1 << 32 }));
+    try std.testing.expectError(error.BadArchive, arc.readF32(gpa, "f", &.{ 1 << 32, 1 << 32 }));
+}
+
+test "a tensor shape whose element count wraps past 2^64 is refused, not evaluated with the wrapped count" {
+    try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(readShapeWrapped, .{}));
 }
 
 test {

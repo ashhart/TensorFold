@@ -135,12 +135,12 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const scopes = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"auth scopes"} }));
     scopes.has_side_effects = true;
     b.step("test-key-scopes-host", "Key-file scopes: exact route grants, stateless Responses and refusals over sockets").dependOn(&scopes.step);
-    const witnessed = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"execution witness"} }));
-    witnessed.has_side_effects = true;
-    b.step("test-execution-witness-host", "The opt-in execution witness: parts, scopes, reload epochs and refusals over sockets").dependOn(&witnessed.step);
     const handoff_routes = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"handoff routes:"} }));
     handoff_routes.has_side_effects = true;
     b.step("test-handoff-routes-host", "GET and DELETE /v1/handoff/<id>: a held export streamed over sockets, behind the key gate").dependOn(&handoff_routes.step);
+    const witnessed = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"execution witness"} }));
+    witnessed.has_side_effects = true;
+    b.step("test-execution-witness-host", "The opt-in execution witness: parts, scopes, reload epochs and refusals over sockets").dependOn(&witnessed.step);
     const profile_line = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"profile line:"} }));
     profile_line.has_side_effects = true;
     b.step("test-profile-line-host", "Profile start-up line scoping against the tree's real backend names").dependOn(&profile_line.step);

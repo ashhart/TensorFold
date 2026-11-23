@@ -228,13 +228,20 @@ pub fn slotResumeEnv() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
+/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
+pub fn adaptiveBlockEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
+}
+
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
 }
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
-const plain = resume_rules.plain;
+fn plain(s: *const lanes.Stream) bool {
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and resume_rules.unsalted(s.cache_salt);
+}
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
 fn keepsEnd(s: *const lanes.Stream) bool {
@@ -299,9 +306,8 @@ pub fn resumeAt(ptr: *anyopaque, prompt: []const u32, spans: []const [2]u32) u32
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
-pub fn leave(b: *Metal, s: *const lanes.Stream) void {
+pub fn leave(b: *Metal, s: *lanes.Stream) void {
     var at = b.runner.offsets[0];
-    const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
     if (!slotResume(b) or !plain(s) or !standsAt(b, at)) return b.standing.deinit(b.gpa);
     var landed = s.fill_at.load(.monotonic);
     if (s.reason == .cancelled or s.isCancelled()) {
@@ -315,7 +321,7 @@ pub fn leave(b: *Metal, s: *const lanes.Stream) void {
         }
         s.keepInterruptedPrefill(at);
     }
-    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended, .remote = resume_rules.leftRemote(s) }, s.context.items, s.decode_spans);
+    b.standing.leftLanded(b.gpa, s, at, landed, true); // a hand-off's rows too, with TF_PREFILL_KEEP
 }
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
@@ -444,6 +450,11 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropRound();
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (slot == 0 and b.draft_block.enabled) {
+        std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
+        b.draft_block.drop();
+        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+    }
     if (slot == 0) leave(b, s);
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
     b.owners[slot] = null;
@@ -547,12 +558,14 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
             try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
+        if (result.rounds > 0) b.draft_block.observe(@intFromPtr(s), result.tree_landed);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);
             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);

@@ -17,7 +17,7 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
-        const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
+        const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (r.kind == .names) &.{ "a,b,c", ",", "1\nwrong" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
         for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
             const why = (try e.refusal(a, Env{ .name = r.name, .raw = raw }, all)).?;
@@ -36,6 +36,7 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
+    .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
     .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
@@ -48,6 +49,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "\t100 ", .n = 100 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .raw = "\t4294967295 ", .n = std.math.maxInt(u32) },
+    .{ .name = "TENSORFOLD_PULL_CONNECT_SECONDS", .raw = " 30\t", .n = 30 },
+    .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .raw = " 0\t", .n = 0 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .raw = "65537", .n = 65537 },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .raw = "16777217", .n = 16777217 },
@@ -102,6 +105,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
@@ -109,10 +114,14 @@ const valid = [_]Case{
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
+    .{ .name = "TF_ROCE_HCA", .raw = "rocep1s0f0,rocep1s0f1", .n = 2 },
+    .{ .name = "TF_ROCE_HCA", .raw = "=mlx5_0:1", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "32", .n = 32 },
+    .{ .name = "TF_FN_GX_GATEUP_MB2", .raw = "0", .n = 0 },
+    .{ .name = "TF_FN_GX_GATEUP_MB2", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "8192", .n = 8192 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "6144", .n = 6144 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
@@ -123,8 +132,12 @@ const valid = [_]Case{
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "17", .n = 17 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
+    .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "128", .n = 128 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
@@ -134,6 +147,16 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_MIN", .raw = "0", .n = 0 },
     .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
     .{ .name = "TF_PREFILL_CHUNK", .raw = "16", .n = 16 },
@@ -198,6 +221,8 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_ENGRAM_DIR", .raw = "engram-rows", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .raw = "full", .n = 1 },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_DSPARK_BLOCK", .raw = "7", .n = 7 },
+    .{ .name = "TF_DSV41_MARKOV_GPU", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_API_KEY", .raw = " example-key-1, example-key-2\n", .n = 0 },
     .{ .name = "HF_TOKEN", .raw = " hf_Example\n", .n = 0 },
     .{ .name = "HUGGING_FACE_HUB_TOKEN", .raw = "hf_Example", .n = 0 },
@@ -213,6 +238,19 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PARALLEL", .raw = "4096", .n = 4096 },
     .{ .name = "TENSORFOLD_PARALLEL", .raw = "auto", .n = 0 },
     .{ .name = "TENSORFOLD_PARALLEL", .raw = "AUTO", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB", .raw = " ZIG\n", .n = 4 },
+    .{ .name = "TF_DSV41_CALIB", .raw = "Measure", .n = 3 },
+    .{ .name = "TF_DSV41_CALIB_DIR", .raw = "calib tables", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB_SHAPE", .raw = "FIT", .n = 1 },
+    .{ .name = "TF_DSV41_CALIB_STAT", .raw = "Median", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB_REPS", .raw = "50", .n = 50 },
+    .{ .name = "TF_DSV41_CALIB_FILE", .raw = "tables/calib-zig.json", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB_WARM", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB_RECHECK", .raw = "8", .n = 8 },
+    .{ .name = "TF_DSV41_CALIB_CYCLE", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
+    .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
+    .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -238,34 +276,38 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
-        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
-        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
-        .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
-        .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
-        .{ "TF_CUDA_CARVEOUT_MIB", "0" },              .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
-        .{ "TF_ROCE_GID_INDEX", "2147483648" },        .{ "TF_PROMPT_ROWS", "16" },
-        .{ "TF_PROMPT_ROWS", "129" },                  .{ "TF_PROMPT_ROWS", "2064" },
-        .{ "TF_PROMPT_ROWS", " 512" },                 .{ "XPU_A8_BITS", "04" },
-        .{ "XPU_A8_BITS", "16" },                      .{ "XPU_TP", "0" },
-        .{ "XPU_TP", "3" },                            .{ "XPU_TP", " 4" },
-        .{ "XPU_CTX", "0" },                           .{ "XPU_CTX", "262145" },
-        .{ "XPU_CHUNK", "0" },                         .{ "XPU_CHUNK", "2049" },
-        .{ "XPU_CHUNK_SOLO", "0" },                    .{ "XPU_CHUNK_SOLO", "2049" },
-        .{ "XPU_MTP_DEPTH", "0" },                     .{ "XPU_MTP_DEPTH", "16" },
-        .{ "XPU_DEVICE_ID", "0" },                     .{ "XPU_DEVICE_ID", "0xzz" },
-        .{ "TF_SLIDE_POCKET_KEY", "AUTO" },            .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },
-        .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" }, .{ "TF_DSPINE_WINDOW", "0" },
-        .{ "TF_DSPINE_WINDOW", "15" },                 .{ "TF_DSPINE_WINDOW", "8193" },
-        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },     .{ "TF_QWEN_KV_PAGE_TEST", "0" },
-        .{ "TF_Q27_GEMM", "wide" },                    .{ "TF_Q27_GEMM", "NARROW" },
-        .{ "TF_Q27_TAIL", "on" },                      .{ "TF_Q27_TAIL", "OFF" },
-        .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },       .{ "TF_QWEN_KEEP_LATE", "2" },
-        .{ "TF_TIMING", "2" },                         .{ "TF_NO_TREES", "true" },
-        .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
-        .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
-        .{ "TF_PREFILL_CHUNK", "0" },                  .{ "TF_PREFILL_CHUNK", "520" },
-        .{ "TF_PREFILL_KEEP", "true" },                .{ "TF_PREFILL_AHEAD", "0" },
-        .{ "TF_PREFILL_TIMEOUT_S", "0" },              .{ "TF_PREFILL_TIMEOUT_S", "86401" },
+        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },                     .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
+        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },                   .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
+        .{ "TF_CUDA_SEGMENTS", "0" },                             .{ "TF_CUDA_SEGMENTS", "5" },
+        .{ "TF_CUDA_CARVEOUT", "true" },                          .{ "TF_CUDA_CARVEOUT", "01" },
+        .{ "TF_CUDA_CARVEOUT_MIB", "0" },                         .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
+        .{ "TF_ROCE_GID_INDEX", "2147483648" },                   .{ "TF_PROMPT_ROWS", "16" },
+        .{ "TF_PROMPT_ROWS", "129" },                             .{ "TF_PROMPT_ROWS", "2064" },
+        .{ "TF_PROMPT_ROWS", " 512" },                            .{ "XPU_A8_BITS", "04" },
+        .{ "XPU_A8_BITS", "16" },                                 .{ "XPU_TP", "0" },
+        .{ "XPU_TP", "3" },                                       .{ "XPU_TP", " 4" },
+        .{ "XPU_CTX", "0" },                                      .{ "XPU_CTX", "262145" },
+        .{ "XPU_CHUNK", "0" },                                    .{ "XPU_CHUNK", "2049" },
+        .{ "XPU_CHUNK_SOLO", "0" },                               .{ "XPU_CHUNK_SOLO", "2049" },
+        .{ "XPU_MTP_DEPTH", "0" },                                .{ "XPU_MTP_DEPTH", "16" },
+        .{ "XPU_DEVICE_ID", "0" },                                .{ "XPU_DEVICE_ID", "0xzz" },
+        .{ "TF_SLIDE_POCKET_KEY", "AUTO" },                       .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },
+        .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },            .{ "TF_DSPINE_WINDOW", "0" },
+        .{ "TF_DSPINE_WINDOW", "15" },                            .{ "TF_DSPINE_WINDOW", "8193" },
+        .{ "TF_PREFILL_CHUNK", "0" },                             .{ "TF_PREFILL_CHUNK", "520" },
+        .{ "TF_PREFILL_KEEP", "true" },                           .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TIMEOUT_S", "0" },                         .{ "TF_PREFILL_TIMEOUT_S", "86401" },
+        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },                .{ "TF_QWEN_KV_PAGE_TEST", "0" },
+        .{ "TF_Q27_GEMM", "wide" },                               .{ "TF_Q27_GEMM", "NARROW" },
+        .{ "TF_Q27_TAIL", "on" },                                 .{ "TF_Q27_TAIL", "OFF" },
+        .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },                  .{ "TF_QWEN_KEEP_LATE", "2" },
+        .{ "TF_TIMING", "2" },                                    .{ "TF_NO_TREES", "true" },
+        .{ "TF_MTP_TREES", "yes" },                               .{ "TF_MTP_BATCH", "off" },
+        .{ "TF_QWEN_POOL_LOG", "true" },                          .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TF_PREFILL_CHUNK", "0" },                             .{ "TF_PREFILL_CHUNK", "520" },
+        .{ "TF_PREFILL_KEEP", "true" },                           .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TIMEOUT_S", "0" },                         .{ "TF_PREFILL_TIMEOUT_S", "86401" },
+        .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
@@ -347,6 +389,7 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_GM_V3", raw));
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_DRAFTS", raw));
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COPY_DRAFTER", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
 }
@@ -487,4 +530,33 @@ test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank ke
         try t.expect(std.mem.indexOf(u8, why, "TENSORFOLD_PARALLEL") != null);
         try t.expect(std.mem.indexOf(u8, why, "or auto") != null);
     }
+}
+
+test "environment: a malformed calibration setting stops a Metal start naming the setting, its text and the accepted forms" {
+    const metal: e.Flags = .{ .metal = true };
+    const bad = [_]struct { name: []const u8, raw: []const u8 }{
+        .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "abc" },
+        .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "600001" },
+        .{ .name = "TF_DSV41_CALIB_REPS", .raw = "0" },
+        .{ .name = "TF_DSV41_CALIB_REPS", .raw = "51" },
+        .{ .name = "TF_DSV41_CALIB", .raw = "stored" },
+        .{ .name = "TF_DSV41_CALIB_STAT", .raw = "mean" },
+    };
+    for (bad) |c| {
+        const why = (try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, metal)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, c.name) != null);
+        try t.expect(std.mem.indexOf(u8, why, c.raw) != null);
+        try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
+        // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
+        try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
+    }
+}
+
+test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
+    const name = "TF_QWEN_KV_HOST_GIB";
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| try t.expectEqual(@as(u64, 0), try e.value(u64, name, raw, 0));
+    try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
+    try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
+    for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
 }

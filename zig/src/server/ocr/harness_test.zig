@@ -19,7 +19,7 @@ pub const Harness = struct {
     next: usize = 0,
     /// The tower input size the vision step reports; null: the missing-frame path.
     frame: ?api.Size = .{ .width = 100, .height = 50 },
-    reader: ?api.ocr.Ocr = .{ .prompt = "Read the page.", .parse = parse },
+    reader: ?api.ocr.Ocr = .{ .prompt = "Read the page.", .geometry = .block, .parse = parse },
     vision: bool = true,
     srv: *Server = undefined,
 
@@ -78,6 +78,10 @@ fn parse(a: Allocator, src: []const u8, original: api.Size, frame: api.Size) any
         var words = std.mem.tokenizeScalar(u8, block[0..nl], ' ');
         const kind = std.meta.stringToEnum(api.ocr.Kind, words.next() orelse return error.Unreadable) orelse return error.Unreadable;
         const content = if (nl < block.len) block[nl + 1 ..] else "";
+        if (kind == .page) {
+            try out.append(a, .{ .content = content, .quad = null, .kind = kind });
+            continue;
+        }
         var v: [4]f32 = undefined;
         for (&v) |*x| x.* = try std.fmt.parseFloat(f32, words.next() orelse return error.Unreadable);
         const sx = @as(f32, @floatFromInt(original.width)) / @as(f32, @floatFromInt(frame.width));
@@ -92,7 +96,7 @@ fn parse(a: Allocator, src: []const u8, original: api.Size, frame: api.Size) any
 }
 
 /// Bytes as tokens; every prompt renders "a#b", one image placeholder ('#', an added token) between two words.
-fn text() model_text.Text {
+pub fn text() model_text.Text {
     return .{ .ctx = undefined, .vtable = &.{ .encode = TestText.encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .added = added } };
 }
 fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {

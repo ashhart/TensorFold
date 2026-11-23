@@ -20,6 +20,8 @@ const StartupLine = startup.StartupLine;
 pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
+const Mtp = @import("qwen27_mtp.zig").Mtp;
+const keepEnd = @import("qwen27_keep_end.zig").keepEnd;
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -29,6 +31,8 @@ pub const Options = struct {
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null,
     drafter_bits: u8 = 0,
+    mtp_drafts: ?u32 = null, // --mtp-drafts N: the MTP head beside the checkpoint drafts every stream's chains (0: off)
+    mtp_confidence: ?f64 = null, // --mtp-confidence: a chain stops where its cumulative chance falls below it
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
     decode_share: ?f64 = null, // --decode-share: the reply's share of a fill step's wall time beside live decoders
@@ -48,6 +52,8 @@ pub const Host = struct {
     trace: ?tf.gpu_profile.Trace = null, // TF_Q27_PROFILE: rounds' class GPU times to the log, gpu_seconds in replies
     draft: ?*lb.Draft = null,
     back: *lb.Metal,
+    mtp: ?*Mtp = null, // --mtp-drafts: the MTP head, the core's drafter in front of `back`
+    wrap: ?lanes.drafted.Drafted = null,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -104,30 +110,6 @@ pub const Host = struct {
         return images.prepare(h.vision.?, h.clock.io, a, bytes, max_tokens);
     }
 };
-
-/// The reply's state at `stands` (its end or one short), born with its prompt; its history pinned too when both fit.
-fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
-    if (s.reuse.remote and !s.reuse_failed and !keep_remote) return; // on another machine's prefix: only with TF_PREFILL_KEEP
-    const prompt: u32 = @intCast(s.prompt_len);
-    const tokens = s.context.items;
-    if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
-    const spans = api.cache_modes.reply(gpa, s.decode_spans, prompt, stands) catch return;
-    defer gpa.free(spans);
-    // an image prompt's rows go by their images (the request's cache key), as its lookups and marks do
-    const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
-    defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
-    if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
-    store.keep_remote = s.reuse.remote and !s.reuse_failed; // a turn resuming it is remote too (#1594 step 2b)
-    defer store.keep_remote = false;
-    // Keep the history too when both copies fit; otherwise the reply end keeps its ordinary priority.
-    const history = if (s.history_len > 0) store.find(keyed[0..@min(keyed.len, @as(usize, s.history_len) + 1)], s.chunks, spans) else null;
-    const pin = if (history) |e| if (@import("qwen27_resume.zig").pinReplyHistory(store, e, s.history_len, stands)) e else null else null;
-    if (pin) |e| e.borrowers += 1;
-    defer if (pin) |e| {
-        e.borrowers -= 1;
-    };
-    _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
-}
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -295,8 +277,15 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, reserve.loaded_rows);
     errdefer model.deinit();
-    var with = o;
-    // the tower before the slots: their room and the cache's budget count it as taken
+    if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), try q.decode_round.pagesOn())) |r| {
+        why.* = r.why;
+        return r.err;
+    }
+    if ((o.mtp_drafts orelse 0) > 0) model.loadMtp(io, dir) catch |err| {
+        if (err == error.MissingMtpFile) why.* = try std.fmt.allocPrint(a, "--mtp-drafts: Qwen3.8-27B's MTP head is read from {s} beside the checkpoint, and {s} has none", .{ q.gpu_weights.mtp_file, dir });
+        return err;
+    };
+    var with = o; // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
     const h = try attach(gpa, io, model, null, with, a, why);
@@ -348,8 +337,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
+    const mtp_on = model.weights.mtp != null and (o.mtp_drafts orelse 0) > 0;
     const shared = try q.simd_attention.sharedPrefix(model.device.tensorUnits());
-    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
+    // the MTP head's keys and values: one more attention layer a slot, beside the drafter's ring when there is one
+    const head_kv: usize = if (mtp_on) @as(usize, capacity + window) * model.config.kvDim() * 2 * 2 else 0;
+    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
@@ -373,8 +365,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null;
-    // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
+    h.trace = null; // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in pages; Fit charged each its window
     h.runner = try if (try q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
@@ -390,14 +381,24 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    if (h.draft != null) try h.back.measure(io);
-    h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
+    if (h.draft != null or mtp_on) try h.back.measure(io);
+    h.mtp = null;
+    h.wrap = null;
+    if (mtp_on) {
+        const x = try Mtp.init(gpa, h.back, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
+        h.mtp = x;
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), x.drafter());
+        std.log.info("qwen27: the MTP head drafts chains of {d} at most, a step {d:.2} ms", .{ x.depth(), x.step_ms });
+    }
+    errdefer if (h.mtp) |x| x.deinit();
+    errdefer if (h.wrap) |*w| w.deinit();
+    h.cfg = try lanes.Config.init(gpa, if (h.wrap) |*w| w.facts(h.back.facts()) else h.back.facts(), window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .image_share = if (o.vision) |x| x.image_share else .request, .explain = tf.qwen_vl.geometry.problem } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -407,13 +408,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
-    h.warm = .{ .queue = model.queue };
-    // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
+    h.warm = .{ .queue = model.queue }; // ready slots wired before the cache budget reads the footprint
     const residency = tf.startup_receipt.span(.residency);
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     residency.end();
-    errdefer q.residency.drop(h);
-    // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
+    errdefer q.residency.drop(h); // decided before cache sizing and the worker starts
     const ane = tf.startup_receipt.span(.optional_ane);
     if (model.share_pending) {
         const before = cache_fit.footprint();
@@ -423,8 +422,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
-    ane.end();
-    // Slot 0's history rewind, wired before cache sizing: even a cache with two full-context copies may evict it.
+    ane.end(); // slot 0's history rewind: even two full copies may evict it
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
@@ -542,6 +540,8 @@ pub fn close(ptr: *anyopaque) void {
     q.residency.drop(h);
     if (h.disk_stage) |b| b.deinit();
     h.cfg.deinit(h.gpa);
+    if (h.wrap) |*w| w.deinit();
+    if (h.mtp) |x| x.deinit();
     h.back.deinit();
     if (h.draft) |d| d.deinit();
     if (h.trace) |*t| t.reportRest();
@@ -551,8 +551,16 @@ pub fn close(ptr: *anyopaque) void {
     h.gpa.destroy(h);
 }
 
+test "qwen27 startup: the adaptive block hooks are analyzed" {
+    _ = &lb.Metal.init;
+    _ = &lb.Metal.backend;
+    _ = &lb.Metal.lone;
+}
+
 test {
+    _ = @import("qwen27_draft_block.zig");
     _ = @import("qwen27_share_fit.zig");
+    _ = @import("qwen27_startup_line.zig");
 }
 
 test "Qwen27 interior state uses a guaranteed cold request cut" {

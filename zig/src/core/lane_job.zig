@@ -69,6 +69,7 @@ pub const Job = struct {
         keepAt(ptr, s, at, false);
     }
 
+    /// An interrupted pass reports its completed prefix; warm passes may hand it to a queued follow-up.
     pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
         keepAt(ptr, s, at, true);
     }
@@ -82,6 +83,7 @@ pub const Job = struct {
         if (s.reuse.remote and !s.reuse_failed and !job.host.keep_remote) return; // TF_PREFILL_KEEP=0: nothing on a pulled prefix
         store.keep_remote = s.reuse.remote and !s.reuse_failed; // on another machine's prefix (a refused copy prefilled here)
         defer store.keep_remote = false;
+
         if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 

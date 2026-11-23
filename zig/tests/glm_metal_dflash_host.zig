@@ -253,7 +253,7 @@ test "GLM's draft refusals cover the stock names and qwen27's 64-layer tap contr
 const Taps = tf.glm.metal_dflash_taps.Taps;
 
 test "tap ring offsets wrap by window and pack planes by layer order" {
-    const taps = Taps{ .ring = undefined, .window = 16, .hidden = 64, .stage = undefined };
+    const taps = Taps{ .ring = undefined, .window = 16, .hidden = 64 };
     const stride = 5 * 64 * 2;
     try std.testing.expectEqual(null, taps.offset(0, 3));
     try std.testing.expectEqual(@as(?usize, 3 * stride + 0 * 64 * 2), taps.offset(5, 3));
@@ -264,12 +264,16 @@ test "tap ring offsets wrap by window and pack planes by layer order" {
 
 test "per-stream routes: a shared window's segs capture into their own stream's ring by its state" {
     var routes: [3]Taps.Route = @splat(.{ .s = null, .ring = undefined });
-    const taps = Taps{ .ring = undefined, .window = 16, .hidden = 64, .stage = undefined, .routes = &routes };
+    const taps = Taps{ .ring = undefined, .window = 16, .hidden = 64, .routes = &routes };
     var states: [3]tf.glm.state.State = undefined;
     for (&states, 0..) |*s, i| s.* = .{ .cap = 64, .pos = @intCast(i) };
     var t = taps;
     t.setRoute(0, &states[0], undefined);
     t.setRoute(1, &states[1], undefined);
+    try std.testing.expect(t.routeRing(&states[0]) != null);
+    t.setActive(0, false);
+    try std.testing.expect(t.routeRing(&states[0]) == null);
+    t.setActive(0, true);
     try std.testing.expect(t.routeRing(&states[0]) != null);
     try std.testing.expect(t.routeRing(&states[2]) == null); // a stream drafting no chain: its seg rows are skipped
     t.clearRoute(&states[0]);
@@ -279,7 +283,7 @@ test "per-stream routes: a shared window's segs capture into their own stream's 
 
 test "a stream above the drafter's caps captures no taps: no route, no ring, so its prefill launches no tap copies" {
     var routes: [3]Taps.Route = @splat(.{ .s = null, .ring = undefined });
-    var t = Taps{ .ring = .{ .id = @ptrFromInt(0x1000) }, .window = 16, .hidden = 64, .stage = undefined, .routes = &routes };
+    var t = Taps{ .ring = .{ .id = @ptrFromInt(0x1000) }, .window = 16, .hidden = 64, .routes = &routes };
     var states: [2]tf.glm.state.State = undefined;
     for (&states, 0..) |*s, i| s.* = .{ .cap = 64, .pos = @intCast(i) };
     t.setRoute(0, &states[0], .{ .id = @ptrFromInt(0x2000) });
@@ -287,7 +291,7 @@ test "a stream above the drafter's caps captures no taps: no route, no ring, so 
     try std.testing.expect(t.ringFor(&states[1]) == null); // never routed: a capped stream (begin clears its route)
     t.clearRoute(&states[0]);
     try std.testing.expect(t.ringFor(&states[0]) == null);
-    const lone = Taps{ .ring = .{ .id = @ptrFromInt(0x1000) }, .window = 16, .hidden = 64, .stage = undefined };
+    const lone = Taps{ .ring = .{ .id = @ptrFromInt(0x1000) }, .window = 16, .hidden = 64 };
     try std.testing.expect(lone.ringFor(&states[1]) != null); // no routes at all: one drafter context, the shared ring
     const P = tf.glm.metal_dflash_rounds.Policy;
     try std.testing.expect(!(P{}).ok(65536)); // a 64K prompt is over the default cap: begin gives it no route
@@ -371,7 +375,7 @@ test "the draft head runs on tensor units at 4 or 8 bits in groups of 64, and on
     try std.testing.expectEqual(backend.HeadPath.rows, backend.headPath(true, q, true));
 }
 
-test "heldBytes includes the tap-stage buffer beside drafter model bytes" {
+test "heldBytes returns drafter model bytes without removed tap-stage buffer" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const ring = try device.buffer(64 * 5 * 512 * 2, mtl.ResourceOptions.shared);
@@ -383,5 +387,68 @@ test "heldBytes includes the tap-stage buffer beside drafter model bytes" {
     var d: tf.glm.metal_dflash_load.Drafter = .{ .gpa = std.testing.allocator, .model = &m, .taps = &taps, .target = undefined };
     var e: tf.glm.engine.Engine = undefined;
     e.dflash = &d;
-    try std.testing.expectEqual(@as(u64, 1024 + taps.stage.length()), tf.glm.metal_dflash_load.heldBytes(&e));
+    try std.testing.expectEqual(@as(u64, 1024), tf.glm.metal_dflash_load.heldBytes(&e));
+}
+
+test "chain flatten takes the best root and best children, chances are the per-step own" {
+    const a = std.testing.allocator;
+    const rounds = tf.glm.metal_dflash_rounds;
+    const tokens = [_]u32{ 3, 8, 8, 8, 8, 8, 8, 8, 8 };
+    const parents = [_]i32{ -1, 0, 0, 0, 1, 1, 2, 2, 2 };
+    const scores = [_]f64{ -0.5, -0.7, -1.4, -3.0, -0.9, -1.1, -1.5, -1.6, -2.5 };
+    const tree: selector.Tree = .{ .gpa = a, .tokens = @constCast(&tokens), .parents = @constCast(&parents), .scores = @constCast(&scores) };
+    var chain: [7]u32 = undefined;
+    var chances: [7]f64 = undefined;
+    const n = rounds.flatten(&tree, &chain, &chances);
+    try std.testing.expectEqual(@as(u32, 3), n);
+    try std.testing.expectEqual(@as(u32, 3), chain[0]);
+    try std.testing.expectEqual(@as(u32, 8), chain[1]);
+    try std.testing.expectEqual(@as(u32, 8), chain[2]);
+    try std.testing.expectApproxEqAbs(@exp(-0.5), chances[0], 1e-9);
+    try std.testing.expectApproxEqAbs(@exp(-0.2), chances[1], 1e-9);
+    try std.testing.expectApproxEqAbs(@exp(-0.2), chances[2], 1e-9);
+}
+
+test "chain flatten stops where the tree has no child at the chain's depth" {
+    const a = std.testing.allocator;
+    const rounds = tf.glm.metal_dflash_rounds;
+    const tokens = [_]u32{ 5, 6 };
+    const parents = [_]i32{ -1, 0 };
+    const scores = [_]f64{ -0.3, -0.4 };
+    const tree: selector.Tree = .{ .gpa = a, .tokens = @constCast(&tokens), .parents = @constCast(&parents), .scores = @constCast(&scores) };
+    var chain: [7]u32 = undefined;
+    var chances: [7]f64 = undefined;
+    try std.testing.expectEqual(@as(u32, 2), rounds.flatten(&tree, &chain, &chances));
+}
+
+test "confidence cut and settledMtp track active prefixes and safe MTP tap pausing" {
+    const rounds = tf.glm.metal_dflash_rounds;
+    const src = tf.glm.metal_dflash_source;
+    var chances = [_]f64{ 0.9, 0.9, 0.9, 0.9 };
+    rounds.cutChances(&chances, 0.7);
+    try std.testing.expectEqual(@as(f64, 0.9), chances[0]);
+    try std.testing.expectEqual(@as(f64, 0), chances[3]);
+    try std.testing.expectEqual(@as(u32, 3), rounds.pricedPrefix(&chances));
+    var tiny = [_]f64{ 0.1, 0.9, 0.9 };
+    rounds.cutChances(&tiny, 0.7);
+    try std.testing.expectEqual(@as(u32, 1), rounds.pricedPrefix(&tiny));
+    try std.testing.expectApproxEqAbs(rounds.default_confidence, try rounds.confidence(), 1e-9);
+    var c: src.Chooser = .{};
+    const rule: src.Rule = .{ .first_dflash = 2, .probe_mtp = 2, .back_every = 8, .probe_len = 2, .watch = 2 };
+    for (0..4) |_| {
+        _ = c.next(rule, true);
+        c.observe(.dflash, 1, 40);
+        c.observe(.mtp, 1, 20);
+    }
+    try std.testing.expect(!c.settledMtp(rule)); // still chosen/probing until settled
+    while (!c.settledMtp(rule)) {
+        _ = c.next(rule, true);
+        c.observe(.mtp, 1, 20);
+    }
+    try std.testing.expect(c.settledMtp(rule));
+    while (c.settledMtp(rule)) {
+        _ = c.next(rule, true);
+        c.observe(.mtp, 1, 20);
+    }
+    try std.testing.expect(c.since + 2 >= rule.back_every); // wakes up before probe_len triggers
 }

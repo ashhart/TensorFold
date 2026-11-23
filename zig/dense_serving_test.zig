@@ -11,8 +11,8 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc", &hash(@embedFile("kernels/cuda/experts_prefill.cu")));
     try std.testing.expectEqualStrings("e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
-    // 191061381's bytes: 82f3dde92 and 191061381 (#2609) add pattn_kernel instances; 94a9a48d6 moves helpers out
-    try std.testing.expectEqualStrings("905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
+    // #2239 adds vision_kernel<64, 8> for Qwen3-ASR's tower; every function main had keeps its SASS (sm_80 to sm_121)
+    try std.testing.expectEqualStrings("4227f0a9b7a89ac296388a7dcd9e49cd0dd487ed09ee46cc1d4eda94ab8e3741", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
     const group = @embedFile("kernels/cuda/qmm_group.cu");
     try std.testing.expectEqualStrings("ceff4ee13e97b5aa93cbe7a1edc9a524c78aaa145dd1e5c82dcb05a3011aae23", &hash(group[0..16095]));
     try std.testing.expectEqualStrings("8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0", &hash(group));
@@ -28,22 +28,29 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7", &hash(@embedFile("kernels/cuda/scan_rows.cu")));
 }
 test "dense serving: owned launches and projections retain their reviewed argument sequence" {
-    const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++ @embedFile("src/families/qwen3_5/cuda_forward.zig");
+    const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++
+        @embedFile("src/families/qwen3_5/cuda_scan.zig") ++
+        @embedFile("src/families/qwen3_5/cuda_forward.zig");
+    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(" };
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, source, at, "try e.")) |start| {
-        const rest = source[start..];
+    while (true) {
+        var start: ?usize = null;
+        for (prefixes) |prefix| if (std.mem.indexOfPos(u8, source, at, prefix)) |candidate| {
+            if (start) |previous| {
+                if (candidate < previous) start = candidate;
+            } else start = candidate;
+        };
+        const call_start = start orelse break;
+        const rest = source[call_start..];
         const end = std.mem.indexOfScalar(u8, rest, ';') orelse return error.BadSource;
         const call = rest[0 .. end + 1];
-        at = start + 6;
-        if (!(std.mem.startsWith(u8, call, "try e.run(e.fns.") or std.mem.startsWith(u8, call, "try e.proj(") or
-            std.mem.startsWith(u8, call, "try e.norm("))) continue;
-        at = start + end + 1;
+        at = call_start + end + 1;
         for (call) |c| if (!std.ascii.isWhitespace(c)) {
             try out.append(std.testing.allocator, c);
         };
     }
-    // 4dd870b84d's sequence: the first input norm keys on g.first + i (#2579); BF16 norms take norm_shift (#2383)
-    try std.testing.expectEqualStrings("7be514892c77ce544d809f73d5a7e2dec2fd33bcb40c68ab67ab6e409a1c02f8", &hash(out.items));
+    // The launch sequence includes main's moved delta scan and MTP's retained-row tap argument.
+    try std.testing.expectEqualStrings("2099ef3b0a28d63d079b65d191a9c3be7e7c0ff93fb9b53ec9d6a6e61565220d", &hash(out.items));
 }

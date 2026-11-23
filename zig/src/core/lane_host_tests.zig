@@ -15,6 +15,7 @@ test {
 
 test {
     _ = @import("lane_host_score_exit_test.zig");
+    _ = @import("lane_host_score_stress_test.zig");
     _ = @import("lane_host_grammar_test.zig");
 }
 
@@ -35,6 +36,13 @@ test {
     _ = @import("lane_remote_cut_test.zig");
     _ = @import("lane_export_cancel_test.zig");
     _ = @import("lane_host_flush_test.zig");
+    _ = @import("lane_trace.zig");
+    _ = @import("lane_host_decode_share_test.zig");
+    _ = @import("lane_host_srpt.zig");
+    _ = @import("lane_host_env.zig");
+    _ = @import("lane_host_frame_test.zig");
+    _ = @import("lane_host_fetch.zig");
+    _ = @import("lane_host_cache_queue_test.zig");
 }
 
 test {

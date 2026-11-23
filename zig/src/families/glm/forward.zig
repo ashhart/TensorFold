@@ -441,7 +441,7 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     e.setPipeline(k.index_decode); // a row's heads as the tensor op's rows (glm_index_nax.metal)
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
     e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
-    e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
+    e.dispatchGroups(size(std.math.divCeil(u32, most, if (k.m3_fast) 64 else 128) catch unreachable, n, 1), size(128, 1, 1));
     const sel = SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() };
     if (most > select_cap and most <= select_marks) { // between them glm_index_select's one group a row is quicker
         e.setPipeline(k.index_select);
