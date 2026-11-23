@@ -450,7 +450,11 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     if (slot == 0 and b.draft_block.enabled) {
         std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
         b.draft_block.drop();
-        if (b.draft) |d| if (d.generation.draft.dflash()) |m| m.tree_block = @import("qwen27_draft_block.zig").wide;
+        if (b.draft) |d| {
+            if (d.generation.draft.dflash()) |m| {
+                m.tree_block = @import("qwen27_draft_block.zig").wide;
+            }
+        }
     }
     if (slot == 0) leave(b, s);
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
