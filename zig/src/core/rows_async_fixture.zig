@@ -109,6 +109,7 @@ pub const Gate = struct {
     release: std.atomic.Value(bool) = .init(false),
     left: std.atomic.Value(bool) = .init(false),
     mode: enum { good, full, short, sync_failure, first_fails } = .good,
+    hold_ns: i128 = 250 * std.time.ns_per_ms, // bounded so a gated peer cannot hang the test
     calls: usize = 0,
     sync_entered: std.atomic.Value(bool) = .init(false),
     sync_release: std.atomic.Value(bool) = .init(true),
@@ -121,7 +122,7 @@ pub const Gate = struct {
     fn write(ctx: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.entered.store(true, .release);
-        const end = rows.write.nowNs() + 250 * std.time.ns_per_ms;
+        const end = rows.write.nowNs() + g.hold_ns;
         while (!g.release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
         defer g.left.store(true, .release);
         g.calls += 1;
@@ -135,7 +136,7 @@ pub const Gate = struct {
     fn sync(ctx: ?*anyopaque, fd: c_int) !void {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.sync_entered.store(true, .release);
-        const end = rows.write.nowNs() + 250 * std.time.ns_per_ms;
+        const end = rows.write.nowNs() + g.hold_ns;
         while (!g.sync_release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
         if (g.mode == .sync_failure) return error.SyncFailed;
         if (platform.c.fsync(fd) != 0) return error.RowsWrite;

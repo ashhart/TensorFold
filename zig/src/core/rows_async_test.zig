@@ -378,14 +378,16 @@ test "spill I/O: a full byte permit holds another save that fits it alone until 
 test "spill I/O: the job permit holds a ninth small save behind eight blocked writes until one is written" {
     const x = try Fixture.open("job-permit", .finish, false, 1 << 30);
     defer x.close();
-    var hold: Hold = .{};
+    // A save below one block needs a single chunk, so staging returns while the writer is gated.
+    var hold: Hold = .{ .hold_ns = 10 * std.time.ns_per_s };
     defer hold.release.store(true, .release);
     x.r.file_io = hold.io();
     var tokens: [9][1100]u32 = undefined;
     for (&tokens, 0..) |*p, i| {
         p.* = fixture.prompt(@intCast(30 + i));
-        try x.keep(p, 600);
+        try x.keep(p, 200);
     }
+    try Hold.wait(&hold.entered);
     try std.testing.expectEqual(@as(usize, 8), x.r.worker.?.pending());
     try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
     try std.testing.expectEqual(@as(u64, 0), x.r.counts.skipped);
