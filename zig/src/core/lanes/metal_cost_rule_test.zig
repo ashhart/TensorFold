@@ -129,3 +129,26 @@ test "Metal window prices: paired warm probes follow identical calls despite dif
     try std.testing.expectEqual(@as(u64, 32), cursor);
     try std.testing.expectEqual(@as(u64, 0), peer_cursor);
 }
+
+test "Metal window prices: stateful Qwen cold timing restores the serial saved-table oracle" {
+    const Stateful = struct {
+        calls: usize = 0,
+        pub fn time(t: *@This(), i: usize) !f64 {
+            const value = truth(i) + @as(f64, @floatFromInt(t.calls));
+            t.calls += 1;
+            return value;
+        }
+    };
+    var timer: Stateful = .{};
+    var ms: [16]f64 = undefined;
+    try rule.serialWindows(&timer, &ms);
+    var expected: [16]f64 = undefined;
+    for (&expected, 0..) |*m, i| m.* = truth(i) + @as(f64, @floatFromInt(8 * i + 1));
+    try std.testing.expectEqualSlices(f64, &expected, &ms);
+    try std.testing.expectEqual(@as(usize, 16 * 8), timer.calls);
+    const old_reference: [16]f64 = @splat(1);
+    try std.testing.expect(rule.drifted(&ms, &old_reference));
+    try rule.again(&timer, &ms);
+    try std.testing.expectEqualSlices(f64, &expected, &ms);
+    try std.testing.expectEqual(@as(usize, 2 * 16 * 8), timer.calls);
+}
