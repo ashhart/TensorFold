@@ -69,6 +69,16 @@ pub const Trim = trim.Trim;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("depth_test.zig");
+    _ = @import("shared_price_test.zig");
+    _ = @import("shared_verify_price_test.zig");
+    _ = @import("shared_warm_price_test.zig");
+    _ = @import("shared_calibration_test.zig");
+    _ = @import("shared_warmup_test.zig");
+    _ = @import("shared_head_price_test.zig");
+    _ = @import("shared_price_learning_test.zig");
+    _ = @import("shared_price_8_test.zig");
+    _ = @import("shared_price_modes_test.zig");
     _ = @import("engine_test.zig");
     _ = @import("plain_streams_test.zig");
     _ = @import("deep_chain_test.zig");

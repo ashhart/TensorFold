@@ -18,11 +18,17 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    copy_ms: ?Table = null, // opt-in copy prices, independent of the head depth rule
+    copy_plain: ?u64 = null,
+    copy_wait: ?u64 = null,
+    copy_band: ?usize = null,
+    copy_rounds: u64 = 0,
     alpha: f64 = 0.6, // geometric_depth: the stream's acceptance, kept / tried (decoder.py alpha, from 0.6)
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
         if (st.ms) |*t| t.deinit(gpa);
+        if (st.copy_ms) |*t| t.deinit(gpa);
     }
 };
 
@@ -50,6 +56,7 @@ pub const Probe = struct {
 pub const Overhead = struct { streams: u32, ms: f64, head: f64 = 0.0 };
 
 pub const Rule = struct {
+    pub const copyRows = @import("copy_rule.zig").rows;
     gpa: Allocator,
     k: Constants = .{},
     prior: []const f64,
@@ -60,6 +67,7 @@ pub const Rule = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
+    copy_guard: bool = false, // copy_rule.zig only; existing head pricing never reads it
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
@@ -96,6 +104,7 @@ pub const Rule = struct {
             .mtp_step_ms = cfg.mtp_step_ms,
             .draft_step_ms = cfg.draft_step_ms,
             .plain_guard = cfg.plain_guard,
+            .copy_guard = cfg.copy_guard,
             .node_probabilities = cfg.node_probabilities,
             .granted_depth = cfg.granted_depth,
             .confidence_floor = cfg.draft_confidence,
@@ -582,19 +591,6 @@ pub const Rule = struct {
 fn distance(a: u32, b: usize) usize {
     const x: usize = a;
     return if (x > b) x - b else b - x;
-}
-
-test {
-    _ = @import("depth_test.zig");
-    _ = @import("shared_price_test.zig");
-    _ = @import("shared_verify_price_test.zig");
-    _ = @import("shared_warm_price_test.zig");
-    _ = @import("shared_calibration_test.zig");
-    _ = @import("shared_warmup_test.zig");
-    _ = @import("shared_head_price_test.zig");
-    _ = @import("shared_price_learning_test.zig");
-    _ = @import("shared_price_8_test.zig");
-    _ = @import("shared_price_modes_test.zig");
 }
 
 test {
