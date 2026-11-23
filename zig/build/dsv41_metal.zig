@@ -43,6 +43,8 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     });
     // the package's own checks run with the default test step; its device suites run from their named steps
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = p.pkg })).step);
+    const profile_run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg, .filters = &.{ "a branched tree launch books", "drafter timings drained after" } }));
+    b.step("test-dsv41-round-prof-host", "DeepSeek-V4.1 Metal: deterministic round profile host regressions").dependOn(&profile_run.step);
     const step = b.step("test-dsv41-metal", "DeepSeek-V4.1 Metal layer and forward: float64 stages, rows at once == one at a time");
     // serve_lanes over the CPU twin, checked here so no CUDA step has to depend on the neutral served engine
     const lanes_test = b.createModule(.{
