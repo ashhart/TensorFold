@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
+
 - H3 on Macs: long image renders give way to live speech on the GPU (#N).
 
 - Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#N).
