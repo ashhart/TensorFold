@@ -110,7 +110,6 @@ test "Metal review: both entries in a two-wide high plateau are retimed" {
     try t.expectEqualSlices(f64, &.{ 10, 10, 10, 10, 10, 10 }, &ms);
 }
 
-
 test "Metal review: shared17 cannot heal below the live narrow16 price" {
     var timer: Timer = .{ .value = 10 };
     var ms = [_]f64{ 13, 14 };
