@@ -43,6 +43,7 @@ test {
     _ = omni;
     _ = @import("cuda_wide.zig");
     _ = @import("cuda_wide_walk_test.zig");
+    _ = @import("cuda_attn_segs_test.zig");
     _ = @import("cuda_bolt_lanes_test.zig");
     _ = @import("cuda_shared_draw.zig");
     _ = @import("cuda_lanes.zig");

@@ -258,14 +258,9 @@ pub const Head = struct {
         try o.dense(h.cat, h.cxs, m.eh_proj, h.x, rows);
         try t.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
         try o.dense(b.y, b.xs, m.attn.qkv, b.qkv, rows);
-        var segs_buf: [glue.max_segs]glue.AttnSeg = undefined;
-        var at0: usize = 0;
-        while (at0 < spans.len) {
-            const take = @min(glue.max_segs, spans.len - at0);
-            for (spans[at0..][0..take], segs_buf[0..take]) |s, *sg| sg.* = .{ .kc = s.k_cache, .vc = s.v_cache, .meta = s.meta, .row0 = s.row0, .rows = s.rows, .pt = s.table };
-            try t.attentionSegs(segs_buf[0..take], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, f.ashape());
-            at0 += take;
-        }
+        var segs_buf: [streams]glue.AttnSeg = undefined; // attentionSegs launches them in parts it rebases
+        for (spans, segs_buf[0..spans.len]) |s, *sg| sg.* = .{ .kc = s.k_cache, .vc = s.v_cache, .meta = s.meta, .row0 = s.row0, .rows = s.rows, .pt = s.table };
+        try t.attentionSegs(segs_buf[0..spans.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, f.ashape());
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
         if (!tail) return;
         if (spans.len == 1) {
