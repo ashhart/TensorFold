@@ -25,7 +25,7 @@ pub const Set = struct {
     embeds: [2]ref.Gated(vision.Embed) = undefined,
     ropes: [2]ref.Gated(vision.Rope) = undefined,
     adds: [2]ref.Gated(vision.ScaleAdd) = undefined,
-    attns: [2]Attention = undefined,
+    attn: Attention = undefined,
 
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.ek = try ink.experts.Kernels.load(gpu.d);
@@ -71,12 +71,12 @@ pub const Set = struct {
         for (&set.embeds) |*x| try list.append(a, x.kernel());
         for (&set.ropes) |*x| try list.append(a, x.kernel());
         for (&set.adds) |*x| try list.append(a, x.kernel());
-        for (&set.attns) |*x| try list.append(a, x.kernel());
+        try list.append(a, set.attn.kernel());
     }
 
     pub fn deinit(set: *Set) void {
         if (!set.live) return;
-        for (&set.attns) |*x| x.deinit();
+        set.attn.deinit();
         for (&set.adds) |*x| x.deinit();
         for (&set.ropes) |*x| x.deinit();
         for (&set.embeds) |*x| x.deinit();
