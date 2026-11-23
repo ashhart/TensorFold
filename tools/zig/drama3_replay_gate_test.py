@@ -9,8 +9,8 @@ SIZES = {1: "{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }", 4: "{ 4, 4,
 EVERY_DECODE = (1, 1, 4, 16, 1)
 
 
-def pcm_only(chunk: int) -> str:
-    return (f"Drama replay PCM only: codec chunk {chunk} against 1, max abs 3.052e-5, RMS 4.317e-6; "
+def pcm_only(chunk: int, max_abs: str = "3.052e-5") -> str:
+    return (f"Drama replay PCM only: codec chunk {chunk} against 1, max abs {max_abs}, RMS 4.317e-6; "
             "every exact check passed")
 
 
@@ -63,6 +63,22 @@ class ReplayGateTests(unittest.TestCase):
                      pcm_only(4) + " extra"):
             with self.subTest(line=line):
                 self.assertNotEqual(gate(log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(line,))), 0)
+
+    def test_pcm_past_reported_bound_fails(self):
+        for max_abs in ("3.053e-5", "2.500e-1", "1.000e0", "1.200e3"):
+            with self.subTest(max_abs=max_abs):
+                self.assertNotEqual(gate(log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(pcm_only(16, max_abs),))), 0)
+
+    def test_bad_chunk_4_before_a_bounded_chunk_16_fails(self):
+        """Ash's case on #4463: the last PCM line is in bounds, the one before it is not."""
+        for max_abs in ("nan", "inf", "2.500e-1"):
+            with self.subTest(max_abs=max_abs):
+                lines = log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(pcm_only(4, max_abs), pcm_only(16)))
+                self.assertNotEqual(gate(lines), 0)
+
+    def test_nonfinite_rms_fails(self):
+        lines = log(*EVERY_DECODE, last="error: ReplayPcmOnly", info=(pcm_only(4).replace("RMS 4.317e-6", "RMS nan"), pcm_only(16)))
+        self.assertNotEqual(gate(lines), 0)
 
 
 if __name__ == "__main__":
