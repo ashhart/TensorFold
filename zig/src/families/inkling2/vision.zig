@@ -19,12 +19,10 @@ const pre = "model.visual.backbone.";
 pub const prefixes = [_][]const u8{"model.visual."};
 /// Image tokens a tower's scratch covers when the caller names no limit: 1280 x 1280 pixels.
 pub const default_tokens: u32 = 1024;
-const attn_smem: u32 = 2 * 2 * 64 * (head_dim / 8 + 1) * 16;
 
 /// The family's tower kernels (inkling2/vision.cu).
 pub const Kernels = struct {
     mod: cuda.Module,
-    attention: cuda.Function,
     embed: cuda.Function,
     rope: cuda.Function,
     scale_add: cuda.Function,
@@ -35,12 +33,10 @@ pub const Kernels = struct {
         errdefer mod.unload();
         const k: Kernels = .{
             .mod = mod,
-            .attention = try mod.function("tf_ink2v_attention"),
             .embed = try mod.function("tf_ink2v_embed"),
             .rope = try mod.function("tf_ink2v_rope"),
             .scale_add = try mod.function("tf_ink2v_scale_add"),
         };
-        try k.attention.allowDynamicShared(attn_smem);
         return k;
     }
 
@@ -85,6 +81,7 @@ pub const Tower = struct {
     d: *const cuda.Driver,
     k: Kernels,
     vk: vit.Kernels,
+    fa: vit.Attention,
     g: vit.Gemms,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     max_tokens: u32,
@@ -143,7 +140,9 @@ pub const Tower = struct {
         errdefer k.unload();
         var vk = try vit.Kernels.load(d);
         errdefer vk.unload();
-        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens, .proj_inter = v.proj_hidden, .hidden = v.text_hidden };
+        var fa = try vit.Attention.load(d);
+        errdefer fa.unload();
+        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .fa = fa, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens, .proj_inter = v.proj_hidden, .hidden = v.text_hidden };
         errdefer {
             for (t.bufs.items) |*b| b.free();
             t.bufs.deinit(gpa);
@@ -221,6 +220,7 @@ pub const Tower = struct {
         for (t.bufs.items) |*b| b.free();
         t.bufs.deinit(t.gpa);
         t.g.deinit();
+        t.fa.unload();
         t.vk.unload();
         t.k.unload();
         t.gpa.destroy(t);
@@ -284,13 +284,7 @@ pub const Tower = struct {
         var a: cuda.Args = .{};
         for ([_]u64{ t.qkv, t.cs, t.sn }) |v| a.add(v);
         try go(t.k.rope, s, .{ .x = @intCast(R) }, 256, 0, &a);
-        var b: cuda.Args = .{};
-        b.add(t.qkv);
-        b.add(t.att);
-        b.add(@as(c_int, @intCast(R)));
-        b.add(@as(c_int, heads));
-        b.add(@as(f32, 1.0 / @sqrt(@as(f32, head_dim))));
-        try go(t.k.attention, s, .{ .x = @intCast((R + 127) / 128), .y = heads }, 256, attn_smem, &b);
+        try t.fa.full(s, t.qkv, t.att, R, heads, head_dim, 1.0 / @sqrt(@as(f32, head_dim)));
         try vit.linear(&t.g, &t.vk, s, t.acc, t.att, l.out_w, l.out_b, t.y, R, width, width);
         try t.scaleAdd(s, l.ls1, R);
         try t.vk.layerNorm(s, t.x, l.ln2_w, l.ln2_b, t.xn, R, width, eps);
@@ -413,7 +407,6 @@ fn testVision(text_hidden: u32) config.Vision {
 
 test "scratch for the default limit stays under 256 MiB" {
     try std.testing.expect(scratchBytes(testVision(4608), default_tokens) < 256 << 20);
-    try std.testing.expectEqual(@as(u32, 36864), attn_smem);
 }
 
 test "the splice copies rows as wide as the config's decoder, Small's 4608 and Mini's 2304" {
