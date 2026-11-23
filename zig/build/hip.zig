@@ -438,6 +438,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "hip", .module = hip },
             .{ .name = "engine_api", .module = api },
             .{ .name = "lanes", .module = lanes },
+            .{ .name = "core", .module = core },
             .{ .name = "qwen3_5", .module = family },
             .{ .name = "flashnext", .module = flashnext },
             .{ .name = "nemotron", .module = nemotron },

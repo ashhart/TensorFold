@@ -116,6 +116,7 @@ const LaneServed = struct {
     fn close(ptr: *anyopaque) void {
         const h: *LaneServed = @ptrCast(@alignCast(ptr));
         h.host.stop();
+        @import("core").route_tap.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.wrap) |*w| w.deinit();
@@ -220,6 +221,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "xpu", problem)) return null;
     if (try o.slideRefusal(a, "XPU")) |why| {
         problem.* = why;
         return null;
@@ -241,11 +246,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             problem.* = try std.fmt.allocPrint(a, "the XPU engine does not support --tp {d} for {s}", .{ o.tp, o.model_type });
             return null;
         }
-        return nem.open(a, gpa, io, o, problem);
+        return route_tap.held(&tap_guard, try nem.open(a, gpa, io, o, problem));
     }
     if (comptime has_qwen27) {
-        if (std.mem.eql(u8, o.model_type, "qwen3_5")) return openQwen27(a, gpa, io, o, problem);
-        if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return @import("xpu_flashnext.zig").open(a, gpa, io, o, problem);
+        if (std.mem.eql(u8, o.model_type, "qwen3_5")) return route_tap.held(&tap_guard, try openQwen27(a, gpa, io, o, problem));
+        if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return route_tap.held(&tap_guard, try @import("xpu_flashnext.zig").open(a, gpa, io, o, problem));
         const gemma = if (nem.has_gemma4) ", Gemma 4 E4B (gemma4, MLX 4/64)" else "";
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Qwen3.8 Flash Next (qwen4_exp, MLX 4/32), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
     } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B, Qwen3.8 Flash Next and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
@@ -273,7 +278,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
             return null;
         };
     };
-    return openLanes(gpa, io, runner, dr, o, context) catch |err| {
+    const opened = openLanes(gpa, io, runner, dr, o, context) catch |err| {
         if (dr) |x| x.deinit();
         runner.deinit();
         problem.* = if (err == error.StreamDoesNotFit)
@@ -287,6 +292,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };
+    return opened;
 }
 
 test "slide admission: xpu refuses before checkpoint or device access" {

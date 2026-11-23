@@ -77,7 +77,6 @@ fn isGemma4(model_type: []const u8) bool {
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
 }
-
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
@@ -93,7 +92,6 @@ const Host = struct {
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
-
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const h: *Host = @ptrCast(@alignCast(ctx));
@@ -102,15 +100,14 @@ const Host = struct {
         const r = try nemotron.gpu_round.run(h.gpa, h.metal, s, h.round, .{ .ctx = hooks.ctx, .committed = hooks.committed, .yield = hooks.yield });
         return r.paused;
     }
-
     fn halt(ctx: *anyopaque, reason: []const u8) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.halt(reason);
     }
-
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        tf.route_tap.stop();
         if (h.slide) |s| s.deinit(h.gpa);
         const rows = if (h.cache) |*store| store.disk else null;
         if (h.cache) |*store| store.deinit();
@@ -129,46 +126,49 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    var tap_guard: tf.route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!tf.route_tap.admit(a, gpa, o.model_type, o.rank, "metal", problem)) return null;
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
         problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return tf.route_tap.held(&tap_guard, try @import("drama_open.zig").openMetal(a, gpa, io, o, problem));
     if (o.cfg_enabled or o.cfg_batched) {
         problem.* = "--cfg-* guidance requires a Drama 3 speech model";
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     if (std.mem.eql(u8, o.model_type, "kimi_k3") or std.mem.eql(u8, o.model_type, "kimi_k31"))
-        return @import("kimi_metal.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("qwen3_metal.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "hy_v4_flash")) return @import("hy4_metal.zig").open(a, gpa, io, o, problem);
+        return tf.route_tap.held(&tap_guard, try @import("kimi_metal.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return tf.route_tap.held(&tap_guard, try @import("qwen4_metal.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen3")) return tf.route_tap.held(&tap_guard, try @import("qwen3_metal.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "hy_v4_flash")) return tf.route_tap.held(&tap_guard, try @import("hy4_metal.zig").open(a, gpa, io, o, problem));
     const dense = ownsQwen27(a, io, o.model_type, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "lfm3") or std.mem.eql(u8, o.model_type, "lfm3_vl")) return @import("lfm3.zig").open(a, gpa, io, o, problem);
-    if (dense) return openQwen27(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
-    if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return @import("uocr.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "lfm3") or std.mem.eql(u8, o.model_type, "lfm3_vl")) return tf.route_tap.held(&tap_guard, try @import("lfm3.zig").open(a, gpa, io, o, problem));
+    if (dense) return tf.route_tap.held(&tap_guard, try openQwen27(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return tf.route_tap.held(&tap_guard, try openFlashNext(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "glm5_next")) return tf.route_tap.held(&tap_guard, try openGlm(a, gpa, io, o, problem));
+    if (isGemma4(o.model_type)) return tf.route_tap.held(&tap_guard, try @import("gemma4.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return tf.route_tap.held(&tap_guard, try @import("uocr.zig").open(a, gpa, io, o, problem));
     if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl") and !std.mem.eql(u8, o.model_type, "minimax_m3_vl")) {
         problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4, Step-5, MiniMax-M3.1-Flash and Unlimited-OCR-2 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "ricursive")) return @import("ricursive.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return tf.route_tap.held(&tap_guard, try openGlmDsa(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return tf.route_tap.held(&tap_guard, try @import("qwen35.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "step5_vl")) return tf.route_tap.held(&tap_guard, try @import("step5.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "spark2_5")) return tf.route_tap.held(&tap_guard, try @import("spark25.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return tf.route_tap.held(&tap_guard, try @import("minimax_m3.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "llama")) return tf.route_tap.held(&tap_guard, try @import("llama.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "flint")) return tf.route_tap.held(&tap_guard, try @import("flint.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "ricursive")) return tf.route_tap.held(&tap_guard, try @import("ricursive.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return tf.route_tap.held(&tap_guard, try @import("lfm2_moe.zig").open(a, gpa, io, o, problem));
     if (!std.mem.eql(u8, o.model_type, "nemotron_h") and !std.mem.eql(u8, o.model_type, "nemotron_h_puzzle")) {
         problem.* = try @import("no_backend.zig").message(a, o.model_type);
         return null;
@@ -279,7 +279,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     errdefer if (h.slide) |s| s.deinit(gpa);
     try h.host.start();
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
+    return tf.route_tap.held(&tap_guard, api.Opened{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt });
 }
 
 const prompt_int8_refusal = "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";

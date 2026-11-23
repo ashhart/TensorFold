@@ -96,6 +96,7 @@ fn follow(h: *Host) void {
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    tf.route_tap.stop();
     if (h.cache) |*store| store.deinit();
     if (h.follower) |th| {
         h.e.pair.stopFollowing();

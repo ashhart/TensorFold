@@ -4,6 +4,7 @@ Each family page describes its supported checkpoint, kernels and operating limit
 the native engine, or the Python engine frozen at 0.6.6.
 
 For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.md) before implementing a native family, kernel or serving change.
+`TF_ROUTE_TAP` inspects or monitors MoE routing on tapped families; see [MoE route tap](../route-tap.md).
 
 | Family | Recipe |
 | --- | --- |

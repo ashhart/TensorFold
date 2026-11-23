@@ -69,6 +69,7 @@ pub fn prepare(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_
     defer stamp.end();
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
     try glue.select(k.set, stream, s.mlog, l.bias, pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm, flat_picks);
+    if (@import("core").route_tap.live()) cuda.route_tap_copy.afterPick(stream, pick, s.wts, rows, l.top_k + 1, l.top_k);
 }
 
 /// The block up to its fill: the router, the top-k pick, the plan and the routed experts into the slot rows.

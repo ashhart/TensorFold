@@ -65,6 +65,7 @@ pub const Slots = struct {
     last_end: f64 = 0,
     last_ret: u64 = 0, // when the last window's wait returned (host clock ticks)
     ahead: [2]f64 = .{ 0, 0 }, // the last launch's GPU start and end (0: none)
+    launched_tap: u32 = 0,
     launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
@@ -72,6 +73,7 @@ pub const Slots = struct {
     borrowed: ?kept_mod.Borrowed = null, // a lookup still restoring this state: eviction spares it while anything else fits
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
+    ring_tap: [ring_len]u32 = @splat(0),
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
     fence: ?Fence = null, // orders queued rounds on the GPU
     pool: ?pool_mod.Pool = null, // one Mac: the streams share the engine's MLA caches (GLM_POOL=0: a window each)
@@ -168,6 +170,7 @@ pub const Slots = struct {
         defer o.pool.pop();
         sl.fence.?.update(o.enc);
         o.enc.end();
+        if (@import("../../core/route_tap_metal.zig").live()) sl.launched_tap = @import("../../core/route_tap_metal.zig").mark();
         o.cb.commit();
         sl.launched = o.cb.retain();
     }
@@ -178,6 +181,7 @@ pub const Slots = struct {
         sl.launched = null;
         defer cb.release();
         cb.wait();
+        if (sl.launched_tap != 0) @import("../../core/route_tap_metal.zig").afterLand(sl.launched_tap);
         sl.ahead = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             std.log.err("glm: keeps and drafts committed ahead failed: {s}", .{msg});
@@ -347,6 +351,7 @@ pub const Slots = struct {
             sl.ring_cb[h] = null;
             defer mtl.objc.release(cb.id);
             cb.wait();
+            if (sl.ring_tap[h] != 0) @import("../../core/route_tap_metal.zig").afterLand(sl.ring_tap[h]);
             sl.e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
             if (cb.failure()) |msg| {
                 sl.e.event.set(sl.e.ev); // a failed buffer may never signal: the next one must not wait on it
@@ -359,8 +364,9 @@ pub const Slots = struct {
 
     /// Queued rounds the host will not read (their work done): their command buffers let go.
     fn dropRing(sl: *Slots) void {
-        for (&sl.ring_cb) |*cb| if (cb.*) |c| {
+        for (&sl.ring_cb, 0..) |*cb, i| if (cb.*) |c| {
             c.wait();
+            if (sl.ring_tap[i] != 0) @import("../../core/route_tap_metal.zig").afterLand(sl.ring_tap[i]);
             mtl.objc.release(c.id);
             cb.* = null;
         };
@@ -394,6 +400,7 @@ pub const Slots = struct {
         enc.end();
         e.ev += 1;
         cb.signal(e.event, e.ev); // a synchronous window after it waits for this
+        if (@import("../../core/route_tap_metal.zig").live()) sl.ring_tap[to] = @import("../../core/route_tap_metal.zig").mark();
         cb.commit();
         sl.ring_cb[to] = .{ .id = mtl.objc.retain(cb.id) };
         slot.row0 = 0;
