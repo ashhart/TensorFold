@@ -112,7 +112,7 @@ test "CUDA load cache: Flash Next sweep follows MTP and retains live PLE files" 
     const drop = std.mem.indexOf(u8, s, ".dropPageCache(gpa, io, dir, e.ngram.files.items)") orelse return error.NoPleExclusion;
     try t.expect(std.mem.indexOf(u8, s, "mtp.Head.init").? < drop);
     const owner = @embedFile("src/families/flashnext/cuda_prompt_wt.zig");
-    try t.expect(std.mem.indexOf(u8, owner, "if (runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;") != null);
+    try t.expect(std.mem.indexOf(u8, owner, "if (wt_io.runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;") != null);
     try t.expect(std.mem.indexOf(u8, owner, "self.f.releaseExcept(keep.items, scratch)") != null);
 }
 

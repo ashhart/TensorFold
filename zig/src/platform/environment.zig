@@ -1,7 +1,6 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
-
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
@@ -346,7 +345,6 @@ pub fn registered(comptime name: []const u8) void {
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
-
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);

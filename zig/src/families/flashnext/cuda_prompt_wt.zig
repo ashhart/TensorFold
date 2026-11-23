@@ -7,6 +7,7 @@ const hc = @import("cuda_hc.zig");
 const qmm = @import("cuda_qmm.zig");
 const gdn = @import("cuda_gdn.zig");
 const exl3_store = @import("exl3/pack/cuda_exl3_store.zig");
+const wt_io = @import("cuda_prompt_wt_io.zig");
 
 pub const layers_n: usize = 48;
 pub const linear_n: usize = 36;
@@ -59,17 +60,6 @@ const Tensor = core.safetensors.Tensor;
 
 const Held = struct { rel: []u8, file: Shard };
 
-/// MADV_WILLNEED over `bytes` one 128 KiB readahead window a call: one call over a whole tensor reads its first window.
-fn prefetch(bytes: []const u8) void {
-    if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
-    const page = std.heap.pageSize();
-    const step = 128 << 10;
-    const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
-    const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
-    var at = lo;
-    while (at < hi) : (at += step) _ = std.os.linux.madvise(@ptrFromInt(at), @min(step, hi - at), std.os.linux.MADV.WILLNEED);
-}
-
 /// One mapped shard: core.safetensors.File.
 const Shard = struct {
     f: core.safetensors.File,
@@ -88,7 +78,7 @@ const Shard = struct {
     fn drop(self: *const Shard, scratch: std.mem.Allocator) void {
         var keep: std.ArrayList([]const u8) = .empty;
         defer keep.deinit(scratch);
-        for (self.f.names.keys()) |name| if (runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;
+        for (self.f.names.keys()) |name| if (wt_io.runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;
         self.f.releaseExcept(keep.items, scratch);
     }
 
@@ -96,10 +86,6 @@ const Shard = struct {
         return self.f.get(name);
     }
 };
-
-fn runtimePage(name: []const u8) bool {
-    return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null;
-}
 
 /// The final load-only sweep over the index's shards excludes the n-gram table's live mappings.
 pub fn dropPageCache(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, keep: anytype) void {
@@ -234,7 +220,7 @@ pub const Store = struct {
     /// hold, the tensor's pages read ahead: only for a reader that copies all of it (the one-GPU threaded loader).
     pub fn holdAhead(self: *Store, requested: []const u8) !Tensor {
         const t = try self.hold(requested);
-        prefetch(t.bytes);
+        wt_io.prefetch(t.bytes);
         return t;
     }
 
@@ -603,7 +589,7 @@ test {
 }
 
 test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
-    try std.testing.expect(runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
-    try std.testing.expect(!runtimePage("language_model.model.norm.weight"));
-    try std.testing.expect(!runtimePage("language_model.mtp.norm.weight"));
+    try std.testing.expect(wt_io.runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
+    try std.testing.expect(!wt_io.runtimePage("language_model.model.norm.weight"));
+    try std.testing.expect(!wt_io.runtimePage("language_model.mtp.norm.weight"));
 }

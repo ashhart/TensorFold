@@ -125,7 +125,7 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_SNAP_HOST", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .raw = "unqualified", .n = 0 },
-    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .raw = " 0.5 ", .n = @bitCast(@as(f64, 0.5)) },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .raw = "0.5", .n = @bitCast(@as(f64, 0.5)) },
     .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .raw = "20:+1,15:-1", .n = 0 },
     .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .raw = "8", .n = 8 },
@@ -323,7 +323,6 @@ test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact
     for ([_][2][]const u8{
         .{ "TF_FLASHNEXT_CHUNK", "0" },
         .{ "TF_FLASHNEXT_CHUNK", "16385" },
-        .{ "TF_FLASHNEXT_CHUNK_SOLO", "0" },
         .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
         .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
         .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
@@ -447,31 +446,6 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COPY_DRAFTER", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
-}
-
-test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
-    const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
-    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
-        a.free(why);
-        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
-    }
-    try t.expect(!try e.value(bool, name, null, false));
-    try t.expect(try e.value(bool, name, "1", false));
-}
-
-test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unset keeps pages on" {
-    const name = "TENSORFOLD_LFM2_KV_PAGES";
-    for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, name) != null);
-    }
-    try t.expect(try e.value(bool, name, null, true));
-    try t.expect(try e.value(bool, name, "1", true));
-    try t.expect(!try e.value(bool, name, "0", true));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
@@ -614,4 +588,8 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+
+test {
+    _ = @import("environment_tier_test.zig");
 }

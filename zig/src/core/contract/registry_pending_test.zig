@@ -16,15 +16,20 @@ const TargetDecision = registry.TargetDecision;
 test {
     _ = @import("flashnext_exl3_pending.zig");
 }
-test "EXL3 prompt resource records select measured CUDA 13.4 usage without changing older compiler records" {
-    const record = for (cuda) |candidate| {
+test "EXL3 prompt resource records: 13.4 receipts reach the pending launches and older rows keep 13.3's" {
+    const settled = for (cuda) |candidate| {
         if (std.mem.eql(u8, candidate.launch.name, "exl3_candidate tf_exl3_prompt_2")) break candidate;
     } else return error.MissingExl3PromptRecord;
-    const older = registry.usageFor(record, .{ .major = 13, .minor = 3 });
-    const current = registry.usageFor(record, .{ .major = 13, .minor = 4 });
+    const older = registry.usageFor(settled, .{ .major = 13, .minor = 3 });
+    try std.testing.expectEqual(@as(u32, 79), older[4].regs);
+    try std.testing.expectEqual(older, registry.usageFor(settled, .{ .major = 13, .minor = 4 }));
+    const pending = for (@import("flashnext_exl3_pending.zig").records) |candidate| {
+        if (std.mem.eql(u8, candidate.launch.name, "exl3_candidate tf_exl3_promptd_2")) break candidate;
+    } else return error.MissingExl3PromptRecord;
+    try std.testing.expect(std.meta.eql(registry.usageFor(pending, .{ .major = 13, .minor = 3 }), none));
+    const current = registry.usageFor(pending, .{ .major = 13, .minor = 4 });
     for (current, 0..) |usage, index| {
-        try std.testing.expectEqual(@as(u32, if (index < 3) 80 else 77), usage.regs);
-        try std.testing.expectEqual(@as(u32, if (index < 3) 80 else 79), older[index].regs);
+        try std.testing.expectEqual(@as(u32, if (index == 0) 202 else if (index < 3) 204 else 179), usage.regs);
         try std.testing.expectEqual(@as(u32, 32768), usage.static);
         try std.testing.expectEqual(@as(u32, 256), usage.bound);
     }

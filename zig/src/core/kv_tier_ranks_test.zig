@@ -4,6 +4,7 @@ const kt = @import("kv_tier.zig");
 const Rig = @import("kv_tier_test.zig").Rig;
 const Lease = kt.Lease;
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
 test "a page whose host rows were rewritten loses its frame, so the next pin copies them in; a pinned one refuses" {
     var r: Rig = undefined;
@@ -46,4 +47,22 @@ test "ranks open only on the same shape, slots and digest; a rank that differs i
     var l = try b.lease(1, 1); // a different history: the digest moves
     defer b.tier.finish(&l);
     try std.testing.expectError(error.RanksDisagree, kt.Lockstep.agree(va, kt.Lockstep.vector(&b.tier, 16)));
+}
+
+test "ranks lending a different count are told apart by the digest" {
+    var a: Rig = undefined;
+    var b: Rig = undefined;
+    try a.open(8, 4);
+    defer a.close();
+    try b.open(8, 4);
+    defer b.close();
+    var la = try a.leaseLent(4, 3, 2);
+    defer a.tier.finish(&la);
+    var lb = try b.leaseLent(4, 3, 2);
+    defer b.tier.finish(&lb);
+    try expectEqual(a.tier.digest(), b.tier.digest());
+    try b.tier.lend(&lb, 0);
+    var lc = try b.leaseLent(0, 1, 1);
+    defer b.tier.finish(&lc);
+    try expect(a.tier.digest() != b.tier.digest());
 }

@@ -193,7 +193,7 @@ pub const Pool = struct {
         if (logical == 0 or frames == 0 or (mib > 0 and frames < per_stream)) return error.BadFlashNextKvHost;
         const tiered = mib > 0;
         const total = if (tiered) try std.math.add(usize, try std.math.mul(usize, frames, kv_page), try std.math.mul(usize, logical, ix_page)) else try std.math.mul(usize, count, page_bytes);
-        // pieces mapped as the lanes first use them: memory no stream has taken is free at load; a host tier's frames stay put
+        // pieces map as the lanes first use them: unopened memory is free at load; a host tier keeps its frames
         var arena = try @import("cuda_kv_arena.zig").Arena.alloc(gpa, e.driver, total, if (tiered) null else device, if (tiered) null else io);
         errdefer arena.free();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .plain = undefined, .pool = undefined, .arena = arena, .ibase = arena.buf.ptr + frames * kv_page, .lanes = &.{} };
@@ -582,55 +582,9 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
     try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
 }
 
-test "exl3: host-tier admission follows frame reservations rather than logical context size" {
-    const t = std.testing;
-    const run_pages = 2;
-    const slots = 9;
-    const frames = comptime kvt.framesFor(run_pages, slots);
-    const logical = frames + run_pages + 8;
-    const page_bytes = 256;
-    var backing: [2 * logical * page_bytes]u8 = undefined;
-    var host: host_tier.Host = .{ .tier = undefined, .store = undefined, .kv_page = page_bytes };
-    try host.tier.init(t.allocator, &backing, frames, page_bytes);
-    defer host.tier.deinit();
-    var lanes = [_]Lane{.{ .seq = undefined }};
-    const pool: Pool = .{
-        .gpa = t.allocator,
-        .e = undefined,
-        .layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = page_bytes, .snap_bytes = 0, .run_bytes = run_pages * page_bytes },
-        .capacity = logical * page_bytes,
-        .head = null,
-        .plain = undefined,
-        .pool = &host.tier.pool,
-        .host = &host,
-        .slot_frames = slots,
-        .arena = undefined,
-        .ibase = 0,
-        .lanes = &lanes,
-    };
-    try t.expect(pool.fits(pool.capacity));
-    {
-        var lease: kv.tier.Lease = .{};
-        try host.tier.reserve(&lease, 1, frames);
-        defer host.tier.finish(&lease);
-        try t.expect(!pool.fits(pool.capacity));
-    }
-    try t.expect(pool.fits(pool.capacity));
-    {
-        var lease: kv.tier.Lease = .{};
-        try host.tier.reserve(&lease, 2 * logical, 0);
-        defer host.tier.finish(&lease);
-        try t.expect(!pool.fits(pool.capacity));
-    }
-    try t.expect(pool.fits(pool.capacity));
-    lanes[0].used = true;
-    try t.expect(!pool.fits(pool.capacity));
-    lanes[0].used = false;
-    try t.expect(!pool.fits(pool.capacity + window_rows + 1));
-}
-
 test {
     _ = @import("cuda_kv_init_test.zig");
     _ = @import("cuda_kv_lifetime_test.zig");
     _ = @import("cuda_kv_arena.zig");
+    _ = @import("cuda_kv_lanes_host_test.zig").Tests(Lane, Pool, window_rows);
 }

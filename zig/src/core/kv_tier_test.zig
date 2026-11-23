@@ -426,24 +426,6 @@ test "lent frames: counted in the frame promise, never victims or mapped, back a
     try t.audit();
 }
 
-test "ranks lending a different count are told apart by the digest" {
-    var a: Rig = undefined;
-    var b: Rig = undefined;
-    try a.open(8, 4);
-    defer a.close();
-    try b.open(8, 4);
-    defer b.close();
-    var la = try a.leaseLent(4, 3, 2);
-    defer a.tier.finish(&la);
-    var lb = try b.leaseLent(4, 3, 2);
-    defer b.tier.finish(&lb);
-    try expectEqual(a.tier.digest(), b.tier.digest());
-    try b.tier.lend(&lb, 0);
-    var lc = try b.leaseLent(0, 1, 1);
-    defer b.tier.finish(&lc);
-    try expect(a.tier.digest() != b.tier.digest());
-}
-
 test "a lent run is consecutive frames, leaves the free frames, and comes back at finish" {
     var r: Rig = undefined;
     try r.open(8, 6);
@@ -569,7 +551,6 @@ test "a stream cannot end while it holds the last pin of a dirty page, its own t
     try expect(!try endsWithForeignDirty(.none));
     try expect(try endsWithForeignDirty(.ignore_dirty));
 }
-
 
 test "a retired page's sentinel in a lease's pages is skipped when the stream finishes" {
     var r: Rig = undefined;
