@@ -32,43 +32,124 @@ pub fn detectDeviceId() !u32 {
 }
 
 pub fn openPeers(out: []ze.Gpu) !void {
+    if (try @import("sys").environment.read(?u32, "XPU_DEVICE_ID", null)) |id| return ze.Gpu.openPeers(id, out);
     return openPeersWith(out, detectDeviceId, ze.Gpu.openPeers);
 }
 
+// Qwen27/TP preserve their incumbent B70 default; only NoDevice permits discovery.
 fn openPeersWith(out: []ze.Gpu, detect: anytype, open: anytype) !void {
-    const id = try detect();
-    try open(id, out);
+    open(0xe223, out) catch |err| {
+        if (err != error.NoDevice) return err;
+        const id = try detect();
+        if (id == 0xe223) return error.NoDevice;
+        return open(id, out);
+    };
 }
 
-test "XPU device selection: B60 and B70 IDs reach the peer opener" {
+test "XPU device selection: B60 discovery follows only a missing B70 group" {
     const Fake = struct {
-        var selected: u32 = 0;
-        var opened: u32 = 0;
+        var allow_b60: bool = true;
+        var detected: u32 = 0;
+        var detect_calls: usize = 0;
+        var attempts: [2]u32 = .{ 0, 0 };
+        var opened: usize = 0;
         fn detect() !u32 {
-            return selected;
+            detect_calls += 1;
+            return detected;
         }
         fn open(id: u32, out: []ze.Gpu) !void {
-            opened = id;
             try std.testing.expectEqual(@as(usize, 2), out.len);
+            attempts[opened] = id;
+            opened += 1;
+            if (id == 0xe223 or !allow_b60) return error.NoDevice;
         }
     };
     var out: [2]ze.Gpu = undefined;
-    for ([_]u32{ 0xe211, 0xe223 }) |id| {
-        Fake.selected = id;
+    const Case = struct { allow_b60: bool, detected: u32 };
+    for ([_]Case{
+        .{ .allow_b60 = true, .detected = 0xe211 },
+        .{ .allow_b60 = false, .detected = 0xe211 },
+        .{ .allow_b60 = false, .detected = 0xe223 },
+    }) |case| {
+        Fake.allow_b60 = case.allow_b60;
+        Fake.detected = case.detected;
+        Fake.detect_calls = 0;
+        Fake.attempts = .{ 0, 0 };
         Fake.opened = 0;
-        try openPeersWith(&out, Fake.detect, Fake.open);
-        try std.testing.expectEqual(id, Fake.opened);
+        if (case.allow_b60) {
+            try openPeersWith(&out, Fake.detect, Fake.open);
+        } else {
+            try std.testing.expectError(error.NoDevice, openPeersWith(&out, Fake.detect, Fake.open));
+        }
+        try std.testing.expectEqual(if (case.detected == 0xe211) @as(usize, 2) else 1, Fake.opened);
+        try std.testing.expectEqual(@as(u32, 0xe223), Fake.attempts[0]);
+        if (case.detected == 0xe211) try std.testing.expectEqual(@as(u32, 0xe211), Fake.attempts[1]);
+        try std.testing.expectEqual(@as(usize, 1), Fake.detect_calls);
+    }
+}
+
+test "XPU device selection: opener errors other than NoDevice propagate" {
+    const Fake = struct {
+        var detect_calls: usize = 0;
+        var open_calls: usize = 0;
+        fn detect() !u32 {
+            detect_calls += 1;
+            return 0xe211;
+        }
+        fn open(id: u32, out: []ze.Gpu) !void {
+            try std.testing.expectEqual(@as(u32, 0xe223), id);
+            try std.testing.expectEqual(@as(usize, 1), out.len);
+            open_calls += 1;
+            return error.ZeFailed;
+        }
+    };
+    var out: [1]ze.Gpu = undefined;
+    try std.testing.expectError(error.ZeFailed, openPeersWith(&out, Fake.detect, Fake.open));
+    try std.testing.expectEqual(@as(usize, 1), Fake.open_calls);
+    try std.testing.expectEqual(@as(usize, 0), Fake.detect_calls);
+}
+
+test "XPU device selection: mixed enumerations keep B70 for TP=1 and TP=2" {
+    const Fake = struct {
+        var detected: u32 = 0;
+        var detect_calls: usize = 0;
+        var opened: u32 = 0;
+        var peers: usize = 0;
+        fn detect() !u32 {
+            detect_calls += 1;
+            return detected;
+        }
+        fn open(id: u32, out: []ze.Gpu) !void {
+            opened = id;
+            peers = out.len;
+        }
+    };
+    var out: [2]ze.Gpu = undefined;
+    for ([_]u32{ 0xe211, 0xe223 }) |first_detected| {
+        for ([_]usize{ 1, 2 }) |tp| {
+            Fake.detected = first_detected;
+            Fake.detect_calls = 0;
+            Fake.opened = 0;
+            Fake.peers = 0;
+            try openPeersWith(out[0..tp], Fake.detect, Fake.open);
+            try std.testing.expectEqual(@as(u32, 0xe223), Fake.opened);
+            try std.testing.expectEqual(tp, Fake.peers);
+            try std.testing.expectEqual(@as(usize, 0), Fake.detect_calls);
+        }
     }
 }
 
 test "XPU device selection: the environment override needs no device or driver" {
     const sys = @import("sys");
     const name = "XPU_DEVICE_ID";
-    const before = if (sys.getenv(name)) |raw| try std.testing.allocator.dupeSentinel(u8, raw, 0) else null;
+    const before = try sys.environment.read(?u32, name, null);
     defer {
-        if (before) |raw| {
+        if (before) |id| {
+            var storage: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&storage, "0x{x}", .{id}) catch unreachable;
+            storage[text.len] = 0;
+            const raw: [:0]const u8 = storage[0..text.len :0];
             _ = sys.env.setenv(name, raw, 1);
-            std.testing.allocator.free(raw);
         } else _ = sys.env.unsetenv(name);
     }
     for ([_][:0]const u8{ "0xe211", "0xe223" }, [_]u32{ 0xe211, 0xe223 }) |raw, id| {
