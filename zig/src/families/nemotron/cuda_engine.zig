@@ -158,7 +158,7 @@ pub const Engine = struct {
             e.side.join.deinit();
         };
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
-        e.c.wide_rounds = @import("cuda_wide.zig").on() and @import("cuda_wide.zig").allowed(e.c, e.k.gb10); // before any buffer
+        e.c.wide_rounds = @import("cuda_wide.zig").on() and @import("cuda_wide.zig").allowed(e.c, e.k.gb10, opts.slide); // before any buffer
         errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections

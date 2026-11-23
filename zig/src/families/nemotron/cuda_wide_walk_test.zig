@@ -10,7 +10,7 @@ const kern = @import("cuda_kernels.zig");
 fn lightning(on: bool) !config.Config {
     var why: config.Why = .{};
     var c = try config.parse(std.testing.allocator, config.lightning, &why);
-    try std.testing.expect(wide.allowed(c, true)); // GB10, one rank, non-latent, not Bolt: the switch applies
+    try std.testing.expect(wide.allowed(c, true, false)); // GB10, one rank, non-latent, not Bolt: the switch applies
     c.wide_rounds = on;
     return c;
 }
