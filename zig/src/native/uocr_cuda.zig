@@ -94,13 +94,17 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     errdefer h.config.deinit(gpa);
     h.core = lanes.Engine.init(gpa, &h.config, h.model.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const image_tokens = if (vis_open.image_tokens_set) vis_open.image_tokens else vis_open.max_images * fl.serve.maxPageTokens();
-    const vis: api.Vision = .{ .ctx = h, .prepare = prepareImage, .image_token = fl.config.image_token, .markers = &h.markers, .image_tokens = image_tokens, .max_images = vis_open.max_images };
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = 1, .context_window = @intCast(context), .vision = vis, .greedy_only = true, .reasoning = false });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = 1, .context_window = @intCast(context), .vision = offer(h, vis_open), .greedy_only = true, .reasoning = false });
     h.host.on_thread = .{ .ctx = h, .run = Host.bind };
     h.host.memory = .{ .read = Host.memory };
     try h.host.start();
     return h;
+}
+
+/// The host's vision offer: --vision's image tokens (else its images' widest pages) and --vision-image-share's value.
+fn offer(h: *Host, vis_open: api.VisionOpen) api.Vision {
+    const image_tokens = if (vis_open.image_tokens_set) vis_open.image_tokens else vis_open.max_images * fl.serve.maxPageTokens();
+    return .{ .ctx = h, .prepare = prepareImage, .image_token = fl.config.image_token, .markers = &h.markers, .image_tokens = image_tokens, .max_images = vis_open.max_images, .image_share = vis_open.image_share };
 }
 
 /// Info.vision's prepare (on the HTTP thread, host work only): a page's views, gundam tiles when they fit.
@@ -139,4 +143,15 @@ test "Unlimited-OCR-2 on CUDA refuses a --context past its window or below one, 
         try std.testing.expect(std.mem.startsWith(u8, problem, "the native Unlimited-OCR-2 engine cannot load this checkpoint (") or
             std.mem.startsWith(u8, problem, "no CUDA driver ("));
     }
+}
+
+test "Unlimited-OCR-2 on CUDA offers --vision-image-share's value, as the Metal host does" {
+    var h: Host = undefined;
+    for ([_]api.ImageShare{ .request, .fixed }) |share| {
+        const v = offer(&h, .{ .max_images = 3, .image_share = share });
+        try std.testing.expectEqual(share, v.image_share);
+        try std.testing.expectEqual(@as(u32, 3), v.max_images);
+        try std.testing.expectEqual(3 * fl.serve.maxPageTokens(), v.image_tokens);
+    }
+    try std.testing.expectEqual(@as(u32, 700), offer(&h, .{ .image_tokens = 700, .image_tokens_set = true }).image_tokens);
 }

@@ -557,6 +557,7 @@ test "Flash Next takes --vision at family admission" {
 }
 test {
     _ = @import("cuda_health_test.zig");
+    _ = @import("uocr_cuda.zig"); // test-uocr-cuda's "Unlimited-OCR-2 on CUDA" open tests
     _ = @import("cuda_ceiling_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
