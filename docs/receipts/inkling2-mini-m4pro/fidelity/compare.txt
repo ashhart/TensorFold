@@ -1,0 +1,24 @@
+Teacher-forced: MLX's greedy ids forced position by position; top-1 agreement, forced-token logprob difference
+| prompt | prompt tokens | top-1 agree | mean abs dlogprob (agreeing) | max abs dlogprob | mismatches: j, MLX top1-top2 gap, native-vs-MLX lp of MLX token |
+|---|---|---|---|---|---|
+| code-python | 1500 | 245/256 (95.7 %) | 0.0206 | 0.2054 | 14: 0.030, -0.057; 15: 0.219, -0.134; 101: 0.120, -0.601; 109: 0.028, -0.393; 138: 0.304, -0.268; 143: 0.148, -0.453; 158: 0.058, -0.243; 175: 0.064, -0.195; 179: 0.121, -0.264; 183: 0.076, -0.084; 192: 0.079, -0.190 |
+| code-zig | 1500 | 254/256 (99.2 %) | 0.0054 | 0.1440 | 43: 0.000, -0.029; 217: 0.107, -0.051 |
+| prose | 900 | 250/256 (97.7 %) | 0.0278 | 0.5292 | 47: 0.168, -0.129; 51: 0.078, -0.104; 56: 0.105, -0.161; 57: 0.060, -0.090; 61: 0.165, -0.249; 78: 0.386, -0.687 |
+| math | 70 | 254/256 (99.2 %) | 0.0050 | 0.1479 | 57: 0.101, -0.059; 85: 0.000, -0.028 |
+| multilingual | 62 | 255/256 (99.6 %) | 0.0059 | 0.1467 | 57: 0.318, -0.183 |
+| doc-8k | 7998 | 252/256 (98.4 %) | 0.0170 | 0.2134 | 0: 0.100, -0.096; 96: 0.000, -0.072; 148: 0.323, -0.291; 215: 0.062, -0.113 |
+| doc-32k | 31998 | 252/256 (98.4 %) | 0.0185 | 0.1818 | 1: 0.000, -0.067; 32: 0.146, -0.263; 139: 0.049, -0.060; 162: 0.048, -0.027 |
+
+all: 1762/1792 = 98.33 %; mismatches by 64-token block of the continuation: [13, 5, 9, 3] of [448, 448, 448, 448]
+MLX top1-top2 gap at mismatches (nats): median 0.090, max 0.386, <0.1: 15 of 30
+
+Free greedy (first request per prompt, no forcing), native against MLX
+| prompt | first divergence (j) | MLX top1-top2 gap | MLX top1 / native token |
+|---|---|---|---|
+| code-python | 14 | 0.030 | 'er' / ' needs' |
+| code-zig | 43 | 0.000 | ' Value' / ' .' |
+| prose | 47 | 0.168 | ' The' / ' It' |
+| math | 57 | 0.101 | ' are' / ' of' |
+| multilingual | 57 | 0.318 | ' English' / ' German' |
+| doc-8k | 0 | 0.100 | '\n\n' / ' the' |
+| doc-32k | 1 | 0.000 | '-' / '>' |

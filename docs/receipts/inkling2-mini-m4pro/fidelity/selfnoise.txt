@@ -1,0 +1,7 @@
+| prompt | common greedy prefix (of 256) | MLX gap at divergence | mean abs dlogprob on prefix | max |
+|---|---|---|---|---|
+| code-python | 14 | 0.030 | 0.0613 | 0.1482 |
+| code-zig | 43 | 0.000 | 0.0101 | 0.1277 |
+| prose | 51 | 0.078 | 0.0120 | 0.1531 |
+| math | 256 | - | 0.0000 | 0.0000 |
+| multilingual | 256 | - | 0.0000 | 0.0000 |
