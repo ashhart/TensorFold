@@ -7,7 +7,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, fa
     const lifetime = b.step("test-flashnext-rank-lifetime-host", "Rank startup, media, cache restore and failed collective ownership without a GPU");
     lifetime.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "rank start:", "rank cache restore:", "rank cache save:", "after the image broadcast", "image broadcast fails", "rounds and windows keep", "rows cover a split pass", "a split pass reduce-scatters", "the reduce-scatter keeps", "decode graph keys" } })).step);
     const graphs = b.step("test-flashnext-rank-graphs-host", "Head and rollback graphs with a rank's collective, and their keys");
-    graphs.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "rank graphs:", "window graph", "graph tail:" } })).step);
+    graphs.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "rank graphs:", "window graph", "graph tail:", "decode graph keys:", "rank start:", "a nonblocking parent", "across hosts the collectives", "the split needs both ranks", "a split that fails", "a split still running", "a peer that closes its link during the split", "a split NCCL refuses", "one host is a Unix socket", "a link wait polls briefly" } })).step);
     b.step("test-flashnext-mtp-prefill-host", "Lean MTP prefill cache bytes, poisoned outputs and eager pieces without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"Flash Next MTP lean prefill:"} })).step);
     const moe = b.step("test-moetile-host", "Shared down slot fixtures, launch dispatch and contract records without a GPU");
     all.dependOn(moe);

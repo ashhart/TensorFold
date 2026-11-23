@@ -159,6 +159,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const tfq3_limits = b.addRunArtifact(runner_exe);
     tfq3_limits.addArgs(&.{ "kernel-contract", "tfq3" });
     b.step("tfq3-contract-limits", "TFQ3 launch resources against the compiled CUDA images").dependOn(&tfq3_limits.step);
+    b.step("flashnext-model-rank", "Compile the Flash Next two-rank model runner without executing a GPU").dependOn(&runner_exe.step);
     const startup = b.addObject(.{ .name = "modelopt-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/modelopt_startup_compile.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "native", .module = native.engines }} }) });
     _ = startup.getEmittedBin();
     b.step("compile-modelopt-startup", "Compile actual native startup with test-only absent GPU images").dependOn(&startup.step);
