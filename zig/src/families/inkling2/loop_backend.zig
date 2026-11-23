@@ -21,6 +21,18 @@ const Lane = struct {
     sampled: bool = false,
 };
 
+/// The bytes a slot's lane buffers ask for: a vocabulary row of last logits and a sampling rule.
+pub fn laneAllocs(vocab: u32) [2]usize {
+    return .{ @as(usize, vocab) * 4, @sizeOf(cuda.sample.Rule) };
+}
+
+/// The device bytes each served stream holds: its model slot (engine.slotAllocs) and its lane buffers.
+pub fn streamBytes(m: *const Model) u64 {
+    const slot = engine.slotAllocs(&m.layout, m.w.p.n_visits);
+    const lane = laneAllocs(m.w.c.text.unpadded_vocab);
+    return slot[0] + slot[1] + lane[0] + lane[1];
+}
+
 pub const Backend = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
@@ -52,12 +64,13 @@ pub const Backend = struct {
     }
 
     /// Each model slot's own last-logits and rule buffers, up to `n`.
-    fn slotBuffers(b: *Backend, n: usize) !void {
+    pub fn slotBuffers(b: *Backend, n: usize) !void {
+        const sizes = laneAllocs(b.m.w.c.text.unpadded_vocab);
         for (0..n) |i| {
             if (i < b.held) continue;
-            var last = try cuda.DeviceBuffer.alloc(b.d, b.m.w.c.text.unpadded_vocab * 4);
+            var last = try cuda.DeviceBuffer.alloc(b.d, sizes[0]);
             errdefer last.free();
-            b.slot[i] = .{ last, try cuda.DeviceBuffer.alloc(b.d, @sizeOf(cuda.sample.Rule)) };
+            b.slot[i] = .{ last, try cuda.DeviceBuffer.alloc(b.d, sizes[1]) };
             b.held = i + 1;
         }
     }

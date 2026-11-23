@@ -152,3 +152,17 @@ test "pass two resets and only completed passes with a successor capture message
     }
     try std.testing.expectEqual(lp.passes - 1, banks);
 }
+
+test "pass snapshots and rollback layout cover every visit" {
+    const config_test = @import("config_test.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var why: config.Why = .{};
+    const c = try config.parse(arena.allocator(), config_test.mini, &why);
+    var precisions: [24]plan_.Precision = @splat(.nvfp4);
+    const p = try plan_.build(&c.text, &precisions);
+    const layout = try CacheLayout.init(&c.text, &p, 4096);
+    try std.testing.expectEqual(@as(u32, 48), layout.n);
+    try std.testing.expect(layout.at(17).kv_offset != layout.at(29).kv_offset);
+    try std.testing.expectEqual(@as(u64, layout.at(46).conv_offset + layout.at(46).conv_bytes), layout.at(47).conv_offset);
+}
