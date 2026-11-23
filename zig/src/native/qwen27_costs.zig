@@ -118,9 +118,6 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     defer if (cursor != before) if (cursor_key) |key| lanes.cost_cache.save(u64, b.gpa, io, key, cursor);
     if (kept != null and !warm.admit(ms[probe.from..], widths[probe.from..], &cursor)) return;
     if (probe.phase) |phase| phase.turn.attempted = true;
-    defer {
-        if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
-    }
     var ids: [192]u32 = undefined;
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
     const prompt = ids[0..lanes.cost_rule.context.promptRows(r.capacity, width, width + 5)];
@@ -133,7 +130,7 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     if (kept != null) {
         var warm_timer: WarmTimer(@TypeOf(b)) = .{ .timer = timer };
         warm_timer.timer.from = probe.from;
-        const stats = warmProbe(&warm_timer, ms[probe.from..], widths[probe.from..], &cursor, probe.floor) orelse return;
+        const stats = (try warmProbe(b, &warm_timer, ms[probe.from..], widths[probe.from..], &cursor, probe.floor)) orelse return;
         for (b.costs[0..width], ms, 0..) |*c, m, i| c.* = .{ .width = @intCast(i + 1), .ms = m };
         b.timed = width;
         if (stats.lowered > 0) if (k) |key| lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, key, b.costs[0..width].*);
@@ -145,6 +142,7 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     try lanes.cost_rule.smooth(timer, &ms);
     const ref = lanes.cost_cache.referenceKey(&parts);
     if (lanes.cost_cache.load([width]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.measureWindows(timer, &ms, true);
+    try resetProbe(b);
     for (b.costs[0..width], ms, 0..) |*cost, m, i| cost.* = .{ .width = @intCast(i + 1), .ms = m };
     b.timed = width;
     if (k) |key| lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, key, b.costs[0..width].*);
@@ -202,9 +200,66 @@ fn WarmTimer(comptime B: type) type {
     };
 }
 
-fn warmProbe(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, floor: f64) ?warm.Stats {
-    return warm.prepared(timer, ms, widths, cursor, floor, warm.Local{}, true) catch null;
+fn resetProbe(b: anytype) !void {
+    if (b.draft) |d| try d.reset() else try b.runner.reset(0);
 }
+
+fn warmProbe(b: anytype, timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, floor: f64) !?warm.Stats {
+    const stats: ?warm.Stats = warm.prepared(timer, ms, widths, cursor, floor, warm.Local{}, true) catch blk: {
+        b.dropRound();
+        b.runner.recover();
+        if (b.draft) |d| try d.model.recover();
+        break :blk null;
+    };
+    try resetProbe(b);
+    return stats;
+}
+
+const ProbeRunner = struct {
+    active: ?usize = null,
+    failed: bool = false,
+    resets: usize = 0,
+
+    pub fn recover(r: *@This()) void {
+        r.active = null;
+        r.failed = false;
+    }
+
+    pub fn reset(r: *@This(), slot: usize) !void {
+        try std.testing.expectEqual(@as(usize, 0), slot);
+        if (r.active != null or r.failed) return error.RoundNotReady;
+        r.resets += 1;
+    }
+};
+
+const ProbeBackend = struct {
+    const Model = struct {
+        failed: bool = false,
+        recover_error: bool = false,
+
+        pub fn recover(m: *@This()) !void {
+            if (m.recover_error) return error.DraftRecoveryFailed;
+            m.failed = false;
+        }
+    };
+    const Draft = struct {
+        runner: *ProbeRunner,
+        model: Model = .{},
+        reset_error: bool = false,
+
+        pub fn reset(d: *@This()) !void {
+            if (d.reset_error or d.model.failed) return error.DraftResetFailed;
+            try d.runner.reset(0);
+        }
+    };
+    runner: *ProbeRunner,
+    draft: ?*Draft = null,
+    round: bool = false,
+
+    pub fn dropRound(b: *@This()) void {
+        b.round = false;
+    }
+};
 
 test "qwen27 startup: shared probe uses the maximum live narrow cost" {
     const Fake = struct {
@@ -215,20 +270,46 @@ test "qwen27 startup: shared probe uses the maximum live narrow cost" {
     const costs = [_]lanes.config.Cost{ .{ .width = 1, .ms = 20 }, .{ .width = 2, .ms = 19.8 } };
     var ms = [_]f64{21};
     var cursor: u64 = 0;
-    _ = warmProbe(Fake{}, &ms, &.{3}, &cursor, sharedFloor(&costs)).?;
+    var runner: ProbeRunner = .{};
+    var b: ProbeBackend = .{ .runner = &runner };
+    _ = (try warmProbe(&b, Fake{}, &ms, &.{3}, &cursor, sharedFloor(&costs))).?;
     try std.testing.expectEqual(@as(f64, 21), ms[0]);
 }
 
-test "qwen27 startup: a failed warm probe leaves the cached prices available" {
-    const Fake = struct {
-        pub fn time(_: @This(), _: usize) !f64 {
-            return error.ProbeFailed;
+test "qwen27 startup: recover a failed verify or keep before retaining cached prices" {
+    const Fault = struct {
+        b: *ProbeBackend,
+        keep: bool,
+
+        pub fn time(f: @This(), _: usize) !f64 {
+            f.b.runner.active = 0;
+            f.b.runner.failed = f.keep;
+            if (f.keep) {
+                f.b.round = true;
+                f.b.draft.?.model.failed = true;
+                return error.KeepGpuFailure;
+            }
+            return error.DrawGpuFailure;
         }
     };
+    var runner: ProbeRunner = .{};
+    var draft: ProbeBackend.Draft = .{ .runner = &runner };
+    var b: ProbeBackend = .{ .runner = &runner };
     var ms = [_]f64{21};
     var cursor: u64 = 0;
-    try std.testing.expect(warmProbe(Fake{}, &ms, &.{1}, &cursor, 0) == null);
+    try std.testing.expect((try warmProbe(&b, Fault{ .b = &b, .keep = false }, &ms, &.{1}, &cursor, 0)) == null);
+    b.draft = &draft;
+    const keep: Fault = .{ .b = &b, .keep = true };
+    try std.testing.expect((try warmProbe(&b, keep, &ms, &.{1}, &cursor, 0)) == null);
+    try std.testing.expect(runner.active == null and !runner.failed and !b.round and !draft.model.failed);
+    try std.testing.expectEqual(@as(usize, 2), runner.resets);
     try std.testing.expectEqual(@as(f64, 21), ms[0]);
+    draft.model.recover_error = true;
+    try std.testing.expectError(error.DraftRecoveryFailed, warmProbe(&b, keep, &ms, &.{1}, &cursor, 0));
+    draft.model.recover_error = false;
+    draft.reset_error = true;
+    try std.testing.expectError(error.DraftResetFailed, warmProbe(&b, keep, &ms, &.{1}, &cursor, 0));
+    try std.testing.expectEqual(@as(usize, 2), runner.resets);
 }
 
 test "qwen27 startup: no-fit shared turns still probe narrow on the same load" {
@@ -241,11 +322,13 @@ test "qwen27 startup: no-fit shared turns still probe narrow on the same load" {
     var shared_cursor: u64 = 0;
     var narrow_cursor: u64 = 0;
     var saved: u64 = 0;
+    var runner: ProbeRunner = .{};
+    var b: ProbeBackend = .{ .runner = &runner };
     for (1..7) |load| {
         var phase: Phase = .{ .turn = .{ .value = saved } };
         if (phase.turn.preferredShared()) phase.turn.attempted = warm.admit(&.{200}, &.{64}, &shared_cursor);
         if (!phase.turn.preferredShared() or phase.retryNarrow()) {
-            const stats = warmProbe(Fake{}, &narrow_ms, &.{16}, &narrow_cursor, 0).?;
+            const stats = (try warmProbe(&b, Fake{}, &narrow_ms, &.{16}, &narrow_cursor, 0)).?;
             try std.testing.expectEqual(@as(u32, 1), stats.reads);
         }
         saved = phase.turn.next();
