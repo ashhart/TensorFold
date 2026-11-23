@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: host tests record where capped prompt chunks cut while another stream is live, family by family (#N).
+
 - Tests: the lone-driver third-prompt test no longer hangs when its poller is descheduled (#4783).
 
 - Lanes: the opt-in shared price log also covers the shared-drafts grant path (#4686). Thanks @eXsoR65.
