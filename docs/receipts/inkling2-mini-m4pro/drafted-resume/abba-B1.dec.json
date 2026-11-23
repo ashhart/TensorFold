@@ -1,0 +1,150 @@
+[
+ {
+  "label": "B1",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": null,
+  "thinking_applicable": null,
+  "decode_tps_median": 32.47983819497409,
+  "decode_tps_all": [
+   30.78,
+   32.48,
+   32.58
+  ],
+  "ttft_s_median": 0.15621941699646413,
+  "prompt_ttft_tps_median": 96.019,
+  "prefill_tps_median": 96.019,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 30.788,
+  "round_gap_p50_ms_median": 63.434,
+  "round_gap_p95_ms_median": 81.803,
+  "tokens_per_chunk_median": 2.151,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.156,
+  "first_content_s_median": 0.156,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.156,
+  "last_output_s_median": 8.007,
+  "evidence": [
+   {
+    "prompt_tokens": 15,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "6667e139c86e",
+    "output_sha256": "1f8c913de646dd5b86ad7b570da45979ba7a1d88ac3d5e887c544acf0b241568",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 15,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "6667e139c86e",
+    "output_sha256": "1f8c913de646dd5b86ad7b570da45979ba7a1d88ac3d5e887c544acf0b241568",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 15,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "6667e139c86e",
+    "output_sha256": "1f8c913de646dd5b86ad7b570da45979ba7a1d88ac3d5e887c544acf0b241568",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "\n\nsobes.tech AI\n\nAnswer from AI\n\nThe Fibonacci sequence is a series of numbers where each subsequent number is the sum of the two previous ones. The first two n",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ },
+ {
+  "label": "B1",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "off requested (unverified)",
+  "thinking_off_requested": true,
+  "thinking_switch": null,
+  "thinking_applicable": null,
+  "decode_tps_median": 30.9002116227761,
+  "decode_tps_all": [
+   30.68,
+   30.92,
+   30.9
+  ],
+  "ttft_s_median": 0.26159924996318296,
+  "prompt_ttft_tps_median": 126.147,
+  "prefill_tps_median": 126.147,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 32.362,
+  "round_gap_p50_ms_median": 62.691,
+  "round_gap_p95_ms_median": 79.919,
+  "tokens_per_chunk_median": 2.048,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.001,
+  "first_content_s_median": 0.262,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.262,
+  "last_output_s_median": 8.514,
+  "evidence": [
+   {
+    "prompt_tokens": 33,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "ea5692a0e8dc",
+    "output_sha256": "97ea9af1243199aa55c06f96f1947f65ed9fc60257ecbc1b1fd05461c9f8cab7",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 33,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "ea5692a0e8dc",
+    "output_sha256": "97ea9af1243199aa55c06f96f1947f65ed9fc60257ecbc1b1fd05461c9f8cab7",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 33,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "ea5692a0e8dc",
+    "output_sha256": "97ea9af1243199aa55c06f96f1947f65ed9fc60257ecbc1b1fd05461c9f8cab7",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "<|message_model|><|content_thinking|>The user wants an explanation of how matrix multiplication uses a GPU in plain English, then a small numerical example. Nee",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ }
+]
