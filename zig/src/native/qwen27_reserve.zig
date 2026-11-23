@@ -62,7 +62,7 @@ pub fn budget(a: std.mem.Allocator, io: std.Io, dir: []const u8, weights: u64, c
     const path = try std.fs.path.join(a, &.{ dir, "config.json" });
     const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
     var problem: q.config.Problem = .{};
-    const c = try q.model.parseServed(a, text, &problem);
+    const c = try q.model.parseServed(a, text, null, &problem);
     if (context == 0 or context > c.max_position) return error.ContextFull;
     const dev = try mtl.Device.init();
     defer dev.deinit();
