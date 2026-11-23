@@ -557,7 +557,6 @@ test "TF_GLM_PAIR_EXPERTS: off by default, 0 or 1, and every rank must agree" {
     try std.testing.expectEqual(Mismatch{ .field = .pair_experts, .rank = 1 }, mismatch(&all).?);
 }
 
-
 test "wire pieces: a blank override is unset; the tools' form takes its world from TF_GLM_WORLD" {
     const Reader = struct {
         fn at(key: [:0]const u8, world: ?[]const u8, pieces: ?[]const u8) ?[]const u8 {
