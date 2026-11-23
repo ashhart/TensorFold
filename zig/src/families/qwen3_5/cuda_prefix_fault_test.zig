@@ -97,12 +97,12 @@ const World = struct {
             .copy => D.fail_dtod = true,
             .wait => D.fail_wait_in = 2,
         }
-        try w.x.keep(r.cache, w.ids, 4096);
+        try w.x.keep(r.cache, w.ids, null, 4096);
         if (fault == .copy or fault == .wait) {
             try t.expectEqual(@as(usize, 0), w.x.store.tree.snaps);
             try t.expectEqual(@as(usize, 1), w.x.store.tree.counts.failed);
             try t.expectEqual(@as(usize, 0), D.freed_pending);
-            try w.x.keep(r.cache, w.ids, 4096);
+            try w.x.keep(r.cache, w.ids, null, 4096);
         }
         try t.expect(w.p.close(r.cache));
         try settled(w.p);
@@ -229,6 +229,19 @@ test "Qwen share faults: a keep whose swapped table fails to upload leaves the l
     try w.deinit();
 }
 
+test "Qwen share faults: an unsalted snapshot is not restored under a salt" {
+    var w: World = undefined;
+    try w.init(t.allocator);
+    const r = try w.x.open(w.next, 16, 9100, &.{}, 1);
+    const gpa = w.x.gpa;
+    defer gpa.free(r.plan.marks);
+    try t.expectEqual(@as(u32, 0), r.plan.from);
+    try t.expect(w.p.close(r.cache));
+    try settled(w.p);
+    try w.resumes(); // the unsalted request still resumes its own state
+    try w.deinit();
+}
+
 test "Qwen share faults: device snapshots restore D2D and eviction frees their bounded buffer" {
     var w: World = undefined;
     try w.gpu(t.allocator, .none);
@@ -245,7 +258,7 @@ test "Qwen share faults: device snapshots restore D2D and eviction frees their b
     w.x.store.limit(.{ .pages = w.p.pool.total(), .snaps = 0 });
     try t.expectEqual(@as(usize, 0), w.x.store.tree.snaps);
     try t.expectEqual(live - 1, D.devices);
-    const fresh = try w.x.open(w.next, 16, 9100, &.{});
+    const fresh = try w.x.open(w.next, 16, 9100, &.{}, null);
     defer w.x.gpa.free(fresh.plan.marks);
     try t.expectEqual(@as(u32, 0), fresh.plan.from);
     try t.expectEqual(@as(usize, 2), D.dtods);
@@ -288,7 +301,7 @@ test "Qwen share faults: a failed D2D restore keeps its snapshot and settles eve
     var w: World = undefined;
     try w.gpu(t.allocator, .none);
     D.fail_dtod = true;
-    try t.expectError(error.NotReady, w.x.open(w.next, 16, 9100, &.{}));
+    try t.expectError(error.NotReady, w.x.open(w.next, 16, 9100, &.{}, null));
     try t.expectEqual(@as(usize, 1), w.x.store.tree.snaps);
     try t.expectEqual(@as(usize, 0), D.freed_pending);
     try settled(w.p);
