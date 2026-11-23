@@ -9,7 +9,7 @@ pub fn steps(b: *std.Build, lanes: *std.Build.Module) void {
 }
 
 pub fn compile(b: *std.Build, draft_ids: *std.Build.Module) void {
-    const target = b.graph.host;
+    const target = if (b.graph.host.result.os.tag == .macos) b.graph.host else b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .link_libc = true });
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .link_libc = true });
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .link_libc = true });
@@ -20,8 +20,9 @@ pub fn compile(b: *std.Build, draft_ids: *std.Build.Module) void {
     engine.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target }));
     const empty = b.addWriteFiles().add("cost-compile-only.metallib", "");
     sources.addImport("nemotron_packed_metallib", @import("metal_targets.zig").embedded(b, empty, "nemotron_packed.metallib"));
-    const root = b.createModule(.{ .root_source_file = b.path("zig/metal_cost_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/metal_cost_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const object = b.addObject(.{ .name = "metal-cost-adapters", .root_module = root });
     _ = object.getEmittedBin();
-    b.step("check-metal-cost-adapters-host", "Compile actual Metal cost adapter bodies without linking or GPU execution").dependOn(&object.step);
+    b.step("check-metal-cost-adapters-host", "Compile actual Metal cost adapter bodies as a Darwin object without linking or GPU execution").dependOn(&object.step);
 }
