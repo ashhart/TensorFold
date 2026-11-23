@@ -5,22 +5,6 @@ using namespace metal;
 
 inline float uv_bf(float x) { return float(bfloat(x)); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float uv_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 // y = bf16(a + b) over `n` values (torch's bf16 add: both widened, one rounding).
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void uv_add(
     const device bfloat* a [[buffer(0)]], const device bfloat* b [[buffer(1)]], device bfloat* y [[buffer(2)]],
@@ -53,13 +37,13 @@ struct UvNorm {
   device bfloat* yr = y + ulong(row) * p.width;
   float s = 0.0f;
   for (uint i = t; i < p.width; i += n) s += float(xr[i]);
-  const float mean = uv_sum(s, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(p.width);
   float v = 0.0f;
   for (uint i = t; i < p.width; i += n) {
     const float d = float(xr[i]) - mean;
     v += d * d;
   }
-  const float inv = metal::precise::rsqrt(uv_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
 }
 
