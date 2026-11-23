@@ -30,7 +30,7 @@ const Stream = struct {
         const f = try prefetch.make(r, t.io, .{});
         var name: rows.chain.Name = undefined;
         for (&name, 0..) |*b, i| b.* = @truncate(i * 7 + 3);
-        var w = try rows.file.Writer.open(dir, &rows.chain.hex(name), ".blk");
+        var w = try rows.file.Writer.open(r.dir, &rows.chain.hex(name), ".blk");
         errdefer w.abort();
         var buf: [64 << 10]u8 = undefined;
         var done: usize = 0;
@@ -133,7 +133,7 @@ test "prefetch stream: a corrupt trailer hash reaches a detached consumer; sourc
     var s = try Stream.open(dir, prefetch.chunk_bytes + 93, false);
     defer s.close();
     var name_buf: [1200]u8 = undefined;
-    const source = try rows.file.path(&name_buf, dir, &rows.chain.hex(s.name), ".blk", false);
+    const source = try rows.file.path(&name_buf, s.r.dir, &rows.chain.hex(s.name), ".blk", false);
     const fd = platform.c.open(source, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
     try t.expect(fd >= 0);
     try t.expectEqual(@as(isize, 1), platform.c.pwrite(fd, "X", 1, 100));
@@ -172,7 +172,7 @@ test "prefetch stream: a queued read falls back and releases its slots without s
     try t.expectEqual(@as(u64, 0), snap.held_bytes);
     try t.expectEqual(@as(usize, 0), snap.held_reads);
     var name_buf: [1200]u8 = undefined;
-    const source = try rows.file.path(&name_buf, dir, &rows.chain.hex(s.name), ".blk", false);
+    const source = try rows.file.path(&name_buf, s.r.dir, &rows.chain.hex(s.name), ".blk", false);
     var opened = try rows.file.open(source, .block, s.name);
     opened.close();
 }

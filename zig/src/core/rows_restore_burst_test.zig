@@ -85,7 +85,9 @@ test "restore scale: bursts bound allocated staging and failures wake every admi
         }
         try t.expectEqual(@as(u64, expected) * 2 * pf.chunk_bytes + r.stage.len, peak);
         f.stop();
-        try t.expectEqual(expected * 8, signal.calls.load(.acquire));
+        // A read wakes on its first fragment and again at settle; a failing read wakes only at settle.
+        const wakes: usize = expected * 8 * (if (fails) @as(usize, 1) else 2);
+        try t.expectEqual(wakes, signal.calls.load(.acquire));
         try t.expectEqual(f.counts.made, f.counts.freed);
         try t.expectEqual(@as(u64, if (fails) expected * 8 else 0), f.counts.failed);
         try t.expectEqual(@as(usize, 0), x.f.live);

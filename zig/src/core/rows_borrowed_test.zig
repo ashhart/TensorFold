@@ -87,13 +87,14 @@ test "borrowed spill: a newest keep waits for the earlier write and restores aft
         try started;
         if (keep.err) |err| return err;
         try t.expectEqual(false, premature);
-        const reason = if (oversized) "StagingFull" else "StagingBusy";
+        // Both sizes now meet StagingFull and stream pieces; no whole-image permit.
+        const reason = "StagingFull";
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, keep.heard.text(), reason));
         try t.expect(std.mem.indexOf(u8, keep.heard.text(), "1000 borrowed tokens") != null);
-        const action: []const u8 = if (oversized) "streaming bounded pieces" else "waiting for staging permit";
+        const action = "streaming bounded pieces";
         try t.expect(std.mem.indexOf(u8, keep.heard.text(), action) != null);
         try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
-        try t.expectEqual(oversized, x.r.stage.len > 0);
+        try t.expect(x.r.stage.len > 0);
         try restore(x, &next, 1000);
         try t.expectEqual(@as(u64, 2), x.r.counts.writes);
         try t.expectEqual(limit, x.r.worker.?.limit);
@@ -121,7 +122,7 @@ test "borrowed spill: an image larger than the whole permit streams before expir
 }
 
 test "borrowed spill: a nontransient family still defers an eviction-only save" {
-    const x = try fixture.Fixture.open("borrowed-ordinary", .evicted, false, 1 << 20);
+    const x = try fixture.Fixture.open("borrowed-ordinary", .evicted, false, 9 << 20);
     defer x.close();
     const tokens = fixture.prompt(75);
     try x.keep(&tokens, 1000);
