@@ -11,9 +11,9 @@ pub fn on() bool {
     return @import("sys").environment.read(bool, "TF_NEMOTRON_WIDE_ROUNDS", false) catch false;
 }
 
-/// Where a 17-32-row round keeps each row's bits: GB10, one rank, non-latent, not Bolt, no e4m3 rows or bf16 experts.
-pub fn allowed(c: Config, gb10: bool) bool {
-    return gb10 and c.latent == 0 and !c.bolt and !c.ck and !c.salm and c.world == 1;
+/// Where a 17-32-row round keeps each row's bits: GB10, one rank, non-latent, not Bolt, no e4m3/bf16 experts, no slide.
+pub fn allowed(c: Config, gb10: bool, slide: bool) bool {
+    return gb10 and c.latent == 0 and !c.bolt and !c.ck and !c.salm and c.world == 1 and !slide;
 }
 
 /// Whether a shared window of `rows` rows fits (its streams' Mamba rows stay at windowRows each, the scan's stride).
@@ -63,17 +63,18 @@ test "wide rounds: 16 streams only with the switch, and only where each row's ke
     c.wide_rounds = true;
     try std.testing.expectEqual(@as(usize, 16), streams(c));
     c = small;
-    try std.testing.expect(allowed(c, true));
-    try std.testing.expect(!allowed(c, false)); // off GB10 affine-4 has no 32-row verify
+    try std.testing.expect(allowed(c, true, false));
+    try std.testing.expect(!allowed(c, false, false)); // off GB10 affine-4 has no 32-row verify
     inline for (.{ "bolt", "ck", "salm" }) |f| {
         var x: Config = small;
         @field(x, f) = true;
-        try std.testing.expect(!allowed(x, true));
+        try std.testing.expect(!allowed(x, true, false));
     }
     var lat: Config = small;
     lat.latent = 1024;
-    try std.testing.expect(!allowed(lat, true)); // Super keeps its own 32-row window
+    try std.testing.expect(!allowed(lat, true, false)); // Super keeps its own 32-row window
     var tp: Config = small;
     tp.world = 2;
-    try std.testing.expect(!allowed(tp, true));
+    try std.testing.expect(!allowed(tp, true, false));
+    try std.testing.expect(!allowed(small, true, true)); // lessons reach 8 streams' rows a pass (REV60 2)
 }
