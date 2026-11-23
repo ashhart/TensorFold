@@ -50,6 +50,12 @@ pub fn wideFrom(chip: Chip, bits: u8) ?usize {
     return out;
 }
 
+/// Whether a window of `rows` at code width `bits` takes the wide kernels, by a table of a cutover each width.
+pub fn takes(wide_from: *const [bit_widths.len]usize, bits: u8, rows: usize) bool {
+    const b = std.mem.indexOfScalar(u8, &bit_widths, bits) orelse return false;
+    return rows >= wide_from[b];
+}
+
 /// tf-row-cutover's key line: the chip it keys on and the table's cutover at each width.
 pub fn keyLine(buf: []u8, chip: Chip) ![]const u8 {
     var w: std.Io.Writer = .fixed(buf);
@@ -95,4 +101,18 @@ test "tf-row-cutover prints the key it uses and the table's cutover at each widt
     try std.testing.expectEqualStrings("generation 17, tier max, table cutover q2=32 q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, chipOf(17, "Apple M5 Max")));
     try std.testing.expectEqualStrings("generation 17, tier ultra, table cutover q2=8 q3=8 q4=8 q5=8 q6=8 q8=8", try keyLine(&buf, chipOf(17, "Apple M5 Ultra")));
     try std.testing.expectEqualStrings("generation 16, tier unknown, table cutover q2=never q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, chipOf(16, "")));
+}
+
+test "a per-width table routes each code width by its own cutover, as an M5 Max's does (REV75 3)" {
+    var max: [bit_widths.len]usize = undefined;
+    for (&max, bit_widths) |*from, bits| from.* = wideFrom(chipOf(17, "Apple M5 Max"), bits).?;
+    try std.testing.expect(takes(&max, 2, 32)); // 2 bits: wide at 32
+    try std.testing.expect(!takes(&max, 2, 31));
+    for ([_]u8{ 3, 4, 5, 6, 8 }) |bits| try std.testing.expect(!takes(&max, bits, 32)); // the rest narrow at every width
+    var ultra: [bit_widths.len]usize = undefined;
+    for (&ultra, bit_widths) |*from, bits| from.* = wideFrom(chipOf(17, "Apple M5 Ultra"), bits).?;
+    for (bit_widths) |bits| {
+        try std.testing.expect(takes(&ultra, bits, 8) and !takes(&ultra, bits, 7)); // the Ultra's 8, as before
+    }
+    try std.testing.expect(!takes(&ultra, 7, 32)); // a width the kernels do not unpack takes none
 }
