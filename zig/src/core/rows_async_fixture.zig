@@ -109,7 +109,7 @@ pub const Gate = struct {
     release: std.atomic.Value(bool) = .init(false),
     left: std.atomic.Value(bool) = .init(false),
     mode: enum { good, full, short, sync_failure, first_fails } = .good,
-    hold_ns: i128 = 250 * std.time.ns_per_ms, // bounded so a gated peer cannot hang the test
+    hold_ns: i128 = 10 * std.time.ns_per_s, // safety bound; timeout controls select hold_ns = 0
     calls: usize = 0,
     sync_entered: std.atomic.Value(bool) = .init(false),
     sync_release: std.atomic.Value(bool) = .init(true),
@@ -118,13 +118,16 @@ pub const Gate = struct {
         return .{ .ctx = g, .write = write, .sync = sync };
     }
 
-    /// A bounded hold: staged saves backpressure their caller, so peer waits cannot hold it forever.
+    /// A gate times out loudly: silently doing I/O would invalidate the blocked-writer schedule.
     fn write(ctx: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.entered.store(true, .release);
-        const end = rows.write.nowNs() + g.hold_ns;
-        while (!g.release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
         defer g.left.store(true, .release);
+        const end = rows.write.nowNs() + g.hold_ns;
+        while (!g.release.load(.acquire)) {
+            if (rows.write.nowNs() >= end) return error.GateTimedOut;
+            rows.write.io.nap();
+        }
         g.calls += 1;
         if (g.mode == .full or (g.mode == .first_fails and g.calls == 1)) return error.NoSpaceLeft;
         if (g.mode == .short and g.calls > 1) return 0;
@@ -137,7 +140,10 @@ pub const Gate = struct {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.sync_entered.store(true, .release);
         const end = rows.write.nowNs() + g.hold_ns;
-        while (!g.sync_release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
+        while (!g.sync_release.load(.acquire)) {
+            if (rows.write.nowNs() >= end) return error.GateTimedOut;
+            rows.write.io.nap();
+        }
         if (g.mode == .sync_failure) return error.SyncFailed;
         if (platform.c.fsync(fd) != 0) return error.RowsWrite;
     }

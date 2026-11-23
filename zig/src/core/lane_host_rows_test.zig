@@ -187,7 +187,7 @@ test "rows I/O: a host serves another turn while its disk writer is blocked" {
     const Fixture = @import("rows_async_fixture.zig");
     const Check = struct {
         fn run(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) !void {
-            var gate: Fixture.Gate = .{};
+            var gate: Fixture.Gate = .{ .hold_ns = 20 * std.time.ns_per_s };
             var first: Box = .{};
             var second: Box = .{};
             defer {
@@ -198,11 +198,13 @@ test "rows I/O: a host serves another turn while its disk writer is blocked" {
             }
             r.file_io = gate.io();
             const p = prompt(31);
-            const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
+            // One state chunk per turn leaves the engine free while the writer holds its write.
+            const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 200 };
             try h.engine().submit(31, &req, .{ .ctx = &first, .event = Box.event });
             try Fixture.Gate.wait(&gate.entered);
+            _ = try first.wait();
             const q = prompt(32);
-            const next: api.Request = .{ .prompt = &q, .max_tokens = 6, .history_len = 600 };
+            const next: api.Request = .{ .prompt = &q, .max_tokens = 6, .history_len = 200 };
             try h.engine().submit(32, &next, .{ .ctx = &second, .event = Box.event });
             const end = waits.deadline();
             var result: ?Reason = null;
@@ -213,10 +215,11 @@ test "rows I/O: a host serves another turn while its disk writer is blocked" {
                 if (result != null) break;
                 pc.rows.write.io.nap();
             }
+            const left_before_release = gate.left.load(.acquire);
             gate.release.store(true, .release);
-            _ = try first.wait();
             _ = try second.wait();
             try std.testing.expectEqual(@as(?Reason, .length), result);
+            try std.testing.expect(!left_before_release);
             try std.testing.expectEqual(@as(usize, 6), second.tokens.items.len);
         }
     };
