@@ -42,15 +42,15 @@ const Stream = struct {
         }
         _ = try w.finish(.{ .kind = @backingInt(rows.file.Kind.block), .payload = 0, .payload_hash = 0, .name = name, .block = r.keying.block }, &.{}, false);
 
-        const pieces = try gpa.alloc(prefetch.Piece, 1);
-        errdefer gpa.free(pieces);
+        const pieces = try f.gpa.alloc(prefetch.Piece, 1);
+        errdefer f.gpa.free(pieces);
         pieces[0] = .{ .name = name, .kind = .block, .at = 0, .len = len, .first = 0, .end = 0, .off = 0 };
-        const rd = try gpa.create(prefetch.Read);
-        errdefer gpa.destroy(rd);
-        const first = try gpa.alignedAlloc(u8, .fromByteUnits(rows.file.alignment), prefetch.chunk_bytes);
-        errdefer gpa.free(first);
-        const second = try gpa.alignedAlloc(u8, .fromByteUnits(rows.file.alignment), prefetch.chunk_bytes);
-        errdefer gpa.free(second);
+        const rd = try f.gpa.create(prefetch.Read);
+        errdefer f.gpa.destroy(rd);
+        const first = try f.gpa.alignedAlloc(u8, .fromByteUnits(rows.file.alignment), prefetch.chunk_bytes);
+        errdefer f.gpa.free(first);
+        const second = try f.gpa.alignedAlloc(u8, .fromByteUnits(rows.file.alignment), prefetch.chunk_bytes);
+        errdefer f.gpa.free(second);
         rd.* = .{ .name = name, .plan = .{ .pieces = pieces, .bytes = len }, .since = 0, .slots = .{ .{ .buf = first }, .{ .buf = second } }, .phase = if (queued) .queued else .reading, .producer_active = !queued };
         f.mutex.lockUncancelable(f.io);
         f.reads.append(f.gpa, rd) catch |err| {
