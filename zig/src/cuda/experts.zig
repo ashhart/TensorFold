@@ -377,14 +377,9 @@ pub const Nvfp4Experts = struct {
     pub const prompt_wn = [3]usize{ 8, 4, 8 };
     pub const pair_prompt_wn = [2]usize{ 4, 8 };
 
-    /// Prompt4<M, 4, WM, WN>'s dynamic shared bytes: stages of 64*WM rows' 64 inputs, then WN x 2 blocks.
-    pub fn promptSmemWM(parts: usize, wm: usize, wn: usize) u32 {
-        return if (wm == 1) prompt_layout.promptSmem(parts, wn) else prompt_layout.pairPromptSmem(parts, wn);
-    }
-
-    pub fn promptSmem(parts: usize, wn: usize) u32 {
-        return prompt_layout.promptSmem(parts, wn);
-    }
+    /// Prompt4<M, 4, WM, WN>'s dynamic shared bytes from the common 64/128-row staging layout.
+    pub const promptSmem = prompt_layout.promptSmem;
+    pub const promptSmemWM = prompt_layout.promptSmemWM;
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
         const selected = @import("sys").environment.parse("TF_NVFP4_DECODE_WARPS", value) catch return error.BadExpertWarps;

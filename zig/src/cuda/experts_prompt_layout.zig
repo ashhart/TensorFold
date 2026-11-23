@@ -12,6 +12,11 @@ pub fn promptSmem(parts: usize, wn: usize) u32 {
     return stagedSmem(parts, wn, 64);
 }
 
+/// Prompt4<M, 4, WM, WN>'s staging: 64*WM rows and WN x 2 weight blocks.
+pub fn promptSmemWM(parts: usize, wm: usize, wn: usize) u32 {
+    return if (wm == 1) promptSmem(parts, wn) else pairPromptSmem(parts, wn);
+}
+
 /// The paired entries' WM=2 staging: 128 rows, two x two input stages.
 pub fn pairPromptSmem(parts: usize, wn: usize) u32 {
     return stagedSmem(parts, wn, 128);
