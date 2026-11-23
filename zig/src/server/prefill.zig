@@ -57,6 +57,7 @@ pub fn ids(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinkin
     if (thinking and srv.info.capability(.reasoning)) return cx.refuse(thinking_on); // on only when the request asked
     const list = try prompt.templateMessages(srv, cx, messages);
     const text = try final(cx, list);
+    if (reply_text.pyStrip(text).len == 0) return cx.refuse(trailing); // whitespace-only renders an empty turn, before either cut check
     const options = prompt.renderOptions(srv, cx, tools, thinking, effort, false);
     var problem: []const u8 = "";
     const whole = prompt.renderText(srv, cx.a, list, options, &problem) catch |e| return failed(cx, e, problem);
