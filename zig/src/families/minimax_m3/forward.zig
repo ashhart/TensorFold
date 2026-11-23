@@ -20,6 +20,8 @@ const IArgs = extern struct { rows: u32, pos: u32, heads: u32, blocks: u32, firs
 /// The decode attention's constants (mm_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, topk: u32, scale: f32, sel: u32, all: u32 };
 
+pub const groupedExpertSlot = @import("expert_choice.zig").groupedExpertSlot;
+
 const Enc = struct {
     e: mtl.ComputeEncoder,
     m: *const Model,

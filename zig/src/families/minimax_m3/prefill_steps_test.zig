@@ -48,6 +48,19 @@ fn stream(prompt: []const u32, id: []const u8) !lanes.Stream {
     return lanes.Stream.init(gpa, .{ .id = id, .prompt = prompt, .max_new = 4, .chunks = &chunks, .reuse = .{ .marks = &marks } });
 }
 
+test "MiniMax-M3 Metal steps: grouped expert widths require the Q8 opt-in" {
+    const choice = @import("expert_choice.zig");
+    for ([_]bool{ false, true }) |q8_opt_in| {
+        try t.expectEqual(@as(?usize, 0), choice.groupedExpertSlot(3, q8_opt_in));
+        try t.expectEqual(@as(?usize, 1), choice.groupedExpertSlot(4, q8_opt_in));
+        for ([_]u32{ 0, 1, 2, 5, 6, 7, 9, 255 }) |bits| {
+            try t.expectEqual(@as(?usize, null), choice.groupedExpertSlot(bits, q8_opt_in));
+        }
+    }
+    try t.expectEqual(@as(?usize, null), choice.groupedExpertSlot(8, false));
+    try t.expectEqual(@as(?usize, 2), choice.groupedExpertSlot(8, true));
+}
+
 test "MiniMax-M3 Metal steps: one call runs one chunk at today's cut, and the calls' chunks are the whole loop's" {
     var ids: [len]u32 = undefined;
     for (&ids, 0..) |*x, i| x.* = @intCast(i % 97 + 3);
