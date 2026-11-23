@@ -43,6 +43,8 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "0", .n = 0 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "0", .n = 0 },
