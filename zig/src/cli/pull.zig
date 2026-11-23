@@ -318,11 +318,7 @@ fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, 
 
 /// Server-controlled model text made safe for output, with its hub credential removed.
 fn safeModelType(a: Allocator, text: []const u8, auth: Auth) ![]const u8 {
-    var out = text;
-    if (auth.bearer) |bearer| {
-        const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer["Bearer ".len..] else bearer;
-        if (secret.len > 0 and std.mem.indexOf(u8, out, secret) != null) out = try std.mem.replaceOwned(u8, a, out, secret, "[redacted]");
-    }
+    const out = try auth.redact(a, text);
     for (out) |ch| if (ch <= 0x20 or ch >= 0x7f) return "[unprintable model_type]";
     return out;
 }

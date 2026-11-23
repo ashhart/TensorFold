@@ -215,11 +215,18 @@ const Exchange = struct {
     }
 };
 
-/// A refusal's body, up to 16 KiB, read for at most 100 ms past its head, after its sample's time and code are set.
+/// A complete refusal body up to 16 KiB, read for 100 ms; oversized, timed-out and incomplete bodies return none.
 pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
-    var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(resp.head.content_length orelse 16 << 10, 16 << 10) };
-    if (wait.in.buffered().len < wait.want) _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+    const declared = resp.head.content_length;
+    if (declared != null and declared.? > 16 << 10) return "";
+    var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(declared orelse 16 << 10, 16 << 10), .exact = declared != null };
+    if (wait.exact and wait.in.buffered().len >= wait.want) {
+        wait.complete = true;
+    } else {
+        _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+        if (!wait.complete) return "";
+    }
     const got = wait.in.buffered();
     return a.dupe(u8, got[0..@min(got.len, wait.want)]) catch "";
 }
@@ -227,10 +234,16 @@ pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response
 const BodyWait = struct {
     in: *std.Io.Reader,
     want: usize,
+    exact: bool,
+    complete: bool = false,
     done: std.atomic.Value(bool) = .init(false),
 
     fn run(w: *BodyWait) void {
-        while (w.in.buffered().len < w.want) w.in.fillMore() catch return;
+        while (w.in.buffered().len < w.want) w.in.fillMore() catch |e| {
+            w.complete = !w.exact and e == error.EndOfStream;
+            return;
+        };
+        w.complete = w.exact;
     }
 };
 

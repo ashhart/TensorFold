@@ -182,7 +182,7 @@ pub fn fileStat(io: std.Io, path: []const u8) !u64 {
 }
 
 /// A snapshot's path a hub tree names: relative, and no traversal segments.
-fn snapshotPathOk(path: []const u8) bool {
+pub fn snapshotPathOk(path: []const u8) bool {
     if (path.len == 0 or path[0] == '/') return false;
     if (std.mem.indexOfAny(u8, path, "\\:\x00") != null) return false;
     var it = std.mem.splitScalar(u8, path, '/');
