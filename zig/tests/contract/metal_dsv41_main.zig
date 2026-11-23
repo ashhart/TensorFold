@@ -14,6 +14,7 @@ const dsv41_cand = @import("metal_dsv41_cand.zig");
 const dsv41_attn = @import("metal_dsv41_attn.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
 const dsv41_xmma = @import("metal_dsv41_xmma.zig");
+const dsv41_experts_cert = @import("metal_dsv41_experts_cert.zig");
 const dsv41_index = @import("metal_dsv41_index.zig");
 const dsv41_engram = @import("metal_dsv41_engram.zig");
 const dsv41_glue = @import("metal_dsv41_glue.zig");
@@ -93,6 +94,7 @@ pub const Suites = struct {
     attn: *dsv41_attn.Suite,
     experts: *dsv41_experts.Suite,
     xmma: *dsv41_xmma.Suite,
+    experts_cert: *dsv41_experts_cert.Suite,
     ix: *dsv41_index.Suite,
     engram: *dsv41_engram.Suite,
     glue: *dsv41_glue.Suite,
@@ -131,6 +133,8 @@ pub const Suites = struct {
         errdefer experts.destroy();
         const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
         errdefer xmma.destroy();
+        const experts_cert = try dsv41_experts_cert.Suite.create(a, device, queue, kernels, only);
+        errdefer experts_cert.destroy();
         const ix = try dsv41_index.Suite.create(a, device, queue, kernels, only);
         errdefer ix.destroy();
         const engram = try dsv41_engram.Suite.create(a, device, queue, kernels, only);
@@ -167,7 +171,7 @@ pub const Suites = struct {
         errdefer segs.destroy();
         const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
         errdefer segs_ix.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_cert = fp8_cert, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_cert = fp8_cert, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .experts_cert = experts_cert, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
     }
 
     pub fn destroy(s: *Suites) void {
@@ -189,6 +193,7 @@ pub const Suites = struct {
         s.glue.destroy();
         s.engram.destroy();
         s.ix.destroy();
+        s.experts_cert.destroy();
         s.xmma.destroy();
         s.experts.destroy();
         s.attn.destroy();
@@ -205,6 +210,7 @@ pub const Suites = struct {
         if (s.experts.probes.items.len > 0) t.failed += try s.experts.pipeline(seed);
         if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try s.experts.timing(io);
         if (s.xmma.probes.items.len > 0) t.failed += try s.xmma.equality(seed);
+        if (s.experts_cert.probes.items.len > 0) t.failed += try s.experts_cert.equality(seed);
         if (std.c.getenv("TF_DSV41_XMMA_TIME") != null) try s.xmma.timing(io);
         t.failed += try s.fp8.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8.timing(io);

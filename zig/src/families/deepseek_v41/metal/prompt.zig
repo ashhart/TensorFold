@@ -49,6 +49,8 @@ pub const Opts = struct {
     /// a cold chunk of seg_min rows or more runs its first Engram span on its first seg % of rows first (0: one run)
     seg: u32 = 30,
     seg_min: u32 = 512,
+    /// opt-in FP64-certified BF16 prompt scratch sizing (Apple M5 Ultra Metal 4.1 only)
+    fp64_bf16: bool = false,
 };
 
 /// What a prompt reads: the config, kernels, RoPE tables, weights, Engram rows and the queue it commits on.
@@ -114,7 +116,7 @@ pub const Prompt = struct {
         const d = try check(c);
         if (o.chunk == 0 or o.head_rows == 0 or o.head_rows > keptOf(c, o) or o.taps_rows > c.window) return error.BadRows;
         if (c.layers > 64) return error.TooManyLayers;
-        var s = try Scratch.init(device, c, o.chunk, o.ix_rows, limit);
+        var s = try Scratch.initWith(device, c, o.chunk, o.ix_rows, limit, o.fp64_bf16);
         errdefer s.deinit();
         var b = try Bufs.init(device, c, o.chunk, o.head_rows, o.taps_rows);
         errdefer b.deinit();

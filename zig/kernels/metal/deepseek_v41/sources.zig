@@ -24,6 +24,14 @@ pub const experts = @embedFile("experts.metal");
 pub const xmma = @embedFile("experts_mma.metal");
 /// DeepSeek V4.1's prompt experts on M5 tensor units, appended to xmma: exact groups there, the rest by decode fmas.
 pub const xunits = @embedFile("experts_units.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 routed-expert shared helpers (Apple M5 Ultra Metal 4.1).
+pub const experts_kimi_cert = @embedFile("experts_kimi_cert.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 decode routed experts (exact double-float accumulation).
+pub const experts_cert = @embedFile("experts_cert.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 prompt routed experts Pass 1 on M5 tensor units.
+pub const xunits_cert = @embedFile("experts_units_cert.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 prompt routed experts Pass 2 exact double-float patch.
+pub const xunits_cert_patch = @embedFile("experts_units_cert_patch.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const topk512 = @embedFile("topk512.metal");
 pub const glue = @embedFile("glue.metal");

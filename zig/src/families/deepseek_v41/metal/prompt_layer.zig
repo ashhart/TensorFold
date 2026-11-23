@@ -342,10 +342,25 @@ fn expertsMma(x: *const Px, e: mtl.ComputeEncoder, o: u32, table: ex.Ref) !void 
     const H = c.hidden;
     const K = c.topk;
     const R = x.b - o;
-    const call: xm.Call = .{ .rows = R, .k = H, .n = c.expert_width, .experts = c.experts };
-    try xm.check(call);
     const route: ex.Route = .{ .ids = cv(ex.Ref, x.at(s.picks, o, 4 * K)), .weights = cv(ex.Ref, x.at(s.wts, o, 4 * K)), .slots = cv(ex.Ref, s.plan[0]), .nslots = cv(ex.Ref, s.plan[1]), .pairs = cv(ex.Ref, s.plan[2]), .where = cv(ex.Ref, s.plan[3]) };
     const dcall: ex.Call = .{ .rows = R, .k = H, .n = c.expert_width, .experts = c.experts };
+    if (x.p.xmma_cert) |*xcp| {
+        const xmc = pipelines.xmma_cert;
+        const call: xmc.Call = .{ .rows = R, .k = H, .n = c.expert_width, .experts = c.experts };
+        try xmc.check(call);
+        ex.plan(&x.p.experts, e, route, dcall);
+        xmc.tiles(xcp, e, route, cv(xmc.Ref, s.xtiles));
+        xmc.quant(xcp, e, cv(xmc.Ref, x.at(s.hn2, o, 2 * H)), cv(xmc.Ref, s.xcodes), cv(xmc.Ref, s.xscales), call);
+        try cut(x, .xe_plan);
+        xmc.up(xcp, e, cv(xmc.Ref, s.xcodes), cv(xmc.Ref, s.xscales), table, route, cv(xmc.Ref, s.xtiles), cv(xmc.Ref, s.act), call);
+        try cut(x, .xe_up);
+        xmc.down(xcp, e, cv(xmc.Ref, s.act), cv(xmc.Ref, s.xdq), table, cv(xmc.Ref, s.xtiles), cv(xmc.Ref, s.eout), call);
+        try cut(x, .xe_down);
+        ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, o, 4 * H)), true, dcall);
+        return;
+    }
+    const call: xm.Call = .{ .rows = R, .k = H, .n = c.expert_width, .experts = c.experts };
+    try xm.check(call);
     ex.plan(&x.p.experts, e, route, dcall);
     const xp = &x.p.xmma;
     xm.tiles(xp, e, route, cv(xm.Ref, s.xtiles));

@@ -45,6 +45,8 @@ pub const Pipelines = struct {
     down: [2]mtl.Pipeline,
     combine: mtl.Pipeline,
     combine_f32: mtl.Pipeline,
+    /// Per-(pair_pos, group) exact-group safety flags allocated only for certified kernels (16 KiB).
+    act_safe: ?mtl.Buffer = null,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device) !Pipelines {
         const text = try source(a, "", &.{});
@@ -54,6 +56,15 @@ pub const Pipelines = struct {
 
     /// The same kernels from other text: the contract's planted controls edit it.
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
+        return loadSourceOpt(device, text, false);
+    }
+
+    /// Load certified decode expert kernels with the per-group `act_safe` flag buffer.
+    pub fn loadSourceCert(device: mtl.Device, text: []const u8) !Pipelines {
+        return loadSourceOpt(device, text, true);
+    }
+
+    fn loadSourceOpt(device: mtl.Device, text: []const u8, cert: bool) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
@@ -64,6 +75,13 @@ pub const Pipelines = struct {
         p.quant = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_quant", false);
         inline for (.{ "one", "rows" }, 0..) |k, i| p.upc[i] = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_" ++ k, false);
         p.down = .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_one", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_rows", false) };
+        if (cert) {
+            const buf = try device.buffer(16384, mtl.ResourceOptions.shared);
+            @memset(buf.contents()[0..16384], 0);
+            p.act_safe = buf;
+        } else {
+            p.act_safe = null;
+        }
         return p;
     }
 
@@ -75,6 +93,7 @@ pub const Pipelines = struct {
         p.quant.deinit();
         for (p.upc) |x| x.deinit();
         for (p.down) |x| x.deinit();
+        if (p.act_safe) |b| b.deinit();
     }
 };
 
@@ -144,16 +163,28 @@ pub fn upCoded(p: *const Pipelines, e: mtl.ComputeEncoder, codes: Ref, scales: R
         e.setValue(UpArgs{ .K = c.k, .N = c.n, .topk = c.topk, .rows_max = c.rows, .limit = swiglu_limit }, 6);
         e.setBuffer(r.weights.buf, r.weights.off, 7);
         e.setBuffer(scales.buf, scales.off, 8);
+        if (p.act_safe) |as| e.setBuffer(as, 0, 9);
         e.dispatchGroups(groups(c, c.n), mtl.Size.of(256, 1, 1));
     }
 }
 
-/// Kimi's down: act [pair position][width] to out [pair position][hidden] (bf16); the slots of one row, then of more.
+/// Kimi's down: act [pair position][width] to out [pair position][hidden] (bf16); standalone (ignores `act_safe`).
 pub fn down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r: Route, out: Ref, c: Call) void {
-    for (p.down[0..if (c.rows > 1) 2 else 1]) |pipe| {
+    downWith(p, e, act, table, r, out, c, false);
+}
+
+/// `down` immediately following `upCoded` (reads `p.act_safe` exact-group flags when allocated).
+pub fn downFromUp(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r: Route, out: Ref, c: Call) void {
+    downWith(p, e, act, table, r, out, c, p.act_safe != null);
+}
+
+fn downWith(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r: Route, out: Ref, c: Call, use_safe: bool) void {
+    const lin: f32 = if (use_safe) 1.0 else 0.0;
+    for (p.down[0..if (c.rows > 1) 2 else 1], 0..) |pipe, i| {
         e.setPipeline(pipe);
         bind(e, &.{ act, table, r.slots, r.nslots, r.pairs, out });
-        e.setValue(XpArgs{ .K = c.n, .N = c.k, .topk = c.topk, .rows_max = c.rows }, 6);
+        e.setValue(XpArgs{ .K = c.n, .N = c.k, .topk = c.topk, .rows_max = c.rows, .lin = lin }, 6);
+        if (i == 1) if (p.act_safe) |as| e.setBuffer(as, 0, 7);
         e.dispatchGroups(groups(c, c.k), mtl.Size.of(256, 1, 1));
     }
 }

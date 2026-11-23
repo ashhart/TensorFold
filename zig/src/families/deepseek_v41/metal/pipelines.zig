@@ -16,6 +16,7 @@ pub const compress = @import("compress.zig");
 pub const engram = @import("engram.zig");
 pub const cand = @import("cand.zig");
 pub const xmma = @import("experts_mma.zig");
+pub const xmma_cert = @import("experts_mma_cert.zig");
 pub const fused = @import("fused.zig");
 pub const hc = @import("hc.zig");
 pub const glue_k = @import("glue_k.zig");
@@ -64,6 +65,8 @@ pub const Pipelines = struct {
     cand: mtl.Pipeline,
     cand_segs: mtl.Pipeline,
     xmma: xmma.Pipelines,
+    /// opt-in FP64-certified BF16 prompt routed MXFP4 experts (Apple M5 Ultra Metal 4.1 only)
+    xmma_cert: ?xmma_cert.Pipelines = null,
     fused: fused.Pipelines,
     hc: hc.Pipelines,
     glue_k: glue_k.Pipelines,
@@ -89,7 +92,11 @@ pub const Pipelines = struct {
         errdefer p.attn.deinit();
         p.index = try index.Pipelines.load(device);
         errdefer p.index.deinit();
-        p.experts = try experts.Pipelines.load(a, device);
+        p.experts = if (fp64_bf16) blk: {
+            const dsrc = try xmma_cert.decodeSource(a, "");
+            defer a.free(dsrc);
+            break :blk try experts.Pipelines.loadSourceCert(device, dsrc);
+        } else try experts.Pipelines.load(a, device);
         errdefer p.experts.deinit();
         p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);
         errdefer p.glue.deinit();
@@ -113,6 +120,8 @@ pub const Pipelines = struct {
         errdefer p.cand_segs.deinit();
         p.xmma = try xmma.Pipelines.load(a, device);
         errdefer p.xmma.deinit();
+        p.xmma_cert = if (fp64_bf16) try xmma_cert.Pipelines.load(a, device) else null;
+        errdefer if (p.xmma_cert) |*xc| xc.deinit();
         p.fused = try fused.Pipelines.load(device);
         errdefer p.fused.deinit();
         p.hc = try hc.Pipelines.load(device);
@@ -142,6 +151,7 @@ pub const Pipelines = struct {
         p.cand.deinit();
         p.cand_segs.deinit();
         p.xmma.deinit();
+        if (p.xmma_cert) |*xc| xc.deinit();
         p.fused.deinit();
         p.hc.deinit();
         p.glue_k.deinit();

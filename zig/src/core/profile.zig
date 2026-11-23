@@ -200,7 +200,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_DSV41_ROWS_CAP, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .present, .effect = "Rows in each forward bucket", .evidence = "#2370" },
     .{ .id = .TF_DSV41_TOOL_GRAMMAR, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Legacy alias of the server-wide auto-tool grammar policy", .evidence = "#2370" },
     .{ .id = .TF_DSV41_COPY_DRAFTER, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Adaptive suffix copy drafting in the lookup planner", .evidence = "#2638" },
-    .{ .id = .TF_DSV41_FP64_BF16, .families = &.{"deepseek_v41"}, .backend = "metal", .class = .arithmetic, .syntax = .one, .effect = "Opt into FP64-certified BF16 dense FP8 kernels on Apple M5 Ultra Metal 4.1", .evidence = "proposal pending gate agreement; default-off; refused outside M5 Ultra Metal 4.1" },
+    .{ .id = .TF_DSV41_FP64_BF16, .families = &.{"deepseek_v41"}, .backend = "metal", .class = .arithmetic, .syntax = .one, .effect = "Opt into FP64-certified BF16 dense FP8 and routed MXFP4 expert kernels on Apple M5 Ultra Metal 4.1", .evidence = "proposal pending gate agreement; default-off; refused outside M5 Ultra Metal 4.1" },
 };
 
 comptime {

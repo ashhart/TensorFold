@@ -6,6 +6,7 @@ const pipelines = @import("pipelines.zig");
 const kv = @import("kv.zig");
 const attn = pipelines.attn;
 const xm = @import("experts_mma.zig");
+const xmc = @import("experts_mma_cert.zig");
 
 pub const Ref = pipelines.glue.Ref;
 /// Window rows before a chunk's first row in the linear window buffer: row `back + t - a` holds position t.
@@ -100,6 +101,8 @@ pub const Scratch = struct {
     xdq: Ref = undefined,
     /// the grouped experts run on tensor units (xm.units)
     units: bool = false,
+    /// opt-in FP64-certified BF16 routed experts (extra 32-row pad on xdq for tensor-unit down)
+    fp64_bf16: bool = false,
     act: Ref = undefined,
     eout: Ref = undefined,
     yr: Ref = undefined,
@@ -113,8 +116,13 @@ pub const Scratch = struct {
 
     /// Buffers for chunks of up to `rows` rows; `limit` positions bound the index scores, scored `ix_rows` at a time.
     pub fn init(device: mtl.Device, c: *const Config, rows: u32, ix_rows: u32, limit: u32) !Scratch {
+        return initWith(device, c, rows, ix_rows, limit, false);
+    }
+
+    /// `init` with explicit opt-in FP64-certified BF16 scratch sizing.
+    pub fn initWith(device: mtl.Device, c: *const Config, rows: u32, ix_rows: u32, limit: u32, fp64_bf16: bool) !Scratch {
         if (rows == 0 or ix_rows == 0) return error.BadRows;
-        var s: Scratch = .{ .units = xm.units(device) };
+        var s: Scratch = .{ .units = xm.units(device), .fp64_bf16 = fp64_bf16 };
         const size = s.layout(c, rows, ix_rows, limit);
         s.buf = try device.buffer(size, mtl.ResourceOptions.shared);
         @memset(s.buf.contents()[0..size], 0);
@@ -146,7 +154,7 @@ pub const Scratch = struct {
         const IX: usize = @as(usize, c.index_heads) * c.index_dim;
         const W: usize = c.expert_width;
         const P: usize = @as(usize, rows) * c.topk;
-        const xb = xm.bytes(.{ .rows = rows, .k = c.hidden, .n = c.expert_width, .experts = c.experts }, s.units);
+        const xb = if (s.fp64_bf16) xmc.bytes(.{ .rows = rows, .k = c.hidden, .n = c.expert_width, .experts = c.experts }) else xm.bytes(.{ .rows = rows, .k = c.hidden, .n = c.expert_width, .experts = c.experts }, s.units);
         s.rows = rows;
         s.ix_rows = @min(ix_rows, rows);
         s.keys = limit;
