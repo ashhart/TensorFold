@@ -58,15 +58,17 @@ test "Engram gathers the selected affine rows in token and head order" {
     try std.testing.expectError(error.BadEngramOutput, table.gather(a, &.{window0}, out[1..]));
 }
 
-test "a stray hy4 tensor refuses at the checkpoint's last read site" {
+test "a direct Engram table loads, while a stray hy4 tensor refuses at the checkpoint's last read site" {
     const fixture = @import("core").checkpoint_fixture;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const data: [4]u16 = @splat(0x3f80);
+    const table_name = "model.layers.0.engram_layer.multi_head_embedding.embedding.weight";
     const entries = [_]fixture.Entry{
         .{ .name = "model.norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = table_name, .dtype = "BF16", .shape = &.{ 1, 4 }, .bytes = std.mem.sliceAsBytes(&data) },
         .{ .name = "model.stray.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
     };
     try fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
@@ -75,6 +77,7 @@ test "a stray hy4 tensor refuses at the checkpoint's last read site" {
     var ck = try core.Checkpoint.openModel(a, io, dir);
     defer ck.close();
     _ = try ck.expect("model.norm.weight", .bf16, &.{4});
+    try ck.skip(table_name); // openDirect owns the read; only its exact table name is outside the used-set audit.
     try std.testing.expectError(error.UnusedHy4Tensors, @import("loader.zig").refuseLeftovers(&ck, error.UnusedHy4Tensors));
     _ = try ck.expect("model.stray.weight", .bf16, &.{4});
     try @import("loader.zig").refuseLeftovers(&ck, error.UnusedHy4Tensors);
