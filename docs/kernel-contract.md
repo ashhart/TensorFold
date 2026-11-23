@@ -86,9 +86,11 @@ and gate 5. `zig build tf-kernel-contract` builds the program alone; `--only TEX
 TEXT, `--offline DIR` adds the M1/M2 compiles, and `--repro` prints the smallest input behind each known finding.
 
 On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), and run `zig build kernel-contract
--Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=...
--Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
-`registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
+-Dnvcc=/usr/local/cuda/bin/nvcc`. A family's suite alone runs as `zig build int4-contract -Dnvcc=...` (the GPTQ int4
+experts and head, its `SUMMARY` line and each control) or as `tf-cuda-test int4-contract` on a built runner. For the
+limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=... -Dsm=80,86,89,120,121`, then
+`tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values `registry.zig` holds for that
+build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
 For the sm_110 image set, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
 The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
