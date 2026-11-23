@@ -14,9 +14,8 @@ pub const max_rows = 512;
 const max_items = 64;
 const ring_size = 4096;
 
-/// What `Model.save` returns: one stream's exact state at a length (3 loop passes of KV and convolution history).
-const Snap = @typeInfo(@typeInfo(@TypeOf(fl.Model.save)).@"fn".return_type.?).error_union.payload;
-const Kept = struct { target: *const Target, snap: Snap };
+const kept_states = @import("inkling2_kept.zig");
+const Kept = kept_states.Kept;
 
 pub const Images = struct {
     ctx: *anyopaque,
@@ -63,6 +62,7 @@ pub const Target = struct {
     sampling_scratch: []u8,
     follow: ?mtl.ResidencySet.Follow = null,
     costs: costs.Table = .{}, // timed at load for a drafted server (Target.measureCosts); the lane config reads it
+    head: ?*fl.draft.Adapter = null, // a drafted server's DSpark head: a kept state holds its context beside the lane
 
     pub fn samplingBytes(model: *const fl.Model) usize {
         return @as(usize, model.config.text.unpadded_vocab) * 64 + 128;
@@ -206,7 +206,7 @@ pub const Target = struct {
     }
 
     /// A kept prompt state of this prompt's prefix: the lane starts there, or the pass runs from 0.
-    fn restoreKept(self: *Target, lane: *Lane, stream: *lanes.Stream, prompt_len: usize) void {
+    fn restoreKept(self: *Target, lane: *Lane, stream: *lanes.Stream, prompt_len: usize, drafting: bool) void {
         const saved = stream.reuse.saved orelse return;
         const kept: *const Kept = @ptrCast(@alignCast(saved));
         const snap = &kept.snap;
@@ -214,21 +214,25 @@ pub const Target = struct {
             stream.reuse_failed = true;
             return;
         }
-        self.model.restore(&lane.state, snap) catch |err| {
-            stream.reuse_failed = true;
-            stream.reuse_error = err;
-            self.model.reset(&lane.state); // a failed copy may have written part of the state
-            return;
+        self.model.restore(&lane.state, snap) catch |err| return self.refuseKept(lane, stream, err);
+        // a drafting stream's head takes the context kept beside the lane; with none kept it begins past the prefix
+        if (drafting) if (self.head) |h| if (kept.head) |*context| {
+            h.restore(stream, context) catch |err| return self.refuseKept(lane, stream, err);
         };
         stream.cached = snap.len;
+    }
+
+    fn refuseKept(self: *Target, lane: *Lane, stream: *lanes.Stream, err: anyerror) void {
+        stream.reuse_failed = true;
+        stream.reuse_error = err;
+        self.model.reset(&lane.state); // a failed copy may have written part of the state
     }
 
     fn fill(self: *Target, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
         const lane = try self.newLane(stream);
         errdefer release(self, stream);
         const ids = stream.prompt();
-        if (sink != null and stream.reuse.saved != null) return error.InklingDraftsNeedFullPrompt;
-        self.restoreKept(lane, stream, ids.len);
+        self.restoreKept(lane, stream, ids.len, sink != null);
         const hidden: usize = self.model.config.text.hidden;
         const first_row = lane.state.len;
         const image_rows = try self.gpa.alloc(fl.ImageRows, stream.images.len);
@@ -446,32 +450,12 @@ pub const Target = struct {
 
     /// The prompt cache's copies of a stream's state at a chunk end; the prompt pass restores them itself.
     pub fn snapshots(self: *Target) api.prompt_cache.Snapshots {
-        return .{ .ptr = self, .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop } };
+        return kept_states.snapshots(self);
     }
 
-    fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        return Snap.bytes(&of(ptr).model.config, at);
-    }
-
-    fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-        const self = of(ptr);
-        const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
-        const lane = try self.laneOf(stream);
-        if (lane.state.len != at) return error.SnapshotOutOfStep;
-        const kept = try self.gpa.create(Kept);
-        errdefer self.gpa.destroy(kept);
-        kept.* = .{ .target = self, .snap = try self.model.save(&lane.state) };
-        return kept;
-    }
-
-    fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
-        return error.BackendRestores; // the prompt pass restores, before its first chunk
-    }
-
-    fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-        const kept: *Kept = @ptrCast(@alignCast(saved));
-        kept.snap.deinit();
-        of(ptr).gpa.destroy(kept);
+    /// The state of the stream's lane (an error if it has none).
+    pub fn stateOf(self: *Target, stream: *lanes.Stream) !*fl.state.State {
+        return &(try self.laneOf(stream)).state;
     }
 };
 

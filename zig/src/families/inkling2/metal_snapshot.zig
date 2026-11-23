@@ -14,7 +14,7 @@ fn live(t: *const config.Text, i: u32, len: u32) struct { start: u32, count: u32
 }
 
 /// `count` positions from `start` in a ring of `ring` slots (0: slot = position) as at most two runs of slots.
-fn runs(start: u32, count: u32, ring: u32) [2]struct { slot: u32, count: u32 } {
+pub fn runs(start: u32, count: u32, ring: u32) [2]struct { slot: u32, count: u32 } {
     if (ring == 0 or count == 0) return .{ .{ .slot = start, .count = count }, .{ .slot = 0, .count = 0 } };
     const first = start % ring;
     const head = @min(count, ring - first);

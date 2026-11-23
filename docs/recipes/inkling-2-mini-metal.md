@@ -14,7 +14,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/inkling-2-mini" --port 
   --no-drafts --prompt-cache-gib 0 --no-thinking
 ```
 
-Drop `--no-drafts` for DSpark. A DSpark server refuses `--prompt-cache-gib`, so kept prompt states need `--no-drafts`.
+Drop `--no-drafts` for DSpark. `--prompt-cache-gib N` keeps prompt states on either server; with DSpark a kept state
+also holds the head's context (see Kept prompt states).
 Add `--vision` for images. `--parallel N` grants as many streams as the weights, the scratch and N states at the chosen
 `--context` fit in the load limit; the startup line prints the demand and a named count that does not fit is refused by
 name. A 65,536-token prompt needs `--context 65552`: the receipt's longest cold row is served at that window.
@@ -313,6 +314,30 @@ request must give the same text alone and with `"draft": false`) gave all equal 
 each count against the solo runs, 4 of 4 against `"draft": false`, 0 unequal, 0 failed. Drafts were accepted (467 on
 code, 447 on chat), so the check was not vacuous. The raw summaries are `sampled-*.out` in the receipt.
 
+## Kept prompt states
+
+`--prompt-cache-gib N` keeps a stream's state at prompt boundaries (a 512-token grid, the end of each prompt) and
+resumes a later prompt that extends one. A kept state is the 48 visits' keys, values and convolution histories: 32 KiB a
+position over the eight global visits, 160 MiB for the 40 sliding visits' last 1,024 positions, and 19.5 MiB of
+histories (273 MiB at 3,000 tokens).
+
+With DSpark a kept state also holds the head's context. The head has no recurrence of its own, but its key and value at
+a position are a projection of the target's tap rows there (the inputs to visits 5, 23 and 41 and the output after the
+final norm), and a kept state holds no tap rows, so the context is copied, not rebuilt from the lane's. It is the full
+layer's keys and values for every position (4 KiB a position) and the two sliding layers' last 1,024 positions (8 MiB):
+19.7 MiB at 3,000 tokens, 7 % more. The head's last feature row is not kept: the next absorbed row overwrites it. A
+resumed request restores the lane and the head before its first chunk, so its head drafts from the context a fresh
+request's would.
+
+Measured on the M4 Pro (`--context 8192 --parallel 4`, multi-turn chats of 2,900 to 4,500 tokens, greedy and seeded 0.7;
+[drafted-resume](../receipts/inkling2-mini-m4pro/drafted-resume/summary.txt)): a DSpark server with
+`--prompt-cache-gib 6` gave the same token ids as a plain `--no-drafts` server with the cache off in 56 of 56 requests,
+37 of them resumed (at 2,560 to 4,541 tokens, past the 1,024-token window; four concurrent streams and a conversation
+that alternates `"draft": false` and drafted turns included); single-stream resumed requests had the same drafts proposed
+and accepted as cold ones, and `bench_concurrent.py --alone --serial` had 60 of 60 equal. A resumed first token took 2.3
+to 2.6 s against 10 to 12 s cold at 3,000 tokens and 6 to 7 s against 16 to 17 s at 4,400, on a machine under load;
+decode with no kept states is unchanged (A-B-B-A, 33.2 against 32.7 and 30.8 against 31.2 tok/s).
+
 ## Verification
 
 Each line names the head it was taken on. The contract line was taken at `c7aa88235c` (and `test-inkling2-host` built
@@ -331,8 +356,8 @@ and passed there); the sampled-decode table at `61be67917f`; the host-test line 
   at `98b1e13bd0` gave 77 passed, 8 skipped, 0 failed.
 - Drafted equals plain: the hashes and the `--alone --serial` counts in the receipt above; the contract's grouped kernels
   are byte-equal to the one-row kernels, including NaN, infinity and all-pairs-one-expert inputs.
-- Kept prompt states resume as a fresh run only with `--no-drafts`; resumed equals fresh with the drafter on is not
-  implemented (see Limits).
+- A resumed prompt equals a fresh one with the drafter on and off, greedy and sampled, at one and four streams: see
+  Kept prompt states.
 
 ## Limits
 
@@ -349,9 +374,12 @@ and passed there); the sampled-decode table at `61be67917f`; the host-test line 
   into `reasoning_content`, a finished reply puts the same string in `content` as well, and `usage.reasoning_tokens` is 0
   (found by a contributor on an M3 Pro). #4124 splits Inkling 2 replies by the format's state table; merged into this
   branch it gave the split and a nonzero `reasoning_tokens` on the M4 Pro, so this limit goes when #4124 is on `main`.
-- A DSpark server refuses `--prompt-cache-gib`: the draft head keeps per-stream state a kept prompt state does not
-  hold, so the served default with drafts never resumes a prompt. `--drafter` is refused (the head is the checkpoint's
-  own), as are `--slide`, `--loops`, `--policy` and `--checkpoint-slots`.
+- A kept state holds the DSpark head's context only when the stream that made it drafted: one made by a `"draft": false`
+  request, or at the end of a prompt-only warm pass (`max_tokens` 0), holds none, and a drafted request resumed from it
+  starts its head past the kept prefix. Its tokens are the same (the verify rows decide them); the head drafts from less
+  context until the new rows fill it, so fewer drafts land.
+- `--drafter` is refused (the head is the checkpoint's own), as are `--slide`, `--loops`, `--policy` and
+  `--checkpoint-slots`.
 - Cold prefill is 0.75 to 0.83 of MLX's rate (the latest quiet session, with the Metal 4 prompt queue; 0.72 to 0.87
   before it). The text path has no M5 tensor-unit kernel.
 - Four drafted streams are within noise of plain, not faster; one stream is 15 to 22 % faster.

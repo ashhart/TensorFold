@@ -103,14 +103,10 @@ fn checkpointFileBytes(a: Allocator, io: std.Io, dir: []const u8, drafted: bool)
     return total +| (std.Io.Dir.cwd().statFile(io, head, .{}) catch return total).size;
 }
 
-/// Kept-state bytes: --prompt-cache-gib, else half the room; none beside DSpark, so the default never resumes.
-fn cacheBudget(a: Allocator, o: api.Open, left: u64, drafted: bool, problem: *[]const u8) !?u64 {
-    const gib = o.prompt_cache_gib orelse return if (drafted) 0 else left / 2;
+/// Kept-state bytes: --prompt-cache-gib, else half the room.
+fn cacheBudget(a: Allocator, o: api.Open, left: u64, problem: *[]const u8) !?u64 {
+    const gib = o.prompt_cache_gib orelse return left / 2;
     if (gib == 0) return 0;
-    if (drafted) {
-        problem.* = "Inkling 2's DSpark head keeps its own per-stream state, which a kept prompt state does not hold: serve with --no-drafts to use --prompt-cache-gib";
-        return null;
-    }
     // The conversion must be safe even when an explicit over-cap budget is allowed.
     if (gib >= 0x1p34) {
         problem.* = "--prompt-cache-gib is too large to represent in bytes";
@@ -204,8 +200,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     // The adapter's lanes are lazy; cap them to the count that actually fits.
     if (h.draft) |d| d.opts.streams = count;
     const cache_left = left -| (stream_bytes * count) -| cache_fit.MARGIN;
-    const budget = try cacheBudget(a, o, cache_left, drafted, problem) orelse return null;
+    const budget = try cacheBudget(a, o, cache_left, problem) orelse return null;
     h.target = try target.Target.init(gpa, model, .{ .capacity = window, .streams = count, .rows = target.max_rows, .drafts = drafted, .images = if (h.vision != null) .{ .ctx = h, .encode = Host.encode } else null });
+    h.target.head = h.draft;
     errdefer h.target.deinit();
     if (drafted) try h.target.measureCosts(io);
     var backend = h.target.backend();
@@ -337,19 +334,16 @@ test "inkling2 DSpark is the checkpoint's bundled head: --drafter is refused, no
     try std.testing.expectEqual(@as(u64, 0), checkpointFileBytes(a, std.testing.io, "/nonexistent-inkling2-dir", true));
 }
 
-test "inkling2 prompt cache budget: half the room, none beside a head, explicit sizes checked" {
+test "inkling2 prompt cache budget: half the room, explicit sizes checked" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
     const gib: u64 = 1 << 30;
-    try std.testing.expectEqual(@as(?u64, 4 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type }, 8 * gib, false, &problem));
-    try std.testing.expectEqual(@as(?u64, 0), try cacheBudget(a, .{ .dir = "d", .model_type = model_type }, 8 * gib, true, &problem));
-    try std.testing.expectEqual(@as(?u64, 0), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 0 }, 8 * gib, false, &problem));
-    try std.testing.expectEqual(@as(?u64, 2 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 2 }, 8 * gib, false, &problem));
-    try std.testing.expectEqual(@as(?u64, null), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 9 }, 8 * gib, false, &problem));
+    try std.testing.expectEqual(@as(?u64, 4 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type }, 8 * gib, &problem));
+    try std.testing.expectEqual(@as(?u64, 0), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 0 }, 8 * gib, &problem));
+    try std.testing.expectEqual(@as(?u64, 2 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 2 }, 8 * gib, &problem));
+    try std.testing.expectEqual(@as(?u64, null), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 9 }, 8 * gib, &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "left under the load limit") != null);
-    try std.testing.expectEqual(@as(?u64, 9 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 9, .prompt_cache_over_cap = true }, 8 * gib, false, &problem));
-    try std.testing.expectEqual(@as(?u64, null), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 1 }, 8 * gib, true, &problem));
-    try std.testing.expect(std.mem.indexOf(u8, problem, "--no-drafts") != null);
+    try std.testing.expectEqual(@as(?u64, 9 * gib), try cacheBudget(a, .{ .dir = "d", .model_type = model_type, .prompt_cache_gib = 9, .prompt_cache_over_cap = true }, 8 * gib, &problem));
 }

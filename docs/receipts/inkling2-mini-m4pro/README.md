@@ -89,6 +89,14 @@ read `CKPT BIN WORK PY JPEG` from the environment. The pinned libjpeg-turbo rele
 | `img-sm-abba-{1-A,2-B,3-B,4-A}.{json,serve.txt}`, `img-sm-final-B.{json,serve.txt}` | The A-B-B-A first-token sessions (`img_client3.py`, plain binaries, quiet machine) and the final build's one session |
 | `hash-sm-text.txt`, `hash-sm-final-text.txt`, `img-sm-contract.txt` | The `chat_hashes.py` server logs of B and the final build (`sha=` 0b037128ee78 b37d8a0e39c4 77bf7c99cc66 538175732cc7) and the media rows of `tf-kernel-contract --only inkling2` |
 
+## Drafted resume (`drafted-resume/`)
+
+A resumed prompt equals a fresh one with the DSpark head on: `summary.txt` holds the numbers and how each file was made,
+`battery.py`, `compare.py`, `ttft.py` and `cancel.py` the clients (they read the recipe at `fe99c81a11` from `NOTES`),
+`{plain,drafted}-{cold,cache}.json` the per-request token ids, cached tokens and draft counters, `ttft.jsonl`,
+`cancel.jsonl` and `abba-*.dec.json` the first-token, interrupted-pass and decode runs. Taken at a machine load of 45 to
+55, so read times as relative.
+
 ## Not in this receipt
 
 - Anything greedy at the head `e90ecce19a` except the `decode-depth*` and `decode-short-head*` files (`57de097873`, plain
