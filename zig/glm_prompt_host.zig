@@ -152,6 +152,7 @@ test "GLM prompt workflow: multiple passes, nonzero and reused slots retain the 
     const z: [1025]u32 = @splat(93);
     try pass(&e, &.{.{ .slot = 7, .ids = &a }});
     try pass(&e, &.{.{ .slot = 11, .ids = &z }});
+    try t.expectEqual(z.len - 1, e.seqs[11].st.mtp_len);
     try t.expectEqual(@as(u16, 41), held(&e, 7));
     try t.expectEqual(@as(u16, 93), held(&e, 11));
     e.seqs[11].st.pos = 0;
@@ -206,6 +207,8 @@ test "GLM prompt workflow: DFlash context equals ordinary ingest at own offsets 
         for (&dr.states, 0..) |*v, i| v.ring = .{ .ptr = @intFromPtr(&actual[i]) };
         e.drafter = &dr;
         try pass(&e, &.{ .{ .slot = 4, .ids = &aa }, .{ .slot = 9, .ids = &bb } });
+        try t.expectEqual(@as(usize, 0), e.seqs[4].st.mtp_len);
+        try t.expectEqual(@as(usize, 0), e.seqs[9].st.mtp_len);
         var single: [5 * glm.dflash.TAP_ROW]u8 align(8) = @splat(0xa5);
         dr.taps_prefill = @intFromPtr(&single);
         for (&dr.states, 0..) |*v, i| v.ring = .{ .ptr = @intFromPtr(&ordinary[i]) };
