@@ -124,35 +124,52 @@ __device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* _
     __syncthreads();   // the stages become the epilogue's sums
 }
 
-// acc (members TPH * hf .. + TPH - 1) -> E[member - TPH * hf][col] fp32, row stride ES; col0: first tile's column.
-__device__ __forceinline__ void tspill(float* E, int ES, int col0, const float (&acc)[TMT][TNB][4], int hf) {
+#include "exl3_prompt_gb10.cuh"
+
+// Scatter the live accumulators to their member rows in the epilogue buffer.
+template <int NBA>
+__device__ __forceinline__ void tspill(float* E, int ES, int col0, const float (&acc)[TMT][NBA][4], int hf) {
     const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
 #pragma unroll
     for (int i = 0; i < TMT; ++i)
 #pragma unroll
         for (int q = 0; q < TPM / 16; ++q) {
             const int nb = hf * (TPM / 16) + q;
-            const int tok = q * 8 + 2 * t, col = col0 + i * 16 + g;
-            E[(size_t)tok * ES + col] = acc[i][nb][0];
-            E[(size_t)(tok + 1) * ES + col] = acc[i][nb][1];
-            E[(size_t)tok * ES + col + 8] = acc[i][nb][2];
-            E[(size_t)(tok + 1) * ES + col + 8] = acc[i][nb][3];
+            if (NBA == TNB || nb < NBA) {
+                const int tok = q * 8 + 2 * t, col = col0 + i * 16 + g;
+                E[(size_t)tok * ES + col] = acc[i][nb][0];
+                E[(size_t)(tok + 1) * ES + col] = acc[i][nb][1];
+                E[(size_t)tok * ES + col + 8] = acc[i][nb][2];
+                E[(size_t)(tok + 1) * ES + col + 8] = acc[i][nb][3];
+            }
         }
 }
 
-template <int XR, int K2>
-__device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint64_t* __restrict__ Tg,
-        const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,
-        const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd,
-        int K, int N, int xdiv, float limit, int act_mode, unsigned char* smem_raw, int* rows_sh) {
-    const int cb = blockIdx.x, item = blockIdx.y;
-    if (item >= counts[0]) return;
-    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
-    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
-    __syncthreads();
+// The item's 8-member column blocks: the main loop and epilogue compiled for each count (an item has 1 to TPM members).
+#define TF_EXL3_PROMPT_NBA(cnt, CALL)            \
+    switch (((cnt) + 7) >> 3) {                  \
+        case 1: CALL(1); break;                  \
+        case 2: CALL(2); break;                  \
+        case 3: CALL(3); break;                  \
+        case 4: CALL(4); break;                  \
+        case 5: CALL(5); break;                  \
+        case 6: CALL(6); break;                  \
+        case 7: CALL(7); break;                  \
+        default: CALL(8); break;                 \
+    }
+
+template <int XR, int K2, int NBA, bool Pipelined>
+__device__ __forceinline__ void tgateup_n(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint64_t* __restrict__ Tg,
+        const uint64_t* __restrict__ Tu, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, unsigned char* smem_raw, const int* rows_sh, int cb, int e,
+        int cnt) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    float acc[TMT][TNB][4];
-    tmain<2, XR, K2>(Xg, Xu, Tg, Tu, rows_sh, cnt, e, K, N >> 4, cb, xdiv, reinterpret_cast<half*>(smem_raw), acc);
+    float acc[TMT][NBA][4];
+    if constexpr (Pipelined) {
+        pipelined_main<2, XR, K2, NBA, XR == TPM ? 4 : 3>(Xg, Xu, Tg, Tu, rows_sh, e, K, N >> 4, cb, xdiv, smem_raw, acc);
+    } else {
+        tmain<2, XR, K2>(Xg, Xu, Tg, Tu, rows_sh, cnt, e, K, N >> 4, cb, xdiv, reinterpret_cast<half*>(smem_raw), acc);
+    }
     float* Eg = reinterpret_cast<float*>(smem_raw);
     int mat, nt;
     ttile<2>(warp * TMT, cb, mat, nt);
@@ -160,7 +177,7 @@ __device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half*
     const int n = cb * 128 + 4 * lane;
     for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
         if (hf) __syncthreads();   // the first half's rows are read
-        tspill(Eg + (size_t)mat * TPH * GU_ES, GU_ES, col0, acc, hf);
+        tspill<NBA>(Eg + (size_t)mat * TPH * GU_ES, GU_ES, col0, acc, hf);
         __syncthreads();
         for (int i = warp; i < TPH && hf * TPH + i < cnt; i += TNW) {
             const int p = rows_sh[hf * TPH + i];
@@ -190,6 +207,29 @@ __device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half*
 #pragma unroll
             for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
         }
+    }
+}
+
+template <int XR, int K2>
+__device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint64_t* __restrict__ Tg,
+        const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,
+        const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd,
+        int K, int N, int xdiv, float limit, int act_mode, unsigned char* smem_raw, int* rows_sh) {
+    const int cb = blockIdx.x, item = blockIdx.y;
+    if (item >= counts[0]) return;
+    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
+    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
+    __syncthreads();
+#if __CUDA_ARCH__ == 1210
+    if constexpr (K2 == 8) {
+#define TF_EXL3_PROMPT_GU(NBA) \
+    tgateup_n<XR, K2, NBA, true>(Xg, Xu, Tg, Tu, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh, cb, e, cnt)
+        TF_EXL3_PROMPT_NBA(cnt, TF_EXL3_PROMPT_GU)
+#undef TF_EXL3_PROMPT_GU
+    } else
+#endif
+    {
+        tgateup_n<XR, K2, TNB, false>(Xg, Xu, Tg, Tu, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, smem_raw, rows_sh, cb, e, cnt);
     }
 }
 

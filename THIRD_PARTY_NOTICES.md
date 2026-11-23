@@ -460,6 +460,13 @@ The image preparation (`zig/src/families/deepseek_v41/metal/vision_prep.zig`,
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
 with the common EXL3 and DeepSeek contributor credits preserved.
 
+## MiaAI-Lab GLM EXL3 prompt experts on SM121
+
+The four-bit CUDA prompt expert main loop in `zig/kernels/cuda/exl3_prompt_gb10.cuh` is adapted from
+[MiaAI-Lab's GLM-5.3-Flash DGX Spark recipe, patch 0078](https://github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104/blob/ff29b0d7159718238415e053a586a9dc6df5e6c2/patches/engine/0078-exl3p-0067-exl3p-prompt-experts-main-loop-and-epilogues.patch), under
+the Apache License 2.0. Copyright 2026 Mia's AI Lab (MiaAI-Lab). The patch credits the K12 loop in Aevonix's GLM-5.3-Flash-EXL3-4x-RTX-PRO-6000-TensorFold.
+This adaptation uses TensorFold's shared-expert skip and output layout and retains its scalar epilogues.
+
 ## MiaAI-Lab Flash Next prompt expert staging
 
 `zig/kernels/cuda/nvfp4_experts_tile.cu` adapts the K32 shared-memory pipeline in patch0014 of

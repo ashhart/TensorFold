@@ -61,7 +61,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
-| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864]; paired C experiment (REV25 E1) | no (dense) | done [#558] |
+| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864]; SM121 4-bit EXL3 prompt pipeline; paired C experiment (REV25 E1) | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562]; yes C [#2485] (dense) | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |

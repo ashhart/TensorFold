@@ -1,4 +1,4 @@
-//! Shared-id prompt kernels require measured compiler resource records for their current ABI.
+//! The shared-id prompt kernels use resource records measured on their current ABI.
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
@@ -15,8 +15,18 @@ pub fn owns(name: []const u8) bool {
 }
 
 test "EXL3 prompt: unmeasured compiler usage stays pending" {
-    for (records) |r| for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |version| {
+    for (records) |r| for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 4 } }) |version| {
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(r, version));
     };
     try std.testing.expectEqual(@as(usize, 20), try registry.checkCuda(std.testing.allocator, &records, true));
+}
+
+test "EXL3 prompt: CUDA 13.3 has launch-bound measurements on every registered SM" {
+    for (records) |r| {
+        const usages = registry.usageFor(r, .{ .major = 13, .minor = 3 });
+        for (usages) |u| {
+            try std.testing.expect(u.regs > 0 and u.static > 0);
+            try std.testing.expectEqual(@as(u32, 256), u.bound);
+        }
+    }
 }
