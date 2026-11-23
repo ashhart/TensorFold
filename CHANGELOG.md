@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_POOL_AFTER_WARMUP=1` (opt-in) sizes dense Qwen3.5's still-empty KV page pool again after warm-up, from the free memory then measured under the same reserve and cap, so pages the first plan held back for warm-up become KV capacity; `/memory` reports the decision; tokens are unchanged, and other modes keep today's pool (#4591).
+
 - Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH=1` (opt-in) captures the greedy verify round's argmax in the target graph, skips the token download greedy rounds never read and uploads per-forward metadata from pinned memory; same kernel and inputs, so tokens are unchanged (#4616).
 
 - Nemotron on CUDA: a new prompt is filled a chunk at a time between other streams' decode rounds, so a long prompt no longer stalls replies already streaming; tokens unchanged.
