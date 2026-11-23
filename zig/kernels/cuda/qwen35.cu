@@ -1,6 +1,7 @@
 // Qwen3.5's hybrids (2B, 27B) on CUDA: the Metal kernels' arithmetic and rounding; a segment is one stream's window.
 
 #include "qwen35.cuh"
+#include "qwen_pdl.cuh"
 #include "qwen35_attn_tc.cuh"
 
 using namespace tf_q35;
@@ -170,6 +171,7 @@ __device__ __forceinline__ void norm_rows(__nv_bfloat16* __restrict__ H, const _
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
                                                                const int* __restrict__ P, float* __restrict__ XS) {
+    qwen_pdl::enter();
     norm_rows<false>(H, R, W, X, eps, D, P, XS);
 }
 
@@ -177,6 +179,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm_shift(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                      const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps,
                                                                      int D, const int* __restrict__ P, float* __restrict__ XS) {
+    qwen_pdl::enter();
     norm_rows<true>(H, R, W, X, eps, D, P, XS);
 }
 
@@ -197,6 +200,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
                                                                   __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ K,
                                                                   __nv_bfloat16* __restrict__ V, float* __restrict__ G, __nv_bfloat16* __restrict__ BETA,
                                                                   const int* __restrict__ P) {
+    qwen_pdl::enter();
     const int lane = threadIdx.x;
     const int head = blockIdx.y;
     const int w = blockIdx.z;
@@ -385,6 +389,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
 extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_post(Geo geo, const __nv_bfloat16* __restrict__ Y, const __nv_bfloat16* __restrict__ Z,
                                                                    const __nv_bfloat16* __restrict__ NW, float eps, __nv_bfloat16* __restrict__ OUT,
                                                                    const int* __restrict__ P, float* __restrict__ XS) {
+    qwen_pdl::enter();
     __shared__ __align__(16) __nv_bfloat16 done[DK];  // the head's outputs, for XS's group sums (XS may be null)
     const int lane = threadIdx.x, hv = blockIdx.y;
     if (past_rows(P, blockIdx.z)) return;
@@ -443,6 +448,7 @@ __device__ __forceinline__ void head_rows(const __nv_bfloat16* __restrict__ X, c
 extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride, float eps,
                                                                     const int* __restrict__ P) {
+    qwen_pdl::enter();
     head_rows<false>(X, W, OUT, heads, stride, hstride, eps, P);
 }
 
@@ -450,6 +456,7 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
 extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm_shift(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                           __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride,
                                                                           float eps, const int* __restrict__ P) {
+    qwen_pdl::enter();
     head_rows<true>(X, W, OUT, heads, stride, hstride, eps, P);
 }
 
@@ -468,6 +475,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                 const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                 const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y) {
+    qwen_pdl::enter();
     rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, StoreBf16{layer, geo.kvh});
 }
 
@@ -515,6 +523,7 @@ __device__ __forceinline__ void block_sums(__nv_bfloat16* done, size_t total, fl
 // out = bf16(y * bf16(sigmoid(gate))), the gate the second half of each query head's q_proj rows; rows qh * HD wide.
 extern "C" __global__ void tf_q35_attn_gate(Geo geo, const __nv_bfloat16* __restrict__ Y, const __nv_bfloat16* __restrict__ QRAW,
                                               __nv_bfloat16* __restrict__ OUT, int rows, const int* __restrict__ P, float* __restrict__ XS) {
+    qwen_pdl::enter();
     __shared__ __align__(16) __nv_bfloat16 done[256];
     const size_t W = (size_t)geo.qh * HD;
     if (P != nullptr) rows = P[2];
