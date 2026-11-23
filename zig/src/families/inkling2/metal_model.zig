@@ -25,6 +25,8 @@ pub const Options = struct {
     drafts: bool = false,
     /// Image rows requested: forward accepts Item.images only when set.
     vision: bool = false,
+    /// Prompt chunks of `ex.group_min_rows` rows or more run on a Metal 4 queue where this Mac has one.
+    metal4: bool = false,
 };
 
 /// Per-forward activations for `rows` rows: row-major, stage by stage in the order the graph writes them.
@@ -127,6 +129,8 @@ pub const Model = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
+    /// Where prompt chunks run: a Metal 4 queue, or `queue` itself.
+    prompt_queue: mtl.Queue,
     config: config.Config,
     options: Options,
     mapped: Mapped,
@@ -164,6 +168,8 @@ pub const Model = struct {
         errdefer m.device.deinit();
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
+        m.prompt_queue = if (options.metal4) m.device.queue4() catch m.queue else m.queue;
+        errdefer if (m.prompt_queue.id != m.queue.id) m.prompt_queue.deinit();
         const path = try std.fmt.allocPrintSentinel(gpa, "{s}/model-00001-of-00001.safetensors", .{dir}, 0);
         defer gpa.free(path);
         m.mapped = try Mapped.open(path);
@@ -210,6 +216,11 @@ pub const Model = struct {
     pub const logitBase = fwd.logitBase;
     pub const tapBase = fwd.tapBase;
 
+    /// The queue a pass over `rows` rows runs on.
+    pub fn queueFor(m: *const Model, rows: u32) mtl.Queue {
+        return if (rows >= ex.group_min_rows) m.prompt_queue else m.queue;
+    }
+
     pub fn deinit(m: *Model) void {
         m.setResident(null);
         if (m.taps) |b| b.deinit();
@@ -221,6 +232,7 @@ pub const Model = struct {
         m.weights.deinit(m.gpa);
         m.checkpoint.deinit();
         m.mapped.deinit();
+        if (m.prompt_queue.id != m.queue.id) m.prompt_queue.deinit();
         m.queue.deinit();
         m.device.deinit();
         m.gpa.destroy(m);

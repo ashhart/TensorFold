@@ -76,7 +76,7 @@ pub const Run = struct {
 
     pub fn begin(r: *Run) void {
         std.debug.assert(!r.open);
-        r.cb = r.m.queue.commandBuffer();
+        r.cb = r.m.queueFor(r.n).commandBuffer();
         r.e = r.cb.compute(.serial);
         r.open = true;
     }

@@ -41,7 +41,9 @@ produce the one-row kernels' bytes: prompt chunks of 64 rows or more group the r
 expert's weights once for a tile and sum on simdgroup matrix multiplies in the one-row chain's order; drafted verify
 rounds of 2 to 63 rows plan pairs by expert in tiles of four; the dense prompt projections and the loop gates' state and
 down chains run on an MMA tile that keeps the one-row chains; prompt chunks' global layers score and weight eight rows
-at a time on 8x8 matrices, each row keeping its key blocks, running max and sum. The DSpark head runs every drafting
+at a time on 8x8 matrices, each row keeping its key blocks, running max and sum. Prompt chunks of 64 rows or more are
+submitted on a Metal 4 command queue where the Mac has one (`TF_METAL4=0` keeps them on Metal 3); decode and drafted
+rounds stay on the Metal 3 queue. The DSpark head runs every drafting
 stream of a round in one pass. Admission counts the weights, the scratch and each stream's state bytes (a cache slot per
 visit, at the configured `--context`) against the load limit, and a `warning` memory-pressure level no longer serializes
 streams that fit; `critical` still does. The kernel contract (`tf-kernel-contract --only inkling2`) registers every
@@ -153,6 +155,41 @@ The dense projection tile (`61be67917f`, a different build from the table) took 
 8,192 tokens (4.7 %) and from 104.8 s to 102.0 s at 32,768 (2.7 %): one A-B-B-A session, the mean of each pair, plain
 server, same hashes. The table above predates it.
 
+Where a 512-row prompt chunk's GPU time goes (`prefill-stages.txt` in the receipt: a stamp between every two dispatches
+on a Metal 4 queue, `TF_METAL4_TIMELINE`; the stage spans add to the first token, 21.7 s of 21.9 s at 8,192 tokens and
+98.0 s of 98.5 s at 32,768, so the host's encoding and the gaps between kernels cost nothing there). Floors are 7.7
+TFLOP/s on the matrix units and 250 GB/s; the gap of the experts is the open one the maintainer owns.
+
+| Family (48 visits) | Chunk at position 512 | Floor | Chunk at position 31,744 | Floor |
+| --- | --- | --- | --- | --- |
+| Routed experts (gate/up, down, plan, combine) | 857 ms (67 %) | 406 ms | 896 ms (49 %) | 406 ms |
+| Dense projections (MMA tile) | 215 ms (17 %) | 172 ms | 222 ms (12 %) | 172 ms |
+| Global attention, 8 visits | 18 ms (1 %) | 5 ms | 449 ms (25 %) | 209 ms |
+| Sliding attention, 40 visits | 112 ms (9 %) | 25 ms | 167 ms (9 %) | 34 ms |
+| Loop gates and blend | 47 ms | not derived | 48 ms | not derived |
+| Attention-residual mixes and norms | 14 ms | not derived | 14 ms | not derived |
+| Conv, KV prep, q and rel clip | 14 ms | not derived | 15 ms | not derived |
+| Router, residual, copies, embed | 5 ms | not derived | 5 ms | not derived |
+| Chunk | 1,281 ms | | 1,815 ms | |
+
+A 32,768-token prompt costs 0.34 ms a token more than an 8,192-token one (2.99 against 2.65 ms): 0.32 ms of it is global
+attention, 0.02 ms sliding attention (its window is full after the second chunk), and the experts, dense tiles, gates and
+KV writes are flat to within 0.3 %. The prompt kernels read the K and V rows of every global visit once for each tile of
+eight rows and head, which is where the rate falls; the unique KV bytes of a chunk at 31,744 are 1.06 GB (4 ms at 250
+GB/s), so the visit is compute and cache bound, at 3.7 of 7.7 TFLOP/s. One sliding visit takes 3.8 ms alone at a full
+window (512 rows, 24 heads, the scalar kernel): 1.9 ms of it is the value phase, 1.0 ms the key dot products and 0.4 ms
+the rest [INFERENCE: from leaving each phase out; the outputs of those runs differ]. Each row's window starts one key
+later than the row before, so its 32-key blocks do, and rows cannot share an 8x8 key tile without changing the
+running max and sum's order [INFERENCE]; no attention kernel changed.
+
+Sending the prompt chunks through a Metal 4 queue (the same kernels, arguments and order) took the first token from 25.0
+to 22.4 s at 8,192 tokens and from 116.1 to 103.9 s at 32,768 (10.4 % and 10.5 %: the mean of each pair in an A-B-B-A
+session at the commit's build, plain server; an earlier session on a loaded machine gave 16.9 % and 14.8 %), with the
+same token hashes on all four servers and the four chat hashes above. Why the Metal 3 queue is slower was not isolated:
+its stage times were not stamped, and the Metal 4 stage spans equal the first token. Decode stays on the Metal 3 queue
+and is unchanged (27.4 to 30.1 tok/s in both builds, on a machine slower than the decode table's); a build with the
+whole model on a Metal 4 queue showed no decode gain in one A-P-P-A session.
+
 Peak physical footprint (`footprint`, 1 GB resolution, sampled every 3 s through an 8,192-token prompt and a 128-token
 reply): native about 24 GB, with `--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike;
 MLX about 23 GB.
@@ -232,10 +269,10 @@ code, 447 on chat), so the check was not vacuous. The raw summaries are `sampled
 
 ## Verification
 
-Each line names the head it was taken on. The contract line and the sampled-decode table were taken at `61be67917f`; the
-host-test line at `e90ecce19a`.
+Each line names the head it was taken on. The contract line was taken at `c7aa88235c` (and `test-inkling2-host` built
+and passed there); the sampled-decode table at `61be67917f`; the host-test line at `e90ecce19a`.
 
-- Kernel contract, `tf-kernel-contract --only inkling2` at `61be67917f`: 86 kernels pass gates 1 to 4, 133 controls red
+- Kernel contract, `tf-kernel-contract --only inkling2` at `c7aa88235c`: 86 kernels pass gates 1 to 4, 133 controls red
   as planted, 0 missed, 0 limit problems, on the M4 Pro (see [the kernel contract](../kernel-contract.md#coverage)).
 - Original checkpoint, device integration (`test-inkling2-metal`, 7 of 7): shared rows, rollback and restore, drafted and
   plain token ids; a 129-row trace matched every FP32 logit across 128-row and 32-row chunking, SHA-256
@@ -269,7 +306,8 @@ host-test line at `e90ecce19a`.
 - A DSpark server refuses `--prompt-cache-gib`: the draft head keeps per-stream state a kept prompt state does not
   hold, so the served default with drafts never resumes a prompt. `--drafter` is refused (the head is the checkpoint's
   own), as are `--slide`, `--loops`, `--policy` and `--checkpoint-slots`.
-- Cold prefill is 0.72 to 0.87 of MLX's rate. The text path has no M5 tensor-unit kernel.
+- Cold prefill is 0.72 to 0.87 of MLX's rate (the table predates the Metal 4 prompt queue, which took about 10 % off
+  the first token). The text path has no M5 tensor-unit kernel.
 - Four drafted streams are within noise of plain, not faster; one stream is 15 to 22 % faster.
 - Admission by state bytes was tested on a 48 GiB Mac only; a 36 GB Mac (where an earlier head serialized four streams
   under memory pressure) has not run it.

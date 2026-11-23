@@ -1,0 +1,27 @@
+session r1: order A B B A; A = base binary (5e75f97db2, Metal 3 queue for everything), B = prompt chunks on a Metal 4 queue
+  server    8,192 first token s  32,768 first token s  fibonacci-raw tok/s  gpu-chat-no-think tok/s
+  A1                     26.927               143.879                28.02                    27.26
+  B1                     23.678               114.793                28.94                    28.75
+  B2                     22.464               112.461                29.63                    27.78
+  A2                     28.609               122.751                29.41                    28.49
+  8,192 tokens: A mean 27.77 s, B mean 23.07 s, B over A -16.9 %
+  32,768 tokens: A mean 133.31 s, B mean 113.63 s, B over A -14.8 %
+  sha= lines (prompt tokens, tokens out, sha) identical on all four servers: True
+  1/1:4fc82b26aecb 1036/24:538175732cc7 15/256:6667e139c86e 28/64:b37d8a0e39c4 28/8:0b037128ee78 32768/1:8a44904f45d6 33/256:ea5692a0e8dc 416/16:77bf7c99cc66 8192/1:419cacb4c297
+
+session r2: order A B B A; A = base binary (5e75f97db2, Metal 3 queue for everything), B = prompt chunks on a Metal 4 queue
+  server    8,192 first token s  32,768 first token s  fibonacci-raw tok/s  gpu-chat-no-think tok/s
+  A1                     25.194               115.586                27.38                    27.68
+  B1                     22.491               105.398                28.63                    29.72
+  B2                     22.337               102.400                30.16                    30.05
+  A2                     24.860               116.570                30.14                    30.08
+  8,192 tokens: A mean 25.03 s, B mean 22.41 s, B over A -10.4 %
+  32,768 tokens: A mean 116.08 s, B mean 103.90 s, B over A -10.5 %
+  sha= lines (prompt tokens, tokens out, sha) identical on all four servers: True
+  1/1:4fc82b26aecb 1036/24:538175732cc7 15/256:6667e139c86e 28/64:b37d8a0e39c4 28/8:0b037128ee78 32768/1:8a44904f45d6 33/256:ea5692a0e8dc 416/16:77bf7c99cc66 8192/1:419cacb4c297
+
+decode on a Metal 4 queue as well (not shipped): A-P-P-A, one server each (--context 8192 --parallel 1 --no-drafts), tools/bench_openai.py
+--tokens 256 --reps 3 --temperatures 0, median tokens a second, fibonacci-raw / gpu-chat-no-think; P = a local binary with the whole model
+on the Metal 4 queue and the timeline patch described in the README
+  A1 29.98 / 28.73   P1 28.70 / 23.83   P2 27.38 / 27.73   A2 28.46 / 27.68
+contract at c7aa88235c: SUMMARY 86 kernels: 86 pass gates 1-4, 0 fail, 0 known findings; 133 controls: 133 red as planted, 0 missed; 0 limit problems; gates 19898 ms, limits 790 ms

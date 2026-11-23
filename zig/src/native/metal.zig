@@ -24,6 +24,8 @@ pub const deviceName = metal_shared.deviceName;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
 pub const backends: []const []const u8 = &.{"metal"};
+/// Compiles the Metal 4 queue in (Inkling 2 sends its prompt chunks through it; TF_METAL4=0 keeps Metal 3).
+pub const metal4 = true;
 /// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
 pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib", "--mtp-drafts", "--mtp-confidence" };
