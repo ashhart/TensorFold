@@ -30,10 +30,15 @@ pub fn requested(generation: u32, moe: bool) u32 {
     return q.prompt_rows.requested(generation, moe, rowsValue());
 }
 
+/// The prompt rows asked for on `c`: a valid TF_PROMPT_ROWS, else the chip and family default.
+pub fn requestedFor(generation: u32, c: Config) u32 {
+    return q.prompt_rows.requestedModel(generation, c.moe(), c.looped, rowsValue());
+}
+
 /// The prompt rows startup takes: the request when it fits (always when named), never under the window.
 pub fn rows(f: memory.Fit, generation: u32, window: u32) !u32 {
     const geometry = try q.attention_plan.Geometry.fromConfig(f.config, f.shared);
-    const wanted = q.prompt_rows.frameRequested(generation, f.config.moe(), rowsValue(), geometry);
+    const wanted = if (f.config.looped) requestedFor(generation, f.config) else q.prompt_rows.frameRequested(generation, f.config.moe(), rowsValue(), geometry);
     return @max(window, try f.choose(wanted, q.prompt_rows.override(rowsValue()) != null));
 }
 

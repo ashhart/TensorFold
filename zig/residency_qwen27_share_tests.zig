@@ -145,6 +145,8 @@ test "residency owner Qwen27 share: program-only room refuses and exact payload 
     var c: Config = undefined;
     c.hidden = 5120;
     c.layers = 64;
+    c.physical_layers = 0;
+    c.looped = false;
     const program = share_owner.Share.bytes(c, 256);
     try t.expectEqual(@as(u64, 480 << 20), program);
     const ram: u64 = 32 << 30;
@@ -172,6 +174,8 @@ test "residency owner Qwen27 share: measured price admits exactly and refuses on
     var c: Config = undefined;
     c.hidden = 5120;
     c.layers = 64;
+    c.physical_layers = 0;
+    c.looped = false;
     const overhead = @import("src/families/qwen27/ane_policy.zig").build_runtime_overhead;
     const ram: u64 = 32 << 30;
     const ceiling = ram / 100 * 70 - mtl.ResidencySet.margin;
@@ -194,9 +198,12 @@ test "residency owner Qwen27 share: cold and warm loads leave the same priced ca
     model.config = undefined;
     model.config.hidden = 5120;
     model.config.layers = 64;
+    model.config.physical_layers = 0;
+    model.config.looped = false;
     var share: share_owner.Share = undefined;
     share.columns = 256;
     share.slices = 4;
+    share.known_bytes = 0;
     model.ane = &share;
     const total = try share_owner.Share.totalBytes(model.config, share.columns, share.slices, @import("src/families/qwen27/ane_policy.zig").build_runtime_overhead);
     const before: u64 = 19 << 30;

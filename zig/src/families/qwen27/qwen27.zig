@@ -1,5 +1,8 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const yarn = @import("yarn.zig");
+pub const loop = @import("loop.zig");
+pub const loop_affine = @import("loop_affine.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
@@ -37,6 +40,9 @@ pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
+pub const ane_awq = @import("ane_awq.zig");
+pub const ane_affine = @import("ane_affine.zig");
+pub const ane_policy = @import("ane_policy.zig");
 pub const round_plan = @import("round_plan.zig");
 pub const state = @import("state.zig");
 pub const session = @import("session.zig");
@@ -45,10 +51,14 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
+    _ = yarn;
+    _ = loop;
+    _ = loop_affine;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = session;
@@ -77,6 +87,10 @@ test {
     _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
     _ = @import("slot_pages_test.zig");
+    _ = sn_mtp;
+    _ = ane_policy;
+    _ = ane_awq;
+    _ = ane_affine;
 }
 
 pub const residency = @import("residency.zig");

@@ -18,9 +18,9 @@ inline void q27_write(device uchar* p, uint i, float v, uint type) {
   else ((device float*)p)[i] = v;
 }
 
-struct Head { uint width, rows, stride, activation, gain; float eps; };
+struct Head { uint width, rows, stride, activation, gain; float eps; uint shift; };
 
-// Head RMSNorm retains its native-input rounding before gain multiplication, as the shared Metal RMS implementation.
+// Head RMSNorm retains its native-input rounding before gain multiplication for MLX, or 1+w in FP32 when shift != 0.
 kernel void q27_head_norm(device const uchar* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
                           constant Head& a [[buffer(2)]], device uchar* Y [[buffer(3)]],
                           uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
@@ -51,13 +51,15 @@ kernel void q27_head_norm(device const uchar* X [[buffer(0)]], device const ucha
     for (uint j = 0; j != 4 && column + j < a.width; ++j) {
       const uint at = column + j;
       const float value = q27_read(X, row * a.stride + at, a.activation);
-      const float normal = q27_round(value * inverse[0], a.activation);
-      q27_write(Y, row * a.width + at, q27_read(W, at, a.gain) * normal, a.activation);
+      const float w = q27_read(W, at, a.gain);
+      const float out = a.shift != 0 ? (1.0f + w) * (value * inverse[0]) : w * q27_round(value * inverse[0], a.activation);
+      q27_write(Y, row * a.width + at, out, a.activation);
     }
   }
 }
 
 struct Embed { uint width, rows, vocab, bits, group, metadata; };
+struct EmbedBf16 { uint width, rows, vocab; };
 
 // Native metadata promotes to FP32 for affine decode, then the activation rounds once.
 kernel void q27_embed(device const uint* ids [[buffer(0)]], device const uint* words [[buffer(1)]],
@@ -74,7 +76,14 @@ kernel void q27_embed(device const uint* ids [[buffer(0)]], device const uint* w
   q27_write(out, at.y * a.width + at.x, value, a.metadata);
 }
 
-struct Rope { uint width, heads, rows, rotary, activation; float theta; uint h_end, w_end, plane; };
+kernel void q27_embed_bf16(device const uint* ids [[buffer(0)]], device const bfloat* table [[buffer(1)]],
+                           constant EmbedBf16& a [[buffer(2)]], device bfloat* out [[buffer(3)]],
+                           uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= a.width || at.y >= a.rows || ids[at.y] >= a.vocab) return;
+  out[ulong(at.y) * ulong(a.width) + ulong(at.x)] = table[ulong(ids[at.y]) * ulong(a.width) + ulong(at.x)];
+}
+
+struct Rope { uint width, heads, rows, rotary, activation; float theta; uint h_end, w_end, plane; float yarn_scale; float yarn_freq[32]; };
 
 // Rotate paired halves at each row's position: pair d's axis plane under M-RoPE, plane 0 (t) otherwise.
 kernel void q27_rope(device const uchar* X [[buffer(0)]], device const int* positions [[buffer(1)]],
@@ -87,9 +96,12 @@ kernel void q27_rope(device const uchar* X [[buffer(0)]], device const int* posi
     const bool second = at.x >= pairs;
     const uint d = second ? at.x - pairs : at.x;
     const uint axis = d % 3 == 1 && d < a.h_end ? 1u : (d % 3 == 2 && d < a.w_end ? 2u : 0u);
-    const float angle = float(positions[axis * a.plane + at.z]) * pow(a.theta, -float(d) / float(pairs));
+    const float freq = a.yarn_scale != 0.0f ? a.yarn_freq[d] : pow(a.theta, -float(d) / float(pairs));
+    const float angle = float(positions[axis * a.plane + at.z]) * freq;
+    const float cs = a.yarn_scale != 0.0f ? cos(angle) * a.yarn_scale : cos(angle);
+    const float sn = a.yarn_scale != 0.0f ? sin(angle) * a.yarn_scale : sin(angle);
     const float partner = q27_read(X, base + (second ? d : d + pairs), a.activation);
-    value = second ? value * cos(angle) + partner * sin(angle) : value * cos(angle) - partner * sin(angle);
+    value = second ? value * cs + partner * sn : value * cs - partner * sn;
   }
   q27_write(Y, base + at.x, value, a.activation);
 }
