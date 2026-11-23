@@ -21,6 +21,12 @@ pub fn windowFits(c: Config, rows: usize) bool {
     return rows <= @import("cuda_state.zig").sharedRows(c);
 }
 
+/// The shared check's rows for stream `k`: uneven splits, within the round's room and the stream's own window.
+pub fn checkRows(round: usize, k: usize, room: usize, waiting: usize, window: usize, left: usize) usize {
+    const cap = @min(room - waiting, window);
+    return @min(1 + (round * 7 + k * 5 + round / 3) % cap, left);
+}
+
 /// A shared round's streams at most.
 pub fn streams(c: Config) usize {
     return if (c.wide_rounds) wide_streams else narrow_streams;
@@ -77,4 +83,30 @@ test "wide rounds: 16 streams only with the switch, and only where each row's ke
     tp.world = 2;
     try std.testing.expect(!allowed(tp, true, false));
     try std.testing.expect(!allowed(small, true, true)); // lessons reach 8 streams' rows a pass (REV60 2)
+}
+
+test "wide rounds: the shared-widths check's rounds reach 17 to 32 rows with the switch, a stream's within 16 (REV60 5)" {
+    for ([_]bool{ false, true }) |switched| {
+        var c: Config = small;
+        c.wide_rounds = switched;
+        const room = @import("cuda_state.zig").sharedRows(c);
+        const window = @import("cuda_state.zig").windowRows(c);
+        for (2..streams(c) + 1) |n| {
+            var widest: usize = 0;
+            for (0..64) |round| {
+                var left = room;
+                var total: usize = 0;
+                for (0..n) |k| {
+                    const rows = checkRows(round, k, left, n - 1 - k, window, 1000);
+                    try std.testing.expect(rows >= 1 and rows <= window);
+                    if (!switched) try std.testing.expectEqual(1 + (round * 7 + k * 5 + round / 3) % (left - (n - 1 - k)), rows); // as before
+                    left -= rows;
+                    total += rows;
+                }
+                try std.testing.expect(total <= room);
+                widest = @max(widest, total);
+            }
+            if (switched) try std.testing.expect(widest > window); // the check now sends the rounds the switch allows
+        }
+    }
 }
