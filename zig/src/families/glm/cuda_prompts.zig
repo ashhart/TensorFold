@@ -53,7 +53,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
     for (parts, segs[0..parts.len]) |p, g| {
         one[0] = .{ .w = &e.w, .st = g.st, .b = &e.bp };
         // decode._absorb_rows; the head's pass writes final-norm row 0, which the hold rows above already copied
-        if (e.mtp and g.rows > 1) {
+        if (e.mtp and e.drafter == null and g.rows > 1) {
             try f.mtpMode(@ptrCast(p.ids[1..]), &.{e.bp.fnormed + g.row0 * D * 2}, false);
             try g.st.setMtpLen(e.stream, g.st.mtp_len + g.rows - 1);
         }

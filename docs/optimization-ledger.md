@@ -64,7 +64,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864]; paired C experiment (REV25 E1) | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562]; yes C [#2485] (dense) | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
-| 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
+| 16. DFlash(2) | done [#1465] | yes | done C[#979] (prompt taps only), open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C open [#2257] | done [#1779] | done [#768] |

@@ -445,7 +445,7 @@ pub const Engine = struct {
         if (last and f.prof != null) std.log.info("glm prof draw rank={d} slot={d} start={d} rows={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, draw_started) });
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
-        if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
+        if (e.mtp and e.drafter == null) try prompt_solo.mtpRows(e, &f, as_i32);
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .mtp);
         stamp = prof_mod.span(f.prof, e.stream, .commit);
