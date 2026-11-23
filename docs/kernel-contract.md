@@ -584,6 +584,25 @@ normalisation, q/k norm and rotary in both stacks' forms, the speaker head's tap
 of the two branches), each output within float64's range at its bf16 points, and its head-64 attention against
 `contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
 dropped each).
+CUDA checks Ripple-65B's two-rank glue (`ricursive_tp2.cu`, `ricursive-tp2-contract`): the scaled embedding, the value
+residual's lerp below and from one half, two ranks' fp32 partials added once in rank order, the query heads padded to 12
+a key head and back, a drafter's tap rows, each bit for bit against a host rule; the output gate's fp32 sigmoid, the
+clamped SwiGLU and the post-norm add into the fp32 residual, each inside float64's range at its rounding points. Eight
+controls, each red at `shapes`: the embedding's product left unrounded, a lerp start-anchored past one half, the
+sigmoid rounded to fp16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
+bf16, each head read from its neighbour, and taps rounded toward zero. Their launches are in `ricursive_tp2_records.zig`.
+
+CUDA checks Ripple-65B's DFlash2 drafter glue (`ricursive_tp2_draft.cu`, `ricursive-tp2-draft-contract`; both Ripple
+groups also run in `kernel-contract`): the tap ring's column gathers for either rank, the unscaled embedding into
+fp32, fp32 values into bf16 and each 2,048-logit slice's 32 best (ties to the lower id, NaN read as -Inf), each by a
+host rule; the norm (bf16 rows, and fp16 or bf16 over each block's drafts), the `__expf` SwiGLU, both 4-tap
+convolutions, the query and key head norms with and without rotation, the ring writes of keys and values, and the
+block attention with its chunk merge at a sliding and the full layer's reach, each inside float64's range at its
+rounding points. Twelve controls, each red at `shapes` and kept beside the served kernel in the same image: rows read
+from the ring's next row, the table read as fp16, values toward zero (fp32 to bf16 and the ring's values), lane ties
+to the higher id, x / rms unrounded, silu(g) rounded to bf16, each convolution on the other branch's weights, heads
+rotated the other way, ring keys read one row on, and the merge's running sum never rescaled. Their launches are in
+`ricursive_tp2_draft_records.zig`.
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's

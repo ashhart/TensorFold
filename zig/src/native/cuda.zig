@@ -173,17 +173,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type) and refusals.ranksMatch(F, o)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (comptime @hasDecl(F, "ranks")) if (std.mem.eql(u8, o.model_type, F.model_type)) {
+        problem.* = F.ranks_refusal;
+        return null; // the family's own --tp, after no other family took this one
+    };
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
     const o = family_memory.familyOpen(F, asked);
     if (try refusals.place(F, a, o)) |why| { // a rank inside its world, a world the family serves: before admission
-        problem.* = why;
-        return null;
-    }
-    if (refusals.family(F, o)) |why| {
         problem.* = why;
         return null;
     }
@@ -491,6 +491,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     }), .{ .ctx = loaded.ctx, .text = F.explain }, snaps.warmQuiet(F));
     opened = true;
     if (h.witness) |w| w.adopted = true;
+    if (@hasDecl(F, "thinking")) F.thinking(&h.host.info_); // a family's own think block rules
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
@@ -518,7 +519,13 @@ test {
     _ = cuda_device; // the device and variable tests
     _ = windows;
 }
-
+test "a family that names its ranks opens only at them; one that names none at any" {
+    const Two = struct {
+        pub const ranks: u32 = 2;
+    };
+    try std.testing.expect(refusals.ranksMatch(Two, .{ .dir = "d", .model_type = "m", .tp = 2 }) and !refusals.ranksMatch(Two, .{ .dir = "d", .model_type = "m" }));
+    try std.testing.expect(refusals.ranksMatch(struct {}, .{ .dir = "d", .model_type = "m", .tp = 2 }) and refusals.ranksMatch(struct {}, .{ .dir = "d", .model_type = "m" }));
+}
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
     var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
     defer target.deinit();
