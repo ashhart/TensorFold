@@ -1,6 +1,7 @@
-//! Phase 1 benchmark & bit-exactness verification for Level Zero P2P TP=2 and TP=4 collectives on Arc Pro B70.
+//! Phase 1 benchmark & bit-exactness verification for Level Zero P2P TP=2 and TP=4 collectives on Arc Pro Xe2.
 const std = @import("std");
 const ze = @import("ze");
+const device_id = @import("device_id.zig");
 const tp_mod = @import("tp.zig");
 const kb = @import("xpu_tp_kernels");
 
@@ -18,7 +19,7 @@ fn f32ToF16Rte(v: f32) u16 {
 fn runSuite(tp_deg: usize) !void {
     const alloc = std.heap.c_allocator;
     var gpus: [4]ze.Gpu = undefined;
-    ze.Gpu.openPeers(0xe223, gpus[0..tp_deg]) catch |err| {
+    device_id.openPeers(gpus[0..tp_deg]) catch |err| {
         std.debug.print("skipped TP={d}: {s}\n", .{ tp_deg, @errorName(err) });
         return;
     };
