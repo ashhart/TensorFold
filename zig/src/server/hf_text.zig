@@ -101,7 +101,9 @@ pub const HfText = struct {
             return error.Load;
         };
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
-            t.native_inkling2 = template_override == null and kind == .string and std.mem.eql(u8, kind.string, "inkling2");
+            // the Inkling 2 family's two model types (families/inkling2/config.zig): Small's and Mini's looped one
+            t.native_inkling2 = template_override == null and kind == .string and
+                (std.mem.eql(u8, kind.string, "inkling2") or std.mem.eql(u8, kind.string, "inkling2_loop"));
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
             if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
