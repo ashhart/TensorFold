@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const glue = @import("cuda_glue.zig");
+const max_streams = @import("cuda_engine.zig").max_streams;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
@@ -244,13 +245,9 @@ pub const Forward = struct {
                     const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
                     try f.mark(.qkv);
-                    var k0: usize = 0;
-                    while (k0 < segs.len) : (k0 += glue.max_segs) {
-                        const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
-                        var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
-                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
-                        try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
-                    }
+                    var at_segs: [max_streams]glue.AttnSeg = undefined; // attentionSegs launches them in parts it rebases
+                    for (segs, at_segs[0..segs.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
+                    try t.attentionSegs(at_segs[0..segs.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
