@@ -6,10 +6,11 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
+const img = @import("images.zig");
 const cfg = @import("../config.zig");
 const be = lanes.backend;
 
-pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
+pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null };
 const ring = 4096;
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
@@ -169,7 +170,7 @@ pub const Metal = struct {
         return h;
     }
 
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !void {
+    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, pictures: ?*img.Rows) !void {
         const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
@@ -187,7 +188,8 @@ pub const Metal = struct {
             const capture = self.prepared and stream != null;
             if (capture) _ = self.nextTapGeneration();
             const taps: ?st.Ref = if (capture) .{ .buf = s.taps.? } else null;
-            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = taps });
+            const rows_of: []const fwd.ImageRows = if (pictures) |p| p.chunk(base + at, base + end) else &.{};
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = taps, .images = rows_of });
             if (capture) {
                 const rows = end - at;
                 if (self.sink) |k| try k.take(k.ptr, stream.?, .{
@@ -219,7 +221,6 @@ pub const Metal = struct {
         const self = cast(ptr);
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
-        if (stream.images.len > 0) return error.InklingHasNoImageTower;
         const need = st.cacheBytes(ids.len + stream.max_new);
         if (self.held + need > self.options.budget) {
             std.log.warn("inkling2_loop: a stream needs {d:.1} GiB of state; {d:.1} of {d:.1} GiB are held", .{ gib(need), gib(self.held), gib(self.options.budget) });
@@ -240,7 +241,9 @@ pub const Metal = struct {
                 if (snapshot.restore(cache, self.model.queue, snap)) stream.cached = @intCast(snap.at) else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        try self.feed(cache, ids[cache.len..], stream);
+        var pictures = try img.Rows.init(self.gpa, self.options.images, stream, cache.len);
+        defer pictures.deinit();
+        try self.feed(cache, ids[cache.len..], stream, &pictures);
     }
 
     pub fn warm(self: *Metal) !void {
@@ -248,7 +251,7 @@ pub const Metal = struct {
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
-        try self.feed(&cache, &ids, null);
+        try self.feed(&cache, &ids, null, null);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
     }
 
