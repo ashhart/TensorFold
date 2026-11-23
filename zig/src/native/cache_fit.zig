@@ -307,3 +307,13 @@ test "Flash Next batch retains main's session count at 128 GiB and a 30 GiB foot
     try std.testing.expectEqual(1 + old_room / each, 1 + plan.sessions / each);
     try std.testing.expectEqual(@as(u64, 0), (try fitUnderDefault(cap, 30 * GiB, 0, false, DEFAULT_MINIMUM)).budget);
 }
+
+test "cache maximum: missing footprint readings retain the automatic allowance" {
+    var why: []const u8 = "";
+    const automatic = try budgetUnderMaximum(24 * GiB, null, false, 20 * GiB, 2 * GiB, std.testing.allocator, &why, "");
+    try std.testing.expectEqual(@as(u64, 2 * GiB), automatic.budget_bytes);
+    const explicit = try budgetUnderMaximum(24 * GiB, 8, true, 20 * GiB, 2 * GiB, std.testing.allocator, &why, "");
+    try std.testing.expectEqual(@as(u64, 8 * GiB), explicit.budget_bytes);
+    const off = try budgetUnderMaximum(24 * GiB, 0, false, 20 * GiB, 0, std.testing.allocator, &why, "");
+    try std.testing.expectEqual(@as(u64, 0), off.budget_bytes);
+}
