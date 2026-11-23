@@ -54,8 +54,10 @@ pub const Model = struct {
     tap: mtl.Pipeline,
     /// A drafter block's attention over its context ring and itself (dspark.metal's mm_draft_vec, either drafter's).
     draft_vec: mtl.Pipeline,
-    /// A decode window's rows of each expert at 3 and 4 bits (experts.metal), grouped by mm_route_groups.
-    grouped: [2]mtl.Pipeline,
+    /// A decode window's rows of each expert at 3, 4 and 8 bits (experts.metal), grouped by mm_route_groups.
+    grouped: [3]mtl.Pipeline,
+    /// TF_MINIMAX_Q8_GROUPED, read once at model load: slot 2 serves Q8 only when explicitly enabled.
+    q8_grouped: bool,
     /// Each layer's place in the drafter's taps, -1 when untapped (no drafter: all -1).
     tap_at: [cfg.max_layers]i8 = @splat(-1),
     taps: u32 = 0,
@@ -70,6 +72,7 @@ pub const Model = struct {
         m.gpa = gpa;
         m.mms = 0;
         m.vision = null;
+        m.q8_grouped = try @import("sys").environment.read(bool, "TF_MINIMAX_Q8_GROUPED", false);
         m.config = try cfg.Config.read(gpa, io, dir);
         const c = &m.config;
         m.device = try mtl.Device.init();
@@ -145,8 +148,10 @@ pub const Model = struct {
             m.grouped[0] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q3", false);
             errdefer m.grouped[0].deinit();
             m.grouped[1] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q4", false);
+            if (m.q8_grouped) m.grouped[2] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q8", false);
         }
-        errdefer for (m.grouped) |p| p.deinit();
+        errdefer for (m.grouped[0..2]) |p| p.deinit();
+        errdefer if (m.q8_grouped) m.grouped[2].deinit();
         errdefer for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
         try m.addMm(m.weights.head);
         for (m.weights.layers) |l| {
@@ -218,7 +223,8 @@ pub const Model = struct {
         m.index_nax.deinit();
         m.tap.deinit();
         m.draft_vec.deinit();
-        for (m.grouped) |p| p.deinit();
+        for (m.grouped[0..2]) |p| p.deinit();
+        if (m.q8_grouped) m.grouped[2].deinit();
         m.sample.deinit();
         m.sample_full.deinit();
         m.rows.deinit();

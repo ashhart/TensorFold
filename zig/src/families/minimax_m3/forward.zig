@@ -20,7 +20,7 @@ const IArgs = extern struct { rows: u32, pos: u32, heads: u32, blocks: u32, firs
 /// The decode attention's constants (mm_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, topk: u32, scale: f32, sel: u32, all: u32 };
 
-pub const groupedExpertSlot = @import("expert_choice.zig").groupedExpertSlot;
+const choice = @import("expert_choice.zig");
 
 const Enc = struct {
     e: mtl.ComputeEncoder,
@@ -45,8 +45,8 @@ const Enc = struct {
 
     fn experts(x: Enc, w: rows.Experts, in: mtl.Buffer, out: mtl.Buffer, ids: mtl.Buffer, slots: usize) !void {
         const call = try rows.callIndexed(&x.m.rows, w, slots, false);
-        if (w.one.bits == 3 or w.one.bits == 4) { // expert by expert: a weight read once for every row that picked it
-            x.e.setPipeline(x.m.grouped[if (w.one.bits == 3) 0 else 1]);
+        if (choice.groupedExpertSlot(w.one.bits, x.m.q8_grouped)) |pipeline| { // expert by expert: a weight read once for every row that picked it
+            x.e.setPipeline(x.m.grouped[pipeline]);
             for ([_]mtl.Buffer{ in, w.one.w, w.one.scales, w.one.biases }, [_]usize{ 0, w.one.w_off, w.one.s_off, w.one.b_off }, 0..) |r, off, slot| x.e.setBuffer(r, off, slot);
             x.e.setValue(call.dims, 4);
             x.e.setBuffer(out, 0, 5);

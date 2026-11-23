@@ -146,11 +146,12 @@ fn hostGroups(a: std.mem.Allocator, ids: []const i32) !struct { g: []u32, m: []u
 
 // --- mm_experts_grouped: each picked expert's rows read once a window, tf_rp_rows_at's sums ----------------------
 
-/// The checkpoints' expert formats: 3-bit groups of 64, and the 4-bit groups of 128 on their chosen layers.
+/// The checkpoints' grouped expert formats: 3-bit and 8-bit groups of 64, and 4-bit groups of 128 on chosen layers.
 const Form = struct { bits: u8, group: usize, name: []const u8 };
 const grouped_forms = [_]Form{
     .{ .bits = 3, .group = 64, .name = "metal minimax_m3 mm_experts_grouped_q3 g64" },
     .{ .bits = 4, .group = 128, .name = "metal minimax_m3 mm_experts_grouped_q4 g128" },
+    .{ .bits = 8, .group = 64, .name = "metal minimax_m3 mm_experts_grouped_q8 g64" },
 };
 
 /// As tf_row_projection_indexed (Ornith's q27_rows_extra): 16-input pieces, a lane's pieces in turn, a simd_sum.
@@ -166,10 +167,13 @@ pub const Grouped = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
+    baseline_pipe: ?mtl.Pipeline = null,
     form: Form,
     f: ?Affine = null,
     ids: []i32 = &.{},
     refs: [7]rig_.Ref = undefined,
+    baseline_ids: rig_.Ref = undefined,
+    baseline_out: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     dims: [6]i32 = undefined,
 
@@ -178,6 +182,7 @@ pub const Grouped = struct {
         const gu = config.moe_intermediate * 2;
         return .{
             .name = f.name,
+            .replaces = if (f.bits == 8) "tf_row_projection_indexed_q8_f32" else null,
             .accum = .f32,
             .depth = rowDepth,
             .out = .bf16,
@@ -188,12 +193,21 @@ pub const Grouped = struct {
     }
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, f: Form) !Grouped {
-        const fun = if (f.bits == 3) "mm_experts_grouped_q3" else "mm_experts_grouped_q4";
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try expertsPipeline(a, device, fun), .form = f };
+        const fun = switch (f.bits) {
+            3 => "mm_experts_grouped_q3",
+            4 => "mm_experts_grouped_q4",
+            8 => "mm_experts_grouped_q8",
+            else => unreachable,
+        };
+        var t = Grouped{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try expertsPipeline(a, device, fun), .form = f };
+        errdefer t.pipe.deinit();
+        if (f.bits == 8) t.baseline_pipe = try expertsPipeline(a, device, "tf_row_projection_indexed_q8_f32");
+        return t;
     }
     pub fn deinit(t: *Grouped) void {
         t.drop();
         t.rig.deinit();
+        if (t.baseline_pipe) |p| p.deinit();
         t.pipe.deinit();
     }
     fn drop(t: *Grouped) void {
@@ -232,6 +246,10 @@ pub const Grouped = struct {
         t.refs[5] = try t.rig.input(std.mem.sliceAsBytes(grp.g));
         t.refs[6] = try t.rig.input(std.mem.sliceAsBytes(grp.m));
         t.out = try t.rig.output(t.count() * 2);
+        if (t.form.bits == 8) {
+            t.baseline_ids = try t.rig.input(std.mem.sliceAsBytes(t.ids));
+            t.baseline_out = try t.rig.scratch(t.count() * 2);
+        }
         return true;
     }
 
@@ -247,6 +265,23 @@ pub const Grouped = struct {
         // as forward.zig's experts(): (columns / (RPS * SG), slots) groups of 64 threads
         e.dispatchGroups(mtl.Size.of(n / (row.columns * row.groups), t.ids.len, 1), mtl.Size.of(32 * row.groups, 1, 1));
         try t.rig.finish(p);
+    }
+
+    /// The indexed Q8 kernel on the same inputs, with its own ids and scratch output for gate 3's byte comparison.
+    pub fn replaced(t: *Grouped) ![]const u8 {
+        if (t.form.bits != 8) return error.NotAReplacement;
+        const n: usize = @intCast(t.dims[1]);
+        const len = t.count() * 2;
+        @memset(t.rig.bytes(t.baseline_out, len), 0xff);
+        const p = t.rig.begin();
+        const e = p.e;
+        e.setPipeline(t.baseline_pipe.?);
+        for (t.refs[0..5], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setBuffer(t.baseline_out.buf, t.baseline_out.off, 5);
+        e.setBuffer(t.baseline_ids.buf, t.baseline_ids.off, 6);
+        e.dispatchGroups(mtl.Size.of(n / (row.columns * row.groups), t.ids.len, 1), mtl.Size.of(32 * row.groups, 1, 1));
+        try t.rig.finish(p);
+        return t.rig.bytes(t.baseline_out, len);
     }
 
     pub fn count(t: *Grouped) usize {
