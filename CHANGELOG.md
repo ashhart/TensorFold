@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: Macs with tensor units that are not Ultras (an M5 Max, for example) now take 8-bit prompt chunks in row blocks, one dispatch for many 16-row windows, as Ultras already did, instead of re-reading the weights for every 16-row window; Ultras are unchanged (#3280, refs #2851). Thanks to @scchumbletech.
+
 - Metal: Nemotron, Qwen3.8-27B and LFM2 build their prompt pick kernels from one source, with tokens unchanged (#4739). Thanks @jschmied.
 
 - Draft depth: a lone stream with a fixed-block drafter, such as Inkling 2 Mini's DSpark, is now priced for the full block it runs, as shared rounds already were, so single requests propose full blocks (#4457). Thanks @gilby.
