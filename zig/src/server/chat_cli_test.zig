@@ -195,7 +195,7 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     for (0..f.count()) |i| try std.testing.expectEqualStrings("Bearer example-key-1", f.header(i, "authorization").?);
     try r.env.put("TENSORFOLD_API_KEY", "two words");
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url }));
-    try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
+    try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected Latin-1 keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
 }
 
