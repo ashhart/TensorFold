@@ -7,6 +7,7 @@ const Model = @import("../families/inkling2/metal/model.zig").Model;
 const st = @import("../families/inkling2/metal/state.zig");
 const backend = @import("../families/inkling2/metal/backend.zig");
 const dspark = @import("../families/inkling2/metal/dspark.zig");
+const dl = @import("../families/inkling2/dspark_lanes.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -87,7 +88,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     }
     const scratch: u64 = st.scratchBytes(st.batch_rows) + st.scratchBytes(st.prompt_rows);
-    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() + dspark.Drafter.scoreBytes(0) else 0;
+    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() + dl.scoreBytes(0) else 0;
     const budget = cacheBudget(ram, model.device.maxWorkingSet(), @import("sys").getenv("INKLING2_LOAD_LIMIT_GB"), resident) catch {
         if (drafter) |d| d.deinit();
         model.deinit();
@@ -95,10 +96,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     const streams: u64 = @max(o.lanes, 1);
-    const draft_token = if (drafter != null) dspark.Drafter.tokenBytes() else 0;
-    const draft_fixed = if (drafter != null) dspark.Drafter.streamBytes(0) + dspark.Drafter.ring_slack * draft_token else 0;
-    const draft_shared_token = if (drafter) |_| dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0) else 0;
-    const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
+    // The shared host's fit: a drafted stream's fixed bytes, its bytes a token, and the shared scores' a token.
+    const draft: dl.Fit = if (drafter != null) dl.fit() else .{ .fixed = 0, .lane = 0, .shared = 0 };
+    const fits = longest(budget, model.config.text.max_context, streams, draft.fixed, draft.lane, draft.shared);
     const window: i64 = o.context orelse @intCast(fits);
     if (contextProblem(window, fits)) |why| {
         if (drafter) |d| d.deinit();
@@ -113,7 +113,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.drafter = drafter;
-    const reserved = if (drafter != null) streams * dspark.Drafter.streamBytes(@intCast(window)) + dspark.Drafter.scoreBytes(@intCast(window)) - dspark.Drafter.scoreBytes(0) else 0;
+    const reserved = if (drafter != null) streams * dl.laneBytes(@intCast(window)) + dl.scoreBytes(@intCast(window)) - dl.scoreBytes(0) else 0;
     if (reserved > budget) return error.DSparkReservationExceeded;
     h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget - reserved });
     errdefer h.metal.deinit();
@@ -121,9 +121,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.drafted = null;
     h.warm = .{ .queue = model.queue };
     if (drafter) |d| {
-        try d.setContext(@intCast(window));
+        try d.lanes.setContext(@intCast(window));
         try d.measure();
-        h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+        h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.lanes.drafter());
         h.drafted.?.first_rows = true;
     }
     errdefer if (h.drafted) |*d| d.deinit();
@@ -283,14 +283,12 @@ test "Inkling native longest context accounts target, streams and shared draft s
     try std.testing.expectEqual(@as(usize, 7), longest(budget, 8, 2, 11, 13, 17));
     try std.testing.expectEqual(@as(usize, 0), longest(st.cacheBytes(1) - 1, 8, 1, 0, 0, 0));
     // A stream's bytes are within the ring's slack of its fixed bytes and a token's bytes a token, never under.
-    const token = dspark.Drafter.tokenBytes();
-    const fixed = dspark.Drafter.streamBytes(0) + dspark.Drafter.ring_slack * token;
+    const fit = dl.fit();
     for ([_]usize{ 1, 127, 128, 129, 4096, 262144 }) |n| {
-        const bound = fixed + n * token;
-        try std.testing.expect(bound >= dspark.Drafter.streamBytes(n));
-        try std.testing.expect(bound - dspark.Drafter.streamBytes(n) <= dspark.Drafter.ring_slack * token);
+        const bound = fit.fixed + n * fit.lane;
+        try std.testing.expect(bound >= dl.laneBytes(n));
+        try std.testing.expect(bound - dl.laneBytes(n) <= dl.ring_slack * fit.lane);
     }
     // 36 GiB of state hold the model's whole window for eight drafted streams.
-    const shared = dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0);
-    try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fixed, token, shared));
+    try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fit.fixed, fit.lane, fit.shared));
 }

@@ -1,7 +1,6 @@
-//! Fixed eight-row DSpark scratch and committed-only per-stream context rings.
+//! Fixed eight-row DSpark scratch and a stream's context rings; the shared lane host sizes and books them.
 const std = @import("std");
 const mtl = @import("metal");
-const kernels = @import("dspark_kernels.zig");
 
 pub const hidden = 2304;
 pub const query = 3072;
@@ -11,7 +10,6 @@ pub const rank = 256;
 pub const vocabulary = 200058;
 pub const block = 8;
 pub const absorb_rows = 64;
-pub const local_ring = std.mem.alignForward(usize, 1024 + block, 128);
 
 const fields = [_][]const u8{
     "ids",    "resid", "next_resid", "x",    "y",     "q_raw", "k_raw", "v_raw", "q",     "kb",         "vb", "attn",
@@ -83,44 +81,14 @@ pub const Scratch = struct {
         s.* = undefined;
     }
 };
-/// A global ring's rows come this many at a time.
-pub const global_step = 128;
-pub fn globalRing(capacity: usize) usize {
-    return std.mem.alignForward(usize, capacity, global_step);
-}
-
-/// The attention scratch: a score a (row, head) and key, or the tensor-unit path's partials where they need more.
-pub fn scoreBytes(capacity: usize) u64 {
-    const chunks = @max(capacity, 1024) / kernels.units_chunk + 2;
-    return @max(@as(u64, 8 * 24 * 4) * (capacity + block), kernels.unitsBytes(chunks));
-}
-
-/// Two sliding layers hold two fixed K/V rings; layer 1 holds two global K/V rings.
-pub fn laneFixedBytes() u64 {
-    return 2 * 2 * local_ring * kv * 2 + hidden * 2;
-}
-
-pub fn laneTokenBytes() u64 {
-    return 2 * kv * 2;
-}
-
-pub fn laneBytes(capacity: usize) u64 {
-    return laneFixedBytes() + globalRing(capacity) * laneTokenBytes();
-}
-
+/// One stream's K and V rings of the drafter's three layers, and its newest target row.
 pub const Lane = struct {
     k: [3]mtl.Buffer,
     v: [3]mtl.Buffer,
-    rings: [3]usize,
     newest: mtl.Buffer,
-    from: u64 = 0,
-    end: u64 = 0,
-    held: [7]u32 = @splat(0),
-    held_len: u32 = 0,
 
-    pub fn init(device: mtl.Device, capacity: usize) !Lane {
-        if (capacity == 0 or capacity > 1048576) return error.DSparkLaneGeometry;
-        var l: Lane = .{ .k = undefined, .v = undefined, .rings = .{ local_ring, globalRing(capacity), local_ring }, .newest = undefined };
+    pub fn init(device: mtl.Device, rings: [3]usize) !Lane {
+        var l: Lane = .{ .k = undefined, .v = undefined, .newest = undefined };
         var made: usize = 0;
         errdefer {
             for (0..made) |i| {
@@ -128,7 +96,7 @@ pub const Lane = struct {
                 l.v[i].deinit();
             }
         }
-        for (l.rings, 0..) |ring, i| {
+        for (rings, 0..) |ring, i| {
             const bytes = ring * kv * 2;
             l.k[i] = try device.buffer(bytes, mtl.ResourceOptions.private);
             l.v[i] = device.buffer(bytes, mtl.ResourceOptions.private) catch |err| {
@@ -150,15 +118,3 @@ pub const Lane = struct {
         l.* = undefined;
     }
 };
-
-comptime {
-    if (local_ring != 1152 or laneTokenBytes() != 4096) @compileError("DSpark ring geometry drift");
-}
-
-test "DSpark stream accounting includes sliding, global and shared attention scratch" {
-    try std.testing.expectEqual(@as(u64, 9_437_184 + 4608), laneFixedBytes());
-    try std.testing.expectEqual(laneFixedBytes() + 128 * 4096, laneBytes(1));
-    try std.testing.expectEqual(laneFixedBytes() + 1152 * 4096, laneBytes(1025));
-    try std.testing.expectEqual(@as(u64, 768 * 1032), scoreBytes(1024));
-    // Ring and scores bytes are reserved with the target cache before the lane opens.
-}

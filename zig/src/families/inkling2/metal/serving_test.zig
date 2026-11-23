@@ -202,8 +202,8 @@ fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want
     defer target.deinit();
     const draft_head = try dspark.Drafter.init(gpa, io, model.device, model, drafter_dir);
     defer draft_head.deinit();
-    try draft_head.setContext(context);
-    var wrapped = try lanes.drafted.Drafted.init(gpa, target.backend(), draft_head.drafter());
+    try draft_head.lanes.setContext(context);
+    var wrapped = try lanes.drafted.Drafted.init(gpa, target.backend(), draft_head.lanes.drafter());
     defer wrapped.deinit();
     wrapped.first_rows = true;
     const b = wrapped.backend();

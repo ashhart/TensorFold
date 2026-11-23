@@ -1,4 +1,4 @@
-//! Inkling 2 Mini DSpark: committed target features, three-layer proposal blocks, folded Markov logits.
+//! Inkling 2 Mini DSpark on Metal, the kernels behind the shared lane host: features, blocks, folded Markov logits.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
@@ -10,13 +10,16 @@ const glue = @import("glue.zig");
 const k = @import("dspark_kernels.zig");
 const weight_loader = @import("dspark_weights.zig");
 const state = @import("dspark_state.zig");
+const host = @import("../dspark_lanes.zig");
 
-const dr = lanes.drafter;
-const Stream = lanes.Stream;
 const Ref = k.Ref;
-const tap_list = [_]u32{ 5, 23, 41, 48 };
 /// Drafts a hold offers at most: the block after its anchor. The depth rule prices how many a round takes.
-const hold_depth: u32 = state.block - 1;
+const hold_depth: u32 = host.depth;
+/// The partials of the tensor-unit attention at a window under 1,024 tokens, where the host has fewer score bytes.
+const units_floor = k.unitsBytes(1024 / k.units_chunk + 2);
+
+/// A lane and what the shared host books of it: its rings and its committed rows [from, end).
+const Context = struct { lane: *const state.Lane, rings: [3]usize, from: u64, end: u64 };
 /// Streams one greedy hold can chain on the GPU; a wider hold samples on the host as sampled streams do.
 const chain_streams = 16;
 
@@ -35,6 +38,9 @@ fn failed(cb: mtl.CommandBuffer, what: []const u8) !void {
 }
 
 pub const Drafter = struct {
+    /// What the shared host opens a stream: its rings and its newest row.
+    pub const Lane = state.Lane;
+
     gpa: std.mem.Allocator,
     target: *const Model,
     weights: weight_loader.Loaded,
@@ -48,10 +54,10 @@ pub const Drafter = struct {
     scores: ?mtl.Buffer = null,
     /// The block attention's tensor-unit kernels, on the chips that have the units.
     units: ?k.Units = null,
-    capacity: usize = 1,
     /// A draft's share of a full hold, timed by `measure`.
     step_ms: f64 = 0,
-    contexts: std.AutoHashMapUnmanaged(*Stream, state.Lane) = .empty,
+    /// The round loop's drafter: the shared host's books over these kernels.
+    lanes: host.Drafter(Drafter) = undefined,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, target: *const Model, drafter_dir: []const u8) !*Drafter {
         _ = io; // Native factory convention; Checkpoint.addFile uses platform file calls.
@@ -66,6 +72,7 @@ pub const Drafter = struct {
             .pipelines = undefined,
             .scratch = undefined,
         };
+        d.lanes = host.Drafter(Drafter).init(gpa, d);
         errdefer d.weights.deinit();
         d.pipelines = try k.Pipelines.load(device);
         errdefer d.pipelines.deinit();
@@ -80,9 +87,7 @@ pub const Drafter = struct {
     }
 
     pub fn deinit(d: *Drafter) void {
-        var it = d.contexts.valueIterator();
-        while (it.next()) |lane| lane.deinit();
-        d.contexts.deinit(d.gpa);
+        d.lanes.deinit();
         if (d.scores) |scores| scores.deinit();
         if (d.units) |*u| u.deinit();
         d.chain_tokens.deinit();
@@ -96,126 +101,56 @@ pub const Drafter = struct {
     }
 
     pub fn fixedBytes(d: *const Drafter) u64 {
-        return d.weights.fixedBytes() + state.scratchBytes();
+        return d.weights.fixedBytes() + state.scratchBytes() + units_floor;
     }
 
-    pub fn scoreBytes(capacity: usize) u64 {
-        return state.scoreBytes(capacity);
+    pub fn openLane(d: *Drafter, rings: [3]usize) !Lane {
+        return Lane.init(d.target.device, rings);
     }
 
-    pub fn streamBytes(capacity: usize) u64 {
-        return state.laneBytes(capacity);
+    pub fn closeLane(_: *Drafter, lane: *Lane) void {
+        lane.deinit();
     }
 
-    /// A stream's bytes a token of its window; its global rings round the window up by at most `ring_slack` tokens.
-    pub fn tokenBytes() u64 {
-        return state.laneTokenBytes();
-    }
-    pub const ring_slack = state.global_step - 1;
-
-    /// The selected target window fixes every new lane's global ring and the shared attention score allocation.
-    pub fn setContext(d: *Drafter, window: u32) !void {
-        const capacity: usize = @intCast(window);
-        if (capacity == 0 or capacity > 1048576) return error.DSparkLaneGeometry;
-        if (d.contexts.count() != 0) return error.DSparkContextActive;
-        const scores = try d.target.device.buffer(@intCast(state.scoreBytes(capacity)), mtl.ResourceOptions.private);
+    /// The holds' shared attention scratch: the host's bytes, or the tensor-unit partials' floor where that is more.
+    pub fn setScores(d: *Drafter, bytes: u64) !void {
+        const scores = try d.target.device.buffer(@intCast(@max(bytes, units_floor)), mtl.ResourceOptions.private);
         if (d.scores) |old| old.deinit();
         d.scores = scores;
-        d.capacity = capacity;
     }
 
-    pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
-    }
-
-    fn cast(ptr: *anyopaque) *Drafter {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn tapsFn(_: *anyopaque) []const u32 {
-        return &tap_list;
-    }
-
-    fn factsFn(ptr: *anyopaque) dr.Facts {
-        const d = cast(ptr);
+    pub fn policy(d: *const Drafter) host.Policy {
         // No plain rounds: one draft pays from about a third landing, and the guard's estimate near that line is noise.
-        return .{ .depth = hold_depth, .step_ms = d.step_ms, .plain_guard = false, .batched = true, .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
+        return .{ .step_ms = d.step_ms, .plain_guard = false, .batched = true };
     }
 
-    fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
-        const d = cast(ptr);
-        if (d.contexts.contains(stream)) return error.DraftStreamOpen;
-        const lane = try state.Lane.init(d.target.device, d.capacity);
-        errdefer {
-            var owned = lane;
-            owned.deinit();
-        }
-        try d.contexts.put(d.gpa, stream, lane);
-    }
-
-    fn releaseFn(ptr: *anyopaque, stream: *Stream) void {
-        const d = cast(ptr);
-        if (d.contexts.fetchRemove(stream)) |entry| {
-            var lane = entry.value;
-            lane.deinit();
-        }
-    }
-
-    fn heldFn(ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void {
-        const d = cast(ptr);
-        for (streams, out) |stream, tokens| {
-            const lane = d.contexts.getPtr(stream) orelse return error.DraftStreamUnknown;
-            if (tokens.len > lane.held_len) return error.DraftHeldFewer;
-            @memcpy(tokens, lane.held[0..tokens.len]);
-        }
-    }
-
-    fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const state.Lane, taps: Ref, start: u64, rows: usize) void {
+    fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, rings: [3]usize, taps: Ref, start: u64, rows: usize) void {
         const n: u32 = @intCast(rows);
         k.fuseTaps(&d.pipelines, e, taps, r(d.weights.weights.fuse), at(d.weights.dflare, 0), at(d.scratch.fused, 0), at(lane.newest, 0), n);
         for (d.weights.weights.layers, 0..) |layer, i| {
             const c = at(d.scratch.fused, i * rows * state.hidden * 2);
             fwd.dense(d.target, e, layer.k_ctx, c, at(d.scratch.ck, 0), rows);
             fwd.dense(d.target, e, layer.v_ctx, c, at(d.scratch.cv, 0), rows);
-            k.commitContext(&d.pipelines, e, at(d.scratch.ck, 0), at(d.scratch.cv, 0), r(layer.k_norm_ctx), at(lane.k[i], 0), at(lane.v[i], 0), @intCast(start), n, @intCast(lane.rings[i]));
+            k.commitContext(&d.pipelines, e, at(d.scratch.ck, 0), at(d.scratch.cv, 0), r(layer.k_norm_ctx), at(lane.k[i], 0), at(lane.v[i], 0), @intCast(start), n, @intCast(rings[i]));
         }
     }
 
-    fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
-        const d = cast(ptr);
+    /// Every stream's pieces of an absorb in one command buffer, in the order the host hands them.
+    pub fn absorb(d: *Drafter, pieces: []const host.Absorb(Lane)) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        if (items.len == 0) return;
         const cb = d.target.queue.commandBuffer();
         const e = cb.compute(.serial);
-        const row_bytes = 4 * state.hidden * 2;
-        for (items) |item| {
-            const lane = d.contexts.getPtr(item.stream) orelse return error.DraftStreamUnknown;
-            const features = item.features;
-            if (features.space != .device or features.dtype != .bf16 or features.row_bytes != row_bytes) return error.DraftFeaturesUnsupported;
-            if (item.rows != null) return error.TreesNotBuilt;
-            if (features.rows == 0 or features.rows > 1048576) return error.DraftFeaturesUnsupported;
-            if (item.start < lane.end) return error.DraftContextGap;
-            if (item.start > lane.end) lane.from = item.start;
-            const end = item.start + features.rows;
-            if (end > 1048576) return error.DraftContextGap;
-            const source = mtl.Buffer{ .id = @ptrFromInt(features.buffer) };
-            var position = item.start;
-            while (position < end) {
-                const rows: usize = @intCast(@min(state.absorb_rows, end - position));
-                const offset = features.offset + @as(usize, @intCast(position - item.start)) * row_bytes;
-                d.absorbRows(e, lane, at(source, offset), position, rows);
-                position += rows;
-            }
-            lane.end = end;
-            lane.held_len = 0;
+        for (pieces) |p| {
+            const source = mtl.Buffer{ .id = @ptrFromInt(p.features.buffer) };
+            d.absorbRows(e, p.lane, p.rings, at(source, @intCast(p.offset)), p.position, p.rows);
         }
         e.end();
         cb.commit();
         try failed(cb, "absorb");
     }
 
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, pending: u32, anchor: u64, depth: u32) void {
+    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, c: Context, pending: u32, depth: u32) void {
         s.ids.slice(u32, 1)[0] = pending;
         glue.embedNorm(&d.target.glue, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.x, 0), 1);
         k.initializeRows(&d.pipelines, e, at(s.x, 0), r(d.weights.weights.mask), at(s.x, 0));
@@ -224,8 +159,8 @@ pub const Drafter = struct {
             fwd.dense(d.target, e, layer.q, at(s.x, 0), at(s.q_raw, 0), 8);
             fwd.dense(d.target, e, layer.k, at(s.x, 0), at(s.k_raw, 0), 8);
             fwd.dense(d.target, e, layer.v, at(s.x, 0), at(s.v_raw, 0), 8);
-            k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(anchor));
-            if (d.units) |*u| k.attendUnits(u, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from)) else k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(lane.end), @intCast(lane.rings[i]), i != 1, @intCast(lane.from));
+            k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), @intCast(c.end));
+            if (d.units) |*u| k.attendUnits(u, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(c.lane.k[i], 0), at(c.lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(c.end), @intCast(c.rings[i]), i != 1, @intCast(c.from)) else k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(c.lane.k[i], 0), at(c.lane.v[i], 0), at(d.scores.?, 0), at(s.attn, 0), @intCast(c.end), @intCast(c.rings[i]), i != 1, @intCast(c.from));
             fwd.dense(d.target, e, layer.o, at(s.attn, 0), at(s.y, 0), 8);
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.resid, 0), r(layer.post_norm), at(s.next_resid, 0), at(s.x, 0), 8, false);
             fwd.dense(d.target, e, layer.gate, at(s.x, 0), at(s.gate, 0), 8);
@@ -236,7 +171,7 @@ pub const Drafter = struct {
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.next_resid, 0), r(next_norm), at(s.resid, 0), at(s.x, 0), 8, false);
         }
         k.base(&d.pipelines, e, r(d.target.weights.unembed), at(s.x, state.hidden * 2), at(s.base, 0), depth, state.vocabulary);
-        k.kappa(&d.pipelines, e, at(s.x, state.hidden * 2), at(lane.newest, 0), r(d.weights.weights.rnn), r(d.weights.weights.rnn_bias), at(s.kappa, 0), depth);
+        k.kappa(&d.pipelines, e, at(s.x, state.hidden * 2), at(c.lane.newest, 0), r(d.weights.weights.rnn), r(d.weights.weights.rnn_bias), at(s.kappa, 0), depth);
     }
 
     fn recurrent(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, step: usize, previous: u32, second_bank: bool) void {
@@ -257,8 +192,8 @@ pub const Drafter = struct {
     }
 
     /// One stream's greedy hold: its block, then each step's recurrent pass, logits and pick; `held` takes the drafts.
-    fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, lane: *const state.Lane, held: Ref, pending: u32, anchor: u64, depth: usize) void {
-        d.encodeBlock(e, s, lane, pending, anchor, @intCast(depth));
+    fn encodeChain(d: *Drafter, e: mtl.ComputeEncoder, s: *const state.Scratch, c: Context, held: Ref, pending: u32, depth: usize) void {
+        d.encodeBlock(e, s, c, pending, @intCast(depth));
         var second_bank = false;
         for (0..depth) |step| {
             const current = if (second_bank) s.next_state else s.state;
@@ -272,7 +207,8 @@ pub const Drafter = struct {
 
     /// A full hold on an empty context, the third of three runs timed: the depth rule prices a draft at its share.
     pub fn measure(d: *Drafter) !void {
-        var lane = try state.Lane.init(d.target.device, d.capacity);
+        const rings = host.rings(d.lanes.capacity);
+        var lane = try Lane.init(d.target.device, rings);
         defer lane.deinit();
         const held = Ref{ .buf = d.chain_tokens, .off = 0 };
         var ms: f64 = 0;
@@ -285,7 +221,7 @@ pub const Drafter = struct {
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            d.encodeChain(e, &d.scratch, &lane, held, 2, 0, hold_depth);
+            d.encodeChain(e, &d.scratch, .{ .lane = &lane, .rings = rings, .from = 0, .end = 0 }, held, 2, hold_depth);
             e.end();
             cb.commit();
             try failed(cb, "timed hold");
@@ -297,50 +233,35 @@ pub const Drafter = struct {
     }
 
     /// Greedy streams: the blocks and every step in one command buffer, each draft picked on the GPU for the next.
-    fn holdChained(d: *Drafter, items: []const dr.Hold) !void {
+    fn holdChained(d: *Drafter, items: []const host.Hold(Lane), drafts: [][host.depth]u32) !void {
         const tokens = d.chain_tokens.slice(u32, chain_streams * 8);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = d.target.queue.commandBuffer();
         const e = cb.compute(.serial);
         for (items, 0..) |item, i| {
-            const depth: usize = @min(item.depth, 7);
             const s = try d.slot(i);
-            const lane = d.contexts.getPtr(item.stream).?;
             const held = Ref{ .buf = d.chain_tokens, .off = i * 8 * @sizeOf(u32) };
             tokens[i * 8] = item.pending;
-            d.encodeChain(e, s, lane, held, item.pending, item.position - 1, depth);
+            d.encodeChain(e, s, .{ .lane = item.lane, .rings = item.rings, .from = item.from, .end = item.anchor }, held, item.pending, item.depth);
         }
         e.end();
         cb.commit();
         try failed(cb, "chained block");
-        for (items, 0..) |item, i| {
-            const depth: usize = @min(item.depth, 7);
-            const lane = d.contexts.getPtr(item.stream).?;
-            for (0..depth) |step| {
-                const token = tokens[i * 8 + step + 1];
-                if (token >= state.vocabulary) return error.DraftNonfinite;
-                lane.held[step] = token;
-            }
-            lane.held_len = @intCast(depth);
-        }
+        // A token past the vocabulary says the logits were not finite; the host refuses it when it keeps the drafts.
+        for (items, drafts, 0..) |item, *out, i| @memcpy(out[0..item.depth], tokens[i * 8 + 1 ..][0..item.depth]);
     }
 
-    /// Every stream's block and first step in one command buffer, then one command buffer a later step for all of them.
-    fn holdFn(ptr: *anyopaque, items: []const dr.Hold) anyerror!void {
-        const d = cast(ptr);
-        if (items.len == 0) return;
+    /// One call a hold for all its streams: greedy ones chain in one command buffer, sampled ones a step a buffer.
+    pub fn hold(d: *Drafter, items: []const host.Hold(Lane), drafts: [][host.depth]u32) !void {
         var deepest: usize = 0;
         for (items, 0..) |item, i| {
-            const lane = d.contexts.getPtr(item.stream) orelse return error.DraftStreamUnknown;
-            if (item.depth == 0 or item.position == 0) return error.DraftDepth;
-            if (lane.end != item.position - 1) return error.DraftContextGap;
-            deepest = @max(deepest, @min(item.depth, 7));
+            deepest = @max(deepest, item.depth);
             @memset((try d.slot(i)).state.slice(u16, state.rank), 0);
         }
         var greedy = items.len <= chain_streams;
         for (items) |item| greedy = greedy and item.sampling == null;
-        if (greedy) return d.holdChained(items);
+        if (greedy) return d.holdChained(items, drafts);
         const previous = try d.gpa.alloc(u32, items.len);
         defer d.gpa.free(previous);
         const values = try d.gpa.alloc(f32, state.vocabulary);
@@ -353,12 +274,10 @@ pub const Drafter = struct {
                 const cb = d.target.queue.commandBuffer();
                 const e = cb.compute(.serial);
                 for (items, 0..) |item, i| {
-                    const depth: usize = @min(item.depth, 7);
-                    if (step >= depth) continue;
+                    if (step >= item.depth) continue;
                     const s = try d.slot(i);
                     if (step == 0) {
-                        const lane = d.contexts.getPtr(item.stream).?;
-                        d.encodeBlock(e, s, lane, item.pending, item.position - 1, @intCast(depth));
+                        d.encodeBlock(e, s, .{ .lane = item.lane, .rings = item.rings, .from = item.from, .end = item.anchor }, item.pending, item.depth);
                         previous[i] = item.pending;
                     }
                     d.recurrent(e, s, step, previous[i], second_bank);
@@ -367,18 +286,15 @@ pub const Drafter = struct {
                 cb.commit();
                 try failed(cb, if (step == 0) "block" else "recurrent step");
             }
-            for (items, 0..) |item, i| {
-                const depth: usize = @min(item.depth, 7);
-                if (step >= depth) continue;
-                const lane = d.contexts.getPtr(item.stream).?;
+            for (items, drafts, 0..) |item, *out, i| {
+                if (step >= item.depth) continue;
                 const raw = (try d.slot(i)).logits.slice(u16, state.vocabulary);
                 for (raw, values) |bits, *value| value.* = @bitCast(@as(u32, bits) << 16);
                 const base_position = std.math.cast(u32, item.position) orelse return error.DraftDepth;
                 const position = std.math.add(u32, base_position, @intCast(step)) catch return error.DraftDepth;
                 previous[i] = try gpu_rule.sample(d.gpa, values, item.sampling, position, null);
                 if (previous[i] >= state.vocabulary) return error.DraftNonfinite;
-                lane.held[step] = previous[i];
-                if (step + 1 == depth) lane.held_len = @intCast(depth);
+                out[step] = previous[i];
             }
             second_bank = !second_bank;
         }
@@ -386,7 +302,13 @@ pub const Drafter = struct {
 };
 
 test "Mini taps and block depth match checkpoint section eight" {
-    try std.testing.expectEqualSlices(u32, &.{ 5, 23, 41, 48 }, &tap_list);
-    try std.testing.expectEqual(@as(u32, 48), tap_list[3]);
-    try std.testing.expectEqual(@as(u64, 768 * 1032), Drafter.scoreBytes(1024));
+    try std.testing.expectEqualSlices(u32, &.{ 5, 23, 41, 48 }, &host.taps);
+    try std.testing.expectEqual(@as(u32, 48), host.taps[3]);
+    try std.testing.expectEqual(@as(u32, 7), hold_depth);
+    try std.testing.expectEqual(@as(u32, state.block), host.block);
+}
+
+test "the host's score bytes hold the tensor-unit partials from 1,024 tokens up, and the floor holds them below" {
+    for ([_]usize{ 1024, 1025, 4096, 65536, 262144, 1 << 20 }) |n| try std.testing.expect(host.scoreBytes(n) >= k.unitsBytes(n / k.units_chunk + 2));
+    for ([_]usize{ 1, 255, 256, 1023 }) |n| try std.testing.expect(units_floor >= k.unitsBytes(@max(n, 1024) / k.units_chunk + 2));
 }
