@@ -86,6 +86,14 @@ pub const Probe = struct {
             .{ .rows = 20, .n = 11, .k = 90 }, // window 64 in a ring of 100
             .{ .rows = 16, .n = 12, .k = 1144 }, // Mini sliding visit wraps its KV ring
             .{ .rows = 1, .n = 13, .k = 2048 }, // Mini global visit crosses the chunk seam
+            .{ .rows = 16, .n = 13, .k = 2040 }, // the rows kernel: two tiles either side of the chunk seam
+            .{ .rows = 40, .n = 13, .k = 4090 }, // five tiles, three chunks, edges at 4095 and 4096
+            .{ .rows = 24, .n = 13, .k = 1000 }, // shared blocks past 2 per stream: the running max moves
+            .{ .rows = 13, .n = 7, .k = 100 }, // 48 over 8, a short context, a tile of 5
+            .{ .rows = 19, .n = 9, .k = 2500 }, // group 7 on the rows kernel
+            .{ .rows = 9, .n = 3, .k = 300 }, // group 1
+            .{ .rows = 12, .n = 0, .k = 2044 }, // the non-finite plants' case on the rows kernel, across the seam
+            .{ .rows = 10, .n = 0, .k = 40 }, // the same in the first chunk
         };
         return .{ .ctx = p, .vt = &vt, .spec = .{
             .name = p.label,
@@ -274,6 +282,12 @@ pub const mutations = [_]Mutation{
     .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 attention, the bias not rounded to bf16", .from = "float(bfloat(b))", .to = "b" },
     .{ .kind = .whole, .gate = .nonfinite, .label = "control: inkling2 attention, a -inf score under a -inf max weighed exp(NaN)", .from = "(score[h] == -INFINITY ? 0.0f : metal::precise::exp(score[h] - m_new))", .to = "metal::precise::exp(score[h] - m_new)" },
     .{ .kind = .whole, .gate = .nonfinite, .label = "control: inkling2 attention, a row of only -inf divided by a floored sum", .from = "const float o = (isnan(M) || M == -INFINITY) ? NAN : A / L;", .to = "const float o = A / max(L, 1e-30f);" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the rescale skipped", .from = "rp[0] = rp[0] * al_tg[sg * I2_RB + (lane >> 2)];", .to = "rp[0] = rp[0];" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the rescale checked on row 0 only", .from = "simd_all(al_tg[sg * I2_RB + row_of_lane] == 1.0f)", .to = "simd_all(al_tg[sg * I2_RB] == 1.0f)" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the first past-the-tile block skipped", .from = "for (ulong block = first; block * 32 < ke - ks; block += I2_ATTN_SGS) {", .to = "for (ulong block = first + I2_ATTN_SGS; block * 32 < ke - ks; block += I2_ATTN_SGS) {" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the bias read one distance off", .from = "const ulong back = pf + i - key;", .to = "const ulong back = pf + i - key + 1;" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the sink's weight dropped from the sum", .from = "l[i] = m[i] == -INFINITY ? 0.0f : 1.0f;", .to = "l[i] = 0.0f;" },
+    .{ .kind = .whole, .gate = .shapes, .label = "control: inkling2 rows attention, the streams' sums not scaled to the max", .from = "L[i] += mrg_l[s * I2_RB + i] * e;", .to = "L[i] += mrg_l[s * I2_RB + i];" },
     .{ .kind = .one_row, .gate = .shapes, .label = "control: inkling2 attention, the direct kernel's sum off by 1e-4", .from = "out[at] = i2_attn_finish(M, L, A, float(gate[at]));\n    } else {", .to = "out[at] = i2_attn_finish(M, L * 1.0001f, A, float(gate[at]));\n    } else {" },
 };
 

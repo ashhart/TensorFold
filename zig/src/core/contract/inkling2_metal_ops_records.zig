@@ -9,8 +9,12 @@ fn attentionBytes(g: u32) u32 {
     return 4 * (g * 128 + g * 16 + 2 * 4 * g + 4 * g * 128);
 }
 
+fn rowsBytes() u32 {
+    return 4 * (8 * 128 + 8 * 16 + 4 * 512 + 4 * 8 + 2 * 4 * 8);
+}
+
 pub const records = blk: {
-    var out: [20 + 2 * attn_groups]M = undefined;
+    var out: [22 + 2 * attn_groups]M = undefined;
     const singles = [_]M{
         .{ .name = "inkling2 ops inkling2_embed", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_rms_norm", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
@@ -23,6 +27,9 @@ pub const records = blk: {
         .{ .name = "inkling2 ops inkling2_scaled_l2_clip", .threads = 32, .tg_memory = 0, .reserved = 32 },
         .{ .name = "inkling2 ops inkling2_kv_prep", .threads = 32, .tg_memory = 0, .reserved = 32 },
         .{ .name = "inkling2 ops inkling2_attn_merge", .threads = 128, .tg_memory = 0, .reserved = 128 },
+        // q 8 x 128, rel 8 x 16, scores/probabilities/staging 4 x 512, alpha 4 x 8, m and l 2 x 4 x 8 floats.
+        .{ .name = "inkling2 ops inkling2_attn_rows_partial", .threads = 128, .tg_memory = rowsBytes(), .reserved = 128 },
+        .{ .name = "inkling2 ops inkling2_attn_rows_final", .threads = 128, .tg_memory = rowsBytes(), .reserved = 128 },
         .{ .name = "inkling2 ops inkling2_route_select", .threads = 32, .tg_memory = 0, .reserved = 32 },
         .{ .name = "inkling2 ops inkling2_softcap", .threads = 256, .tg_memory = 0, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_residual_attn", .threads = 256, .tg_memory = 0, .reserved = 256 },
