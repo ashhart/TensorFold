@@ -2,8 +2,12 @@
 
 pub const image = @import("image.zig");
 pub const vision = @import("vision.zig");
+pub const shape = @import("shape.zig");
 pub const kernels = @import("kernels.zig");
 pub const ops = @import("ops.zig");
+pub const shard = @import("shard.zig");
+pub const exl3 = @import("exl3.zig");
+pub const pack_weights = @import("pack_weights.zig");
 pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const loop = @import("loop.zig");
@@ -17,8 +21,12 @@ pub const model_type = "inkling2";
 test {
     _ = image;
     _ = vision;
+    _ = shape;
     _ = kernels;
     _ = ops;
+    _ = shard;
+    _ = exl3;
+    _ = pack_weights;
     _ = experts;
     _ = modelopt;
     _ = native;

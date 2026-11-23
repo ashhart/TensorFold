@@ -617,3 +617,10 @@ build [atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) 
 ([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
 under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)); no weights are included.
 `tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild that checkpoint (`docs/receipts/hy4-flash-nvfp4/`).
+
+## Inkling 2 EXL3 packs
+
+`zig/src/families/inkling2/exl3.zig` and `zig/src/families/inkling2/pack_weights.zig` read packs in the EXL3 format of
+[turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3) 1.x (MIT): the trellis layout, the `mul1` codebook
+and the per-tensor records. Packs carry the tensor names of an `inkling2` architecture added to exllamav3 for this
+model. The loader and its two-rank cuts are TensorFold's own.
