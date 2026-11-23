@@ -214,7 +214,6 @@ fn fillAt(h: *LaneHost, at: usize) void {
     // the trace's line, from what the job holds before the call can end it; written last, after any completion
     var line: lane_trace.Event = if (h.trace) |t| .fill(t, job.id, job.seq, if (first) job.stream.cached else job.stream.fill_at.load(.monotonic)) else undefined;
     defer if (h.trace) |t| t.end(&line);
-    if (first) job.reborrow(); // its kept state, lent since admission, borrowed for the call that restores it
     job.fill_began = true;
     load.calling(h, job);
     const cap = capRows(h, remaining(h, job)); // the engine's default caps only past the threshold rows
@@ -244,14 +243,12 @@ fn fillAt(h: *LaneHost, at: usize) void {
     _ = h.deliver(job);
 }
 
-/// Whether a stream's kept state is restored or refused (or none was offered): its lookup can be reported.
-pub fn restoreSettled(s: *const @import("lanes").Stream) bool {
-    return s.reuse.saved == null or s.reuse_failed or s.cached > 0;
-}
+pub const restoreSettled = @import("lane_job.zig").restoreSettled;
 
 /// Fill `at`'s next call: the rows it advanced (all it had, if it left the list); no progress shown spends any budget.
 pub fn step(h: *LaneHost, at: usize) u64 {
     const job = h.filling.items[at];
+    job.reborrow(); // a first call's kept state borrowed again first: its rows are counted from what it resumes
     const before = remaining(h, job);
     fillAt(h, took(h, at));
     // the call can finish, cancel or requeue the job: it is read again only while it is still filling
@@ -264,6 +261,7 @@ pub fn step(h: *LaneHost, at: usize) u64 {
 
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
+    h.filling.items[at].reborrow(); // as step's: its share and srpt read the rows it has left after it
     const decoding = runnable(h) > 0;
     if (h.srpt.on) return srptStep(h, at, decoding);
     // an engine default shares only while the prompt has the threshold's rows left; the flag shares every long prompt
