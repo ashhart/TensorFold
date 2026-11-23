@@ -64,6 +64,11 @@ pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
     return null;
 }
 
+/// A family that names its `ranks` (--tp) opens only at them; another family of its model_type takes the rest.
+pub fn ranksMatch(comptime F: type, o: api.Open) bool {
+    return !@hasDecl(F, "ranks") or o.tp == F.ranks;
+}
+
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (comptime @hasDecl(F, "kvHostRefusal")) if (F.kvHostRefusal(o)) |why| return why;
