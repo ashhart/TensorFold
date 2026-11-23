@@ -321,7 +321,7 @@ pub fn off(p: *anyopaque, bytes: usize) *anyopaque {
     return @ptrFromInt(@intFromPtr(p) + bytes);
 }
 
-pub const detectDeviceId = @import("../../xpu/device_id.zig").detectDeviceId;
+pub const detectDeviceId = @import("device_id").detectDeviceId;
 
 // Safetensors Store (drops non-PLE shard pages during load to preserve host RAM)
 
