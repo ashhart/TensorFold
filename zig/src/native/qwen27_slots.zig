@@ -236,11 +236,6 @@ pub fn slotResumeEnv() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
-/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
-pub fn adaptiveBlockEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
-}
-
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;

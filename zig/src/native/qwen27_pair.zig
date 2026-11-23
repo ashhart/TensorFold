@@ -211,6 +211,17 @@ pub fn measuresFirst(pair: ?*const Pair) bool {
     return pair == null;
 }
 
+/// The tokens the round's own head seam picked for rows [first, first + rows); rank 1's local argmax would disagree.
+pub fn seamPicked(runner: *q.decode_round.Runner, first: usize, rows: usize, out: []u32) !void {
+    const seam_picks = runner.picks orelse return error.HeadSeamMissing;
+    const vocab: u32 = @intCast(runner.model.shard.global.vocab);
+    const ids: [*]const u32 = @ptrCast(@alignCast(seam_picks.buffer.contents() + seam_picks.offset));
+    for (out[0..rows], ids[first..][0..rows]) |*t, id| {
+        if (id >= vocab) return error.NonfiniteLogits;
+        t.* = id;
+    }
+}
+
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
 

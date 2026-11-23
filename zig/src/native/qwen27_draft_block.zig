@@ -1,6 +1,11 @@
 //! TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's DFlash2 block rows from its landed depth; the target is unchanged.
 const std = @import("std");
 
+/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
+pub fn adaptiveBlockEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
+}
+
 pub const wide: u32 = 16;
 pub const narrow: u32 = 8;
 /// Consecutive rounds landing at most `calm_depth` tree drafts before the block narrows.

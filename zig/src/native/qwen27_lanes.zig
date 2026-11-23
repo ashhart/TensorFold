@@ -137,7 +137,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv(), .draft_block = .{ .enabled = try slots.adaptiveBlockEnv() } };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv(), .draft_block = .{ .enabled = try @import("qwen27_draft_block.zig").adaptiveBlockEnv() } };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -334,16 +334,7 @@ pub const Metal = struct {
 
     /// The tokens argmaxRows picked for rows [first, first + rows).
     fn picked(b: *const Metal, first: usize, rows: usize, out: []u32) !void {
-        if (b.runner.reduce != null) {
-            const seam_picks = b.runner.picks orelse return error.HeadSeamMissing;
-            const vocab: u32 = @intCast(b.runner.model.shard.global.vocab);
-            const ids: [*]const u32 = @ptrCast(@alignCast(seam_picks.buffer.contents() + seam_picks.offset));
-            for (out[0..rows], ids[first..][0..rows]) |*t, id| {
-                if (id >= vocab) return error.NonfiniteLogits;
-                t.* = id;
-            }
-            return;
-        }
+        if (b.runner.reduce != null) return pair_mod.seamPicked(b.runner, first, rows, out); // the round's own head seam decides; rank 1's local argmax would not
         const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
         for (out[0..rows], picks[first..][0..rows]) |*t, p| {
             if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
