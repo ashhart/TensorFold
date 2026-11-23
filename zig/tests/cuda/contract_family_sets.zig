@@ -132,6 +132,7 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
+        sets.qwen3_asr.deinit();
         sets.nemo_audio.deinit();
         sets.glm_vision.deinit();
         sets.moss.deinit();
