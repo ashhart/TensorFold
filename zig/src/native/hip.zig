@@ -82,7 +82,6 @@ const Ready = struct {
     policy_line: []const u8,
 
     const Options = serve.Options;
-
     fn deinit(r: Ready, gpa: Allocator) void {
         gpa.free(r.policy_line);
         if (r.dev.group) |g| g.close(gpa);
