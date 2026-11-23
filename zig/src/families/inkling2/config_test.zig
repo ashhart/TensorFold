@@ -64,6 +64,7 @@ test "Inkling 2 Mini's config.json parses: 24 weight layers, 48 visits and four 
     try t.expectEqual(@as(u32, 3), loop.passes);
     try t.expectEqual(@as(u32, 64), loop.gate_rank);
     try t.expectEqual(@as(u32, 2304), c.vision.text_hidden);
+    try t.expectEqual(@as(f32, 1e-5), c.vision.eps);
     const m = c.mtp.?;
     try t.expectEqual(@as(u32, 3), m.layers);
     try t.expectEqual(@as(u32, 9216), m.inter);
