@@ -442,7 +442,6 @@ pub const Model = struct {
         const before = queued.gpu;
         try queued.add(pass.cb, 0);
         if (self.profile) self.spent[stages.len - 1] += queued.gpu - before;
-        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         @memcpy(video_velocity, self.video_velocity.slice(f32, video_velocity.len));
         @memcpy(audio_velocity, self.audio_velocity.slice(f32, audio_velocity.len));
         const wall = mtl.clock.seconds() - started;
