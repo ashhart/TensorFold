@@ -77,7 +77,7 @@ fn prompt(comptime text: []const u8) []const u8 {
 
 /// The prompt kernels and the scan picking between them: each scanned key's values through stream 0's table.
 pub const attention_prompt = blk: {
-    var s = prompt(@embedFile("attention_prompt.metal"));
+    var s = prompt(@embedFile("../core/prompt_pick.metal") ++ @embedFile("attention_prompt.metal"));
     s = edit(s, "caches[0].values + (int64_t)tg.x * args.value_stride;", "caches[0].values;", 1);
     s = edit(s, "(v + (int64_t)key * PD + lane * 8)", "(v + (int64_t)(tf_paged_row(caches[0].table, uint(key), caches[0].page_bytes, tg.x, PD) / 2) + lane * 8)", 1);
     break :blk s;

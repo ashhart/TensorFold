@@ -15,9 +15,4 @@
 }
 
 [[max_total_threads_per_threadgroup(1)]]
-[[kernel]] void nemotron_prompt_pick(device atomic_uint* flag [[buffer(0)]], constant uint* grid [[buffer(1)]],
-    device uint* grids [[buffer(2)]]) {
-  const bool masked = atomic_load_explicit(flag, memory_order_relaxed) != 0;
-  atomic_store_explicit(flag, 0u, memory_order_relaxed);
-  for (int i = 0; i < 3; i++) { grids[i] = masked ? 0u : grid[i]; grids[3 + i] = masked ? grid[i] : 0u; }
-}
+TF_PROMPT_PICK(nemotron_prompt_pick)
