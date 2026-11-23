@@ -222,6 +222,26 @@ test "assistant prefill: refusals name why the final message cannot be continued
     try t.expectEqual(@as(usize, 0), script.count);
 }
 
+test "assistant prefill: whitespace-only final content is refused before an empty turn is generated" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Whitespace passes both cut() checks (a think-close newline passes the first), so refuse it here.
+    for (templates[0..2]) |tmpl| {
+        var script: Script = .{};
+        var s = try Served.init(a, tmpl.source, tmpl.config, tmpl.kind, &script);
+        defer s.deinit();
+        const contents = [_][]const u8{ "\\n", " ", "\\t\\n ", "\\n\\n" };
+        for (contents) |content| {
+            const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":16,\"messages\":[{{\"role\":\"user\",\"content\":\"Hi\"}},{{\"role\":\"assistant\",\"content\":\"{s}\"}}],\"continue_final_message\":true,{s}}}", .{ content, off });
+            const status, const reply = try s.post(a, "/v1/chat/completions", body);
+            try t.expectEqual(@as(u16, 400), status);
+            try t.expectEqualStrings(prefill.trailing, reply.get("error").?.strField("message").?);
+        }
+        try t.expectEqual(@as(usize, 0), script.count); // the engine never saw an empty turn
+    }
+}
+
 test "assistant prefill: a template that rewrites or drops the final message's text is refused; one that strips its lead is cut" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
