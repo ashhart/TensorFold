@@ -33,6 +33,7 @@ pub const Job = struct {
     load: @import("lane_host_load.zig").Pass = .{}, // this attempt's prompt pass in the load ledger
     prefilled: ?i96 = null,
     entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+    lent: ?u64 = null, // a filling job's kept state (its serial), given back until its first call borrows it again
     cache_promise: @import("prompt_cache_reserve.zig").Room = .{}, // net room for this pass, until kept or ended
     marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
     frame: u32 = 0, // exact family frame, before its compact cache-word hash
@@ -86,5 +87,29 @@ pub const Job = struct {
         job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
         const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
         if (job.stream.reuse_failed or ok) store.resumedWithReason(e, job.cacheKey(), if (ok) null else job.stream.reuse_error orelse error.RestoreRejected) else store.release(e);
+    }
+
+    /// Into the fill queue: its kept state goes back to the store until its first call, so none is pinned meanwhile.
+    pub fn lending(job: *Job) *Job {
+        const e = job.entry orelse return job;
+        const store = job.host.cache orelse return job;
+        job.lent = e.serial;
+        job.entry = null;
+        store.release(e);
+        return job;
+    }
+
+    /// Its first call: the kept state borrowed again; evicted while it waited, the pass fills from the start (exact).
+    pub fn reborrow(job: *Job) void {
+        const serial = job.lent orelse return;
+        job.lent = null;
+        const store = job.host.cache orelse return;
+        if (store.reborrow(serial)) |e| {
+            job.entry = e;
+            return;
+        }
+        job.stream.reuse.saved = null; // nothing to restore: the backend opens it cold
+        job.stream.reuse.at = 0;
+        job.stream.fill_at.store(0, .monotonic);
     }
 };

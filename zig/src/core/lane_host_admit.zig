@@ -16,19 +16,12 @@ pub fn pick(h: *LaneHost) ?usize {
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
     if (h.stale) return hold(h, .engine_unavailable);
     if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return hold(h, .engine_busy);
-    if (borrowedUnstarted(h)) return hold(h, .engine_busy); // its first call frees room: none may be pinned beside it
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
     while (true) { // a request that waits for a cut another prompt is filling stays queued, passed over
         const at = choose(h) orelse return null;
         if (!prefix.waits(h, h.queued.items[at])) return at;
         h.queued.items[at].wait_reason = .prefix_cut;
     }
-}
-
-/// An admitted fill not yet begun holds its kept state borrowed, unevictable until its first call reports it.
-pub fn borrowedUnstarted(h: *const LaneHost) bool {
-    for (h.filling.items) |j| if (!j.fill_began and j.entry != null) return true;
-    return false;
 }
 
 /// Every queued job waits for `why`; no job is picked.

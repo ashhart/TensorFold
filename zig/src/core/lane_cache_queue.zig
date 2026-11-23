@@ -142,7 +142,7 @@ fn extends(current: *const Job, job: *const Job, e: *const pc.Entry) bool {
     const r = job.request;
     if (e.salt != r.cacheSalt()) return false;
     if (job == current or r.promptOnly() or r.prompt_logprobs != null or r.untaught) return false;
-    if (job.started and job.entry == null) return false;
+    if (job.started and job.entry == null and job.lent == null) return false; // a lent state stays protected
     const key = job.cacheKey();
     if (e.at >= key.len or e.tokens.len == 0 or e.tokens.len > key.len) return false;
     if (!@import("cache_images.zig").equal(e.images, r.images, @intCast(e.tokens.len))) return false;

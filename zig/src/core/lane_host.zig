@@ -413,7 +413,7 @@ pub const LaneHost = struct {
         if (!r.promptOnly() and r.max_tokens == 0 and h.info_.warm_turns) return @import("lane_host_warm.zig").pass(h, job, began);
         if (!r.promptOnly() and lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
-            h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
+            h.filling.append(h.gpa, job.lending()) catch return h.drop(job, "out of memory"); // its kept state lent until its first call
             return true;
         }
         load.calling(h, job);
