@@ -89,7 +89,12 @@ test "REV99 slot metadata covers actual demand and forecast job allocations" {
     const large = try plan.pool(8 * 36, @splat(4), 16, 4);
     const small_live = try measured(4);
     const large_live = try measured(8);
-    try t.expect(large.metadata - small.metadata >= large_live - small_live);
+    const small_forecast = if (@hasDecl(layout.plan, "forecastJobs")) try plan.forecastJobs(9, small.slots) else 0;
+    const large_forecast = if (@hasDecl(layout.plan, "forecastJobs")) try plan.forecastJobs(9, large.slots) else 0;
+    try t.expect(large.metadata + large_forecast - small.metadata - small_forecast >= large_live - small_live);
+    const placement = try layout.of(inventory, settings);
+    try t.expect(placement.forecast > 0 and placement.forecast <= placement.extra);
+    try t.expectEqual(@as(u64, 1 << 20), placement.extra);
 }
 
 const Buffer = struct {
