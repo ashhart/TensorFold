@@ -176,7 +176,7 @@ test "GLM EXL3: a mixed layer (3-bit gate and up, 4-bit down) loads each width's
         var m = Mock.init(gpa);
         defer m.deinit();
         try synth(&m, prng.random(), 4, count, dims, inter, k2s, true);
-        const w = try x3.load(&m, 4, count, dims, inter, cut);
+        const w = try x3.load(&m, 4, count, dims, inter, cut, false);
         try expectUploads(&m, w, 4, count, dims, inter, cut, k2s);
         try testing.expectEqual(@as(u32, 6), w.uniform_gu);
         try testing.expectEqual(@as(u32, 8), w.uniform_d);
@@ -205,7 +205,7 @@ test "GLM EXL3: widths that differ by expert and projection keep their own offse
     defer m.deinit();
     try synth(&m, prng.random(), 9, count, 256, 256, k2s, false);
     const cut: Span = .{ .lo = 128, .hi = 256 };
-    const w = try x3.load(&m, 9, count, 256, 256, cut);
+    const w = try x3.load(&m, 9, count, 256, 256, cut, false);
     try expectUploads(&m, w, 9, count, 256, 256, cut, k2s);
     try testing.expectEqual(@as(u32, 0), w.uniform_gu);
     try testing.expectEqual(@as(u32, 0), w.uniform_d);
@@ -214,6 +214,30 @@ test "GLM EXL3: widths that differ by expert and projection keep their own offse
     const l = x3.layer(w, count, 256, 128, 10);
     try testing.expect(l.uniform_k2 == 0 and l.uniform_k2_gu == 0 and l.uniform_k2_d == 0);
     try testing.expect(!cuda.exl3_experts.prompt.eligible(l));
+}
+
+test "GLM EXL3: full GLM-5.3's 2-, 3- and 4-bit experts take the prompt kernels a width each; gate apart from up does not" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(11);
+    const count = 4;
+    const g = [count]u32{ 6, 4, 6, 8 };
+    const d = [count]u32{ 6, 6, 4, 6 };
+    const cut: Span = .{ .lo = 0, .hi = 256 };
+    for ([_]bool{ true, false }) |alike| {
+        const u = if (alike) g else [count]u32{ 6, 6, 6, 8 };
+        const k2s: [3][]const u32 = .{ &g, &u, &d };
+        var m = Mock.init(gpa);
+        defer m.deinit();
+        try synth(&m, prng.random(), 5, count, 256, 256, k2s, false);
+        const w = try x3.load(&m, 5, count, 256, 256, cut, true);
+        try expectUploads(&m, w, 5, count, 256, 256, cut, k2s);
+        try testing.expectEqual(@as(u32, if (alike) 1 << 4 | 1 << 6 | 1 << 8 else 0), w.mixed_gu);
+        try testing.expectEqual(@as(u32, 1 << 4 | 1 << 6), w.mixed_d);
+        const l = x3.layer(w, count, 256, 256, 10);
+        try testing.expectEqual(alike, cuda.exl3_experts.prompt.eligible(l));
+        const flash = try x3.load(&m, 5, count, 256, 256, cut, false); // GLM-5.3-Flash keeps its compact path
+        try testing.expect(flash.mixed_gu == 0 and flash.mixed_d == 0);
+    }
 }
 
 test "GLM EXL3: a trellis at a width the kernels do not read, or of the wrong shape, is refused with its reason" {
@@ -310,7 +334,7 @@ test "GLM EXL3: a 4-bit layer uploads upstream's bytes, names and pointers, and 
         defer old.deinit();
         old.tensors = m.tensors;
         const want = try upstream4(&old, 3, count, 256, 512, cut);
-        const got = try x3.load(&m, 3, count, 256, 512, cut);
+        const got = try x3.load(&m, 3, count, 256, 512, cut, false);
         try testing.expectEqual(old.puts.items.len, m.puts.items.len);
         for (old.puts.items, m.puts.items) |a, b| {
             try testing.expectEqualStrings(a.name, b.name);

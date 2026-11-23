@@ -7,6 +7,12 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_k6", .symbol = "tf_exl3_prompt_gu_k6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_k6", .symbol = "tf_exl3_prompt_down_k6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_m4", .symbol = "tf_exl3_prompt_gu_m4", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_m4", .symbol = "tf_exl3_prompt_down_m4", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_m6", .symbol = "tf_exl3_prompt_gu_m6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_m6", .symbol = "tf_exl3_prompt_down_m6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_m8", .symbol = "tf_exl3_prompt_gu_m8", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_m8", .symbol = "tf_exl3_prompt_down_m8", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
 };
 
 pub fn owns(name: []const u8) bool {
@@ -18,5 +24,5 @@ test "EXL3 prompt: unmeasured compiler usage stays pending" {
     for (records) |r| for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |version| {
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(r, version));
     };
-    try std.testing.expectEqual(@as(usize, 20), try registry.checkCuda(std.testing.allocator, &records, true));
+    try std.testing.expectEqual(@as(usize, 50), try registry.checkCuda(std.testing.allocator, &records, true));
 }
