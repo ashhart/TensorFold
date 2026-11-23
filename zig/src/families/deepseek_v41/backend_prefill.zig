@@ -1,6 +1,6 @@
 //! The V4.1 prompt pass a chunk at a time: the lane host runs the other streams' rounds between two chunks.
 const std = @import("std");
-const ds = @import("model.zig");
+const ds = @import("model_metal.zig");
 const lanes = @import("lanes");
 const Stream = lanes.Stream;
 const Backend = @import("backend.zig").Backend;

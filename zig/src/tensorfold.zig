@@ -42,13 +42,13 @@ pub const moe_route = @import("core/moe_route.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
 pub const deepseek_v41_config = @import("families/deepseek_v41/config.zig");
-pub const deepseek_v41_load = @import("families/deepseek_v41/load.zig");
+pub const deepseek_v41_load = @import("families/deepseek_v41/load_metal.zig");
 pub const deepseek_v41_pack = @import("families/deepseek_v41/pack.zig");
 pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
 /// The streamed Engram row source: the qualification tool's reference reads its rows through this.
 pub const deepseek_v41_engram_rows = @import("families/deepseek_v41/engram_rows_safetensors.zig");
 pub const deepseek_v41_view = @import("families/deepseek_v41/view.zig");
-pub const deepseek_v41 = @import("families/deepseek_v41/model.zig");
+pub const deepseek_v41 = @import("families/deepseek_v41/model_metal.zig");
 pub const deepseek_v41_profiler = @import("families/deepseek_v41/profiler.zig");
 pub const deepseek_v41_backend = @import("families/deepseek_v41/backend.zig");
 pub const deepseek_v41_token_map = @import("families/deepseek_v41/token_map.zig");

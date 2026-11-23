@@ -1,6 +1,6 @@
 //! V4.1 lane slots: a stream a slot, greedy, drafts off; a window is a slot's sub-forward, so rows keep solo bits.
 const std = @import("std");
-const ds = @import("model.zig");
+const ds = @import("model_metal.zig");
 const kv = @import("metal_kv_state.zig");
 const lanes = @import("lanes");
 const be = lanes.backend;
