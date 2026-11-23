@@ -69,6 +69,7 @@ pub fn prepare(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_
     defer stamp.end();
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
     try glue.select(k.set, stream, s.mlog, l.bias, pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm, flat_picks);
+    if (@import("core").route_tap.live()) cuda.route_tap_copy.afterPick(stream, pick, s.wts, rows, l.top_k + 1, l.top_k);
 }
 
 /// The block up to its fill: the router, the top-k pick, the plan and the routed experts into the slot rows.
@@ -78,7 +79,6 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const shared_id: i32 = @intCast(l.count);
     const flat = direct(k, l, rows, prompt);
     try prepare(k, stream, l, s, x, x_stride, rows, s.pick, if (flat) s.x3.picks else null);
-    if (@import("core").route_tap.live()) cuda.route_tap_copy.afterPick(stream, s.pick, s.wts, rows, l.top_k + 1, l.top_k);
     const stamp = prof_mod.span(k.prof, stream, .experts);
     defer stamp.end();
     if (k.prof) |p| p.mark(stream, .router);
