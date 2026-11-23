@@ -137,6 +137,7 @@ fn auditLaunch(launch: limits.CudaLaunch, sm: u32) limits.CudaLaunch {
         "qmmf FP8 64-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 32-row tile", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
+        "qmmf BF16 32-row tile, fused slices", // zig/src/cuda/qmmf.zig:225
         "qmmf shared down 32 stride", // zig/src/cuda/qmmf.zig:189
         "prompt16 FP8", // zig/src/cuda/nvfp4.zig:122
         "qmmf FP8 fp32 out 64-row tile", // zig/src/cuda/qmmf.zig:147
@@ -144,6 +145,7 @@ fn auditLaunch(launch: limits.CudaLaunch, sm: u32) limits.CudaLaunch {
         "qmmf FP8 fp32 out 64-row tile, fused slices", // zig/src/cuda/qmmf.zig:151
         "qmmf BF16 fp32 out 32-row tile", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 fp32 out 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
+        "qmmf BF16 fp32 out 32-row tile, fused slices", // zig/src/cuda/qmmf.zig:225
         "h3 h3_attention", // zig/src/families/h3/cuda.zig:97
     };
     for (raised) |name| if (std.mem.eql(u8, launch.name, name)) {
