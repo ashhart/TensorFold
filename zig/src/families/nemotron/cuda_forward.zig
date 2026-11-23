@@ -161,6 +161,8 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
+        // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
+        if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
         var routed = f.routedWindow(segs);
         var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
         routed.flight = &flight;
