@@ -67,15 +67,16 @@ M4 Max and the M5 Ultra rows above.
 Raw results, the generator of the prompt token arrays, hashes and the build's SHA-256 are in
 [`receipts/inkling2-mini-m4pro`](../receipts/inkling2-mini-m4pro/README.md), which says which file each number comes
 from. The decode, cold-prompt (table), concurrency and footprint numbers were not measured at the head; the contract,
-the hashes and the dense-tile cold first-token pairs below were measured at `61be67917f`.
+the hashes and the dense-tile cold first-token pairs below were measured at `61be67917f`, and the decode-at-depth table
+at `57de097873`.
 
 | | |
 | --- | --- |
-| Build | Decode, cold prompts, footprint: #4337 at `a0935b5279`, the PR's recipe-time binary; concurrency: the head-pass build that became `05b6fdb5c0`, plain on its parent. `zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast`, Zig 0.17.0, macOS 27.2 |
+| Build | Decode, cold prompts, footprint: #4337 at `a0935b5279`, the PR's recipe-time binary; concurrency: the head-pass build that became `05b6fdb5c0`, plain on its parent; decode at depth: `57de097873`, SHA-256 `e74f0e5e08aa4d1eddefe867cc286e5eccfa7ad16f72950eb14d9479b61ab2ed`. `zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast`, Zig 0.17.0, macOS 27.2 |
 | Reference | `mlx_lm.server --model "$CKPT" --host 127.0.0.1 --port 8099`, mlx 0.32.4, mlx-lm `0.1.dev1006+g0c4c99192` ("Add Inkling 2 Mini"), same checkpoint, no drafter |
 | Native servers | `--context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking` (plain decode, cold prompts); `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, with and without `--no-drafts` (concurrency, and the DSpark decode column) |
-| Requests | greedy, `tools/bench_openai.py --tokens 256 --reps 3 --temperatures 0`; `tools/bench_concurrent.py --tokens 256 --reps 3 --temperatures 0 --levels 1,4`; cold prompts of exactly 2,048, 8,192, 32,768 and 65,536 tokens through `/v1/completions`, one token out, cached tokens 0 |
-| Conditions | one model process at a time; an unrelated CPU job used about 60 % of a core during the decode and cold runs, so read ratios between rows, not the absolute rates |
+| Requests | greedy, `tools/bench_openai.py --tokens 256 --reps 3 --temperatures 0`; `tools/bench_concurrent.py --tokens 256 --reps 3 --temperatures 0 --levels 1,4`; cold prompts of exactly 2,048, 8,192, 32,768 and 65,536 tokens through `/v1/completions`, one token out, cached tokens 0; decode at depth: the same cold prompts, then 192 streamed tokens (16 after 65,536 on native), greedy, `decode_depth.py` |
+| Conditions | one model process at a time; an unrelated CPU job used about 60 % of a core during the decode and cold runs, so read ratios between rows, not the absolute rates. The depth runs shared the machine with other jobs' builds (load average 4.5 to 6.3 when they started); every native and MLX server held the GPU alone |
 
 Decode, one stream (tokens a second, median of three):
 
@@ -109,6 +110,45 @@ Cold first token (seconds, tokens a second in brackets):
 | 32,768 | 81.74 (401) | 108.27 (303) |
 | 65,536 | 180.27 (364) | 249.21 (263) |
 
+Decode after a cold prompt (one stream, plain, tokens a second and milliseconds a token; the mean inter-token latency of
+192 streamed tokens after the first few; MLX and native cells are each the mean of two fresh-server sessions in the order
+native, MLX, MLX, native, on two prompt sets; `57de097873`):
+
+| Prompt tokens | MLX | Native plain | Native over MLX |
+| --- | --- | --- | --- |
+| 2,048 | 23.04 (43.41 ms) | 28.48 (35.11 ms) | 1.24 |
+| 8,192 | 22.60 (44.24 ms) | 28.40 (35.22 ms) | 1.26 |
+| 32,768 | 20.03 (49.94 ms) | 25.78 (38.80 ms) | 1.29 |
+| 65,536 | 17.80 (56.20 ms) | 23.19 (43.11 ms) | 1.30 |
+
+The native 65,536 row is 16 tokens after the prompt (a server at `--context 65552` takes no more), from two further
+sessions taken after the others, 43.12 and 43.11 ms; a 65,344-token prompt with 192 tokens out, which also ends at
+65,536, gave 43.00 and 42.96 ms. From 2,048 to 65,536 tokens native gains 8.0 ms a token (0.126 ms a 1,000 tokens) and
+MLX 12.8 (0.201). The K and V that the 8 global visits read grow by 32,768 bytes a token of depth (8 key heads x 128 x 2
+bytes x 2 x 8 visits), which is 0.131 ms a 1,000 tokens at 250 GB/s, so native's growth is what the bytes cost; the two
+native runs at one depth differ by 0.1 to 0.5 ms. The server prints no stage times, so the split comes from timing the
+decode attention kernel alone (`attn-decode-bench.txt`: one query row, eight or forty visits with their own K and V
+buffers, multiplied out to 8 global and 40 sliding visits), the rest by subtraction:
+
+| Prompt tokens | Global attention, 8 visits | Sliding attention, 40 visits | Everything else | Token |
+| --- | --- | --- | --- | --- |
+| 2,048 | 0.80 ms | 2.26 ms | 32.05 ms | 35.11 ms |
+| 8,192 | 1.14 ms | 2.26 ms | 31.82 ms | 35.22 ms |
+| 32,768 | 5.03 ms | 2.26 ms | 31.51 ms | 38.80 ms |
+| 65,536 | 9.24 ms | 2.26 ms | 31.61 ms | 43.11 ms |
+
+One global visit reads at 235 GB/s at 8,192 keys, 213 at 32,768 and 232 at 65,536 (1.15 ms); at 2,048 keys it takes 0.10
+ms for 8 MB (84 GB/s, 8 threadgroups on 20 cores), about 0.5 ms a token above the 250 GB/s floor, and the 65,536-key
+visit is 0.6 ms a token above it. The kernels' summation order fixes their chunking (2,048 keys, 4 simdgroups), so a
+faster schedule has to keep it: hoisting the K loads, double-buffering the V rows and an `I2_V_BATCH` of 8 and 16 gave
+the same bytes and at best 4 % on the 65,536-key visit (0.4 ms a token, about 1 %), so no kernel changed. A sliding visit
+costs 0.057 ms against a 0.02 ms floor for its 4 MB; leaving out its V phase takes it to 0.033 ms and leaving out the K
+dot product to 0.038, so it is not byte-bound, and 40 of them are about 1.6 ms a token above the floor, the one part of
+the attention left well above it. The depth runs' 2,048-token rate (28.5) is below the decode table's 31.1: the head's
+own short-prompt run gave 31.3 and 31.2 tokens a second (`bench_openai`, `fibonacci-raw` and `gpu-chat-no-think`, about
+32.0 ms), so 2,048 tokens of depth cost 3 ms a token, which the global and sliding visits' time at that depth would
+explain [INFERENCE: the short-prompt kernel times were not taken].
+
 The dense projection tile (`61be67917f`, a different build from the table) took the first token from 23.8 s to 22.7 s at
 8,192 tokens (4.7 %) and from 104.8 s to 102.0 s at 32,768 (2.7 %): one A-B-B-A session, the mean of each pair, plain
 server, same hashes. The table above predates it.
@@ -123,9 +163,11 @@ Plain and drafted greedy replies are identical. These token hashes (the server's
 `538175732cc7`. A drafted four-stream run with `--alone --serial` compared 30 replies with their runs alone and 4 with
 `"draft": false`: all equal.
 
-Native decode is ahead of the reference with and without the drafter. Cold prefill is 0.72 to 0.87 of the reference's
-rate and falls more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,536). Not measured here: M1, M2, a 36 GB
-Mac, images served, a quality suite.
+Native plain decode is ahead of the reference at every depth measured, 1.24 to 1.30 times from 2,048 to 65,536 tokens
+(table above), and the drafter's decode is ahead of it at the two short prompts of the decode table; drafted decode was
+not measured at depth, nor concurrent streams at depth. Cold prefill is 0.72 to 0.87 of the reference's rate and falls
+more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,536). Not measured here: M1, M2, a 36 GB Mac, images
+served, a quality suite.
 
 Sampled decode, `bench_concurrent --temperatures 0.7 --seed 1234 --alone --serial --levels 1,4 --tokens 256 --reps 3`
 (aggregate tokens a second), `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, on an idle machine, the

@@ -1,0 +1,89 @@
+$ORACLE/lib/python3.12/site-packages/mlx_lm/server.py:1881: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-11-23 13:09:32,005 - INFO - Starting httpd at 127.0.0.1 on port 8312...
+127.0.0.1 - - [23/Nov/2026 13:09:32] "GET /v1/models HTTP/1.1" 200 -
+[transformers] You are using a model of type `inkling2_loop` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-11-23 13:09:35,016 - WARNING - You are using a model of type `inkling2_loop` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-11-23 13:09:35,371 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-11-23 13:09:35,371 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-11-23 13:09:35,371 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 13:09:35,371 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 13:09:35] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 13:09:35,447 - INFO - Prompt processing progress: 1/1
+2026-11-23 13:09:35,610 - INFO - Prompt Cache: 1 sequences, 0.00 GB
+2026-11-23 13:09:35,610 - INFO - - assistant: 1 sequences, 0.00 GB
+2026-11-23 13:09:35,610 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 13:09:35,610 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 13:09:35] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 13:09:39,663 - INFO - Prompt processing progress: 2047/2048
+2026-11-23 13:09:39,723 - INFO - Prompt processing progress: 2048/2048
+2026-11-23 13:09:48,021 - INFO - Prompt Cache: 3 sequences, 0.66 GB
+2026-11-23 13:09:48,021 - INFO - - assistant: 3 sequences, 0.66 GB
+2026-11-23 13:09:48,021 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 13:09:48,021 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 13:09:48] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 13:09:52,096 - INFO - Prompt processing progress: 2048/8192
+2026-11-23 13:09:56,227 - INFO - Prompt processing progress: 4096/8192
+2026-11-23 13:10:00,431 - INFO - Prompt processing progress: 6144/8192
+2026-11-23 13:10:04,700 - INFO - Prompt processing progress: 8191/8192
+2026-11-23 13:10:04,762 - INFO - Prompt processing progress: 8192/8192
+2026-11-23 13:10:13,198 - INFO - Prompt Cache: 5 sequences, 1.88 GB
+2026-11-23 13:10:13,198 - INFO - - assistant: 5 sequences, 1.88 GB
+2026-11-23 13:10:13,198 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 13:10:13,198 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 13:10:13] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 13:10:17,318 - INFO - Prompt processing progress: 2048/32768
+2026-11-23 13:10:21,456 - INFO - Prompt processing progress: 4096/32768
+2026-11-23 13:10:25,670 - INFO - Prompt processing progress: 6144/32768
+2026-11-23 13:10:29,960 - INFO - Prompt processing progress: 8192/32768
+2026-11-23 13:10:34,311 - INFO - Prompt processing progress: 10240/32768
+2026-11-23 13:10:38,737 - INFO - Prompt processing progress: 12288/32768
+2026-11-23 13:10:43,240 - INFO - Prompt processing progress: 14336/32768
+2026-11-23 13:10:47,816 - INFO - Prompt processing progress: 16384/32768
+2026-11-23 13:10:52,463 - INFO - Prompt processing progress: 18432/32768
+2026-11-23 13:10:57,184 - INFO - Prompt processing progress: 20480/32768
+2026-11-23 13:11:01,993 - INFO - Prompt processing progress: 22528/32768
+2026-11-23 13:11:06,887 - INFO - Prompt processing progress: 24576/32768
+2026-11-23 13:11:11,843 - INFO - Prompt processing progress: 26624/32768
+2026-11-23 13:11:16,874 - INFO - Prompt processing progress: 28672/32768
+2026-11-23 13:11:21,970 - INFO - Prompt processing progress: 30720/32768
+2026-11-23 13:11:27,143 - INFO - Prompt processing progress: 32767/32768
+2026-11-23 13:11:27,221 - INFO - Prompt processing progress: 32768/32768
+2026-11-23 13:11:36,835 - INFO - Prompt Cache: 7 sequences, 4.71 GB
+2026-11-23 13:11:36,835 - INFO - - assistant: 7 sequences, 4.71 GB
+2026-11-23 13:11:36,835 - INFO - - user: 0 sequences, 0.00 GB
+2026-11-23 13:11:36,835 - INFO - - system: 0 sequences, 0.00 GB
+127.0.0.1 - - [23/Nov/2026 13:11:37] "POST /v1/completions HTTP/1.1" 200 -
+2026-11-23 13:11:41,815 - INFO - Prompt processing progress: 2048/65536
+2026-11-23 13:11:45,947 - INFO - Prompt processing progress: 4096/65536
+2026-11-23 13:11:50,148 - INFO - Prompt processing progress: 6144/65536
+2026-11-23 13:11:54,425 - INFO - Prompt processing progress: 8192/65536
+2026-11-23 13:11:58,775 - INFO - Prompt processing progress: 10240/65536
+2026-11-23 13:12:03,203 - INFO - Prompt processing progress: 12288/65536
+2026-11-23 13:12:07,703 - INFO - Prompt processing progress: 14336/65536
+2026-11-23 13:12:12,279 - INFO - Prompt processing progress: 16384/65536
+2026-11-23 13:12:16,929 - INFO - Prompt processing progress: 18432/65536
+2026-11-23 13:12:21,652 - INFO - Prompt processing progress: 20480/65536
+2026-11-23 13:12:26,457 - INFO - Prompt processing progress: 22528/65536
+2026-11-23 13:12:31,329 - INFO - Prompt processing progress: 24576/65536
+2026-11-23 13:12:36,279 - INFO - Prompt processing progress: 26624/65536
+2026-11-23 13:12:41,311 - INFO - Prompt processing progress: 28672/65536
+2026-11-23 13:12:46,416 - INFO - Prompt processing progress: 30720/65536
+2026-11-23 13:12:51,606 - INFO - Prompt processing progress: 32768/65536
+2026-11-23 13:12:56,863 - INFO - Prompt processing progress: 34816/65536
+2026-11-23 13:13:02,201 - INFO - Prompt processing progress: 36864/65536
+2026-11-23 13:13:07,606 - INFO - Prompt processing progress: 38912/65536
+2026-11-23 13:13:13,091 - INFO - Prompt processing progress: 40960/65536
+2026-11-23 13:13:18,644 - INFO - Prompt processing progress: 43008/65536
+2026-11-23 13:13:24,282 - INFO - Prompt processing progress: 45056/65536
+2026-11-23 13:13:29,989 - INFO - Prompt processing progress: 47104/65536
+2026-11-23 13:13:35,766 - INFO - Prompt processing progress: 49152/65536
+2026-11-23 13:13:41,633 - INFO - Prompt processing progress: 51200/65536
+2026-11-23 13:13:47,572 - INFO - Prompt processing progress: 53248/65536
+2026-11-23 13:13:53,591 - INFO - Prompt processing progress: 55296/65536
+2026-11-23 13:13:59,673 - INFO - Prompt processing progress: 57344/65536
+2026-11-23 13:14:05,847 - INFO - Prompt processing progress: 59392/65536
+2026-11-23 13:14:12,100 - INFO - Prompt processing progress: 61440/65536
+2026-11-23 13:14:18,428 - INFO - Prompt processing progress: 63488/65536
+2026-11-23 13:14:24,855 - INFO - Prompt processing progress: 65535/65536
+2026-11-23 13:14:24,981 - INFO - Prompt processing progress: 65536/65536

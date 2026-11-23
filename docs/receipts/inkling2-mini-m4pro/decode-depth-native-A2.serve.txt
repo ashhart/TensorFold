@@ -1,0 +1,21 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 1 streams, 65552-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.96 GiB; DSpark off, images off, prompt cache 0.00 GiB; demand 21.24 GiB (18.97 GiB fixed, 1 x 2.27 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8311/v1 (sampling: temperature 1.0; drafts: off; context: 65552; loaded in 10.2s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-dd340624ddf96fe1ff27f3fa9aba5997 prompt=1 cached=0 thinking=False effort=none tokens=4 sha=1a39ea904076 finish=length rounds=3 accepted=0/0 ttft=0.047 decode=0.096 elapsed=0.143 queued=0.000 tok/s=31.1
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-fb1da85568f669ecd119c0b3d1593935 prompt=2048 cached=0 thinking=False effort=none tokens=192 sha=00fc3bde6759 finish=length rounds=191 accepted=0/0 ttft=5.153 decode=6.693 elapsed=11.846 queued=0.000 tok/s=28.5
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-65e29d84bf6b610f735c0b5c79bf32f6 prompt=8192 cached=0 thinking=False effort=none tokens=192 sha=18338c7c3d5a finish=length rounds=191 accepted=0/0 ttft=21.826 decode=6.779 elapsed=28.606 queued=0.000 tok/s=28.2
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-640f3a14a9b9cf03e2760853567fe45e prompt=32768 cached=0 thinking=False effort=none tokens=192 sha=6f11f7d6d9ae finish=length rounds=191 accepted=0/0 ttft=97.156 decode=7.393 elapsed=104.548 queued=0.000 tok/s=25.8
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] refused cmpl-743787980b251fe926fae151a9087770: This server's maximum context length is 65552 tokens, but the rendered prompt has 65536 tokens and requests 192 reply tokens, which exceeds the context window. Reduce the prompt to at most 65360 prompt tokens or request at most 16 reply tokens, including chat template and thinking tokens.
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

@@ -8,7 +8,8 @@ pinned Zig 0.17.0. The checkpoint is `thinkingmachines/Inkling-2-Mini` at revisi
 This receipt does not qualify other chips, other checkpoints or a Linux backend. Only the `sampled-*` files were produced
 on a binary of the PR's head `e90ecce19a` (built with the table split of `metal.zig`, which changes no kernel). The
 recipe's other numbers are from the binary built at `a0935b5279` (decode, cold prompts, footprint) and from the DSpark
-head-pass build that became `05b6fdb5c0` (concurrency); the head contains both.
+head-pass build that became `05b6fdb5c0` (concurrency); the head contains both. The `decode-depth*` files are from a
+binary of the PR's head `57de097873` and were taken after the other numbers.
 An unrelated CPU job used about 60 % of a core during the decode and cold runs, so read ratios between rows.
 
 ## Builds
@@ -39,6 +40,9 @@ SHA-256 and the commands.
 | `chat_hashes.py`, `cold_prefill.py` | The two clients, with local paths removed | |
 | `dense-abba.txt` | One quiet-machine session at `61be67917f` (the dense projection tile): the contract SUMMARY line, then A (`e90ecce19a`), B (`61be67917f`), B, A plain servers (`--context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking`), cold first token at 8,192 and 32,768 tokens and the four chat hashes. The 2,048-token request failed in the harness (no prompt file), so it is not in the file | Dense-tile note: 23.8 to 22.7 s at 8,192, 104.8 to 102.0 s at 32,768; 133 controls; the same hashes on A and B |
 | `sampled-plain1.out`, `sampled-drafted1.out`, `sampled-drafted2.out`, `sampled-plain2.out`, `sampled.sh` | One idle-machine session at `61be67917f`: `bench_concurrent --alone --serial --levels 1,4 --tokens 256 --reps 3 --temperatures 0.7 --seed 1234` against a plain (`--no-drafts`), a DSpark, a second DSpark and a second plain server (`--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`), one line of JSON a cell (the `alone` and `serial` counts are the sampled-exactness check); `sampled.sh` is the script with the paths replaced | Sampled table and the Limits bullet: DSpark 1 to 3 % under plain at one stream and 2 % under on four chat streams, 23 % under on four code streams; plain sampled 21 and 34 against 31 and 67 greedy; 3 and 12 of each count equal alone, 4 of 4 equal to `"draft": false` |
+| `decode-depth.json`, `decode_depth.py`, `decode-depth-native-A1.serve.txt`, `-native-A2`, `-native-C`, `-native-D`, `decode-depth-mlx-B1.serve.txt`, `-mlx-B2` | Decode rate after a cold prompt, `decode_depth.py` (streamed `/v1/completions`, temperature 0, 192 new tokens, the mean of the inter-token latencies after the first token and the next few, `--rep0` picks the prompt set: set 0 is the arrays of the Cold prompts table below, set 1 the same builder with seed N x 10 + 1). One fresh server a session, in the order native A1, MLX B1, MLX B2, native A2 (prompt sets 0, 0, 1, 1), then native C (set 1) and D (set 0) for the deepest rows; plain native servers as the cold run, `--context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking`; MLX `mlx_lm.server` at its defaults. A native server at that context takes at most 16 reply tokens after a 65,536-token prompt, so the 65,536 row has 16 and a 65,344-token row has 192 (it ends at 65,536). The `summary` object is the table in the recipe; the logs are the servers' (MLX paths replaced by `$ORACLE`). The generated texts of native and MLX differ (different bits), so `text_sha` is not a cross-server check | Decode at depth table: 28.5 / 28.4 / 25.8 / 23.2 tok/s native and 23.0 / 22.6 / 20.0 / 17.8 MLX at 2,048 / 8,192 / 32,768 / 65,536 tokens |
+| `attn-decode-bench.txt`, `attn_decode_bench.swift` | The decode attention kernel timed alone at one query row: GPU time a visit in ms at 2,048 to 65,536 keys (global) and a 1,024-key window (sliding), two passes, then the schedule variants tried (`I2_V_BATCH` 8 and 16, K loads hoisted, the query as float4, V rows double-buffered) and four ablations | The ms-a-token breakdown under the depth table |
+| `decode-short-head.json`, `decode-short-head.serve.txt` | `tools/bench_openai.py --tokens 256 --reps 3 --temperatures 0` on a plain native server of the depth build `57de097873` (same flags as the decode table's), taken after the depth runs | Short-prompt decode at the head, 31.3 and 31.2 tok/s, quoted beside the depth table |
 
 ## Cold prompts
 
@@ -58,7 +62,9 @@ decoded array; their sizes are in each row's `body_bytes`.
 
 ## Not in this receipt
 
-- Anything greedy at the head `e90ecce19a`, other chips, a 36 GB Mac, images served, a quality suite.
+- Anything greedy at the head `e90ecce19a` except the `decode-depth*` and `decode-short-head*` files (`57de097873`, plain
+  servers only); drafted decode and more than one stream at depth; other chips, a 36 GB Mac, images served, a quality
+  suite.
 - The earlier round-one and round-two results the PR description records; the recipe no longer cites them.
 - The M3 Pro, M4 Max and M5 Ultra figures in the recipe's platforms table: they are contributors' runs, quoted from the
   PR's comments and not reproduced here.

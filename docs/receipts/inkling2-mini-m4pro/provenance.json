@@ -23,6 +23,11 @@
       "commit": "e90ecce19a11d0cfe18a2f3c4b57dfae33a56976 plus the metal.zig table split",
       "sha256": "0c6ce5f143471000018c8c3104b541b4c3e5937c1a61f185cf1c7984e4ea0eaf",
       "used_for": ["sampled-drafted.out", "sampled-plain.out", "sampled-drafted2.out"]
+    },
+    "depth_head": {
+      "commit": "57de097873 (the PR's head when the depth runs were taken; the tree was clean)",
+      "sha256": "e74f0e5e08aa4d1eddefe867cc286e5eccfa7ad16f72950eb14d9479b61ab2ed",
+      "used_for": ["decode-depth.json native rows", "decode-depth-native-*.serve.txt"]
     }
   },
   "commands": {
@@ -31,6 +36,8 @@
     "concurrency_server": "serve CHECKPOINT --host 127.0.0.1 --port 8122 --context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking [--no-drafts]",
     "concurrency": "python3 tools/bench_concurrent.py http://127.0.0.1:8122/v1 m --levels 1,4 --tokens 256 --reps 3 --temperatures 0 --label LABEL --output FILE [--alone --serial]",
     "cold": "python3 cold_prefill.py http://127.0.0.1:8099/v1 --model m --ck CHECKPOINT --sizes 2048,8192,32768,65536 --label LABEL --output FILE",
-    "mlx_server": "mlx_lm.server --model CHECKPOINT --host 127.0.0.1 --port 8099"
+    "mlx_server": "mlx_lm.server --model CHECKPOINT --host 127.0.0.1 --port 8099",
+    "depth": "python3 decode_depth.py http://127.0.0.1:PORT/v1 --model m (default_model for MLX) --ck CHECKPOINT --sizes 2048,8192,32768,65536 --tokens 192 --rep0 REP0 --label LABEL --output FILE; native servers as decode_cold_server; the 65,344 and 65,536 rows used --sizes 65344:192,65536:16",
+    "depth_kernel": "NV=8 attn_decode_bench KERNEL_DIR KERNEL_DIR POS0 1 0 15 (NV=40 and window 1024 for a sliding layer); built from attn_decode_bench.swift with swiftc -O"
   }
 }
