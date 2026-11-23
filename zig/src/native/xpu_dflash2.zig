@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 pub const TREE_MIN = 5; // drafts from which a stream's window is a DFlash2 tree (below: its chain)
 
 /// The round loop's facts through Drafted as the lane target gave them alone (its own rule shares a round's rows).
-pub fn facts(wrap: *const lanes.drafted.Drafted, target: lanes.Model) lanes.Model {
+pub fn facts(wrap: *lanes.drafted.Drafted, target: lanes.Model) lanes.Model {
     var m = wrap.facts(target);
     m.allocate_shared_drafts = target.allocate_shared_drafts;
     return m;

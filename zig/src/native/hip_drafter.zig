@@ -69,7 +69,8 @@ pub fn attach(a: Allocator, gpa: Allocator, loaded: anytype, o: api.Open, proble
         loaded.deinit(loaded.ctx);
         return null;
     };
-    return .{ .backend = x.backend(), .facts = x.facts(loaded.facts), .drafted = x };
+    const facts = x.facts(loaded.facts);
+    return .{ .backend = x.backend(), .facts = facts, .drafted = x };
 }
 
 /// Frees the wrapper attach made, after the lane core that ran over it; the family frees its drafter.

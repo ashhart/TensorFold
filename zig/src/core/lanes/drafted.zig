@@ -36,6 +36,7 @@ pub const Drafted = struct {
     /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
     held_on_target: bool = false,
     first_rows: bool = false,
+    prepares: bool = false, // the drafter owns context; facts() sets it before backend() picks the prepared tables
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -74,9 +75,10 @@ pub const Drafted = struct {
         v.reports_fill = true;
         break :blk v;
     };
+    /// The target's policy through the wrapper; it never calls the drafter, which a target-only test may leave inert.
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.drafter.facts().hold_context_costs.len > 0, x.first_rows) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.prepares, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -120,8 +122,9 @@ pub const Drafted = struct {
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, guard, batching and copy match; chains late.
-    pub fn facts(x: *const Drafted, target: Model) Model {
+    pub fn facts(x: *Drafted, target: Model) Model {
         const d = x.drafter.facts();
+        x.prepares = d.hold_context_costs.len > 0; // the prepared tables stage this context before a draft
         var m = target;
         m.mtp = true;
         m.speculate = true;
