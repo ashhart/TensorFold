@@ -1,4 +1,4 @@
-//! tf_ink2v_attention under the contract: the tower's full attention over one picture's rows, head dim 64.
+//! prefill_attention.cu's vision_kernel<64, 8> under the contract: Inkling 2's tower attention over one picture's rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -12,21 +12,20 @@ const aref = core.attention_ref;
 const threads = core.contract.reference_threads;
 
 const D = ink.vision.head_dim;
-const smem: u32 = 2 * 2 * 64 * (D / 8 + 1) * 16; // vision.zig's attn_smem
 
 /// The P x V chain of a row: every key, a 64-key tile at a time.
 fn keyChain(s: c.Shape) usize {
     return s.k + 64;
 }
 
-fn scale(wide: bool) f32 {
-    return 1.0 / @sqrt(@as(f32, if (wide) 128 else D));
+fn scale() f32 {
+    return 1.0 / @sqrt(@as(f32, D));
 }
 
 /// Shape: heads (rows), head dim (n), sequence rows W (k): 16 heads at 1, 4 and 32 tokens, two at 256 to 4,096.
-fn spec(wide: bool) c.Spec {
+fn spec() c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 2, .n = D, .k = 1025 }, .{ .rows = 16, .n = D, .k = 5 }, .{ .rows = 16, .n = D, .k = 17 }, .{ .rows = 16, .n = D, .k = 129 }, .{ .rows = 2, .n = D, .k = 4097 }, .{ .rows = 2, .n = D, .k = 16385 } };
-    const name = if (wide) "inkling2 experts control: tf_ink2v_attention scaled for head dim 128" else "inkling2 experts vision tf_ink2v_attention (full attention, head dim 64)";
+    const name = "inkling2 vit vision_kernel<64, 8> (full attention, head dim 64)";
     return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 1, .out = .bf16, .tiles = .{ .{}, .{}, .{ .size = 128 } }, .served = served, .sums = .{ .why = attn.why } };
 }
 
@@ -43,8 +42,7 @@ fn mirrored(rng: std.Random, out: []f32) void {
 
 pub const Attention = struct {
     rig: rig_.Rig,
-    k: *const ink.vision.Kernels,
-    wide: bool = false, // control: the score scale of head dim 128
+    att: *const cuda.vit.Attention,
     shape: c.Shape = undefined,
     qkv: []u16 = &.{}, // [W][3 heads 64]: q heads, then k, then v
     f: []f64 = &.{}, // [3][heads][W][64]: the same in float64
@@ -70,7 +68,7 @@ pub const Attention = struct {
     }
 
     pub fn kernel(self: *Attention) g.Kernel {
-        return .{ .spec = spec(self.wide), .ctx = self, .vt = &vt, .control = if (self.wide) .shapes else null };
+        return .{ .spec = spec(), .ctx = self, .vt = &vt };
     }
 
     const vt = g.hooks(Attention);
@@ -148,13 +146,7 @@ pub const Attention = struct {
     }
 
     pub fn run(self: *Attention) !void {
-        var a: cuda.Args = .{};
-        a.add(self.dev);
-        a.add(self.out);
-        a.add(@as(c_int, @intCast(self.shape.k)));
-        a.add(@as(c_int, @intCast(self.heads())));
-        a.add(scale(self.wide));
-        try cuda.launch.launch(self.k.attention, .{ .grid = .{ .x = @intCast((self.shape.k + 127) / 128), .y = @intCast(self.heads()) }, .block = .{ .x = 256 }, .shared = smem }, self.rig.s, &a);
+        try self.att.full(self.rig.s, self.dev, self.out, self.shape.k, self.heads(), D, scale());
         try self.rig.s.synchronize();
     }
 
@@ -177,7 +169,7 @@ pub const Attention = struct {
             var want: [D]f64 = undefined;
             var tol: [D]f64 = undefined;
             const t = j.t;
-            const s: f64 = scale(false);
+            const s: f64 = scale();
             for (j.lo..j.hi) |i| {
                 const row = i / t.heads();
                 const head = i % t.heads();
@@ -227,7 +219,7 @@ pub const Attention = struct {
         for (p, 0..) |*x, j| {
             var s: f64 = 0;
             for (0..D) |e| s += q[e] * k[j * D + e];
-            x.* = s * scale(false);
+            x.* = s * scale();
             m = @max(m, x.*);
         }
         var l: f64 = 0;
