@@ -1,6 +1,7 @@
 //! How many streams the CUDA host serves at load: the page plan's lanes, or the whole windows its room holds.
 const std = @import("std");
 const api = @import("engine_api");
+const lanes = @import("lanes");
 const kv_pool = @import("core").kv_pool;
 const budget = @import("cuda_memory.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
@@ -58,8 +59,16 @@ pub fn shareSlots(share: bool, snap_bytes: u64, host_cache: bool) !?usize {
     return if (share and snap_bytes > 0 and !host_cache) try @import("core").kv_prompts.sharing() else null;
 }
 
+/// A family's slot limit applies to the whole CUDA request, before any stream accounting.
+fn admissionRequest(comptime F: type, o: api.Open) !api.Open {
+    var request = o;
+    if (comptime @hasDecl(F, "requestedLanes")) request.lanes = try F.requestedLanes(o.lanes, o.lanes_fixed);
+    return request;
+}
+
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
 pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Budget, problem: *[]const u8) !?Count {
+    const request = try admissionRequest(F, o);
     const free = loaded.free_streams;
     const grow = budget.growRoom(b.room, !@hasField(F.Options, "lanes"));
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
@@ -70,22 +79,22 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
             return null;
         } else 0;
         const paged = if (host > 0)
-            try @import("cuda_kv_host.zig").plan(a, l, wrapped.room, o, host, problem) orelse return null
+            try @import("cuda_kv_host.zig").plan(a, l, wrapped.room, request, host, problem) orelse return null
         else
-            try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
-        const planned = kv_pages.budgetOf(F, l, wrapped.room, o, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
+            try kv_pages.plan(F, a, l, wrapped.room, request, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots) orelse return null;
+        const planned = kv_pages.budgetOf(F, l, wrapped.room, request, @intCast(b.window), b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share), slots);
         return .{ .streams = paged.lanes, .paged = paged, .layout = l, .slots = slots, .planned = if (slots != null) planned else null, .extra_device = if (host > 0) try @import("cuda_kv_host.zig").deviceBytes(l) else 0 };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
     if (ledger.wanted(F, loaded, b.stream_bytes)) {
         var short: ?ledger.Short = null;
-        const p = ledger.plan(F, loaded, o, .{ .room = b.room, .context = b.window, .host_budget = b.host_budget, .host_cache = b.host_cache }, &short) orelse {
+        const p = ledger.plan(F, loaded, request, .{ .room = b.room, .context = b.window, .host_budget = b.host_budget, .host_cache = b.host_cache }, &short) orelse {
             problem.* = try std.fmt.allocPrint(a, no_stream, .{ b.window, toGib(short.?.one_full +| short.?.scratch), toGib(b.room), toGib(b.model), toGib(b.reserve), b.low });
             return null;
         };
-        return .{ .streams = o.lanes, .paged = null, .layout = null, .ledger = p };
+        return .{ .streams = request.lanes, .paged = null, .layout = null, .ledger = p };
     }
-    const streams = budget.admit(grow, b.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
+    const streams = budget.admit(grow, b.stream_bytes, free, request.lanes, request.lanes_fixed) catch |e| {
         problem.* = switch (e) {
             error.NoStream => try std.fmt.allocPrint(a, no_stream, .{
                 b.window,
@@ -107,6 +116,27 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
         return null;
     };
     return .{ .streams = streams, .paged = null, .layout = null };
+}
+
+test "CUDA cache default: Muse automatic admission and host lanes fit its 32 slots" {
+    const F = @import("muse_spark").native;
+    const loaded = .{ .free_streams = @as(u32, 32), .stream_bytes = @as(u64, 0) };
+    const b: Budget = .{ .room = 0, .model = 0, .reserve = 0, .low = "", .window = 4096, .stream_bytes = 0, .host_cache = false, .host_budget = 0, .share = false };
+    var problem: []const u8 = "";
+    const automatic = (try count(F, std.testing.allocator, loaded, .{ .dir = "", .model_type = F.model_type, .lanes = 64 }, b, &problem)).?;
+    try std.testing.expectEqual(@as(u32, 32), automatic.streams);
+    var cfg = try lanes.Config.init(std.testing.allocator, .{ .exact_width = 8 }, 8, 7);
+    defer cfg.deinit(std.testing.allocator);
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(std.testing.allocator, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(std.testing.allocator, std.testing.io, &core, .{ .lanes = automatic.streams });
+    try std.testing.expectEqual(@as(u32, 32), host.engine().info().lanes);
+    const explicit = (try count(F, std.testing.allocator, loaded, .{ .dir = "", .model_type = F.model_type, .lanes = 32, .lanes_fixed = true }, b, &problem)).?;
+    try std.testing.expectEqual(@as(u32, 32), explicit.streams);
+    try std.testing.expectError(error.Slots, count(F, std.testing.allocator, loaded, .{ .dir = "", .model_type = F.model_type, .lanes = 33, .lanes_fixed = true }, b, &problem));
 }
 
 test "TF_KV_SHARE makes the whole cache pool pages and opens on a cache, unless the family keeps copies in slots (GLM)" {
