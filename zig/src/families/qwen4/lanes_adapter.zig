@@ -51,8 +51,9 @@ pub fn Adapter(comptime E: type, comptime D: type, comptime L: type) type {
             for (s.prompt()) |token| if (token >= l.e.c.vocab) return error.TokenOutOfRange;
             for (l.lanes) |*lane| if (lane.stream == null) {
                 const slot = try l.e.lease();
+                slot.state.untaught = s.untaught;
                 lane.* = .{ .stream = s, .slot = slot };
-                if (s.reuse.saved) |ptr| {
+                if (!s.untaught) if (s.reuse.saved) |ptr| {
                     const snap: *Snap = @ptrCast(@alignCast(ptr));
                     l.restore(lane, snap) catch |err| {
                         if (!l.e.healthy()) return err;
@@ -61,7 +62,7 @@ pub fn Adapter(comptime E: type, comptime D: type, comptime L: type) type {
                         try slot.state.reset();
                         slot.has_logits = false;
                     };
-                }
+                };
                 lane.filled = slot.state.pos;
                 s.cached = @intCast(lane.filled);
                 s.fill_at.store(@intCast(lane.filled), .release);

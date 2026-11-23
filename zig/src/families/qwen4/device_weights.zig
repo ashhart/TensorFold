@@ -72,11 +72,21 @@ pub fn Placed(comptime B: type) type {
         }
         fn raw(self: *Self, name: []const u8, tail: []const u8) !B.Buffer {
             const t = try self.tensor(name, tail);
+            if (self.c.learned == 0) {
+                if (self.dry) {
+                    try self.addBytes(t.bytes.len);
+                    return undefined;
+                }
+                return self.put(t.bytes);
+            }
+            var temporary: std.heap.ArenaAllocator = .init(self.a);
+            defer temporary.deinit();
+            const bytes = try @import("pocket_matrix.zig").base(temporary.allocator(), self.c, name, t);
             if (self.dry) {
-                try self.addBytes(t.bytes.len);
+                try self.addBytes(bytes.len);
                 return undefined;
             }
-            return self.put(t.bytes);
+            return self.put(bytes);
         }
         pub fn take(self: *Self, name: []const u8, want: schema.Want) !void {
             if (want.role == .integer_vector) return;
@@ -121,10 +131,11 @@ pub fn Placed(comptime B: type) type {
                 const t = try self.tensor(name, if (recipe.format == .fp8) "weight_scale" else "weight_scale_2");
                 break :blk @bitCast(std.mem.readInt(u32, t.bytes[0..4], .little));
             } else 1;
+            const pocket_role = @import("pocket_matrix.zig").role(name);
             const p: wo.Params = .{
                 .rows = 1,
-                .n = @intCast(want.shape.dims[0]),
-                .k = @intCast(want.shape.dims[1]),
+                .n = @intCast(want.shape.dims[0] - if (pocket_role != null and pocket_role.? != .down) self.c.learned else 0),
+                .k = @intCast(want.shape.dims[1] - if (pocket_role == .down) self.c.learned else 0),
                 .format = @fromBackingInt(@intCast(@backingInt(recipe.format))),
                 .group = if (recipe.format == .mlx4 or recipe.format == .mlx8) @intCast(recipe.group) else 64,
                 .scale_kind = kind,

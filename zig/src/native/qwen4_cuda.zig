@@ -9,6 +9,7 @@ const B = G.Storage;
 const P = struct {
     const Self = @This();
     pub const Engine = F.engine.Engine(G);
+    pub const Learning = @import("qwen4_slide.zig").Owner(Engine, F.train_cuda.Kernels(C));
     pub const Drawer = F.cuda_draw.Drawer(C, L, B);
     a: std.mem.Allocator,
     driver: C.Driver,
@@ -64,9 +65,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Ope
         problem.* = why;
         return null;
     }
-    if (try o.slideRefusal(a, "CUDA")) |why| {
-        problem.* = why;
-        return null;
+    if (o.slide) {
+        if (try @import("slide_adapter.zig").refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+            problem.* = why;
+            return null;
+        }
     }
     if (F.native_host.refusal(o)) |why| {
         problem.* = why;
@@ -85,8 +88,4 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Ope
         problem.* = try std.fmt.allocPrint(a, "Qwen4 CUDA refused {s}: {s}", .{ if (p.name().len > 0) p.name() else "native load", @errorName(err) });
         return null;
     };
-}
-
-test "slide admission: qwen4_cuda refuses before checkpoint or device access" {
-    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text" });
 }

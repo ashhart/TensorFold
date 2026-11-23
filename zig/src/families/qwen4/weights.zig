@@ -35,9 +35,9 @@ pub fn walk(c: *const cfg.Config, ns: Namespace, sink: anytype, p: *cfg.Problem)
         const layer = try std.fmt.bufPrint(&lb, "{s}layers.{d}", .{ pre, i });
         for ([_][]const u8{ "attn_hyper_connection", "mlp_hyper_connection" }) |part|
             try w.hc(try std.fmt.bufPrint(&b, "{s}.{s}", .{ layer, part }), true);
-        try w.proj(layer, "mlp.gate_proj", c.intermediate, c.hidden);
-        try w.proj(layer, "mlp.up_proj", c.intermediate, c.hidden);
-        try w.proj(layer, "mlp.down_proj", c.hidden, c.intermediate);
+        try w.proj(layer, "mlp.gate_proj", c.intermediate + c.learned, c.hidden);
+        try w.proj(layer, "mlp.up_proj", c.intermediate + c.learned, c.hidden);
+        try w.proj(layer, "mlp.down_proj", c.hidden, c.intermediate + c.learned);
         switch (c.kinds[i]) {
             .linear_attention => {
                 try w.proj(layer, "linear_attn.in_proj_qkv", c.convWidth(), c.hidden);
