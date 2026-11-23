@@ -56,7 +56,6 @@ test "the head is sampled once between widths and keeps the pass minimum" {
         try std.testing.expectEqual(@as(u8, @intCast(index)), event);
         window += 1;
     }
-
 }
 
 test "an end-only slow stretch cannot set the head level" {
