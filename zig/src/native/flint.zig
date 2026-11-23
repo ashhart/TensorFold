@@ -44,17 +44,15 @@ fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Op
 }
 
 fn admittedWindow(a: std.mem.Allocator, c: *const fl.config.Config, draft_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
-    return admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)) + draft_stream, left, o, window, problem);
+    return admittedStreams(a, fl.state.cacheBytes(c, @intCast(window + 1)) + draft_stream, left, o, window, problem);
 }
 
 fn longestWindow(c: *const fl.config.Config, budget: u64, most: usize) usize {
-    return fl.budget.longest(c, budget, most);
+    return fl.budget.longest(c, budget, most + 1) -| 1;
 }
 
 fn targetBudget(budget: u64, served: u32, draft_stream: u64) u64 {
-    _ = served;
-    _ = draft_stream;
-    return budget;
+    return budget -| @as(u64, served) * draft_stream;
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
