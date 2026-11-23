@@ -26,14 +26,30 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
     var shape: [96]u8 = undefined;
     const parts = [_][]const u8{ "glm-metal-pair", std.mem.span(e.device.name()), try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ e.c.layers, e.c.hidden, e.c.experts, e.c.tp, e.c.inter[1] - e.c.inter[0], @intFromBool(e.hasMtp()) }) };
     const key = if (lead) lanes.cost_cache.key(gpa, io, &parts) catch null else null;
-    const kept = if (key) |k| lanes.cost_cache.load(Costs, gpa, io, k) else null;
-    if (!try e.agree(kept == null)) { // rank 0's word: both Macs time, or neither does
-        if (kept) |c| report(c, "kept");
-        return kept;
-    }
+    var kept = if (key) |k| lanes.cost_cache.load(Costs, gpa, io, k) else null;
+    if (kept) |table| for (table.window, 0..) |w, i| {
+        if (w.width != i + 1 or !(w.ms > 0) or !std.math.isFinite(w.ms)) { kept = null; break; }
+    };
+    const cold = try e.agree(kept == null); // the leader decides whether both ranks measure or heal
     var scratch: Scratch = .{ .sl = sl, .io = io };
     try scratch.start();
     defer sl.release(0);
+    if (!cold) {
+        var costs: Costs = if (kept) |c| c else undefined;
+        var values: [st.max_rows]f64 = @splat(0);
+        var widths: [st.max_rows]u32 = undefined;
+        for (&widths, 0..) |*w, i| w.* = @intCast(i + 1);
+        if (lead) for (costs.window, &values) |w, *m| { m.* = w.ms; };
+        const cursor_key = if (key) |k| lanes.cost_cache.buildKey(&k, &.{"metal-heal-v1"}) else null;
+        var cursor: u64 = if (cursor_key) |k| lanes.cost_cache.load(u64, gpa, io, k) orelse 0 else 0;
+        _ = try cost_rule.warm_prices.synced(WindowTimer{ .s = &scratch }, &values, &widths, &cursor, Agree{ .slots = sl }, lead);
+        if (!lead) return null;
+        for (&costs.window, values) |*w, m| w.ms = m;
+        if (key) |k| lanes.cost_cache.save(Costs, gpa, io, k, costs);
+        if (cursor_key) |k| lanes.cost_cache.save(u64, gpa, io, k, cursor);
+        report(costs, "checked");
+        return costs;
+    }
     const ref_key = lanes.cost_cache.referenceKey(&parts);
     const reference = if (lead) lanes.cost_cache.load(Timed, gpa, io, ref_key) else null;
     const t = try schedule(WindowTimer{ .s = &scratch }, HeadTimer{ .s = &scratch }, Agree{ .slots = sl }, lead, e.hasMtp(), reference);
@@ -49,27 +65,23 @@ fn report(c: Costs, how: []const u8) void {
     std.log.info("glm: the pair's windows ({s}): {d:.2} {d:.2} {d:.2} {d:.2} {d:.2} ms at 1-5 rows, {d:.2} at 16, a head step {d:.2} ms", .{ how, c.window[0].ms, c.window[1].ms, c.window[2].ms, c.window[3].ms, c.window[4].ms, c.window[15].ms, c.head_ms });
 }
 
-/// The same calls on both Macs whatever their clocks read: rank 0's dip or drift alone decides a second pass.
+/// Both ranks follow the leader's selected repair reads and drift retries, regardless of their own clocks.
 pub fn schedule(windows: anytype, heads: anytype, agree: anytype, lead: bool, head: bool, reference: ?Timed) !Timed {
     for (0..warm) |_| _ = try windows.time(st.max_rows - 1);
     var t: Timed = .{ .window = undefined, .head = .{ 0, 0 } };
-    for (&t.window, 0..) |*m, i| m.* = try cost_rule.fastest(windows, i);
+    try cost_rule.measureWindows(windows, &t.window, false);
     if (head) for (&t.head, 0..) |*h, i| {
         h.* = try cost_rule.fastest(heads, i);
     };
+    try cost_rule.smoothSynced(windows, &t.window, agree, lead);
     const drifted = if (reference) |r| cost_rule.drifted(&t.window, &r.window) else false;
-    if (try agree.decide(lead and (dipped(&t.window) or drifted))) {
-        try cost_rule.again(windows, &t.window);
+    if (try agree.decide(lead and drifted)) {
+        try cost_rule.measureWindows(windows, &t.window, true);
         if (head) for (&t.head, 0..) |*h, i| {
             h.* = @min(h.*, try cost_rule.fastest(heads, i));
         };
     }
     return t;
-}
-
-fn dipped(ms: []const f64) bool {
-    for (ms[1..], ms[0 .. ms.len - 1]) |m, before| if (m < before * (1 - cost_rule.dip)) return true;
-    return false;
 }
 
 /// The depth rule's table: window ms by width, and a head level's ms from the two chains.
@@ -174,12 +186,12 @@ test "both Macs make the same timing calls, and only rank 0's word starts a seco
         var asked: ?bool = null;
         const w: Script = .{ .calls = calls, .dip = if (lead) 3 else null };
         const t = try schedule(w, w, Fixed{ .answer = true, .asked = &asked }, lead, true, null);
-        try std.testing.expectEqual(lead, asked.?);
+        try std.testing.expectEqual(false, asked.?);
         try std.testing.expect(t.window[0] == 10 and t.head[1] > t.head[0]);
     }
     try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
-    // warm-up, 16 widths and 2 head chains of 1 + 7 runs each, then the same again for the second pass
-    try std.testing.expectEqual(@as(usize, warm + 2 * (st.max_rows + 2) * (1 + cost_rule.reps)), runs[0].items.len);
+    // The forced decisions add one repair per width, then a complete retry with the same head samples.
+    try std.testing.expectEqual(@as(usize, warm + st.max_rows + 2 * (st.max_rows + 2) * (1 + cost_rule.reps)), runs[0].items.len);
 }
 
 test "the table holds every width and a head level's ms from the two chains" {
