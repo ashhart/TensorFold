@@ -4,10 +4,17 @@ const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const lanes = @import("tensorfold").lanes;
 const be = lanes.backend;
-const Phase = struct { key: ?[32]u8 = null, value: u64 = 0, reads: u32 = 0 };
+const warm = lanes.cost_rule.warm_prices;
+const Phase = struct {
+    key: ?[32]u8 = null,
+    turn: warm.Turn = .{},
+
+    fn retryNarrow(phase: Phase) bool {
+        return phase.turn.preferredShared() and !phase.turn.attempted;
+    }
+};
 const Probe = struct {
-    enabled: bool = true,
-    shared_next: ?*bool = null,
+    start_turn: bool = false,
     from: usize = 0,
     floor: f64 = 0,
     seed: ?lanes.cost_cache.KeySeed = null,
@@ -17,23 +24,31 @@ const Probe = struct {
 pub fn measure(b: anytype, io: std.Io) !void {
     const has_shared = b.tensor_units and b.runner.slots > 1 and
         ((b.window < 64 and b.runner.capacity > 64) or (b.window < 32 and b.runner.capacity > 32));
-    var probe_shared = false;
     var phase: Phase = .{};
     const seed = lanes.cost_cache.keySeed(b.gpa, io, false) catch null;
-    const probe: Probe = .{ .shared_next = if (has_shared) &probe_shared else null, .seed = seed, .phase = &phase };
-    defer if (phase.reads > 0) if (phase.key) |key| lanes.cost_cache.save(u64, b.gpa, io, key, phase.value +% 1);
+    const probe: Probe = .{ .start_turn = has_shared, .seed = seed, .phase = &phase };
+    defer if (phase.key) |key| lanes.cost_cache.save(u64, b.gpa, io, key, phase.turn.next());
+    try narrow(b, io, probe);
+    if (!has_shared) return;
+    if (b.window < 64 and b.runner.capacity > 64) try shared(b, io, 64, seed, &phase) else try shared(b, io, 32, seed, &phase);
+    if (phase.retryNarrow()) {
+        const timed = b.timed;
+        defer b.timed = timed;
+        try narrow(b, io, .{ .seed = seed, .phase = &phase });
+    }
+}
+
+fn narrow(b: anytype, io: std.Io, probe: Probe) !void {
     switch (b.window) {
         16 => try sized(b, io, 16, "qwen27-lanes", probe),
         32 => try sized(b, io, 32, "qwen27-lanes", probe),
         64 => try sized(b, io, 64, "qwen27-lanes", probe),
         else => return error.WindowTooWide,
     }
-    if (!b.tensor_units or b.runner.slots == 1) return;
-    if (b.window < 64 and b.runner.capacity > 64) try shared(b, io, 64, probe_shared, seed, &phase) else if (b.window < 32 and b.runner.capacity > 32) try shared(b, io, 32, probe_shared, seed, &phase);
 }
 
 /// Price wider unfused forwards without taking another stream's caches or changing the lone window's prices.
-fn shared(b: anytype, io: std.Io, comptime width: usize, probe: bool, seed: ?lanes.cost_cache.KeySeed, phase: *Phase) !void {
+fn shared(b: anytype, io: std.Io, comptime width: usize, seed: ?lanes.cost_cache.KeySeed, phase: *Phase) !void {
     const window = b.window;
     const draft = b.draft;
     const profile = b.pass_profile;
@@ -52,7 +67,13 @@ fn shared(b: anytype, io: std.Io, comptime width: usize, probe: bool, seed: ?lan
         b.costs = costs;
         b.timed = timed;
     }
-    try sized(b, io, width, "qwen27-shared-rows", .{ .enabled = probe, .from = window, .floor = costs[window - 1].ms, .seed = seed, .phase = phase });
+    try sized(b, io, width, "qwen27-shared-rows", .{ .from = window, .floor = sharedFloor(costs[0..window]), .seed = seed, .phase = phase });
+}
+
+fn sharedFloor(costs: []const lanes.config.Cost) f64 {
+    var floor: f64 = 0;
+    for (costs) |cost| floor = @max(floor, cost.ms);
+    return floor;
 }
 
 fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe: Probe) !void {
@@ -68,23 +89,22 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
             break;
         }
     };
-    var probe_now = probe.enabled;
-    if (kept != null) if (probe.shared_next) |next| {
+    var probe_now = if (probe.phase) |phase| !phase.turn.attempted else true;
+    if (kept != null and probe.start_turn) {
         const current = k orelse unreachable;
         const phase_key = lanes.cost_cache.buildKey(&current, &.{"metal-family-phase-v1"});
-        const phase = lanes.cost_cache.load(u64, b.gpa, io, phase_key) orelse 0;
-        probe_now = phase % 2 == 0;
-        next.* = !probe_now;
+        const turn: warm.Turn = .{ .value = lanes.cost_cache.load(u64, b.gpa, io, phase_key) orelse 0 };
+        probe_now = !turn.preferredShared();
         if (probe.phase) |p| {
             p.key = phase_key;
-            p.value = phase;
+            p.turn = turn;
         }
-    };
-    if (kept) |table| if (!probe_now or r.capacity <= width) {
+    }
+    if (kept) |table| {
         @memcpy(b.costs[0..width], &table);
         b.timed = width;
-        return;
-    };
+        if (!probe_now or r.capacity <= width) return;
+    }
     if (r.capacity <= width) return error.ContextFull;
     var ms: [width]f64 = undefined;
     var widths: [width]u32 = undefined;
@@ -94,29 +114,29 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     };
     const cursor_key = if (k) |key| lanes.cost_cache.buildKey(&key, &.{"metal-heal-v2"}) else null;
     var cursor = if (cursor_key) |key| lanes.cost_cache.load(u64, b.gpa, io, key) orelse 0 else 0;
-    if (kept != null and lanes.cost_rule.warm_prices.select(ms[probe.from..], widths[probe.from..], cursor).n == 0) {
-        @memcpy(b.costs[0..width], &kept.?);
-        b.timed = width;
-        return;
-    }
+    const before = cursor;
+    defer if (cursor != before) if (cursor_key) |key| lanes.cost_cache.save(u64, b.gpa, io, key, cursor);
+    if (kept != null and !warm.admit(ms[probe.from..], widths[probe.from..], &cursor)) return;
+    if (probe.phase) |phase| phase.turn.attempted = true;
     defer {
         if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
     }
     var ids: [192]u32 = undefined;
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
     const prompt = ids[0..lanes.cost_rule.context.promptRows(r.capacity, width, width + 5)];
-    var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
+    var s = lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 }) catch |err| {
+        if (kept != null) return;
+        return err;
+    };
     defer s.deinit(b.gpa);
     const timer: Timer(@TypeOf(b)) = .{ .b = b, .s = &s, .prompt = prompt };
     if (kept != null) {
         var warm_timer: WarmTimer(@TypeOf(b)) = .{ .timer = timer };
         warm_timer.timer.from = probe.from;
-        const stats = try lanes.cost_rule.warm_prices.prepared(&warm_timer, ms[probe.from..], widths[probe.from..], &cursor, probe.floor, lanes.cost_rule.warm_prices.Local{}, true);
-        if (probe.phase) |phase| phase.reads += stats.reads;
+        const stats = warmProbe(&warm_timer, ms[probe.from..], widths[probe.from..], &cursor, probe.floor) orelse return;
         for (b.costs[0..width], ms, 0..) |*c, m, i| c.* = .{ .width = @intCast(i + 1), .ms = m };
         b.timed = width;
         if (stats.lowered > 0) if (k) |key| lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, key, b.costs[0..width].*);
-        if (stats.reads > 0) if (cursor_key) |key| lanes.cost_cache.save(u64, b.gpa, io, key, cursor);
         return;
     }
     try b.refill(prompt);
@@ -180,4 +200,56 @@ fn WarmTimer(comptime B: type) type {
             return t.timer.time(i);
         }
     };
+}
+
+fn warmProbe(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, floor: f64) ?warm.Stats {
+    return warm.prepared(timer, ms, widths, cursor, floor, warm.Local{}, true) catch null;
+}
+
+test "qwen27 startup: shared probe uses the maximum live narrow cost" {
+    const Fake = struct {
+        pub fn time(_: @This(), _: usize) !f64 {
+            return 19.9;
+        }
+    };
+    const costs = [_]lanes.config.Cost{ .{ .width = 1, .ms = 20 }, .{ .width = 2, .ms = 19.8 } };
+    var ms = [_]f64{21};
+    var cursor: u64 = 0;
+    _ = warmProbe(Fake{}, &ms, &.{3}, &cursor, sharedFloor(&costs)).?;
+    try std.testing.expectEqual(@as(f64, 21), ms[0]);
+}
+
+test "qwen27 startup: a failed warm probe leaves the cached prices available" {
+    const Fake = struct {
+        pub fn time(_: @This(), _: usize) !f64 {
+            return error.ProbeFailed;
+        }
+    };
+    var ms = [_]f64{21};
+    var cursor: u64 = 0;
+    try std.testing.expect(warmProbe(Fake{}, &ms, &.{1}, &cursor, 0) == null);
+    try std.testing.expectEqual(@as(f64, 21), ms[0]);
+}
+
+test "qwen27 startup: no-fit shared turns still probe narrow on the same load" {
+    const Fake = struct {
+        pub fn time(_: @This(), _: usize) !f64 {
+            return 80;
+        }
+    };
+    var narrow_ms = [_]f64{80};
+    var shared_cursor: u64 = 0;
+    var narrow_cursor: u64 = 0;
+    var saved: u64 = 0;
+    for (1..7) |load| {
+        var phase: Phase = .{ .turn = .{ .value = saved } };
+        if (phase.turn.preferredShared()) phase.turn.attempted = warm.admit(&.{200}, &.{64}, &shared_cursor);
+        if (!phase.turn.preferredShared() or phase.retryNarrow()) {
+            const stats = warmProbe(Fake{}, &narrow_ms, &.{16}, &narrow_cursor, 0).?;
+            try std.testing.expectEqual(@as(u32, 1), stats.reads);
+        }
+        saved = phase.turn.next();
+        try std.testing.expectEqual(@as(u64, load), narrow_cursor);
+    }
+    try std.testing.expectEqual(@as(u64, 0), shared_cursor);
 }

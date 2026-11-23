@@ -51,14 +51,19 @@ test "Metal review: a useful 150ms entry is not starved by a discarded widest wa
     try t.expectEqual(@as(u32, 1), stats.lowered);
 }
 
-test "Metal review: setup wall time can stop all reads without advancing the cursor" {
+test "Metal review: setup overrun cools down and advances to the next width" {
     var timer: Timer = .{ .setup_ms = 195 };
     var ms = [_]f64{ 10, 20 };
     var cursor: u64 = 0;
     _ = try prepared(&timer, &ms, &.{ 1, 2 }, &cursor);
     try t.expectEqual(@as(usize, 1), timer.setups);
     try t.expectEqual(@as(usize, 0), timer.n);
-    try t.expectEqual(@as(u64, 0), cursor);
+    var skipped: Timer = .{ .setup_ms = 195 };
+    _ = try prepared(&skipped, &ms, &.{ 1, 2 }, &cursor);
+    try t.expectEqual(@as(usize, 0), skipped.setups);
+    var next: Timer = .{};
+    _ = try prepared(&next, &ms, &.{ 1, 2 }, &cursor);
+    try t.expectEqual(@as(usize, 1), next.seen[0]);
 }
 
 test "Metal review: real 16/17 32/33 48/49 pairs run narrower first" {
@@ -221,4 +226,25 @@ test "Metal review: no valid measured pass refuses a fresh table" {
     };
     var ms: [2]f64 = undefined;
     try t.expectError(error.InvalidWindowCost, rule.measureWindows(Invalid{}, &ms, false));
+}
+
+test "Metal review: setup and edges leave every rotating width reachable" {
+    const lone = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 24, 28, 31, 33 };
+    var shared: [48]u32 = undefined;
+    for (&shared, 17..) |*w, i| w.* = @intCast(i);
+    for ([_][]const u32{ &.{ 4, 8, 16, 32, 64, 128 }, &lone, &shared }) |widths| {
+        var values: [48]f64 = @splat(50);
+        values[widths.len - 1] = 150;
+        const ms = values[0..widths.len];
+        var cursor: u64 = 0;
+        for (0..widths.len) |i| {
+            var timer: Timer = .{ .setup_ms = 1, .value = if (i == widths.len - 1) 150 else 50 };
+            _ = try prepared(&timer, ms, widths, &cursor);
+            try t.expect(timer.n > 0);
+            try t.expectEqual(i, timer.seen[0]);
+        }
+        const phase0 = warm.select(ms, widths, 0);
+        const phase1 = warm.select(ms, widths, widths.len);
+        try t.expect(!std.mem.eql(usize, phase0.at[0..phase0.n], phase1.at[0..phase1.n]));
+    }
 }
