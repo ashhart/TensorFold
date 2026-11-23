@@ -3,7 +3,7 @@ const std = @import("std");
 pub const plan = @import("../../core/fsr/plan.zig");
 const memory = @import("flashnext_memory");
 const prompt = memory.prompt;
-pub const Plan = struct { pool: ?plan.Pool = null, ple: ?u64 = null, raw: u64, extra: u64 = 0 };
+pub const Plan = struct { pool: ?plan.Pool = null, ple: ?u64 = null, raw: u64, extra: u64 = 0, forecast: u64 = 0 };
 
 pub fn of(inventory: anytype, settings: anytype) !Plan {
     var p: Plan = .{ .raw = inventory.raw, .extra = if (settings.ssd_experts != null or settings.ple_on_ssd or settings.fsr_trace != null) 1024 * 1024 else 0 };
@@ -11,8 +11,9 @@ pub fn of(inventory: anytype, settings: anytype) !Plan {
         // One full layer's union fits at every admitted prompt and concurrent window width.
         p.pool = try plan.pool(bytes, inventory.expert_parts, 49 * 512, 512);
         // Bounded demand IDs, forecast logits/routes and metadata for the source descriptor owner.
-        const forecast = try std.math.mul(u64, p.pool.?.slots, @sizeOf(@import("../../core/fsr/arena.zig").ArenaOf(void, 9).Job));
-        p.extra = try std.math.sub(u64, 1024 * 1024, forecast); // reclassify prepaid jobs, preserving the total
+        p.extra = 1024 * 1024;
+        p.forecast = try plan.forecastJobs(9, p.pool.?.slots); // a subset of the prepaid owner allowance
+        if (p.forecast > p.extra) return error.ExpertMetadataTooLarge;
     }
     if (settings.ple_on_ssd) {
         p.ple = try std.math.add(u64, try plan.pleRows(prompt.PMAX * 16, 160, 8, 32), 128 * 3 * 32);
