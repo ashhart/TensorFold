@@ -182,7 +182,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | --- | --- |
 | `TF_FLASHNEXT_PROMPT_BF16` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_WINDOW_GRAPH` | Exactly `0` or `1`; default on |
-| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | Exactly `0` or `1`; default off. `1` keeps CUDA graphs for both sequence-state/draft-spare pointer orientations, avoiding recapture after whole-window accepts |
+| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | Exactly `0` or `1`; default off. For one stream, `1` keeps CUDA graphs for both sequence-state/draft-spare pointer orientations, avoiding recapture after whole-window accepts |
 | `TF_FLASHNEXT_LANE_PARTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_KEEP_INPASS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_FIRST_EARLY` | Exactly `0` or `1`; default on |
