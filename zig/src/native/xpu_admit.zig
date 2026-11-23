@@ -29,6 +29,12 @@ test "the size less what the engine allocated caps an over-reported free" {
     try std.testing.expectEqual(@as(u32, 3), streamsThatFit(m, 2 * gib, 2 * gib, 2 * gib, 8, 8));
 }
 
+test "a cache reserve near the CLI limit cannot overflow the activation reserve" {
+    const reserve = 17_179_869_183 * gib;
+    const m: Memory = .{ .free = std.math.maxInt(u64), .size = std.math.maxInt(u64), .allocated = 0 };
+    try std.testing.expectEqual(@as(u32, 0), streamsThatFit(m, 2 * gib, reserve, gib, 8, 8));
+}
+
 test "at most the wanted streams and the engine's maximum" {
     const m: Memory = .{ .free = 30 * gib, .size = 32 * gib, .allocated = 0 };
     try std.testing.expectEqual(@as(u32, 2), streamsThatFit(m, 2 * gib, 0, gib, 2, 8));
