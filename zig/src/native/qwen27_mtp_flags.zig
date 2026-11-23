@@ -24,6 +24,12 @@ pub fn deviceRefusal(drafts: ?u32, tensor_units: bool, pages: bool) ?Refused {
 }
 pub const Refused = struct { err: anyerror, why: []const u8 };
 
+/// Why --drafter is refused before the target or the drafter loads.
+pub fn drafterRefusal(a: std.mem.Allocator, dir: []const u8, drafter: []const u8, err: anyerror) ![]const u8 {
+    if (err == error.DraftForAnotherTarget) return std.fmt.allocPrint(a, "--drafter {s} drafts for another target: its width, vocabulary or tapped layers do not fit {s} (DraftForAnotherTarget)", .{ drafter, dir });
+    return std.fmt.allocPrint(a, "--drafter {s} is not a drafter the native Qwen engine serves for {s} ({s}): it takes z-lab/Qwen3.8-27B-DFlash2 as released, for Qwen3.8-27B", .{ drafter, dir, @errorName(err) });
+}
+
 /// Hashes the disk identity's mode words; the head's word joins only when it is on, as main keys the rest.
 pub fn identityWords(w: *std.hash.Wyhash, words: []const u64, head: bool) void {
     w.update(std.mem.sliceAsBytes(words));
