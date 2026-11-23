@@ -22,14 +22,14 @@ pub fn caches(ram: u64, working_set: u64, text: ?[]const u8, resident: u64) erro
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
 
-/// The longest context one stream's caches fit in `bytes`, at most `most`.
+/// The longest context one stream's caches fit in `bytes`, at most `most`; backends allocate one extra position.
 pub fn longest(c: *const cfg.Config, bytes: u64, most: usize) usize {
-    if (st.cacheBytes(c, 1) > bytes) return 0;
+    if (most == 0 or st.cacheBytes(c, 2) > bytes) return 0;
     var lo: usize = 1;
     var hi: usize = most;
     while (lo < hi) {
         const mid = lo + (hi - lo + 1) / 2;
-        if (st.cacheBytes(c, mid) <= bytes) lo = mid else hi = mid - 1;
+        if (st.cacheBytes(c, mid + 1) <= bytes) lo = mid else hi = mid - 1;
     }
     return lo;
 }

@@ -49,19 +49,24 @@ const DraftCost = struct {
     fixed: u64 = 0,
     lane: u64 = 0,
     tap: u64 = 0,
+
+    fn stream(d: DraftCost) u64 {
+        return d.lane + d.tap;
+    }
 };
 
 const Admission = struct { lanes: u32, ledger: u64 };
 
 fn longestWindow(c: *const fl.config.Config, left: u64, most: usize, draft: DraftCost) usize {
-    _ = draft;
-    return fl.budget.longest(c, left, most);
+    return fl.budget.longest(c, (left -| draft.fixed) -| draft.stream(), most);
 }
 
 fn fitAdmission(a: std.mem.Allocator, c: *const fl.config.Config, left: u64, o: api.Open, window: u64, draft: DraftCost, problem: *[]const u8) !?Admission {
-    _ = draft;
-    const lanes = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)), left, o, window, problem) orelse return null;
-    return .{ .lanes = lanes, .ledger = left };
+    const target = fl.state.cacheBytes(c, @intCast(window + 1));
+    const available = left -| draft.fixed;
+    const reserved = draft.stream();
+    const opened = try admittedStreams(a, target + reserved, available, o, window, problem) orelse return null;
+    return .{ .lanes = opened, .ledger = available - opened * reserved };
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -85,37 +90,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     };
-    // refusals that return null free what they hold themselves: errdefer runs only for errors
-    var ram: u64 = 0;
-    var len: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
-    const text: ?[]const u8 = if (std.c.getenv("MINIMAX_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
-    const c = &model.config; // the decode window's and the prompt chunk's buffers
-    const tower: u64 = if (model.vision) |v| v.bytes() else 0;
-    const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows, c.context) + fl.state.scratchBytes(c, fl.state.prompt_rows, c.context) + tower;
-    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
-        model.deinit();
-        problem.* = "MINIMAX_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
-        return null;
-    };
-    const fits = fl.budget.longest(&model.config, budget, model.config.context);
-    const window: i64 = o.context orelse @intCast(fits);
-    if (window < 1 or window > fits) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's MiniMax-M3 caches fit {d} tokens under its load limit (75% of RAM, or MINIMAX_LOAD_LIMIT_GB)", .{ window, fits });
-        model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
-        return null;
-    }
-    const served = try admittedStreams(a, fl.state.cacheBytes(&model.config, @intCast(window)), budget, o, @intCast(window), problem) orelse {
-        model.deinit();
-        return null;
-    };
-    std.log.info("minimax_m3: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
-    const h = try gpa.create(Host);
-    errdefer gpa.destroy(h);
-    h.gpa = gpa;
-    h.io = io;
-    h.model = model;
-    h.resident = null;
     const df2 = if (o.drafts and kind == .dflash2) fl.dflash2.Config.read(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's DFlash2 config cannot be read ({s})", .{@errorName(err)});
         model.deinit();
@@ -126,26 +100,70 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     } else null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget, .drafts = dspark != null or df2 != null });
+    const draft2 = if (df2) |dc| try fl.dflash2.Drafter.init(gpa, model, dc) else null;
+    errdefer if (draft2) |d| d.deinit();
+    const draft = if (dspark) |dc| try fl.dspark.Drafter.init(gpa, model, dc) else null;
+    errdefer if (draft) |d| d.deinit();
+    const tap_count: u64 = if (df2) |dc| dc.taps.len else if (dspark) |dc| dc.taps.len else 0;
+    const tap = tap_count * model.config.hidden * 2;
+    const fixed: u64 = if (draft2) |d| d.fixedBytes() else if (draft) |d| d.fixedBytes() else 0;
+    const lane: u64 = if (draft2) |d| d.laneBytes() else if (draft) |d| d.laneBytes() else 0;
+    const cost: DraftCost = .{ .fixed = fixed + (fl.state.batch_rows + fl.state.prompt_rows) * tap, .lane = lane, .tap = tap };
+    // refusals that return null free what they hold themselves: errdefer runs only for errors
+    var ram: u64 = 0;
+    var len: usize = @sizeOf(u64);
+    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
+    const text: ?[]const u8 = if (std.c.getenv("MINIMAX_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    const c = &model.config; // the decode window's and the prompt chunk's buffers
+    const tower: u64 = if (model.vision) |v| v.bytes() else 0;
+    const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows, c.context) + fl.state.scratchBytes(c, fl.state.prompt_rows, c.context) + tower;
+    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
+        if (draft) |d| d.deinit();
+        if (draft2) |d| d.deinit();
+        model.deinit();
+        problem.* = "MINIMAX_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        return null;
+    };
+    const fits = longestWindow(c, budget, model.config.context, cost);
+    const window: i64 = o.context orelse @intCast(fits);
+    if (window < 1 or window > fits) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's MiniMax-M3 caches fit {d} tokens under its load limit (75% of RAM, or MINIMAX_LOAD_LIMIT_GB)", .{ window, fits });
+        if (draft) |d| d.deinit();
+        if (draft2) |d| d.deinit();
+        model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
+        return null;
+    }
+    const admission = try fitAdmission(a, c, budget, o, @intCast(window), cost, problem) orelse {
+        if (draft) |d| d.deinit();
+        if (draft2) |d| d.deinit();
+        model.deinit();
+        return null;
+    };
+    const served = admission.lanes;
+    const ledger = admission.ledger;
+    std.log.info("minimax_m3: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
+    const h = try gpa.create(Host);
+    errdefer gpa.destroy(h);
+    h.gpa = gpa;
+    h.io = io;
+    h.model = model;
+    h.resident = null;
+    h.draft = draft;
+    h.draft2 = draft2;
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = ledger, .drafts = dspark != null or df2 != null });
     errdefer h.metal.deinit();
     try h.metal.warm();
-    h.draft = null;
-    h.draft2 = null;
     h.wrap = null;
-    if (df2) |dc| {
+    if (df2 != null) {
         try h.metal.measure();
-        h.draft2 = try fl.dflash2.Drafter.init(gpa, model, dc);
-        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft2.?.drafter());
-    } else if (dspark) |dc| {
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), draft2.?.drafter());
+    } else if (dspark != null) {
         try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
-        h.draft = try fl.dspark.Drafter.init(gpa, model, dc);
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft.?.drafter());
     } else if (h.metal.facts().copy_drafts) {
         try h.metal.measure(); // the lanes' own copy drafts are priced against the same rounds, with no drafter too
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    errdefer if (h.draft) |d| d.deinit();
-    errdefer if (h.draft2) |d| d.deinit();
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, fl.state.window_rows, fl.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
@@ -157,12 +175,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .image_share = v.image_share, .explain = tf.qwen_vl.geometry.problem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, servedInfo(h, served, @intCast(window), vis));
     h.cache = null;
-    h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
+    h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else ledger;
     if (h.cache_cap > 0) {
         const M = fl.backend.Metal;
         // prompt chunks change arithmetic with their rows
         const rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = true, .grid = fl.state.prompt_rows, .min_prompt = 0 };
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, budget));
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, ledger));
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
