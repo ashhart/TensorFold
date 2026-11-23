@@ -180,9 +180,9 @@ fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, w
 fn longestWindow(c: *const fl.config.Config, dc: *const fl.config.Config, budget: u64, most: usize, o: api.Open) usize {
     const drafted: fl.budget.Drafted = .{ .c = dc, .streams = 1 };
     if (!o.lanes_fixed or o.context != null) return fl.budget.longestWith(c, drafted, budget, most);
-    // A fixed default needs every target+drafter pair, not one target beside N drafters.
+    // A fixed default needs every target+drafter pair and every other lane's pool byte.
     const pairs: u64 = @max(o.lanes, 1);
-    return fl.budget.longestWith(c, drafted, budget / pairs, most);
+    return fl.budget.longestWith(c, drafted, (budget -| (pairs - 1)) / pairs, most);
 }
 
 /// --drafter's refusal for a target its drafts were not measured to pay for (Nanbeige4.3-33B-INT4 on the M5 Ultra).
