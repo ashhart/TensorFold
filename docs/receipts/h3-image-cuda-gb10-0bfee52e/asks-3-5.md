@@ -51,13 +51,13 @@ These problems already exist on Ash's main: against `bdcb6e608` this head adds o
 `h3_image_cuda_records.zig` and their line in `registry_joins.zig` under `zig/kernels/cuda` and `zig/src/core/contract`.
 Without `h3`, the full contract has never finished on TOP. Job `top-1c5bc91282e3` spent 75 minutes in moss's `tf_md_conv3x3`
 float64 shapes reference, whose code is the same on Ash's main, and the Desk stopped it there. Its 3629 lines up to that
-point show every H3 gate passing. `plant-203.sh` at `42a57c64f` runs the full contract for 20 minutes and keeps its log;
-that job is in TOP's queue.
+point show every H3 gate passing. The Lead left that one non-H3 reference out of ask 5, so `kernel-contract` now takes
+`-WORD`s (`c759a1372`): `kernel-contract -tf_md_conv3x3` runs every other kernel's gates and controls, the back and after
+suites, and every limit record, `tf_md_conv3x3`'s included. One job at `93f592f6b` (`plant-203.sh` on `gpu/203-plant-h3`) runs
+it, both selftests, the five-SM audit and ask 4's search. That job is in TOP's queue.
 
 ## CI on #3733
 
-At `c203accb0` (23 Nov 05:2x): `pytest`, `release-paths` and `comfyui-moss-installer` pass. `zig` and `zig-macos-dev-tools`
-were cancelled. `zig-windows` and `benchmark-clients (windows-latest)` are in progress. `fmt`, `zig-b` and
-`benchmark-clients (ubuntu-latest)` are queued, and `host-nightly-*` is skipped. No job is red. Ash's main isn't green either:
-`No GPU` and `Zig format` at `bdcb6e6086` are queued or pending, and every run before that at `df0f420161`, `a325f58258`
-and `833d8ec465` was cancelled or is still pending.
+At `04f9ad328` (23 Nov), every job passes: `zig`, `zig-b`, `zig-windows`, `zig-macos-dev-tools`, `fmt`, `pytest`,
+`release-paths (ubuntu-24.04)`, `comfyui-moss-installer` and `benchmark-clients` on Ubuntu and Windows.
+`host-nightly-linux` and `host-nightly-macos` are skipped. No job is red.
