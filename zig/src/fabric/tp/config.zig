@@ -233,9 +233,8 @@ fn envGet(name: []const u8) ?[]const u8 {
     if (name.len >= buf.len) return null;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    const v = std.c.getenv(buf[0..name.len :0]) orelse return null;
-    const s = std.mem.span(v);
-    return if (s.len == 0) null else s;
+    const v = (@import("sys").environment.Process{}).get(buf[0..name.len :0]) orelse return null;
+    return if (v.len == 0) null else v;
 }
 
 fn int(comptime T: type, get: *const fn ([]const u8) ?[]const u8, name: []const u8, default: T, lo: T, hi: T) Error!T {
