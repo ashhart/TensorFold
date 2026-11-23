@@ -242,6 +242,19 @@ test "qwen27 hand-off: a pass resuming slot 0's remote rows makes no unplanned c
     }
 }
 
+test "qwen27 hand-off: a salted request makes no rewind point in slot 0" {
+    var m: Mac = .{};
+    m.init();
+    defer m.deinit();
+    m.back.rewind = @as(Buffer, undefined); // a rewind buffer: only its presence is read here
+    var own = try lanes.Stream.init(gpa, .{ .id = "own", .prompt = &p1, .max_new = 1, .history_len = 8 });
+    defer own.deinit(gpa);
+    try t.expectEqual(@as(u32, 8), slots.rewindPoint(&m.back, &own, 0, 7, .{})); // an unsalted one does go back
+    var s = try lanes.Stream.init(gpa, .{ .id = "salted", .prompt = &p1, .max_new = 1, .history_len = 8, .cache_salt = 1 });
+    defer s.deinit(gpa);
+    try t.expectEqual(@as(u32, 0), slots.rewindPoint(&m.back, &s, 0, 7, .{}));
+}
+
 test "qwen27 hand-off: attach's TF_PREFILL_KEEP reaches slot 0 as it reaches the lane host" {
     var m: Mac = .{};
     m.init();
