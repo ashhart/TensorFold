@@ -287,3 +287,9 @@ test "a vector derived at another site is not refused where the engine steers" {
     try std.testing.expect(why != null);
     try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
 }
+
+test "the control vector's flags are the serve table's flag type" {
+    // cli.zig concatenates this table into its own, so both must name one type, not two equal shapes.
+    const cli = @import("cli.zig");
+    try std.testing.expect(@TypeOf(serve.flags[0]) == cli.Flag);
+}

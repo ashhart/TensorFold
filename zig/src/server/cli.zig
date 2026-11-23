@@ -4,21 +4,10 @@ const builtin = @import("builtin");
 const api = @import("engine_api");
 const glp_startup = @import("glp_startup.zig");
 const Allocator = std.mem.Allocator;
-pub const Kind = enum {
-    value, // --flag VALUE or --flag=VALUE
-    store_true, // --flag
-    append, // repeatable --flag VALUE
-};
-pub const Flag = struct {
-    name: []const u8,
-    kind: Kind = .value,
-    choices: []const []const u8 = &.{}, // argparse's choices; empty: any value of the flag's type.
-    /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
-    native: bool = false,
-    native_values: ?[]const []const u8 = null, // The values it honours when only some of the choices.
-    /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
-    path: bool = false,
-};
+/// The serve flag table and its sub-tables (glp_startup.zig) concatenate, so there is one shape only.
+const cli_flag = @import("cli_flag.zig");
+pub const Kind = cli_flag.Kind;
+pub const Flag = cli_flag.Flag;
 const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
 /// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
 const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves")) @import("root").serves else &.{};
