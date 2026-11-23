@@ -6,12 +6,16 @@ const sources = @import("kernel_sources");
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Out = enum { f32, bf16 };
 pub const Call = struct { k: u32, n: u32, rows: u32, out: Out = .f32, reuse_x: bool = false };
+pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys: i64 = 0 };
 
 const F32Args = extern struct { K: u32, N: u32, R: u32 };
 const CertArgs = extern struct { K: u32, N: u32, R: u32, col_cap: u32, c_hw: f32 };
+const FastArgs = extern struct { K: u32, N: u32, R: u32, B: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
+const PrepSmallArgs = extern struct { K: u32, R: u32, B: u32, pad: u32 = 0, xs: i64 };
+const SmallArgs = extern struct { K: u32, N: u32, R: u32, B: u32, xs: i64, ws: i64, ss: i64, ys: i64, nws: i64, x_shared: u32, c_hw: f32 };
 
-const max_norm_entries = 1024;
-const norm_cache_bytes: usize = 48 << 20;
+const max_norm_entries = 2048;
+const norm_cache_bytes: usize = 64 << 20;
 const max_scratch_rows: usize = 4096;
 const max_scratch_k: usize = 8192;
 const max_scratch_n: usize = 32768;
@@ -48,6 +52,9 @@ const State = struct {
     keys: [max_norm_entries]NormKey = undefined,
     nkeys: usize = 0,
     tmp_norm_w: mtl.Buffer,
+    small_xh: mtl.Buffer,
+    small_xs: mtl.Buffer,
+    small_nx: mtl.Buffer,
 
     fn init(a: std.mem.Allocator, device: mtl.Device) !*State {
         const st = try a.create(State);
@@ -66,6 +73,12 @@ const State = struct {
         const norm_w_pool = try device.buffer(norm_cache_bytes, opt);
         errdefer norm_w_pool.deinit();
         const tmp_norm_w = try device.buffer(max_scratch_n * 16, opt);
+        errdefer tmp_norm_w.deinit();
+        const small_xh = try device.buffer(8 * 16 * max_scratch_k * 2, opt);
+        errdefer small_xh.deinit();
+        const small_xs = try device.buffer(8 * 16 * (max_scratch_k / 32) * 4, opt);
+        errdefer small_xs.deinit();
+        const small_nx = try device.buffer(8 * 16 * 16, opt);
         st.* = .{
             .a = a,
             .device = device,
@@ -76,6 +89,9 @@ const State = struct {
             .cross_rows = cross_rows,
             .norm_w_pool = norm_w_pool,
             .tmp_norm_w = tmp_norm_w,
+            .small_xh = small_xh,
+            .small_xs = small_xs,
+            .small_nx = small_nx,
         };
         return st;
     }
@@ -91,6 +107,9 @@ const State = struct {
         st.cross_rows.deinit();
         st.norm_w_pool.deinit();
         st.tmp_norm_w.deinit();
+        st.small_xh.deinit();
+        st.small_xs.deinit();
+        st.small_nx.deinit();
         st.a.destroy(st);
     }
 
@@ -160,10 +179,19 @@ pub const Pipelines = struct {
     zero_cnt: mtl.Pipeline,
     gemm: mtl.Pipeline,
     repair: mtl.Pipeline,
+    fast_bf16: mtl.Pipeline,
+    fast_f32: mtl.Pipeline,
+    prep_x_small: mtl.Pipeline,
+    small_gemm: mtl.Pipeline,
     st: *State,
 
+    /// Buffers held by the certified norm cache and small-M scratch (for joining the target's residency set).
+    pub fn normBufs(p: *const Pipelines) [5]mtl.Buffer {
+        return .{ p.st.norm_w_pool, p.st.tmp_norm_w, p.st.small_xh, p.st.small_xs, p.st.small_nx };
+    }
+
     pub fn load(a: std.mem.Allocator, device: mtl.Device) !Pipelines {
-        return loadSource(a, device, sources.dsv41.fp8_mma_cert);
+        return loadSource(a, device, sources.dsv41.fp8_mma_cert_all);
     }
 
     pub fn loadSource(a: std.mem.Allocator, device: mtl.Device, text: []const u8) !Pipelines {
@@ -181,8 +209,16 @@ pub const Pipelines = struct {
         errdefer zero_cnt.deinit();
         var gemm = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_cert_gemm", false);
         errdefer gemm.deinit();
-        const repair = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_cert_repair_bf16", false);
-        return .{ .f32 = p_f32, .norm_w = norm_w, .prep_x = prep_x, .zero_cnt = zero_cnt, .gemm = gemm, .repair = repair, .st = st };
+        var repair = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_cert_repair_bf16", false);
+        errdefer repair.deinit();
+        var fast_bf16 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_fast_nax_bf16", false);
+        errdefer fast_bf16.deinit();
+        var fast_f32 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_fast_nax_f32", false);
+        errdefer fast_f32.deinit();
+        var prep_x_small = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_cert_prep_x_small", false);
+        errdefer prep_x_small.deinit();
+        const small_gemm = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_cert_small_gemm", false);
+        return .{ .f32 = p_f32, .norm_w = norm_w, .prep_x = prep_x, .zero_cnt = zero_cnt, .gemm = gemm, .repair = repair, .fast_bf16 = fast_bf16, .fast_f32 = fast_f32, .prep_x_small = prep_x_small, .small_gemm = small_gemm, .st = st };
     }
 
     pub fn clearNormCache(p: *Pipelines) void {
@@ -196,13 +232,16 @@ pub const Pipelines = struct {
         p.zero_cnt.deinit();
         p.gemm.deinit();
         p.repair.deinit();
+        p.fast_bf16.deinit();
+        p.fast_f32.deinit();
+        p.prep_x_small.deinit();
+        p.small_gemm.deinit();
         p.st.deinit();
     }
 };
 
 pub fn check(c: Call) !void {
     if (c.rows == 0 or c.k == 0 or c.k % 32 != 0 or c.n == 0 or c.n % 32 != 0) return error.BadFp8Shape;
-    if (c.out == .bf16 and (c.k > max_scratch_k or c.n > max_scratch_n)) return error.BadFp8Shape;
 }
 
 /// X [rows][K] bf16, W [N][K] E4M3, S [N/32][K/32] E8M0, Y [rows][N]: certified 0.0 ULP vs FP64.
@@ -219,6 +258,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref
         e.dispatchThreads(mtl.Size.of(c.n, c.rows, 1), mtl.Size.of(16, 16, 1));
         return;
     }
+    if (c.k > max_scratch_k or c.n > max_scratch_n) return error.BadFp8Shape;
     const nw = p.st.getNormW(p, e, w, s, c.k, c.n);
     var r0: u32 = 0;
     while (r0 < c.rows) : (r0 += max_scratch_rows) {
@@ -275,7 +315,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref
 /// Batched BF16 FP8 projection for `batch` contiguous groups in 4 dispatches and 3 barriers.
 pub fn encodeBatched(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, batch: u32, c: Call) !void {
     try check(c);
-    if (c.out != .bf16 or batch <= 1 or c.rows > max_scratch_rows or @as(usize, batch) * c.n > max_scratch_n) {
+    if (c.out != .bf16 or batch <= 1 or c.rows > max_scratch_rows or c.k > max_scratch_k or @as(usize, batch) * c.n > max_scratch_n) {
         const g_k: usize = c.k / 32;
         const g_n: usize = c.n / 32;
         for (0..batch) |bi| {
@@ -342,6 +382,102 @@ pub fn encodeBatched(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref,
     e.setValue(ca_args, 6);
     e.dispatchGroups(mtl.Size.of(c.n, batch, 1), mtl.Size.of(128, 1, 1));
     e.barrier();
+}
+
+/// Fast non-dd M5 tensor-unit FP8 projection for DSpark drafting (1..128 rows, batched via `b`).
+pub fn encodeFast(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, c: Call, b: Batch) !void {
+    try check(c);
+    if (b.n == 0) return error.BadFp8Shape;
+    const args = FastArgs{ .K = c.k, .N = c.n, .R = c.rows, .B = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys };
+    e.setPipeline(if (c.out == .f32) p.fast_f32 else p.fast_bf16);
+    e.setBuffer(x.buf, x.off, 0);
+    e.setBuffer(w.buf, w.off, 1);
+    e.setBuffer(s.buf, s.off, 2);
+    e.setBuffer(y.buf, y.off, 3);
+    e.setValue(args, 4);
+    e.dispatchGroups(mtl.Size.of((c.n + 31) / 32, (c.rows + 15) / 16, b.n), mtl.Size.of(128, 1, 1));
+}
+
+/// Whether exact small-M tensor-unit verify (`encodeSmall`) beats scalar `fp8_rows_cert` for this shape on M5 Ultra.
+pub fn takesSmall(c: Call, launches: u32) bool {
+    if (c.out != .bf16 or c.rows == 0 or c.rows > 16 or launches == 0 or launches > 8) return false;
+    if (c.k == 0 or c.k % 32 != 0 or c.k > max_scratch_k or c.n == 0 or c.n % 32 != 0) return false;
+    const cols = c.n * launches;
+    if (cols >= 1024) return c.rows >= 2;
+    if (cols >= 512) return c.rows >= 3;
+    return c.rows >= 4;
+}
+
+/// Hoist small-M (R = 1..16) BF16 activation prep + 4-segment L2 norms into L2-resident scratch (`small_xh/xs/nx`).
+pub fn prepSmall(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, rows: u32, k: u32, batch: u32, xs: i64) void {
+    const b_prep: u32 = if (batch > 1 and xs == 0) 1 else batch;
+    const args = PrepSmallArgs{ .K = k, .R = rows, .B = b_prep, .xs = xs };
+    e.setPipeline(p.prep_x_small);
+    e.setBuffer(x.buf, x.off, 0);
+    e.setBuffer(p.st.small_xh, 0, 1);
+    e.setBuffer(p.st.small_xs, 0, 2);
+    e.setBuffer(p.st.small_nx, 0, 3);
+    e.setValue(args, 4);
+    e.dispatchGroups(mtl.Size.of(16, b_prep, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Exact FP64-certified BF16 small-M (R = 1..16) M5 tensor-unit projection with hoisted `prepSmall` and inline repair.
+pub fn encodeSmall(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, c: Call, b: Batch) !void {
+    try check(c);
+    if (c.out != .bf16 or c.rows > 16 or c.k > max_scratch_k or b.n == 0 or b.n > 8) return error.BadFp8Shape;
+    const x_shared: u32 = if (b.n > 1 and b.xs == 0) 1 else 0;
+    const contig = b.n == 1 or (b.ws == @as(i64, c.n) * c.k and b.ss == @as(i64, c.n / 32) * (c.k / 32));
+    if (contig) {
+        const nw = p.st.getNormW(p, e, w, s, c.k, b.n * c.n);
+        if (!c.reuse_x) {
+            prepSmall(p, e, x, c.rows, c.k, b.n, b.xs);
+            e.barrier();
+        }
+        const args = SmallArgs{ .K = c.k, .N = c.n, .R = c.rows, .B = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys, .nws = @as(i64, c.n) * 16, .x_shared = x_shared, .c_hw = 2.0e-7 };
+        e.setPipeline(p.small_gemm);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(p.st.small_xh, 0, 1);
+        e.setBuffer(p.st.small_xs, 0, 2);
+        e.setBuffer(p.st.small_nx, 0, 3);
+        e.setBuffer(w.buf, w.off, 4);
+        e.setBuffer(s.buf, s.off, 5);
+        e.setBuffer(nw.buf, nw.off, 6);
+        e.setBuffer(y.buf, y.off, 7);
+        e.setValue(args, 8);
+        e.dispatchGroups(mtl.Size.of((c.n + 31) / 32, 1, b.n), mtl.Size.of(128, 1, 1));
+        return;
+    }
+    if (b.n == 2) {
+        const w1 = Ref{ .buf = w.buf, .off = @intCast(@as(i64, @intCast(w.off)) + b.ws) };
+        const s1 = Ref{ .buf = s.buf, .off = @intCast(@as(i64, @intCast(s.off)) + b.ss) };
+        const nw0 = p.st.getNormW(p, e, w, s, c.k, c.n);
+        const nw1 = p.st.getNormW(p, e, w1, s1, c.k, c.n);
+        if (nw0.buf.id == p.st.norm_w_pool.id and nw1.buf.id == p.st.norm_w_pool.id) {
+            if (!c.reuse_x) {
+                prepSmall(p, e, x, c.rows, c.k, 2, b.xs);
+                e.barrier();
+            }
+            const args = SmallArgs{ .K = c.k, .N = c.n, .R = c.rows, .B = 2, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys, .nws = @as(i64, @intCast(nw1.off)) - @as(i64, @intCast(nw0.off)), .x_shared = x_shared, .c_hw = 2.0e-7 };
+            e.setPipeline(p.small_gemm);
+            e.setBuffer(x.buf, x.off, 0);
+            e.setBuffer(p.st.small_xh, 0, 1);
+            e.setBuffer(p.st.small_xs, 0, 2);
+            e.setBuffer(p.st.small_nx, 0, 3);
+            e.setBuffer(w.buf, w.off, 4);
+            e.setBuffer(s.buf, s.off, 5);
+            e.setBuffer(nw0.buf, nw0.off, 6);
+            e.setBuffer(y.buf, y.off, 7);
+            e.setValue(args, 8);
+            e.dispatchGroups(mtl.Size.of((c.n + 31) / 32, 1, 2), mtl.Size.of(128, 1, 1));
+            return;
+        }
+    }
+    for (0..b.n) |bi| {
+        const i: i64 = @intCast(bi);
+        var ci = c;
+        ci.reuse_x = (x_shared == 1) and (c.reuse_x or bi > 0);
+        try encodeSmall(p, e, .{ .buf = x.buf, .off = @intCast(@as(i64, @intCast(x.off)) + i * b.xs) }, .{ .buf = w.buf, .off = @intCast(@as(i64, @intCast(w.off)) + i * b.ws) }, .{ .buf = s.buf, .off = @intCast(@as(i64, @intCast(s.off)) + i * b.ss) }, .{ .buf = y.buf, .off = @intCast(@as(i64, @intCast(y.off)) + i * b.ys) }, ci, .{});
+    }
 }
 
 test "M5 Ultra chip guard matches only M5 Ultra" {

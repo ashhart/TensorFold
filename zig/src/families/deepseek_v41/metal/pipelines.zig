@@ -95,7 +95,7 @@ pub const Pipelines = struct {
         p.experts = if (fp64_bf16) blk: {
             const dsrc = try xmma_cert.decodeSource(a, "");
             defer a.free(dsrc);
-            break :blk try experts.Pipelines.loadSourceCert(device, dsrc);
+            break :blk try experts.Pipelines.loadSourceWithFast(device, dsrc);
         } else try experts.Pipelines.load(a, device);
         errdefer p.experts.deinit();
         p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);

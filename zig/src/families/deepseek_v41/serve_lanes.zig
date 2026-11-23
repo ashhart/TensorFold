@@ -70,6 +70,8 @@ pub const Model = struct {
     decode_share: ?f64 = null,
     /// the lanes' speculative pass while TF_DSV41_SPEC_DRAFT is unset (a backend that drafts behind its windows)
     spec_default: bool = false,
+    /// optional backend-calibrated default cost table used when no cached calibration exists
+    default_costs: ?*const fn (gpa: Allocator, rows: usize) anyerror!costs_mod.Costs = null,
 };
 
 /// The replies' share of wall time beside a prompt in steps when neither --decode-share nor the env names one.
@@ -145,6 +147,12 @@ pub const Served = struct {
             if (cal.path) |p| gpa.free(p);
             cal.path = got.path;
         }
+        if (cal.source == .default) if (backend.default_costs) |make| {
+            errdefer cal.costs.deinit(gpa);
+            const custom = try make(gpa, 64);
+            cal.costs.deinit(gpa);
+            cal.costs = custom;
+        };
         s.costs = cal.costs;
         std.log.info("dsv41 draft costs: {t}{s}{s}, verify 1 / 16 rows {d:.3} / {d:.3} ms, pass {d:.3} ms", .{ cal.source, if (cal.path != null) " " else "", cal.path orelse "", s.costs.windowMs(1), s.costs.windowMs(16), s.costs.draft });
         var pass = backend.pass(backend.ptr) orelse s.nd.pass();

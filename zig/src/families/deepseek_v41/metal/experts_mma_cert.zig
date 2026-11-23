@@ -49,11 +49,11 @@ pub fn check(c: Call) !void {
     if (c.rows == 0 or c.k % 32 != 0 or c.k == 0 or c.k > 8192 or c.n % 32 != 0 or c.n == 0) return error.BadExpertShape;
 }
 
-/// Decode certified expert source (experts_kimi_cert + experts_cert), with optional header (TF_CTL).
+/// Decode certified expert source (experts_kimi_cert + experts_cert + fast DSpark), with optional header.
 pub fn decodeSource(a: std.mem.Allocator, head: []const u8) ![]u8 {
     const body = try std.mem.replaceOwned(u8, a, sources.dsv41.experts_cert, "#include \"experts_kimi_cert.metal\"\n", sources.dsv41.experts_kimi_cert);
     defer a.free(body);
-    return std.mem.concat(a, u8, &.{ head, body });
+    return std.mem.concat(a, u8, &.{ head, body, "\n", sources.dsv41.experts_fast_cert });
 }
 
 /// Full M5 Ultra Metal 4.1 tensor-unit certified expert source (decode + Pass 1 + Pass 2 patch).

@@ -11,6 +11,9 @@ pub const fp8_rows = @embedFile("fp8_rows.metal");
 pub const fp8_tile = @embedFile("fp8_tile.metal");
 /// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 prompt kernels (Apple M5 Ultra Metal 4.1).
 pub const fp8_mma_cert = @embedFile("fp8_mma_cert.metal");
+/// DeepSeek V4.1 opt-in M5 Ultra small-M verify NAX and fast DSpark FP8 projections (appended to fp8_mma_cert).
+pub const fp8_small_cert = @embedFile("fp8_small_cert.metal");
+pub const fp8_mma_cert_all = fp8_mma_cert ++ "\n" ++ fp8_small_cert;
 /// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 decode rows (1-16 rows, exact double-float).
 pub const fp8_rows_cert = @embedFile("fp8_rows_cert.metal");
 /// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 verify tile (1-16 rows, exact double-float).
@@ -28,6 +31,8 @@ pub const xunits = @embedFile("experts_units.metal");
 pub const experts_kimi_cert = @embedFile("experts_kimi_cert.metal");
 /// DeepSeek V4.1 opt-in FP64-certified BF16 decode routed experts (exact double-float accumulation).
 pub const experts_cert = @embedFile("experts_cert.metal");
+/// DeepSeek V4.1 opt-in fast non-dd MXFP4 routed experts for DSpark drafting (appended to experts_cert).
+pub const experts_fast_cert = @embedFile("experts_fast_cert.metal");
 /// DeepSeek V4.1 opt-in FP64-certified BF16 prompt routed experts Pass 1 on M5 tensor units.
 pub const xunits_cert = @embedFile("experts_units_cert.metal");
 /// DeepSeek V4.1 opt-in FP64-certified BF16 prompt routed experts Pass 2 exact double-float patch.

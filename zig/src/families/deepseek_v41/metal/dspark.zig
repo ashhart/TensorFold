@@ -186,9 +186,9 @@ pub const Pass = struct {
         x.a.destroy(x);
     }
 
-    /// The launch context of `rows` rows (the drafter reads its own rings, so no slot and no first position).
+    /// The launch context of `rows` rows (uses fast non-dd M5 NAX / MXFP4 when TF_DSV41_FP64_BF16=1 is active).
     pub fn ctx(x: *const Pass, rows: u32) Ctx {
-        return .{ .c = x.c, .p = x.p, .s = x.s, .slot = &x.noslot, .tables = x.tables, .p0 = 0, .rows = rows };
+        return .{ .c = x.c, .p = x.p, .s = x.s, .slot = &x.noslot, .tables = x.tables, .p0 = 0, .rows = rows, .fast = x.p.mma_cert != null };
     }
 
     /// The heads the family's chain and trees read.

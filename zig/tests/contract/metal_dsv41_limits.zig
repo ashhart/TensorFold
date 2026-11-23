@@ -44,7 +44,7 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 cert ")) {
         if (!assemble) return @as(Launch, undefined);
-        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_mma_cert, .pre_m5 = "" };
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_mma_cert_all, .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
         if (!assemble) return @as(Launch, undefined);

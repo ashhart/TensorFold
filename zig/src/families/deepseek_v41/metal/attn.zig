@@ -37,11 +37,13 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     const segs = x.parts(&buf);
     // rows of several slots: each slot-bound stage is one dispatch over the layer's slot table
     const tab: ?Ref = if (segs_.many(x)) try segs_.table(x, l) else null;
-    // every reader of hq and hn: wq_a, wkv, the compressor's linears, the index weights
-    try x.proj(e, s.hq, w.wq_a, s.qa, false);
-    try x.proj(e, s.hq, w.wkv, s.kv, false);
+    // hoist prep_x_small(hq) beside compressor/index_wp when opt-in, then wq_a and wkv share hq
+    const hq_prepped = x.prepProj(e, s.hq, c.hidden);
     if (kv_src) try compressIn(x, e, w, ratio);
     if (ix_src) try g.mv(gp, e, s.hn, w.ix_wp.?, s.ixw, R, c.hidden, c.index_heads, false);
+    if (hq_prepped) e.barrier();
+    try x.projReuse(e, s.hq, w.wq_a, s.qa, false, hq_prepped);
+    try x.projReuse(e, s.hq, w.wkv, s.kv, false, hq_prepped);
     e.barrier();
     // q_norm; the window key (kv_norm, RoPE, act_quant) into both mirror slots of the ring; the ratio-2 pool
     try f.normq(&x.p.fused, e, cv(f.Ref, s.qa), cv(f.Ref, w.q_norm), cv(f.Ref, s.qr), cv(f.Ref, s.qrq), R, c.q_lora, c.eps);
@@ -65,10 +67,12 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
         if (tab) |t| each.pool(x, e, t) else pool(x, e, w, segs);
     }
     e.barrier();
-    // wq_b and the index queries' wq_b on the q latent; the compressed latent's norm
-    try x.proj(e, s.qrq, w.wq_b, s.q, false);
-    if (ix_src) try x.proj(e, s.qrq, w.ix_wq_b.?, s.ixq, false);
+    // hoist prep_x_small(qrq) beside comp_norm when opt-in, then wq_b and ix_wq_b share prepped qrq concurrently
+    const qrq_prepped = x.prepProj(e, s.qrq, c.q_lora);
     if (kv_src) g.rmsnorm(gp, e, s.lat, w.comp_norm.?, s.latn, R, D, c.eps);
+    if (qrq_prepped) e.barrier();
+    try x.projReuse(e, s.qrq, w.wq_b, s.q, false, qrq_prepped);
+    if (ix_src) try x.projReuse(e, s.qrq, w.ix_wq_b.?, s.ixq, false, qrq_prepped);
     e.barrier();
     // RoPE on each head's last 64 dims, the index queries' RoPE; the latent's index key and its RoPE
     try g.rope(gp, e, s.q, s.qrope, pos, table, R, c.heads, D, @intCast(x.tables.positions));

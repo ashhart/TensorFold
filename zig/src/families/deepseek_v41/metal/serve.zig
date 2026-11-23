@@ -132,7 +132,28 @@ pub const Metal = struct {
             .calib = knobs(),
             .steps = m.opt.steps,
             .decode_share = m.opt.decode_share,
+            .default_costs = if (m.parts.env.p.mma_cert != null and m.parts.env.c.layers >= 32 and m.parts.env.c.hidden >= 4096) defaultM5Costs else null,
         };
+    }
+
+    /// Calibrated Apple M5 Ultra opt-in FP64-certified BF16 default cost table when no cached calibration exists.
+    fn defaultM5Costs(gpa: Allocator, rows: usize) anyerror!host.costs.Costs {
+        const table = [_]f64{
+            24.729, 32.717, 37.740, 44.362, 48.775, 52.957, 59.351, 63.814,
+            79.293, 83.801, 88.508, 93.076, 98.638, 105.903, 111.900, 115.967,
+        };
+        const pts = [_]host.costs.Point{
+            .{ .rows = 24, .ms = 184.355 },
+            .{ .rows = 32, .ms = 226.008 },
+        };
+        const ext = try host.costs.extend(gpa, &table, &pts);
+        defer gpa.free(ext);
+        const verify = try gpa.alloc(f64, rows);
+        const slope = if (ext.len >= 2) ext[ext.len - 1] - ext[ext.len - 2] else 5.207;
+        for (verify, 0..) |*v, i| {
+            v.* = if (i < ext.len) ext[i] else ext[ext.len - 1] + slope * @as(f64, @floatFromInt(i + 1 - ext.len));
+        }
+        return .{ .verify = verify, .draft = 3.690, .slot = 1.669 };
     }
 
     /// The server's image input: PNG, JPEG or WebP bytes to the tower's patches (null: no tower, or no limits given).

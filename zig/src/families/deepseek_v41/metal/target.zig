@@ -135,6 +135,8 @@ pub const Target = struct {
     }
     fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
         try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
+        if (t.env.p.mma_cert) |*mc| try out.appendSlice(t.a, &mc.normBufs());
+        if (t.env.p.xmma_cert) |*xc| try out.appendSlice(t.a, &xc.hybridBufs());
         for (t.slots) |*s| {
             for (s.kv.regions) |r| {
                 try out.append(t.a, r.window);

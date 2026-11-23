@@ -41,8 +41,11 @@ pub const Pipelines = struct {
     /// act_quant of the rows once, and the gate/up over its values (the decode layers'): slots of one row, of more
     quant: mtl.Pipeline,
     upc: [2]mtl.Pipeline,
+    /// optional fast non-dd MXFP4 gate/up and down for DSpark drafting under TF_DSV41_FP64_BF16=1
+    upc_fast: ?[2]mtl.Pipeline = null,
     /// Kimi's down for the slots of one row, and of 2 to 16 (one weight decode for every row of a pass)
     down: [2]mtl.Pipeline,
+    down_fast: ?[2]mtl.Pipeline = null,
     combine: mtl.Pipeline,
     combine_f32: mtl.Pipeline,
     /// Per-(pair_pos, group) exact-group safety flags allocated only for certified kernels (16 KiB).
@@ -56,15 +59,20 @@ pub const Pipelines = struct {
 
     /// The same kernels from other text: the contract's planted controls edit it.
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
-        return loadSourceOpt(device, text, false);
+        return loadSourceOpt(device, text, false, false);
     }
 
     /// Load certified decode expert kernels with the per-group `act_safe` flag buffer.
     pub fn loadSourceCert(device: mtl.Device, text: []const u8) !Pipelines {
-        return loadSourceOpt(device, text, true);
+        return loadSourceOpt(device, text, true, false);
     }
 
-    fn loadSourceOpt(device: mtl.Device, text: []const u8, cert: bool) !Pipelines {
+    /// Load certified decode expert kernels plus the opt-in fast non-dd DSpark variants from `experts_cert.metal`.
+    pub fn loadSourceWithFast(device: mtl.Device, text: []const u8) !Pipelines {
+        return loadSourceOpt(device, text, true, true);
+    }
+
+    fn loadSourceOpt(device: mtl.Device, text: []const u8, cert: bool, fast: bool) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
@@ -75,6 +83,8 @@ pub const Pipelines = struct {
         p.quant = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_quant", false);
         inline for (.{ "one", "rows" }, 0..) |k, i| p.upc[i] = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_" ++ k, false);
         p.down = .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_one", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_rows", false) };
+        p.upc_fast = if (fast) .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_one_fast", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_rows_fast", false) } else null;
+        p.down_fast = if (fast) .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_one_fast", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_rows_fast", false) } else null;
         if (cert) {
             const buf = try device.buffer(16384, mtl.ResourceOptions.shared);
             @memset(buf.contents()[0..16384], 0);
@@ -92,7 +102,9 @@ pub const Pipelines = struct {
         for (p.up) |x| x.deinit();
         p.quant.deinit();
         for (p.upc) |x| x.deinit();
+        if (p.upc_fast) |uf| for (uf) |x| x.deinit();
         for (p.down) |x| x.deinit();
+        if (p.down_fast) |df| for (df) |x| x.deinit();
         if (p.act_safe) |b| b.deinit();
     }
 };
@@ -168,6 +180,19 @@ pub fn upCoded(p: *const Pipelines, e: mtl.ComputeEncoder, codes: Ref, scales: R
     }
 }
 
+/// Fast non-dd `upCoded` for DSpark drafting under TF_DSV41_FP64_BF16=1 (falls back to `upCoded` if absent).
+pub fn upCodedFast(p: *const Pipelines, e: mtl.ComputeEncoder, codes: Ref, scales: Ref, table: Ref, r: Route, act: Ref, c: Call) void {
+    const pipes = p.upc_fast orelse return upCoded(p, e, codes, scales, table, r, act, c);
+    for (pipes[0..if (c.rows > 1) 2 else 1]) |pipe| {
+        e.setPipeline(pipe);
+        bind(e, &.{ codes, table, r.slots, r.nslots, r.pairs, act });
+        e.setValue(UpArgs{ .K = c.k, .N = c.n, .topk = c.topk, .rows_max = c.rows, .limit = swiglu_limit }, 6);
+        e.setBuffer(r.weights.buf, r.weights.off, 7);
+        e.setBuffer(scales.buf, scales.off, 8);
+        e.dispatchGroups(groups(c, c.n), mtl.Size.of(256, 1, 1));
+    }
+}
+
 /// Kimi's down: act [pair position][width] to out [pair position][hidden] (bf16); standalone (ignores `act_safe`).
 pub fn down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r: Route, out: Ref, c: Call) void {
     downWith(p, e, act, table, r, out, c, false);
@@ -185,6 +210,17 @@ fn downWith(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r:
         bind(e, &.{ act, table, r.slots, r.nslots, r.pairs, out });
         e.setValue(XpArgs{ .K = c.n, .N = c.k, .topk = c.topk, .rows_max = c.rows, .lin = lin }, 6);
         if (i == 1) if (p.act_safe) |as| e.setBuffer(as, 0, 7);
+        e.dispatchGroups(groups(c, c.k), mtl.Size.of(256, 1, 1));
+    }
+}
+
+/// Fast non-dd `down` for DSpark drafting under TF_DSV41_FP64_BF16=1 (falls back to `down` if absent).
+pub fn downFast(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, table: Ref, r: Route, out: Ref, c: Call) void {
+    const pipes = p.down_fast orelse return down(p, e, act, table, r, out, c);
+    for (pipes[0..if (c.rows > 1) 2 else 1]) |pipe| {
+        e.setPipeline(pipe);
+        bind(e, &.{ act, table, r.slots, r.nslots, r.pairs, out });
+        e.setValue(XpArgs{ .K = c.n, .N = c.k, .topk = c.topk, .rows_max = c.rows }, 6);
         e.dispatchGroups(groups(c, c.k), mtl.Size.of(256, 1, 1));
     }
 }

@@ -27,6 +27,8 @@ pub const Ctx = struct {
     segs: []const Seg = &.{},
     /// first row of this context inside the launch's buffers (nonzero only in a segment's context of `parts`)
     r0: u32 = 0,
+    /// fast non-dd M5 NAX/MXFP4 path for DSpark drafting under TF_DSV41_FP64_BF16=1 (target verify stays exact)
+    fast: bool = false,
 
     /// Total rows of the launch.
     pub fn total(x: *const Ctx) u32 {
@@ -60,13 +62,43 @@ pub const Ctx = struct {
         return x.s.metaAt(at + stride * x.r0);
     }
 
+    /// Hoist small-M BF16 activation prep into L2-resident scratch for consecutive `projReuse` calls sharing `in`.
+    pub fn prepProj(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, k: u32) bool {
+        const mc = if (x.p.mma_cert) |*m| m else return false;
+        const mma = pipelines.fp8_mma_cert;
+        if (x.fast or x.rows < 2 or x.rows > 16 or k == 0 or k % 32 != 0 or k > 8192) return false;
+        mma.prepSmall(mc, e, cv(mma.Ref, in), x.rows, k, 1, 0);
+        return true;
+    }
+
     /// A dense FP8 projection of the launch's rows: x [rows][k] bf16 to y [rows][n].
     pub fn proj(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool) !void {
-        try x.projBatch(e, in, w, out, f32_out, .{});
+        try x.projBatchReuse(e, in, w, out, f32_out, .{}, false);
+    }
+
+    /// Like `proj`, skipping `prepSmall` when `reuse_x` is true (caller already called `prepProj` + barrier on `in`).
+    pub fn projReuse(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool, reuse_x: bool) !void {
+        try x.projBatchReuse(e, in, w, out, f32_out, .{}, reuse_x);
     }
 
     /// `proj` over a batch of same-shape launches in one dispatch; the kernel by row count, a row's bits the same.
     pub fn projBatch(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool, b: fp8.Batch) !void {
+        try x.projBatchReuse(e, in, w, out, f32_out, b, false);
+    }
+
+    /// Like `projBatch`, skipping `prepSmall` when `reuse_x` is true (caller called `prepProj` + barrier on `in`).
+    pub fn projBatchReuse(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool, b: fp8.Batch, reuse_x: bool) !void {
+        if (x.p.mma_cert) |*mc| {
+            const mma = pipelines.fp8_mma_cert;
+            if (x.fast) {
+                const call: mma.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .out = if (f32_out) .f32 else .bf16 };
+                return mma.encodeFast(mc, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), call, .{ .n = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys });
+            }
+            if (!f32_out) {
+                const mcall: mma.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .out = .bf16, .reuse_x = reuse_x };
+                if (mma.takesSmall(mcall, b.n)) return mma.encodeSmall(mc, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), mcall, .{ .n = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys });
+            }
+        }
         const t = pipelines.fp8_tile;
         const tc: t.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .out = if (f32_out) .f32 else .bf16 };
         if (t.takes(tc, b.n)) return t.encode(&x.p.tile, e, cv(t.Ref, in), cv(t.Ref, w.w), cv(t.Ref, w.s), cv(t.Ref, out), tc, .{ .n = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys });

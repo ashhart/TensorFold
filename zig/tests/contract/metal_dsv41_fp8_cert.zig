@@ -14,7 +14,7 @@ const rows_k = tf.dsv41_metal.fp8_rows;
 const tile_k = tf.dsv41_metal.fp8_tile;
 const base = "dsv41_fp8_cert ";
 
-pub const Path = enum { mma, rows, tile };
+pub const Path = enum { mma, small, rows, tile };
 pub const Variant = struct { path: Path, out: mma.Out = .bf16, fixture: bool = false, ctl: u8 = 0 };
 
 const served = [_]c.Shape{
@@ -78,7 +78,7 @@ pub const Proj = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name };
         const src = switch (v.path) {
-            .mma => sources.dsv41.fp8_mma_cert,
+            .mma, .small => sources.dsv41.fp8_mma_cert_all,
             .rows => sources.dsv41.fp8_rows_cert,
             .tile => sources.dsv41.fp8_tile_cert,
         };
@@ -86,7 +86,7 @@ pub const Proj = struct {
         defer if (text) |t| a.free(t);
         const body = text orelse src;
         switch (v.path) {
-            .mma => p.mma_p = try mma.Pipelines.loadSource(a, device, body),
+            .mma, .small => p.mma_p = try mma.Pipelines.loadSource(a, device, body),
             .rows => p.rows_p = try rows_k.Pipelines.loadSource(device, body),
             .tile => p.tile_p = try tile_k.Pipelines.loadSource(device, body),
         }
@@ -128,6 +128,7 @@ pub const Proj = struct {
         const r: u32 = @intCast(shape.rows);
         switch (p.v.path) {
             .mma => mma.check(.{ .k = k, .n = n, .rows = r, .out = p.v.out }) catch return false,
+            .small => if (r > 16) return false else mma.check(.{ .k = k, .n = n, .rows = r, .out = .bf16 }) catch return false,
             .rows => rows_k.check(.{ .k = k, .n = n, .rows = r, .split = rows_k.splitOf(k) }) catch return false,
             .tile => if (!tile_k.fits(.{ .k = k, .n = n, .rows = r })) return false,
         }
@@ -152,6 +153,7 @@ pub const Proj = struct {
         const pass = p.rig.begin();
         switch (p.v.path) {
             .mma => try mma.encode(&p.mma_p.?, pass.e, .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.w.buf, .off = p.w.off }, .{ .buf = p.s.buf, .off = p.s.off }, .{ .buf = p.y.buf, .off = p.y.off }, .{ .k = k, .n = n, .rows = r, .out = p.v.out }),
+            .small => try mma.encodeSmall(&p.mma_p.?, pass.e, .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.w.buf, .off = p.w.off }, .{ .buf = p.s.buf, .off = p.s.off }, .{ .buf = p.y.buf, .off = p.y.off }, .{ .k = k, .n = n, .rows = r, .out = .bf16 }, .{}),
             .rows => try rows_k.encodeWhole(&p.rows_p.?, pass.e, .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.w.buf, .off = p.w.off }, .{ .buf = p.s.buf, .off = p.s.off }, .{ .buf = p.y.buf, .off = p.y.off }, .{ .k = k, .n = n, .rows = r, .split = rows_k.splitOf(k), .out = if (p.v.out == .f32) .f32 else .bf16 }, .{}),
             .tile => try tile_k.encode(&p.tile_p.?, pass.e, .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.w.buf, .off = p.w.off }, .{ .buf = p.s.buf, .off = p.s.off }, .{ .buf = p.y.buf, .off = p.y.off }, .{ .k = k, .n = n, .rows = r, .out = if (p.v.out == .f32) .f32 else .bf16 }, .{}),
         }
@@ -206,6 +208,11 @@ pub const Suite = struct {
         .{ .v = .{ .path = .mma, .out = .bf16, .ctl = 2 }, .name = base ++ "mma control: last K group dropped" },
         .{ .v = .{ .path = .mma, .out = .bf16, .ctl = 3 }, .name = base ++ "mma control: group sums rounded to fp16" },
         .{ .v = .{ .path = .mma, .out = .bf16, .ctl = 4 }, .name = base ++ "mma control: writes past its output" },
+        .{ .v = .{ .path = .small, .out = .bf16 }, .name = base ++ "small bf16" },
+        .{ .v = .{ .path = .small, .out = .bf16, .ctl = 1 }, .name = base ++ "small control: non-finite inputs flushed" },
+        .{ .v = .{ .path = .small, .out = .bf16, .ctl = 2 }, .name = base ++ "small control: last K group dropped" },
+        .{ .v = .{ .path = .small, .out = .bf16, .ctl = 3 }, .name = base ++ "small control: group sums rounded to fp16" },
+        .{ .v = .{ .path = .small, .out = .bf16, .ctl = 4 }, .name = base ++ "small control: writes past its output" },
         .{ .v = .{ .path = .rows, .out = .bf16 }, .name = base ++ "rows bf16" },
         .{ .v = .{ .path = .rows, .out = .f32 }, .name = base ++ "rows f32" },
         .{ .v = .{ .path = .rows, .out = .bf16, .ctl = 1 }, .name = base ++ "rows control: non-finite inputs flushed" },
@@ -271,20 +278,23 @@ pub const Suite = struct {
             const w = try rig.input(f.codes);
             const sc = try rig.input(f.scales);
             const ym = try rig.output(bytes);
+            const ys = try rig.output(bytes);
             const yr = try rig.output(bytes);
             const yt = try rig.output(bytes);
             const pass = rig.begin();
             try mma.encode(&mp, pass.e, .{ .buf = x.buf, .off = x.off }, .{ .buf = w.buf, .off = w.off }, .{ .buf = sc.buf, .off = sc.off }, .{ .buf = ym.buf, .off = ym.off }, .{ .k = k, .n = n, .rows = rows, .out = .bf16 });
+            try mma.encodeSmall(&mp, pass.e, .{ .buf = x.buf, .off = x.off }, .{ .buf = w.buf, .off = w.off }, .{ .buf = sc.buf, .off = sc.off }, .{ .buf = ys.buf, .off = ys.off }, .{ .k = k, .n = n, .rows = rows, .out = .bf16 }, .{});
             try rows_k.encodeWhole(&rp, pass.e, .{ .buf = x.buf, .off = x.off }, .{ .buf = w.buf, .off = w.off }, .{ .buf = sc.buf, .off = sc.off }, .{ .buf = yr.buf, .off = yr.off }, .{ .k = k, .n = n, .rows = rows, .split = rows_k.splitOf(k), .out = .bf16 }, .{});
             try tile_k.encode(&tp, pass.e, .{ .buf = x.buf, .off = x.off }, .{ .buf = w.buf, .off = w.off }, .{ .buf = sc.buf, .off = sc.off }, .{ .buf = yt.buf, .off = yt.off }, .{ .k = k, .n = n, .rows = rows, .out = .bf16 }, .{});
             try rig.finish(pass);
-            launches += 3;
+            launches += 4;
             const bm = rig.bytes(ym, bytes);
+            const bs = rig.bytes(ys, bytes);
             const br = rig.bytes(yr, bytes);
             const bt = rig.bytes(yt, bytes);
-            if (!bf16Equal(bm, br) or !bf16Equal(bm, bt)) bad += 1;
+            if (!bf16Equal(bm, bs) or !bf16Equal(bm, br) or !bf16Equal(bm, bt)) bad += 1;
         };
-        std.debug.print("{s} {s}prompt/decode/tile equality: {d} shapes x random/nonfinite ({d} launches), {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", base, shapes.len, launches, bad });
+        std.debug.print("{s} {s}prompt/small/decode/tile equality: {d} shapes x random/nonfinite ({d} launches), {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", base, shapes.len, launches, bad });
         return bad;
     }
 };

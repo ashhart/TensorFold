@@ -8,6 +8,10 @@ const mma_records = [_]M{
     .{ .name = "dsv41 fp8 cert zero tf_dsv41_fp8_cert_zero_cnt", .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false },
     .{ .name = "dsv41 fp8 cert gemm tf_dsv41_fp8_cert_gemm", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "dsv41 fp8 cert repair tf_dsv41_fp8_cert_repair_bf16", .threads = 128, .tg_memory = 5632, .reserved = 128, .offline = false },
+    .{ .name = "dsv41 fp8 cert prep small tf_dsv41_fp8_cert_prep_x_small", .threads = 256, .tg_memory = 160, .reserved = 256, .offline = false },
+    .{ .name = "dsv41 fp8 cert small tf_dsv41_fp8_cert_small_gemm", .threads = 128, .tg_memory = 9232, .reserved = 128, .offline = false },
+    .{ .name = "dsv41 fp8 cert fast bf16 tf_dsv41_fp8_fast_nax_bf16", .threads = 128, .tg_memory = 12288, .reserved = 128, .offline = false },
+    .{ .name = "dsv41 fp8 cert fast f32 tf_dsv41_fp8_fast_nax_f32", .threads = 128, .tg_memory = 12288, .reserved = 128, .offline = false },
     .{ .name = "dsv41 fp8 cert f32 tf_dsv41_fp8_cert_f32", .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false },
 };
 

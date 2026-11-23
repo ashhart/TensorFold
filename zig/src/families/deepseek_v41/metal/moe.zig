@@ -8,6 +8,7 @@ const pipelines = @import("pipelines.zig");
 const Ctx = ctx_.Ctx;
 const g = pipelines.glue;
 const ex = pipelines.experts;
+const xc = pipelines.xmma_cert;
 const f = pipelines.fused;
 const cv = ctx_.cv;
 
@@ -33,7 +34,36 @@ pub fn encodeWith(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer,
     const route: ex.Route = .{ .ids = cv(ex.Ref, s.picks), .weights = cv(ex.Ref, s.wts), .slots = cv(ex.Ref, s.plan[0]), .nslots = cv(ex.Ref, s.plan[1]), .pairs = cv(ex.Ref, s.plan[2]), .where = cv(ex.Ref, s.plan[3]) };
     const rt: g.Route = .{ .logits = s.logits, .bias = w.gate_b, .bias_vl = w.gate_bvl orelse w.gate_b, .image = s.image, .picks = s.picks, .weights = s.wts };
     const table: ex.Ref = .{ .buf = w.table };
+    const use_xu = !x.fast and sh.topk == ex.topk and x.p.xmma_cert != null and R >= 2;
     if (sh.plan) |pp| {
+        if (use_xu) {
+            const xp = &x.p.xmma_cert.?;
+            const xmc: xc.Call = .{ .rows = R, .k = c.hidden, .n = c.expert_width, .experts = sh.experts };
+            g.gatePlan(pp, e, rt, s.plan, s.hn2, w.gate_w, s.sync, R, c.hidden, sh.experts, sh.topk, c.routed_scale);
+            xc.quant(xp, e, cv(ex.Ref, s.hn2), cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), xmc);
+            const hq2_prepped = x.prepProj(e, s.hq2, c.hidden);
+            e.barrier();
+            xc.tilesHybrid(xp, e, route, cv(ex.Ref, s.xmtiles), xmc);
+            if (fin) |m| f.mixFinish(&x.p.fused, e, m, R);
+            e.barrier();
+            ex.use(e, w.backing());
+            xc.upHybrid(xp, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.xmtiles), cv(ex.Ref, s.act), xmc);
+            try sharedUpReuse(x, e, w, s.hq2, hq2_prepped);
+            e.barrier();
+            xc.patchUpHybrid(xp, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.xmtiles), cv(ex.Ref, s.act), xmc);
+            f.swiglu(&x.p.fused, e, cv(f.Ref, s.sg), cv(f.Ref, s.su), cv(f.Ref, s.sact), cv(f.Ref, s.sactq), R * c.expert_width, c.swiglu_limit);
+            e.barrier();
+            xc.dprepHybrid(xp, e, cv(ex.Ref, s.act), cv(ex.Ref, s.xmdq), xmc);
+            xc.downOneHybrid(xp, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), xmc);
+            const sactq_prepped = x.prepProj(e, s.sactq, c.expert_width);
+            e.barrier();
+            xc.downXuHybrid(xp, e, cv(ex.Ref, s.act), cv(ex.Ref, s.xmdq), table, cv(ex.Ref, s.xmtiles), cv(ex.Ref, s.eout), xmc);
+            try x.projReuse(e, s.sactq, w.shared[1], s.sout, false, sactq_prepped);
+            e.barrier();
+            xc.patchDownHybrid(xp, e, cv(ex.Ref, s.act), cv(ex.Ref, s.xmdq), table, cv(ex.Ref, s.xmtiles), cv(ex.Ref, s.eout), xmc);
+            e.barrier();
+            return join(x, e, sh, j, call);
+        }
         // the gate's logits, route and plan in one launch beside the shared FP8 w1 and w3 and act_quant(x)
         g.gatePlan(pp, e, rt, s.plan, s.hn2, w.gate_w, s.sync, R, c.hidden, sh.experts, sh.topk, c.routed_scale);
         try sharedUp(x, e, w, s.hq2);
@@ -43,10 +73,10 @@ pub fn encodeWith(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer,
         if (fin) |m| f.mixFinish(&x.p.fused, e, m, R);
         f.swiglu(&x.p.fused, e, cv(f.Ref, s.sg), cv(f.Ref, s.su), cv(f.Ref, s.sact), cv(f.Ref, s.sactq), R * c.expert_width, c.swiglu_limit);
         ex.use(e, w.backing());
-        ex.upCoded(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call);
+        if (x.fast) ex.upCodedFast(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call) else ex.upCoded(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call);
         e.barrier();
         try x.proj(e, s.sactq, w.shared[1], s.sout, false);
-        ex.down(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call);
+        if (x.fast) ex.downFast(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call) else ex.downFromUp(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call);
         e.barrier();
         return join(x, e, sh, j, call);
     }
@@ -65,9 +95,9 @@ pub fn encodeWith(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer,
     ex.quant(&x.p.experts, e, cv(ex.Ref, s.hn2), cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), call);
     try x.proj(e, s.sactq, w.shared[1], s.sout, false);
     e.barrier();
-    ex.upCoded(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call);
+    if (x.fast) ex.upCodedFast(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call) else ex.upCoded(&x.p.experts, e, cv(ex.Ref, s.xq), cv(ex.Ref, s.xqs), table, route, cv(ex.Ref, s.act), call);
     e.barrier();
-    ex.down(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call);
+    if (x.fast) ex.downFast(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call) else ex.down(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call);
     e.barrier();
     join(x, e, sh, j, call);
 }
@@ -82,17 +112,21 @@ fn join(x: *const Ctx, e: mtl.ComputeEncoder, sh: Shape, j: Join, call: ex.Call)
 
 /// The shared expert's w1 and w3 on one input: one dispatch of two launches when both live in the same buffers.
 fn sharedUp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, in: ctx_.Ref) !void {
+    return sharedUpReuse(x, e, w, in, false);
+}
+
+fn sharedUpReuse(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, in: ctx_.Ref, reuse_x: bool) !void {
     const s = x.s;
     const w1 = w.shared[0];
     const w3 = w.shared[2];
     if (w1.w.buf.id != w3.w.buf.id or w1.s.buf.id != w3.s.buf.id) {
-        try x.proj(e, in, w1, s.sg, false);
-        return x.proj(e, in, w3, s.su, false);
+        try x.projReuse(e, in, w1, s.sg, false, reuse_x);
+        return x.projReuse(e, in, w3, s.su, false, reuse_x);
     }
     const d = struct {
         fn of(a: ctx_.Ref, b: ctx_.Ref) i64 {
             return @as(i64, @intCast(b.off)) - @as(i64, @intCast(a.off));
         }
     };
-    try x.projBatch(e, in, w1, s.sg, false, .{ .n = 2, .ws = d.of(w1.w, w3.w), .ss = d.of(w1.s, w3.s), .ys = d.of(s.sg, s.su) });
+    try x.projBatchReuse(e, in, w1, s.sg, false, .{ .n = 2, .ws = d.of(w1.w, w3.w), .ss = d.of(w1.s, w3.s), .ys = d.of(s.sg, s.su) }, reuse_x);
 }
