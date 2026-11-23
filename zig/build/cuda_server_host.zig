@@ -111,8 +111,10 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     const start_run = b.addRunArtifact(b.addTest(.{ .root_module = start_tests, .filters = &.{"start CLI:"} }));
     start_run.has_side_effects = true;
     const start_step = b.step("test-start-cli-host", "Automatic model choice, download consent, first reply and serve-child cleanup without devices");
-    start_step.dependOn(&start_run.step);
-    step.dependOn(&start_run.step);
+    if (host.result.os.tag != .windows) {
+        start_step.dependOn(&start_run.step);
+        step.dependOn(&start_run.step);
+    }
     const windows_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });
     const windows_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = windows_target, .optimize = .debug, .link_libc = true });
     const windows_start = @import("server.zig").plain(b, "zig/src/server/start_cli.zig", windows_target, .debug, windows_lanes);
