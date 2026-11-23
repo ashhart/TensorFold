@@ -7,7 +7,6 @@ pub const pricedBatched = alloc.pricedBatched;
 pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
-const copy_price = @import("copy_price.zig");
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -18,11 +17,11 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
-    copy_ms: ?Table = null, // a lone stream's copy rounds' times by copied rows (lanes/lone_copy.zig)
-    copy_plain: ?u64 = null, // copies priced off in a row, and how many before one is tried again
+    copy_ms: ?Table = null, // opt-in copy prices, independent of the head depth rule
+    copy_plain: ?u64 = null,
     copy_wait: ?u64 = null,
-    copy_band: ?usize = null, // the context band its copy prices started from, where it leaves them (lanes/lone_copy.zig)
-    copy_rounds: u64 = 0, // its own timed copy rounds
+    copy_band: ?usize = null,
+    copy_rounds: u64 = 0,
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
@@ -54,16 +53,18 @@ pub const Probe = struct {
 pub const Overhead = struct { streams: u32, ms: f64, head: f64 = 0.0 };
 
 pub const Rule = struct {
+    pub const copyRows = @import("copy_rule.zig").rows;
     gpa: Allocator,
     k: Constants = .{},
     prior: []const f64,
     most_drafts: u32,
+    shared_cap: u32 = 0, // Model.shared_mtp_cap: most a shared round chains a stream; a lone one chains most_drafts (0: off)
     family_costs: *const Table,
     shared_costs: *const Table,
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
-    copy_guard: bool = false, // a lone stream's copies compete with its own plain rounds (Config.copy_guard)
+    copy_guard: bool = false, // copy_rule.zig only; existing head pricing never reads it
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
@@ -116,11 +117,6 @@ pub const Rule = struct {
     fn costs(r: *Rule, who: ?Who) !*Table {
         const w = who orelse return &r.round_ms;
         if (!r.plain_guard) return if (w.sampled) &r.round_ms else &r.greedy_ms;
-        return r.ownCosts(w);
-    }
-
-    /// The stream's own round times by depth (plain_guard's, and a copy's plain price: lanes/copy_price.zig).
-    pub fn ownCosts(r: *Rule, w: Who) !*Table {
         _ = try r.rates(w);
         const st = &w.state.*.?;
         if (st.ms == null) st.ms = .{};
@@ -135,22 +131,18 @@ pub const Rule = struct {
         if (table == &r.greedy_ms) try r.blend(&r.round_ms, drafts, ms); // a greedy round counts for every stream too
     }
 
-    pub fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
+    fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
         const before = table.get(drafts);
         try table.put(r.gpa, drafts, if (before) |b| b + r.k.cost_rate * (ms - b) else ms);
     }
 
     /// Measured round time when there is one, else the load-time forward cost plus head steps.
     pub fn roundCost(r: *Rule, drafts: i64, who: ?Who) !?f64 {
-        return r.roundCostIn(try r.costs(who), drafts, r.plain_guard);
-    }
-
-    /// roundCost on `table`; `with_floor`: an untimed depth also pays the least excess a timed round's row showed.
-    pub fn roundCostIn(r: *const Rule, table: *const Table, drafts: i64, with_floor: bool) ?f64 {
+        const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
-        if (with_floor) {
+        if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
             for (table.slots, 0..) |slot, d| {
@@ -172,11 +164,11 @@ pub const Rule = struct {
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
-            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
+            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else if (r.shared_cap != 0) r.most_drafts else 3;
             return @max(1, @min(most, want));
         }
         const st = try r.state(who);
-        var best = (try r.bestRows(who, p, most, false, st.last)).rows;
+        var best = (try r.bestRows(who, p, most, st.last)).rows;
         st.rounds += 1;
         if (best == 0) {
             st.last = null; // plain holds no depth: the next drafted depth is chosen fresh
@@ -201,11 +193,11 @@ pub const Rule = struct {
     }
 
     /// The rows with the most expected tokens a ms (0: plain); `hold` stays unless another beats it by depth_margin.
-    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool, hold: ?i64) !struct { rows: i64, drafted: i64 } {
+    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, hold: ?i64) !struct { rows: i64, drafted: i64 } {
         var best: i64 = 1;
         var best_rate: f64 = -1.0;
-        if (copy or r.plain_guard) {
-            if (try (if (copy) copy_price.plain(r, who) else r.roundCost(0, who))) |plain| {
+        if (r.plain_guard) {
+            if (try r.roundCost(0, who)) |plain| {
                 if (plain != 0.0) { // a draft must beat plain by plain_margin: estimates near the line are noise
                     best = 0;
                     best_rate = r.k.plain_margin / plain;
@@ -219,7 +211,7 @@ pub const Rule = struct {
         var run: f64 = 1.0;
         var d: i64 = 1;
         while (d <= most) : (d += 1) {
-            const cost = (if (copy) try copy_price.cost(r, d, who) else try r.roundCost(d, who)) orelse break;
+            const cost = (try r.roundCost(d, who)) orelse break;
             const at: usize = @intCast(d - 1);
             run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
             expected += run;
@@ -243,34 +235,12 @@ pub const Rule = struct {
 
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
     fn probePlain(r: *Rule, st: *State) bool {
-        return r.backoff(&st.plain, &st.wait);
-    }
-
-    /// True on the pass reaching `wait` passes in a row; the count restarts, the wait doubles (to plain_wait_most).
-    fn backoff(r: *const Rule, passes: *?u64, wait: *?u64) bool {
-        passes.* = (passes.* orelse 0) + 1;
-        const w = wait.* orelse r.k.depth_probe_every;
-        if (passes.*.? < w) return false;
-        passes.* = 0;
-        wait.* = @min(2 * w, r.k.plain_wait_most);
+        st.plain = (st.plain orelse 0) + 1;
+        const wait = st.wait orelse r.k.depth_probe_every;
+        if (st.plain.? < wait) return false;
+        st.plain = 0;
+        st.wait = @min(2 * wait, r.k.plain_wait_most);
         return true;
-    }
-
-    /// A lone copy's best prefix on its stream's own times, none while plain wins bar a backoff probe (`take` counts).
-    pub fn copyRows(r: *Rule, who: Who, chances: []const f64, rows: i64, take: bool) !i64 {
-        if (rows <= 0 or !r.copy_guard or r.family_costs.empty()) return rows;
-        if ((try copy_price.plain(r, who)) == null) return rows;
-        const best = try r.bestRows(who, chances, rows, true, null);
-        const st = &who.state.*.?;
-        if (best.rows > 0) {
-            if (take) {
-                st.copy_plain = 0;
-                st.copy_wait = r.k.depth_probe_every;
-            }
-            return best.rows;
-        }
-        const probe = if (take) r.backoff(&st.copy_plain, &st.copy_wait) else (st.copy_plain orelse 0) + 1 >= (st.copy_wait orelse r.k.depth_probe_every);
-        return if (probe) best.drafted else 0;
     }
 
     /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.
@@ -390,15 +360,15 @@ pub const Rule = struct {
         const streams = if (paired != null) total_streams else whos.len;
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
+        const top: i64 = if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts;
         if (r.confidence_floor != null) {
-            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
+            for (whos, out) |*w, *o| o.* = @min(try r.headDepth(w, null, probe), top);
             return;
         }
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
-                const granted: i64 = if (w.granted) |g| g else r.most_drafts;
-                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
+                const inner = @min(try r.headDepth(w, null, probe), top);
+                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, @as(i64, w.granted orelse r.most_drafts) + r.k.draft_slack), probe);
             }
             if (r.granted_depth) capPass(out, r.batch_rows);
             if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHoldsFor(whos, sampled, out, total_streams);
@@ -412,7 +382,7 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs[0..whos.len]) |w, *m, *p| {
-            m.* = @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
+            m.* = @min(top, @max(1, w.draft_room - 1));
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }

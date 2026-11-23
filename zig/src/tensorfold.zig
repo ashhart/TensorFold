@@ -10,6 +10,7 @@ pub const wav = @import("core/wav.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
+pub const digest_cache = @import("core/digest_cache.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.
@@ -28,6 +29,7 @@ pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
 pub const npy = @import("core/npy.zig");
 pub const picture = @import("core/picture/picture.zig");
+pub const audio = @import("core/audio.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
@@ -81,6 +83,7 @@ pub const hy4_contract = @import("families/hy4_flash/contract_exports.zig");
 pub const qwen3_metal = @import("families/qwen3/metal/metal.zig");
 pub const llama = @import("families/llama/llama.zig");
 pub const flint = @import("families/flint/flint.zig");
+pub const ricursive = @import("families/ricursive/ricursive.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 pub const lfm3 = @import("families/lfm3/lfm3.zig");
@@ -91,6 +94,7 @@ test {
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
     _ = @import("families/lfm3/state.zig");
+    _ = @import("families/lfm3/qk_segments_test.zig"); // a shared round's qk in one dispatch (Metal)
     _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
@@ -120,6 +124,7 @@ test {
     _ = @import("families/llama/llama.zig");
     _ = qwen3_metal;
     _ = @import("families/flint/flint.zig");
+    _ = @import("families/ricursive/ricursive.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
@@ -160,6 +165,7 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
+pub const recurrent_workspace = @import("core/recurrent_workspace.zig");
 
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");
@@ -175,3 +181,5 @@ pub const hc_pointwise_metal_adapter = @import("core/hc_pointwise_metal_impl.zig
 pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("core/attention_ref.zig");
+
+pub const metal_penalties = @import("families/flashnext/penalties.zig");

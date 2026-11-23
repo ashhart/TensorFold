@@ -42,10 +42,13 @@ test {
     _ = @import("plain_catchup_test.zig");
     _ = calib_measure;
     _ = @import("calib_measure_test.zig");
+    _ = @import("cost_table_test.zig");
     _ = branches_oracle;
     _ = @import("branches_test.zig");
     _ = @import("drive_test.zig");
     _ = @import("lanes_test.zig");
+    _ = @import("lanes_grammar_test.zig");
+    _ = @import("lanes_first_test.zig");
     _ = @import("golden_test.zig");
     _ = spec;
     _ = @import("spec_test.zig");

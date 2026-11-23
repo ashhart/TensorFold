@@ -143,6 +143,8 @@ pub const Engine = struct {
         // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
         const busy = try chunkRows();
         const chunk = try chunks.soloRows(busy, false);
+        const fuse_split_n = @import("fused_split.zig").columns(try @import("fused_split.zig").on());
+        if (fuse_split_n != 0) std.log.info("flashnext: TF_FLASHNEXT_FUSED_SPLIT=1: split-K lane calls of {d} columns or more run on the fused form", .{fuse_split_n});
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -218,6 +220,7 @@ pub const Engine = struct {
         e.ngram = try ple.Ngram.init(gpa, io, e.model_dir);
         errdefer e.ngram.deinit();
         e.batch_k = try batch.Kernels.load(driver);
+        e.batch_k.native_lane.fuse_split_n = fuse_split_n;
         e.batch_s = null;
         e.scores = null;
         e.chunk = chunk;

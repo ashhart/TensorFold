@@ -27,6 +27,10 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-wait-reasons-server-host", "The ledger's wait, refusal and failure labels in /metrics and /v1/load").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"wait reason ledger:"} })).step);
     // the open-connection limit, one address's share under pressure and its flags (#3048), on Linux hosts too
     b.step("test-connection-admission-host", "Connection limit, per-address share, trusted proxies and idle shedding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "security: ", "connection CLI:" } })).step);
+    b.step("test-admission-http-host", "Admission places over HTTP: n choices, refusals and walk-aways return every place").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"admission HTTP:"} })).step);
+    const flush = b.step("test-prompt-cache-flush-host", "The prompt cache flush: its hold, a cold next turn, withdrawal and who may call it");
+    flush.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"prompt cache flush:"} })).step);
+    flush.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"prompt cache flush"} })).step);
     b.step("test-drama-cfg-host", "Drama CFG CLI, HTTP and voice transitions without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"CFG"} })).step);
     b.step("test-speech-redraw-deadline-host", "Busy speech redraw expiry without counting an unsubmitted take").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a busy redraw stops at its latest start"} })).step);
     b.step("test-server-keepalive-host", "Silent engine keepalives and cancellation through the threaded server").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a silent engine's stream gets keepalives before its first token"} })).step);
@@ -36,6 +40,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.tokenizer, .filters = &.{"EOS policy:"} })).step);
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), .filters = &.{"EOS policy:"} })).step);
     b.step("test-serve-flags-host", "Serve flag parsing, the flat TOML reader and --config expansion, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "--compact-at:", "flat TOML:", "serve --config:" } })).step);
+    b.step("test-request-deadline-host", "deadline_s: the server ends a reply at its deadline with usage and ids").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request deadline:"} })).step);
     b.step("test-dory-cli-host", "Dory CUDA loop option forwarding and invalid-value refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"--device and --segments:"} })).step);
     b.step("test-dory-chat-host", "Dory chat template, EOS, reasoning split and qwen3_coder call on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Dory chat:"} })).step);
     b.step("test-embeddings-protocol-host", "Embedding request and response contracts without an admitted model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings protocol:"} })).step);
@@ -77,6 +82,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-request-journal-host", "The request journal's records, rotation and crash quarantine on a fake engine").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request journal:"} })).step);
     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
     b.step("test-cors-template-host", "Exact CORS and special-preserving template route regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "CORS", "apply-template:" } })).step);
+    const salts = b.step("test-cache-salt-host", "Salted state, disk, Recall and per-key route isolation");
+    salts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "salts:", "salts per key:", "two salts never", "a salted text prompt", "the routes:", "cache salt isolation:" } })).step);
+    salts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{ "one salt keeps", "the disk store keeps salted", "a salted request neither" } })).step);
     b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     // the 512 KiB grammar limit: a sent grammar by its text, tools by the grammar for one call (#3038)

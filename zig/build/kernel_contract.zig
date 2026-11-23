@@ -12,6 +12,8 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug) }));
     run.has_side_effects = true;
+    const attn = b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"XPU attention:"} });
+    b.step("test-xpu-attn-contract-host", "Decode attention's float64 reference, tree, tail and sum fixtures (no GPU)").dependOn(&b.addRunArtifact(attn).step);
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
@@ -130,6 +132,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
+    @import("ling_forward.zig").steps(b, target, optimize, metal_mod, sources, kimi_metallib);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,

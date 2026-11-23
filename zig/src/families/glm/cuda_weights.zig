@@ -43,7 +43,6 @@ pub const Weights = struct {
     norm: glue.Norm = .{ .bf16 = 0 },
     head: projection.Proj = .{ .bf16 = 0 }, // [share.vocab][dims]: bf16, or MXFP8 for the lane
     mtp: ?Mtp = null,
-    exl3_shx: bool = true, // EXL3: every layer's gate and up share one input rotation (a prompt rotates each row once)
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     named: std.ArrayList(Named) = .empty,
 
@@ -251,7 +250,8 @@ const Loader = struct {
         const q_norm = try L.put("layers.{d}.dsa.q_norm", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.kv_a_layernorm.weight", .{i}), .bf16);
         const kv_norm = try L.put("layers.{d}.dsa.kv_norm", .{i});
-        const q_b = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * qk, h.hi * qk } }}, wants, "layers.{d}.dsa.q_b");
+        const qh = qk + c.rope; // a q head's rows: its latent-path dims, then its roped ones
+        const q_b = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * qh, h.hi * qh } }}, wants, "layers.{d}.dsa.q_b");
         const kv_b = try L.get("layers.{d}.self_attn.kv_b_proj.weight", .{i});
         const per = qk + c.v_dim; // a head's kv_b rows: its keys, then its values
         const total = c.mla_heads * per;
@@ -279,11 +279,12 @@ const Loader = struct {
             .wk = wk,
             .wv = wv,
             .o = o,
-            .index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim },
+            .index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool } },
             .heads = h.len(),
             .qk = qk,
             .dv = c.v_dim,
             .lw = c.kv_lora,
+            .rope = c.rope,
             .q_lora = c.q_lora,
             .dims = c.hidden,
             .eps = c.eps,
@@ -441,7 +442,6 @@ const Loader = struct {
         var x3: ?exl3.Experts = null;
         if (c.exl3) { // the MTP layer's experts too
             x3 = try exl3.load(L, i, count, d, c.moe_inter, cut);
-            if (!x3.?.shx) L.w.exl3_shx = false;
         } else routed = try L.nvfp4Experts(i);
         const sh = L.w.share.shared;
         const sw: []const formats.Format = if (i == c.layers) &.{ .bf16, .fp8_pb, .mxfp8 } else &.{ .bf16, .fp8_pb }; // MTP's MXFP8

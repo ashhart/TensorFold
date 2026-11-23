@@ -46,11 +46,13 @@ pub const Generation = struct {
     asked: ?*const std.atomic.Value(bool) = null, // POST /v1/requests/{id}/cancel's ask (cancel_ids.zig)
     cancel_sent: bool = false, // the ask went to the engine once; the loop then reads until the engine finishes
     seed: ?u64 = null,
+    report_seed: bool = false, // one of n > 1 choices: the tensorfold block names its seed
     sink: ?Sink,
     thinking: bool,
     chat: bool = true,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    grammar: @import("eos_phase.zig").Phase = .none, // the request's grammar at the next token to commit
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     required: bool = false, // tool_choice "required" or a named function: the reply must call a tool
@@ -75,9 +77,11 @@ pub const Generation = struct {
     lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
     recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
+    deadline_ns: ?i96 = null, // "deadline_s": when the server ends the reply itself
+    deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
 
     fn eos(g: *const Generation, t: u32) bool {
-        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+        return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
     }
 
     /// Whether the route's own tool parser would find a call, or a refused envelope, in `text` taken as the answer.
@@ -112,6 +116,7 @@ pub const Generation = struct {
 
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
+        const before = g.grammar; // the stream below judges each token's end at its own phase, as this loop does
         var landed: usize = 0;
         for (chunk) |t| {
             if (g.reason != null) break;
@@ -123,6 +128,7 @@ pub const Generation = struct {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
             } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
+            g.grammar = g.grammar.next(t); // thinking on: the grammar takes the reply from the token after `</think>`
         }
         if (landed == 0) return;
         const arrived = nowNs(g.srv.io);
@@ -137,17 +143,11 @@ pub const Generation = struct {
             g.wrote_ns = nowNs(g.srv.io);
         }
         if (g.streaming_done) return;
-        var fresh: std.ArrayList(u32) = .empty;
-        for (chunk[0..landed]) |t| {
-            if (g.eos(t)) {
-                g.streaming_done = true;
-                break;
-            }
-            try fresh.append(g.a, t);
-        }
+        const fresh = @import("eos_phase.zig").streamed(before, g.ignore_eos, g.srv.eos, chunk[0..landed]);
+        if (fresh.ended) g.streaming_done = true;
         const live = g.liveRows();
-        if (live) |l| try l.add(g.srv, g.a, fresh.items);
-        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
+        if (live) |l| try l.add(g.srv, g.a, fresh.tokens);
+        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.tokens);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
@@ -264,6 +264,16 @@ pub const Generation = struct {
                 g.srv.engine.cancel(g.id);
                 g.cancel_sent = true;
             };
+            // a client's cancel came first: the reply ends "cancelled", not at a deadline that passes afterwards
+            if (g.deadline_ns) |d| if (!g.deadline_hit and !g.cancel_sent and g.reason == null and nowNs(g.srv.io) >= d) {
+                m.mutex.lockUncancelable(m.io);
+                const ended_first = m.finished; // still draining a reply the engine already ended: it keeps that end
+                m.mutex.unlock(m.io);
+                if (ended_first) g.deadline_ns = null else {
+                    g.deadline_hit = true;
+                    g.srv.engine.cancel(g.id); // the engine ends the stream: its tokens and usage stay whole
+                }
+            };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
                 const now = nowNs(g.srv.io);
@@ -276,6 +286,7 @@ pub const Generation = struct {
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
+            _ = m.unread.fetchSub(@intCast(tokens.len), .monotonic); // written out: the lane host may run it again
         }
     }
 
@@ -283,17 +294,19 @@ pub const Generation = struct {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
-        const ended: []const u8 = g.reason orelse switch (m.reason) {
+        const natural: []const u8 = g.reason orelse switch (m.reason) {
             .stop => "stop",
             .length => "length",
             .silence => return cx.other("the text engine returned a speech-only finish reason"),
             .cancelled => "cancelled",
             .failed => return cx.other(if (m.message.len > 0) try a.dupe(u8, m.message) else "the reply failed"),
         };
+        // the server ended the reply at its deadline: a late token's EOS, stop string or cap never hides that
+        const ended = if (g.deadline_hit) "deadline" else natural;
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
@@ -377,6 +390,7 @@ pub const Generation = struct {
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
+        if (g.report_seed) try runtime.put(a, "seed", if (g.seed) |v| try json.intValue(a, v) else .null);
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);

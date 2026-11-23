@@ -14,10 +14,15 @@ pub const Ds = struct {
 
     /// The rig of `fixture.dsparkConfig`, the drafter's weights read back from the same image, a pass of `slots` slots.
     pub fn init(a: std.mem.Allocator, io: std.Io, limit: u32, seed: u64, slots: u32) !*Ds {
+        return initWith(a, io, fixture.dsparkConfig(), limit, seed, slots, .{});
+    }
+
+    /// `init` of config `c` with the pass's GPU chain (`gpu_chain`) and narrow block (`narrow`) as `o` sets them.
+    pub fn initWith(a: std.mem.Allocator, io: std.Io, c: host.config.Config, limit: u32, seed: u64, slots: u32, o: struct { gpu_chain: bool = false, narrow: u32 = 0 }) !*Ds {
         const d = try a.create(Ds);
         errdefer a.destroy(d);
         d.a = a;
-        d.r = try fixture.Rig.initWith(a, io, fixture.dsparkConfig(), limit, seed);
+        d.r = try fixture.Rig.initWith(a, io, c, limit, seed);
         errdefer d.r.deinit();
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -30,7 +35,7 @@ pub const Ds = struct {
         defer pack.deinit();
         d.w = try pkg.dspark.loadWeights(a, io, d.r.device, &pack, &d.r.c);
         errdefer d.w.deinit();
-        d.pass = try pkg.dspark.Pass.init(a, d.r.device, d.r.queue, &d.r.c, &d.r.p, &d.r.s, &d.r.tables, &d.r.top.?, &d.w, .{ .slots = slots, .candidates = d.r.c.vocab });
+        d.pass = try pkg.dspark.Pass.init(a, d.r.device, d.r.queue, &d.r.c, &d.r.p, &d.r.s, &d.r.tables, &d.r.top.?, &d.w, .{ .slots = slots, .candidates = d.r.c.vocab, .gpu_chain = o.gpu_chain, .narrow = o.narrow });
         return d;
     }
 

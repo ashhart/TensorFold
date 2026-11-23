@@ -12,6 +12,7 @@ const calib = @import("calib.zig");
 const costs_mod = @import("costs.zig");
 const Policy = @import("policy.zig").Policy;
 const spec_mod = @import("spec.zig");
+const first_mask = @import("lanes_first.zig");
 
 pub const max_block = 16;
 
@@ -34,6 +35,7 @@ pub const St = struct {
     len: u64 = 0, // rows the target holds (provisional after a window until keep)
     base: u64 = 0, // the last window's start
     first: u32 = 0, // the prompt's choice (for `first`)
+    first_bits: std.ArrayList(u32) = .empty, // the grammar bits the pass drew `first` under (lanes_first.zig)
     held: [max_block]u32 = undefined, // the last pass's drafts (the main chain)
     conf: [max_block]f64 = undefined,
     n: u32 = 0, // drafts held (0: none this round)
@@ -80,6 +82,7 @@ pub const Lanes = struct {
 
     pub fn drop(x: *Lanes, st: *St) void {
         st.shown.deinit(x.gpa);
+        st.first_bits.deinit(x.gpa);
         x.gpa.destroy(st);
     }
 
@@ -89,7 +92,7 @@ pub const Lanes = struct {
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .release = release };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .held = heldChain, .release = release, .first_masked = firstMasked };
     /// a target that runs prompts in pieces (iface.Target begin / piece / finish): the round planner may use them
     const vtable_pieces: be.Backend.VTable = blk: {
         var v = vtable;
@@ -185,6 +188,7 @@ pub const Lanes = struct {
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
         if (s.images.len > 0) try x.target.setImages(slot, s.images);
+        try x.target.firstMask(slot, try first_mask.take(x, st, s));
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
@@ -261,6 +265,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
+        try x.target.firstMask(st.slot, try first_mask.take(x, st, s));
         return x.finished(st, ids, try x.target.finish(st.slot, ids, s.sampling, ids.len));
     }
 
@@ -270,6 +275,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
+        try x.target.firstMask(st.slot, try first_mask.take(x, st, s));
         if (try x.target.tail(st.slot, ids, s.sampling, ids.len)) |first_| {
             try x.finished(st, ids, first_);
             return false;
@@ -295,6 +301,12 @@ pub const Lanes = struct {
         if (position != st.len) return error.PositionMismatch;
         try x.drawn.append(x.gpa, st.first);
         return x.drawn.items.len - 1;
+    }
+
+    /// Backend.first_masked: `first`, the pass's pick under these same bits; no forward, KV row or draft runs.
+    fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
+        try first_mask.check(try self(ptr).get(s), mask);
+        return first(ptr, s, position);
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -334,7 +346,8 @@ pub const Lanes = struct {
             @memcpy(tokens[1 .. 1 + w.held], st.held[0..w.held]);
             @memcpy(tokens[1 + w.held ..], w.tokens);
             const parents = w.parents; // each row's parent row (row 0: -1)
-            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling };
+            if (w.masks.len > 0 and !x.target.masks()) return error.StructuresUnsupported;
+            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling, .masks = w.masks };
             c.* = o.sampled;
             @memcpy(o.drafts, tokens[1..]);
         }
@@ -462,8 +475,10 @@ pub const Lanes = struct {
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
                 const done = if (x.spec) |*sp| sp.ingested(st.slot, r.start, path) else false;
+                // the speculation ingested another path of this window than the commit kept: the kept one lands now
+                const redo = !done and if (x.spec) |*sp| sp.differs(st.slot, r.start) else false;
                 // a shared round drafts before its keep: the path, not st.len; no ask: the next ingest catches it up
-                if (!done and (asks_now or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
+                if (!done and (asks_now or redo or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
                 at = r.start + path.len;
             }
             if (r.position != at + 1) return error.PositionMismatch;
@@ -554,6 +569,13 @@ pub const Lanes = struct {
             at += len;
         }
         return .{ .count = total, .tokens = tokens, .parents = parents };
+    }
+
+    /// Backend.held: the held chain's drafts as host tokens, the ones `verify` puts in a window's held rows.
+    fn heldChain(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const st = try self(ptr).get(s);
+        if (out.len > st.n) return error.HeldMismatch;
+        @memcpy(out, st.held[0..out.len]);
     }
 
     /// Each held draft's chance of landing from the raw confidences (the engine's own allocation, without the policy).

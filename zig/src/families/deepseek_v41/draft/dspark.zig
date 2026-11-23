@@ -209,6 +209,24 @@ pub fn chain(scratch: Allocator, m: Markov, ids: []const i32, base: []const f32,
     }
 }
 
+/// The chain over the whole vocabulary (the release's rule): each draft the keyed pick of base + bias(prev).
+pub fn chainFull(scratch: Allocator, m: Markov, logits: []const f32, v: usize, anchor: u32, params: Params, hid: ?[]const f32, drafts: []u32, conf: []f32) !void {
+    const d = if (hid) |h| h.len / drafts.len else 0;
+    const ids = try scratch.alloc(i32, v);
+    defer scratch.free(ids);
+    const z = try scratch.alloc(f32, v);
+    defer scratch.free(z);
+    for (ids, 0..) |*id, i| id.* = @intCast(i);
+    var prev = anchor;
+    for (drafts, conf, 0..) |*t, *q, i| {
+        for (z, logits[i * v ..][0..v], 0..) |*o, b, id| o.* = b + m.bias(prev, @intCast(id));
+        const tok = (try pick(scratch, ids, z, params.pos0 + i, params.sampling())) orelse prev;
+        q.* = if (hid) |h| m.confidence(h[i * d ..][0..d], prev) else 0.5;
+        t.* = tok;
+        prev = tok;
+    }
+}
+
 const Ranked = struct { value: f32, id: u32 };
 
 fn rankedBefore(_: void, a: Ranked, b: Ranked) bool {
@@ -217,27 +235,89 @@ fn rankedBefore(_: void, a: Ranked, b: Ranked) bool {
 
 /// A row's best `ids.len` by (value desc, id asc) as token ids (`id0`: first column), bounded selection, no full sort.
 pub fn candidates(scratch: Allocator, logits: []const f32, id0: u32, ids: []i32, vals: []f32) !void {
-    const k = @min(ids.len, logits.len);
-    const best = try scratch.alloc(Ranked, k);
+    const best = try scratch.alloc(Ranked, @min(ids.len, logits.len));
     defer scratch.free(best);
-    var n: usize = 0;
-    for (logits, 0..) |v, i| {
-        const r: Ranked = .{ .value = v, .id = @intCast(i) };
-        if (n == k) {
-            if (k == 0 or !rankedBefore({}, r, best[k - 1])) continue;
-            n -= 1;
+    candidatesWith(best, logits, id0, ids, vals);
+}
+
+/// The most candidates a row keeps on `candidateRows`' threads (their lists live on the stack).
+pub const max_candidates = 256;
+
+/// `candidates` of `ids.len / k` rows of `logits` (row r at r * `v`), rows past the first on threads of their own.
+pub fn candidateRows(logits: []const f32, v: usize, k: usize, ids: []i32, vals: []f32) !void {
+    if (k == 0 or k > max_candidates) return error.Candidates;
+    const rows = ids.len / k;
+    var threads: [16]?std.Thread = @splat(null);
+    const Row = struct {
+        fn run(lg: []const f32, o: []i32, ov: []f32) void {
+            var best: [max_candidates]Ranked = undefined;
+            candidatesWith(best[0..@min(o.len, lg.len)], lg, 0, o, ov);
         }
-        var j = n;
-        while (j > 0 and rankedBefore({}, r, best[j - 1])) : (j -= 1) best[j] = best[j - 1];
-        best[j] = r;
-        n += 1;
+    };
+    // Room for process TLS; a failed spawn leaves its row to this thread.
+    for (1..@min(rows, threads.len)) |r| threads[r] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Row.run, .{ logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k] }) catch null;
+    for (0..rows) |r| if (r >= threads.len or threads[r] == null) Row.run(logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k]);
+    for (threads) |t| if (t) |th| th.join();
+}
+
+/// `candidates` with the ranked list in `best` (`@min(ids.len, logits.len)` entries).
+fn candidatesWith(best: []Ranked, logits: []const f32, id0: u32, ids: []i32, vals: []f32) void {
+    const k = best.len;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < logits.len) {
+        // a full list takes a value only above its last (a later id loses the tie): a block with none is skipped whole
+        if (n == k and k > 0 and i + vlanes <= logits.len) {
+            const v: V = logits[i..][0..vlanes].*;
+            if (@reduce(.Or, v > @as(V, @splat(best[k - 1].value)))) {
+                for (i..i + vlanes) |j| take(best, &n, logits[j], j);
+            }
+            i += vlanes;
+        } else {
+            take(best, &n, logits[i], i);
+            i += 1;
+        }
     }
-    for (ids[0..k], vals[0..k], best[0..k]) |*i, *v, r| {
-        i.* = @intCast(r.id + id0);
+    for (ids[0..k], vals[0..k], best[0..k]) |*o, *v, r| {
+        o.* = @intCast(r.id + id0);
         v.* = r.value;
     }
     @memset(ids[k..], -1);
     @memset(vals[k..], -std.math.inf(f32));
+}
+
+test "candidates of several rows on threads == each row alone" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(4106);
+    const v = 3001;
+    const rows = 7;
+    const logits = try a.alloc(f32, rows * v);
+    defer a.free(logits);
+    for (logits, 0..) |*x, i| x.* = if ((i / v) % 2 == 0) @floatFromInt(prng.random().intRangeAtMost(i32, -9, 9)) else prng.random().floatNorm(f32);
+    var ids: [rows * 64]i32 = undefined;
+    var vals: [rows * 64]f32 = undefined;
+    try candidateRows(logits, v, 64, &ids, &vals);
+    for (0..rows) |r| {
+        var one: [64]i32 = undefined;
+        var ov: [64]f32 = undefined;
+        try candidates(a, logits[r * v ..][0..v], 0, &one, &ov);
+        try std.testing.expectEqualSlices(i32, &one, ids[r * 64 ..][0..64]);
+        try std.testing.expectEqualSlices(f32, &ov, vals[r * 64 ..][0..64]);
+    }
+}
+
+/// Value `v` of id `i` into the ranked list `best` holding `n` (full at best.len: only one ranked before its last).
+inline fn take(best: []Ranked, n: *usize, v: f32, i: usize) void {
+    const k = best.len;
+    const r: Ranked = .{ .value = v, .id = @intCast(i) };
+    if (n.* == k) {
+        if (k == 0 or !rankedBefore({}, r, best[k - 1])) return;
+        n.* -= 1;
+    }
+    var j = n.*;
+    while (j > 0 and rankedBefore({}, r, best[j - 1])) : (j -= 1) best[j] = best[j - 1];
+    best[j] = r;
+    n.* += 1;
 }
 
 test "candidates: the bounded selection == the first k of a full sort (ties by id)" {
@@ -265,6 +345,36 @@ test "candidates: the bounded selection == the first k of a full sort (ties by i
     var vals: [4]f32 = undefined;
     try candidates(a, &.{ 1.0, 3.0, 3.0 }, 10, &ids, &vals);
     try std.testing.expectEqualSlices(i32, &.{ 11, 12, 10, -1 }, &ids);
+}
+
+test "candidates: rows with NaN, infinities and long ties == a stable full sort, whatever their length" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(4102);
+    const rnd = prng.random();
+    for (0..60) |case| {
+        const len = 1 + rnd.uintLessThan(usize, 3000);
+        const logits = try a.alloc(f32, len);
+        defer a.free(logits);
+        for (logits) |*v| v.* = switch (rnd.uintLessThan(u32, 40)) {
+            0 => std.math.nan(f32),
+            1 => std.math.inf(f32),
+            2 => -std.math.inf(f32),
+            else => if (case % 3 == 0) @floatFromInt(rnd.intRangeAtMost(i32, -3, 3)) else rnd.floatNorm(f32),
+        };
+        // the reference: the scalar bounded selection, value by value
+        const k = @min(64, len);
+        const want = try a.alloc(Ranked, k);
+        defer a.free(want);
+        var n: usize = 0;
+        for (logits, 0..) |v, i| take(want, &n, v, i);
+        var ids: [64]i32 = undefined;
+        var vals: [64]f32 = undefined;
+        try candidates(a, logits, 3, &ids, &vals);
+        for (want[0..k], ids[0..k], vals[0..k]) |r, i, v| {
+            try std.testing.expectEqual(@as(i32, @intCast(r.id + 3)), i);
+            try std.testing.expectEqual(@as(u32, @bitCast(r.value)), @as(u32, @bitCast(v)));
+        }
+    }
 }
 
 /// window = [pending, d_1 .. d_k], chosen = the target's choice after each row -> drafts kept.

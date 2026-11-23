@@ -10,6 +10,17 @@ const Engine = struct {
     scratch_rows: usize = q.engine.grid_rows,
     fail: bool = false,
     stream: ?cuda.Stream = null,
+    layers: [2]void = .{ {}, {} },
+    taps: [8]u32 = undefined,
+    n_taps: usize = 0,
+    learning: ?*const anyopaque = null,
+    mlp: ?*const anyopaque = null,
+    pockets: struct {
+        pub fn any(_: @This()) bool {
+            return false;
+        }
+    } = .{},
+    int8: struct { on: bool = false } = .{},
     pub fn forward(e: *@This(), _: anytype, _: []const u32, _: q.engine.Keep) !void {
         if (e.fail) return error.PlantedForward;
         if (e.stream) |stream| try stream.synchronize();
@@ -22,7 +33,7 @@ const Backend = struct {
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *Cache) = .empty, // streams beside: none decodes
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, void) = .empty,
     prefix: ?struct {
-        pub fn keep(_: @This(), _: *Cache, _: []const u32, _: usize) !void {}
+        pub fn keep(_: @This(), _: *Cache, _: []const u32, _: ?u64, _: usize) !void {}
     } = null,
     pages: ?struct {
         pub fn log(_: @This(), _: usize, _: u32) void {}

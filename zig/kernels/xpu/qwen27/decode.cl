@@ -72,16 +72,17 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
       for (int i = 0; i < 8; i++) SO[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
 }
 
-// Decode attention by key slices: one subgroup per (slice, K/V head, query part, row). Grid y is AKV * QPARTS.
+// Decode attention by key slices: one subgroup per (row, K/V head, query part, slice). Grid y is AKV * QPARTS.
 #define SPLIT 32
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
 #if Q27_QPARTS == 1
-  const int sp = get_group_id(0), hk = get_group_id(1), t = get_group_id(2), lane = get_sub_group_local_id();
+  // Grid (rows, heads, slices): the tree rows of one key slice run back to back and share its K/V rows in L2.
+  const int sp = get_group_id(2), hk = get_group_id(1), t = get_group_id(0), lane = get_sub_group_local_id();
 #else
-  const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
+  const int sp = get_group_id(2), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(0), lane = get_sub_group_local_id();
   const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG; // the first query head held
 #endif
   int base = p0, wf = 0;
@@ -148,22 +149,29 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
   }
 }
 
-// Merge of the slices, in order: O bf16 [T, Q27_AQ, 256]. One subgroup per (head, row).
+// Merge of the slices in order: O bf16 [T, Q27_AQ, 256], 16 subgroups per (head, row), 16 of the 256 dims each.
 KERNEL(16) void attn_merge(global const float *PM, global const float *PL, global const float *PO, global ushort *O,
                            int p0, int NS, global const int *TREE, global const int *POS) {
-  const int hh = get_group_id(0), t = get_group_id(1), lane = get_sub_group_local_id();
+  const int hh = get_group_id(0) / 16, g = get_group_id(0) % 16, t = get_group_id(1), lane = get_sub_group_local_id();
   const int used = (POS ? POS[t] : p0 + DEPTH(t)) / SPLIT + 1; // non-empty slices of row t
   const long base = ((long)t * Q27_AQ + hh) * NS;
   float m = -INFINITY;
-  for (int s = 0; s < used; s++) m = fmax(m, PM[base + s]);
-  float l = 0.0f, o[16];
-  for (int i = 0; i < 16; i++) o[i] = 0.0f;
-  for (int s = 0; s < used; s++) {
-    const float w = exp(PM[base + s] - m);
-    l += PL[base + s] * w;
-    for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
+  for (int s0 = 0; s0 < used; s0 += 16) m = fmax(m, sub_group_reduce_max(s0 + lane < used ? PM[base + s0 + lane] : -INFINITY));
+  float l = 0.0f, o = 0.0f;
+  for (int s0 = 0; s0 < used; s0 += 16) {
+    const bool ok = s0 + lane < used;
+    const float wj = ok ? exp(PM[base + s0 + lane] - m) : 0.0f, lj = ok ? PL[base + s0 + lane] : 0.0f;
+    float v[16];
+    #pragma unroll
+    for (int k = 0; k < 16; k++) v[k] = s0 + k < used ? PO[(base + s0 + k) * 256 + g * 16 + lane] : 0.0f;
+    #pragma unroll
+    for (int k = 0; k < 16; k++) {
+      const float w = sub_group_broadcast(wj, k); // 0 past the last slice, with a 0 value: adds an exact zero
+      l += sub_group_broadcast(lj, k) * w;
+      o += v[k] * w;
+    }
   }
-  for (int i = 0; i < 16; i++) O[((long)t * Q27_AQ + hh) * 256 + i * 16 + lane] = f2bf(o[i] / l);
+  O[((long)t * Q27_AQ + hh) * 256 + g * 16 + lane] = f2bf(o / l);
 }
 
 // Commit of a kept path: its K, V rows move to positions p0 + depth in depth order, never overwriting an unread row.

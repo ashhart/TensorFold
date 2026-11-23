@@ -35,7 +35,7 @@ const usage =
     \\       tensorfold rounds MODEL --tokens ID,... [--max-tokens N]   (GPU ms a serial and a window graph round)
     \\       tensorfold check-draws MODEL FIXTURES_DIR   (MTP draws against the lane fixtures)
     \\       tensorfold shared-widths MODEL PROMPTS.json --streams N [--max-tokens N] [sampling as run]
-    \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
+    \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8; 16 wide)
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
@@ -240,6 +240,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         return 0;
     };
+    _ = try @import("sys").environment.read(bool, "TF_NEMOTRON_WIDE_ROUNDS", false); // a malformed switch refuses; unset or 0, main's
     const engine = nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null, .precision = opts.math }) catch |err| {
         cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this error
         return err;

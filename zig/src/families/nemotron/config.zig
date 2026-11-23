@@ -79,6 +79,7 @@ pub const Config = struct {
     rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
     world: usize = 1,
     ck: bool = false, // --precision checkpoint: e4m3 rows into the FP8 layers, NVFP4 rows into the experts
+    wide_rounds: bool = false, // TF_NEMOTRON_WIDE_ROUNDS where cuda_wide.allowed: shared rounds of 16 streams, 32 rows
     widths: [max_layers][4]Width = @splat(@splat(.{})), // each layer's matrices (members(kind) order) at their widths
     embed_width: Width = .{},
     embed_bf16: bool = false, // the token table is stored bf16 (config.json's `false` for it), read by HIP only

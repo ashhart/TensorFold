@@ -18,10 +18,12 @@ const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
 const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
+const witness = @import("witness.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
+const flush = @import("cache_flush.zig");
 const slide_forget = @import("slide_forget.zig");
 const voice_routes = @import("drama_voice_routes.zig");
 const Server = @import("server.zig").Server;
@@ -110,6 +112,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
+    if (std.mem.eql(u8, route, witness.path)) return witness.route(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, "/api/tags")) return ollama.tags(srv, conn, a);
     if (std.mem.eql(u8, route, "/api/show")) return ollama.show(srv, conn, a);
@@ -134,6 +137,10 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (@import("responses_background.zig").cancelPath(route)) |rid| { // cancel bypasses admission
         discardBody(conn, a);
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
+    }
+    if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
+        discardBody(conn, a);
+        return flush.post(srv, conn, a);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
@@ -162,6 +169,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding or is_ollama_embed, .rerank = is_rerank, .systemone = is_systemone };
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
+    conn.lease = if (entered.held.lease) |*lease| lease else null; // n choices count each against the caps
+    defer conn.lease = null;
     if (entered.refusal) |refusal| return refuse(conn, a, is_anthropic, refusal);
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_voices) return voice_routes.post(srv, conn, a);
@@ -197,7 +206,7 @@ fn refuse(conn: *Conn, a: Allocator, anthropic_shape: bool, refusal: request_gat
 }
 
 /// 429 with Retry-After in the API's own error shape; the unread body is left behind with the connection.
-fn overloaded(conn: *Conn, anthropic_shape: bool, refusal: admission.Refusal) void {
+pub fn overloaded(conn: *Conn, anthropic_shape: bool, refusal: admission.Refusal) void {
     var buf: [320]u8 = undefined;
     const body = (if (anthropic_shape)
         std.fmt.bufPrint(&buf, "{{\"type\": \"error\", \"error\": {{\"type\": \"rate_limit_error\", \"message\": \"{s}\"}}}}", .{admission.message(refusal.reason)})

@@ -10,10 +10,12 @@ test {
     _ = @import("lane_init_test.zig");
     _ = @import("lane_failure_review_test.zig");
     _ = @import("lane_host_first_test.zig");
+    _ = @import("lane_host_prefix_join_test.zig");
 }
 
 test {
     _ = @import("lane_host_score_exit_test.zig");
+    _ = @import("lane_host_score_stress_test.zig");
     _ = @import("lane_host_grammar_test.zig");
 }
 
@@ -29,6 +31,7 @@ test {
 
 test {
     _ = @import("lane_activity_test.zig");
+    _ = @import("lane_host_flush_test.zig");
 }
 
 test {

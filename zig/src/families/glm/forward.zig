@@ -11,6 +11,7 @@ const hc_shape = @import("kernels.zig").hc_shape;
 const hc_core = @import("../../core/hc.zig");
 const wide = @import("wide.zig");
 const Ref = wts.Ref;
+const Taps = @import("metal_dflash_taps.zig").Taps;
 /// The MoE block (moe.zig).
 pub const moe = @import("moe.zig").moe;
 const moeBlock = @import("moe.zig").block;
@@ -29,6 +30,7 @@ pub const Ctx = struct {
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
+    taps: ?*const Taps = null, // the DFlash2 drafter's tap capture (null: no drafter)
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
@@ -40,7 +42,6 @@ pub const Ctx = struct {
 
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
 pub const Span = struct { at: u32, n: u32, row: u32 };
-
 /// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
 pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u32) void {
     const inj = x.inject orelse return;
@@ -65,7 +66,6 @@ pub const rulesFor = @import("draw_rule.zig").rulesFor;
 pub const parseSampling = @import("draw_rule.zig").parseSampling;
 pub const envSampling = @import("draw_rule.zig").envSampling;
 pub const SamplingError = @import("draw_rule.zig").SamplingError;
-
 /// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
 pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
 
@@ -135,7 +135,6 @@ const MlaNorms = extern struct { x_stride: u32, kv_at: u32, ik_at: u32, iw_at: u
 const index_weight_scale: f32 = 1.0 / 64.0;
 const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
-
 pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
 }
@@ -442,7 +441,7 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     e.setPipeline(k.index_decode); // a row's heads as the tensor op's rows (glm_index_nax.metal)
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
     e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
-    e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
+    e.dispatchGroups(size(std.math.divCeil(u32, most, if (k.m3_fast) 64 else 128) catch unreachable, n, 1), size(128, 1, 1));
     const sel = SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() };
     if (most > select_cap and most <= select_marks) { // between them glm_index_select's one group a row is quicker
         e.setPipeline(k.index_select);
@@ -512,6 +511,7 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
         if (k & Class.hc == 0) boundary(x, e, rows, pending, hcs[0], L.in_norm);
+        if (x.taps) |t| if (li > 0) t.after(x, e, li - 1, rows, pos);
         snap(x, e, sc.normed, plane);
         switch (L.attn) {
             .kda => |*a| {

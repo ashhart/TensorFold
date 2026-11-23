@@ -66,6 +66,7 @@ pub const Engine = struct {
                 .k = cfg.k,
                 .prior = cfg.depth_prior,
                 .most_drafts = cfg.most_drafts,
+                .shared_cap = cfg.shared_mtp_cap,
                 .family_costs = &cfg.family_costs,
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
@@ -128,9 +129,7 @@ pub const Engine = struct {
         }
         if (live.items.len > 1 and e.cfg.family_streams) {
             // a shared round is synchronous: a stream that ran a step ahead lands its queued token first
-            for (live.items) |s| {
-                if (s.inflight != null) try e.landInflight(s);
-            }
+            for (live.items) |s| if (s.inflight != null) try e.landInflight(s);
             var kept: usize = 0;
             for (live.items) |s| {
                 if (s.finished) continue;
@@ -150,19 +149,15 @@ pub const Engine = struct {
             try e.roundStreams(chosen);
         } else {
             for (live.items) |s| {
-                const r = if (e.windowed(s)) try e.familyRound(s, null) else try e.pipelinedRound(s);
+                // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
+                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
+                const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
         }
         try trail.resolve(e);
         try e.sweep();
         try trail.state(e);
-    }
-
-    /// Whether a lone stream's rounds are verify windows, else one-token steps queued ahead (pipelinedRound).
-    pub fn windowed(e: *const Engine, s: *const Stream) bool {
-        // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
-        return (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
     }
 
     /// Least recently served streams within the stream and row limits, never cutting pending or forced rows.
@@ -225,7 +220,7 @@ pub const Engine = struct {
         if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
         const held_levels = s.held_levels;
         const timed_copy = e.cfg.family_mtp and s.drafts and @import("lone_copy.zig").records(e, s, plan.kind);
-        const verified: ?f64 = if (timed_copy) e.clock.elapsedMs(.cost) else null; // its read moves before the head drafts
+        const verified: ?f64 = if (timed_copy) e.clock.elapsedMs(.cost) else null;
         if (e.cfg.family_mtp and s.drafts) {
             if (early and o.cut == null) {
                 var w = win.who(s);
@@ -243,7 +238,7 @@ pub const Engine = struct {
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
-        try @import("lone_copy.zig").time(e, s, plan.kind, rows, verified);
+        if (e.cfg.copy_guard) try @import("lone_copy.zig").time(e, s, plan.kind, rows, verified);
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {
             // the stream's round time beyond its window and head levels, for the lane planner
             if (e.cfg.lane_costs.get(@intCast(rows))) |w| {
@@ -537,7 +532,7 @@ pub const Engine = struct {
     pub fn release(e: *Engine, s: *Stream) void {
         e.late.cancel(s);
         if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
-        @import("lone_copy.zig").keep(e, s);
+        if (e.cfg.copy_guard) @import("lone_copy.zig").keep(e, s);
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);
         e.backend.release(s);

@@ -53,6 +53,8 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
+- The rank that finishes loading first waits up to 10 minutes for the other before their first collective; a rank
+  that exits, fails its load or closes its link ends that wait within seconds.
 - `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
 - A prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's
   rows and gathers the sums: rank 0 sends 3.43 MiB a prompt token over two GB10s' RoCE link instead of 5.81, with the
@@ -148,6 +150,11 @@ The family plugs into the core's pieces and adds no scheduler:
 - The core's prompt cache keeps and resumes a stream's state at the marks it asks for. The family copies the state
   (`cuda_snap.zig`), with the MTP head's cache rows for a drafting stream; the head reads one token past a row, so
   states keep with a lookahead of 1, as Nemotron's do.
+- Warm turns, on one GPU with a prompt cache: after a chat reply, once nothing else has run for 150 ms, a background
+  pass prefills the reply as the next turn's prompt renders it and keeps the state one token short of its end, as
+  Nemotron's warm turns do, so the next turn resumes past the reply. The pass runs in chunks of the busy chunk's rows
+  (1,536 by default). A request that arrives, or a prompt still going in, stops it before its next chunk, and the
+  cache keeps what it filled. With `--tp`, no pass runs.
 - For a last user message of at least 8,192 tokens, the lane cache may also keep one state inside that message.
   It chooses the latest existing cold chunk cut leaving at least 2,048 tokens outside the state's key, for a
   replacement question after the same document. It uses the loaded prompt pass size and adds no chunk split.

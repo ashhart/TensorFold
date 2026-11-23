@@ -123,10 +123,10 @@ fn fileOk(path: []const u8) bool {
     return true;
 }
 
-fn hasTorch(py: []const u8) bool {
+fn hasTorchAndSafetensors(py: []const u8) bool {
     const a = std.testing.allocator;
     const r = std.process.run(a, std.testing.io, .{
-        .argv = &.{ py, "-c", "import torch" },
+        .argv = &.{ py, "-c", "import torch, safetensors.torch" },
         .stdout_limit = .limited(256),
         .stderr_limit = .limited(4096),
     }) catch return false;
@@ -138,9 +138,9 @@ fn hasTorch(py: []const u8) bool {
 fn findPython() ?[]const u8 {
     if (std.c.getenv("TF_LING_PYTHON")) |p| {
         const s = std.mem.span(p);
-        if (hasTorch(s)) return s;
+        if (hasTorchAndSafetensors(s)) return s;
     }
-    if (hasTorch("python3")) return "python3";
+    if (hasTorchAndSafetensors("python3")) return "python3";
     return null;
 }
 
@@ -151,7 +151,7 @@ fn ensureDumps() !void {
         return error.SkipZigTest;
     }
     const py = findPython() orelse {
-        std.debug.print("skip: no torch (set TF_LING_PYTHON or python3 on PATH); TFLINGA1 dumps come from ling_forward.py at test time\n", .{});
+        std.debug.print("skip: no Python with both torch and safetensors (set TF_LING_PYTHON or put such a python3 on PATH); TFLINGA1 dumps come from ling_forward.py at test time\n", .{});
         return error.SkipZigTest;
     };
     const a = std.testing.allocator;

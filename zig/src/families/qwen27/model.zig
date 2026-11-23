@@ -92,8 +92,16 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
+        const gen_path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
+        defer a.free(gen_path);
+        // generation_config.json beside config.json: a missing file is none, any other read failure is the loader's
+        const generation = std.Io.Dir.cwd().readFileAlloc(io, gen_path, a, .limited(1 << 20)) catch |e| switch (e) {
+            error.FileNotFound => null,
+            else => return e,
+        };
+        defer if (generation) |g| a.free(g);
         var problem: cfg.Problem = .{};
-        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+        const c = cfg.parseWhy(a, text, generation, &problem) catch |e| {
             if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
             return e;
         };
@@ -151,6 +159,17 @@ pub const Model = struct {
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
         return m;
+    }
+
+    /// The MTP draft head from `dir`'s `mtp-4bit.safetensors`, while a deferred model's files are still open.
+    pub fn loadMtp(m: *Model, io: std.Io, dir: []const u8) !void {
+        if (!m.share_pending) return error.MtpAfterFilesClosed;
+        if (m.weights.mtp != null) return;
+        const path = try std.fs.path.joinZ(m.allocator, &.{ dir, wts.mtp_file });
+        defer m.allocator.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch return error.MissingMtpFile;
+        try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", wts.repacked);
+        try wts.loadMtp(&m.weights, m.device, &m.checkpoint, &m.shard);
     }
 
     /// A deferred share takes at most `room` bytes; zero refuses it, and decided models stay as they are.

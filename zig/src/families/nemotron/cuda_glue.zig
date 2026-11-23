@@ -78,6 +78,22 @@ const ScanSegs = extern struct { p: [max_segs]u64, xc: [max_segs]u64, dt: [max_s
 /// A stream's attention in a shared window, at one layer: its caches, meta row and first row of the shared rows.
 pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usize, pt: u64 = 0 };
 
+/// Whether the streams' rows follow each other from the first's: a launch's table maps its rows by their starts.
+fn contiguous(segs: []const AttnSeg) bool {
+    var next = segs[0].row0;
+    for (segs) |s| {
+        if (s.row0 != next) return false;
+        next += s.rows;
+    }
+    return true;
+}
+
+/// The attention buffers at row `r0`: qkv, partial outputs, maxima and sums, the output and its group sums.
+fn rowsAt(r0: u64, at: Attn, b: [6]u64) [6]u64 {
+    const qd: u64 = at.heads * at.dim;
+    return .{ b[0] + r0 * at.nqkv * 2, b[1] + r0 * at.nch * qd * 4, b[2] + r0 * at.nch * at.heads * 4, b[3] + r0 * at.nch * at.heads * 4, b[4] + r0 * qd * 2, b[5] + r0 * (qd / 64) * 4 };
+}
+
 const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, pt: [max_segs]u64, ps: i64, row0: [max_segs]c_int, n: c_int };
 
 /// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
@@ -184,6 +200,7 @@ pub const Glue = struct {
 
     /// The Mamba conv of a window: the last window's kept rows replay from RAW, then the window's rows.
     pub fn conv(g: Glue, proj: u64, base: u64, raw: u64, xc: u64, cw: u64, cb: u64, meta: u64, rows: usize, m: Shape) !void {
+        if (rows > m.rmax) return error.ScanShape; // a stream's rows stride at rmax, as the scan's
         if (g.tri()) |t| return t.conv(proj, base, raw, xc, cw, cb, meta, rows, m);
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, base, raw, xc, cw, cb, meta });
@@ -207,6 +224,7 @@ pub const Glue = struct {
 
     /// Every stream's conv, then every stream's scan, of a shared window: one launch each, or a stream at a time.
     pub fn mambaSegs(g: Glue, segs: []const MambaSeg, cw: u64, cb: u64, a_: u64, dsk: u64, dtb: u64, lo: f32, hi: f32, m: Shape) !void {
+        for (segs) |s| if (s.rows > m.rmax) return error.ScanShape; // each stream's conv and scan rows stride at rmax
         if (g.set != null or segs.len < 2 or segs.len > max_segs) {
             for (segs) |s| {
                 try g.conv(s.proj, s.base, s.raw, s.xc, cw, cb, s.meta, s.rows, m);
@@ -295,49 +313,56 @@ pub const Glue = struct {
         try g.go(g.f.attn_merge, .{ rows, at.kv_heads, 1 }, 256, 0, &b);
     }
 
-    /// Every stream's keys, values and attention over the shared rows: one launch each, or a stream at a time.
+    /// Every stream's keys, values and attention over the shared rows: launches of up to max_segs streams each.
     pub fn attentionSegs(g: Glue, segs: []const AttnSeg, qkv: u64, po: u64, pm: u64, pl: u64, out: u64, xs: u64, at: Attn) !void {
-        var rows: usize = 0;
-        for (segs) |s| rows += s.rows;
-        if (g.set != null or segs.len < 2 or segs.len > max_segs) {
-            const qd: u64 = at.heads * at.dim;
+        var k0: usize = 0;
+        while (k0 < segs.len) : (k0 += max_segs) try g.attentionPart(segs[k0..@min(segs.len, k0 + max_segs)], qkv, po, pm, pl, out, xs, at);
+    }
+
+    /// Up to max_segs streams a launch, rows and table rebased to the part's first row; else one stream at a time.
+    fn attentionPart(g: Glue, segs: []const AttnSeg, qkv: u64, po: u64, pm: u64, pl: u64, out: u64, xs: u64, at: Attn) !void {
+        if (g.set != null or segs.len < 2 or segs.len > max_segs or !contiguous(segs)) {
             for (segs) |s| {
-                const r0: u64 = s.row0;
-                const q = qkv + r0 * at.nqkv * 2;
+                const r = rowsAt(s.row0, at, .{ qkv, po, pm, pl, out, xs });
                 var own = at;
                 own.pt = s.pt;
-                try g.kvWrite(q, s.kc, s.vc, s.meta, s.rows, own);
-                try g.attention(q, s.kc, s.vc, s.meta, po + r0 * at.nch * qd * 4, pm + r0 * at.nch * at.heads * 4, pl + r0 * at.nch * at.heads * 4, out + r0 * qd * 2, xs + r0 * (qd / 64) * 4, s.rows, own);
+                try g.kvWrite(r[0], s.kc, s.vc, s.meta, s.rows, own);
+                try g.attention(r[0], s.kc, s.vc, s.meta, r[1], r[2], r[3], r[4], r[5], s.rows, own);
             }
             return;
         }
         const grp = at.heads / at.kv_heads;
         if (at.dim != 128 or grp > 16) return error.AttentionShape;
+        // the kernels index launch rows from 0 (seg_of): the part's rows start there, buffers moved to its first row
+        const base = segs[0].row0;
+        const r = rowsAt(base, at, .{ qkv, po, pm, pl, out, xs });
+        var rows: usize = 0;
         var t = std.mem.zeroes(AttnSegs);
         for (segs, 0..) |s, k| {
             t.kc[k] = s.kc;
             t.vc[k] = s.vc;
             t.meta[k] = s.meta;
             t.pt[k] = s.pt;
-            t.row0[k] = int(s.row0);
+            t.row0[k] = int(s.row0 - base);
+            rows += s.rows;
         }
         t.ps = @intCast(at.ps);
         t.n = int(segs.len);
         var w: cuda.Args = .{};
         w.add(t);
-        w.add(qkv);
+        w.add(r[0]);
         ints(&w, &.{ at.nqkv, at.heads * at.dim, at.kv_heads * at.dim });
         try g.go(g.f.kv_write_segs, .{ rows, 1, 1 }, 256, 0, &w);
         const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(at.dim), -0.5));
         var a: cuda.Args = .{};
         a.add(t);
-        ptrs(&a, &.{ qkv, po, pm, pl });
+        ptrs(&a, &.{ r[0], r[1], r[2], r[3] });
         ints(&a, &.{ at.nqkv, at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         a.add(scale);
         try g.go(g.f.attn_chunk_segs, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
         var b: cuda.Args = .{};
         b.add(t);
-        ptrs(&b, &.{ po, pm, pl, out, xs });
+        ptrs(&b, &.{ r[1], r[2], r[3], r[4], r[5] });
         ints(&b, &.{ at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         try g.go(g.f.attn_merge_segs, .{ rows, at.kv_heads, 1 }, 256, 0, &b);
     }

@@ -106,6 +106,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--metrics-open` | Allow `/metrics`, `/v1/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
 | `--log-json` | Write the access, `ended` and `refused` lines as one JSON object each, with `event` set to `access`, `ended` or `refused`. `access` is written when the response starts, with the HTTP status and the request id once assigned. `ended` is written only when the client left or the reply failed, with `prompt` and `tokens`. `refused` is written for an error reply, before its `access` line. Long fields are cut so each line still parses. Off keeps the text lines. |
+| `--execution-witness` | Serve `GET /v1/execution/witness` to read-scoped keys: a snapshot of the running binary, the checkpoint's text files, the serve defaults and settings, or why it is unknown. Needs an API key or `--unix-socket`; see [execution witness](api.md#execution-witness). |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](api.md#admission). |
 | `--max-connections N`, `--max-connections-per-address N`, `--trusted-proxy ADDRESS` | Open connections at most (default 128); from three quarters full, one address's share (default a quarter, 0 off); addresses never counted for that share, as loopback is not, such as a reverse proxy or Docker's bridge gateway. See [admission](api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |
@@ -123,6 +124,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--thinking-reserve N` | With thinking on, let reasoning use up to N tokens beyond a request's `max_tokens`, which then limits the answer (lane engines). |
 | `--loop-guard` | Close reasoning that repeats itself verbatim (a short cycle, or a long passage) where the engine supports it. |
+| `--tool-think-close` | With thinking on, a required or named tool call closes its think block at `max_tokens - max(256, max_tokens / 4)` (or a smaller request `thinking_budget`), so the call fits instead of ending as `length`. Off by default ([API](api.md)). |
 | `--loop-guard-stop` | As `--loop-guard`, but end the reply where the guard fires: the reasoning so far, no answer or tool calls, `finish_reason` `content_filter` and a `reasoning_loop` error ([API](api.md)). |
 | `--no-drafts` | Produce the plain reference through the same engine. |
 | `--drafter DRAFTER` | An external drafter, as a directory or a repo id in the Hugging Face cache, for models that take one (Gemma 4 31B's recipe names its drafter); `none` serves without one. Without the flag, Qwen3.8-27B pairs DFlash2 when the cache holds it (never downloaded, not on HIP): one line names it, and serve runs without it if it does not open. |

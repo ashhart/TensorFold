@@ -116,7 +116,7 @@ test "ssh for a node behind a jump host is key-only and goes through it" {
     const argv = try launch.sshArgv(a, c, c.nodes[2], "true");
     const joined = try std.mem.join(a, " ", argv);
     try std.testing.expect(std.mem.indexOf(u8, joined, "-i /keys/cluster -o IdentitiesOnly=yes -o BatchMode=yes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, joined, "ProxyCommand=ssh -i /keys/cluster -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p tf@host0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, joined, "ProxyCommand=ssh -i /keys/cluster -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p 'tf@host0'") != null);
     try std.testing.expectEqualStrings("tf@host2", argv[argv.len - 2]);
     try std.testing.expect(std.mem.indexOf(u8, joined, "assword") == null);
 }
@@ -181,7 +181,7 @@ test "the node launch backgrounds only the node: the exact remote command, brace
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const cmd = try launch.nodeCommand(arena.allocator(), "{}", "/opt/tf/bin/tensorfold", "n1", "n0", "m");
-    try std.testing.expectEqualStrings("mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s e30= | base64 --decode > ~/.config/tensorfold/cluster.json && { nohup /opt/tf/bin/tensorfold node --name n1 --leader n0 --model m --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }", cmd);
+    try std.testing.expectEqualStrings("mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s 'e30=' | base64 --decode > ~/.config/tensorfold/cluster.json && { nohup /opt/tf/bin/tensorfold node --name n1 --leader n0 --model m --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }", cmd);
     // the braces hold the background job to the node alone, and the node holds none of ssh's stdin, stdout or stderr
     const open = std.mem.indexOf(u8, cmd, "&& { nohup ").?;
     const amp = std.mem.lastIndexOf(u8, cmd, " & echo started $!; }").?;
@@ -212,4 +212,22 @@ test "the launch's remote command returns at once, before the node it started ex
     try std.testing.expect(took < 2 * std.time.ns_per_s);
     const written = try tmp.dir.readFileAlloc(io, ".config/tensorfold/cluster.json", a, .limited(1 << 10));
     try std.testing.expectEqualStrings("{\"cluster\": \"x\"}", written);
+}
+
+test "security: model and jump-host shell metacharacters stay literal arguments" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const attack = "a b'c$(d)`e`f>g;h\ni";
+    const cmd = try launch.nodeCommand(a, "{}", "tensorfold", "n1", "n0", attack);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "--model 'a b'\\''c$(d)`e`f>g;h\ni' --cluster") != null);
+    var nodes = [_]config.Node{
+        .{ .name = "jump", .address = "jump`;id", .backend = .metal },
+        .{ .name = "node", .address = "host", .backend = .metal, .via = "jump" },
+    };
+    const c: config.Config = .{ .name = "lab", .ssh = .{ .user = "u'$(id)", .key = "/tmp/k;id" }, .nodes = &nodes, .models = &.{} };
+    const argv = try launch.sshArgv(a, c, nodes[1], "true");
+    try std.testing.expectEqualStrings("-o", argv[argv.len - 5]);
+    try std.testing.expectEqualStrings("ProxyCommand=ssh -i '/tmp/k;id' -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p 'u'\\''$(id)@jump`;id'", argv[argv.len - 4]);
+    try std.testing.expectEqualStrings("--", argv[argv.len - 3]);
 }

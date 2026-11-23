@@ -279,9 +279,15 @@ test "miss reasons: an expired kept state says expired" {
     f.at = 8;
     _ = store.keep(prompt, 8, null, &.{}, &.{});
     const saved = store.entries.items[0].saved;
+    const held = try store.lookup(arena.allocator(), prompt, 0, &.{}, &.{}, &.{});
+    defer if (held.entry) |e| store.release(e); // keep the expired entry alive through both later lookups
     store.expired(saved); // hidden from lookups at once, still in by_position for derive
     const l = try store.lookup(arena.allocator(), prompt, 0, &.{}, &.{}, &.{});
     try std.testing.expectEqual(miss.Reason.expired, l.miss.?.reason);
+    const foreign = tokens(12, 189);
+    defer gpa.free(foreign);
+    const unrelated = try store.lookup(arena.allocator(), foreign, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(miss.Reason.cold, unrelated.miss.?.reason);
 }
 
 fn plan(a: std.mem.Allocator, s: *pc.Store, prompt: []const u32) !pc.Plan {

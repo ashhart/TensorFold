@@ -50,12 +50,14 @@ test {
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_disk.zig");
     _ = @import("cuda_backend.zig");
+    _ = @import("cuda_argmax_graph.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_solo.zig");
     _ = @import("cuda_shared.zig");
     _ = @import("cuda_assistant.zig");
     _ = @import("cuda_assistant_weights.zig");
     _ = @import("cuda_vision.zig");
+    _ = @import("cuda_image_rows.zig");
     _ = @import("cuda_dflash.zig");
     _ = @import("cuda_dflash_test.zig");
     _ = @import("cuda_tower.zig");

@@ -83,7 +83,7 @@ pub fn run(gpu: check.Gpu) !void {
     const rand = rng.random();
     var fails: usize = 0;
     for (cases) |c| {
-        const np = sp.poolBucket(c.pos, c.rows, c.cap);
+        const np = sp.poolBucket(c.pos, c.rows, c.cap, .{});
         const qi = try gpa.alloc(u16, c.rows * c.heads * d);
         defer gpa.free(qi);
         for (qi) |*x| x.* = bf16(rand.floatNorm(f32));
@@ -136,10 +136,10 @@ pub fn run(gpu: check.Gpu) !void {
         var ms_new: f64 = 0;
         for (0..3) |rep| {
             const t0 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(old, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sa, ta, ca);
+            try sp.selectTokens(old, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, .{}, c.cap, sa, ta, ca);
             try s.synchronize();
             const t1 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(new, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sb, tb, cb);
+            try sp.selectTokens(new, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, .{}, c.cap, sb, tb, cb);
             try s.synchronize();
             const t2 = std.Io.Timestamp.now(gpu.io, .awake);
             if (rep > 0) {
@@ -148,7 +148,7 @@ pub fn run(gpu: check.Gpu) !void {
             }
         }
         step(c, np, "selectTokens scores-only");
-        try sp.selectTokens(half, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, c.cap, sc, tc, cc);
+        try sp.selectTokens(half, ops, s, dq, dw, c.heads, dk, table, dpos, c.pos, c.rows, c.heads, d, .{}, c.cap, sc, tc, cc);
         try s.synchronize();
         step(c, np, "compare scores, pools, tokens, scores-only");
         const blk: usize = @min(c.rows, sp.select_rows);
@@ -166,9 +166,11 @@ pub fn run(gpu: check.Gpu) !void {
     }
     std.debug.print("glm_index_pools paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}\n", .{ paths[0], paths[1], paths[2] });
     try check.expect(paths[0] > 0 and paths[1] > 0 and paths[2] > 0, "glm-index-check: the whole-row, candidate and retry paths must all occur", .{});
-    fails += try decode(gpu, s, ops, &ks, rand);
+    fails += try decode(gpu, s, ops, &ks, &idx, rand);
     std.debug.print("decode select paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}, ties at the floor {d}\n", .{ dpaths[0], dpaths[1], dpaths[2], dpaths[3] });
     try check.expect(dpaths[0] > 0 and dpaths[1] > 0 and dpaths[2] > 0 and dpaths[3] > 0, "glm-index-check: the decode select's four paths must all occur", .{});
+    std.debug.print("decode scores on glm_index_scores: {d} of {d} windows\n", .{ dscored, dcases.len });
+    try check.expect(dscored > 0, "glm-index-check: a decode window's scores must take glm_index_scores", .{});
     try check.expect(fails == 0, "glm-index-check: {d} buffers differ", .{fails});
     check.pass("glm-index-check: scores, pools and token lists byte-equal at {d} cases, tied scores through both selects; the decode select at {d} windows", .{ cases.len, dcases.len });
 }
@@ -188,15 +190,18 @@ const dcases = [_]DCase{
 /// How many rows took each path of the decode select (whole row, candidates, whole row after them, ties at the floor).
 var dpaths = [4]usize{ 0, 0, 0, 0 };
 
+/// How many windows' decode scores took glm_index_scores (Kernels.takesDecode), so the byte checks are not vacuous.
+var dscored: usize = 0;
+
 /// The decode select (cuda_sparse.decodeSelect) against tf_glm_select_rows byte for byte: planted, then selectTokens.
-fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, rand: std.Random) !usize {
+fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, idx: *const glm.index.Kernels, rand: std.Random) !usize {
     const gpa = gpu.gpa;
     const old: glm.glue.Set = .{ .glue = ks };
-    const new: glm.glue.Set = .{ .glue = ks, .dsel = true };
+    const new: glm.glue.Set = .{ .glue = ks, .dsel = true, .dscore = idx }; // decode scores on glm_index_scores too
     const special = [_]f32{ std.math.nan(f32), -std.math.nan(f32), 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32) };
     var fails: usize = 0;
     for (dcases) |c| {
-        const np = sp.poolBucket(c.pos, c.rows, c.cap);
+        const np = sp.poolBucket(c.pos, c.rows, c.cap, .{});
         var bufs: Bufs = .empty;
         defer {
             for (bufs.items) |*b| b.free();
@@ -238,9 +243,9 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
             step(.{ .cap = c.cap, .pos = c.pos, .rows = c.rows }, np, "decode select: planted scores");
             try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = scores, .len = c.rows * np * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(host));
             var sel: cuda.Args = .{};
-            inline for (.{ scores, pa, @as(i64, @intCast(np)), dpos, @as(c_int, sp.topk_pools) }) |v| sel.add(v);
+            inline for (.{ scores, pa, @as(i64, @intCast(np)), dpos, @as(c_int, sp.topk_pools), @as(c_int, sp.pool) }) |v| sel.add(v);
             try cuda.launch.launch(old.glue.select_rows, .{ .grid = .{ .x = @intCast(c.rows) }, .block = .{ .x = 128 } }, s, &sel);
-            try sp.decodeSelect(new, s, scores, pb, np, dpos, c.pos, c.rows, bits, path);
+            try sp.decodeSelect(new, s, scores, pb, np, dpos, c.pos, c.rows, bits, path, .{});
             try s.synchronize();
             var taken: [16]i32 = undefined;
             try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = path, .len = c.rows * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(taken[0..c.rows]));
@@ -255,7 +260,7 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
             if (f != 0) std.debug.print("  (kind {d}, paths {any})\n", .{ kind, taken[0..c.rows] });
             fails += f;
         }
-        // selectTokens on tf_glm_scores' rows: today's set against the decode select's, pools and token lists
+        // selectTokens: today's set against the decode select's and glm_index_scores', scores, pools and token lists
         const qi = try gpa.alloc(u16, c.rows * 32 * d);
         defer gpa.free(qi);
         for (qi) |*x| x.* = bf16(rand.floatNorm(f32));
@@ -269,6 +274,8 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
         const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
         const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
         const dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
+        const nb = (sp.scoreColumns(c.pos, c.rows, np, .{}) + 63) / 64; // selectTokens' blocks
+        if (idx.takesDecode(c.rows, np, nb, dk, 0)) dscored += 1; // the latent table's default ps is 0
         var sa = try scratch(gpu, &bufs, c.rows, np);
         var sb = try scratch(gpu, &bufs, c.rows, np);
         sb.ls = try zeros(gpu, &bufs, sp.bitsBytes(c.rows, np));
@@ -283,10 +290,10 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
         var ms_new: f64 = 0;
         for (0..4) |rep| {
             const t0 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(old, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, c.cap, sa, ta, ca);
+            try sp.selectTokens(old, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, .{}, c.cap, sa, ta, ca);
             try s.synchronize();
             const t1 = std.Io.Timestamp.now(gpu.io, .awake);
-            try sp.selectTokens(new, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, c.cap, sb, tb, cb);
+            try sp.selectTokens(new, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, .{}, c.cap, sb, tb, cb);
             try s.synchronize();
             const t2 = std.Io.Timestamp.now(gpu.io, .awake);
             if (rep > 0) {
@@ -319,16 +326,16 @@ fn blocks(gpu: check.Gpu, bufs: *Bufs, set: glm.glue.Set, idx: *const glm.index.
         step(c, np, "block: upload its position, clear outputs");
         const at_v: i32 = @intCast(c.pos + a);
         const at = try fromHost(gpu, bufs, std.mem.asBytes(&at_v));
-        const nb = (sp.scoreColumns(c.pos + a, n, np) + 63) / 64;
+        const nb = (sp.scoreColumns(c.pos + a, n, np, .{}) + 63) / 64;
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_a, .len = n * np * 4, .borrowed = true }).fill8(0, null);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = out_b, .len = n * np * 4, .borrowed = true }).fill8(0, null);
         try gpu.d.synchronize(); // the memsets run on the default stream, not on s
         step(c, np, "block: tf_glm_scores");
         var sa: cuda.Args = .{};
-        inline for (.{ dq + a * c.heads * d * 2, dw + a * c.heads * 2, @as(i64, @intCast(c.heads)), dk, out_a, at, @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, sp.headScale(c.heads), @as(i64, @intCast(c.heads)), @as(c_int, @intCast(loop)), t.pt, @as(i64, @intCast(t.ps)) }) |v| sa.add(v);
+        inline for (.{ dq + a * c.heads * d * 2, dw + a * c.heads * 2, @as(i64, @intCast(c.heads)), dk, out_a, at, @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, sp.headScale(c.heads), @as(i64, @intCast(c.heads)), @as(c_int, @intCast(loop)), t.pt, @as(i64, @intCast(t.ps)), @as(c_int, sp.pool), @as(c_int, 0), @as(u64, 0) }) |v| sa.add(v);
         try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast((nb + loop - 1) / loop) }, .block = .{ .x = 128 } }, s, &sa);
         step(c, np, "block: tf_glm_index_scores");
-        try idx.scores(s, dq + a * c.heads * d * 2, dw + a * c.heads * 2, c.heads, dk, out_b, at, n, np, nb, scale, sp.headScale(c.heads), c.heads, t.pt, t.ps);
+        try idx.scores(s, dq + a * c.heads * d * 2, dw + a * c.heads * 2, c.heads, dk, out_b, at, n, np, nb, scale, sp.headScale(c.heads), c.heads, t.pt, t.ps, .{});
         try s.synchronize();
         step(c, np, "block: compare");
         fails += try same(gpu, "block scores", out_a, out_b, n * np * 4, np, c);
@@ -380,10 +387,10 @@ fn ties(gpu: check.Gpu, bufs: *Bufs, rand: std.Random, set: glm.glue.Set, idx: *
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = sa.scores, .len = rows * np * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(host));
         step(c, np, "ties: tf_glm_select_rows");
         var sel: cuda.Args = .{};
-        inline for (.{ sa.scores, sa.pools, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools) }) |v| sel.add(v);
+        inline for (.{ sa.scores, sa.pools, @as(i64, @intCast(np)), at, @as(c_int, sp.topk_pools), @as(c_int, sp.pool) }) |v| sel.add(v);
         try cuda.launch.launch(set.glue.select_rows, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 } }, s, &sel);
         step(c, np, "ties: tf_glm_index_pools");
-        try idx.pools(s, sa.scores, sb.pools, at, rows, np, path);
+        try idx.pools(s, sa.scores, sb.pools, at, rows, np, path, .{});
         try s.synchronize();
         step(c, np, "ties: read the paths");
         var taken: [512]i32 = undefined;

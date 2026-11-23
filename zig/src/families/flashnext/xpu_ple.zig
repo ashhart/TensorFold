@@ -19,8 +19,8 @@ fn f32FromBf16(b: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, b[2 * i ..][0..2], .little)) << 16);
 }
 
-/// Dequantize one MLX affine 4-bit group-32 row (`token`) of width `dims` into `out` (bf16 bits).
-pub fn dequantRow(weight: []const u8, scales: []const u8, biases: []const u8, dims: usize, token: usize, out: []u16) !void {
+/// Dequantize one MLX affine 4-bit group-32 row (`token`) of width `dims` into `out` (bf16 bits), folding `w_scale`.
+pub fn dequantRow(weight: []const u8, scales: []const u8, biases: []const u8, dims: usize, token: usize, w_scale: f32, out: []u16) !void {
     if (dims == 0 or dims % 32 != 0 or out.len != dims) return error.UnexpectedTensor;
     const groups = dims / 32;
     const words = dims / 8;
@@ -34,7 +34,8 @@ pub fn dequantRow(weight: []const u8, scales: []const u8, biases: []const u8, di
             const word = std.mem.readInt(u32, weight[woff + (g * 4 + i) * 4 ..][0..4], .little);
             for (0..8) |j| {
                 const q: f32 = @floatFromInt((word >> @intCast(j * 4)) & 0xF);
-                out[g * 32 + i * 8 + j] = toBf16(q * scale + bias);
+                const raw = toBf16(q * scale + bias);
+                out[g * 32 + i * 8 + j] = if (w_scale == 1.0) raw else toBf16(@as(f32, @bitCast(@as(u32, raw) << 16)) * w_scale);
             }
         }
     }
@@ -432,7 +433,7 @@ pub const Ngram = struct {
         for (lo..hi) |i| {
             const loc = try g.hash.locate(ids[i]);
             const row = out[i * dh ..][0..dh];
-            try dequantRow(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row);
+            try dequantRow(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, g.scale, row);
         }
     }
 
@@ -470,12 +471,6 @@ pub const Ngram = struct {
         } else {
             const split: Split = .{ .g = g, .ids = ids, .out = out, .per = (items + n_threads - 1) / n_threads };
             try g.pool.?.run(n_threads, .{ .ctx = &split, .run = Split.part });
-        }
-        if (g.scale != 1.0) {
-            for (out) |*v| {
-                const f: f32 = @bitCast(@as(u32, v.*) << 16);
-                v.* = toBf16(f * g.scale);
-            }
         }
         @memcpy(history, hist[0..history.len]);
     }

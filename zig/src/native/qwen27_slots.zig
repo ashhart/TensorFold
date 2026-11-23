@@ -167,9 +167,16 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
 pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
     const slot = b.slotOf(s) orelse (free(b) orelse return error.NoFreeSlot);
     try ready(b, slot, s);
+    if (b.owners[slot] != s) try b.runner.promise(slot, promiseRows(b, s));
     b.dropTreeOf(slot);
     b.owners[slot] = s;
     return slot;
+}
+
+/// Rows a paged slot promises `s` as it opens: its prompt and one widest pass; its reply's are promised as they come.
+fn promiseRows(b: *const Metal, s: *const lanes.Stream) u32 {
+    const rows = @as(u64, s.prompt().len) + b.runner.model.frame.capacity;
+    return @intCast(@min(rows, b.runner.capacity));
 }
 
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
@@ -182,7 +189,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     defer pool.pop();
     if (!b.fills.contains(s)) {
         const slot = try bind(b, s);
-        errdefer b.owners[slot] = null;
+        errdefer drop(b, slot);
         const f = try opening(b, s, slot);
         errdefer closing(b, s);
         try b.fills.put(b.gpa, s, f);
@@ -192,7 +199,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const done = chunk(b, s, f, 0) catch |err| {
         if (err == error.Cancelled and slot == 0) leave(b, s);
         endFill(b, s);
-        b.owners[slot] = null;
+        drop(b, slot);
         return err;
     };
     if (done) endFill(b, s);
@@ -205,6 +212,12 @@ pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
     if (b.fills.get(s)) |f| s.keepInterruptedPrefill(@intCast(f.at));
 }
 
+/// A pass that failed or went back to the queue frees its slot, pages and promise (a standing slot 0's rows stay).
+fn drop(b: *Metal, slot: u32) void {
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0);
+    b.owners[slot] = null;
+}
+
 /// A stepped pass is over, or its stream left mid-pass.
 pub fn endFill(b: *Metal, s: *lanes.Stream) void {
     if (b.fills.remove(s)) closing(b, s);
@@ -215,6 +228,11 @@ pub fn slotResumeEnv() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
+/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
+pub fn adaptiveBlockEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
+}
+
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
@@ -222,7 +240,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and resume_rules.plain(s.cache_salt);
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
@@ -419,7 +437,13 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropRound();
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (slot == 0 and b.draft_block.enabled) {
+        std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
+        b.draft_block.drop();
+        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+    }
     if (slot == 0) leave(b, s);
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
     if (slot == 0) b.promote_due = b.draft != null; // the next backend call moves a stream in, after this reply is out
@@ -454,6 +478,8 @@ pub fn promote(b: *Metal) void {
         };
         b.owners[0] = s;
         b.owners[k] = null;
+        b.runner.release(from, false); // slot 0 holds its rows now, and the stream's promise with them
+        b.runner.promise(0, promiseRows(b, s)) catch {}; // the pages slot `from` gave back hold it
         b.runner.rope[0] = b.runner.rope[k];
         b.runner.rope[k] = .{};
         clearContext(b, from) catch {};
@@ -492,6 +518,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     b.owners[0] = s;
     var handed = false;
     defer if (!handed) unbind(b, s);
+    try b.runner.promise(0, promiseRows(b, s));
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     try d.generation.settle();
@@ -518,12 +545,14 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
             try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
+        if (result.rounds > 0) b.draft_block.observe(@intFromPtr(s), result.tree_landed);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);
             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);

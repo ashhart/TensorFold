@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const host = @import("dsv41");
 const kv = @import("kv.zig");
 const rope = @import("rope.zig");
-const ctx_ = @import("ctx.zig");
+const launch_ = @import("target_launch.zig");
 const scratch = @import("scratch.zig");
 const forward = @import("forward.zig");
 const prompt = @import("prompt.zig");
@@ -12,12 +12,13 @@ const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
 const tree_ = @import("tree.zig");
 const steps = @import("prompt_steps.zig");
+const picks = @import("picks.zig");
 const vision = @import("vision.zig");
 const vw = @import("vision_weights.zig");
 const vt = @import("vision_tower.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
-
+const pick = @import("pick.zig");
 const iface = host.iface;
 const lanes = host.lanes;
 const Config = host.config.Config;
@@ -25,7 +26,6 @@ const Allocator = std.mem.Allocator;
 const R = pipelines.max_rows;
 /// The shortest system part kept on its own for later conversations.
 const min_shared: usize = 256;
-
 /// What the target reads and borrows: the device, kernels, RoPE tables, layer scratch, weights and Engram rows.
 pub const Env = struct {
     device: mtl.Device,
@@ -39,9 +39,7 @@ pub const Env = struct {
     /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
     vision: ?VisionRefs = null,
 };
-
 pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
-
 pub const Options = struct {
     slots: u32,
     /// positions a slot holds (the context limit)
@@ -52,12 +50,16 @@ pub const Options = struct {
     /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
     resident: ?*mtl.resident.Resident = null,
 };
-
+/// The drafter's work behind a window: `queue` right after its command buffers, `drain` before the target writes.
+pub const Behind = struct {
+    ctx: *anyopaque,
+    queue: *const fn (ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: mtl.Buffer) void,
+    drain: *const fn (ctx: *anyopaque) anyerror!void,
+};
 /// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
+pub const Stats = struct { prompts: u64 = 0, prompt_rows: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
 
 pub const Slot = @import("target_slot.zig").Slot;
-
 pub const Target = struct {
     a: Allocator,
     env: Env,
@@ -75,7 +77,11 @@ pub const Target = struct {
     tree: tree_.Tree = .{},
     /// the ViT and aligner, when the environment has a tower
     tower: ?vt.Tower = null,
-
+    /// sampled picks' float64 logits (picks.rows rows) and the ids 0 .. vocab - 1, kept between picks
+    pick_vals: []f64 = &.{},
+    pick_ids: []u64 = &.{},
+    /// the drafter's work behind a window (null: none)
+    behind: ?Behind = null,
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
@@ -87,6 +93,11 @@ pub const Target = struct {
         errdefer t.b.deinit();
         t.pr = try prompt.Prompt.init(env.device, c, opt.prompt, opt.limit);
         errdefer t.pr.deinit();
+        t.pick_vals = try a.alloc(f64, picks.rows * @as(usize, c.vocab));
+        errdefer a.free(t.pick_vals);
+        t.pick_ids = try a.alloc(u64, c.vocab);
+        errdefer a.free(t.pick_ids);
+        for (t.pick_ids, 0..) |*id, i| id.* = i;
         const slots = try a.alloc(Slot, opt.slots);
         errdefer a.free(slots);
         var made: usize = 0;
@@ -110,7 +121,6 @@ pub const Target = struct {
         t.joinResident() catch {};
         return t;
     }
-
     /// Every buffer the target binds besides the weights joins their residency owner, so none waits to be mapped.
     fn joinResident(t: *Target) !void {
         const r = t.opt.resident orelse return;
@@ -123,7 +133,6 @@ pub const Target = struct {
         t.joined = r.tryAddNow(bufs.items);
         if (t.joined) std.log.info("dsv41 target: {d:.1} GiB of buffers joined the weights' residency set", .{mtl.ResidencySet.gibs(bytes)});
     }
-
     fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
         try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
         for (t.slots) |*s| {
@@ -135,7 +144,6 @@ pub const Target = struct {
             try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
         }
     }
-
     fn freeSlot(a: Allocator, s: *Slot) void {
         s.kv.deinit();
         s.tail.deinit();
@@ -146,7 +154,6 @@ pub const Target = struct {
         a.free(s.images);
         if (s.image_rows) |*r| r.deinit();
     }
-
     pub fn deinit(t: *Target) void {
         t.tree.deinit(t);
         if (t.joined) {
@@ -161,6 +168,8 @@ pub const Target = struct {
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
+        t.a.free(t.pick_vals);
+        t.a.free(t.pick_ids);
         t.a.destroy(t);
     }
 
@@ -180,6 +189,11 @@ pub const Target = struct {
 
     pub fn self(ptr: *anyopaque) *Target {
         return @ptrCast(@alignCast(ptr));
+    }
+
+    /// The drafter's queued work done before the target writes what it reads.
+    fn drainBehind(t: *Target) !void {
+        if (t.behind) |b| try b.drain(b.ctx);
     }
 
     /// The device buffer and offset of an address a `taps` named (the pass's ingest reads it there).
@@ -241,6 +255,7 @@ pub const Target = struct {
     /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
     pub fn startPrompt(t: *Target, slot: u32, ids_in: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
+        try t.drainBehind();
         const s = &t.slots[slot];
         const c = t.env.c;
         if (s.live or s.filling) return error.SlotLive;
@@ -276,7 +291,7 @@ pub const Target = struct {
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
         if (images.len > 0) {
-            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, ids.len, t.opt.prompt.chunk, at);
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, @intCast(ids.len), t.opt.prompt.chunk, at);
             t.pr.images = if (s.image_rows) |*r| r else null;
         }
         s.resumed = at;
@@ -309,6 +324,7 @@ pub const Target = struct {
         if (s.image_rows) |*r| r.deinit();
         s.image_rows = null;
         const n: u32 = @intCast(s.hist.items.len);
+        t.stats.prompt_rows += n - s.resumed;
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
         if (hit) |l| logits = l else {
@@ -317,7 +333,7 @@ pub const Target = struct {
             t.ringTaps(s, n);
         }
         t.promptTaps(s, n);
-        const choice = try t.choose(logits, draw, smp);
+        const choice = try pick.choose(t, logits, draw, smp);
         s.base = n;
         s.live = true;
         s.whole = true;
@@ -366,29 +382,6 @@ pub const Target = struct {
         }
     }
 
-    /// The keyed choice of a logits row over the whole vocabulary (greedy: the first maximum, ties to the lower id).
-    pub fn choose(t: *const Target, row: []const f32, draw: u64, smp: ?lanes.Sampling) !u32 {
-        const s = smp orelse return argmax(row);
-        if (s.temperature <= 0) return argmax(row);
-        const vals = try t.a.alloc(f64, row.len);
-        defer t.a.free(vals);
-        const ids = try t.a.alloc(u64, row.len);
-        defer t.a.free(ids);
-        for (vals, ids, row, 0..) |*v, *id, x, i| {
-            v.* = x;
-            id.* = i;
-        }
-        return @intCast(try lanes.sampling.choose(t.a, vals, ids, draw, s));
-    }
-
-    fn argmax(row: []const f32) u32 {
-        var best: usize = 0;
-        for (row, 0..) |x, i| if (x > row[best]) {
-            best = i;
-        };
-        return @intCast(best);
-    }
-
     pub fn fail(t: *Target, e: anyerror) anyerror {
         if (e == error.CommandBufferFailed) t.failed = true;
         return e;
@@ -399,6 +392,7 @@ pub const Target = struct {
     /// A round's windows: slots' rows share a launch (up to R rows, a slot once), each launch one forward.
     fn window(ptr: *anyopaque, segments: []const iface.Segment, choices: [][]u32) anyerror!void {
         const t = self(ptr);
+        try t.drainBehind();
         // the tree windows (parents not one chain) run first, together: their branches on shadow slots
         try t.tree.window(t, segments, choices);
         var from: usize = 0;
@@ -457,7 +451,10 @@ pub const Target = struct {
         for (group, choices) |g, out| {
             const s = &t.slots[g.slot];
             const n = g.tokens.len;
-            for (0..n) |r| out[r] = try t.choose(lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            const keyed = if (g.sampling) |smp| smp.temperature > 0 and n > 1 else false;
+            if (keyed) try picks.keyed(lg[r0 * V ..][0 .. n * V], g.draws, g.sampling.?, t.pick_vals, t.pick_ids, out[0..n]) else {
+                for (0..n) |r| out[r] = try pick.choose(t, lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            }
             s.base = g.start;
             s.rows = @intCast(n);
             s.open = true;
@@ -470,6 +467,19 @@ pub const Target = struct {
             r0 += n;
         }
         t.stats.launches += 1;
+        // each slot's next window starts with the pick after the drafts its picks accept: its Engram reads start now
+        if (t.env.lookup) |l| for (group, choices) |g, out| t.prefetchNext(l, g, out);
+    }
+
+    /// Starts reading the Engram rows of the slot's next pending row (a guess: a cut commit only wastes the reads).
+    fn prefetchNext(t: *const Target, l: forward.Lookup, g: iface.Segment, out: []const u32) void {
+        if (t.env.c.engram_layers.len == 0) return;
+        var acc: usize = 0;
+        while (acc + 1 < g.tokens.len and g.tokens[acc + 1] == out[acc]) acc += 1;
+        const hist = t.slots[g.slot].hist.items;
+        const at: usize = @intCast(g.start + acc + 1);
+        const look = t.env.c.engram_max_ngram - 1;
+        forward.prefetchRows(&.{.{ .ids = out[acc..][0..1], .lookback = hist[at -| look..at] }}, l);
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
@@ -480,33 +490,13 @@ pub const Target = struct {
             const s = &t.slots[g.slot];
             r.* = .{ .kv = &s.kv, .ids = g.tokens, .start = @intCast(g.start), .lookback = s.hist.items[@as(usize, @intCast(g.start)) -| look..@intCast(g.start)] };
         }
-        return t.launchRuns(runs[0..group.len]);
+        return launch_.run(t, runs[0..group.len], group);
     }
 
-    /// One chain of a launch: the state it runs on, its ids from position `start`, the Engram ids before them.
-    pub const Run = struct { kv: *const kv.Slot, ids: []const u32, start: u32, lookback: []const u32 };
+    pub const Run = launch_.Run;
 
-    /// One launch of the decode forward over the runs' rows, in order (at most R rows).
     pub fn launchRuns(t: *Target, runs: []const Run) !void {
-        const e = t.env;
-        const c = e.c;
-        var pieces: [R]forward.Piece = undefined;
-        var spans: [R]scratch.Span = undefined;
-        var segs: [R]ctx_.Seg = undefined;
-        var r0: u32 = 0;
-        for (runs, 0..) |g, i| {
-            const n: u32 = @intCast(g.ids.len);
-            pieces[i] = .{ .ids = g.ids, .lookback = g.lookback };
-            spans[i] = .{ .p0 = g.start, .n = n };
-            segs[i] = .{ .slot = g.kv, .p0 = g.start, .r0 = r0, .n = n };
-            r0 += n;
-        }
-        try forward.prepareSegs(&t.b, c, pieces[0..runs.len], e.lookup);
-        try e.s.writeSpans(c, spans[0..runs.len]);
-        const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..runs.len] };
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        try forward.run(&x, e.queue, e.model, &t.b);
+        return launch_.run(t, runs, &.{});
     }
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.
@@ -541,6 +531,8 @@ pub const Target = struct {
     fn history(ptr: *anyopaque, slot: u32, start: u64, rows: u32) ?iface.Taps {
         const t = self(ptr);
         if (slot >= t.slots.len) return null;
+        // the rows land in the prompt-taps buffer a queued ingest may still read
+        t.drainBehind() catch return null;
         const s = &t.slots[slot];
         const c = t.env.c;
         const w = tapWidth(c);

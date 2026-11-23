@@ -13,7 +13,7 @@ pub const Opened = api.Opened;
 /// Refuse malformed settings before resolving checkpoints and again before an idle reload.
 pub fn environment(a: Allocator, args: cli.Args) !?[]const u8 {
     const settings = @import("sys").environment;
-    var flags: settings.Flags = .{ .slide = args.slide, .device = args.device, .segments = args.segments, .hooks = @import("build_options").slide_test_hooks };
+    var flags: settings.Flags = .{ .slide = args.slide, .device = args.device, .segments = args.segments, .hooks = @import("build_options").slide_test_hooks, .parallel_named = args.parallel_named };
     for (native.backends) |backend| {
         if (std.mem.eql(u8, backend, "cuda")) flags.cuda = true;
         if (std.mem.eql(u8, backend, "metal")) flags.metal = true;
