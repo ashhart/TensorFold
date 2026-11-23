@@ -9,8 +9,8 @@ const D = cuda.paging_test_device.Device;
 const t = std.testing;
 const env = @import("sys").env;
 
-fn mapped(out: *u64, _: ?*anyopaque, _: c_uint) callconv(.c) c_int {
-    out.* = 0x800000;
+fn mapped(out: *u64, ptr: ?*anyopaque, _: c_uint) callconv(.c) c_int {
+    out.* = @intFromPtr(ptr.?);
     return 0;
 }
 fn noMap(_: *u64, _: ?*anyopaque, _: c_uint) callconv(.c) c_int {
@@ -59,6 +59,8 @@ test "kv safety: Qwen host KV pool contains only KV and maps its separately size
     const count = l.pages(64 + pages.window_rows);
     const before = cuda.usage(false);
     const p = try pages.Pages.init(t.allocator, &e, l, 64, 0, 1, count);
+    try t.expectEqual(@intFromPtr(p.host.?.bytes.ptr), p.base);
+    for (p.host.?.bytes) |byte| try t.expectEqual(@as(u8, 0), byte);
     try t.expectEqual(count * l.pageBytes(), p.host.?.bytes.len);
     try t.expectEqual(l.runPages() * l.pageBytes(), p.run_dev.?.len);
     try t.expectEqual(count, p.pool.total());
