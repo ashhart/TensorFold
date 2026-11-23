@@ -159,6 +159,36 @@ test "cache shape: on pages each cache's part is a 576-wide row's latent then it
     try t.expectEqual(kv + 78 * s.cacheBytes(), st.mtp_caches.lc);
 }
 
+test "cache shape: full GLM-5.3's 57 shared layers keep latent rows alone, on pages and in a plan" {
+    var d = Fake.driver();
+    var layers: [78]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    var st = try fullFixture(&d, &w, &layers);
+    st.deinit();
+    for (3..78) |i| if (i < 6 or (i - 6) % 4 != 0) w.config.shared.set(i); // 0-2 and 6, 10, .., 74 index
+    w.config.dsa = true;
+    st = try state.State.init(t.allocator, &d, &w, 4096);
+    defer st.deinit();
+    const s = state.shapeOf(&w);
+    const lb = 512 * 576 * 2;
+    const pb = 512 * 128 * 2;
+    try t.expectEqual(@as(usize, 22), s.pooledBefore(79)); // 21 layers and the MTP layer's
+    try t.expectEqual(@as(u64, 22 * pb), s.pkPageBytes());
+    try t.expectEqual(@as(u64, 79 * lb + 22 * pb + 1024), s.pageBytes()); // padded to 4,608-byte units
+    try t.expectEqual(@as(usize, 0), st.caches[3].pk_rows);
+    try t.expectEqual(@as(usize, 4096 + 2), st.caches[6].pk_rows);
+    const kv: u64 = 1 << 40;
+    st.place(&w, .{ .kv = kv, .pages = 4, .page_bytes = state.pageBytes(&w) });
+    try t.expectEqual(kv + 7 * lb + 4 * pb, st.caches[7].lc); // after 0, 1, 2 and 6's keys
+    try t.expectEqual(@as(u64, 0), st.caches[7].pk);
+    try t.expectEqual(st.caches[6].lc + lb, st.caches[6].pk);
+    try t.expectEqual(kv + 78 * lb + 21 * pb, st.mtp_caches.lc);
+    var arena = try state.State.init(t.allocator, &d, &w, 4096);
+    defer arena.deinit();
+    const plan = try layout.Plan.init(&arena, &w.config, 2048, 2048, 0);
+    try t.expectEqual(@as(usize, 1 + 22 * 4 + 57 + 1), plan.count); // a shared cache: its latent rows only
+}
+
 test "cache shape: index keys stay in GLM-5.3-Flash's ring of index_ring rows, a rebase keeping whole pools" {
     var d = Fake.driver();
     var layers: [2]weights.Layer = undefined;
