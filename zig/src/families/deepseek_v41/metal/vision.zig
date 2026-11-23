@@ -221,7 +221,7 @@ test "the release's vision_config parses to the defaults" {
     // a head count of 0: refused by name before headDim() divides by it
     const zero = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"num_attention_heads\": 16", "\"num_attention_heads\": 0");
     defer std.testing.allocator.free(zero);
-    try std.testing.expectError(error.UnsupportedVision, Config.parse(std.testing.allocator, zero, 5120));
+    try std.testing.expectError(error.ZeroHeads, Config.parse(std.testing.allocator, zero, 5120));
 }
 
 test "the 2D RoPE table: row angles first, column angles after, position 0 is the identity" {
