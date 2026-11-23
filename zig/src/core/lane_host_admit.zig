@@ -35,6 +35,8 @@ fn hold(h: *LaneHost, why: Wait) ?usize {
 
 /// A queued request past a whole class, refused with every lane busy too: none read for or cancelled (lock held).
 pub fn refused(h: *LaneHost) ?usize {
+    const a = h.info_.admit orelse return null;
+    if (a.need == null) return null; // no owner-class hook: no queue scan or per-job read/cancel checks
     for (h.queued.items, 0..) |j, i| {
         if (passed(h, j) or std.mem.indexOfScalar(Id, h.cancels.items, j.id) != null) continue;
         if (ledger.pastClass(h, j)) return i;
