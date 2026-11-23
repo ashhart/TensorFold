@@ -28,6 +28,7 @@ pub const Kind = enum {
     ctl_tile_tail,
     ctl_tile_half,
     ctl_tile_flush,
+    ctl_tile_swap,
 };
 
 /// The kinds the suite registers on the production operators.
@@ -43,7 +44,7 @@ fn bumped(k: Kind) bool {
 
 pub fn name(k: Kind) []const u8 {
     return switch (k) {
-        .bf16, .ctl_tail, .ctl_half, .ctl_flush, .ctl_tile_tail, .ctl_tile_half, .ctl_tile_flush => "metal inkling2 linear",
+        .bf16, .ctl_tail, .ctl_half, .ctl_flush, .ctl_tile_tail, .ctl_tile_half, .ctl_tile_flush, .ctl_tile_swap => "metal inkling2 linear",
         .f32 => "metal inkling2 linear, f32 out",
         .alone_bf16 => "metal inkling2 linear, each row its own one-row call",
         .alone_f32 => "metal inkling2 linear, f32 out, each row its own one-row call",
@@ -435,6 +436,7 @@ pub const controls = [_]Control{
     .{ .kind = .ctl_tile_tail, .label = "control: inkling2 dense tile, the last K chunk dropped", .tile = 2 },
     .{ .kind = .ctl_tile_half, .label = "control: inkling2 dense tile, sums rounded to fp16", .tile = 3 },
     .{ .kind = .ctl_tile_flush, .label = "control: inkling2 dense tile, non-finite inputs flushed", .tile = 1 },
+    .{ .kind = .ctl_tile_swap, .label = "control: inkling2 dense tile, the permuted fragment pairs swapped", .tile = 4 },
 };
 
 pub fn controlKernel(p: *Probe) g.Kernel {
@@ -442,7 +444,7 @@ pub fn controlKernel(p: *Probe) g.Kernel {
     k.control = switch (p.kind) {
         .ctl_tail, .ctl_tile_tail => .shapes,
         .ctl_half => .sums,
-        .ctl_tile_half => .shapes,
+        .ctl_tile_half, .ctl_tile_swap => .shapes,
         .ctl_flush, .ctl_tile_flush => .nonfinite,
         else => unreachable,
     };

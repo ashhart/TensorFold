@@ -14,7 +14,7 @@ fn rowsBytes() u32 {
 }
 
 pub const records = blk: {
-    var out: [22 + 2 * attn_groups]M = undefined;
+    var out: [23 + 2 * attn_groups]M = undefined;
     const singles = [_]M{
         .{ .name = "inkling2 ops inkling2_embed", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_rms_norm", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
@@ -38,9 +38,10 @@ pub const records = blk: {
         .{ .name = "inkling2 ops inkling2_attn_res_stats", .threads = 256, .tg_memory = 4 * 8 * 4, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_attn_res_mix", .threads = 256, .tg_memory = 0, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_attn_res_norm", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
-        // tg_x and tg_w 4 x 8 x 2 x 8 x 4 words each, part 4 x 2 x 2 x 8 x 8 floats.
-        .{ .name = "inkling2 ops inkling2_dense_mma_bf16", .threads = 128, .tg_memory = 2 * 8192 + 4096, .reserved = 128 },
-        .{ .name = "inkling2 ops inkling2_dense_mma_f32", .threads = 128, .tg_memory = 2 * 8192 + 4096, .reserved = 128 },
+        .{ .name = "inkling2 ops inkling2_dense_perm", .threads = 256, .tg_memory = 0, .reserved = 256 },
+        // part 8 x 2 x 2 x 8 x 8 floats: the eight simdgroups' chain sums.
+        .{ .name = "inkling2 ops inkling2_dense_mma_bf16", .threads = 256, .tg_memory = 4 * 8 * 2 * 2 * 8 * 8, .reserved = 256 },
+        .{ .name = "inkling2 ops inkling2_dense_mma_f32", .threads = 256, .tg_memory = 4 * 8 * 2 * 2 * 8 * 8, .reserved = 256 },
     };
     for (singles, 0..) |s, i| out[i] = s;
     for (0..attn_groups) |gi| {
