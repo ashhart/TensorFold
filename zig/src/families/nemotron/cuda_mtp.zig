@@ -417,7 +417,7 @@ pub const Head = struct {
         const e = h.e;
         const o = e.ops();
         const D: u64 = e.c.hidden;
-        if (parts.len < 1 or parts.len > streams) return error.BadDraftRequest;
+        if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadDraftRequest; // 8 off
         var total: usize = 0;
         for (parts) |p| {
             if (p.keep < 1 or p.keep > state.windowRows(e.c) or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;

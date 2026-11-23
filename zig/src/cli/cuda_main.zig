@@ -35,7 +35,7 @@ const usage =
     \\       tensorfold rounds MODEL --tokens ID,... [--max-tokens N]   (GPU ms a serial and a window graph round)
     \\       tensorfold check-draws MODEL FIXTURES_DIR   (MTP draws against the lane fixtures)
     \\       tensorfold shared-widths MODEL PROMPTS.json --streams N [--max-tokens N] [sampling as run]
-    \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
+    \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8; 16 wide)
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)

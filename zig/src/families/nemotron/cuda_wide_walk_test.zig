@@ -113,3 +113,18 @@ test "wide round walk: a round past 8 streams with lessons attached is refused, 
     var segs: [9]fwd.Seg = undefined;
     try std.testing.expectError(error.LessonsPastRoute, f.windowSegs(&segs));
 }
+
+test "wide round walk: with the switch off a direct draft call past 8 streams is refused, and conv checks its rows (REV74 4)" {
+    const c = try lightning(false);
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.c = c;
+    var h: @import("cuda_mtp.zig").Head = undefined;
+    h.e = &e;
+    const part: @import("cuda_mtp.zig").Part = .{ .k_cache = 0, .v_cache = 0, .probs = 0, .ids = 0, .hidden = 0, .sampled = 0, .rule = null, .pos = 0, .keep = 1, .depth = 1 };
+    var parts: [9]@import("cuda_mtp.zig").Part = @splat(part);
+    try std.testing.expectError(error.BadDraftRequest, h.chains(&parts));
+    const glue = @import("cuda_glue.zig");
+    const g: glue.Glue = .{ .set = null, .f = undefined, .s = undefined, .emb = undefined, .norms = undefined, .moe = undefined };
+    const shape: glue.Shape = .{ .proj = 1, .xd = 1, .cd = 1, .heads = 1, .dh = 32, .groups = 1, .state = 128, .rmax = 16 };
+    try std.testing.expectError(error.ScanShape, g.conv(0, 0, 0, 0, 0, 0, 0, 17, shape));
+}
