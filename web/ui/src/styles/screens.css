@@ -269,7 +269,8 @@ ul.checks li.good b{color:var(--good)}ul.checks li.bad b{color:var(--bad)}
 .presetbox .pgroups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start}
 .presetbox .pgroup{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:10px;min-width:0}
 .presetbox .pgroup.pwide{grid-column:1 / -1}
-.presetbox .pgroup h4{margin:0;font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2)}
+.presetbox .phead h2{font-size:inherit;margin:0}
+.presetbox .pgroup h3{margin:0;font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2)}
 .presetbox label{display:flex;flex-direction:column;gap:4px}
 .presetbox .pfield{gap:3px}
 .presetbox .pfield > span:first-child{display:flex;align-items:center;gap:8px}

@@ -13,6 +13,10 @@ For example, a binary built with `-Dversion=1.2.0` prints:
 uv tool install "tensorfold-web @ git+https://github.com/ashhart/TensorFold@v1.2.0#subdirectory=web"
 ```
 
+For quieter output with a screen reader, run `UV_NO_PROGRESS=1 tensorfold web` in a POSIX shell.
+This hides uv progress bars and keeps install results and errors readable.
+Run `tensorfold web --help` to verify that the launcher finds the installed web application.
+
 The launcher checks PATH first, then `uv tool dir --bin` if uv is available. It repeats the lookup after a successful install.
 On systems where process replacement is available it execs the application; on Windows it waits for the child.
 The application's exit status is retained.

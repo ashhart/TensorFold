@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, gb, num, shortName, type Model, type PullStatus } from '../api'
 import type { Ctx } from '../ctx'
 import { showSub, useSub } from '../route'
@@ -16,6 +16,12 @@ const FILTERS: { id: string; label: string; test: (m: Model) => boolean }[] = [
 ]
 const pages = (tokens: number) => Math.round(tokens / 400)
 
+function modelTitle(m: Model) {
+  const variant = m.id.split('/').pop()?.match(/(?:^|[-_])(\d+(?:-?bit)|oQ\d+|bf16|fp16)(?=[-_]|$)/i)?.[1]
+  if (!variant || m.name.toLowerCase().includes(variant.toLowerCase())) return m.name
+  return `${m.name} · ${variant.replace(/(\d+)-?bit/i, '$1-bit')}`
+}
+
 export default function Models({ machine, engine, settings, refreshEngine, refreshSettings, toast, stale, discover }: Ctx & { discover: boolean }) {
   const [models, setModels] = useState<Model[] | null>(null)
   const [sel, setSel] = useState<string | null>(null)
@@ -23,6 +29,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   const [search, setSearch] = useState('')
   const [pulls, setPulls] = useState<Record<string, PullStatus>>({})
   const [notice, setNotice] = useState<string | null>(null)
+  const pendingReady = useRef(new Set<string>())
   const [busy, setBusy] = useState(false)
   const { run, is } = useWorking()
 
@@ -53,7 +60,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
       for (const p of active) {
         const s = await api.pullStatus(p.repo).catch(() => null)
         if (s) setPulls((old) => ({ ...old, [p.repo]: s }))
-        if (s && s.state !== 'running') { load(); if (s.state === 'done') toast(`${shortName(p.repo)} downloaded`) }
+        if (s && s.state !== 'running') load()
       }
     }, 1000)
     return () => clearInterval(t)
@@ -85,6 +92,23 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
     const done = parts.reduce((a, p) => a + p.done_bytes, 0), total = parts.reduce((a, p) => a + p.total_bytes, 0)
     const failed = parts.find((p) => p.state === 'failed')
     return { running: parts.some((p) => p.state === 'running'), failed, fraction: total ? Math.min(1, done / total) : 0 }
+  }
+  useEffect(() => {
+    const ready: string[] = []
+    for (const m of models ?? []) {
+      const parts = [pulls[m.id], ...(m.drafter ? [pulls[m.drafter]] : [])]
+      if (parts.some(p => p?.state === 'running')) pendingReady.current.add(m.id)
+      else if (parts.some(p => p && p.state !== 'done')) pendingReady.current.delete(m.id)
+      else if (m.installed && m.runs_here && !busy && !stale && !isRunning(m) && pendingReady.current.delete(m.id)) ready.push(modelTitle(m))
+    }
+    if (ready.length) toast(`${ready.join(', ')} downloaded. Start is available.`)
+  }, [models, pulls, engine, stale, busy, toast])
+  const progressText = (fraction: number) => fraction >= 1 ? 'Finishing download' : `${Math.floor(fraction * 100)}% downloaded`
+  const reason = (m: Model) => !m.runs_here ? m.runs_note || 'Unsupported on this engine' : m.verdict?.level === 'no' ? m.verdict.reason : null
+  const closeDetails = () => {
+    document.getElementById(`pick-${sel}`)?.focus()
+    setSel(null)
+    if (!discover) showSub('models', null)
   }
   // one engine at a time: starting another model while one runs is asked first, in place
   const [conflict, setConflict] = useState<Model | null>(null)
@@ -123,7 +147,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
   return (
     <section>
       <div className="model-search"><input className="input" type="search" aria-label="Search models" placeholder="Search models" value={search} onChange={(e) => setSearch(e.target.value)} /><select className="sel" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter models">{FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}</select><a className="btn" href="#bench">Benchmarks</a>{discover && <button className="btn" aria-busy={is('refresh')} onClick={refresh}>{is('refresh') ? 'Refreshing…' : 'Refresh sizes'}</button>}</div>
-      {notice && <div className="notice">{notice}</div>}
+      {notice && <div className="notice" role="alert">{notice}</div>}
       {conflict && <div className="notice conflict" role="alertdialog" aria-label="Another model is running">
         <span>Stop <b>{engine?.model}</b> and start <b>{conflict.name}</b>{engine?.connections ? `, disconnecting ${engine.connections} active connections` : ''}?</span>
         <span className="actions"><button className="btn sm primary" disabled={busy} onClick={() => start(conflict, true)}>Stop it and start {conflict.name}</button><button className="btn sm quiet" onClick={() => setConflict(null)}>Keep it running</button></span>
@@ -170,7 +194,7 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
             return (
               // The model name opens details; Download and Start remain separate controls.
               <div key={m.id} role="listitem" data-selected={sel === m.id} className={`mrow ${m.runs_here ? '' : 'dim'}`} onClick={() => setSel(m.id)}>
-                <div><button type="button" className="n rowpick" aria-current={sel === m.id ? 'true' : undefined} onClick={(e) => { e.stopPropagation(); setSel(m.id) }}><ModelLogo names={[m.name, m.id, m.family]} />{m.name}{m.recommended && <span className="chip fits" style={{ marginLeft: 8 }}>Recommended</span>}</button><div className="d">{m.vendor} · {m.description}</div>
+                <div><h2><button id={`pick-${m.id}`} type="button" className="n rowpick" aria-expanded={sel === m.id} aria-controls={sel === m.id ? 'model-details' : undefined} onClick={(e) => { e.stopPropagation(); if (sel === m.id) closeDetails(); else setSel(m.id) }}><ModelLogo names={[m.name, m.id, m.family]} />{modelTitle(m)}{m.recommended && <span className="chip fits" style={{ marginLeft: 8 }}>Recommended</span>}</button></h2><div className="d">{m.vendor} · {m.description}</div>
                   {p?.running && <div className="progress"><i style={{ width: `${Math.round(p.fraction * 100)}%` }} /></div>}
                   {p?.failed && <div className="small" style={{ color: 'var(--bad)', marginTop: 4 }}>Download failed: {p.failed.error}</div>}</div>
                 <div className="v">{gb(m.size_bytes)}<small>{m.installed ? 'on this machine' : 'to download'}</small></div>
@@ -183,10 +207,11 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
                 </div>
                 <div className="act" onClick={(e) => e.stopPropagation()}>
                   {isRunning(m) ? <span className="chip run">Running</span>
-                    : p?.running ? <><span className="small muted num">{Math.round(p.fraction * 100)}%</span> <button className="btn sm quiet" aria-busy={is(`stop:${m.id}`)} onClick={() => stopPull(m)} aria-label={`Stop downloading ${m.name}`}>Stop</button></>
+                    : p?.running ? <><span className="small muted num" id={`progress-${m.id}`}>{progressText(p.fraction)}</span> <button className="btn sm quiet" aria-busy={is(`stop:${m.id}`)} onClick={() => stopPull(m)} aria-describedby={`progress-${m.id}`} aria-label={`Stop downloading ${modelTitle(m)}`}>Stop</button></>
                     : p?.failed ? <button className="btn sm" disabled={!m.runs_here} onClick={() => pull(m)}>Retry</button>
                     : m.installed ? <button className="btn sm primary" aria-busy={busy && sel === m.id} disabled={busy || stale || !m.runs_here} onClick={() => { setSel(m.id); start(m) }}>{busy && sel === m.id ? 'Starting…' : 'Start'}</button>
-                    : <button className="btn sm" aria-busy={is(`pull:${m.id}`)} disabled={!m.runs_here || m.verdict?.level === 'no'} onClick={() => pull(m)}>Download</button>}
+                    : <button className="btn sm" aria-busy={is(`pull:${m.id}`)} aria-describedby={reason(m) ? `reason-${m.id}` : undefined} disabled={!m.runs_here || m.verdict?.level === 'no'} onClick={() => pull(m)}>Download</button>}
+                  {reason(m) && <small id={`reason-${m.id}`}>{reason(m)}</small>}
                 </div>
               </div>
             )
@@ -194,11 +219,12 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
         </div>
 
         {current && (
-          <div className="card panel">
-            <button className="btn sm quiet model-close" onClick={() => setSel(null)} aria-label="Close model details">✕</button>
+          <div className="card panel" id="model-details">
+            <button className="btn sm quiet model-close" onClick={closeDetails} aria-label="Close model details">✕</button>
             {!current.runs_here ? <span className="chip no">Not on this machine</span> : v ? <span className={`chip ${v.level}`}>{v.label}</span> : <span className="chip no">Size unknown</span>}
-            <h2 className="modelhead"><ModelLogo names={[current.name, current.id, current.family]} size="lg" />{current.name}{current.recommended && <span className="chip fits" style={{ marginLeft: 8, verticalAlign: 'middle' }}>Recommended</span>}</h2>
+            <h2 className="modelhead"><ModelLogo names={[current.name, current.id, current.family]} size="lg" />{modelTitle(current)}{current.recommended && <span className="chip fits" style={{ marginLeft: 8, verticalAlign: 'middle' }}>Recommended</span>}</h2>
             <p className="vendor">by {current.vendor}, {current.license}</p>
+            <h3>Description</h3>
             <p className="small muted" style={{ margin: 0 }}>{current.description}</p>
             <dl className="kv">
               {v && v.level !== 'no' && <><dt>Conversations</dt><dd>up to about {num(pages(v.context_tokens))} pages long ({num(v.context_tokens)} tokens{unverified ? ', a rough estimate on CUDA' : ''})</dd></>}
@@ -227,9 +253,10 @@ export default function Models({ machine, engine, settings, refreshEngine, refre
             </details>
             <div className="actions">
               {isRunning(current) ? (engine?.owned && <button className="btn" aria-busy={busy} disabled={busy || stale} onClick={stop}>{busy ? 'Stopping…' : 'Stop'}</button>)
-                : current.installed ? <button className="btn primary" aria-busy={busy} disabled={busy || stale || !current.runs_here} onClick={() => start(current)}>{busy ? 'Starting…' : 'Start'}</button>
-                : <button className="btn primary" aria-busy={is(`pull:${current.id}`)} disabled={!current.runs_here || v?.level === 'no' || progressOf(current)?.running} onClick={() => pull(current)}>Download {gb((current.size_bytes ?? 0) + (current.drafter_bytes ?? 0))}</button>}
-              {progressOf(current)?.running && <button className="btn" aria-busy={is(`stop:${current.id}`)} onClick={() => stopPull(current)}>Stop the download</button>}
+                : current.installed && !progressOf(current)?.running ? <button className="btn primary" aria-busy={busy} disabled={busy || stale || !current.runs_here} onClick={() => start(current)}>{busy ? 'Starting…' : 'Start'}</button>
+                : <button className="btn primary" aria-busy={is(`pull:${current.id}`)} aria-describedby={reason(current) ? 'detail-download-reason' : undefined} disabled={!current.runs_here || v?.level === 'no' || progressOf(current)?.running} onClick={() => pull(current)}>Download {gb((current.size_bytes ?? 0) + (current.drafter_bytes ?? 0))}</button>}
+              {reason(current) && <small id="detail-download-reason">{reason(current)}</small>}
+              {progressOf(current)?.running && <><span id="detail-progress">{progressText(progressOf(current)!.fraction)}</span><button aria-describedby="detail-progress" className="btn" aria-busy={is(`stop:${current.id}`)} onClick={() => stopPull(current)}>Stop the download</button></>}
               {v?.level === 'no' && <a className="btn" href="#settings">Connect a remote engine</a>}
             </div>
           </div>

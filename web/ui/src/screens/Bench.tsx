@@ -457,7 +457,7 @@ export default function Bench({ engine, toast, stale }: Ctx) {
 
   return (
     <section>
-      <div className="head"><div><a className="back-link" href="#models">← Models</a><h1>Benchmarks</h1><p>Measure speed, quality and exactness on this machine.</p></div></div>
+      <div className="head"><div><a className="back-link" href="#models"><span aria-hidden="true">← </span>Models</a><h1>Benchmarks</h1><p>Measure speed, quality and exactness on this machine.</p></div></div>
       {err && <div className="notice bad">{err}</div>}
       {(simple ? !servedReady : !ready) && <div className="notice info">Nothing is running yet. Start an AI from <a href="#models">Models</a>, then measure it here.</div>}
 

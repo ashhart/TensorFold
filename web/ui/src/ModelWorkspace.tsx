@@ -28,7 +28,10 @@ export default function ModelWorkspace(ctx: Ctx) {
         <div><div className="small muted">Engine</div><h2>{name ?? 'No model loaded'}</h2><div className="small muted">{ready ? 'Ready for conversations' : engine?.status === 'starting' ? 'Loading model…' : engine?.status === 'unauthorized' ? 'API key refused' : engine?.status === 'failed' ? 'Stopped with a problem' : 'Choose a model below'}</div></div>
         <a className="btn" href="#monitor">Details</a>
       </div>
-      <div className="engine-facts"><div><span>State</span><b>{engine?.status ?? 'Connecting'}</b></div><div><span>Memory</span><b>{engine?.memory?.active != null ? gb(engine.memory.active) : '—'}</b></div><div><span>Context</span><b>{engine?.context_length ? `${num(engine.context_length)} tokens` : '—'}</b></div></div>
+      <table className="engine-facts" aria-label="Engine statistics">
+        <thead><tr><th scope="col">State</th><th scope="col">Memory</th><th scope="col">Context</th></tr></thead>
+        <tbody><tr><td>{engine?.status ?? 'Connecting'}</td><td>{engine?.memory?.active != null ? gb(engine.memory.active) : 'Unavailable'}</td><td>{engine?.context_length ? `${num(engine.context_length)} tokens` : 'Unavailable'}</td></tr></tbody>
+      </table>
     </div>
     <nav className="model-tabs" aria-label="Models"><div>{TABS.map(([id, name, href]) => <a key={id} href={href} aria-current={tab === id ? 'page' : undefined}>{name}</a>)}</div></nav>
     {tab === 'mine' || tab === 'discover' ? <Models {...ctx} discover={tab === 'discover'} /> : tab === 'learning' ? <Teach {...ctx} /> : <Connect {...ctx} />}

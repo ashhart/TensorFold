@@ -1,34 +1,50 @@
-import { useState, type ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+type CopyProps = { message: number; onCopy: (text: string) => Promise<boolean> }
+const CopyContext = createContext<CopyProps | null>(null)
 
-function Pre({ children, onCopy }: { children?: ReactNode; onCopy: (text: string) => void }) {
+const CodeBlock: NonNullable<Components['pre']> = ({ children, node }) => {
+  const copy = useContext(CopyContext)!
   const [done, setDone] = useState(false)
-  const text = (node: ReactNode): string => {
-    if (node == null || typeof node === 'boolean') return ''
-    if (typeof node === 'string' || typeof node === 'number') return String(node)
-    if (Array.isArray(node)) return node.map(text).join('')
-    if (typeof node === 'object' && 'props' in node) return text((node as { props: { children?: ReactNode } }).props.children)
-    return ''
-  }
+  const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const pre = useRef<HTMLPreElement>(null)
+  useEffect(() => () => clearTimeout(reset.current), [])
+
   return (
-    <pre>
+    <pre ref={pre}>
       {children}
-      <button type="button" className="btn sm copy" onClick={() => { onCopy(text(children)); setDone(true); setTimeout(() => setDone(false), 1200) }}>{done ? 'Copied' : 'Copy'}</button>
+      <button type="button" className="btn sm copy"
+        aria-label={`Copy code block at line ${node?.position?.start.line ?? 1} in message ${copy.message}`}
+        onClick={async event => {
+          event.currentTarget.focus({ preventScroll: true })
+          const code = pre.current?.querySelector('code')
+          if (!code) return
+          const copied = await copy.onCopy(code.textContent ?? '')
+          if (!pre.current) return
+          clearTimeout(reset.current)
+          setDone(copied)
+          if (copied) reset.current = setTimeout(() => setDone(false), 1200)
+        }}>{done ? 'Copied' : 'Copy'}</button>
     </pre>
   )
 }
 
+// Keep renderer identities stable when the transcript or its parent updates.
+const components: Components = {
+  pre: CodeBlock,
+  a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+  // Link to images so rendering a reply can't send conversation data to the image host.
+  img: ({ src, alt }) => <a href={typeof src === 'string' ? src : undefined} target="_blank" rel="noreferrer" title="Image not loaded: open it yourself">[image: {alt || 'no description'}]</a>,
+}
 
-export default function Markdown({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
+export default function Markdown({ text, onCopy, message }: CopyProps & { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: ({ children }) => <Pre onCopy={onCopy}>{children}</Pre>, a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
-        // an image in a reply is not fetched: a model could put the conversation in its address and send it away
-        img: ({ src, alt }) => <a href={typeof src === 'string' ? src : undefined} target="_blank" rel="noreferrer" title="Image not loaded: open it yourself">[image: {alt || 'no description'}]</a> }}>
-        {text}
-      </ReactMarkdown>
+      <CopyContext.Provider value={{ onCopy, message }}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{text}</ReactMarkdown>
+      </CopyContext.Provider>
     </div>
   )
 }

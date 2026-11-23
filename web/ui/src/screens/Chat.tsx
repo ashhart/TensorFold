@@ -74,9 +74,9 @@ function useSmooth(target: string, live: boolean): string {
   return live && !reduce.current ? target.slice(0, Math.min(shown, target.length)) : target
 }
 
-function Reply({ text, live, onCopy }: { text: string; live: boolean; onCopy: (t: string) => void }) {
+function Reply({ text, live, onCopy, message }: { message: number; text: string; live: boolean; onCopy: (t: string) => Promise<boolean> }) {
   const shown = useSmooth(text, live)
-  return shown ? <Markdown text={shown} onCopy={onCopy} /> : null
+  return shown ? <Markdown message={message} text={shown} onCopy={onCopy} /> : null
 }
 
 export default function Chat({ engine, settings, toast, refreshEngine, conversations }: Ctx) {
@@ -425,7 +425,7 @@ export default function Chat({ engine, settings, toast, refreshEngine, conversat
   const teachable = !!engine?.model_repo?.startsWith('living:') || learnsHere
   const onBase = !engine?.model_repo?.startsWith('living:')
   const teachThis = (text: string) => { try { sessionStorage.setItem('tfs:teach-text', text) } catch {                  } location.hash = '#teach' }
-  const copy = async (t: string) => { try { await copyText(t); toast('Copied') } catch { toast('The browser refused the clipboard', 'bad') } }
+  const copy = async (t: string) => { try { await copyText(t); toast('Copied'); return true } catch { toast('The browser refused the clipboard', 'bad'); return false } }
   const last = [...msgs].reverse().find((m) => m.role === 'assistant' && m.stats)
   // Stream events are not token counts and cannot establish a token rate.
   const amount = (st: Stats) => st.measured === 'engine' ? `${num(st.tokens)} tokens${st.tps != null ? `, ${Math.round(st.tps)} tok/s` : ''}` : `${num(st.events ?? st.tokens)} stream events`
@@ -433,8 +433,11 @@ export default function Chat({ engine, settings, toast, refreshEngine, conversat
 
   return (
     <section className="chatpage">
+      <h1 className="sr-only">Chat</h1>
+      <div id="chat-engine-status" role="status">
       {engine?.status === 'unauthorized' && <div className="notice">The engine answers but refuses the API key this TensorFold Web holds. Enter the engine's key in <a href="#settings">Settings</a>, or restart the engine so it takes the new one.</div>}
       {!ready && engine?.status !== 'unauthorized' && <div className="notice info">No model is running yet. Start one from <a href="#models">Models</a>.</div>}
+      </div>
       {error && <div className="notice bad">{error}</div>}
       {saveError === 'failed' && <div className="notice">TensorFold Web did not save the conversation; it is tried again at the next change.</div>}
       {saveError === 'conflict' && <div className="notice">This conversation was changed elsewhere (another page, or a replay) since this page read it, so it is no longer saved from here. {convId && <button className="btn sm" onClick={() => openConversation(convId, true)}>Reopen it</button>} to see the latest and go on; what this page holds and the server lacks is lost.</div>}
@@ -490,7 +493,7 @@ export default function Chat({ engine, settings, toast, refreshEngine, conversat
         {checking && convId && <SpeedupCheck id={convId} model={model} toast={toast} written={msgs.filter((m) => m.role === 'assistant').map((m) => m.request ?? null)} onClose={() => setChecking(false)} onDone={(a, b) => { setChecking(false); refreshList(); setSpeedupPair(true); setComparing([a, b]) }} />}
         {replaying && convId && <ReplayForm id={convId} model={model} toast={toast} onDone={(rid) => { setReplaying(false); refreshList(); setComparing([convId, rid]) }} />}
         {comparing && <div className="msgs"><ReplyCompare a={comparing[0]} b={comparing[1]} speedup={speedupPair} names={pairNames(comparing)} onClose={() => { setComparing(null); setSpeedupPair(false) }} /></div>}
-        <div className="msgs" ref={box} hidden={!!comparing} onScroll={(e) => { const el = e.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40 }}>
+        <div className="msgs" role="log" aria-label="Conversation messages" aria-busy={streaming} tabIndex={0} ref={box} hidden={!!comparing} onScroll={(e) => { const el = e.currentTarget; stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40 }}>
           {!msgs.length ? (
             <div className="empty">
               <span className="sr-only">Start a conversation</span>
@@ -509,7 +512,7 @@ export default function Chat({ engine, settings, toast, refreshEngine, conversat
                   <div className="who" title={[m.engine, m.thinking ? `thinking ${m.thinking}` : '', m.preset && m.preset !== 'Model defaults' ? `preset ${m.preset}` : '', m.at ? new Date(m.at * 1000).toLocaleString() : ''].filter(Boolean).join(' · ')}><ModelLogo names={[m.model ?? model]} size="xs" /><b>{m.model ?? model}</b>{m.stats ? <span className="num">{amount(m.stats)}</span> : null}{badge(m) ? <span>{badge(m)}</span> : null}</div>
                   {m.reasoning && <details className="think" open={(streaming && i === msgs.length - 1 && !m.content) || undefined}>
                     <summary>{streaming && i === msgs.length - 1 && !m.content ? 'Thinking…' : `Thought for ${num(m.stats?.reasoning ?? m.reasoning.length)} ${m.stats?.reasoning ? 'tokens' : 'characters'}`}</summary>{m.reasoning}</details>}
-                  <Reply text={m.content} live={streaming && i === msgs.length - 1} onCopy={copy} />
+                  <Reply message={i + 1} text={m.content} live={streaming && i === msgs.length - 1} onCopy={copy} />
                   {m.tool_calls?.map((c) => <div key={c.id} className="toolcall"><code>{c.name}({c.arguments})</code>
                     <span className={c.check ? 'bad small' : 'good small'}>{c.check ? ` ✗ ${c.check}` : ' ✓ matches its parameters'}</span></div>)}
                   {m.json && <div className={`small ${m.json.ok ? 'good' : 'bad'}`}>{m.json.ok ? '✓' : '✗'} {m.json.detail}</div>}
@@ -541,7 +544,7 @@ export default function Chat({ engine, settings, toast, refreshEngine, conversat
         )}
         <div className="composer">
           <div className="box">
-            <textarea ref={input} rows={1} value={text} placeholder={ready ? `Message ${model}` : 'Start a model first'} disabled={!ready} aria-label="Message"
+            <textarea ref={input} rows={1} value={text} placeholder={ready ? `Message ${model}` : 'Start a model first'} readOnly={!ready} aria-disabled={!ready} aria-describedby={!ready ? 'chat-engine-status' : undefined} aria-label="Message"
                       onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
           </div>
           {streaming ? <button className="btn" onClick={() => abort.current?.abort()}>Stop</button> : <button className="btn primary" disabled={!ready || !text.trim()} onClick={() => send()}>Send</button>}

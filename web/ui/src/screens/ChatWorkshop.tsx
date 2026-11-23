@@ -84,10 +84,10 @@ export function WorkshopPanel({ ws, set }: { ws: Workshop; set: (w: Workshop) =>
   const custom = ws.toolsText !== JSON.stringify(TOOL_PRESETS[preset].tools, null, 2)
   return (
     <div className="presetbox workshop">
-      <div className="phead"><b>Tools &amp; JSON</b><span className="small muted">Test what an app asks of the model: calling tools, answering in JSON. With either on, replies come whole rather than word by word, and each one is checked.</span></div>
+      <div className="phead"><h2>Tools &amp; JSON</h2><span className="small muted">Test what an app asks of the model: calling tools, answering in JSON. With either on, replies come whole rather than word by word, and each one is checked.</span></div>
       <div className="pgroups">
-        <section className="pgroup" aria-label="Tools">
-          <h4>Tools the model may call</h4>
+        <section className="pgroup">
+          <h3>Tools the model may call</h3>
           <label className="pfield"><span><input type="checkbox" checked={ws.tools} onChange={(e) => set({ ...ws, tools: e.target.checked })} /> <b>Offer tools</b></span>
             <span className="small muted">The model may ask for a tool instead of answering; the page checks the call, gives the result back, and the model answers from it.</span></label>
           {ws.tools && <>
@@ -110,8 +110,8 @@ export function WorkshopPanel({ ws, set }: { ws: Workshop; set: (w: Workshop) =>
             </details>
           </>}
         </section>
-        <section className="pgroup" aria-label="Reply format">
-          <h4>Reply format</h4>
+        <section className="pgroup">
+          <h3>Reply format</h3>
           <Field label="Reply as" help={FORMAT_HELP[ws.output]}>
             <select className="sel sm" value={ws.output} onChange={(e) => set({ ...ws, output: e.target.value as Workshop['output'] })} aria-label="Reply format">
               <option value="text">text</option><option value="json">JSON</option><option value="schema">JSON matching a schema</option></select></Field>
