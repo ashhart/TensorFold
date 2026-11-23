@@ -19,4 +19,5 @@ test {
     _ = snapshot;
     _ = contracts;
     _ = dflash2_config;
+    _ = @import("dflash2_rows_test.zig");
 }
