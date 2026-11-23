@@ -10,6 +10,7 @@ pub const wav = @import("core/wav.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
+pub const checkpoint_file_cache = @import("core/checkpoint_file_cache.zig");
 pub const digest_cache = @import("core/digest_cache.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
