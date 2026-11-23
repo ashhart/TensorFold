@@ -7,14 +7,7 @@ const values = @import("kimi_values.zig");
 const V = json.Value;
 const A = std.mem.Allocator;
 
-pub const Result = struct {
-    content: []const u8,
-    reasoning: []const u8,
-    calls: ?[]V,
-    reasoning_tokens: usize,
-    rejected: bool = false,
-    open_think: bool = false, // the think channel was still open where the tokens end
-};
+pub const Result = @import("native_reply.zig").Result;
 const Tag = enum { message, think, response, tools, call, argument, json };
 const Header = struct { tag: Tag, attrs: *json.Object };
 
