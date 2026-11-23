@@ -325,7 +325,7 @@ pub const Engine = struct {
         if (e.images) |v| try v.activate(slot);
     }
 
-    /// Frees slot `slot`'s sequence unless keepsSequence(slot) (a paged one gives its pages back) and binds slot 0.
+    /// Frees slot `slot`'s sequence unless the slot keeps it (a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
         if (e.images) |v| v.release(slot);
         const paged = if (e.pages) |p| p.paged(slot) else false;
