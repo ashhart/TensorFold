@@ -24,22 +24,35 @@ const end_message = Piece{ .id = 200010, .text = "<|end_message|>", .added = tru
 const content_tool_error = Piece{ .id = 200022, .text = "<|content_tool_error|>", .added = true };
 const content_tool_json = Piece{ .id = 200049, .text = "<|content_invoke_tool_json|>", .added = true };
 const content_tool_text = Piece{ .id = 200057, .text = "<|content_invoke_tool_text|>", .added = true };
+// The tokenizer's other special tokens, none of them a reply control.
+const message_user = Piece{ .id = 200000, .text = "<|message_user|>", .added = true };
+const message_system = Piece{ .id = 200002, .text = "<|message_system|>", .added = true };
+const end_of_text = Piece{ .id = 199999, .text = "<|endoftext|>", .added = true };
+const content_xml = Piece{ .id = 200024, .text = "<|content_xml|>", .added = true };
+const unused = Piece{ .id = 200030, .text = "<|unused_200030|>", .added = true };
+
+/// Token ids the fake has decoded, summed over every call.
+var decoded_ids: usize = 0;
 
 const Fake = struct {
     pieces: []const Piece,
 
     fn text(f: *Fake) model_text.Text {
-        return .{ .ctx = f, .vtable = &.{
-            .encode = encode,
-            .decode = decode,
-            .token_id = tokenId,
-            .token_string = tokenString,
-            .vocab_size = vocabSize,
-            .eos_ids = eosIds,
-            .render = render,
-            .template_source = templateSource,
-            .added = added,
-        } };
+        return .{
+            .ctx = f,
+            .vtable = &.{
+                .encode = encode,
+                .decode = decode,
+                .token_id = tokenId,
+                .token_string = tokenString,
+                .vocab_size = vocabSize,
+                .eos_ids = eosIds,
+                .render = render,
+                .template_source = templateSource,
+                .added = added,
+                .special = added, // every added Inkling 2 token is special in its tokenizer config
+            },
+        };
     }
 
     fn find(f: *const Fake, id: u32) ?Piece {
@@ -59,6 +72,7 @@ const Fake = struct {
 
     fn decode(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
         const f: *Fake = @ptrCast(@alignCast(ctx));
+        decoded_ids += ids.len;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(a);
         for (ids) |id| {
@@ -357,25 +371,21 @@ test "Inkling 2 parse: every truncation class retains only its complete blocks a
     }
 }
 
-test "Inkling 2 parse: sampling end terminates output and still reports an actually unclosed channel" {
+test "Inkling 2 parse: a sampling end closes nothing, so ignore_eos text goes on and open channels stay reported" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // ignore_eos keeps decoding past the sampling end: the next message is the reply's too
     const closed = [_]Piece{
-        content_text,
-        plain(50, "shown"),
-        end_message,
-        end_sampling,
-        content_text,
-        plain(51, "hidden"),
-        end_message,
+        message_model, content_text, plain(50, "shown"), end_message, end_sampling,
+        message_model, content_text, plain(51, " next"), end_message,
     };
     const done = try parse(a, &closed, &.{});
-    try std.testing.expectEqualStrings("shown", done.content);
+    try std.testing.expectEqualStrings("shown next", done.content);
     try std.testing.expect(!done.rejected);
     try std.testing.expect(!done.open_think);
 
-    const thinking = [_]Piece{ content_thinking, plain(52, "open thought"), end_sampling, content_text, plain(53, "hidden") };
+    const thinking = [_]Piece{ content_thinking, plain(52, "open thought"), end_sampling };
     const open = try parse(a, &thinking, &.{});
     try std.testing.expectEqualStrings("open thought", open.reasoning);
     try std.testing.expectEqualStrings("", open.content);
@@ -383,9 +393,10 @@ test "Inkling 2 parse: sampling end terminates output and still reports an actua
     try std.testing.expect(!open.rejected);
 
     const tools = try offeredTools(a, &.{"lookup"});
-    const tool = [_]Piece{ content_tool_json, plain(54, "{\"name\":\"lookup\",\"args\":{}}"), end_sampling, content_text, plain(55, "hidden") };
+    const tool = [_]Piece{ content_tool_json, plain(54, "{\"name\":\"lookup\",\"args\":{}}"), end_sampling };
     const incomplete = try parse(a, &tool, tools);
     try std.testing.expect(incomplete.rejected);
+    try std.testing.expectEqual(@as(usize, 1), incomplete.rejected_calls);
     try std.testing.expect(incomplete.calls == null);
     try std.testing.expectEqualStrings("", incomplete.content);
     try std.testing.expect(!incomplete.open_think);
@@ -442,7 +453,7 @@ test "Inkling 2 parse: reparsing every token prefix is monotonic and never expos
         end_message, // 17
         end_sampling, // 18
         content_text, // 19
-        plain(77, "ignored"), // 20
+        plain(77, "next"), // 20: past the sampling end, as ignore_eos decodes it
         end_message, // 21
     };
     const tools = try offeredTools(a, &.{"lookup"});
@@ -469,10 +480,105 @@ test "Inkling 2 parse: reparsing every token prefix is monotonic and never expos
         previous_calls = call_count;
     }
     const final = try parse(a, &pieces, tools);
-    try std.testing.expectEqualStrings("beforeafter", final.content);
+    try std.testing.expectEqualStrings("beforeafternext", final.content);
     try std.testing.expectEqualStrings("why", final.reasoning);
     try std.testing.expectEqual(@as(usize, 1), final.reasoning_tokens);
     try std.testing.expectEqual(@as(usize, 1), final.calls.?.len);
     try std.testing.expect(!final.rejected);
     try std.testing.expect(!final.open_think);
+}
+
+test "Inkling 2 parse: the tokenizer's other special tokens inside a block are never payload, whole or streamed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pieces = [_]Piece{
+        message_model,  content_thinking, plain(70, "think"), message_system, plain(71, "ing"), end_message,
+        message_model,  content_text,     plain(72, "A"),     message_user,   plain(73, "B"),   end_of_text,
+        plain(74, "C"), content_xml,      plain(75, "D"),     unused,         end_message,
+    };
+    const whole = try parse(a, &pieces, &.{});
+    try std.testing.expectEqualStrings("thinking", whole.reasoning);
+    try std.testing.expectEqualStrings("ABCD", whole.content);
+    var fake: Fake = .{ .pieces = &pieces };
+    var stream = try reply.Stream.init(a, fake.text());
+    var ids: [pieces.len]u32 = undefined;
+    for (&pieces, &ids) |piece, *id| id.* = piece.id;
+    var last: reply.Result = undefined;
+    for (1..ids.len + 1) |n| last = try stream.extend(ids[0..n], &.{});
+    try std.testing.expectEqualStrings("thinking", last.reasoning);
+    try std.testing.expectEqualStrings("ABCD", last.content);
+}
+
+test "Inkling 2 parse: a new message inside an unclosed block closes it, so its tool call parses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try offeredTools(a, &.{"lookup"});
+    const pieces = [_]Piece{
+        message_model,                                         content_text,        plain(80, "Hi"),
+        message_model,                                         plain(81, "lookup"), content_tool_json,
+        plain(82, "{\"name\":\"lookup\",\"args\":{\"q\":1}}"), end_message,
+    };
+    const got = try parse(a, &pieces, tools);
+    try std.testing.expectEqualStrings("Hi", got.content);
+    try expectCall(got.calls, 0, "lookup", "{\"q\":1}");
+    try std.testing.expect(!got.rejected);
+    // a call left open by the next message never finished: refused and counted, its payload never shown
+    const open_call = [_]Piece{
+        message_model, content_tool_json, plain(83, "{\"name\":\"lookup\",\"args\":{}}"),
+        message_model, content_text,      plain(84, "after"),
+        end_message,
+    };
+    const cut = try parse(a, &open_call, tools);
+    try std.testing.expectEqualStrings("after", cut.content);
+    try std.testing.expect(cut.calls == null);
+    try std.testing.expectEqual(@as(usize, 1), cut.rejected_calls);
+}
+
+test "Inkling 2 parse: every refused call is counted: unoffered, malformed and unfinished" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = try offeredTools(a, &.{"lookup"});
+    const pieces = [_]Piece{
+        message_model, content_tool_json, plain(90, "{\"name\":\"other\",\"args\":{}}"),  end_message,
+        message_model, content_tool_json, plain(91, "{\"name\":"),                        end_message,
+        message_model, content_tool_json, plain(92, "{\"name\":\"lookup\",\"args\":{}}"), end_message,
+        message_model, content_tool_json, plain(93, "{\"name\":\"lookup\""),
+    };
+    const got = try parse(a, &pieces, tools);
+    try std.testing.expectEqual(@as(usize, 3), got.rejected_calls);
+    try expectCall(got.calls, 0, "lookup", "{}");
+}
+
+test "Inkling 2 parse: a stop string costs streamed frames no whole-reply decode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var pieces: [3 + 64]Piece = undefined;
+    pieces[0] = message_model;
+    pieces[1] = content_text;
+    for (pieces[2 .. pieces.len - 1], 0..) |*piece, i| piece.* = plain(@intCast(100 + i), "x");
+    pieces[pieces.len - 1] = end_message;
+    var fake: Fake = .{ .pieces = &pieces };
+    const Srv = struct { text: model_text.Text };
+    const srv: Srv = .{ .text = fake.text() };
+    var g: struct {
+        a: Allocator,
+        chat: bool = true,
+        inkling2: ?reply.Stream = null,
+        tools: []const Value = &.{},
+        srv: *const Srv,
+        stops: @import("reply_text.zig").Stops,
+    } = .{ .a = a, .srv = &srv, .stops = .{ .strings = &.{"STOP"} } };
+    g.inkling2 = try reply.Stream.init(a, srv.text);
+    var ids: [pieces.len]u32 = undefined;
+    for (&pieces, &ids) |piece, *id| id.* = piece.id;
+    decoded_ids = 0;
+    for (1..ids.len + 1) |n| _ = try @import("chat_inkling2.zig").read(&g, ids[0..n], false);
+    const done = try @import("chat_inkling2.zig").read(&g, &ids, true);
+    try std.testing.expectEqual(@as(usize, 64), done.content.len);
+    // each token decoded once by the parser and once for the finished reply's stop check: linear, not quadratic
+    try std.testing.expect(decoded_ids <= 2 * ids.len);
 }
