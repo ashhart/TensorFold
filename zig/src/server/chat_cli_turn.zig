@@ -53,7 +53,10 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, request:
     defer client.deinit();
     var printer: Printer = .{ .io = io, .out = out, .show = show };
     var r: reply.Reply = .{ .a = a, .sink = printer.sink() };
-    const bearer = if (key) |k| try std.fmt.allocPrint(a, "Bearer {s}", .{k}) else null;
+    var auth_buf: [300]u8 = undefined;
+    const bearer = if (key) |k| stream.rawHeader(&auth_buf, k) orelse return .{ .failed = .{
+        .reason = "API key cannot be encoded as Latin-1 header text",
+    } } else null;
     var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .body = request, .reply = &r };
     const ended = stream.bounded(io, null, Exchange.run, &x);
     printer.end();

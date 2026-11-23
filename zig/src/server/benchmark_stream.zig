@@ -331,7 +331,7 @@ pub const Fetched = struct {
 };
 
 /// Python's raw Authorization header: Unicode scalar values encoded as Latin-1, never raw UTF-8.
-fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
+pub fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
     const prefix = "Bearer ";
     if (prefix.len + token.len > buf.len) return null;
     @memcpy(buf[0..prefix.len], prefix);
