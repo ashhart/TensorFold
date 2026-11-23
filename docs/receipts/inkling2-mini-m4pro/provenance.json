@@ -1,0 +1,36 @@
+{
+  "machine": {"chip": "Apple M4 Pro", "memory_gib": 48, "os": "macOS 27.2 (26B123)"},
+  "toolchain": {"zig": "0.17.0", "build": "zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast"},
+  "checkpoint": {"repo": "thinkingmachines/Inkling-2-Mini", "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7"},
+  "reference": {"server": "mlx_lm.server", "mlx": "0.32.4", "mlx_lm": "0.1.dev1006+g0c4c99192"},
+  "binaries": {
+    "round_three": {
+      "commit_named_by_the_pr": "a0935b5279",
+      "sha256": "fea64c017bd4ac02d4c4d66ac3ebe3f578c12003df56003f3e99cec375eb6c4f",
+      "used_for": ["decode", "cold prompts", "footprint", "hash-r3b.log"]
+    },
+    "concurrency_plain": {
+      "commit": "e6cb02e09e",
+      "sha256": "7f94186027c9c3d3bb246267a102bc7c1a192bd3c3c0d35ef6656874b14a30c3",
+      "used_for": ["abba-1-plain.json", "abba-4-plain.json"]
+    },
+    "concurrency_dspark": {
+      "commit": "working tree before 05b6fdb5c0 was committed",
+      "sha256": "6b88deb9c1f9ab6afde916b35591c0ea7e5c92329b3ef75e16330e2f4afba857",
+      "used_for": ["abba-2-dspark.json", "abba-3-dspark.json", "dspark-alone-serial.json"]
+    },
+    "head_sampled": {
+      "commit": "e90ecce19a11d0cfe18a2f3c4b57dfae33a56976 plus the metal.zig table split",
+      "sha256": "0c6ce5f143471000018c8c3104b541b4c3e5937c1a61f185cf1c7984e4ea0eaf",
+      "used_for": ["sampled-drafted.out", "sampled-plain.out", "sampled-drafted2.out"]
+    }
+  },
+  "commands": {
+    "decode_cold_server": "serve CHECKPOINT --host 127.0.0.1 --port 8099 --context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking (plain decode and cold prompts); the DSpark decode column used the concurrency server below without --no-drafts, on port 8099",
+    "decode": "python3 tools/bench_openai.py http://127.0.0.1:8099/v1 local-model --tokens 256 --reps 3 --temperatures 0 --label LABEL --output FILE",
+    "concurrency_server": "serve CHECKPOINT --host 127.0.0.1 --port 8122 --context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking [--no-drafts]",
+    "concurrency": "python3 tools/bench_concurrent.py http://127.0.0.1:8122/v1 m --levels 1,4 --tokens 256 --reps 3 --temperatures 0 --label LABEL --output FILE [--alone --serial]",
+    "cold": "python3 cold_prefill.py http://127.0.0.1:8099/v1 --model m --ck CHECKPOINT --sizes 2048,8192,32768,65536 --label LABEL --output FILE",
+    "mlx_server": "mlx_lm.server --model CHECKPOINT --host 127.0.0.1 --port 8099"
+  }
+}
