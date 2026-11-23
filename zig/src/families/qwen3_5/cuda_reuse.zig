@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const spares = @import("cuda_spares.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -33,6 +34,7 @@ pub const Copy = struct {
     format: Format,
     images: []Seen,
     reading: bool = false, // a restore's queued copies may still read `host`: a drop keeps it until they are done
+    spares: ?*spares.Spares = null, // where `host` goes once drained (null: freed)
 
     /// The bytes the copy holds room for, where they are.
     pub fn room(c: *const Copy) usize {
@@ -47,6 +49,12 @@ pub const Target = struct {
     seen: *std.AutoHashMapUnmanaged(*lanes.Stream, []Seen),
     ctx: ?*const cuda.Context = null, // --learn-conversations: made current where the disk tier allocates copies
     device: bool = false, // an integrated GPU: saves go to device memory, unless the disk tier reads them (ctx)
+    spares: spares.Spares = .{}, // freed host copies, for the next save or recall of their size
+
+    /// Whether saves go to device memory: an integrated GPU whose states no disk tier reads on the host.
+    pub fn onDevice(t: *const Target) bool {
+        return t.device and t.ctx == null;
+    }
 };
 
 /// One piece of a stream's state: its offset in the state or key/value buffer, its length.
@@ -190,11 +198,11 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
-    return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null));
+    return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.onDevice(), &t.spares));
 }
 
-/// A copy of `cache` at `at` rows, on the host or the `device`, naming the prompt's images that start before it.
-pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, device: bool) !*Copy {
+/// A copy of `cache` at `at` rows, on the host (from `kept` when given) or the `device`, naming its prompt's images.
+pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, device: bool, kept: ?*spares.Spares) !*Copy {
     if (cache.len != at or cache.last != null or at > cache.cap) return error.NotAtMark;
     try cache.flush(e); // the copy holds the state with the pending kept rows landed
     const l: Layout = .{ .g = e.g, .format = formatOf(e), .cap = cache.cap, .at = at };
@@ -212,7 +220,7 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
     // a cuMemAlloc takes ~4 ms where pinning the same 650 MB takes ~180: on shared memory nothing needs pinning
     const len = l.total();
     const dev = if (device) try cuda.DeviceBuffer.alloc(e.d, len) else null;
-    const host: cuda.HostBuffer = if (dev) |_| .{ .d = e.d, .bytes = &.{} } else try cuda.HostBuffer.alloc(e.d, len);
+    const host: cuda.HostBuffer = if (dev) |_| .{ .d = e.d, .bytes = &.{} } else try spares.pin(kept, e.d, len);
     copy.* = .{
         .host = host,
         .dev = dev,
@@ -221,6 +229,7 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
         .delta = cache.delta,
         .format = l.format,
         .images = images,
+        .spares = if (dev == null) kept else null,
     };
     errdefer drainThenFree(e, copy);
     var off: usize = 0;
@@ -255,7 +264,7 @@ fn drainThenFree(e: *Engine, copy: *Copy) void {
         cuda.copy_source.retainPinned(e.d, copy.host, e.stream);
         return;
     };
-    copy.host.free();
+    spares.release(copy.spares, copy.host);
 }
 
 /// Whether `cache` can take the kept state: the same cache format and bytes, a position inside it, the same images.
@@ -327,7 +336,7 @@ pub fn dropCopy(e: *Engine, copy: *Copy) void {
     } else if (copy.reading) {
         std.log.warn("qwen3_5: a kept state's host copy goes to the copy-source quarantine: a restore's copies did not drain", .{});
         cuda.copy_source.retainPinned(e.d, copy.host, e.stream);
-    } else copy.host.free();
+    } else spares.release(copy.spares, copy.host); // drained: the save waited, and no restore reads it
     e.gpa.free(copy.images);
     e.gpa.destroy(copy);
 }
@@ -573,7 +582,7 @@ test "a device save pins nothing: it copies on the device both ways, and its dro
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
-    const copy = try saveCache(&e, &cache, 10, &.{}, true);
+    const copy = try saveCache(&e, &cache, 10, &.{}, true, null);
     try std.testing.expectEqual(@as(usize, 1), DeviceFake.allocs);
     try std.testing.expectEqual(@as(usize, l.count()), DeviceFake.dtod); // a copy a piece, contiguous
     try std.testing.expectEqual(@as(usize, l.total()), copy.room());

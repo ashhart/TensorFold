@@ -14,6 +14,7 @@ const Script = struct {
     seen: bool = false,
     prompt: [4096]u32 = undefined,
     count: usize = 0,
+    emit: []const u32 = &.{2},
 
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -28,7 +29,7 @@ const Script = struct {
         s.count = request.prompt.len;
         @memcpy(s.prompt[0..s.count], request.prompt);
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        sink.event(sink.ctx, id, &.{ .tokens = &.{2} });
+        sink.event(sink.ctx, id, &.{ .tokens = s.emit });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -293,7 +294,8 @@ fn checkpoint(source: []const u8, config: []const u8, kind: []const u8, expected
     }
 }
 
-fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u8, ids: []const u32) !void {
+/// One chat request with `extra` fields through `openai.run`, answered by the script: the whole JSON reply.
+fn post(srv: *Server, a: Allocator, script: *Script, extra: []const u8) !json.Value {
     const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"messages\":[{{\"role\":\"user\",\"content\":\"H\"}}],\"max_tokens\":2,\"return_token_ids\":true{s}}}", .{extra}))).ok;
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var response: Reply = .{ .a = a };
@@ -301,8 +303,12 @@ fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u
     openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
     try std.testing.expectEqual(@as(?u16, 200), response.status);
     try std.testing.expect(script.seen);
+    return response.whole.?;
+}
+
+fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u8, ids: []const u32) !void {
+    const whole = try post(srv, a, script, extra);
     try std.testing.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
-    const whole = response.whole.?;
     const message = whole.get("choices").?.array[0].get("message").?;
     const is_closed = ids[ids.len - 1] == 301;
     try std.testing.expectEqualStrings(if (is_closed) "K" else "", message.strField("content").?);
@@ -320,4 +326,113 @@ test "thinking request: checkpoint GLM 5.3 off closes its generation prefix and 
 
 test "thinking request: checkpoint LFM2 off closes its generation prefix and preserves main ids" {
     try checkpoint(@embedFile("fixtures/thinking/lfm2.jinja"), @embedFile("fixtures/thinking/lfm2-tokenizer_config.json"), "lfm2_moe", "<|startoftext|><|im_start|>user\nH<|im_end|>\n<|im_start|>assistant\n<think>");
+}
+
+/// GLM 5.3's template with thinking off, served: the prompt carries `word` from `effort`, which the reply reports.
+fn effortOff(server_effort: ?[]const u8, extra: []const u8, effort: ?[]const u8, word: []const u8) !void {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const config = @embedFile("fixtures/thinking/glm53-tokenizer_config.json");
+    var f = try @import("thinking_family_fixture.zig").init(t.allocator, t.io, @embedFile("fixtures/thinking/glm53.jinja"), config, "glm5_next");
+    defer f.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer hf.deinit();
+    const text = hf.text();
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+    const raw = try text.render(a, messages, .{ .enable_thinking = false, .reasoning_effort = effort }, &problem);
+    try t.expect(std.mem.indexOf(u8, raw.text, word) != null);
+    const ids = try std.mem.concat(a, u32, &.{ try raw.encode(text, a, &problem), &.{301} });
+    var script: Script = .{};
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text, .{
+        .served_name = "m",
+        .model_ids = &.{ "m", "alias" },
+        .use_drafts = false,
+        .reasoning_effort = server_effort,
+    }, null);
+    defer srv.deinit();
+    const whole = try post(srv, a, &script, extra);
+    try t.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
+    try t.expectEqualStrings(effort orelse "none", whole.get("tensorfold").?.strField("reasoning_effort").?);
+}
+
+test "thinking request: GLM 5.3 off renders a named effort, and main's Max when none is named" {
+    try effortOff(null, off ++ ",\"reasoning_effort\":\"high\"", "high", "Reasoning Effort: High");
+    try effortOff(null, ",\"thinking\":false,\"reasoning_effort\":\"low\"", "low", "Reasoning Effort: Low");
+    try effortOff(null, off, null, "Reasoning Effort: Max");
+    try effortOff(null, ",\"reasoning_effort\":\"none\"", null, "Reasoning Effort: Max");
+}
+
+test "thinking request: --reasoning-effort never reaches a thinking-off prompt, which keeps main's bytes" {
+    // effortOff's expected prompt is the template's render with no effort and thinking off: main's ids
+    try effortOff("high", off, null, "Reasoning Effort: Max");
+    try effortOff("high", ",\"thinking\":false", null, "Reasoning Effort: Max");
+    try effortOff("high", off ++ ",\"reasoning_effort\":\"low\"", "low", "Reasoning Effort: Low"); // the request's own
+}
+
+test "thinking request: Qwen3.8 off takes a named effort, which its template reads only while thinking" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const config = @embedFile("fixtures/thinking/qwen38-tokenizer_config.json");
+    var f = try @import("thinking_family_fixture.zig").init(t.allocator, t.io, @embedFile("fixtures/thinking/qwen38.jinja"), config, "qwen3_5");
+    defer f.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer hf.deinit();
+    const text = hf.text();
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+    const heard = try text.render(a, messages, .{ .enable_thinking = false, .reasoning_effort = "xhigh" }, &problem);
+    try t.expectEqualStrings((try text.render(a, messages, .{ .enable_thinking = false }, &problem)).text, heard.text);
+    var script: Script = .{};
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text, .{ .served_name = "m", .model_ids = &.{ "m", "alias" }, .use_drafts = false }, null);
+    defer srv.deinit();
+    const whole = try post(srv, a, &script, off ++ ",\"reasoning_effort\":\"high\""); // heard as xhigh on Qwen3.8's levels
+    try t.expectEqualSlices(u32, try heard.encode(text, a, &problem), script.prompt[0..script.count]);
+    try t.expectEqualStrings("xhigh", whole.get("tensorfold").?.strField("reasoning_effort").?);
+}
+
+test "thinking request: a named effort is the request's own, with no fallback, so Kimi's off prompt keeps none" {
+    const fields = @import("fields.zig");
+    const levels = [_][]const u8{ "low", "high", "max" };
+    try std.testing.expect(fields.namedEffort(null, &levels) == null); // effortFor would give Kimi "max"
+    try std.testing.expect(fields.namedEffort("none", &levels) == null);
+    try std.testing.expectEqualStrings("high", fields.namedEffort("high", &levels).?);
+    try std.testing.expectEqualStrings("high", fields.namedEffort("medium", &levels).?); // on GLM-5.3's levels
+}
+
+test "thinking off on a channel model: the model's own unclosed block keeps its scratch text out of the answer" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try fixture.Fixture.init(t.allocator, t.io, null);
+    defer f.deinit();
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"model":{"type":"BPE","vocab":{"H":0,"O":1,"K":2,"<|channel>thought":302,"<channel|>":303,"<|im_end|>":127906},"merges":[]},"decoder":{"type":"Fuse"},
+        \\ "added_tokens":[{"id":302,"content":"<|channel>thought","special":true},{"id":303,"content":"<channel|>","special":true},{"id":127906,"content":"<|im_end|>","special":true}]}
+    });
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = unclosed_switch });
+    var problem: []const u8 = "";
+    const text = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer text.deinit();
+    var script: Script = .{ .emit = &.{ 302, 2, 127906 } }; // its own open, then K, then its end-of-sequence: never closed
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = true,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    const body = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"max_tokens\":4" ++ off ++ "}")).ok;
+    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
+    var response: Reply = .{ .a = a };
+    openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(?u16, 200), response.status);
+    try t.expect(script.seen);
+    const message = response.whole.?.get("choices").?.array[0].get("message").?;
+    try t.expectEqualStrings("", json.strOr(message.get("content")));
 }

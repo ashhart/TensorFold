@@ -17,8 +17,61 @@ const Engine = @import("cuda_engine.zig").Engine;
 /// Rows a job's first message carries after its header (a decode step's one row); more go in a second message.
 pub const small_rows = 1;
 const magic: u32 = 0x4a4f4253;
+const pass_magic: u32 = 0x53534150; // a window's header: a build without window passes refuses it as a bad job
 const header_bytes = 64;
-const Job = enum(u32) { rows = 1, end = 2 };
+pub const header_words = header_bytes / 4;
+const max_layers = @import("config.zig").max_layers;
+const mask_words = (max_layers + 31) / 32;
+const Job = enum(u32) { rows = 1, end = 2, pass = 3 };
+
+comptime {
+    std.debug.assert(4 + mask_words <= header_words); // a pass's header: magic, kind, jobs, rows, then its layer mask
+}
+
+/// A window's jobs under one header: a latent MoE layer each, in rising layer order, all at its rows, none between.
+pub const Pass = struct {
+    mask: [mask_words]u32 = @splat(0),
+    jobs: u32 = 0,
+    first: u32 = 0,
+
+    /// The pass over layer ids in the order rank 0 runs them; null for none, or for ids that do not rise.
+    pub fn of(ids: []const u32) ?Pass {
+        if (ids.len == 0) return null;
+        var p: Pass = .{ .jobs = @intCast(ids.len), .first = ids[0] };
+        for (ids, 0..) |id, k| {
+            if (id >= max_layers or (k > 0 and id <= ids[k - 1])) return null;
+            p.mask[id / 32] |= @as(u32, 1) << @intCast(id % 32);
+        }
+        return p;
+    }
+
+    /// The pass over a forward's latent MoE blocks, in block order.
+    pub fn blocks(list: []const W.Block) ?Pass {
+        var ids: [max_layers]u32 = undefined;
+        var n: usize = 0;
+        for (list) |b| {
+            if (b.kind != .moe) continue;
+            const lt = b.moe.latent orelse continue;
+            if (n == ids.len) return null;
+            ids[n] = lt.id;
+            n += 1;
+        }
+        return of(ids[0..n]);
+    }
+
+    pub fn has(p: Pass, id: u32) bool {
+        return id < max_layers and bit(p.mask, id);
+    }
+
+    fn header(p: Pass, rows: usize, out: *[4 + mask_words]u32) []const u32 {
+        out.* = [4]u32{ pass_magic, @backingInt(Job.pass), p.jobs, @intCast(rows) } ++ p.mask;
+        return out;
+    }
+};
+
+fn bit(mask: [mask_words]u32, i: usize) bool {
+    return mask[i / 32] >> @intCast(i % 32) & 1 != 0;
+}
 
 /// Byte offsets of a job's sections, `per` rows each, 256 apart: picks (int32), latent rows (bf16), hidden rows (bf16).
 fn sections(c: Config, per: usize) [3]usize {
@@ -41,38 +94,213 @@ pub fn jobBytes(c: Config) usize {
     return firstBytes(c) + payloadBytes(c, state.pass_rows);
 }
 
+/// One peer's NCCL line on one stream.
+const Link = struct {
+    g: *const cuda.tp_group.Group,
+    s: cuda.Stream,
+    peer: usize,
+
+    pub fn send(l: Link, ptr: u64, bytes: usize) !void {
+        return l.g.send(l.s, ptr, bytes, l.peer);
+    }
+
+    pub fn recv(l: Link, ptr: u64, bytes: usize) !void {
+        return l.g.recv(l.s, ptr, bytes, l.peer);
+    }
+};
+
 /// Rank 0: layer `id`'s job of `rows` rows to rank 1, its picks, latent rows and hidden rows.
 pub fn send(f: *const fwd.Forward, id: u32, rows: usize) !void {
-    const c = f.c;
-    const b = f.b;
-    const o = f.ops;
     const tp = f.tp.?;
     if (tp.world != 2) return error.TensorParallelNotBuilt;
-    for ([4]u32{ magic, @backingInt(Job.rows), id, @intCast(rows) }, 0..) |v, i| try o.fill32(b.job + i * 4, v, 1);
+    const b = f.b;
+    try post(f.ops, Link{ .g = tp, .s = f.ops.s, .peer = 1 }, f.c, f.pass, f.flight, b.job, .{ b.pick, b.lat, b.y }, id, rows);
+}
+
+/// A window's jobs on rank 0: rank 1 waits inside it from its first job out until its pass's (or a job's) last reply.
+pub const Flight = struct {
+    jobs: u32 = 0, // its pass's jobs (0: a header a job)
+    sent: u32 = 0,
+    received: u32 = 0,
+
+    pub fn open(x: Flight) bool {
+        return x.received < x.sent or (x.sent > 0 and x.received < x.jobs);
+    }
+};
+
+/// A window failed with `name`: while rank 1 waits inside it, every rank stops through `stop`, unless it was captured.
+pub fn settle(flight: Flight, captured: bool, name: []const u8, stop: anytype) void {
+    if (flight.open() and !captured) stop.stop(name);
+}
+
+/// Rank 0's window failed with `name`: a capture sent nothing, else rank 1 may wait on its jobs (NCCL leaves it hung).
+pub fn windowFailed(s: cuda.Stream, flight: Flight, name: []const u8) void {
+    if (!flight.open()) return;
+    settle(flight, (cuda.graph.captureStatus(s) catch .none) != .none, name, Stop{});
+}
+
+/// Every rank hears `name` on its liveness line, then this process ends (its stream may wait on rank 1).
+const Stop = struct {
+    fn stop(_: Stop, name: []const u8) noreturn {
+        std.log.err("rank 0: a window failed ({s}) while rank 1 waited on its jobs; every rank stops", .{name});
+        cuda.tp_watch.fail(name);
+        cuda.tp_watch.stop();
+    }
+};
+
+/// Rank 0's job through `job`'s buffer (`o` fills and copies, `link` sends): a pass's later jobs send their rows alone.
+pub fn post(o: anytype, link: anytype, c: Config, pass: ?Pass, flight: ?*Flight, job: u64, from: [3]u64, id: u32, rows: usize) !void {
+    const in_pass = if (pass) |p| p.has(id) else false;
+    const later = in_pass and id != pass.?.first; // rank 1 has this job's size from the pass's header
+    if (!later) {
+        var out: [4 + mask_words]u32 = undefined;
+        out[0..4].* = .{ magic, @backingInt(Job.rows), id, @intCast(rows) };
+        const words: []const u32 = if (in_pass) pass.?.header(rows, &out) else out[0..4];
+        for (words, 0..) |v, i| try o.fill32(job + i * 4, v, 1);
+    }
     const small = rows <= small_rows;
-    const base: u64 = if (small) b.job + header_bytes else b.job + firstBytes(c);
+    const base: u64 = if (small) job + header_bytes else job + firstBytes(c);
     const at = sections(c, if (small) small_rows else rows);
-    try o.copy(base + at[0], b.pick, rows * c.top_k * 4);
-    try o.copy(base + at[1], b.lat, rows * c.latent * 2);
-    try o.copy(base + at[2], b.y, rows * c.hidden * 2);
-    try tp.send(o.s, b.job, firstBytes(c), 1);
-    if (!small) try tp.send(o.s, base, payloadBytes(c, rows), 1);
+    try o.copy(base + at[0], from[0], rows * c.top_k * 4);
+    try o.copy(base + at[1], from[1], rows * c.latent * 2);
+    try o.copy(base + at[2], from[2], rows * c.hidden * 2);
+    if (later) {
+        try link.send(base, payloadBytes(c, if (small) small_rows else rows));
+    } else {
+        try link.send(job, firstBytes(c));
+        if (!small) try link.send(base, payloadBytes(c, rows));
+    }
+    if (flight) |x| x.sent += 1; // out: a failed NCCL post stops every rank itself (nccl.zig)
+}
+
+/// Rank 0's end header through `job`'s buffer.
+pub fn postEnd(o: anytype, link: anytype, c: Config, job: u64) !void {
+    for ([4]u32{ magic, @backingInt(Job.end), 0, 0 }, 0..) |v, i| try o.fill32(job + i * 4, v, 1);
+    try link.send(job, firstBytes(c));
 }
 
 /// Rank 0: rank 1's expert rows for its job, into rank 1's region of ymoe.
 pub fn receive(f: *const fwd.Forward, rows: usize) !void {
     const region: u64 = latent.partFloats(f.c, state.pass_rows) * 4;
-    try f.tp.?.recv(f.ops.s, f.b.ymoe + region, latent.partFloats(f.c, rows) * 4, 1);
+    try collect(Link{ .g = f.tp.?, .s = f.ops.s, .peer = 1 }, f.flight, f.b.ymoe + region, latent.partFloats(f.c, rows) * 4);
+}
+
+/// Rank 0: a job's reply from rank 1 into `ptr`, counted in `flight`.
+pub fn collect(link: anytype, flight: ?*Flight, ptr: u64, bytes: usize) !void {
+    try link.recv(ptr, bytes);
+    if (flight) |x| x.received += 1;
 }
 
 /// Rank 0 as its engine closes: the end header, so rank 1 leaves its loop.
 pub fn end(e: *Engine) !void {
     cuda.tp_watch.ended(); // the other ranks' lines close on purpose from here
     const o = e.ops();
-    for ([4]u32{ magic, @backingInt(Job.end), 0, 0 }, 0..) |v, i| try o.fill32(e.b.job + i * 4, v, 1);
-    try e.tp.?.send(o.s, e.b.job, firstBytes(e.c), 1);
+    try postEnd(o, Link{ .g = &e.tp.?, .s = o.s, .peer = 1 }, e.c, e.b.job);
     try e.stream.synchronize();
 }
+
+/// What a header asks of rank 1: the end, one job, or a window pass's jobs in rising layer order.
+pub const Header = union(enum) {
+    end,
+    one: struct { id: u32, rows: usize },
+    pass: struct { rows: usize, mask: [mask_words]u32 },
+};
+
+/// A header rank 1 read, for a model of `layers` layers; a short or malformed one is a bad job.
+pub fn parse(h: []const u32, layers: usize) !Header {
+    if (h.len < header_words) return error.BadJob;
+    const rows: usize = h[3];
+    const sized = rows >= 1 and rows <= state.pass_rows;
+    switch (h[0]) {
+        magic => {
+            if (h[1] == @backingInt(Job.end)) return .end;
+            if (h[1] != @backingInt(Job.rows) or !sized) return error.BadJob;
+            return .{ .one = .{ .id = h[2], .rows = rows } };
+        },
+        pass_magic => {
+            if (h[1] != @backingInt(Job.pass) or !sized) return error.BadJob;
+            const mask = h[4..][0..mask_words].*;
+            var jobs: usize = 0;
+            for (mask, 0..) |m, w| {
+                const held: u32 = if (layers >= (w + 1) * 32) ~@as(u32, 0) else if (layers <= w * 32) 0 else (@as(u32, 1) << @intCast(layers - w * 32)) - 1;
+                if (m & ~held != 0) return error.BadJob; // a layer past the model's
+                jobs += @popCount(m);
+            }
+            if (jobs == 0 or jobs != h[2]) return error.BadJob;
+            return .{ .pass = .{ .rows = rows, .mask = mask } };
+        },
+        else => return error.BadJob,
+    }
+}
+
+/// Messages rank 1 took from rank 0 (the end's too), headers it read on the host, and the jobs they held.
+pub const Count = struct { jobs: usize = 0, messages: usize = 0, reads: usize = 0 };
+
+/// Rank 1's jobs until rank 0's end: `r` receives, reads a header on the host and runs a layer's job (tests fake it).
+pub fn follow(r: anytype, c: Config, blocks: anytype, mtp: anytype, first: u64, long: u64) !Count {
+    var n: Count = .{};
+    while (true) {
+        try r.recv(first, firstBytes(c));
+        const h = try r.read(first);
+        n.messages += 1;
+        n.reads += 1;
+        switch (try parse(&h, blocks.len)) {
+            .end => return n,
+            .one => |j| {
+                const t = (if (j.id == latent.mtp_id) mtp else if (j.id < blocks.len) blocks[j.id] else null) orelse return error.BadJob;
+                try take(r, c, t, j.rows, true, first, long, &n);
+            },
+            .pass => |p| {
+                // every layer it names has tables here before any of its jobs is queued
+                for (blocks, 0..) |t, i| if (bit(p.mask, i) and t == null) return error.BadJob;
+                var headed = true;
+                for (blocks, 0..) |t, i| if (bit(p.mask, i)) {
+                    try take(r, c, t.?, p.rows, headed, first, long, &n);
+                    headed = false;
+                };
+            },
+        }
+    }
+}
+
+/// One job's rows, where a job of its size always lands: a headed small job's came in the first message already.
+fn take(r: anytype, c: Config, t: anytype, rows: usize, headed: bool, first: u64, long: u64, n: *Count) !void {
+    const small = rows <= small_rows;
+    const base = if (small) first + header_bytes else long;
+    if (!small or !headed) {
+        try r.recv(base, payloadBytes(c, if (small) small_rows else rows));
+        n.messages += 1;
+    }
+    const s = sections(c, if (small) small_rows else rows);
+    try r.run(t, .{ base + s[0], base + s[1], base + s[2] }, rows);
+    n.jobs += 1;
+}
+
+/// Rank 1's device side of `follow`: NCCL from rank 0, a header read to the host, a layer's partials and their reply.
+const Follower = struct {
+    link: Link,
+    ops: kern.Ops,
+    scratch: latent.Scratch,
+    c: Config,
+    out: u64,
+
+    pub fn recv(x: *const Follower, ptr: u64, bytes: usize) !void {
+        return x.link.recv(ptr, bytes);
+    }
+
+    pub fn read(x: *const Follower, ptr: u64) ![header_words]u32 {
+        var h: [header_words]u32 = undefined;
+        try x.ops.s.synchronize();
+        try x.ops.download(std.mem.sliceAsBytes(&h), ptr);
+        try x.ops.s.synchronize();
+        return h;
+    }
+
+    pub fn run(x: *const Follower, t: latent.Tables, at: [3]u64, rows: usize) !void {
+        try latent.partials(x.ops, t, x.scratch, at[0], at[1], at[2], rows, x.c.ownShares(), x.c, x.out);
+        try x.link.send(x.out, latent.partFloats(x.c, rows) * 4);
+    }
+};
 
 /// Rank 1's tables: each MoE block's (by block index) and the MTP head's.
 const Layers = struct { blocks: []?latent.Tables, mtp: ?latent.Tables = null };
@@ -170,31 +398,11 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const loaded = content.?;
     content = null;
     try load_cache.finishAfter(.{ io, try loaded.finish() }, cuda.tp_watch.ready);
-    var jobs: usize = 0;
-    while (true) {
-        try g.recv(stream, first, firstBytes(c), 0);
-        try stream.synchronize();
-        var h: [4]u32 = undefined;
-        try ops.download(std.mem.sliceAsBytes(&h), first);
-        try stream.synchronize();
-        if (h[0] != magic) return error.BadJob;
-        if (h[1] == @backingInt(Job.end)) {
-            cuda.tp_watch.ended();
-            break;
-        }
-        const rows: usize = h[3];
-        if (rows < 1 or rows > R) return error.BadJob;
-        const t = (if (h[2] == latent.mtp_id) layers.mtp else if (h[2] < layers.blocks.len) layers.blocks[h[2]] else null) orelse return error.BadJob;
-        const small = rows <= small_rows;
-        const base = if (small) first + header_bytes else long;
-        if (!small) try g.recv(stream, long, payloadBytes(c, rows), 0);
-        const s = sections(c, if (small) small_rows else rows);
-        try latent.partials(ops, t, scratch, base + s[0], base + s[1], base + s[2], rows, own, c, out);
-        try g.send(stream, out, latent.partFloats(c, rows) * 4, 0);
-        jobs += 1;
-    }
+    const follower: Follower = .{ .link = .{ .g = &g, .s = stream, .peer = 0 }, .ops = ops, .scratch = scratch, .c = c, .out = out };
+    const n = try follow(&follower, c, layers.blocks, layers.mtp, first, long);
+    cuda.tp_watch.ended();
     try stream.synchronize();
-    std.log.info("rank {d}: rank 0 ended after {d} jobs; leaving", .{ c.rank, jobs });
+    std.log.info("rank {d}: rank 0 ended after {d} jobs in {d} messages and {d} header reads; leaving", .{ c.rank, n.jobs, n.messages, n.reads });
 }
 
 test "a job's sections and messages" {
@@ -206,4 +414,8 @@ test "a job's sections and messages" {
     try std.testing.expectEqual(@as(usize, 64 + 256 + 2048 + 8192), firstBytes(c)); // one row, not 16 rows of padding
     try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[1] % 256); // an odd job's rows start aligned
     try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[2] % 256);
+}
+
+test {
+    _ = @import("cuda_worker_test.zig");
 }

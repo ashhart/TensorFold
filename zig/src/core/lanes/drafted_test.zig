@@ -401,7 +401,7 @@ test "the depth rule reads the drafter's facts, not the target's" {
     head.facts_.copy_match = 20;
     try std.testing.expectEqual(@as(i64, 20), wrapped.facts(t).copy_match);
     head.facts_.stream_bytes = 4096;
-    try std.testing.expectEqual(@as(usize, 1000 + 4096), wrapped.streamBytes(1000)); // admission counts both
+    try std.testing.expectEqual(@as(usize, 1000 + 4096), try wrapped.streamBytes(1000)); // admission counts both
 }
 
 fn always(_: *anyopaque) bool {
@@ -571,7 +571,28 @@ test "the early first token equals the late one after a complete prompt restore"
 
 test {
     _ = @import("drafted_role_test.zig");
+    _ = @import("drafted_rows_test.zig");
     _ = @import("drafted_step_test.zig");
     _ = @import("drafted_held_test.zig");
     _ = @import("drafted_adopt_test.zig");
+}
+
+test "Flint DFlash2 wrapper keeps the target's first-token logprobs" {
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var head: FakeDrafter = .{};
+    defer head.deinit();
+    var wrapped = try Drafted.init(gpa, target.backend(), head.drafter());
+    defer wrapped.deinit();
+    wrapped.first_rows = true;
+    var stream = try sm.Stream.init(gpa, .{ .id = "logprobs", .prompt = &.{ 1, 2, 3 }, .max_new = 2, .drafts = false, .logprobs = 3 });
+    defer stream.deinit(gpa);
+    try wrapped.backend().prefill(&stream);
+    defer wrapped.backend().release(&stream);
+    const want = try target.backend().firstRow(&stream);
+    const got = try wrapped.backend().firstRow(&stream);
+    try std.testing.expectEqual(want.token, got.token);
+    try std.testing.expectEqual(want.logprob, got.logprob);
+    try std.testing.expectEqualSlices(u32, want.ids[0..want.count], got.ids[0..got.count]);
+    try std.testing.expectEqualSlices(f32, want.logprobs[0..want.count], got.logprobs[0..got.count]);
 }

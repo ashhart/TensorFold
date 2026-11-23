@@ -108,7 +108,7 @@ pub const Produce = struct {
         const p: *Produce = @ptrCast(@alignCast(ptr));
         const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = p.target.caches.get(s) orelse return error.UnknownStream;
-        return @ptrCast(try reuse.saveCache(p.target.e, cache, at, &.{}, false));
+        return @ptrCast(try reuse.saveCache(p.target.e, cache, at, &.{}, false, null));
     }
 
     fn bytes(ptr: *anyopaque, at: u32) u64 {

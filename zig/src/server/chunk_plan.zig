@@ -52,6 +52,11 @@ pub const Plan = struct {
             last = next;
         }
     }
+
+    /// The starts of a request over `ids`: `starts` with the system prompt's cut, so a warm pass and a turn agree.
+    pub fn request(p: Plan, a: Allocator, ids: []const u32, system_len: usize) ![]const u32 {
+        return withCut(a, try p.starts(a, ids), if (p.step > 0) @intCast(@max(system_len, 1) - 1) else 0, ids.len, p.min_chunk);
+    }
 };
 
 /// `starts` with `cut` too: a state kept just before a conversation's own text reads only shared tokens.
@@ -152,6 +157,24 @@ test "a harness cut joins the starts, nearer ones go" {
     try std.testing.expectEqualSlices(u32, &.{ 4096, 4650 }, try withCut(a, &.{ 4096, 4650 }, 0, 4680, 256));
     try std.testing.expectEqualSlices(u32, &.{ 4096, 4650 }, try withCut(a, &.{ 4096, 4650 }, 4680, 4680, 256));
     try std.testing.expectEqualSlices(u32, &.{ 600, 4096 }, try withCut(a, &.{4096}, 600, 4680, 256));
+}
+
+test "a warm pass and the next request cut the same starts below the warm end" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p: Plan = .{ .step = 4096, .min_chunk = 1 };
+    const next = try a.alloc(u32, 4700); // the next turn's prompt; a warm pass covered its first 4680 tokens
+    @memset(next, 0);
+    const warm = next[0..4680];
+    const system_len: usize = 600;
+    const w = try p.request(a, warm, system_len);
+    const n = try p.request(a, next, system_len);
+    try std.testing.expect(std.mem.indexOfScalar(u32, w, 599) != null); // the warm pass cuts before the conversation's own text
+    var shared: usize = 0;
+    while (shared < n.len and n[shared] < warm.len) shared += 1; // the next turn's starts the warm pass could serve
+    try std.testing.expectEqualSlices(u32, w, n[0..shared]);
+    try std.testing.expect(std.mem.indexOfScalar(u32, try p.starts(a, warm), 599) == null); // starts alone keep no such cut
 }
 
 test "chunk starts match PrefillPlan.chunks" {

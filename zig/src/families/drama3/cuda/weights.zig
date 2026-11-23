@@ -1,10 +1,11 @@
-//! Drama 3's checkpoint on the device: stacked bf16 projections, FP8 experts repacked for drama3_fp8.cu, a cut lm_head.
+//! Drama 3's checkpoint on the device: bf16 projections, FP8 experts repacked or NVFP4 as stored, a cut lm_head.
 const std = @import("std");
 const staging = @import("stager.zig");
 const cuda = @import("cuda");
 const core = @import("core");
 const cfg = @import("../config.zig");
 const shards = @import("../shards.zig");
+const quant = @import("../metal/quant_format.zig");
 
 const Shards = shards.Shards;
 const fp8 = core.quant.fp8;
@@ -21,6 +22,7 @@ pub const Layer = struct {
     moe_in: u64, // [1288, 2048]
     shared_down: u64, // [2048, 512]
     experts: cuda.experts.Layer,
+    slots: u64, // int32 [256]: an original expert id's held slot, -1 if not held; 0 when every expert is held
 };
 
 pub const TowerLayer = struct {
@@ -51,6 +53,8 @@ pub const Weights = struct {
     layers: [cfg.layers]Layer,
     tower: [cfg.tower_layers]TowerLayer,
     heads: [cfg.codebooks - 1]u64, // [4096, 2048]
+    nvfp4_layers: usize, // layers whose routed experts are NVFP4 (the engine loads their kernels)
+    compact_layers: usize, // layers whose router masks to held experts (a pruned checkpoint)
     bytes: usize,
 
     pub fn deinit(w: *Weights) void {
@@ -104,6 +108,137 @@ const Loader = struct {
             at += r;
         }
         return b.ptr;
+    }
+
+    fn upload(l: *Loader, comptime T: type, data: []const T) !u64 {
+        const b = try l.alloc(data.len * @sizeOf(T));
+        try b.upload(0, std.mem.sliceAsBytes(data));
+        return b.ptr;
+    }
+
+    /// A layer's held NVFP4 experts on the device as stored (packed, never widened), with its slot table if compact.
+    fn nvfp4Experts(l: *Loader, li: usize, held: *const quant.Held, threads: usize) !void {
+        const ids = held.ids[li][0..held.counts[li]];
+        var stage = try stageNvfp4(l.gpa, l.sh, li, ids, threads);
+        defer stage.deinit(l.gpa);
+        const L = &l.w.layers[li];
+        L.experts = .{ .format = .nvfp4, .up = try l.upload(u32, stage.up), .down = try l.upload(u32, stage.down), .up_scale = try l.upload(f32, stage.up_scale), .down_scale = try l.upload(f32, stage.down_scale), .width = cfg.expert_width, .dims = cfg.hidden, .experts = ids.len };
+        L.slots = if (compactSlots(held, li)) |slots| try l.upload(i32, &slots) else 0;
+        if (L.slots != 0) l.w.compact_layers += 1;
+    }
+};
+
+/// A pruned layer's router slot table; null when every expert is held and the original router serves it.
+pub fn compactSlots(held: *const quant.Held, li: usize) ?[cfg.experts]i32 {
+    return if (held.counts[li] == cfg.experts) null else held.slots(li);
+}
+
+/// NVFP4 when a layer's first held gate is packed bytes; a compact map over FP8 experts is refused.
+pub fn nvfp4Layer(sh: *const Shards, li: usize, held: *const quant.Held) !bool {
+    var nb: [160]u8 = undefined;
+    const t = try sh.get(fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.gate_proj.weight", .{ li, held.ids[li][0] }));
+    if (t.dtype == .u8) return true;
+    return if (held.counts[li] == cfg.experts) false else error.CompactFp8Experts;
+}
+
+/// One layer's held NVFP4 experts in slot order as nvfp4_experts.cu reads them; slot i is the map's i-th id.
+pub const Nvfp4Stage = struct {
+    up: []u32, // [held][512/32][2048/32][gate, up][144]
+    down: []u32, // [held][2048/32][512/32][1][144]
+    up_scale: []f32, // [held][gate, up] global scales
+    down_scale: []f32, // [held]
+
+    fn init(gpa: std.mem.Allocator, held: usize) !Nvfp4Stage {
+        const E = cuda.experts.Nvfp4Experts;
+        const up = try gpa.alloc(u32, E.bytes(held, cfg.expert_width, cfg.hidden, 2) / 4);
+        errdefer gpa.free(up);
+        const down = try gpa.alloc(u32, E.bytes(held, cfg.hidden, cfg.expert_width, 1) / 4);
+        errdefer gpa.free(down);
+        const up_scale = try gpa.alloc(f32, held * 2);
+        errdefer gpa.free(up_scale);
+        return .{ .up = up, .down = down, .up_scale = up_scale, .down_scale = try gpa.alloc(f32, held) };
+    }
+
+    pub fn deinit(s: *Nvfp4Stage, gpa: std.mem.Allocator) void {
+        gpa.free(s.up);
+        gpa.free(s.down);
+        gpa.free(s.up_scale);
+        gpa.free(s.down_scale);
+    }
+};
+
+/// Packs a layer's held NVFP4 experts (`ids`: the map's ascending original ids) on `threads` workers.
+pub fn stageNvfp4(gpa: std.mem.Allocator, sh: *const Shards, li: usize, ids: []const u8, threads: usize) !Nvfp4Stage {
+    var out = try Nvfp4Stage.init(gpa, ids.len);
+    errdefer out.deinit(gpa);
+    const n = @max(1, @min(threads, 64, ids.len));
+    const jobs = try gpa.alloc(Nvfp4Job, n);
+    defer gpa.free(jobs);
+    const workers = try gpa.alloc(std.Thread, n);
+    defer gpa.free(workers);
+    var spawned: usize = 0;
+    defer for (workers[0..spawned]) |t| t.join();
+    for (jobs, workers, 0..) |*j, *t, i| {
+        j.* = .{ .sh = sh, .layer = li, .ids = ids, .first = i, .stride = n, .out = &out };
+        t.* = try std.Thread.spawn(.{}, Nvfp4Job.run, .{j});
+        spawned += 1;
+    }
+    for (workers[0..spawned]) |t| t.join();
+    spawned = 0;
+    for (jobs) |j| if (j.err) |e| return e;
+    return out;
+}
+
+const Nvfp4Job = struct {
+    sh: *const Shards,
+    layer: usize,
+    ids: []const u8,
+    first: usize,
+    stride: usize,
+    out: *const Nvfp4Stage,
+    err: ?anyerror = null,
+
+    const projections = [_][]const u8{ "gate_proj", "up_proj", "down_proj" };
+    const Part = struct { codes: []const u8, scales: []const u8, global: f32 };
+
+    fn run(j: *Nvfp4Job) void {
+        j.work() catch |e| {
+            j.err = e;
+        };
+    }
+
+    fn work(j: *Nvfp4Job) !void {
+        const E = cuda.experts.Nvfp4Experts;
+        const n = cfg.expert_width;
+        const k = cfg.hidden;
+        const per_up = E.bytes(1, n, k, 2) / 4;
+        const per_down = E.bytes(1, k, n, 1) / 4;
+        var slot = j.first;
+        while (slot < j.ids.len) : (slot += j.stride) {
+            const e = j.ids[slot];
+            const g = try j.part(e, 0, n, k);
+            const u = try j.part(e, 1, n, k);
+            const d = try j.part(e, 2, k, n);
+            E.packGateUp(j.out.up[slot * per_up ..][0..per_up], .{ g.codes, g.scales }, .{ u.codes, u.scales }, n, k);
+            E.packOne(j.out.down[slot * per_down ..][0..per_down], d.codes, d.scales, k, n);
+            j.out.up_scale[2 * slot] = g.global;
+            j.out.up_scale[2 * slot + 1] = u.global;
+            j.out.down_scale[slot] = d.global;
+            var nb: [160]u8 = undefined;
+            for (projections) |p| for ([_][]const u8{ "", "_scale", "_scale_2" }) |suffix|
+                j.sh.release(fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight{s}", .{ j.layer, e, p, suffix }));
+        }
+    }
+
+    /// Projection `p` of expert `e` ([rows, cols] as stored), checked by the Metal loader's quant_format.nvfp4.
+    fn part(j: *const Nvfp4Job, e: u8, p: usize, rows: usize, cols: usize) !Part {
+        var nb: [3][160]u8 = undefined;
+        const base = "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight";
+        const w = try j.sh.get(fmt(&nb[0], base, .{ j.layer, e, projections[p] }));
+        const s = try j.sh.get(fmt(&nb[1], base ++ "_scale", .{ j.layer, e, projections[p] }));
+        const g = try j.sh.get(fmt(&nb[2], base ++ "_scale_2", .{ j.layer, e, projections[p] }));
+        try quant.nvfp4(w, s, g, rows, cols);
+        return .{ .codes = w.bytes, .scales = s.bytes, .global = @bitCast(std.mem.readInt(u32, g.bytes[0..4], .little)) };
     }
 };
 
@@ -180,6 +315,9 @@ pub const LoadOptions = struct { threads: usize = 16, log: bool = true };
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, c: cfg.Config, opt: LoadOptions) !*Weights {
     var sh = try Shards.open(gpa, io, dir);
     defer sh.close(io);
+    // a malformed, unordered or mismatched expert map fails here, before any device memory
+    const held = try quant.heldMetadata(sh.metadata);
+    try quant.checkStored(&held, sh.map);
     var stream = try cuda.Stream.init(d, false);
     defer stream.deinit();
     var stager = staging.Stager.init(gpa, d, stream);
@@ -191,6 +329,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     w.gpa = gpa;
     w.bufs = .empty;
     w.bytes = 0;
+    w.nvfp4_layers = 0;
+    w.compact_layers = 0;
     errdefer w.deinit();
     errdefer stream.synchronize() catch {};
     var l: Loader = .{ .gpa = gpa, .d = d, .sh = &sh, .w = w, .stager = &stager };
@@ -264,6 +404,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
         }
         L.moe_in = try l.stack(&.{ fmt(&nb[0], pre ++ "mlp.shared_expert.gate_proj.weight", .{li}), fmt(&nb[1], pre ++ "mlp.shared_expert.up_proj.weight", .{li}), fmt(&nb[2], pre ++ "mlp.gate.weight", .{li}), fmt(&nb[3], pre ++ "mlp.shared_expert_gate.weight", .{li}) }, &.{ cfg.shared_width, cfg.shared_width, cfg.experts, 1 }, H, cfg.moe_proj);
         L.shared_down = try l.one(fmt(&nb[0], pre ++ "mlp.shared_expert.down_proj.weight", .{li}), &.{ H, cfg.shared_width });
+        L.slots = 0;
+        if (try nvfp4Layer(&sh, li, &held)) {
+            try l.nvfp4Experts(li, &held, opt.threads);
+            w.nvfp4_layers += 1;
+            continue;
+        }
         // experts
         for (jobs, 0..) |*j, ti| j.* = .{ .sh = &sh, .layer = li, .first = ti, .stride = nthreads, .up = up_h, .down = down_h, .up_scale = us_h, .down_scale = ds_h };
         var spawned: usize = 0;
@@ -309,7 +455,10 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     }
     for (0..cfg.codebooks - 1) |hi| w.heads[hi] = try l.one(fmt(&nb[0], "audio_decoder_mtp.heads.{d}.weight", .{hi}), &.{ cfg.codebook_size, H });
     try stager.finish();
-    if (opt.log) std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+    if (opt.log) {
+        std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+        std.log.info("drama3: routed experts held {d} of {d}; routed experts NVFP4 in {d} of {d} layers; compact routers in {d} of {d} layers", .{ held.total(), cfg.layers * cfg.experts, w.nvfp4_layers, cfg.layers, w.compact_layers, cfg.layers });
+    }
     return w;
 }
 

@@ -90,6 +90,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
             f.page_elems = e.pageBytes() / 2;
             f.untaught = e.bound.untaught;
             f.vision = e.vision;
+            f.audio = e.audio;
             seg[k] = .{ .f = f, .walk = .{ .rows = rows, .pos = e.pos + k * R } };
         }
         try e.copied.record(e.stream);

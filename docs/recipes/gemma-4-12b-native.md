@@ -7,7 +7,7 @@ revision `707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7` (`gemma4_unified`), its lang
 [`google/gemma-4-12B-it-assistant`](https://huggingface.co/google/gemma-4-12B-it-assistant/tree/46d4c6f13f0ac0ad827b915669b8df9b81c64c51)
 (revision `46d4c6f13f0ac0ad827b915669b8df9b81c64c51`) as the drafter. It runs on the native Gemma 4 family that serves
 [the 31B](gemma-4-native.md), on M5 tensor-unit GPUs. Build with Zig **0.17.0** and Xcode's Metal toolchain, as
-described in [the native preview](../../ZIG-PREVIEW.md#build).
+described in [the native preview](../zig-preview.md#build).
 
 ```bash
 hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir "$HOME/models/gemma-4-12b-hf"

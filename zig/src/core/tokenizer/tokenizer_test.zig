@@ -352,6 +352,11 @@ test {
 test {
     _ = @import("identity.zig");
     _ = eos;
+    // the rest of the module's files with tests, so test-tokenizer-host reaches each however lazily it is analyzed
+    _ = @import("regex.zig");
+    _ = @import("steps.zig");
+    _ = @import("tiktoken.zig");
+    _ = @import("unicode.zig");
 }
 
 test "normalized added tokens match compatibility forms but decode their original spelling" {

@@ -1,6 +1,7 @@
 //! Bolt config checks beside the released uniform/Super config suite.
 const std = @import("std");
 const cfg = @import("config.zig");
+const bolt_checks = @import("config_bolt.zig");
 const Why = cfg.Why;
 const parse = cfg.parse;
 const Kind = cfg.Kind;
@@ -45,6 +46,45 @@ test "a negative moe_latent_size is refused before it is cast to a width" {
     try std.testing.expect(!std.mem.eql(u8, text, bolt));
     var why: Why = .{};
     try std.testing.expectError(error.BadConfig, parse(a, text, &why));
+}
+
+test "a top-k above any one layer's expert count is refused, though the largest layer holds enough" {
+    const a = std.testing.allocator;
+    const small = "\"moe_intermediate_size\": 2048, \"n_routed_experts\": 240, \"num_experts_per_tok\": 9";
+    const text = try std.mem.replaceOwned(u8, a, bolt, small, "\"moe_intermediate_size\": 2048, \"n_routed_experts\": 8, \"num_experts_per_tok\": 9");
+    defer a.free(text);
+    try std.testing.expect(!std.mem.eql(u8, text, bolt));
+    var why: Why = .{};
+    try std.testing.expectError(error.BadConfig, parse(a, text, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "layer 1 picks 9 of its 8 experts") != null);
+}
+
+test "an expert count off the router gemv's 4-row tile is refused before load; Bolt's own counts are not" {
+    const a = std.testing.allocator;
+    var why: Why = .{};
+    const own = try parse(a, bolt, &why);
+    try std.testing.expectEqual(@as(?usize, null), bolt_checks.offTile(own));
+    const small = "\"n_routed_experts\": 240";
+    for ([_][]const u8{ "241", "242", "243", "244" }) |e| {
+        const odd = try std.fmt.allocPrint(a, "\"n_routed_experts\": {s}", .{e});
+        defer a.free(odd);
+        const text = try std.mem.replaceOwned(u8, a, bolt, small, odd);
+        defer a.free(text);
+        try std.testing.expect(!std.mem.eql(u8, text, bolt));
+        const c = try parse(a, text, &why);
+        // E = 241 clamps its last tile to rows 237..240 over 236..239; 244 ends on a whole tile
+        const want: ?usize = if (c.moe[1].experts % 4 == 0) null else 1;
+        try std.testing.expectEqual(want, bolt_checks.offTile(c));
+    }
+}
+
+test "Bolt is refused on a tensor-unit chip before loading; Lightning is not" {
+    var why: Why = .{};
+    const c = try parse(std.testing.allocator, bolt, &why);
+    try std.testing.expectError(error.BoltNeedsRowKernels, cfg.checkDevice(c, true));
+    try cfg.checkDevice(c, false);
+    const l = try parse(std.testing.allocator, cfg.lightning, &why);
+    try cfg.checkDevice(l, true);
 }
 
 test "the Bolt checkpoint's own config.json, when it is on this machine" {

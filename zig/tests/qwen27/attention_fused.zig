@@ -385,13 +385,11 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const device = try mtl.Device.init();
     defer device.deinit();
-    if (!device.tensorUnits()) {
-        std.debug.print("attention_fused: no tensor units on {s}, nothing to check\n", .{std.mem.span(device.name())});
-        return;
-    }
     const queue = try device.queue();
     const args = try init.minimal.args.toSlice(a);
-    const text = try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
+    // before M5 the prefix and tail kernels read their results in the simdgroup-matrix layout (simd_attention.zig)
+    if (!device.tensorUnits()) try q.simd_attention.check(device, queue);
+    const text = try q.simd_attention.library(a, device.tensorUnits(), true);
     const library = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer library.deinit();
     var op = try attn.Attention.init(device, library);
@@ -411,7 +409,7 @@ pub fn main(init: std.process.Init) !void {
     defer scratch.deinit();
     var binding = try attn.Binding.init(device, limits);
     defer binding.deinit();
-    // Chips without tensor units plan with shared_prefix off: no prefix kernel, every key through the tail kernel.
+    // shared_prefix off (before M5: TF_QWEN27_SHARED_PREFIX=0): no prefix kernel, every key through the tail kernel.
     const plain_limits = attn.Limits{ .rows = round_rows, .streams = 8, .keys = capacity, .shared_prefix = false };
     var plain_scratch = try attn.Scratch.init(device, plain_limits);
     defer plain_scratch.deinit();

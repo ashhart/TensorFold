@@ -6,31 +6,45 @@ const fs = @import("fixture_serve.zig");
 const ff = @import("fixture_fwd.zig");
 
 const api = host.api;
-const Served = host.serve_lanes.Served;
+pub const Served = host.serve_lanes.Served;
 const testing = std.testing;
-const gpa = testing.allocator;
-const io = testing.io;
-const seed = 71;
+pub const gpa = testing.allocator;
+pub const io = testing.io;
+pub const seed = 71;
 
 test {
     _ = @import("boot_test.zig");
+    _ = @import("tree_test.zig");
+    _ = @import("serve_early_test.zig");
+    _ = @import("steps_test.zig");
+    _ = @import("steps_serve_test.zig");
+    _ = @import("vision_boot_test.zig");
+    _ = @import("calib_test.zig");
 }
 
+/// Replies that have shown their first tokens so far (Box.first).
+var firsts: std.atomic.Value(u64) = .init(0);
+
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.
-const Box = struct {
+pub const Box = struct {
     mutex: std.Io.Mutex = .init,
     out: std.ArrayList(u32) = .empty,
     done: bool = false,
     reason: ?api.Reason = null,
     drafted: u64 = 0,
     cached: u32 = 0,
+    /// when the reply's first tokens came, in the order of every box's (0: none yet)
+    first: u64 = 0,
 
-    fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
+    pub fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
         b.mutex.lockUncancelable(io);
         defer b.mutex.unlock(io);
         switch (e.*) {
-            .tokens => |ts| b.out.appendSlice(gpa, ts) catch {},
+            .tokens => |ts| {
+                if (b.first == 0) b.first = firsts.fetchAdd(1, .monotonic) + 1;
+                b.out.appendSlice(gpa, ts) catch {};
+            },
             .finished => |fin| {
                 b.done = true;
                 b.reason = fin.reason;
@@ -41,7 +55,7 @@ const Box = struct {
         }
     }
 
-    fn wait(b: *Box) !void {
+    pub fn wait(b: *Box) !void {
         for (0..600_000) |_| {
             b.mutex.lockUncancelable(io);
             const done = b.done;
@@ -52,20 +66,20 @@ const Box = struct {
         return error.Timeout;
     }
 
-    fn deinit(b: *Box) void {
+    pub fn deinit(b: *Box) void {
         b.out.deinit(gpa);
     }
 };
 
 /// One request to send: its prompt, length, drafts and sampling.
-const Ask = struct { prompt: []const u32, max: u32 = 24, drafts: bool = true, sampling: ?api.Sampling = null };
+pub const Ask = struct { prompt: []const u32, max: u32 = 24, drafts: bool = true, sampling: ?api.Sampling = null };
 
 var next_id: api.Id = 1;
 /// The prompt rows each reply of the last `serve` call took from kept state (its `prefilled` event), in ask order.
-var cached_rows: [8]u32 = undefined;
+pub var cached_rows: [8]u32 = undefined;
 
 /// The asks sent together (or each after the last finished); each reply returned gpa-owned, the drafted rows summed.
-fn serve(e: api.Engine, asks: []const Ask, together: bool, out: [][]u32, drafted: *u64) !void {
+pub fn serve(e: api.Engine, asks: []const Ask, together: bool, out: [][]u32, drafted: *u64) !void {
     const boxes = try gpa.alloc(Box, asks.len);
     defer gpa.free(boxes);
     @memset(boxes, .{});
@@ -88,27 +102,37 @@ fn serve(e: api.Engine, asks: []const Ask, together: bool, out: [][]u32, drafted
     }
 }
 
-fn freeAll(xs: [][]u32) void {
+pub fn freeAll(xs: [][]u32) void {
     for (xs) |x| gpa.free(x);
 }
 
 /// The reference: the target's serial decode of each ask on a model of its own (no lanes, no cache, no drafts).
-fn reference(asks: []const Ask, out: [][]u32) !void {
+pub fn reference(asks: []const Ask, out: [][]u32) !void {
     const m = try fs.open(gpa, io, seed, .{ .slots = 1, .drafts = false });
     defer fs.close(m);
     for (asks, out) |k, *o| o.* = try m.t.serial(0, k.prompt, k.max, k.sampling);
 }
 
-fn ids(n: usize, s: u64) ![]u32 {
+pub fn ids(n: usize, s: u64) ![]u32 {
     return ff.ids(gpa, &fs.config(), n, s);
 }
 
-fn say(ok: bool, comptime fmt: []const u8, args: anytype) void {
+/// Ids with no user, assistant or think tag among them, so the tests place those themselves.
+pub fn untagged(n: usize, s: u64) ![]u32 {
+    const c = fs.config();
+    const xs = try ids(n, s);
+    for (xs) |*x| if (x.* == c.user or x.* == c.assistant or x.* == c.think_open) {
+        x.* = 7;
+    };
+    return xs;
+}
+
+pub fn say(ok: bool, comptime fmt: []const u8, args: anytype) void {
     std.debug.print("{s} dsv41 metal serve: ", .{if (ok) "PASS" else "FAIL"});
     std.debug.print(fmt ++ "\n", args);
 }
 
-fn same(want: []const []u32, got: []const []u32) usize {
+pub fn same(want: []const []u32, got: []const []u32) usize {
     var bad: usize = 0;
     for (want, got) |w, g| bad += @intFromBool(!std.mem.eql(u32, w, g));
     return bad;
@@ -188,6 +212,82 @@ test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) =
     try testing.expectEqual(@as(u32, 0), first_cached);
     // the later turn resumed past the first prompt: its reply's rows came from the cache too
     try testing.expect(m.t.stats.cached_rows >= 3 * p.len + 30);
+}
+
+test "dsv41 metal serve: (c2) a thinking turn keeps its state before <think>; the next turn resumes there == fresh" {
+    for ([_]bool{ false, true }) |steps| try thinkingTurn(steps);
+}
+
+/// (c2) with whole prompts, or in steps (`steps`): the same kept state and replies.
+fn thinkingTurn(steps: bool) !void {
+    const c = fs.config();
+    const body = try untagged(300, 7);
+    defer gpa.free(body);
+    const p = try std.mem.concat(gpa, u32, &.{ body, &.{ c.assistant, c.think_open } });
+    defer gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30, .steps = steps });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    var drafted: u64 = 0;
+    var first: [1][]u32 = undefined;
+    try serve(e, &.{.{ .prompt = p, .max = 30 }}, false, &first, &drafted);
+    defer freeAll(&first);
+    // the next turn as the template renders it: the tag closed (a stand-in id), the reply, new ids, a thinking header
+    const extra = try untagged(40, 8);
+    defer gpa.free(extra);
+    const turn = try std.mem.concat(gpa, u32, &.{ p[0 .. p.len - 1], &.{c.think_open + 1}, first[0], extra, &.{ c.assistant, c.think_open } });
+    defer gpa.free(turn);
+    const hits0 = m.t.stats.hits;
+    var got: [1][]u32 = undefined;
+    try serve(e, &.{.{ .prompt = turn, .max = 30 }}, false, &got, &drafted);
+    defer freeAll(&got);
+    const resumed = cached_rows[0];
+    const asks = [_]Ask{ .{ .prompt = p, .max = 30 }, .{ .prompt = turn, .max = 30 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const bad = same(&want, &.{ first[0], got[0] });
+    say(bad == 0 and resumed == p.len - 1, "(c2) {s}: a thinking follow-up resumed {d} rows (its turn before <think>: {d}); split prefill and follow-up vs fresh: {d} of 2 replies differ", .{ if (steps) "in steps" else "whole prompts", resumed, p.len - 1, bad });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(m.t.stats.hits > hits0);
+    try testing.expectEqual(@as(u32, @intCast(p.len - 1)), resumed);
+}
+
+test "dsv41 metal serve: (c3) a fresh conversation resumes after the last one's system part == fresh" {
+    for ([_]bool{ false, true }) |steps| try systemPart(steps);
+}
+
+/// (c3) with whole prompts, or in steps (`steps`): the same kept state and replies.
+fn systemPart(steps: bool) !void {
+    const c = fs.config();
+    const system = try untagged(300, 9);
+    defer gpa.free(system);
+    var msgs: [2][]u32 = undefined;
+    for (&msgs, 0..) |*mm, i| mm.* = try untagged(20 + 5 * i, 10 + i);
+    defer for (msgs) |mm| gpa.free(mm);
+    var asks: [2]Ask = undefined;
+    var prompts: [2][]u32 = undefined;
+    for (&prompts, &asks, msgs) |*p, *k, mm| {
+        p.* = try std.mem.concat(gpa, u32, &.{ system, &.{c.user}, mm, &.{ c.assistant, c.think_open } });
+        k.* = .{ .prompt = p.*, .max = 24 };
+    }
+    defer for (prompts) |p| gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30, .steps = steps });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    var drafted: u64 = 0;
+    var got: [2][]u32 = undefined;
+    try serve(s.engine(), &asks, false, &got, &drafted);
+    defer freeAll(&got);
+    const resumed = cached_rows[0..2].*;
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const bad = same(&want, &got);
+    say(bad == 0 and resumed[1] == system.len, "(c3) {s}: a new conversation resumed {d} rows (the system part: {d}); vs fresh: {d} of 2 replies differ", .{ if (steps) "in steps" else "whole prompts", resumed[1], system.len, bad });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual([2]u32{ 0, @intCast(system.len) }, resumed);
 }
 
 test "dsv41 metal serve: (d) sampled replies are their seed's: again, drafted or not, together, serial" {
@@ -286,4 +386,108 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     say(bad == 0 and caught > 0 and drafted > 0, "(f) 4 together vs serial: {d} differ; {d} rows caught up from history, {d} drafted rows, {d} ingests", .{ bad, caught, drafted, m.ad.ingests });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
+}
+
+test "dsv41 metal serve: (g) draft trees (first-position siblings) reply in full, drafted == draft:false == serial" {
+    const p0 = try ids(160, 30);
+    defer gpa.free(p0);
+    const p1 = try ids(240, 31);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 4321, .temperature = 0.8, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 96 }, .{ .prompt = p1, .max = 96, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    for ([_]u32{ 1, 2 }) |sibs| {
+        const m = try fs.open(gpa, io, seed, .{ .slots = 1 });
+        var md = m.model();
+        md.trees = .{ .siblings = sibs, .sib_rows = 4, .dup = .{ .ms = 0.0, .rows = true } };
+        const s = try Served.open(gpa, io, md, ".", null);
+        defer Served.close(s);
+        var drafted: u64 = 0;
+        var got: [2][]u32 = undefined;
+        try serve(s.engine(), &asks, false, &got, &drafted);
+        defer freeAll(&got);
+        var plain_drafted: u64 = 0;
+        var plain: [2][]u32 = undefined;
+        try serve(s.engine(), &.{ .{ .prompt = p0, .max = 96, .drafts = false }, .{ .prompt = p1, .max = 96, .sampling = hot, .drafts = false } }, false, &plain, &plain_drafted);
+        defer freeAll(&plain);
+        const bad = [2]usize{ same(&want, &got), same(&want, &plain) };
+        const pol = s.x.policy;
+        say(bad[0] + bad[1] == 0 and pol.trees > 0, "(g) {d} siblings: drafted / draft:false vs serial: {d} / {d} differ; {d} tree rounds, {d} sibling wins, {d} drafted rows", .{ sibs, bad[0], bad[1], pol.trees, pol.sib_wins, drafted });
+        try testing.expectEqual([2]usize{ 0, 0 }, bad);
+        try testing.expect(pol.trees > 0 and drafted > 0);
+    }
+}
+
+test "dsv41 metal serve: (h) two streams with draft trees on two slots, overlapping: each == draft:false == serial" {
+    const p1 = try ids(240, 31);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 4321, .temperature = 0.8, .top_k = 0, .top_p = 1.0 };
+    // one request on both slots: the first stops soon after the second starts, which then decodes mostly alone
+    const asks = [_]Ask{ .{ .prompt = p1, .max = 72, .sampling = hot }, .{ .prompt = p1, .max = 128, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{ .slots = 2 });
+    var md = m.model();
+    md.trees = .{ .siblings = 1, .sib_rows = 4, .dup = .{ .ms = 0.0, .rows = true } };
+    const s = try Served.open(gpa, io, md, ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    // the second request arrives once the first has 64 tokens: each stream decodes alone and beside the other
+    var boxes = [2]Box{ .{}, .{} };
+    defer for (&boxes) |*b| b.deinit();
+    var reqs: [2]api.Request = undefined;
+    for (&reqs, asks) |*r, k| r.* = .{ .prompt = k.prompt, .max_tokens = k.max, .sampling = k.sampling };
+    try e.submit(900, &reqs[0], .{ .ctx = &boxes[0], .event = Box.event });
+    for (0..600_000) |_| {
+        boxes[0].mutex.lockUncancelable(io);
+        const n = boxes[0].out.items.len;
+        boxes[0].mutex.unlock(io);
+        if (n >= 64) break;
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try e.submit(901, &reqs[1], .{ .ctx = &boxes[1], .event = Box.event });
+    for (&boxes) |*b| try b.wait();
+    var plain_drafted: u64 = 0;
+    var plain: [2][]u32 = undefined;
+    try serve(e, &.{ .{ .prompt = p1, .max = 72, .sampling = hot, .drafts = false }, .{ .prompt = p1, .max = 128, .sampling = hot, .drafts = false } }, true, &plain, &plain_drafted);
+    defer freeAll(&plain);
+    var bad: usize = 0;
+    for (boxes, want, plain, asks) |b, w, p, k| {
+        try testing.expectEqual(api.Reason.length, b.reason.?);
+        try testing.expectEqual(@as(usize, k.max), b.out.items.len);
+        bad += @intFromBool(!std.mem.eql(u32, w, b.out.items)) + @intFromBool(!std.mem.eql(u32, w, p));
+    }
+    const pol = s.x.policy;
+    const st = m.t.tree.stats;
+    const each = st.by_slot[0] > 0 and st.by_slot[1] > 0;
+    say(bad == 0 and each, "(h) two streams, trees on: {d} of 4 replies differ from serial; {d} + {d} tree windows by slot, {d} sibling wins, {d} adopted, {d} drafted rows", .{ bad, st.by_slot[0], st.by_slot[1], pol.sib_wins, st.adopted, boxes[0].drafted + boxes[1].drafted });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(each and boxes[0].drafted > 0 and boxes[1].drafted > 0);
+}
+
+test "dsv41 metal serve: (j) with a residency owner the server gets an idle ticker that keeps the set wired; none without" {
+    {
+        const m = try fs.open(gpa, io, seed, .{ .resident = true });
+        const s = try Served.open(gpa, io, m.model(), ".", null);
+        defer Served.close(s);
+        const k = s.engine().keepaliveTarget() orelse return error.NoKeepalive;
+        for (0..3) |_| k.tick(k.ctx); // the idle ticker's tick: waiting joins committed, a tiny blit through the set
+        // the probe a long prompt gets each interval: the set in use, its waiting joins left waiting
+        const probe = k.probe orelse return error.NoKeepaliveProbe;
+        probe(k.ctx);
+        var drafted: u64 = 0;
+        var got: [1][]u32 = undefined;
+        try serve(s.engine(), &.{.{ .prompt = &.{ 11, 12, 13, 14 }, .max = 8 }}, false, &got, &drafted);
+        defer freeAll(&got);
+        k.tick(k.ctx); // and again after a request
+        say(got[0].len == 8, "(j) idle ticker on a model with a residency owner: 4 ticks and a probe, a reply of {d} tokens between them", .{got[0].len});
+        try testing.expectEqual(@as(usize, 8), got[0].len);
+    }
+    const m = try fs.open(gpa, io, seed, .{});
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    try testing.expect(s.engine().keepaliveTarget() == null);
 }

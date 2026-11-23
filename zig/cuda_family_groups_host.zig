@@ -15,6 +15,7 @@ fn reset() void {
     Trace.count = 0;
     Trace.prompts = 0;
     Trace.grouped = 0;
+    Trace.segmented = 0;
 }
 fn check(rows: usize, parts: usize, tile: usize, grouped: bool, prompt: bool) !void {
     const per = (rows + tile - 1) / tile;
@@ -111,5 +112,38 @@ test "GB10 family grouping: Spark MLP preserves prompts and other GPUs" {
         try m.projectMany(&k, e.stream, &.{ .{ .a4 = weight }, .{ .an = other } }, x, xs, &.{ out, out + 0x1000000 }, 128, false);
         try t.expectEqual(@as(usize, 0), Trace.grouped);
         try t.expectEqual(@as(usize, if (gb10) 9 else 16), Trace.count);
+    }
+}
+
+test "GB10 family grouping: Spark stacked gate-up views use one segmented launch off GB10" {
+    var d: cuda.Driver = undefined;
+    const e = fixture.engine(&d, false);
+    var k: spark.kernels.Kernels = undefined;
+    k.affine = e.affine;
+    k.affine.seg_fn = .{ .d = &d, .handle = @ptrFromInt(8) };
+    k.affine.split_fn = .{ .d = &d, .handle = @ptrFromInt(2) }; // recorded as one member's GemvPart, as gemv_fn's
+    k.affine.split = .{
+        .work = .{ .d = &d, .ptr = 0x4000000, .len = 8 << 20, .borrowed = true },
+        .tickets = .{ .d = &d, .ptr = 0x5000000, .len = 4096, .borrowed = true },
+    };
+    const geo = spark.config.spark4b;
+    const stack: cuda.qlinear.Affine4 = .{ .w = 0x100000, .s = 0x2000000, .b = 0x3000000, .n = 2 * geo.intermediate, .k = geo.hidden, .npad = 2 * geo.intermediate };
+    const views = try spark.weights.gateUpViews(stack, geo.intermediate);
+    const ps = [_]spark.weights.Proj{ .{ .a4 = views[0] }, .{ .a4 = views[1] } };
+    const m: spark.forward.Model = undefined;
+    for ([_]usize{ 1, 2, 8, 16, 17, 32, 64, 128 }) |rows| {
+        reset();
+        try m.projectMany(&k, e.stream, &ps, x, xs, &.{ out, out + 0x1000000 }, rows, false);
+        const chunks = (rows + 15) / 16;
+        try t.expectEqual(chunks, Trace.segmented);
+        try t.expectEqual(2 * chunks, Trace.count);
+        for (Trace.calls[0..Trace.count], 0..) |call, i| {
+            const start = i / 2 * 16;
+            try t.expectEqual(@as(usize, 8), call.id);
+            try t.expectEqual(@as(c_int, 2), call.sk);
+            try t.expectEqual(x + start * geo.hidden * 2, call.x);
+            try t.expectEqual(xs + start * (geo.hidden / 64) * 4, call.xs);
+            try t.expectEqual(out + (i % 2) * 0x1000000 + start * geo.intermediate * 2, call.out);
+        }
     }
 }

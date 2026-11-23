@@ -1,0 +1,8 @@
+head ex-head ex 40960 -- --parallel 4
+head sp-head sp 131072 -- --parallel 4 --prompt-cache-gib 0
+head lp-bf16 lp 131072 -- --parallel 1 --prompt-cache-gib 0
+head lp-fp8 lp 131072 -- --parallel 1 --prompt-cache-gib 0 --kv-cache fp8
+head lp-bf16b lp 131072 -- --parallel 1 --prompt-cache-gib 0
+head ex-fp8 ex 40960 -- --parallel 4 --kv-cache fp8
+head sp-fp8 sp 131072 -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+head lp-nvfp4 lp 131072 GLM=$HOME/.cache/huggingface/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/423acf37583782c51c142d145aef733d72943d93 -- --parallel 1 --prompt-cache-gib 0

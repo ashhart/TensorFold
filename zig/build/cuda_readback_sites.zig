@@ -426,6 +426,14 @@ pub const sites = [_]Site{
         .out = "std.mem.sliceAsBytes(out)[0..n]",
     },
     .{
+        .path = "zig/tests/cuda/audio_check.zig",
+        .source = @embedFile("../tests/cuda/audio_check.zig"),
+        .ordinal = 1,
+        .setup = "const c = .{ .d = &rig.d }; const raw = rig.dest(u8, 46); const at = rig.src;",
+        .at = "at",
+        .out = "raw",
+    },
+    .{
         .path = "zig/tests/cuda/radio_tests.zig",
         .source = @embedFile("../tests/cuda/radio_tests.zig"),
         .ordinal = 1,

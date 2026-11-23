@@ -110,7 +110,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const marks = [_]u32{ 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049, @intCast(ids.len - 5) };
     var own_saves: Saver = .{ .target = &target };
     defer for (own_saves.saved[0..own_saves.n]) |s| reuse.drop(&target, s);
-    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &own_saves, .call = Saver.call });
+    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &own_saves, .call = Saver.call }, &.{});
     if (own_saves.err) |err| return err;
     const fresh = try digest(gpa, e, h, null, ids.len, first);
     var plain: [24]u32 = undefined;
@@ -119,7 +119,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     e.bind(seq);
     var paged_saves: Saver = .{ .target = &target };
     defer for (paged_saves.saved[0..paged_saves.n]) |s| reuse.drop(&target, s);
-    const pf = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &paged_saves, .call = Saver.call });
+    const pf = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &paged_saves, .call = Saver.call }, &.{});
     if (paged_saves.err) |err| return err;
     try check.expect(std.mem.eql(u8, &fresh, &(try digest(gpa, e, h, p, ids.len, pf))), "the paged prompt pass differs from the own sequence's", .{});
     var got: [24]u32 = undefined;
@@ -130,9 +130,9 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
         for ([2]*anyopaque{ from_own, from_paged }, 0..) |saved, way| { // own into paged, then paged into own
             const into = if (way == 0) seq else &e.own;
             e.bind(into);
-            _ = try e.prefillFrom(other, 0, null, h, null, null); // every row the prompt reads holds another prompt's
+            _ = try e.prefillFrom(other, 0, null, h, null, null, &.{}); // prompt-read rows belong to another prompt
             try reuse.restore(&target, null, saved);
-            const d = try digest(gpa, e, h, if (way == 0) p else null, ids.len, try e.prefillFrom(ids, at, null, h, null, null));
+            const d = try digest(gpa, e, h, if (way == 0) p else null, ids.len, try e.prefillFrom(ids, at, null, h, null, null, &.{}));
             const same = std.mem.eql(u8, &fresh, &d);
             std.debug.print("RESULT resume at {d} {s}: {s}\n", .{ at, if (way == 0) "from the own sequence into a paged one" else "from a paged sequence into the own", if (same) "equal" else "DIFFER" });
             bad += @intFromBool(!same);

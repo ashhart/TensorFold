@@ -1,15 +1,19 @@
 // latent.py's MLA attention and sparse.py's index scores by hand: the chunk kernels' online softmax, the chunk merge.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_glue_router.cuh"
 #include <cuda_fp8.h>
 #include "common/mla.cuh"
+#include "glm_index_rope.cuh"
 
 // The 16-head form (decode windows) and 32-head form (prompt chunks), each in glm_attn::wide_smem<HB>() bytes of smem.
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_16(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
                      const int* pt, int64_t pstep) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<16>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
@@ -17,6 +21,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
                      const int* pt, int64_t pstep) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
@@ -25,6 +30,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_16_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<16, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
                                  po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
@@ -32,6 +38,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<32, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
                                  po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
@@ -40,6 +47,7 @@ extern "C" __global__ void __launch_bounds__(256)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_merge(const float* po, const float* pm, const float* pl, __nv_bfloat16* out, const int* cnt, int64_t rows,
                  int64_t heads, int nch, int sparse) {
+  glm_pdl::enter();
   constexpr int LW = glm_attn::LW;
   const int64_t r = blockIdx.x, h = blockIdx.y;
   if (sparse && cnt[r] == 0) return;
@@ -64,16 +72,17 @@ extern "C" __global__ void __launch_bounds__(128)
   for (int j = 0; j < 4; ++j) out[(r * heads + h) * LW + k0 + j] = __float2bfloat16_rn(glm_triton::div_full(o[j], l));
 }
 
-// sparse._scores, block (row, L pool blocks) of 4 warps, 16 pools a warp: sum_h w relu(dots scale), -inf past visible.
+// sparse._scores, a block (row, L pool blocks), 4 warps: sum_h w relu(dots scale); pools of `pool`, roped below `rope`.
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_scores(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride, const __nv_bfloat16* pk,
                   float* out, const int* pos, int64_t np, int64_t nb, float scale, float wscale, int64_t heads,
-                  int loop, const int* pt, int64_t ps) {
+                  int loop, const int* pt, int64_t ps, int pool, int rope, const float* inv) {
+  glm_pdl::enter();
   constexpr int D = 128, HP = 32, BP = 64;
   __shared__ __align__(16) __nv_bfloat16 sm[4 * 2 * 16 * D];  // q's 32 rows, then each warp's two 16-pool buffers
   auto at = [](int row, int u) { return row * D + ((u ^ (row & 7)) << 3); };
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
-  const int64_t r = blockIdx.x, npool = ((int64_t)pos[0] + r + 1) / 4;
+  const int64_t r = blockIdx.x, npool = ((int64_t)pos[0] + r + 1) / pool, pp = 512 / pool;
   for (int idx = threadIdx.x; idx < HP * (D / 8); idx += 128) {
     const int hh = idx / (D / 8), u = idx % (D / 8);
     const bool ok = hh < heads;
@@ -85,9 +94,10 @@ extern "C" __global__ void __launch_bounds__(128)
     const int64_t hh = g + 8 * i;
     wv[i] = hh < heads ? glm_triton::fmul(__bfloat162float(wts[r * w_stride + hh]), wscale) : 0.0f;
   }
-  // A block's pools for this warp: rows p0 .. p0 + 15 of pk (16 | p0: one page), 16 chunks of 16 bytes, 8 a lane.
+  // A block's pools for this warp: rows p0 .. p0 + 15 of pk (16 | p0: one page of pp), 16 chunks of 16 bytes, 8 a lane.
   auto stage = [&](int buf, int64_t p0) {
-    const __nv_bfloat16* src = pk + glm_pages::at<128>(pt, ps / 2, p0 < npool ? p0 : 0, D);
+    const int64_t pa = p0 < npool ? p0 : 0;
+    const __nv_bfloat16* src = pk + (pt ? (int64_t)pt[pa / pp] * (ps / 2) + (pa % pp) * D : pa * D);
 #pragma unroll
     for (int t = 0; t < 8; ++t) {
       const int idx = lane + t * 32, row = idx / (D / 8), u = idx % (D / 8);
@@ -106,6 +116,7 @@ extern "C" __global__ void __launch_bounds__(128)
   for (int kq = 0; kq < D / 16; ++kq)
 #pragma unroll
     for (int i = 0; i < 2; ++i) glm_attn::ldm4<false>(aq[kq][i], sm + at(i * 16 + (lane & 15), kq * 2 + (lane >> 4)));
+  if (rope > 0) glm_rope::frags<D / 16>(aq, q, (int64_t)pos[0] + r, rope, inv);
   __syncthreads();  // q's fragments are in registers: the key buffers take its place
   if (live(0)) stage(0, first * BP + warp * 16);
   glm_attn::commit();

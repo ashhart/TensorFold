@@ -16,7 +16,7 @@ const PAGE = 16384;
 fn pages(n: usize) usize {
     return (n + PAGE - 1) / PAGE * PAGE;
 }
-/// The window, the same on both ranks: decode slots (alternating by sequence parity), then a slot a layer for prefill handoffs, the n-gram tail, the last row's streams and first token, the MTP head's keys; flags; the sync words.
+/// Window (same both ranks): decode slots, per-layer handoff slots, n-gram tail, last row's streams, flags, sync words.
 const SLOT = MAXR * 11 * D * 2; // one layer's expert outputs at the widest window (bf16): 55 pages
 pub const DN_SLOT = pages(CS_ROW + SO_ROW); // a DeltaNet layer: conv state row, then recurrent state row
 pub const ATT_SLOT = 4 * PMAX * 512 + PMAX * 256; // an attention layer: keys of both heads, values of both, raw keys
@@ -215,8 +215,7 @@ pub const Tp2 = struct {
         if (t.thread) |th| th.join();
         t.thread = null;
     }
-    /// The window rows whose experts (every routed slot and the shared one) and MoE branch this rank computes, [lo, hi):
-    /// rank 0 the first half, rounded up, rank 1 the rest.
+    /// Window rows whose experts and MoE branch this rank computes, [lo,hi): rank 0 first half, rank 1 rest.
     pub fn ownRows(t: *const Tp2, rows: usize) [2]usize {
         return tp_seq.ownRows(t.rank, rows);
     }
@@ -246,8 +245,7 @@ pub const Tp2 = struct {
         enc.setBuffer(t.wbuf, SYNC, 2);
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
-    /// After a target layer's experts for this rank's rows (`ownRows`), on the serial encoder: their MoE branch (bf16)
-    /// into the send buffer; `combine` posts it and updates every row.
+    /// After target layer experts for `ownRows`: MoE branch (bf16) to send buffer; `combine` posts and updates rows.
     pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, lg: anytype, rows: usize) void {
         const m = t.seqs.exchange();
         t.last_x = m;
@@ -262,8 +260,7 @@ pub const Tp2 = struct {
             enc.dispatchThreads(mtl.Size.of(D, own[1] - own[0], 1), mtl.Size.of(256, 1, 1));
         }
     }
-    /// The last exchange posted, and its MoE branches into the streams (q4_hc_norm_grouped's job): this rank's rows
-    /// from its send buffer at once, the peer's once they land.
+    /// Last exchange posted, MoE branches into streams: this rank's rows from send buffer at once, peer's on arrival.
     pub fn combine(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
         const own = t.ownRows(rows);
         const peer_lo: usize = if (t.rank == 0) own[1] else 0;
@@ -282,7 +279,7 @@ pub const Tp2 = struct {
         enc.setBuffer(t.wbuf, FLAG, 10);
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
-    /// The head's picks from this rank's vocab columns [lo, lo + n) of `logits` (rows x vocab, bf16) and the peer's: each half's argmax, swapped, merged (the larger value, the lower index on a tie: one Mac's argmax exactly).
+    /// Head picks from vocab cols [lo,lo+n) (both ranks): argmax swapped, merged (larger wins, lower index on tie).
     pub fn argmax(t: *Tp2, enc: mtl.ComputeEncoder, logits: anytype, vocab: usize, lo: usize, n: usize, picks: anytype, rows_buf: anytype, rows: usize) void {
         const m = t.seqs.pick();
         const x = m.flag;
@@ -318,9 +315,7 @@ pub const Tp2 = struct {
         return .{ .b = t.wbuf, .off = sendR(t.seqs.nextReduceSlot()) };
     }
 
-    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials with
-    /// the peer, then q4_hc_norm_plain's stream update of `h` into `out` and `ssp` with the branch rank 0's partial +
-    /// rank 1's, rounded once (bf16, rows x 2560).
+    /// After split projection wrote `part`: post, wait for host swap, then q4_hc_norm_plain folds into `out`/`ssp`.
     pub fn plain(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
         const m = t.seqs.reduce();
         const x = m.flag;
@@ -340,7 +335,7 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// On the serial encoder, after the work that wrote the sources: once the GPU gets here the host copies `writes` into the peer's window and stores `value` at its `flag`; the GPU does not wait.
+    /// On serial encoder, once GPU arrives host copies `writes` to peer's window and sets flag; GPU does not wait.
     pub fn send(t: *Tp2, enc: mtl.ComputeEncoder, writes: []const Write, flag: usize, value: u64) void {
         var job: Job = .{ .kind = .send, .n = writes.len, .flag = flag, .value = value };
         @memcpy(job.writes[0..writes.len], writes);
@@ -370,7 +365,7 @@ pub const Tp2 = struct {
         try t.rd.signal(t.peer, MARK_READY, seq);
     }
 
-    /// Served, rank 1: tell rank 0 whether this request's resume state is in place (rank 0 waits before its prompt pass).
+    /// Served, rank 1: tell rank 0 whether this request's resume state is in place (it waits before its prompt pass).
     pub fn ackRequest(t: *Tp2, ok: bool) !void {
         try t.rd.signal(t.peer, ACK_FLAG, (t.req << 1) | @intFromBool(ok));
     }
@@ -391,7 +386,7 @@ pub const Tp2 = struct {
         return t.quitting.load(.acquire) or @atomicLoad(u64, t.word64(REQ_FLAG), .acquire) > t.req;
     }
 
-    /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null once `quitting` ends the wait.
+    /// Served, rank 1: wait for rank 0's next request (64-byte head + prompt tokens); null when `quitting` ends wait.
     pub fn waitRequest(t: *Tp2) ?struct { head: *const [64]u8, tokens: [*]const u32 } {
         t.req += 1;
         var spins: usize = 0;
@@ -406,7 +401,7 @@ pub const Tp2 = struct {
         return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
     }
 
-    /// A step both ranks take in the same order (a prompt chunk, the first token, a round): rank 0's decision to stop there (a stop string, a cancel) reaches rank 1, so both end on the same step. Rank 1 waits for it.
+    /// A step both ranks take in order: rank 0's stop reaches rank 1, so both end together; rank 1 waits.
     pub fn agree(t: *Tp2, quit: bool, depth: u32) !struct { quit: bool, depth: u32 } {
         t.ctrl += 1;
         if (t.rank == 0) {
@@ -448,9 +443,7 @@ pub const Tp2 = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    /// Each sequence in order, once the GPU posts it: a decode exchange (send this rank's part; the GPU itself waits
-    /// for the peer's, by the flag its message sets) or a prefill send (its writes, then its flag). While idle it
-    /// watches the last exchange: 10 s without the peer's answer fails the link.
+    /// Each posted sequence: decode exchange (send part, wait for peer) or prefill send; idle: 10s no peer fails link.
     fn service(t: *Tp2, first: u32) void {
         _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
         const posted = t.word32(SYNC + GPU * 4);

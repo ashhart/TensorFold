@@ -6,6 +6,7 @@ const serve = @import("hip_serve");
 const Engine = @import("engine.zig").Engine;
 const Pick = @import("engine.zig").Pick;
 const state = @import("../forward/state.zig");
+const pages_ = @import("../forward/pages.zig");
 
 const draw = serve.draw;
 const protocol = serve.protocol;
@@ -79,6 +80,7 @@ pub const Worker = struct {
         errdefer w.gpa.destroy(lane);
         lane.* = .{ .caches = try w.e.emptyCaches(m[2]), .len = prompt.len };
         errdefer lane.caches.deinit(w.gpa);
+        if (!w.fits(lane, 0, held)) return error.ShortMessage;
         try lane.caches.set(w.gpa, 0, held);
         if (m[6] != protocol.no_snapshot) try lane.caches.loadLinear(try w.slots.get(m[6]), w.e.stream.handle);
         try f.begin(m[1], lane, prompt, m[4]);
@@ -131,16 +133,24 @@ pub const Worker = struct {
         try w.e.flush();
     }
 
+    /// Whether rank 0's table from page `first` on fits the lane's table and this rank's pool.
+    fn fits(w: *const Worker, l: *const Lane, first: usize, ids: []const u32) bool {
+        return protocol.pagesFit(first, ids, l.caches.table.items.len, pages_.pagesFor(l.caches.total), w.e.pool.count);
+    }
+
     pub fn pages(w: *Worker, l: *Lane, first: usize, ids: []const u32) !void {
+        if (!w.fits(l, first, ids)) return error.ShortMessage;
         try l.caches.set(w.gpa, first, ids);
     }
 
     /// Slot `slot` keeps the stream's linear state.
     pub fn snap(w: *Worker, l: *Lane, slot: u32) !void {
+        if (!protocol.slotFits(slot, w.slots.slots.items.len)) return error.ShortMessage;
         try l.caches.saveLinear(try w.slots.buffer(slot, l.caches.linearBytes()), w.e.stream.handle);
     }
 
     pub fn copy(w: *Worker, from: u32, to: u32) !void {
+        if (!protocol.pageFits(from, w.e.pool.count) or !protocol.pageFits(to, w.e.pool.count)) return error.ShortMessage;
         try w.e.pool.copyPage(from, to, w.e.stream.handle);
     }
 };

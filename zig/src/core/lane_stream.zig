@@ -15,6 +15,8 @@ pub fn freeProposer(h: *LaneHost, job: *Job) void {
 /// An admitted job's stream (its kept prefix looked up, its drafter): false when it failed (the job is finished).
 pub fn open(h: *LaneHost, job: *Job) bool {
     const r = job.request;
+    // A family may skip image warm passes before any cache lookup or backend call.
+    if (!h.core.backend.warm_images and h.info_.warm_turns and r.background and r.max_tokens == 0 and r.images.len > 0) return !h.cancel(job);
     var reuse: lanes.stream.Reuse = .{};
     // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
     if (h.frame_key) |frame| if (h.cache != null and r.images.len > 0 and r.cacheKey().len > 0) {
@@ -29,7 +31,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
-        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept }, .remote = if (l.entry) |e| e.remote else false };
+        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted }, .remote = if (l.entry) |e| e.remote else false };
     } else |_| {};
     @import("lane_remote.zig").use(h, job, &reuse);
     const handoff = @import("lane_export.zig").exporting(h, job, &reuse);
@@ -61,6 +63,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .loop_guard = r.loop_guard,
         .loop_stop = r.loop_stop,
         .chunks = if (handoff) &job.cut else r.chunks,
+        .message_starts = r.message_starts,
         .history_len = r.history_len,
         .shared_prefixes = r.shared_prefixes,
         .reuse = reuse,
@@ -74,6 +77,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .untaught = r.untaught,
         .images = r.images,
         .key = r.cache_key,
+        .cache_salt = r.cacheSalt(),
     }) catch {
         freeProposer(h, job);
         recalls.release(job);

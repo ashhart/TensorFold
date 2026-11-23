@@ -1,5 +1,6 @@
 //! DELETE /v1/slide/fact/{id}: one fact's neurons zeroed, every fact it leaves asked again, then written or put back.
 const std = @import("std");
+const platform = @import("sys");
 const json = @import("json");
 const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
@@ -16,6 +17,12 @@ const Allocator = std.mem.Allocator;
 const Fact = slide_graph.Fact;
 
 const busy = "a learn or delete request is running: send yours when it ends";
+
+/// A write failure with the OS cause recorded by atomic_file, when there is one.
+fn writeName(a: Allocator, e: anyerror) ![]const u8 {
+    if (e != error.ShardWrite) return @errorName(e);
+    return std.fmt.allocPrint(a, "ShardWrite ({s})", .{platform.atomic_file.causeName()});
+}
 
 /// A refused delete: its HTTP status and why.
 pub const Refused = struct { code: u16, message: []const u8 };
@@ -121,7 +128,7 @@ pub fn deleteMany(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const 
         if (try @import("slide_correction.zig").afterCut(srv, cx, kept, selected, Stays{})) |m| return endedMany(out, batch, null, m.why);
         for (batch.states) |state| if (state != .deleting) return endedMany(out, batch, null, "nothing to delete: the selected neurons hold nothing in the pocket");
         srv.teacher.forgetFact(srv.io, batch.questions);
-        srv.slide.removeMany(batch.ids, slide.now(srv), reason) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the neurons are silent, but the graph file could not be written ({s}); send the same delete again", .{@errorName(e)}));
+        srv.slide.removeMany(batch.ids, slide.now(srv), reason) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the neurons are silent, but the graph file could not be written ({s}); send the same delete again", .{try writeName(a, e)}));
         return completed(out, batch, 0, "deleted: an earlier delete had reached the shards (its neurons were silent already), and the graph file now records it");
     }
     var written = false;
@@ -144,13 +151,14 @@ pub fn deleteMany(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const 
     }
     const summary = if (selected == 1) try outcome(a, facts, id, zeroed, left) else try std.fmt.allocPrint(a, "deleted {d} selected facts: {d} neurons silenced and written; {d} retained facts rechecked", .{ selected, zeroed, left });
     srv.slide.recordMany(batch.ids, .deleting) catch |e| {
+        const why = try writeName(a, e); // before the put-back, whose own writes would replace the cause
         const back = putBack(srv, a);
-        return endedMany(out, batch, null, try std.fmt.allocPrint(a, "the graph file could not be written ({s}), nothing was written, and {s}", .{ @errorName(e), if (back) "the delete was put back" else slide.unplaced }));
+        return endedMany(out, batch, null, try std.fmt.allocPrint(a, "the graph file could not be written ({s}), nothing was written, and {s}", .{ why, if (back) "the delete was put back" else slide.unplaced }));
     };
     if (slide.saveAll(srv, a)) |failed| return unsaved(srv, a, out, batch, failed);
     written = true;
     srv.teacher.forgetFact(srv.io, batch.questions);
-    srv.slide.removeMany(batch.ids, slide.now(srv), reason) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the shards are written without the selected facts, but the graph file could not be ({s}): it still marks them deleting; send the same delete again to settle it", .{@errorName(e)}));
+    srv.slide.removeMany(batch.ids, slide.now(srv), reason) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the shards are written without the selected facts, but the graph file could not be ({s}): it still marks them deleting; send the same delete again to settle it", .{try writeName(a, e)}));
     log.line("slide: {d} selected facts deleted in {d:.1} s: {d} neurons silenced and written, {d} retained facts checked", .{ selected, slide.seconds(srv, began), zeroed, left });
     completed(out, batch, zeroed, summary);
 }
@@ -176,7 +184,7 @@ fn unsaved(srv: *Server, a: Allocator, out: *slide.Out, batch: Batch, failed: []
     const back = putBack(srv, a);
     const again = if (back) slide.saveAll(srv, a) else failed;
     if (again != null) return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), and {s}: the folder may hold part of the delete, and the graph file marks the selected facts deleting; send the same delete again once the folder can be written", .{ failed, if (back) "writing them back as they were failed too" else slide.unplaced }));
-    srv.slide.recordStates(batch.ids, batch.states) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was, but the graph file could not be ({s}); send the same delete again to settle it", .{ failed, @errorName(e) }));
+    srv.slide.recordStates(batch.ids, batch.states) catch |e| return endedMany(out, batch, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was, but the graph file could not be ({s}); send the same delete again to settle it", .{ failed, try writeName(a, e) }));
     return endedMany(out, batch, null, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was: the folder and the graph file are as they were", .{failed}));
 }
 

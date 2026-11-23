@@ -4,6 +4,11 @@ const weights = @import("qwen_cuda_weights.zig");
 const fixture = @import("qwen_cuda_weights_fixture.zig");
 const diagnostics = @import("qwen_weights_diagnostics");
 
+comptime {
+    _ = @import("qwen_cuda_dequant.zig");
+    _ = @import("qwen_cuda_weights_quant_test.zig");
+}
+
 fn run(a: std.mem.Allocator, dir: []const u8, fail_at: ?usize) !void {
     var sink: fixture.Sink = .{ .a = a, .fail_at = fail_at };
     defer sink.deinit();

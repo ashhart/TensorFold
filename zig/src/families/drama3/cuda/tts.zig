@@ -4,7 +4,7 @@ const model = @import("../model.zig");
 const cuda = @import("cuda");
 const eng = @import("engine.zig");
 const codec_ = @import("codec.zig");
-const wav = @import("../wav.zig");
+const wav = @import("core").wav;
 const cfg = @import("../config.zig");
 const kern = @import("kernels.zig");
 const completion = @import("../completion.zig");
@@ -285,7 +285,7 @@ pub const CodecOnly = struct {
     }
 
     pub fn weightBytes(o: *const CodecOnly) usize {
-        return o.c.weight_bytes;
+        return o.c.w.bytes;
     }
 
     pub fn setProbe(o: *CodecOnly, p: ?codec_.Probe) void {

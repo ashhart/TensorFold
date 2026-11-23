@@ -94,6 +94,7 @@ pub const Fake = struct {
         f.table = b.vtable.*;
         f.table.prefill = fill.Callbacks(Fake).whole;
         f.table.prefill_step = if (stepped) fill.Callbacks(Fake).one else null;
+        f.table.cancel_prefill = fill.Callbacks(Fake).cancelPrompt;
         f.table.release = release;
         f.table.verify = verify;
         f.table.keep = keep;
@@ -219,11 +220,12 @@ pub const Fake = struct {
         if (o.pairs.items.len != @min(end, s.prompt_len - 1)) return error.LostPromptLookahead;
         o.normalized = true;
     }
-    pub fn markPrompt(f: *Fake, s: *Stream, at: u32) !void {
+    pub fn markPrompt(f: *Fake, s: *Stream, at: u32, interrupted: bool) !void {
+        if (interrupted) f.bound = s;
         if (f.fail_mark) return error.MarkFailed;
         if (f.bound != s or !f.owner(s).normalized) return error.WrongSession;
         if (f.target.lanes.get(s).?.history.items.len != at) return error.PositionMismatch;
-        if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
+        if (interrupted) s.keepInterruptedPrefill(at) else if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
     }
     pub fn finishPrompt(f: *Fake, s: *Stream) !void {
         const o = f.owner(s);

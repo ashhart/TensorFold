@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import os
 import re
 import selectors
@@ -44,20 +45,43 @@ def launch(binary, fixtures):
         selector.close()
 
 
-def exchange(port, data):
+# the server's close reaching a client that is still sending: a reset, a closed pipe or a socket no longer connected
+CLOSED_FIRST = {errno.ECONNRESET, errno.EPIPE, errno.ENOTCONN}
+
+
+def exchange(port, data, closes_ok=False):
+    """The bytes the server sent back, and whether it closed while the request was still being sent or read."""
+    output = bytearray()
     with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
         connection.settimeout(5)
-        connection.sendall(data)
-        connection.shutdown(socket.SHUT_WR)
-        output = bytearray()
-        while True:
-            part = connection.recv(8192)
-            if not part:
-                break
-            output.extend(part)
-            if len(output) > 1 << 20:
-                raise AssertionError("fixture response exceeded 1 MiB")
-    return bytes(output)
+        try:
+            connection.sendall(data)
+            connection.shutdown(socket.SHUT_WR)
+            while True:
+                part = connection.recv(8192)
+                if not part:
+                    break
+                output.extend(part)
+                if len(output) > 1 << 20:
+                    raise AssertionError("fixture response exceeded 1 MiB")
+        except OSError as error:
+            if not closes_ok or error.errno not in CLOSED_FIRST:
+                raise
+            return bytes(output), True
+    return bytes(output), False
+
+
+def refused_or_closed(output, expected):
+    """A close mid-request may cut the refusal off, but nothing it delivered may be a served (2xx) reply."""
+    if re.match(rb"HTTP/1\.[01] 2", output):
+        raise AssertionError("the server answered a request it should have refused")
+    if b"\r\n\r\n" in output:
+        try:
+            actual = statuses(output)
+        except AssertionError:
+            return  # the refusal itself was cut off by the close
+        if actual != expected:
+            raise AssertionError(f"expected {expected} or a close, got {actual}")
 
 
 def statuses(wire):
@@ -112,11 +136,14 @@ def cases():
     yield "GET conflicting framing is rejected", [400], (
         b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n"
         b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
-    # a body no route reads is taken only to keep the connection in step, so it has a small cap of its own
+    # an unread body has a small cap; past it the server refuses and closes, maybe before the whole body is sent
     for size, expected in ((65536, 200), (65537, 400)):
         yield f"GET body of {size} bytes against the unread cap", [expected], (
             b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: "
-            + str(size).encode() + b"\r\n\r\n" + b"x" * size)
+            + str(size).encode() + b"\r\n\r\n" + b"x" * size), expected != 200
+    # the cap is decided on the declared length before any body is read, so a head alone shows it with no race
+    yield "GET declaring 65537 bytes is refused before its body is read", [400], (
+        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 65537\r\n\r\n")
     yield "GET body preserves a genuine following request", [200, 200], (
         b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4\r\n\r\ndata"
         b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " + KEY
@@ -133,7 +160,7 @@ SLOTS = 128
 def answered(port):
     """True when a new client is served; a full server answers 503 or resets the connection."""
     try:
-        return statuses(exchange(port, CLOSING)) == [200]
+        return statuses(exchange(port, CLOSING)[0]) == [200]
     except (AssertionError, OSError):
         return False
 
@@ -176,12 +203,17 @@ def main():
     failed = 0
     total = 0
     try:
-        for label, expected, data in cases():
+        for label, expected, data, *closes_ok in cases():
             total += 1
             try:
-                actual = statuses(exchange(port, data))
-                if actual != expected:
-                    raise AssertionError(f"expected {expected}, got {actual}")
+                output, closed = exchange(port, data, bool(closes_ok and closes_ok[0]))
+                if closed:
+                    refused_or_closed(output, expected)
+                    label += " (the server closed first)"
+                else:
+                    actual = statuses(output)
+                    if actual != expected:
+                        raise AssertionError(f"expected {expected}, got {actual}")
                 print("PASS", label)
             except (AssertionError, OSError, ValueError) as error:
                 failed += 1

@@ -310,6 +310,7 @@ fn partsCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
 pub fn mmDense(
     e: mtl.ComputeEncoder,
     mm: affine_mm.Pipes,
+    bm: u32,
     q: affine.Affine,
     x: Ref,
     sums: Ref,
@@ -317,7 +318,7 @@ pub fn mmDense(
     n_rows: u32,
 ) void {
     affine_mm.rowSums(e, mm, 64, x, sums, n_rows, q.k);
-    affine_mm.dense(e, mm, x, sums, q, y, n_rows);
+    affine_mm.denseBm(e, mm, x, sums, q, y, n_rows, bm);
 }
 
 /// dims: x rows, sorted pairs, experts, picks a row.
@@ -365,7 +366,8 @@ fn gatherCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     upq.n = @intCast(r);
     // every expert's gate and up, dense on every x row: [2][parts][rows, r]
     for (0..parts) |e| for ([2]Mat{ m, up }, 0..) |w, j| {
-        try g.run(mmDense, .{ mm, w.part(e, parts), ref(m.x()), sums, ref(bs[1]).at(((j * parts + e) * rows * r) * 2), @as(u32, rows) });
+        const y_at = ref(bs[1]).at(((j * parts + e) * rows * r) * 2);
+        try g.run(mmDense, .{ mm, g.p.mm_bm, w.part(e, parts), ref(m.x()), sums, y_at, @as(u32, rows) });
     };
     const dg = bs[1].slice(u16, 2 * parts * rows * r);
     const gu = bs[2].slice(u16, slots * 2 * r);
@@ -384,7 +386,10 @@ fn gatherCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     for (order, 0..) |o, i| @memcpy(xs[i * k ..][0..k], m.x().slice(u16, rows * k)[@as(usize, @intCast(o)) * k ..][0..k]);
     const y = bs[5].slice(u16, (parts + 1) * slots * r);
     try g.run(mmDown, .{ mm, gate, ref(bs[4]), sums, sorted, ref(bs[5]), @as(u32, slots), @as(u32, parts) });
-    for (0..parts) |e| try g.run(mmDense, .{ mm, m.part(e, parts), ref(bs[4]), sums, ref(bs[5]).at((1 + e) * slots * r * 2), @as(u32, slots) });
+    for (0..parts) |e| {
+        const y_at = ref(bs[5]).at((1 + e) * slots * r * 2);
+        try g.run(mmDense, .{ mm, g.p.mm_bm, m.part(e, parts), ref(bs[4]), sums, y_at, @as(u32, slots) });
+    }
     for (order, 0..) |o, i| {
         const e: usize = @intCast(picks[@intCast(o)]);
         try eql(y[@as(usize, @intCast(o)) * r ..][0..r], y[((1 + e) * slots + i) * r ..][0..r]);
@@ -546,6 +551,8 @@ pub fn main() !void {
     all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
     all.pairs += try batch.sharedGluCheck(&g);
     all.pairs += try @import("glm_rows_moe.zig").check(&g);
+    all.pairs += try @import("glm_rows_moe.zig").checkUnique(&g);
+    all.pairs += try @import("glm_rows_fp8.zig").check(&g);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
     const cl = try @import("glm_rows_classes.zig").check(&g.p, device, queue);

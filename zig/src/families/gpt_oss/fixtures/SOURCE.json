@@ -1,0 +1,43 @@
+{
+  "checkpoint": "openai/gpt-oss-20b",
+  "revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "file": "config.json",
+      "inputSha256": "3a2a26ded679375b7928ddeca59764df7cea83220c1961035f6d6e232659e9ce",
+      "fixtureSha256": "3a2a26ded679375b7928ddeca59764df7cea83220c1961035f6d6e232659e9ce",
+      "transformation": "none"
+    },
+    {
+      "file": "generation_config.json",
+      "inputSha256": "f9970ada892d2d1f72e3ed0a6535ccebadd11897318794ca671d8c7014c957da",
+      "fixtureSha256": "f9970ada892d2d1f72e3ed0a6535ccebadd11897318794ca671d8c7014c957da",
+      "transformation": "none"
+    },
+    {
+      "file": "model-00000-of-00002.safetensors.header.json",
+      "inputSha256": "c3f0da47d5067762957fb7c2498baa7116dca369f7ec21cb87d534131f28a339",
+      "fixtureSha256": "79342560c524ca186e60530732df0e15a7fa5d8362eb77dab0c84ef844c7b509",
+      "tensors": 196,
+      "dataBytes": 4792250240,
+      "transformation": "JSON whitespace only, one entry per line; same keys, dtype, shapes and byte offsets"
+    },
+    {
+      "file": "model-00001-of-00002.safetensors.header.json",
+      "inputSha256": "2a5470e03fce466096b781271d6d5a6584080c97aa3bfe3ef5979b2ad504688f",
+      "fixtureSha256": "3e3f8fc53bc6a469030b5d86b106cafc96c1c684aeb9b372510e89a957cd72a2",
+      "tensors": 197,
+      "dataBytes": 4798679872,
+      "transformation": "JSON whitespace only, one entry per line; same keys, dtype, shapes and byte offsets"
+    },
+    {
+      "file": "model-00002-of-00002.safetensors.header.json",
+      "inputSha256": "9417871457ee6416db1afa51d00a73fe10bb2b1ff2b82accf9920f60e277681f",
+      "fixtureSha256": "0a1e9c7eaf13af9f6e169a80fc7d72b66a50a1526ccb9050c0a27902ca5c47be",
+      "tensors": 66,
+      "dataBytes": 4170334656,
+      "transformation": "JSON whitespace only, one entry per line; same keys, dtype, shapes and byte offsets"
+    }
+  ]
+}

@@ -290,6 +290,15 @@ function mcpSandboxReadRoots(config: McpServerConfig, cwd: string): string[] {
     roots.push(path.dirname(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw)))
   }
   add(config.command)
+  // dyld resolves bundled frameworks and resources outside Contents/MacOS.
+  if (process.platform === 'darwin') {
+    const executableDir = path.dirname(path.resolve(cwd, config.command))
+    const contents = path.dirname(executableDir)
+    if (path.basename(executableDir) === 'MacOS' && path.basename(contents) === 'Contents'
+      && path.basename(path.dirname(contents)).endsWith('.app')) {
+      roots.push(contents)
+    }
+  }
   for (const arg of config.args) add(arg)
   return roots
 }

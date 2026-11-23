@@ -71,12 +71,16 @@ pub const Client = struct {
         const U = union(enum) { done: void, timer: void };
         var buf: [2]U = undefined;
         var sel = Io.Select(U).init(io, &buf);
-        sel.concurrent(.done, work, .{ c, a, url, headers, limits, &outcome }) catch {
-            work(c, a, url, headers, limits, &outcome); // no spare thread: run here, bounded by the sockets alone
-            return if (outcome.err) |e| e else outcome.step;
+        return c.race(a, url, headers, limits, &outcome, &sel);
+    }
+
+    fn race(c: *Client, a: Allocator, url: []const u8, headers: []const std.http.Header, limits: Limits, outcome: *Outcome, sel: anytype) Error!Step {
+        sel.concurrent(.done, work, .{ c, a, url, headers, limits, outcome }) catch return error.Network;
+        sel.concurrent(.timer, sleep, .{ c.http.io, limits.timeout_ms }) catch {
+            while (sel.cancel()) |_| {}
+            return error.Timeout;
         };
-        sel.concurrent(.timer, sleep, .{ io, limits.timeout_ms }) catch {};
-        const first = sel.await() catch U{ .timer = {} };
+        const first = sel.await() catch .timer;
         while (sel.cancel()) |_| {}
         if (first == .timer) return error.Timeout;
         return if (outcome.err) |e| e else outcome.step;
@@ -433,4 +437,37 @@ test "security: request credentials stay within their original web origin" {
     var returning: Fake = .{ .next = &.{ "https://other.example/path", "https://api.example/back" } };
     _ = try c.getVia(std.testing.allocator, "https://api.example/search", &headers, .{}, &returning);
     try std.testing.expectEqual(@as(usize, 1), returning.authenticated);
+}
+
+test "security: an unschedulable fetch or deadline refuses and leaves no worker" {
+    const Fake = struct {
+        const Tag = enum { done, timer };
+        fail: Tag,
+        scheduled: usize = 0,
+        cancelled: usize = 0,
+
+        fn concurrent(f: *@This(), tag: Tag, _: anytype, _: anytype) !void {
+            if (tag == f.fail) return error.NoTask;
+            f.scheduled += 1;
+        }
+
+        fn await(_: *@This()) !Tag {
+            return .done;
+        }
+
+        fn cancel(f: *@This()) ?void {
+            f.cancelled += 1;
+            return null;
+        }
+    };
+    var c = Client.init(std.testing.allocator, std.testing.io, "test");
+    defer c.deinit();
+    for ([_]Fake.Tag{ .done, .timer }) |fail| {
+        var fake: Fake = .{ .fail = fail };
+        var outcome: Client.Outcome = .{};
+        const got = c.race(std.testing.allocator, "https://example.com", &.{}, .{}, &outcome, &fake);
+        try std.testing.expectError(if (fail == .done) error.Network else error.Timeout, got);
+        try std.testing.expectEqual(@as(usize, if (fail == .done) 0 else 1), fake.scheduled);
+        try std.testing.expectEqual(@as(usize, if (fail == .done) 0 else 1), fake.cancelled);
+    }
 }

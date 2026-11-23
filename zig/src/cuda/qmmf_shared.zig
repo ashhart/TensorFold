@@ -52,6 +52,7 @@ test "shared down stride: geometry, output address and stride match the contiguo
     d.api.cuLaunchKernel = Mock.run;
     var l: q.Lane = undefined;
     l.clusters = true;
+    l.pdl = false;
     l.half_below = 96;
     for (&l.shared_down, 0..) |*f, i| f.* = .{ .d = &d, .handle = @ptrFromInt(101 + i) };
     const s: Stream = .{ .d = &d, .handle = null };

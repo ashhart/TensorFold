@@ -87,6 +87,11 @@ pub const Schedule = struct {
     }
 };
 
+/// Whether step `at` is past the schedule: `set_timesteps` drops repeats, so it can be shorter than the request.
+pub fn past(s: Schedule, at: u32) bool {
+    return @as(usize, at) >= s.timesteps.len;
+}
+
 /// set_timesteps(steps): the shifted grid snapped to the nearest training noise level, repeats dropped.
 pub fn timesteps(gpa: std.mem.Allocator, c: Config, steps: u32) !Schedule {
     if (steps < 1) return error.BadStepCount;
@@ -171,5 +176,19 @@ test "timesteps and sigmas equal MOSSImageScheduler's for every recorded config 
                 return error.TestUnexpectedResult;
             }
         }
+    }
+}
+
+test "a request's step count can be longer than the schedule: the pass ends on the schedule's last level" {
+    const a = std.testing.allocator;
+    // 1, 50 and 200 are the served counts; 250 is a count set_timesteps shortens by dropping repeats
+    for ([_]struct { u32, usize }{ .{ 1, 1 }, .{ 50, 50 }, .{ 200, 200 }, .{ 250, 246 } }) |case| {
+        const s = try timesteps(a, .{}, case[0]);
+        defer s.deinit(a);
+        try std.testing.expectEqual(case[1], s.timesteps.len);
+        var at: u32 = 0;
+        // every pass reads timesteps[at] and sigmas[at + 1]: the loop must stop with both inside their slices
+        while (!past(s, at)) : (at += 1) try std.testing.expect(@as(usize, at) + 1 < s.sigmas.len);
+        try std.testing.expectEqual(case[1], @as(usize, at));
     }
 }

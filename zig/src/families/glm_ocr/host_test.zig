@@ -175,3 +175,7 @@ test "GLM-OCR refuses invalid geometry, pixel buffers and budgets before allocat
     try std.testing.expectError(error.BadPixels, processor.prepareRgb(a, .{ .height = 84, .width = 112, .pixels = &.{} }, 6144));
     try std.testing.expectError(error.ImageBudget, processor.prepareRgb(a, .{ .height = 84, .width = 112, .pixels = &.{} }, 1));
 }
+
+test {
+    _ = @import("ocr_test.zig");
+}

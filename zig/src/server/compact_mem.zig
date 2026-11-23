@@ -25,7 +25,9 @@ pub fn hashes(a: Allocator, msgs: []const Value, mem: Mem) bool {
     return std.mem.eql(u8, got, mem.hash);
 }
 
-pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
+/// The note kept for these messages (null: none, or a salted request: the store is keyed by the messages alone).
+pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value, salt: u64) ?Mem {
+    if (salt != 0) return null;
     const dir = srv.config.compact_memory orelse return null;
     const key = conversationKey(a, msgs) catch return null;
     const note = readNamed(srv, a, dir, &key, ".md") orelse return null;
@@ -40,7 +42,9 @@ pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
     return .{ .note = note, .covered = covered, .hash = hash };
 }
 
-pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8) void {
+/// Keep the note for these messages, unless the request is salted: another salt's request with them would read it.
+pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8, salt: u64) void {
+    if (salt != 0) return;
     const dir = srv.config.compact_memory orelse return;
     // a folder made here is the owner's alone; one that already exists keeps the mode its owner gave it
     const Permissions = std.Io.File.Permissions;

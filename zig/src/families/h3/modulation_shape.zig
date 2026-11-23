@@ -1,6 +1,6 @@
 //! H3 modulation dimensions checked on the host before division, indexing or GPU allocation.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const geometry = @import("geometry.zig");
 
 pub fn linear(x: usize, w: usize, n: usize, rows: usize, k: usize) !usize {
