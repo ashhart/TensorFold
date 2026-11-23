@@ -15,7 +15,6 @@ const Env = struct {
         return null;
     }
 };
-
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
@@ -35,10 +34,7 @@ test "environment: every strict reader refuses bad text before opening a model, 
         try t.expect(untouched == null);
     }
 }
-
-    .{ .name = "TF_DRM_CARD", .scope = .cuda, .kind = .path, .forms = "a device path without control characters to a DRM card; empty for /dev/dri/card0" },
-    .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .also = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
-
+const valid = @import("environment_valid_cases.zig").valid;
 /// An environment whose carveout flag and source are set by the test, for the settings a source owns.
 const CarveEnv = struct {
     name: []const u8,
@@ -52,7 +48,6 @@ const CarveEnv = struct {
         return null;
     }
 };
-
 test "environment: the daemon's settings are skipped while the carveout is off or the card is the source, and refused by name otherwise" {
     const names = [_][]const u8{
         "TF_CUDA_CARVEOUT_SOURCE",
@@ -74,7 +69,6 @@ test "environment: the daemon's settings are skipped while the carveout is off o
         } else try t.expectEqual(@as(?[]const u8, null), card);
     }
 }
-
 test "environment: the DRM card's setting is read only when the carveout is on and the card is its source" {
     const bad: CarveEnv = .{ .name = "TF_DRM_CARD", .raw = "card\x1b", .carveout = "0" };
     try t.expectEqual(@as(?[]const u8, null), try e.refusal(a, bad, all));
@@ -91,7 +85,6 @@ test "environment: the DRM card's setting is read only when the carveout is on a
         try t.expect(std.mem.indexOf(u8, why, "TF_DRM_CARD") != null);
     }
 }
-
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
     for (valid) |c| {
         try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
@@ -112,7 +105,6 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         try t.expect(covered);
     }
 }
-
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
@@ -155,7 +147,6 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
 }
-
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {
     const name = "TENSORFOLD_TOOL_ID_KEY_FILE";
     try t.expectEqualStrings("relative/k ey", (try e.path(name, "relative/k ey")).?);
