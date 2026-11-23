@@ -259,11 +259,13 @@ pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_p
     return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
-/// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
-const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize };
+/// The qualified sizes: the 27B's, the 9B's, and the tied 4B and 0.8B (the same heads of 256 and 128).
+const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize, kv_heads: usize };
 const sizes = [_]Size{
-    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48 },
-    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
+    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48, .kv_heads = 4 },
+    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32, .kv_heads = 4 },
+    .{ .hidden = 2560, .intermediate = 9216, .layers = 32, .heads = 16, .v_heads = 32, .kv_heads = 4 },
+    .{ .hidden = 1024, .intermediate = 3584, .layers = 24, .heads = 8, .v_heads = 16, .kv_heads = 2 },
 };
 
 /// The served config: a dense tied head is admitted only under TF_QWEN27_TIED_HEAD=1.
@@ -279,7 +281,7 @@ fn qualifiedSize(c: cfg.Config) bool {
 
 /// A qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
+    const dense = qualifiedSize(c) and c.k_heads == 16 and (c.kv_heads == 4 or c.hidden == 1024) and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
     if (!(dense or routed or a3b(c)) or c.vocab != 248320) return error.UnqualifiedQwenShape;
@@ -339,7 +341,7 @@ fn testShape(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u
 test "a qwen3_5 dense checkpoint opens at the 27B and 9B shapes and refuses its neighbours" {
     try testShape(5120, 17408, 64, 24, 48);
     try testShape(4096, 12288, 32, 16, 32);
-    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(2560, 9216, 32, 16, 32)); // the 4B
+    try testShape(2560, 9216, 32, 16, 32); // the tied 4B: qualified by #3702's size rows
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(4096, 12288, 64, 16, 32)); // 9B widths, 27B depth
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(5120, 17408, 64, 24, 32)); // 27B, 9B GDN heads
 }

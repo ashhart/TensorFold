@@ -49,7 +49,8 @@ pub const Geometry = struct {
         // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2), 4 (16/4) or 8 (16/2).
         if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
         const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4) or (g.heads == 16 and g.kv_heads == 2);
-        if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
+        const small = g.heads == 8 and g.kv_heads == 2; // the tied 0.8B: the same group-4 shader build as the 9B
+        if (g.heads / g.kv_heads != 6 and !one_mac and !small) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
         return @min(requested, @as(u32, if ((g.shared_prefix and g.fuse_chain) or g.solo_prompt or (g.fuse_chain and g.wide_prompt)) chain_rows else max_rows));
@@ -543,9 +544,9 @@ test "target attention reads every config dimension without widening kernel qual
     c.heads = 16; // the 9B: GQA4 over 4 KV heads, one Mac only
     c.kv_heads = 4;
     try std.testing.expectEqual(@as(u32, 4), (try Geometry.fromConfig(c, true)).group());
-    c.heads = 8; // its rank of a two-way split is not qualified
+    c.heads = 8; // the 0.8B's whole-model shape: the same group-4 shader build the 9B takes
     c.kv_heads = 2;
-    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    try std.testing.expectEqual(@as(u32, 4), (try Geometry.fromConfig(c, true)).group());
     c.heads = 20; // GQA5: no shader build takes it
     c.kv_heads = 4;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));

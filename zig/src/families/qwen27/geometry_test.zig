@@ -141,3 +141,31 @@ test "dense geometry: fixed head arithmetic and projection alignment still refus
     bad.kinds[0] = .attention;
     try std.testing.expectError(error.UnqualifiedLayerSchedule, geometry.supported(bad));
 }
+
+test "the tied 4B and 0.8B qualify and strangers still refuse" {
+    const model = @import("model.zig");
+    const tied4b =
+        \\{"model_type":"qwen3_5","hidden_size":2560,"intermediate_size":9216,"num_hidden_layers":32,
+        \\"num_attention_heads":16,"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,
+        \\"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"eos_token_id":151643,"tie_word_embeddings":true}
+    ;
+    const tied08 =
+        \\{"model_type":"qwen3_5","hidden_size":1024,"intermediate_size":3584,"num_hidden_layers":24,
+        \\"num_attention_heads":8,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":16,"linear_key_head_dim":128,
+        \\"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"eos_token_id":151643,"tie_word_embeddings":true}
+    ;
+    inline for (.{ tied4b, tied08 }) |text| {
+        const c = try cfg.parse(a, text, null);
+        try model.supported(c);
+    }
+    const stranger =
+        \\{"model_type":"qwen3_5","hidden_size":1536,"intermediate_size":4096,"num_hidden_layers":28,
+        \\"num_attention_heads":12,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":16,"linear_key_head_dim":128,
+        \\"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"eos_token_id":151643,"tie_word_embeddings":true}
+    ;
+    const c = try cfg.parse(a, stranger, null);
+    try std.testing.expectError(error.UnqualifiedQwenShape, model.supported(c));
+}
