@@ -20,6 +20,8 @@ pub const fp8_rows_cert = @embedFile("fp8_rows_cert.metal");
 pub const fp8_tile_cert = @embedFile("fp8_tile_cert.metal");
 /// DeepSeek V4.1 CSA2 attention: window, selected compressed rows and the sink over one shared latent row.
 pub const csa2_attn = segs_h ++ @embedFile("csa2_attn.metal");
+/// DeepSeek V4.1 opt-in DSpark bidirectional block attention sharing KV loads across block rows.
+pub const dspark_attn_cert = @embedFile("dspark_attn_cert.metal");
 /// DeepSeek V4.1's copy of Kimi's expert plan, chains and combine: the E8M0 scale over its full range.
 pub const experts_kimi = @embedFile("experts_kimi.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over the copy.

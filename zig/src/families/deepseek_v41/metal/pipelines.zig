@@ -90,7 +90,7 @@ pub const Pipelines = struct {
         errdefer p.mma.deinit();
         p.mma_cert = if (fp64_bf16) try fp8_mma_cert.Pipelines.load(a, device) else null;
         errdefer if (p.mma_cert) |*mc| mc.deinit();
-        p.attn = try attn.Pipelines.load(device);
+        p.attn = if (fp64_bf16) try attn.Pipelines.loadWithDspark(device) else try attn.Pipelines.load(device);
         errdefer p.attn.deinit();
         p.index = try index.Pipelines.load(device);
         errdefer p.index.deinit();

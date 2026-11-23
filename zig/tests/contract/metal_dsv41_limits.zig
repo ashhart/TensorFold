@@ -54,6 +54,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_tile, .pre_m5 = sources.dsv41.fp8_tile };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 dspark_cert attn ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.dspark_attn_cert, .pre_m5 = sources.dsv41.dspark_attn_cert };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 attn ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.csa2_attn, .pre_m5 = sources.dsv41.csa2_attn };
