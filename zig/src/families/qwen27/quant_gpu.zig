@@ -263,8 +263,7 @@ pub const Kernels = struct {
         // A plain matrix off qk: tf_lane_reg on its reg copy when it has one, else the cooperative kernel.
         const on_reg = reg and (!p.plain or p.reg_copy != null);
         const words = if (p.plain) p.reg_copy orelse p.words else p.words;
-        // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
-        // long key: reg rows past 128; 8-bit past 16 as whole-prompt row blocks; cooperative never
+        // Long keys: reg rows past 128 on Ultras; non-reg rows past 16 on tensor units; cooperative stays short.
         const long = if (on_reg) longKey(k.long_prompt, k.prompt, rows) else !reg and k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
         const sums: ?Sums = if (on_reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long, reg and !on_reg);
