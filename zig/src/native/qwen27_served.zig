@@ -379,14 +379,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null;
-    const paged = try q.decode_round.pagesOn();
-    const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| {
-        why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
-        return err;
-    };
-    h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step);
-    if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
+    h.trace = null; const paged = try q.decode_round.pagesOn();
+    const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| { why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16"; return err; };
+    h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step); if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -399,10 +394,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer h.back.deinit();
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
-    h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
-    h.runner.grown = .{ .ctx = h, .added = Host.added };
-    h.back.vision = o.images;
-    if (h.draft != null or mtp_on) try h.back.measure(io);
+    h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added }; h.runner.grown = .{ .ctx = h, .added = Host.added };
+    h.back.vision = o.images; if (h.draft != null or mtp_on) try h.back.measure(io);
     h.mtp = null;
     h.wrap = null;
     if (mtp_on) {
