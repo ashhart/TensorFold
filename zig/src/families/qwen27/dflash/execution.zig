@@ -194,12 +194,34 @@ fn layersV1(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, frame: 
 /// A stream's new taps for a batched pass: absorbed into its caches before its block reads them.
 pub const Absorb = struct { taps: op.View, positions: []const u64 };
 
-/// In one frame, absorb taps per stream, draft 2-8 blocks and build each lattice without its anchor row.
-pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, frame: u64, absorbs: []const ?Absorb, streams: []const Stream, block: u32, out: []op.Lattice) !void {
-    try preparation.check();
-    try g.config.check();
-    if (block < 2 or block > 16 or streams.len < 2 or streams.len * block > 128 or out.len != streams.len or absorbs.len != streams.len) return error.BadRuntimeBlock;
-    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.span() - 1) return error.BadDraftContext;
+/// Several streams' new taps stacked in one pass; each span's keys and values go to that stream's caches.
+pub const Stacked = struct { taps: op.View, positions: []const u64, spans: []const Span };
+
+/// One read of each absorb weight for every stacked row, each row's position its own stream's.
+pub fn encodeStacked(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, frame: u64, s: Stacked) !void {
+    const c = g.config;
+    try s.taps.check(@intCast(s.positions.len), c.ringWidth(), .bf16);
+    var next: u32 = 0;
+    for (s.spans) |span| {
+        if (span.rows == 0 or span.first != next) return error.BadCommittedTaps;
+        next += span.rows;
+    }
+    if (next != s.positions.len) return error.BadCommittedTaps;
+    const hidden = if (c.variant == .v1) s.taps else try norm(ops, frame, try project(ops, frame, s.taps, g.fusion, preparation.mode), g.hidden_norm, c.eps, 1, c.hidden);
+    for (g.layers, 0..) |layer, i| {
+        const raw_keys = try project(ops, frame, hidden, layer.attention.k, preparation.mode);
+        const keys = try rotate(ops, frame, try norm(ops, frame, raw_keys, layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), s.positions, c.kv_heads, c);
+        const values = try project(ops, frame, hidden, layer.attention.v, preparation.mode);
+        for (s.spans) |span| {
+            const k = try ops.vtable.mask_rows(ops.ptr, frame, keys, span.first, span.rows);
+            const v = try ops.vtable.mask_rows(ops.ptr, frame, values, span.first, span.rows);
+            try ops.vtable.stream_append(ops.ptr, frame, span.stream, @intCast(i), k, v, s.positions[span.first..][0..span.rows]);
+        }
+    }
+}
+
+/// Each stream's new taps through its own absorb pass, in stream order.
+pub fn encodeAbsorbs(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, frame: u64, absorbs: []const ?Absorb) !void {
     for (absorbs, 0..) |a, k| if (a) |x| {
         try x.taps.check(@intCast(x.positions.len), g.config.ringWidth(), .bf16);
         try encodeAppendTo(ops, g, preparation, x.taps, x.positions, frame, .{ .stream = @intCast(k) });
@@ -211,7 +233,7 @@ pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation,
     try preparation.check();
     try g.config.check();
     if (block < 2 or block > 16 or streams.len < 2 or streams.len * block > 128 or out.len != streams.len or absorbs.len != streams.len) return error.BadRuntimeBlock;
-    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.window - 1) return error.BadDraftContext;
+    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.span() - 1) return error.BadDraftContext;
     if (stacked) |s| try encodeStacked(ops, g, preparation, frame, s) else try encodeAbsorbs(ops, g, preparation, frame, absorbs);
     const output = try encodeStreams(ops, g, preparation, streams, frame, block, &.{});
     try ops.vtable.lattices(ops.ptr, frame, output.head, output.projected, g.config, block, out);

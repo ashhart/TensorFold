@@ -20,5 +20,7 @@ test {
     _ = @import("runtime_context.zig");
     _ = @import("fixtures.zig");
     _ = @import("execution_test.zig");
+    _ = @import("absorb_batch.zig");
+    _ = @import("absorb_batch_test.zig");
     _ = @import("execution_v1_test.zig");
 }
