@@ -123,6 +123,7 @@ pub const inkling2_experts: []const u8 = if (available) &Blob("fatbin_inkling2_e
 pub const inkling2_modelopt: []const u8 = if (available) &Blob("fatbin_inkling2_modelopt").bytes else &.{};
 pub const inkling2_loop_math: []const u8 = if (available) &Blob("fatbin_inkling2_loop_math").bytes else &.{};
 pub const inkling2_vision: []const u8 = if (available) &Blob("fatbin_inkling2_vision").bytes else &.{};
+pub const inkling2_loop: []const u8 = if (available) &Blob("fatbin_inkling2_loop").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
 pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
