@@ -78,7 +78,6 @@ pub const Backend = struct {
         const sync = try env.read(?bool, "FZ_SETTLE_SYNC", null);
         return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = chain, .serial_drafts = serial, .overlap = overlap, .times = RoundTimes.init(), .fence = if (sync == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
-
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
     pub fn timeCosts(b: *Backend) !void {
         return batch_costs.timeCosts(b);
