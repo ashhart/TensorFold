@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Draft depth: a lone stream with a fixed-block drafter, such as Inkling 2 Mini's DSpark, is now priced for the full block it runs, as shared rounds already were, so single requests propose full blocks (#4457). Thanks @gilby.
+
 - Docs: the runbook says GLM-5.3-Flash on Metal shares 16 rows between streams, so drafts fill only the rows left over (#4722). Thanks @SashaMIT.
 
 - Docs: the credits say the native CUDA engine serves EXL3 packs (#4743). Thanks @Bizuayeu.
