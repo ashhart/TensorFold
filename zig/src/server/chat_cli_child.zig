@@ -16,8 +16,8 @@ pub const words: server.Words = .{
     .stuck = "Model server did not exit after termination; cleanup is incomplete",
 };
 
-/// What a managed child needs. ``exe`` defaults to this executable; ``key`` defaults to a fresh private key.
-pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, key: ?[]const u8 = null, log_dir: []const u8 };
+/// A managed child's needs. ``key`` defaults to a fresh private key; ``environment_key`` can preserve a caller list for the child.
+pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, key: ?[]const u8 = null, environment_key: ?[]const u8 = null, log_dir: []const u8 };
 
 /// The started server, the name it serves and the key every request to it carries.
 pub const Child = struct { managed: server.Managed, served: []const u8, key: []const u8 };
@@ -77,7 +77,7 @@ pub fn plan(s: Setup, model_arg: []const u8, extra: []const []const u8, startup_
 
 /// ``p`` started and ready; null with ``problem`` set ("" when stopped) and ``tail`` the child's last log lines.
 pub fn start(s: Setup, p: Plan, tail: *[]const []const u8, problem: *[]const u8) !?Child {
-    const o: server.Options = .{ .startup_timeout_s = p.timeout_s, .bench_dir = s.log_dir, .tail = tail, .served = p.served, .lock = false, .own_group = true, .key = p.key, .words = words };
+    const o: server.Options = .{ .startup_timeout_s = p.timeout_s, .bench_dir = s.log_dir, .tail = tail, .served = p.served, .lock = false, .own_group = true, .key = p.key, .environment_key = s.environment_key, .words = words };
     const m = try server.Managed.spawn(s.a, s.io, s.environ, p.argv, o, problem) orelse return null;
     return .{ .managed = m, .served = p.served, .key = p.key };
 }

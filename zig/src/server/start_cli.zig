@@ -8,6 +8,7 @@ const turn = @import("chat_cli_turn.zig");
 const history = @import("chat_cli_history.zig");
 const stream = @import("benchmark_stream.zig");
 const stop = @import("benchmark_stop.zig");
+const chat = @import("chat_cli.zig");
 const Allocator = std.mem.Allocator;
 
 const windows = builtin.os.tag == .windows;
@@ -126,12 +127,10 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
     if (comptime windows) return fail(ctx, 2, "starting a server is not supported on Windows yet: use tensorfold serve MODEL in one console and tensorfold chat --url URL MODEL in another", .{}) else return run(ctx, args);
 }
 
-fn callerKey(ctx: *const Context) ?[]const u8 {
-    return if (ctx.environ.get("TENSORFOLD_API_KEY")) |key| key else null;
-}
-
 fn run(ctx: *const Context, args: Args) !u8 {
-    if (!args.check and (callerKey(ctx) == null or callerKey(ctx).?.len == 0))
+    const caller_key = if (args.check) null else chat.envKey(ctx.environ) catch return fail(ctx, 2, chat.bad_key, .{});
+    const raw_key = ctx.environ.get("TENSORFOLD_API_KEY");
+    if (!args.check and (raw_key == null or raw_key.?.len == 0))
         return fail(ctx, 2, "persistent start requires TENSORFOLD_API_KEY in the environment; requests send Authorization: Bearer $TENSORFOLD_API_KEY, or use --check for a private temporary key", .{});
     if (comptime !windows) if (ctx.signals) stop.install();
     defer if (comptime !windows) if (ctx.signals) stop.restore();
@@ -158,7 +157,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
         if (try pull(ctx, choice.model) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{choice.model});
         if (choice.drafter) |d| if (try pull(ctx, d) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{d});
     }
-    return serve(ctx, args, choice);
+    return serve(ctx, args, choice, caller_key);
 }
 
 fn pull(ctx: *const Context, spec: []const u8) !u8 {
@@ -172,11 +171,11 @@ fn pull(ctx: *const Context, spec: []const u8) !u8 {
     return registry.pull.run(ctx.a, ctx.io, ctx.out, ctx.err, ctx.environ, ctx.override, spec);
 }
 
-fn serve(ctx: *const Context, args: Args, choice: registry.Choice) !u8 {
+fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?[]const u8) !u8 {
     var problem: []const u8 = "";
     var tail: []const []const u8 = &.{};
     const serving_exe = ctx.serve_exe orelse if (ctx.self_exe) |current| try nativeSibling(ctx.a, current) else null;
-    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = serving_exe, .key = if (args.check) null else callerKey(ctx), .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
+    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = serving_exe, .key = caller_key, .environment_key = if (args.check) null else ctx.environ.get("TENSORFOLD_API_KEY"), .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
     var extra: std.ArrayList([]const u8) = .empty;
     try extra.appendSlice(ctx.a, &.{ "--name", std.fs.path.basename(choice.entry.repo) });
     if (choice.drafter_dir) |d| try extra.appendSlice(ctx.a, &.{ "--drafter", d });
