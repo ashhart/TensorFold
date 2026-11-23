@@ -28,7 +28,7 @@ holds every kernel and a planted control for each rule. Images (PNG, JPEG) go th
 
 | | |
 | --- | --- |
-| Build | head of #4337 at `4b3d076ec6`, `zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast`, Zig 0.17.0, macOS 27.2 |
+| Build | #4337 at `a0935b5279` (the binary measured), `zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast`, Zig 0.17.0, macOS 27.2 |
 | Reference | `mlx_lm.server --model "$CKPT" --host 127.0.0.1 --port 8099`, mlx 0.32.4, mlx-lm `0.1.dev1006+g0c4c99192` ("Add Inkling 2 Mini"), same checkpoint, no drafter |
 | Native servers | `--context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0` (decode, cold prompts); `--context 8192 --parallel 4 --prompt-cache-gib 0`, with and without `--no-drafts` (concurrency) |
 | Requests | greedy, `tools/bench_openai.py --tokens 256 --reps 3 --temperatures 0`; `tools/bench_concurrent.py --tokens 256 --reps 3 --temperatures 0 --levels 1,4`; cold prompts of exactly 2,048, 8,192, 32,768 and 65,536 tokens through `/v1/completions`, one token out, cached tokens 0 |
@@ -38,39 +38,40 @@ Decode, one stream (tokens a second, median of three):
 
 | Prompt | MLX | Native plain | Native DSpark |
 | --- | --- | --- | --- |
-| `fibonacci-raw` | 22.84 | 29.05 | 35.33 |
-| `gpu-chat-no-think` | 22.54 | 29.00 | 35.33 |
+| `fibonacci-raw` | 23.05 | 31.12 | 35.76 |
+| `gpu-chat-no-think` | 23.69 | 31.07 | 35.01 |
 
 Concurrency, `bench_concurrent` (aggregate tokens a second, per stream in brackets; slowest first token in seconds):
 
 | Prompt, streams | MLX | Native plain | Native DSpark |
 | --- | --- | --- | --- |
-| code, 1 | 22.9, 0.23 s | 30.4, 0.13 s | 37.2, 0.14 s |
-| code, 4 | 22.4 (22.8), 34.7 s | 63.3 (16.1), 0.50 s | 63.5 (16.0), 0.53 s |
-| chat, 1 | 23.2, 0.37 s | 28.4, 0.24 s | 35.0, 0.24 s |
-| chat, 4 | 22.6 (23.1), 34.6 s | 61.5 (15.8), 0.94 s | 62.1 (15.9), 0.99 s |
+| code, 1 | 23.4, 0.25 s | 26.5, 0.13 s | 36.4, 0.14 s |
+| code, 4 | 23.3 (23.6), 33.8 s | 64.5 (16.4), 0.50 s | 55.4 (15.5), 0.55 s |
+| chat, 1 | 23.3, 0.37 s | 30.6, 0.24 s | 33.8, 0.25 s |
+| chat, 4 | 23.3 (23.9), 33.9 s | 64.4 (16.3), 0.97 s | 60.4 (15.5), 1.00 s |
 
 The reference server answers four requests one after another here. A DSpark server times its verify forward by total
-rows at load (2.6 s), so the lane host prices shared rounds: at four streams a round of 4 rows costs 58 ms and each
-extra verify row about 10 ms plus a 10 ms head block a stream, so the rule drafts four streams only where that pays and
-DSpark matches plain (it drafted 7 deep for every stream before, 213 ms for 32 rows, and ran at 54.7 and 39.8). Rounds
-before a stream count's first plain price (about 128 rounds) still draft by the table alone.
+rows at load (2.6 s), so the lane host prices shared rounds: it drafted every stream 7 deep at four streams before (213 ms
+for 32 rows, 54.7 and 39.8 tokens a second in an earlier run) and now drafts only where a priced round beats plain. At
+four streams DSpark is still 6 to 14 % under plain in these runs, and at one stream it is 10 to 37 % over it.
 
 Cold first token (seconds, tokens a second in brackets):
 
 | Prompt tokens | MLX | Native |
 | --- | --- | --- |
-| 2,048 | 4.67 (439) | 8.15 (251) |
-| 8,192 | 17.83 (460) | 37.54 (218) |
-| 32,768 | 77.67 (422) | 179.76 (182) |
-| 65,536 | 180.57 (363) | 422.01 (155) |
+| 2,048 | 4.68 (437) | 5.49 (373) |
+| 8,192 | 19.53 (420) | 22.53 (364) |
+| 32,768 | 81.74 (401) | 108.27 (303) |
+| 65,536 | 180.27 (364) | 249.21 (263) |
 
-Peak physical footprint (`footprint`, after an 8,192-token prompt and a 128-token reply): native about 23 GB, with
-`--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike; MLX about 24 GB.
+Peak physical footprint (`footprint`, 1 GB resolution, after an 8,192-token prompt and a 128-token reply): native about
+24 GB, with `--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike; MLX about 23 GB.
 
-Plain and drafted greedy replies are identical, and these token hashes (the server's `sha=`) match the previous head's:
-8 tokens `4c2031fb1535`, 64 tokens `57519a5a167f`, a 416-token prompt and 16 tokens `77bf7c99cc66`, a 1,036-token
-prompt and 24 tokens `538175732cc7`.
+Plain and drafted greedy replies are identical. These token hashes (the server's `sha=`, chat completions at
+`--context 8192`) are the same on this binary and on the head before the last prompt-kernel changes: the Fibonacci
+question with 8 and 64 tokens out `0b037128ee78` and `b37d8a0e39c4`, a 416-token prompt and 16 tokens
+`77bf7c99cc66`, a 1,036-token prompt and 24 tokens `538175732cc7`.
 
-Native decode is ahead of the reference with and without the drafter, and cold prefill is not: native reaches 0.43 to
-0.57 of the reference's rate. Not measured here: other chips, a 36 GB Mac, images served, a quality suite.
+Native decode is ahead of the reference with and without the drafter. Cold prefill is 0.72 to 0.87 of the reference's
+rate and falls more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,536). Not measured here: other chips, a
+36 GB Mac, images served, a quality suite.
