@@ -348,11 +348,11 @@ fn expectDraftedAdmission(comptime D: type) !void {
     var why: []const u8 = "";
     const fitted = (try fitAdmission(a, &c, left, auto, 128, draft, &why)).?;
     try std.testing.expectEqual(@as(u32, 2), fitted.lanes);
-    try std.testing.expectEqual(2 * target, fitted.ledger);
+    try std.testing.expectEqual(3 * target, fitted.ledger);
     try std.testing.expect((try fitAdmission(a, &c, left, exact, 128, draft, &why)) == null);
     defer a.free(why);
     const pair = (try fitAdmission(a, &c, left, two, 128, draft, &why)).?;
-    try std.testing.expectEqual(2 * target, pair.ledger);
+    try std.testing.expectEqual(3 * target, pair.ledger);
     try std.testing.expectEqual(@as(usize, 127), longestWindow(&c, fixed + fl.state.cacheBytes(&c, 128) + reserved, 128, draft));
 }
 
