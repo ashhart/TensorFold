@@ -45,6 +45,16 @@ pub fn first(f: Facts, total: usize, nseg: usize) ?u32 {
     return @intCast(block * ((total - 1) / block));
 }
 
+/// Sets `r.tail_from` and says whether the last layer writes keys alone; a pipeline stage does neither.
+pub fn begin(r: *Runner, head: forward.Head, accepted: bool, images: bool, total: usize, nseg: usize) bool {
+    r.tail_from = null;
+    if (r.span != null) return false;
+    const f = facts(r, head, accepted, images);
+    r.tail_from = first(f, total, nseg);
+    if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(total));
+    return keysOnly(f);
+}
+
 /// What reads runner `r`'s last layer rows in a pass at `head`, as decode_round's verify reads it.
 pub fn facts(r: anytype, head: anytype, accepted: bool, images: bool) Facts {
     const m = r.model;

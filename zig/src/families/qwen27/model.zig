@@ -49,12 +49,17 @@ pub const Model = struct {
 
     /// One rank of a `ranks`-way tensor-parallel run: the same checkpoint, sliced in the engine.
     pub fn loadShard(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode, share_fits: ?*const fn (u64) bool) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false, null);
     }
 
     /// One rank of a pair, its share decided after everything else is accounted for (the serving order).
     pub fn loadShardDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true, null);
+    }
+
+    /// A pipeline stage's model (RFC #2005): only layers [first, end) leave the files; the share is never decided.
+    pub fn loadStage(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, first: usize, end: usize) !*Model {
+        return loadShared(a, io, dir, rows, 0, 1, .full, null, true, .{ first, end });
     }
 
     fn loadWith(
@@ -65,7 +70,7 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
-        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later);
+        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later, null);
     }
 
     fn loadShared(
@@ -78,6 +83,7 @@ pub const Model = struct {
         mode: cfg.Mode,
         share_fits: ?*const fn (u64) bool,
         later: bool,
+        owned_layers: ?[2]usize,
     ) !*Model {
         if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
@@ -138,7 +144,7 @@ pub const Model = struct {
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
         headers.end();
         const packing = timing.span(.read_pack);
-        m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
+        m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws, owned_layers);
         errdefer m.weights.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
@@ -183,8 +189,8 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
-        // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
-        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
+        // The share is every layer's whole MLP: tensor parallel ranks and stages hold less and run prompts on the GPU.
+        const share = m.shard.ranks == 1 and m.weights.stage == null and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
         // the share and its overhead bound are qualified on the dense 27B's MLP alone: routed prompts stay on the GPU
         if (columns > 0 and c.moe()) std.log.info("qwen27: the Neural Engine share is not qualified for routed checkpoints; prompts run on the GPU alone", .{});
