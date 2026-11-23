@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const http = std.http;
 const hub = @import("hub.zig");
+const credential = @import("sys").credential;
 const environment = @import("sys").environment;
 
 /// The hub pull talks to when HF_ENDPOINT names none.
@@ -67,18 +68,19 @@ pub const Auth = struct {
         const bearer = auth.bearer orelse return text;
         const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
         if (secret.len == 0) return text;
+        var matcher = credential.Matcher.init(a, text);
+        defer matcher.deinit();
         var out: std.ArrayList(u8) = .empty;
-        var rest = text;
+        var at: usize = 0;
         var replaced = false;
-        while (true) {
-            const span = (try credentialSpan(a, rest, secret)) orelse break;
-            try out.appendSlice(a, rest[0..span.start]);
+        while (try matcher.spanFrom(at, secret)) |span| {
+            try out.appendSlice(a, text[at..span.start]);
             try out.appendSlice(a, "[redacted]");
-            rest = rest[span.end..];
+            at = span.end;
             replaced = true;
         }
         if (!replaced) return text;
-        try out.appendSlice(a, rest);
+        try out.appendSlice(a, text[at..]);
         return out.items;
     }
 
@@ -134,107 +136,11 @@ fn origin(uri: std.Uri, buf: []u8) ?Origin {
     const port: u16 = uri.port orelse if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) 443 else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else return null;
     return .{ .scheme = uri.scheme, .host = host, .port = port };
 }
-
-/// The original-text span of a credential, including one hidden by any number of percent-encoding layers.
-fn credentialSpan(a: Allocator, text: []const u8, secret: []const u8) !?Span {
-    if (secret.len == 0) return null;
-    var best: ?Span = if (std.mem.indexOf(u8, text, secret)) |at| .{ .start = at, .end = at + secret.len } else null;
-    if (std.mem.indexOfScalar(u8, text, '%') == null) return best;
-
-    // One shrinking in-place buffer plus provenance avoids generating exponentially many encoded variants.
-    const decoded = try a.dupe(u8, text);
-    defer a.free(decoded);
-    const starts = try a.alloc(usize, text.len);
-    defer a.free(starts);
-    const ends = try a.alloc(usize, text.len);
-    defer a.free(ends);
-    for (starts, ends, 0..) |*start, *end, i| {
-        start.* = i;
-        end.* = i + 1;
-    }
-    const states = try a.alloc(usize, text.len + 1);
-    defer a.free(states);
-    const next_states = try a.alloc(usize, text.len + 1);
-    defer a.free(next_states);
-    var len = text.len;
-    if (layerSpan(decoded[0..len], secret, starts, ends, states, next_states)) |span| {
-        if (best == null or span.start < best.?.start or (span.start == best.?.start and span.end > best.?.end)) best = span;
-    }
-    while (true) {
-        var read: usize = 0;
-        var write: usize = 0;
-        var changed = false;
-        while (read < len) {
-            if (read + 2 < len and decoded[read] == '%' and hex(decoded[read + 1]) != null and hex(decoded[read + 2]) != null) {
-                decoded[write] = hex(decoded[read + 1]).? * 16 + hex(decoded[read + 2]).?;
-                starts[write] = starts[read];
-                ends[write] = ends[read + 2];
-                read += 3;
-                changed = true;
-            } else {
-                decoded[write] = decoded[read];
-                starts[write] = starts[read];
-                ends[write] = ends[read];
-                read += 1;
-            }
-            write += 1;
-        }
-        len = write;
-        if (layerSpan(decoded[0..len], secret, starts, ends, states, next_states)) |span| {
-            if (best == null or span.start < best.?.start or (span.start == best.?.start and span.end > best.?.end)) best = span;
-        }
-        if (!changed) return best;
-    }
-}
-
-/// One layer's polynomial-time matcher: each input position retains only its earliest possible match start.
-fn layerSpan(text: []const u8, secret: []const u8, starts: []const usize, ends: []const usize, state_buf: []usize, next_buf: []usize) ?Span {
-    if (std.mem.indexOfScalar(u8, secret, '%') == null) {
-        const at = std.mem.indexOf(u8, text, secret) orelse return null;
-        return .{ .start = starts[at], .end = ends[at + secret.len - 1] };
-    }
-    const none = std.math.maxInt(usize);
-    for (state_buf[0 .. text.len + 1], 0..) |*state, i| state.* = i;
-    var states = state_buf;
-    var next = next_buf;
-    for (secret) |wanted| {
-        @memset(next[0 .. text.len + 1], none);
-        for (states[0 .. text.len + 1], 0..) |start, at| {
-            if (start == none) continue;
-            // Literal input always remains an alternative, including '%' beginning a valid escape.
-            if (at < text.len and text[at] == wanted and start < next[at + 1]) next[at + 1] = start;
-            if (at + 2 < text.len and text[at] == '%' and hex(text[at + 1]) != null and hex(text[at + 2]) != null) {
-                const byte = hex(text[at + 1]).? * 16 + hex(text[at + 2]).?;
-                if (byte == wanted and start < next[at + 3]) next[at + 3] = start;
-            }
-        }
-        const swap = states;
-        states = next;
-        next = swap;
-    }
-    var best: ?Span = null;
-    for (states[0 .. text.len + 1], 0..) |start, end| {
-        if (start == none) continue;
-        const span: Span = .{ .start = starts[start], .end = ends[end - 1] };
-        if (best == null or span.start < best.?.start or (span.start == best.?.start and span.end > best.?.end)) best = span;
-    }
-    return best;
-}
-
-const Span = struct { start: usize, end: usize };
-
 fn containsCredential(text: []const u8, secret: []const u8) bool {
-    const span = credentialSpan(std.heap.page_allocator, text, secret) catch return true;
-    return span != null;
+    var matcher = credential.Matcher.init(std.heap.page_allocator, text);
+    defer matcher.deinit();
+    return (matcher.spanFrom(0, secret) catch return true) != null;
 }
-
-fn hex(c: u8) ?u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
-}
-
 /// The first non-empty of HF_TOKEN and HUGGING_FACE_HUB_TOKEN, else the one token file the `hf` tools read.
 pub fn token(a: Allocator, io: std.Io, env: ?*const std.process.Environ.Map, problem: *[]const u8) !?Token {
     for ([_][:0]const u8{ "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN" }) |name| {

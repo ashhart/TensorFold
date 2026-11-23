@@ -145,7 +145,6 @@ fn worldKeyed(r: *Run, replies: []const []const fake.Write, key_file: []const u8
         .{ .method = "POST", .path = "/v1/chat/completions", .replies = replies },
     }), key_file);
 }
-
 test "start CLI: a missing fit or a refused download never invokes pull or serve" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -169,7 +168,6 @@ test "start CLI: a missing fit or a refused download never invokes pull or serve
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "download declined; nothing was downloaded") != null);
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
 }
-
 test "start CLI: an above-Latin-1 key is refused before model selection or pulls" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -186,7 +184,6 @@ test "start CLI: an above-Latin-1 key is refused before model selection or pulls
     for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
         try std.testing.expect(std.mem.indexOf(u8, text, token) == null);
 }
-
 test "start CLI: explicit consent shows sizes and pulls both pinned specs before a failed pull stops" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -215,7 +212,6 @@ test "start CLI: explicit consent shows sizes and pulls both pinned specs before
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{}));
     try std.testing.expectEqual(@as(usize, 2), r.pulls.items.len);
 }
-
 const DownloadInterrupt = struct {
     var run: *Run = undefined;
 
@@ -238,7 +234,6 @@ fn forkedDownload() !?u32 {
     _ = platform.c.waitpid(pid, &status, 0);
     return null;
 }
-
 test "start CLI: Ctrl-C during a deferred download has its normal process effect" {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -253,7 +248,6 @@ test "start CLI: Ctrl-C during a deferred download has its normal process effect
     try std.testing.expect(platform.c.W.IFSIGNALED(status));
     try std.testing.expect(platform.c.W.TERMSIG(status) == std.posix.SIG.INT);
 }
-
 test "start CLI: an unpublished snapshot is not complete and cannot skip its pull" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -271,7 +265,6 @@ test "start CLI: an unpublished snapshot is not complete and cannot skip its pul
     try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "nothing was downloaded") != null);
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
 }
-
 test "start CLI: a cached model answers once, prints no key and --check reaps its serve child" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -298,7 +291,6 @@ test "start CLI: a cached model answers once, prints no key and --check reaps it
     for ([_][]const u8{ key, "user-key-must-not-leak" }) |secret|
         for ([_][]const u8{ r.out.written(), r.err.written(), args }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
-
 test "start CLI: a malformed cached config requires repair while valid caches skip pulls" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -317,7 +309,6 @@ test "start CLI: a malformed cached config requires repair while valid caches sk
     try std.testing.expectEqualStrings("Org/Model@" ++ revision, r.pulls.items[0]);
     try std.testing.expectEqualStrings("Org/Draft@" ++ draft_revision, r.pulls.items[1]);
 }
-
 test "start CLI: managed first-reply failures redact every configured credential" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -348,7 +339,6 @@ test "start CLI: managed first-reply failures redact every configured credential
         try std.testing.expect(std.mem.indexOf(u8, errors.items, secret) == null);
     try std.testing.expect(std.mem.indexOf(u8, errors.items, "[redacted]") != null);
 }
-
 test "start CLI: a failed first reply is fatal and still reaps its serve child" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -365,7 +355,6 @@ test "start CLI: a failed first reply is fatal and still reaps its serve child" 
     try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "first reply failed: HTTP 500: generation failed") != null);
     try std.testing.expect(r.childGone());
 }
-
 test "start CLI: CUDA spawns its native sibling instead of the unsupported low-level serve child" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -382,7 +371,6 @@ test "start CLI: CUDA spawns its native sibling instead of the unsupported low-l
     try std.testing.expect(r.childGone());
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, try r.path("low-level-called"), .{}));
 }
-
 test "start CLI: pre-M5 Metal starts Gemma-style rows without resolving pulling or passing a drafter" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -404,7 +392,6 @@ test "start CLI: pre-M5 Metal starts Gemma-style rows without resolving pulling 
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Pulling Org/Model@" ++ revision) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), r.root) == null);
 }
-
 test "start CLI: pre-M5 Gemma consent counts only the selected model bytes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -437,7 +424,6 @@ test "start CLI: pre-M5 Gemma consent counts only the selected model bytes" {
     try std.testing.expect(cuda.drafter != null);
     try std.testing.expectEqual(@as(u64, 21_483_957_916), cuda.download_bytes);
 }
-
 test "start CLI: CUDA still resolves pulls and passes the selected drafter" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -457,7 +443,6 @@ test "start CLI: CUDA still resolves pulls and passes the selected drafter" {
     const want_drafter = try std.fmt.allocPrint(a, "--drafter\n{s}", .{drafter});
     try std.testing.expect(std.mem.indexOf(u8, args, want_drafter) != null);
 }
-
 test "start CLI: persistent mode requires a valid environment credential before model work" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -484,7 +469,6 @@ test "start CLI: persistent mode requires a valid environment credential before 
         try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
     }
 }
-
 test "start CLI: persistent caller keys preserve the child list and send only the first key" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -527,7 +511,6 @@ test "start CLI: persistent caller keys preserve the child list and send only th
     for ([_][]const u8{ caller_key, second_key, second_key[0..8], key_list }) |secret|
         for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
-
 test "start CLI: a managed first reply authenticates Latin-1 and removes terminal controls" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -568,7 +551,6 @@ test "start CLI: a managed first reply authenticates Latin-1 and removes termina
         }
     }
 }
-
 test "start CLI: managed logs redact percent-encoded ASCII and Latin-1 credentials" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -592,6 +574,27 @@ test "start CLI: managed logs redact percent-encoded ASCII and Latin-1 credentia
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
     try std.testing.expect(r.childGone());
     for ([_][]const u8{ ascii, latin, encoded_ascii, encoded_latin, "%2525", "a%25%62", "%62", "[redacted]25" }) |secret|
+        for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
+            try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+}
+test "start CLI: KR66 managed logs redact repeatedly encoded ASCII and Latin-1 credentials" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    try r.env.put("TENSORFOLD_API_KEY", "a/b,fixture-caf\u{e9}");
+    try r.env.put("START_TEST_SHORT_LIVED", "1");
+    try r.env.put("START_TEST_LOG_ENCODED", "a%252Fb a%25252Fb fixture-caf%25E9 fixture-caf%2525E9 fixture-caf%25C3%25A9 fixture-caf%2525C3%2525A9");
+    try r.cache();
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = "a/b" });
+    const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
+    defer f.stop();
+    try r.standIn(f.port);
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
+    try std.testing.expect(r.childGone());
+    for ([_][]const u8{ "a/b", "a%252Fb", "a%25252Fb", "%252Fb", "%25252Fb", "%2Fb", "2Fb", "fixture-caf\u{e9}", "fixture-caf\xe9", "fixture-caf%25E9", "fixture-caf%2525E9", "%25E9", "%2525E9", "%E9", "E9", "fixture-caf%25C3%25A9", "fixture-caf%2525C3%2525A9", "%25C3", "%2525C3", "%25A9", "%2525A9", "%C3", "%A9", "C3", "A9" }) |secret|
         for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
