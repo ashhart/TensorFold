@@ -1,6 +1,7 @@
 //! A prompt pass's image rows on every rank: rank 0's tower encodes them, the others receive them, all splice them.
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const lanes = @import("lanes");
 const vision = @import("cuda_vision.zig");
 const vcfg = @import("vision_config.zig");
@@ -217,7 +218,7 @@ pub const Images = struct {
         a.add(@as(c_int, @intCast(n)));
         a.add(@as(c_int, @intCast(vcfg.out_hidden)));
         a.add(@as(c_int, @intCast(copies)));
-        try cuda.launch.launch(v.run.f.inject, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 256 } }, s, &a);
+        try cuda_pdl.launch(v.run.f.inject, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 256 } }, s, &a);
     }
 
     /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).

@@ -20,6 +20,15 @@ pub fn projectMany(e: *Engine, ls: []const Proj, x: u64, xs: u64, outs: []const 
         for (ls, outs, many[0..ls.len]) |l, out, *m| m.* = .{ .q = l.a4, .out = out };
         return e.affine.promptMany(e.stream, x, many[0..ls.len], rows);
     }
+    const paired = allow_fused_prompt and qwen38PairShape(ls, rows, prompt, e.affine.pdl, e.int8.on) and blk: {
+        for (outs, 0..) |out, i| for (outs[i + 1 ..]) |other| if (out == other) break :blk false;
+        break :blk true;
+    };
+    if (paired) {
+        for (ls[0..2], outs[0..2], 0..) |l, out, i| try e.project(l, x, xs, out, rows, prompt, params, sums and i == 0);
+        const pair = [_]A.Out{ .{ .q = ls[2].a4, .out = outs[2] }, .{ .q = ls[3].a4, .out = outs[3] } };
+        return e.affine.promptMany(e.stream, x, &pair, rows);
+    }
     const segmented = (e.affine.split != null or e.affine.pdl) and !(prompt and rows > 16) and !(e.affine.pdl and prompt and e.int8.on) and ls.len <= A.segs_max and for (ls) |l| {
         if (l != .a4 or l.inputs() != ls[0].inputs()) break false;
     } else true;
@@ -45,6 +54,36 @@ fn qwen38PromptShape(ls: []const Proj, rows: usize) bool {
     if (ls.len == 3)
         return ls[0].outputs() == 12288 and ls[1].outputs() == 1024 and ls[2].outputs() == 1024;
     return ls[0].outputs() == 10240 and ls[1].outputs() == 6144 and ls[2].outputs() == 48 and ls[3].outputs() == 48;
+}
+
+/// Large BF16 prompt DeltaNet inputs on the GB10's existing many tile; qkv and z keep their own launches.
+fn qwen38PairShape(ls: []const Proj, rows: usize, prompt: bool, pdl: bool, int8: bool) bool {
+    if (!prompt or !pdl or int8 or rows < 2048 or ls.len != 4) return false;
+    for (ls, [_]usize{ 10240, 6144, 48, 48 }) |l, n| {
+        if (l != .a4 or l.inputs() != 5120 or l.outputs() != n) return false;
+    }
+    return true;
+}
+
+test "Qwen3.8 pair shape: only large BF16 GDN prompts on GB10 admit the a and b pair" {
+    const delta = [_]Proj{ affine(10240), affine(6144), affine(48), affine(48) };
+    for ([_]usize{ 0, 16, 256, 2047, 2048, 4096 }) |rows| {
+        for ([_]bool{ false, true }) |prompt| for ([_]bool{ false, true }) |pdl| for ([_]bool{ false, true }) |int8| {
+            try std.testing.expectEqual(rows >= 2048 and prompt and pdl and !int8, qwen38PairShape(&delta, rows, prompt, pdl, int8));
+        };
+    }
+    for (0..delta.len) |i| {
+        var other = delta;
+        other[i].a4.k = 4096;
+        try std.testing.expect(!qwen38PairShape(&other, 2048, true, true, false));
+        other = delta;
+        other[i].a4.n += 1;
+        try std.testing.expect(!qwen38PairShape(&other, 2048, true, true, false));
+        other[i] = .{ .bf = .{ .w = 0, .n = delta[i].outputs(), .k = 5120 } };
+        try std.testing.expect(!qwen38PairShape(&other, 2048, true, true, false));
+    }
+    try std.testing.expect(!qwen38PairShape(delta[0..3], 2048, true, true, false));
+    try std.testing.expect(!qwen38PairShape(&.{ delta[0], delta[1], delta[2], delta[3], delta[3] }, 2048, true, true, false));
 }
 
 pub fn qwen38LargePromptShape(n: usize, k: usize, rows: usize) bool {

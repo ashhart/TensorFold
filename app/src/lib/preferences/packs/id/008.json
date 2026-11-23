@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Menghapus folder menghentikan penemuan di sana, tidak menghapus model; model berjalan tetap dimuat hingga server dihentikan.",
   "Rename": "Ganti nama",
   "Render the plan panel with block progress bars and status glyphs.": "Tampilkan panel rencana dengan bilah kemajuan dan ikon status.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Pengukuran community-v1 terulang untuk model cache di Mac ini.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Pengukuran community-v2 terulang untuk model cache di Mac ini.",
   "repeated checks": "pemeriksaan berulang",
   "Replace matching records from the backup": "Ganti catatan sesuai dari cadangan",
   "replaces the current instructions": "mengganti instruksi saat ini",

@@ -8,8 +8,8 @@ const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
 pub const Seg = struct { s: *Session, row0: usize, rows: usize };
 
-/// `masks`: structured output, the rows' logits masked to their grammars' tokens before the argmax and the draws.
-pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*const @import("grammar.zig").Masks) !void {
+/// `masks` (grammars) and `pens` (presence and frequency penalties) edit the rows' logits before argmax and draws.
+pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*const @import("grammar.zig").Masks, pens: ?*const @import("penalties.zig").Rows) !void {
     const r = e.r;
     const m = e.m;
     const t = &m.t;
@@ -100,6 +100,10 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     try m.lane(t.mixed, fz.D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
     if (masks) |k| {
         k.encode(r.enc, t.logits, rows);
+        if (!r.serial) r.enc.barrier();
+    }
+    if (pens) |p| {
+        p.encode(r.enc, t.logits);
         if (!r.serial) r.enc.barrier();
     }
     r.enc.setPipeline(r.argmax_pipe);

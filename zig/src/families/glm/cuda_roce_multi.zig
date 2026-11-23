@@ -32,7 +32,7 @@ fn fallsBack(err: anyerror, entered: bool) bool {
 
 /// fabric/tp's bootstrap, ports, wire and kernel, and a probe against the group's NCCL: each step every rank's or none.
 fn borrow(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, g: *const Group, cfg: tp.Config, entered: *bool) !*Wire {
-    const path = std.mem.span(std.c.getenv("TF_TP_KERNEL_IMAGE") orelse return error.NoKernelImage);
+    const path = (@import("sys").environment.Process{}).get("TF_TP_KERNEL_IMAGE") orelse return error.NoKernelImage;
     const image = try std.Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .limited(1 << 26), .@"16", null);
     defer gpa.free(image); // the module copies it at load
     var b = try tp.Bootstrap.open(cfg);

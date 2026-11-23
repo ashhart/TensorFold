@@ -7,6 +7,10 @@ const Stream = lanes.Stream;
 const ad = @import("xpu_dflash2.zig");
 const x = @import("xpu_dflash2_test.zig");
 
+comptime {
+    _ = @import("xpu_tp_refusal_test.zig");
+}
+
 const gpa = std.testing.allocator;
 const SLOT = 2; // not the first slot: the adapter and the reference both look the stream up
 

@@ -1,4 +1,4 @@
-//! Routed-expert prompt kernels from .metal files compiled at run time: a chunk's skewed top-k routing, chained speed, bits against the first.
+//! Routed-expert prompt kernels from runtime metal: skewed top-k routing per chunk, chained speed, bits vs first.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");

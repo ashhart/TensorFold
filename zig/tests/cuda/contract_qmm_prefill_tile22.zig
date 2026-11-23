@@ -14,6 +14,8 @@ fn noSums(_: c.Shape) usize {
 }
 
 const served = [_]c.Shape{
+    .{ .rows = 2048, .n = 48, .k = 5120 },
+    .{ .rows = 4096, .n = 48, .k = 5120 },
     .{ .rows = 2048, .n = 12288, .k = 5120 },
     .{ .rows = 2048, .n = 10240, .k = 5120 },
     .{ .rows = 2048, .n = 17408, .k = 5120 },

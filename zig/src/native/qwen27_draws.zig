@@ -21,6 +21,9 @@ pub fn each(job: anytype, rows: usize) anyerror!void {
     for (errors[0..rows]) |e| if (e) |err| return err;
 }
 
+/// What a penalized row takes from a copy of its logits first: lanes.penalty_rows.Entries.applyRow by frame row.
+pub const Lower = struct { ctx: *const anyopaque, apply: *const fn (ctx: *const anyopaque, row: u32, logits: []u16) void };
+
 /// A window's logits rows, each drawn by `drawFn` at its own position with its own mask, into its own `out` slot.
 pub fn Rows(comptime drawFn: anytype, comptime Sampling: type) type {
     return struct {
@@ -32,10 +35,21 @@ pub fn Rows(comptime drawFn: anytype, comptime Sampling: type) type {
         positions: []const u64,
         out: []u32,
         masks: []const u32,
+        pens: ?Lower = null, // presence and frequency penalties by frame row: row i is `row0 + i`
+        row0: usize = 0,
 
         pub fn row(r: @This(), i: usize) !void {
             const mask = if (r.masks.len == 0) &.{} else r.masks[i * r.width ..][0..r.width];
-            r.out[i] = try @import("qwen27_masks.zig").draw(drawFn, r.gpa, r.words[i * r.vocab ..][0..r.vocab], r.sampling, r.positions[i], mask);
+            const words = r.words[i * r.vocab ..][0..r.vocab];
+            const draw = @import("qwen27_masks.zig").draw;
+            const p = r.pens orelse {
+                r.out[i] = try draw(drawFn, r.gpa, words, r.sampling, r.positions[i], mask);
+                return;
+            };
+            const lowered = try r.gpa.dupe(u16, words); // the shared frame's row stays the forward's
+            defer r.gpa.free(lowered);
+            p.apply(p.ctx, @intCast(r.row0 + i), lowered);
+            r.out[i] = try draw(drawFn, r.gpa, lowered, r.sampling, r.positions[i], mask);
         }
     };
 }
@@ -83,4 +97,29 @@ test "qwen27 draws: the lowest failing row's error, as the sequential walk retur
     fail[3] = false;
     try std.testing.expectError(error.EvenRow, each(Squares{ .out = &out, .fail = &fail }, 16));
     try std.testing.expectError(error.TooManyDrawRows, each(Squares{ .out = &out, .fail = &fail }, max_rows + 1));
+}
+
+fn greatest(_: std.mem.Allocator, logits: []const u16, _: ?u8, _: u64, _: []const u32) !u32 {
+    var best: usize = 0;
+    for (logits, 0..) |w, t| {
+        if (@as(f32, @bitCast(@as(u32, w) << 16)) > @as(f32, @bitCast(@as(u32, logits[best]) << 16))) best = t;
+    }
+    return @intCast(best);
+}
+
+/// Frame row 5 loses 1.5 on token 1 (Entries.applyRow's rounding is lanes.penalty_rows' own test).
+fn lowerFive(_: *const anyopaque, row: u32, logits: []u16) void {
+    if (row == 5) logits[1] = 0x3fc0; // 3 - 1.5
+}
+
+test "qwen27 draws: a penalized row draws from its lowered copy, and the frame's rows stay the forward's" {
+    const gpa = std.testing.allocator;
+    const row = [_]u16{ 0x3f80, 0x4040, 0x4000, 0 }; // 1, 3, 2, 0
+    const words = row ++ row;
+    var out: [2]u32 = undefined;
+    const pens: Lower = .{ .ctx = &words, .apply = lowerFive };
+    const job = Rows(greatest, u8){ .gpa = gpa, .words = &words, .vocab = 4, .width = 1, .sampling = null, .positions = &.{ 0, 0 }, .out = &out, .masks = &.{}, .pens = pens, .row0 = 4 };
+    try each(job, 2);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, &out); // row 5's 1.5 falls under 2
+    try std.testing.expectEqualSlices(u16, &(row ++ row), &words);
 }

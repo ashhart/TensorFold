@@ -1,4 +1,4 @@
-//! The Responses store: the newest finished responses with their messages, and the chains they continue.
+//! The Responses store: finished responses and their chains, each visible only to its creating key identity.
 const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -15,6 +15,7 @@ const Entry = struct {
     parent: ?[]const u8,
     messages: []Value,
     size: usize,
+    owner: ?[32]u8,
 };
 
 /// The newest stored responses, in memory, for GET, DELETE and ``previous_response_id``.
@@ -37,27 +38,28 @@ pub const Store = struct {
         gpa.destroy(e);
     }
 
-    fn find(s: *Store, id: []const u8) ?usize {
-        for (s.entries.items, 0..) |e, i| if (std.mem.eql(u8, e.id, id)) return i;
+    fn find(s: *Store, id: []const u8, owner: ?[32]u8) ?usize {
+        for (s.entries.items, 0..) |e, i| if (std.mem.eql(u8, e.id, id) and std.meta.eql(e.owner, owner)) return i;
         return null;
     }
 
     /// Keeps a finished response with the messages it added; the oldest go past 1,024 entries or 256 MiB.
-    pub fn put(s: *Store, io: std.Io, cx: *Cx, response: Value, added: []const Value) !void {
+    pub fn put(s: *Store, io: std.Io, cx: *Cx, response: Value, added: []const Value, owner: ?[32]u8) !void {
         const from_output = try translate_mod.messages(cx, response.get("output").?.array);
         const all = try std.mem.concat(cx.a, Value, &.{ added, from_output });
-        return s.insert(io, cx, response, all, true);
+        return s.insert(io, cx, response, all, true, owner);
     }
 
     /// Keeps a finished response with its whole conversation and no stored parent (its public fields stay as sent).
-    pub fn putWhole(s: *Store, io: std.Io, cx: *Cx, response: Value, messages: []Value) !void {
-        return s.insert(io, cx, response, messages, false);
+    pub fn putWhole(s: *Store, io: std.Io, cx: *Cx, response: Value, messages: []Value, owner: ?[32]u8) !void {
+        return s.insert(io, cx, response, messages, false, owner);
     }
 
     /// One entry for ``response`` with these messages; ``chained`` links it to its ``previous_response_id``.
-    fn insert(s: *Store, io: std.Io, cx: *Cx, response: Value, messages: []Value, chained: bool) !void {
+    fn insert(s: *Store, io: std.Io, cx: *Cx, response: Value, messages: []Value, chained: bool, owner: ?[32]u8) !void {
         const e = try s.gpa.create(Entry);
         e.arena = .init(s.gpa);
+        e.owner = owner;
         errdefer free(s.gpa, e);
         const a = e.arena.allocator();
         e.response = try json.deepCopy(a, response);
@@ -68,7 +70,7 @@ pub const Store = struct {
         e.size = (try json.stringify(cx.a, e.response, .{})).len + (try json.stringify(cx.a, .{ .array = e.messages }, .{})).len;
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
-        if (s.find(e.id)) |i| {
+        if (s.find(e.id, owner)) |i| {
             const old = s.entries.orderedRemove(i);
             s.bytes -= old.size;
             free(s.gpa, old);
@@ -82,17 +84,17 @@ pub const Store = struct {
         }
     }
 
-    pub fn get(s: *Store, io: std.Io, a: Allocator, id: []const u8) !?Value {
+    pub fn get(s: *Store, io: std.Io, a: Allocator, id: []const u8, owner: ?[32]u8) !?Value {
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
-        const i = s.find(id) orelse return null;
+        const i = s.find(id, owner) orelse return null;
         return try json.deepCopy(a, s.entries.items[i].response);
     }
 
-    pub fn delete(s: *Store, io: std.Io, id: []const u8) bool {
+    pub fn delete(s: *Store, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
-        const i = s.find(id) orelse return false;
+        const i = s.find(id, owner) orelse return false;
         const old = s.entries.orderedRemove(i);
         s.bytes -= old.size;
         free(s.gpa, old);
@@ -104,6 +106,7 @@ pub const Store = struct {
 pub const History = struct {
     store: *Store,
     io: std.Io,
+    owner: ?[32]u8,
 
     pub fn conversation(h: History, cx: *Cx, rid: Value) errors.Refused![]Value {
         if (rid != .string) return cx.refuse("previous_response_id must be a string");
@@ -131,7 +134,7 @@ pub const History = struct {
         var chain: std.ArrayList([]Value) = .empty;
         var at: ?[]const u8 = id;
         while (at) |x| {
-            const i = s.find(x) orelse return .{ .missing = try a.dupe(u8, x) };
+            const i = s.find(x, h.owner) orelse return .{ .missing = try a.dupe(u8, x) };
             const e = s.entries.orderedRemove(i);
             s.entries.append(s.gpa, e) catch {};
             try chain.append(a, e.messages);
@@ -155,16 +158,16 @@ test "a whole response keeps its own conversation and no stored parent, and a lo
     var cx: Cx = .{ .a = a };
     var s: Store = .{ .gpa = std.testing.allocator };
     defer s.deinit();
-    const h: History = .{ .store = &s, .io = io };
+    const h: History = .{ .store = &s, .io = io, .owner = null };
     const user = (try json.parse(a, "{\"role\":\"user\",\"content\":\"x\"}")).ok;
     var one = [_]Value{user};
-    try s.put(io, &cx, (try json.parse(a, "{\"id\":\"resp_p\",\"output\":[]}")).ok, &one);
-    try s.put(io, &cx, (try json.parse(a, "{\"id\":\"resp_d\",\"previous_response_id\":\"resp_p\",\"output\":[]}")).ok, &one);
+    try s.put(io, &cx, (try json.parse(a, "{\"id\":\"resp_p\",\"output\":[]}")).ok, &one, null);
+    try s.put(io, &cx, (try json.parse(a, "{\"id\":\"resp_d\",\"previous_response_id\":\"resp_p\",\"output\":[]}")).ok, &one, null);
     var three = [_]Value{ user, user, user };
-    try s.putWhole(io, &cx, (try json.parse(a, "{\"id\":\"resp_c\",\"previous_response_id\":\"resp_p\",\"output\":[]}")).ok, &three);
+    try s.putWhole(io, &cx, (try json.parse(a, "{\"id\":\"resp_c\",\"previous_response_id\":\"resp_p\",\"output\":[]}")).ok, &three, null);
     try std.testing.expectEqual(@as(usize, 2), h.lookup(&cx, "resp_d").?.len);
     try std.testing.expectEqual(@as(usize, 3), h.lookup(&cx, "resp_c").?.len);
-    try std.testing.expectEqualStrings("resp_p", (try s.get(io, a, "resp_c")).?.get("previous_response_id").?.string);
+    try std.testing.expectEqualStrings("resp_p", (try s.get(io, a, "resp_c", null)).?.get("previous_response_id").?.string);
     try std.testing.expect(h.lookup(&cx, "resp_x") == null);
     try std.testing.expectError(error.Refused, h.conversation(&cx, .{ .string = "resp_x" }));
     try std.testing.expectEqual(@as(usize, 3), (try h.conversation(&cx, .{ .string = "resp_c" })).len);

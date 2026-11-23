@@ -4,3 +4,10 @@
 #include "contract_js_controls.cuh"
 #include "contract_dense_controls.cuh"
 #include "contract_experts_bf16_controls.cuh"
+#include "contract_nemo_audio_controls.cuh"
+#include "contract_idol_controls.cuh"
+#include "contract_embed_controls.cuh"
+#include "contract_hcn_controls.cuh"
+// Idol decoders: controls for rounding, sums and exceptional values.
+#include "contract_controls_idol_decoder.cuh"
+#include "contract_qwen3_asr_controls.cuh"

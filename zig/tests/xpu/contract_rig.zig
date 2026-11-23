@@ -8,23 +8,31 @@ const images = @import("xpu_contract_images");
 pub const guard = 256;
 const pattern = 0xa5;
 
-/// The image a kernel lives in: the Qwen3.8-27B glue, gate 5's controls, or gates 1 to 4's.
-pub const Image = enum { glue, controls, gate };
+/// The image a kernel lives in: the Qwen3.8-27B glue, TP collectives, gate 5's controls, or gates 1 to 4's.
+pub const Image = enum { glue, tp, decode, attn_upstream, merge_upstream, controls, gate };
 
 fn blob(i: Image) []const u8 {
     return switch (i) {
         .glue => &images.glue,
+        .tp => &images.tp,
+        .decode => &images.decode,
+        .attn_upstream => &images.attn_upstream,
+        .merge_upstream => &images.merge_upstream,
         .controls => &images.controls,
         .gate => &images.gate_controls,
     };
 }
 
-/// One card, its context and stream, and the three images loaded native for it.
+/// One card, its context and stream, and the contract images loaded native for it.
 pub const Dev = struct {
     drv: xpu.Driver,
     ctx: xpu.Context,
     s: xpu.Stream,
     glue: xpu.Module,
+    tp: xpu.Module,
+    decode: xpu.Module,
+    attn_upstream: xpu.Module,
+    merge_upstream: xpu.Module,
     controls: ?xpu.Module, // the driver refuses the whole image when one control asks for more SLM than it has
     controls_err: ?anyerror = null,
     gate: xpu.Module,
@@ -35,6 +43,10 @@ pub const Dev = struct {
         self.ctx = try xpu.Context.init(&self.drv, ordinal);
         self.s = try xpu.Stream.init(&self.ctx);
         self.glue = try xpu.Module.loadNative(&self.ctx, blob(.glue));
+        self.tp = try xpu.Module.loadNative(&self.ctx, blob(.tp));
+        self.decode = try xpu.Module.loadNative(&self.ctx, blob(.decode));
+        self.attn_upstream = try xpu.Module.loadNative(&self.ctx, blob(.attn_upstream));
+        self.merge_upstream = try xpu.Module.loadNative(&self.ctx, blob(.merge_upstream));
         self.controls = xpu.Module.loadNative(&self.ctx, blob(.controls)) catch |e| blk: {
             self.controls_err = e;
             break :blk null;
@@ -45,7 +57,11 @@ pub const Dev = struct {
     pub fn deinit(self: *Dev) void {
         self.gate.unload();
         if (self.controls) |*m| m.unload();
+        self.tp.unload();
         self.glue.unload();
+        self.decode.unload();
+        self.attn_upstream.unload();
+        self.merge_upstream.unload();
         self.s.deinit();
         self.ctx.deinit();
         self.drv.close();
@@ -54,6 +70,10 @@ pub const Dev = struct {
     pub fn module(self: *Dev, i: Image) !*xpu.Module {
         return switch (i) {
             .glue => &self.glue,
+            .tp => &self.tp,
+            .decode => &self.decode,
+            .attn_upstream => &self.attn_upstream,
+            .merge_upstream => &self.merge_upstream,
             .controls => if (self.controls) |*m| m else error.ControlsNotBuilt,
             .gate => &self.gate,
         };

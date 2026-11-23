@@ -1,0 +1,1874 @@
+diff --git a/LICENSES/FlashAttention-BSD-3.txt b/LICENSES/FlashAttention-BSD-3.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..5860e4b33f3d9d85fc636137c559331d51783a5b
+--- /dev/null
++++ b/LICENSES/FlashAttention-BSD-3.txt
+@@ -0,0 +1,29 @@
++BSD 3-Clause License
++
++Copyright (c) 2022, the respective contributors, as shown by the AUTHORS file.
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++* Redistributions of source code must retain the above copyright notice, this
++  list of conditions and the following disclaimer.
++
++* Redistributions in binary form must reproduce the above copyright notice,
++  this list of conditions and the following disclaimer in the documentation
++  and/or other materials provided with the distribution.
++
++* Neither the name of the copyright holder nor the names of its
++  contributors may be used to endorse or promote products derived from
++  this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
++FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/THIRD_PARTY_NOTICES.md b/THIRD_PARTY_NOTICES.md
+index 0cc42a93ea9ec5392740317512297da64304c657..cb01cff854ef47a6ce62a57a306b7eae7245950c 100644
+--- a/THIRD_PARTY_NOTICES.md
++++ b/THIRD_PARTY_NOTICES.md
+@@ -382,3 +382,17 @@ seeded CPU generator, so that it makes the same latents bit for bit:
+ - `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
+   Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
+   `LICENSES/avx_mathfun-zlib.txt`).
++
++
++## MOSS ComfyUI numerical compatibility
++
++The CUDA compatibility path follows the numerical conventions of PyTorch 2.14.1,
++Comfy Kitchen 0.2.41 and FlashAttention 2. PyTorch is Copyright (c) 2016- Facebook,
++Inc. and its affiliates, under BSD-3-Clause. Comfy Kitchen normalization and rotary
++kernels are Copyright (c) 2025 Comfy Org and NVIDIA CORPORATION & AFFILIATES,
++under Apache-2.0. FlashAttention is Copyright (c) 2023-2024 Tri Dao, under BSD-3-Clause.
++The existing BSD and Apache license texts are in LICENSES/.
++
++References: https://github.com/pytorch/pytorch/tree/v2.14.1,
++https://github.com/Comfy-Org/comfy-kitchen/tree/v0.2.41,
++https://github.com/Dao-AILab/flash-attention.
+diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index cfb83c933bde66db56d34194530389ac201ba055..bdf07cdaf89e5d93de97920c81de1488c4c1aa4f 100644
+--- a/zig/build/cuda.zig
++++ b/zig/build/cuda.zig
+@@ -138,9 +138,21 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     b.getInstallStep().dependOn(&q35_install.step);
+     b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);
+     // tf-moss-image: MOSS-Image's transformer on a reference case (tools/zig/moss_image_case.py), compared and timed
+-    const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+-    const moss_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "moss_image", .module = moss } } });
+-    b.installArtifact(b.addExecutable(.{ .name = "tf-moss-image", .root_module = moss_tool }));
++    var moss_images = images;
++    for (kernels, &moss_images) |kernel, *image| {
++        if (!std.mem.eql(u8, kernel.name, "moss_image") and !std.mem.eql(u8, kernel.name, "vit") and !std.mem.eql(u8, kernel.name, "prefill_attention")) image.* = null;
++    }
++    const moss_cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &moss_images else &.{});
++    const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = moss_cuda }, .{ .name = "core", .module = mods.core } } });
++    const moss_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = moss_cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "moss_image", .module = moss } } });
++    const moss_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-moss-image", .root_module = moss_tool }), .{});
++    b.getInstallStep().dependOn(&moss_install.step);
++    b.step("moss-image-cuda", "Build the MOSS-Image CUDA denoiser").dependOn(&moss_install.step);
++    const moss_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/moss_contract_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = moss_cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "moss_image_cuda", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda_kernels.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = moss_cuda }} }) } } });
++    moss_contract.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse b.addWriteFiles().add("moss_no_controls.fatbin", "") });
++    const moss_contract_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-moss-contract", .root_module = moss_contract }), .{});
++    b.step("moss-image-contract", "Build the complete MOSS CUDA kernel-contract runner").dependOn(&moss_contract_install.step);
++
+     const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, mods.core) } } });
+     const d3_exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = d3_tool });
+     b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
+diff --git a/zig/build/cuda_runtime.zig b/zig/build/cuda_runtime.zig
+index daa3ea94cce0f79ff993ada166cc5a9e9385118c..ce38f4dda566a95483dba9d4c354693a6271b6a0 100644
+--- a/zig/build/cuda_runtime.zig
++++ b/zig/build/cuda_runtime.zig
+@@ -5,16 +5,18 @@ pub fn stagger(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     return b.createModule(.{ .root_source_file = b.path("zig/src/core/stagger.zig"), .target = target, .optimize = optimize });
+ }
+
+-/// The runtime module for `target`; `with_kernels` false builds it host-only (empty images).
++/// The runtime module for `target`; selected images are lazy imports, and no images builds it host-only.
+ pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const ?std.Build.LazyPath) *std.Build.Module {
+     const options = b.addOptions();
+-    var with = images.len > 0;
+-    for (images) |i| with = with and i != null;
++    var with = false;
++    for (images) |i| with = with or i != null;
+     options.addOption(bool, "with_kernels", with);
+     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+     cuda.addOptions("kernel_options", options);
+     cuda.addImport("stagger", stagger(b, target, optimize));
+-    if (with) for (@import("cuda_kernels.zig").kernels, images) |k, image| cuda.addAnonymousImport(b.fmt("fatbin_{s}", .{k.name}), .{ .root_source_file = image.? });
++    if (with) for (@import("cuda_kernels.zig").kernels, images) |k, image| {
++        if (image) |file| cuda.addAnonymousImport(b.fmt("fatbin_{s}", .{k.name}), .{ .root_source_file = file });
++    };
+     return cuda;
+ }
+diff --git a/zig/kernels/cuda/contract_controls.cu b/zig/kernels/cuda/contract_controls.cu
+index 63ff744b4754364d20627c38dc91279901d5eb42..383ac033f5a13a231c7421df079d50216d81d6b2 100644
+--- a/zig/kernels/cuda/contract_controls.cu
++++ b/zig/kernels/cuda/contract_controls.cu
+@@ -365,7 +365,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_ctl_pocket_in_fmax(const __
+         act[static_cast<int64_t>(r) * 64 + j] = z * z;
+     }
+ }
+-// Gate 3: moss_image.cu's steps, each with one of the publisher's bf16 points dropped; their range checks must go red.
++// MOSS arithmetic controls change one required materialization or scalar.
+ namespace tf_ctl_moss {
+ typedef __nv_bfloat16 bf16;
+ __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
+@@ -374,25 +374,53 @@ __device__ __forceinline__ float warp_sum(float v) {
+   for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+   return v;
+ }
+-// tf_moss_norm; DROP 0: bf16(x inv), 1: bf16(y s).
++// Norm faults: add normalized BF16, or omit folded-scale BF16.
+ template <int DROP>
+ __device__ void norm(const bf16* X, const bf16* W, const bf16* S, const bf16* B, bf16* Y, int width, float eps,
+                      int modulated) {
+   __shared__ float part[8];
+   const bf16* x = X + (size_t)blockIdx.x * width;
+   bf16* y = Y + (size_t)blockIdx.x * width;
++  // Match the reference's row reduction and rsqrt, including its small-row path.
++  const bool warp_row = modulated && gridDim.x <= 1024;
++  const int threads = warp_row ? 32 : (modulated ? 256 : 128);
++  if (threadIdx.x >= threads) return;
+   float a = 0.0f;
+-  for (int i = threadIdx.x; i < width; i += 256) a += ld(x + i) * ld(x + i);
+-  a = warp_sum(a);
+-  if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = a;
+-  __syncthreads();
+-  float total = 0.0f;
+-  for (int w = 0; w < 8; ++w) total += part[w];
+-  const float inv = 1.0f / sqrtf(total / (float)width + eps);
+-  for (int i = threadIdx.x; i < width; i += 256) {
+-    const float xn = ld(x + i) * inv;
+-    float v = bf((DROP == 0 ? xn : bf(xn)) * ld(W + i));
+-    if (modulated) v = (DROP == 1 ? v * ld(S + i) : bf(v * ld(S + i))) + ld(B + i);
++  if (warp_row) {
++    for (int i = threadIdx.x; i < width; i += 32) a = fmaf(ld(x + i), ld(x + i), a);
++  } else {
++    const int vector = modulated ? 8 : 4;
++    for (int base = threadIdx.x * vector; base < width; base += threads * vector)
++      for (int j = 0; j < vector && base + j < width; ++j) {
++        const float value = ld(x + base + j);
++        a = fmaf(value, value, a);
++      }
++  }
++  for (int offset = 16; offset; offset >>= 1) a += __shfl_down_sync(0xffffffffu, a, offset);
++  float total;
++  if (warp_row) {
++    total = __shfl_sync(0xffffffffu, a, 0);
++  } else {
++    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = a;
++    __syncthreads();
++    total = 0.0f;
++    if (modulated) {
++      for (int w = 0; w < 8; ++w) total += part[w];
++    } else {
++      // PyTorch's vectorized RMSNorm merges four warps as a tree.
++      for (int step = 2; step; step >>= 1) {
++        if (threadIdx.x < step) part[threadIdx.x] += part[threadIdx.x + step];
++        __syncthreads();
++      }
++      total = part[0];
++    }
++  }
++  const float inv = rsqrtf(modulated ? fmaf(total, 1.0f / width, eps) : total / width + eps);
++  for (int i = threadIdx.x; i < width; i += threads) {
++    const float raw = ld(x + i) * inv;
++    const float normalized = DROP == 0 ? bf(raw) : raw;
++    const float folded = modulated ? (DROP == 1 ? bf(ld(W + i) * ld(S + i)) - 1.0f : bf(bf(ld(W + i) * ld(S + i)) - 1.0f)) : 0.0f;
++    const float v = modulated ? fmaf(normalized, 1.0f + folded, ld(B + i)) : normalized * ld(W + i);
+     y[i] = __float2bfloat16_rn(v);
+   }
+ }
+@@ -412,8 +440,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_norm_scale(const _
+   tf_ctl_moss::norm<1>(X, W, S, B, Y, width, eps, modulated);
+ }
+
+-// tf_moss_qk without bf16(q cos).
+-extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_qk_cos(const __nv_bfloat16* QR, const __nv_bfloat16* KR,
++// An extra normalized-query BF16 point before the learned weight is the fault.
++extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_qk_normalized(const __nv_bfloat16* QR, const __nv_bfloat16* KR,
+                                                                      const __nv_bfloat16* VR, const __nv_bfloat16* NQ,
+                                                                      const __nv_bfloat16* NK, const float* CS,
+                                                                      const float* SN, __nv_bfloat16* QKV, int rows,
+@@ -421,32 +449,36 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_qk_cos(const __nv_
+   using namespace tf_ctl_moss;
+   const int r = blockIdx.x, h = blockIdx.y * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+   if (h >= heads || r >= rows) return;
+-  const size_t from = (size_t)r * stride + h * 128 + lane * 4;
++  const size_t from = (size_t)r * stride + h * 128 + lane;
+   float q[4], k[4], qq = 0.0f, kk = 0.0f;
++#pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    q[i] = ld(QR + from + i);
+-    k[i] = ld(KR + from + i);
+-    qq += q[i] * q[i];
+-    kk += k[i] * k[i];
++    q[i] = ld(QR + from + i * 32);
++    k[i] = ld(KR + from + i * 32);
++    qq = fmaf(q[i], q[i], qq);
++    kk = fmaf(k[i], k[i], kk);
+   }
+-  const float qn = 1.0f / sqrtf(warp_sum(qq) / 128.0f + eps);
+-  const float kn = 1.0f / sqrtf(warp_sum(kk) / 128.0f + eps);
++#pragma unroll
++  for (int offset = 16; offset; offset >>= 1) {
++    qq += __shfl_down_sync(0xffffffffu, qq, offset);
++    kk += __shfl_down_sync(0xffffffffu, kk, offset);
++  }
++  const float qn = rsqrtf(fmaf(__shfl_sync(0xffffffffu, qq, 0), 1.0f / 128.0f, eps));
++  const float kn = rsqrtf(fmaf(__shfl_sync(0xffffffffu, kk, 0), 1.0f / 128.0f, eps));
++#pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    q[i] = bf(bf(q[i] * qn) * ld(NQ + lane * 4 + i));
+-    k[i] = bf(bf(k[i] * kn) * ld(NK + lane * 4 + i));
++    q[i] = bf(bf(q[i] * qn) * ld(NQ + lane + i * 32));
++    k[i] = bf((k[i] * kn) * ld(NK + lane + i * 32));
+   }
+-  const float sign = lane < 16 ? -1.0f : 1.0f;
+-  bf16* qo = QKV + (size_t)r * 3 * heads * 128 + h * 128 + lane * 4;
+-  bf16* ko = qo + heads * 128;
+-  bf16* vo = ko + heads * 128;
++  const size_t row = (size_t)r * 3 * heads * 128 + h * 128 + lane;
++#pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    const float qp = sign * __shfl_xor_sync(0xffffffffu, q[i], 16);
+-    const float kp = sign * __shfl_xor_sync(0xffffffffu, k[i], 16);
+-    const int j = (lane & 15) * 4 + i;
+-    const float c = CS[(size_t)r * 64 + j], s = SN[(size_t)r * 64 + j];
+-    qo[i] = __float2bfloat16_rn(q[i] * c + bf(qp * s));
+-    ko[i] = __float2bfloat16_rn(bf(k[i] * c) + bf(kp * s));
+-    vo[i] = VR[from + i];
++    const float sign = i < 2 ? -1.0f : 1.0f;
++    const int pair = lane + (i & 1) * 32;
++    const float c = CS[(size_t)r * 64 + pair], s = SN[(size_t)r * 64 + pair];
++    QKV[row + i * 32] = __float2bfloat16_rn((i < 2 ? fmaf(q[i], c, (sign * q[i ^ 2]) * s) : fmaf(sign * q[i ^ 2], s, q[i] * c)));
++    QKV[row + heads * 128 + i * 32] = __float2bfloat16_rn((i < 2 ? fmaf(k[i], c, (sign * k[i ^ 2]) * s) : fmaf(sign * k[i ^ 2], s, k[i] * c)));
++    QKV[row + 2 * heads * 128 + i * 32] = VR[from + i * 32];
+   }
+ }
+
+@@ -465,7 +497,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_situ_sigmoid(const
+   O[(size_t)r * width + c] = __float2bfloat16_rn(left * right);
+ }
+
+-// tf_moss_gate_add without bf16(g y).
++// An extra BF16 product breaks the fused residual.
+ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_gate_add_product(__nv_bfloat16* X, const __nv_bfloat16* Y,
+                                                                                const __nv_bfloat16* G, int width,
+                                                                                int rows) {
+@@ -473,7 +505,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_gate_add_product(_
+   const int c = blockIdx.y * 256 + threadIdx.x, r = blockIdx.x;
+   if (c >= width || r >= rows) return;
+   const size_t i = (size_t)r * width + c;
+-  X[i] = __float2bfloat16_rn(ld(X + i) + ld(G + c) * ld(Y + i));
++  X[i] = __float2bfloat16_rn(bf(ld(G + c) * ld(Y + i)) + ld(X + i));
+ }
+ // Gate 3: main's tf_exl3_plan_finish (PlanStage without alpha), the baseline, and two SwiGLU-OAI faults that go red.
+ #include "exl3_plan.cuh"
+@@ -538,3 +570,26 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
+ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
+ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
+ #undef TF_CTL_EXL3_GROUPED
++
++// MOSS elementwise controls deliberately change one output formula.
++extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_bias_tail(__nv_bfloat16* x, const __nv_bfloat16* b, int width, int rows) {
++  const int c = blockIdx.y * 256 + threadIdx.x, r = blockIdx.x;
++  if (c + 1 < width && r < rows) { const size_t i = (size_t)r * width + c; x[i] = __float2bfloat16_rn(__bfloat162float(x[i]) + __bfloat162float(b[c])); }
++}
++extern "C" __global__ void tf_ctl_moss_silu_identity(__nv_bfloat16* x, int width) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < width) x[i] = __float2bfloat16_rn(__bfloat162float(x[i]));
++}
++extern "C" __global__ void tf_ctl_moss_modulation_scale(const __nv_bfloat16* shared, __nv_bfloat16* out, int width) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i >= width) return;
++  const int from[8] = {1, 0, 2, 4, 3, 5, 7, 6};
++  for (int v = 0; v < 8; ++v) out[v * width + i] = shared[from[v] * width + i];
++  out[8 * width + i] = __float2bfloat16_rn(1.0f);
++}
++extern "C" __global__ void tf_ctl_moss_time_phase(__nv_bfloat16* out, float timestep) {
++  const int i = threadIdx.x;
++  const float phase = 0.5f * timestep * expf((-9.210340371976184f * i) / 128.0f);
++  out[i] = __float2bfloat16_rn(cosf(phase));
++  out[128 + i] = __float2bfloat16_rn(sinf(phase));
++}
+diff --git a/zig/kernels/cuda/moss_image.cu b/zig/kernels/cuda/moss_image.cu
+index 402af740c989fec7960784b5d951f603d332b290..008468e5a85539bc873d994331f7d17f84d5b72d 100644
+--- a/zig/kernels/cuda/moss_image.cu
++++ b/zig/kernels/cuda/moss_image.cu
+@@ -1,4 +1,4 @@
+-// MOSS-Image's glue on CUDA: moss_image.metal's kernels op for op, rounded where the publisher's torch code rounds.
++// MOSS-Image's ComfyUI CUDA arithmetic, with explicit BF16 materialization and FMA boundaries.
+ #include <cuda_bf16.h>
+ #include <stdint.h>
+
+@@ -19,7 +19,7 @@ __device__ __forceinline__ float warp_sum(float v) {
+
+ using namespace tf_moss;
+
+-// y = bf16(bf16(x * rsqrt(mean(x^2) + eps)) * w), then if modulated bf16(bf16(y * s) + b); a block of 256 a row.
++// Match Torch RMSNorm or Comfy Kitchen RMS-AdaLN, including their distinct reduction orders.
+ extern "C" __global__ void __launch_bounds__(256) tf_moss_norm(const bf16* __restrict__ X, const bf16* __restrict__ W,
+                                                                const bf16* __restrict__ S, const bf16* __restrict__ B,
+                                                                bf16* __restrict__ Y, int width, float eps,
+@@ -27,18 +27,45 @@ extern "C" __global__ void __launch_bounds__(256) tf_moss_norm(const bf16* __res
+   __shared__ float part[8];
+   const bf16* x = X + (size_t)blockIdx.x * width;
+   bf16* y = Y + (size_t)blockIdx.x * width;
++  // Match the reference's row reduction and rsqrt, including its small-row path.
++  const bool warp_row = modulated && gridDim.x <= 1024;
++  const int threads = warp_row ? 32 : (modulated ? 256 : 128);
++  if (threadIdx.x >= threads) return;
+   float a = 0.0f;
+-  for (int i = threadIdx.x; i < width; i += 256) a += ld(x + i) * ld(x + i);
+-  a = warp_sum(a);
+-  if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = a;
+-  __syncthreads();
+-  float total = 0.0f;
+-#pragma unroll
+-  for (int w = 0; w < 8; ++w) total += part[w];
+-  const float inv = 1.0f / sqrtf(total / (float)width + eps);
+-  for (int i = threadIdx.x; i < width; i += 256) {
+-    float v = bf(bf(ld(x + i) * inv) * ld(W + i));
+-    if (modulated) v = bf(v * ld(S + i)) + ld(B + i);
++  if (warp_row) {
++    for (int i = threadIdx.x; i < width; i += 32) a = fmaf(ld(x + i), ld(x + i), a);
++  } else {
++    const int vector = modulated ? 8 : 4;
++    for (int base = threadIdx.x * vector; base < width; base += threads * vector)
++      for (int j = 0; j < vector && base + j < width; ++j) {
++        const float value = ld(x + base + j);
++        a = fmaf(value, value, a);
++      }
++  }
++  for (int offset = 16; offset; offset >>= 1) a += __shfl_down_sync(0xffffffffu, a, offset);
++  float total;
++  if (warp_row) {
++    total = __shfl_sync(0xffffffffu, a, 0);
++  } else {
++    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = a;
++    __syncthreads();
++    total = 0.0f;
++    if (modulated) {
++      for (int w = 0; w < 8; ++w) total += part[w];
++    } else {
++      // PyTorch's vectorized RMSNorm merges four warps as a tree.
++      for (int step = 2; step; step >>= 1) {
++        if (threadIdx.x < step) part[threadIdx.x] += part[threadIdx.x + step];
++        __syncthreads();
++      }
++      total = part[0];
++    }
++  }
++  const float inv = rsqrtf(modulated ? fmaf(total, 1.0f / width, eps) : total / width + eps);
++  for (int i = threadIdx.x; i < width; i += threads) {
++    const float normalized = ld(x + i) * inv;
++    const float folded = modulated ? bf(bf(ld(W + i) * ld(S + i)) - 1.0f) : 0.0f;
++    const float v = modulated ? fmaf(normalized, 1.0f + folded, ld(B + i)) : normalized * ld(W + i);
+     y[i] = __float2bfloat16_rn(v);
+   }
+ }
+@@ -51,37 +78,36 @@ extern "C" __global__ void __launch_bounds__(256) tf_moss_qk(const bf16* __restr
+                                                              int rows, int heads, int stride, float eps) {
+   const int r = blockIdx.x, h = blockIdx.y * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+   if (h >= heads || r >= rows) return;
+-  const size_t from = (size_t)r * stride + h * 128 + lane * 4;
++  const size_t from = (size_t)r * stride + h * 128 + lane;
+   float q[4], k[4], qq = 0.0f, kk = 0.0f;
+ #pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    q[i] = ld(QR + from + i);
+-    k[i] = ld(KR + from + i);
+-    qq += q[i] * q[i];
+-    kk += k[i] * k[i];
++    q[i] = ld(QR + from + i * 32);
++    k[i] = ld(KR + from + i * 32);
++    qq = fmaf(q[i], q[i], qq);
++    kk = fmaf(k[i], k[i], kk);
++  }
++#pragma unroll
++  for (int offset = 16; offset; offset >>= 1) {
++    qq += __shfl_down_sync(0xffffffffu, qq, offset);
++    kk += __shfl_down_sync(0xffffffffu, kk, offset);
+   }
+-  const float qn = 1.0f / sqrtf(warp_sum(qq) / 128.0f + eps);
+-  const float kn = 1.0f / sqrtf(warp_sum(kk) / 128.0f + eps);
++  const float qn = rsqrtf(fmaf(__shfl_sync(0xffffffffu, qq, 0), 1.0f / 128.0f, eps));
++  const float kn = rsqrtf(fmaf(__shfl_sync(0xffffffffu, kk, 0), 1.0f / 128.0f, eps));
+ #pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    q[i] = bf(bf(q[i] * qn) * ld(NQ + lane * 4 + i));
+-    k[i] = bf(bf(k[i] * kn) * ld(NK + lane * 4 + i));
++    q[i] = bf((q[i] * qn) * ld(NQ + lane + i * 32));
++    k[i] = bf((k[i] * kn) * ld(NK + lane + i * 32));
+   }
+-  // lane l holds channels 4l..4l+3; its partner half sits 16 lanes away. The first half turns by -partner.
+-  const float sign = lane < 16 ? -1.0f : 1.0f;
+-  const size_t row = (size_t)r * 3 * heads * 128;
+-  bf16* qo = QKV + row + h * 128 + lane * 4;
+-  bf16* ko = qo + heads * 128;
+-  bf16* vo = ko + heads * 128;
++  const size_t row = (size_t)r * 3 * heads * 128 + h * 128 + lane;
+ #pragma unroll
+   for (int i = 0; i < 4; ++i) {
+-    const float qp = sign * __shfl_xor_sync(0xffffffffu, q[i], 16);
+-    const float kp = sign * __shfl_xor_sync(0xffffffffu, k[i], 16);
+-    const int j = (lane & 15) * 4 + i;
+-    const float c = CS[(size_t)r * 64 + j], s = SN[(size_t)r * 64 + j];
+-    qo[i] = __float2bfloat16_rn(bf(q[i] * c) + bf(qp * s));
+-    ko[i] = __float2bfloat16_rn(bf(k[i] * c) + bf(kp * s));
+-    vo[i] = VR[from + i];
++    const float sign = i < 2 ? -1.0f : 1.0f;
++    const int pair = lane + (i & 1) * 32;
++    const float c = CS[(size_t)r * 64 + pair], s = SN[(size_t)r * 64 + pair];
++    QKV[row + i * 32] = __float2bfloat16_rn((i < 2 ? fmaf(q[i], c, (sign * q[i ^ 2]) * s) : fmaf(sign * q[i ^ 2], s, q[i] * c)));
++    QKV[row + heads * 128 + i * 32] = __float2bfloat16_rn((i < 2 ? fmaf(k[i], c, (sign * k[i ^ 2]) * s) : fmaf(sign * k[i ^ 2], s, k[i] * c)));
++    QKV[row + 2 * heads * 128 + i * 32] = VR[from + i * 32];
+   }
+ }
+
+@@ -105,5 +131,39 @@ extern "C" __global__ void __launch_bounds__(256) tf_moss_gate_add(bf16* __restr
+   const int c = blockIdx.y * 256 + threadIdx.x, r = blockIdx.x;
+   if (c >= width || r >= rows) return;
+   const size_t i = (size_t)r * width + c;
+-  X[i] = __float2bfloat16_rn(ld(X + i) + bf(ld(G + c) * ld(Y + i)));
++  X[i] = __float2bfloat16_rn(fmaf(ld(G + c), ld(Y + i), ld(X + i)));
++}
++
++extern "C" __global__ void __launch_bounds__(256) tf_moss_bias_add(bf16* __restrict__ X, const bf16* __restrict__ B,
++                                                                   int width, int rows) {
++  const int c = blockIdx.y * 256 + threadIdx.x, r = blockIdx.x;
++  if (c >= width || r >= rows) return;
++  const size_t i = (size_t)r * width + c;
++  X[i] = __float2bfloat16_rn(ld(X + i) + ld(B + c));
++}
++
++// Match ComfyUI's float32 sinusoid, then materialize BF16 before the time MLP.
++extern "C" __global__ void tf_moss_time(bf16* out, float timestep) {
++  const int i = threadIdx.x;
++  const float frequency = expf((-9.210340371976184f * i) / 128.0f);
++  const float phase = timestep * frequency;
++  out[i] = __float2bfloat16_rn(cosf(phase));
++  out[128 + i] = __float2bfloat16_rn(sinf(phase));
++}
++
++extern "C" __global__ void tf_moss_silu(bf16* x, int width) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i < width) { const float v = ld(x + i); x[i] = __float2bfloat16_rn(v / (1.0f + expf(-v))); }
++}
++
++// shared is shift, scale, gate for attention and MLP, followed by head shift, scale.
++extern "C" __global__ void tf_moss_modulation(const bf16* shared, bf16* out, int width) {
++  const int i = blockIdx.x * blockDim.x + threadIdx.x;
++  if (i >= width) return;
++  const int from[8] = {1, 0, 2, 4, 3, 5, 7, 6};
++  for (int v = 0; v < 8; ++v) {
++    const float value = ld(shared + from[v] * width + i);
++    out[v * width + i] = __float2bfloat16_rn(value + ((v == 0 || v == 3 || v == 6) ? 1.0f : 0.0f));
++  }
++  out[8 * width + i] = __float2bfloat16_rn(1.0f);
+ }
+diff --git a/zig/kernels/cuda/prefill_attention.cu b/zig/kernels/cuda/prefill_attention.cu
+index 2719004affabad632c1dc2c19b3add8a5929804f..da6bc4c11292a4cb5808319bbad8ac09cfc82d8d 100644
+--- a/zig/kernels/cuda/prefill_attention.cu
++++ b/zig/kernels/cuda/prefill_attention.cu
+@@ -187,9 +187,8 @@ hpattn8_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__
+ }
+
+ // full_kernel's row arithmetic, one barrier a 64-key tile: two buffers of odd-padded rows, the next tile loading.
+-template <int D, int WARPS>
+-__global__ void __launch_bounds__(32 * WARPS)
+-vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ out, int W, int HO, float scale) {
++template <int D, int WARPS, bool COMFY>
++__device__ __forceinline__ void image_kernel_body(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ out, int W, int HO, float scale) {
+     static_assert(D % 16 == 0, "whole 16-dim steps");
+     constexpr int C = D / 8, RS = C + 1, K16 = D / 16, NT = BN / 8, THREADS = 32 * WARPS;
+     extern __shared__ uint4 smem[];
+@@ -225,11 +224,14 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
+ #pragma unroll
+     for (int i = 0; i < C; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.0f;
+     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
+-    stage(0);
+-    for (int t = 0; t < tiles; ++t) {
++    // MOSS follows FlashAttention's reverse key-tile traversal.
++    constexpr bool reverse = COMFY;
++    stage(reverse ? tiles - 1 : 0);
++    for (int tile = 0; tile < tiles; ++tile) {
++        const int t = reverse ? tiles - 1 - tile : tile;
+         cp_wait<0>();
+         __syncthreads();                                 // tile t landed, and every warp is done with tile t - 1
+-        if (t + 1 < tiles) stage(t + 1);
++        if (tile + 1 < tiles) stage(reverse ? t - 1 : t + 1);
+         const uint4* ks = smem + (t & 1) * 2 * BN * RS;
+         const uint4* vs = ks + BN * RS;
+         float sc[NT][4];
+@@ -253,10 +255,10 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
+ #pragma unroll
+         for (int n = 0; n < NT; ++n) {
+             const int c = kb + 8 * n;
+-            sc[n][0] = c <= last ? __fmul_rn(sc[n][0], scale) : -INFINITY;
+-            sc[n][1] = c + 1 <= last ? __fmul_rn(sc[n][1], scale) : -INFINITY;
+-            sc[n][2] = c <= last ? __fmul_rn(sc[n][2], scale) : -INFINITY;
+-            sc[n][3] = c + 1 <= last ? __fmul_rn(sc[n][3], scale) : -INFINITY;
++            sc[n][0] = c <= last ? (reverse ? sc[n][0] : __fmul_rn(sc[n][0], scale)) : -INFINITY;
++            sc[n][1] = c + 1 <= last ? (reverse ? sc[n][1] : __fmul_rn(sc[n][1], scale)) : -INFINITY;
++            sc[n][2] = c <= last ? (reverse ? sc[n][2] : __fmul_rn(sc[n][2], scale)) : -INFINITY;
++            sc[n][3] = c + 1 <= last ? (reverse ? sc[n][3] : __fmul_rn(sc[n][3], scale)) : -INFINITY;
+             tm0 = fmaxf(tm0, fmaxf(sc[n][0], sc[n][1]));
+             tm1 = fmaxf(tm1, fmaxf(sc[n][2], sc[n][3]));
+         }
+@@ -266,21 +268,33 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
+         }
+         const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
+         const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
+-        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
+-        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
++        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : (reverse ? exp2f(__fmul_rn(__fsub_rn(m0, n0), __fmul_rn(scale, LOG2E))) : texp(__fsub_rn(m0, n0)))) : 1.0f;
++        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : (reverse ? exp2f(__fmul_rn(__fsub_rn(m1, n1), __fmul_rn(scale, LOG2E))) : texp(__fsub_rn(m1, n1)))) : 1.0f;
+         float c0[NT], c1[NT];
+ #pragma unroll
+         for (int n = 0; n < NT; ++n) {
+             const int c = kb + 8 * n;
+-            sc[n][0] = act0 && c <= last ? texp(__fsub_rn(sc[n][0], n0)) : 0.0f;
+-            sc[n][1] = act0 && c + 1 <= last ? texp(__fsub_rn(sc[n][1], n0)) : 0.0f;
+-            sc[n][2] = act1 && c <= last ? texp(__fsub_rn(sc[n][2], n1)) : 0.0f;
+-            sc[n][3] = act1 && c + 1 <= last ? texp(__fsub_rn(sc[n][3], n1)) : 0.0f;
++            sc[n][0] = act0 && c <= last ? (reverse ? exp2f(__fsub_rn(__fmul_rn(sc[n][0], __fmul_rn(scale, LOG2E)), __fmul_rn(n0, __fmul_rn(scale, LOG2E)))) : texp(__fsub_rn(sc[n][0], n0))) : 0.0f;
++            sc[n][1] = act0 && c + 1 <= last ? (reverse ? exp2f(__fsub_rn(__fmul_rn(sc[n][1], __fmul_rn(scale, LOG2E)), __fmul_rn(n0, __fmul_rn(scale, LOG2E)))) : texp(__fsub_rn(sc[n][1], n0))) : 0.0f;
++            sc[n][2] = act1 && c <= last ? (reverse ? exp2f(__fsub_rn(__fmul_rn(sc[n][2], __fmul_rn(scale, LOG2E)), __fmul_rn(n1, __fmul_rn(scale, LOG2E)))) : texp(__fsub_rn(sc[n][2], n1))) : 0.0f;
++            sc[n][3] = act1 && c + 1 <= last ? (reverse ? exp2f(__fsub_rn(__fmul_rn(sc[n][3], __fmul_rn(scale, LOG2E)), __fmul_rn(n1, __fmul_rn(scale, LOG2E)))) : texp(__fsub_rn(sc[n][3], n1))) : 0.0f;
+             c0[n] = __fadd_rn(sc[n][0], sc[n][1]);
+             c1[n] = __fadd_rn(sc[n][2], sc[n][3]);
+         }
+-        l0 = __fmaf_rn(l0, a0, rowsum(c0));
+-        l1 = __fmaf_rn(l1, a1, rowsum(c1));
++        if constexpr (reverse) {
++            l0 = __fmaf_rn(l0, a0, sc[0][0]);
++            l1 = __fmaf_rn(l1, a1, sc[0][2]);
++            l0 = __fadd_rn(l0, sc[0][1]);
++            l1 = __fadd_rn(l1, sc[0][3]);
++#pragma unroll
++            for (int n = 1; n < NT; ++n) {
++                l0 = __fadd_rn(__fadd_rn(l0, sc[n][0]), sc[n][1]);
++                l1 = __fadd_rn(__fadd_rn(l1, sc[n][2]), sc[n][3]);
++            }
++        } else {
++            l0 = __fmaf_rn(l0, a0, rowsum(c0));
++            l1 = __fmaf_rn(l1, a1, rowsum(c1));
++        }
+         m0 = n0;
+         m1 = n1;
+ #pragma unroll
+@@ -303,18 +317,38 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
+             }
+         }
+     }
++    if constexpr (reverse) {
++        l0 = __fadd_rn(l0, __shfl_xor_sync(0xffffffffu, l0, 2));
++        l1 = __fadd_rn(l1, __shfl_xor_sync(0xffffffffu, l1, 2));
++        l0 = __fadd_rn(l0, __shfl_xor_sync(0xffffffffu, l0, 1));
++        l1 = __fadd_rn(l1, __shfl_xor_sync(0xffffffffu, l1, 1));
++    }
+ #pragma unroll
+     for (int i = 0; i < C; ++i) {
+         const int d = 8 * i + 2 * qd;
+         if (r0 < W)
+             *reinterpret_cast<uint32_t*>(out + ((int64_t)r0 * HO + head) * D + d) =
+-                pack(tdiv(o[i][0], l0), tdiv(o[i][1], l0));
++                pack((reverse ? __fmul_rn(o[i][0], 1.0f / l0) : tdiv(o[i][0], l0)), (reverse ? __fmul_rn(o[i][1], 1.0f / l0) : tdiv(o[i][1], l0)));
+         if (r1 < W)
+             *reinterpret_cast<uint32_t*>(out + ((int64_t)r1 * HO + head) * D + d) =
+-                pack(tdiv(o[i][2], l1), tdiv(o[i][3], l1));
++                pack((reverse ? __fmul_rn(o[i][2], 1.0f / l1) : tdiv(o[i][2], l1)), (reverse ? __fmul_rn(o[i][3], 1.0f / l1) : tdiv(o[i][3], l1)));
+     }
+ }
+
++
++// The canonical vision path keeps its traversal and rounding. MOSS uses ComfyUI's FlashAttention order.
++template <int D, int WARPS>
++__global__ void __launch_bounds__(32 * WARPS)
++vision_kernel(const __nv_bfloat16* qkv, __nv_bfloat16* out, int rows, int heads, float scale) {
++    image_kernel_body<D, WARPS, false>(qkv, out, rows, heads, scale);
++}
++
++template <int D, int WARPS>
++__global__ void __launch_bounds__(32 * WARPS)
++moss_kernel(const __nv_bfloat16* qkv, __nv_bfloat16* out, int rows, int heads, float scale) {
++    image_kernel_body<D, WARPS, true>(qkv, out, rows, heads, scale);
++}
++
+ } // namespace tf_prefill_attention
+
+ // Head dim 128, eight warps, eight query heads a block, eight staging slots (Nemotron's 16 heads a KV head).
+@@ -348,3 +382,5 @@ template __global__ void tf_prefill_attention::hpattn_whole_kernel<256, 8, 2, 2>
+ template __global__ void tf_prefill_attention::hpattn8_whole_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
+     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
++
++template __global__ void tf_prefill_attention::moss_kernel<128, 8>(const __nv_bfloat16*, __nv_bfloat16*, int, int, float);
+diff --git a/zig/src/core/contract/gates.zig b/zig/src/core/contract/gates.zig
+index e00e23f6b25a957fb53316b327519d49a1221259..a815417a16b1cdd66056a5fff1180fa278023ced 100644
+--- a/zig/src/core/contract/gates.zig
++++ b/zig/src/core/contract/gates.zig
+@@ -49,10 +49,16 @@ pub const VTable = struct {
+     check: ?*const fn (*anyopaque, Gate) anyerror!?[]const u8 = null,
+     /// A replacement's baseline: the replaced kernel's bytes on the prepared inputs.
+     replaced: ?*const fn (*anyopaque) anyerror![]const u8 = null,
++    /// Frees the device buffers and host copies the last `prepare` left; called once a kernel's gates are done.
++    release: ?*const fn (*anyopaque) void = null,
+ };
+
+ /// The VTable of a test type T: its prepare, run, count and reference, its `rig`'s bytes, and the optional hooks.
+ pub fn hooks(comptime T: type) VTable {
++    const Rig = switch (@typeInfo(@FieldType(T, "rig"))) {
++        .pointer => |p| p.child,
++        else => @FieldType(T, "rig"),
++    };
+     const H = struct {
+         fn of(ctx: *anyopaque) *T {
+             return @ptrCast(@alignCast(ctx));
+@@ -96,6 +102,9 @@ pub fn hooks(comptime T: type) VTable {
+         fn replaced(ctx: *anyopaque) anyerror![]const u8 {
+             return of(ctx).replaced();
+         }
++        fn release(ctx: *anyopaque) void {
++            if (@hasDecl(Rig, "finishGates")) of(ctx).rig.finishGates() else of(ctx).rig.reset();
++        }
+     };
+     return .{
+         .prepare = H.prepare,
+@@ -111,6 +120,7 @@ pub fn hooks(comptime T: type) VTable {
+         .simulate = if (@hasDecl(T, "simulate")) H.simulate else null,
+         .check = if (@hasDecl(T, "check")) H.check else null,
+         .replaced = if (@hasDecl(T, "replaced")) H.replaced else null,
++        .release = if (@hasDecl(Rig, "reset")) H.release else null,
+     };
+ }
+
+@@ -310,7 +320,7 @@ pub fn sums(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
+     const q = misses(got, want, allow);
+     if (!(q <= 1)) return say(.fail, .sums, s.name, "{d:.1}x over its exact-sum bound at k {d}: not fp32 sums (fp16 would miss {d:.0}x, bf16 {d:.0}x)", .{ q, shape.k, margin[0], margin[1] });
+     if (need[1] == 0 or need[0] == 0) return say(.pass, .sums, s.name, "within its bound at k {d}; fp16 sums would miss {d:.0}x, bf16 {d:.1}x ({s})", .{ shape.k, margin[0], margin[1], s.sums.why });
+-    return say(.pass, .sums, s.name, "exact sums at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ shape.k, margin[0], margin[1] });
++    return say(.pass, .sums, s.name, "{s} at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ if (s.sums.exact) "exact sums" else "FP32 sums within their derived bound", shape.k, margin[0], margin[1] });
+ }
+
+ /// A kernel's or control's gates 1-4; a control must fail its own gate and passes when it does.
+@@ -341,6 +351,7 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
+ /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
+ pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
+     for (kernels) |k| {
++        defer if (k.vt.release) |free| free(k.ctx);
+         const s = std.hash.Wyhash.hash(seed, k.spec.name);
+         if (k.control) |g| {
+             t.controls += 1;
+diff --git a/zig/src/core/contract/moss_image_cuda_records.zig b/zig/src/core/contract/moss_image_cuda_records.zig
+index d810c8dd5d5c8230294b12e78e68d0fbdcbb4888..855c9ad7f96926cc37373d2956b3214730003eb2 100644
+--- a/zig/src/core/contract/moss_image_cuda_records.zig
++++ b/zig/src/core/contract/moss_image_cuda_records.zig
+@@ -1,13 +1,18 @@
+ //! MOSS-Image's CUDA launches: its own steps (moss_image.cu) and full attention at head dim 128.
+ const registry = @import("registry.zig");
+
+-/// nvcc 13.0's usage, the compiler of the release fatbins; nvcc 13.2 compiles each the same.
++/// nvcc 13.0 compile records for the MOSS compatibility build.
+ pub const cuda = [_]registry.CudaRecord{
+-    .{ .launch = .{ .name = "moss_image tf_moss_norm", .symbol = "tf_moss_norm", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 32, .bound = 256 }, .{ .regs = 34, .static = 32, .bound = 256 }, .{ .regs = 34, .static = 32, .bound = 256 }, .{ .regs = 33, .static = 32, .bound = 256 }, .{ .regs = 33, .static = 32, .bound = 256 } } },
+-    .{ .launch = .{ .name = "moss_image tf_moss_qk", .symbol = "tf_moss_qk", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
+-    .{ .launch = .{ .name = "moss_image tf_moss_situ", .symbol = "tf_moss_situ", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 17, .static = 0, .bound = 256 }, .{ .regs = 17, .static = 0, .bound = 256 } } },
+-    .{ .launch = .{ .name = "moss_image tf_moss_gate_add", .symbol = "tf_moss_gate_add", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 11, .static = 0, .bound = 256 }, .{ .regs = 11, .static = 0, .bound = 256 }, .{ .regs = 11, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 } } },
+-    .{ .launch = .{ .name = "vit vision_kernel<128, 8> (MOSS-Image)", .symbol = "_ZN20tf_prefill_attention13vision_kernelILi128ELi8EEEvPK13__nv_bfloat16PS1_iif", .image = "prefill_attention", .threads = 256, .dynamic = 69632, .opt_in = true }, .usage = .{ .{ .regs = 178, .static = 0, .bound = 256 }, .{ .regs = 178, .static = 0, .bound = 256 }, .{ .regs = 178, .static = 0, .bound = 256 }, .{ .regs = 170, .static = 0, .bound = 256 }, .{ .regs = 170, .static = 0, .bound = 256 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_norm", .symbol = "tf_moss_norm", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 30, .static = 32, .bound = 256, .local = 0 }, .{ .regs = 37, .static = 32, .bound = 256, .local = 0 }, .{ .regs = 37, .static = 32, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 32, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 32, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_qk", .symbol = "tf_moss_qk", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 40, .static = 0, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_situ", .symbol = "tf_moss_situ", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 18, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 18, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 18, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 17, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 17, .static = 0, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_gate_add", .symbol = "tf_moss_gate_add", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 14, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 14, .static = 0, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "vit vision_kernel<128, 8> (MOSS-Image)", .symbol = "_ZN20tf_prefill_attention13vision_kernelILi128ELi8EEEvPK13__nv_bfloat16PS1_iif", .image = "prefill_attention", .threads = 256, .dynamic = 69632, .opt_in = true }, .usage = .{ .{ .regs = 178, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 178, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 178, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 170, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 170, .static = 0, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_bias_add", .symbol = "tf_moss_bias_add", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 10, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 12, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 12, .static = 0, .bound = 256, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_time", .symbol = "tf_moss_time", .image = "moss_image", .threads = 128 }, .usage = .{ .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 23, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 23, .static = 0, .bound = 0, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_silu", .symbol = "tf_moss_silu", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 16, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 16, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 16, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 16, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 16, .static = 0, .bound = 0, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image tf_moss_modulation", .symbol = "tf_moss_modulation", .image = "moss_image", .threads = 256 }, .usage = .{ .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 19, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 20, .static = 0, .bound = 0, .local = 0 }, .{ .regs = 20, .static = 0, .bound = 0, .local = 0 } } },
++    .{ .launch = .{ .name = "moss_image moss_kernel<128, 8>", .symbol = "_ZN20tf_prefill_attention11moss_kernelILi128ELi8EEEvPK13__nv_bfloat16PS1_iif", .image = "prefill_attention", .threads = 256, .dynamic = 69632, .opt_in = true }, .usage = .{ .{ .regs = 194, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 194, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 194, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 174, .static = 0, .bound = 256, .local = 0 }, .{ .regs = 174, .static = 0, .bound = 256, .local = 0 } } },
+ };
+
+ test "MOSS-Image CUDA: every launch is in the live registry and fits every SM" {
+diff --git a/zig/src/core/contract/registry.zig b/zig/src/core/contract/registry.zig
+index 8e8e10c965ac5afd9f9bd67b503983e8c13e5e3b..c7bb536ebe68458a513679f0f62564c1b5156d2f 100644
+--- a/zig/src/core/contract/registry.zig
++++ b/zig/src/core/contract/registry.zig
+@@ -13,6 +13,7 @@ pub const CudaRecord = struct {
+     /// Keep the independent later compiler selection when adding a late 13.0 receipt.
+     later_pending: bool = false,
+ };
++pub const moss_cuda = @import("moss_image_cuda_records.zig").cuda;
+ const target = @import("registry_target.zig");
+ pub const TargetDecision = target.TargetDecision;
+ pub const targetDecision = target.targetDecision;
+diff --git a/zig/src/core/contract/seed_test.zig b/zig/src/core/contract/seed_test.zig
+index 7b613b6326705ac5e5de20a166390fdb0ab72f06..9136d3ab2b0a611eddf6889d9a3671a1c4f537c1 100644
+--- a/zig/src/core/contract/seed_test.zig
++++ b/zig/src/core/contract/seed_test.zig
+@@ -4,8 +4,17 @@ const g = @import("gates.zig");
+ const c = @import("contract.zig");
+ const Probe = struct {
+     seed: u64 = 0,
++    buffer: ?[]u8 = null,
++    previous: ?*Probe = null,
++    fn release(p: *anyopaque) void {
++        const self: *Probe = @ptrCast(@alignCast(p));
++        if (self.buffer) |buffer| std.testing.allocator.free(buffer);
++        self.buffer = null;
++    }
+     fn prepare(p: *anyopaque, _: c.Shape, _: g.Fill, s: u64) anyerror!bool {
+         const self: *Probe = @ptrCast(@alignCast(p));
++        if (self.previous) |previous| std.debug.assert(previous.buffer == null);
++        if (self.buffer == null) self.buffer = try std.testing.allocator.alloc(u8, 64);
+         self.seed = s;
+         return false;
+     }
+@@ -31,7 +40,7 @@ const Probe = struct {
+         return 0;
+     }
+     fn kernel(p: *Probe, name: []const u8) g.Kernel {
+-        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference } };
++        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference, .release = release } };
+     }
+ };
+ test "contract seed: an inserted kernel cannot change another named fixture's seed" {
+@@ -47,3 +56,15 @@ test "contract seed: an inserted kernel cannot change another named fixture's se
+     try std.testing.expectEqual(before, target.seed);
+     try std.testing.expect(inserted.seed != target.seed);
+ }
++
++test "contract release: prior kernel buffers are freed before the next prepares" {
++    const was = g.quiet;
++    g.quiet = true;
++    defer g.quiet = was;
++    var a: Probe = .{};
++    var b: Probe = .{ .previous = &a };
++    var tally: g.Tally = .{};
++    try g.runAll(std.testing.allocator, &.{ a.kernel("first"), b.kernel("second") }, 0x6b63, &tally);
++    try std.testing.expect(a.buffer == null);
++    try std.testing.expect(b.buffer == null);
++}
+diff --git a/zig/src/cuda/cublaslt.zig b/zig/src/cuda/cublaslt.zig
+index c620786cb54bd54cbaa9c997b1489d0d908010ce..5fdaa686b42f62003c3b751b9c3ffef33e472f74 100644
+--- a/zig/src/cuda/cublaslt.zig
++++ b/zig/src/cuda/cublaslt.zig
+@@ -151,14 +151,24 @@ pub const Linear = struct {
+         errdefer _ = lt.api.cublasLtMatmulPreferenceDestroy(self.pref);
+         const limit: u64 = workspace_limit;
+         try lt.check(lt.api.cublasLtMatmulPreferenceSetAttribute(self.pref, pref_max_workspace_bytes, &limit, @sizeOf(u64)), "set workspace");
++        self.epilogue = epilogue;
++        if (epilogue != .none) {
++            const e: u32 = @backingInt(epilogue);
++            try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_epilogue, &e, @sizeOf(u32)), "set epilogue");
++        }
+         var found: [1]Heuristic = undefined;
+         var count: c_int = 0;
+         try lt.check(lt.api.cublasLtMatmulAlgoGetHeuristic(self.handle, self.desc, self.a, self.b, self.c, self.c, self.pref, 1, &found, &count), "cublasLtMatmulAlgoGetHeuristic");
++        if ((count < 1 or found[0].state != 0) and epilogue != .none) {
++            const none: u32 = @backingInt(Epilogue.none);
++            try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_epilogue, &none, @sizeOf(u32)), "unset epilogue");
++            self.epilogue = .none;
++            try lt.check(lt.api.cublasLtMatmulAlgoGetHeuristic(self.handle, self.desc, self.a, self.b, self.c, self.c, self.pref, 1, &found, &count), "cublasLtMatmulAlgoGetHeuristic");
++        }
+         if (count < 1 or found[0].state != 0) return error.NoAlgorithm;
+         self.algo = found[0].algo;
+         self.workspace_need = found[0].workspace_size;
+-        self.epilogue = .none;
+-        if (epilogue != .none) try self.fuse(epilogue, workspace_limit);
++        if (epilogue != .none and self.epilogue == .none) try self.fuse(epilogue, workspace_limit);
+         return self;
+     }
+
+diff --git a/zig/src/cuda/vit.zig b/zig/src/cuda/vit.zig
+index f7acecdc15357c54762847fcaa44baf9d748eb45..89115a94b387b9d9e64754af379f663a176c932d 100644
+--- a/zig/src/cuda/vit.zig
++++ b/zig/src/cuda/vit.zig
+@@ -193,12 +193,19 @@ pub const Gemms = struct {
+     gpa: Allocator,
+     lt: cublaslt.Library,
+     workspace: memory.DeviceBuffer,
++    bias_workspace_bytes: usize,
+     plans: std.AutoHashMapUnmanaged([3]u64, Linear) = .empty,
+
+     pub fn init(gpa: Allocator, d: *const Driver) !Gemms {
++        return initWithBiasWorkspace(gpa, d, workspace_bytes);
++    }
++
++    /// A separate bias workspace reproduces the reference's cuBLASLt addmm policy.
++    pub fn initWithBiasWorkspace(gpa: Allocator, d: *const Driver, bias_workspace_bytes: usize) !Gemms {
++        if (bias_workspace_bytes == 0 or bias_workspace_bytes > workspace_bytes) return error.BadWorkspaceSize;
+         var lt = try cublaslt.Library.open();
+         errdefer lt.close();
+-        return .{ .gpa = gpa, .lt = lt, .workspace = try memory.DeviceBuffer.alloc(d, workspace_bytes) };
++        return .{ .gpa = gpa, .lt = lt, .workspace = try memory.DeviceBuffer.alloc(d, workspace_bytes), .bias_workspace_bytes = bias_workspace_bytes };
+     }
+
+     pub fn deinit(g: *Gemms) void {
+@@ -211,7 +218,7 @@ pub const Gemms = struct {
+
+     /// y [rows, n] = x [rows, k] . w [n, k]^T, f32 accumulation, `out` rows.
+     pub fn run(g: *Gemms, s: Stream, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, out: cublaslt.DataType) !void {
+-        try (try g.plan(rows, n, k, out, .none)).run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
++        try (try g.plan(rows, n, k, out, .none)).run(x, w, y, g.workspace.ptr, g.workspace.len, s.handle);
+     }
+
+     /// Whether the shape's own algorithm carries the bias in cuBLASLt's epilogue; else `linear` sums through f32.
+@@ -222,7 +229,7 @@ pub const Gemms = struct {
+     fn plan(g: *Gemms, rows: usize, n: usize, k: usize, out: cublaslt.DataType, epilogue: cublaslt.Epilogue) !*const Linear {
+         const key = [3]u64{ rows, n, k | @as(u64, @intCast(@backingInt(out))) << 40 | @as(u64, @backingInt(epilogue)) << 48 };
+         const got = try g.plans.getOrPut(g.gpa, key);
+-        if (!got.found_existing) got.value_ptr.* = Linear.initEpilogue(&g.lt, rows, n, k, out, workspace_bytes, epilogue) catch |e| {
++        if (!got.found_existing) got.value_ptr.* = Linear.initEpilogue(&g.lt, rows, n, k, out, if (epilogue == .none) g.workspace.len else g.bias_workspace_bytes, epilogue) catch |e| {
+             g.plans.removeByPtr(got.key_ptr);
+             return e;
+         };
+@@ -233,7 +240,7 @@ pub const Gemms = struct {
+ /// y [rows, n] = bf16(x . w^T + b), the bias in cuBLASLt's epilogue, or else through f32 `acc` and tf_vit_bias.
+ pub fn linear(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize) !void {
+     const p = try g.plan(rows, n, kk, .bf16, .bias);
+-    if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
++    if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, g.bias_workspace_bytes, s.handle);
+     try g.run(s, x, w, acc, rows, n, kk, .f32);
+     try k.bias(s, acc, b, y, rows, n);
+ }
+@@ -242,7 +249,7 @@ pub fn linear(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64,
+ pub fn linearAct(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize, r: ?u64, out: u64, act: Act) !void {
+     const p = try g.plan(rows, n, kk, .bf16, .bias);
+     if (p.epilogue == .bias) {
+-        try p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
++        try p.runBias(x, w, b, y, g.workspace.ptr, g.bias_workspace_bytes, s.handle);
+         return k.pointwise(s, y, r, out, rows * n, act);
+     }
+     try g.run(s, x, w, acc, rows, n, kk, .f32);
+@@ -254,11 +261,15 @@ const Full = struct {
+     dim: usize,
+     warps: u32,
+     slots: u32 = 0,
++    moss: bool = false,
+
+     fn sym(comptime f: Full) [:0]const u8 {
+         const p = "_ZN20tf_prefill_attention";
+         const t = "EEEvPK13__nv_bfloat16PS1_iif";
+-        if (f.slots == 0) return std.fmt.comptimePrint(p ++ "13vision_kernelILi{d}ELi{d}" ++ t, .{ f.dim, f.warps });
++        if (f.slots == 0) {
++            const name = if (f.moss) "11moss_kernel" else "13vision_kernel";
++            return std.fmt.comptimePrint(p ++ name ++ "ILi{d}ELi{d}" ++ t, .{ f.dim, f.warps });
++        }
+         return std.fmt.comptimePrint(p ++ "11full_kernelILi{d}ELi{d}ELi{d}" ++ t, .{ f.dim, f.warps, f.slots });
+     }
+
+@@ -296,6 +307,19 @@ pub const Attention = struct {
+         return a;
+     }
+
++    pub fn loadMoss(d: *const Driver) !Attention {
++        var a = try load(d);
++        errdefer a.unload();
++        inline for (fulls, 0..) |shape, i| {
++            if (shape.dim == 128) {
++                const f = Full{ .dim = 128, .warps = shape.warps, .moss = true };
++                a.fns[i] = try a.mod.function(comptime f.sym());
++                try a.fns[i].allowDynamicShared(f.smem());
++            }
++        }
++        return a;
++    }
++
+     pub fn unload(a: *Attention) void {
+         a.mod.unload();
+     }
+diff --git a/zig/src/families/moss_image/cuda_kernels.zig b/zig/src/families/moss_image/cuda_kernels.zig
+index 1e89e0107135a772064aabc695e4e61e48fda55a..6f2213598ea08113f6a89b91b12004d2449bf9db 100644
+--- a/zig/src/families/moss_image/cuda_kernels.zig
++++ b/zig/src/families/moss_image/cuda_kernels.zig
+@@ -16,12 +16,16 @@ pub const Kernels = struct {
+     qk: cuda.Function,
+     situ: cuda.Function,
+     gate_add: cuda.Function,
++    bias_add: cuda.Function,
++    time: cuda.Function,
++    silu: cuda.Function,
++    modulation: cuda.Function,
+
+     pub fn load(d: *const cuda.Driver) !Kernels {
+         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+         var mod = try cuda.Module.load(d, cuda.kernels.moss_image);
+         errdefer mod.unload();
+-        return .{ .mod = mod, .norm = try mod.function("tf_moss_norm"), .qk = try mod.function("tf_moss_qk"), .situ = try mod.function("tf_moss_situ"), .gate_add = try mod.function("tf_moss_gate_add") };
++        return .{ .mod = mod, .norm = try mod.function("tf_moss_norm"), .qk = try mod.function("tf_moss_qk"), .situ = try mod.function("tf_moss_situ"), .gate_add = try mod.function("tf_moss_gate_add"), .bias_add = try mod.function("tf_moss_bias_add"), .time = try mod.function("tf_moss_time"), .silu = try mod.function("tf_moss_silu"), .modulation = try mod.function("tf_moss_modulation") };
+     }
+
+     pub fn unload(k: *Kernels) void {
+@@ -33,14 +37,14 @@ fn go(f: cuda.Function, s: cuda.Stream, grid: cuda.launch.Dim3, threads: u32, a:
+     try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, s, a);
+ }
+
+-/// y = the RMSNorm of `rows` rows of x with weight w, then bf16(bf16(y s) + b) when `modulated`.
++/// Torch RMSNorm, or Comfy Kitchen RMS-AdaLN with the norm weight folded into the BF16 scale.
+ pub fn norm(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, scale: u64, shift: u64, y: u64, rows: usize, width: usize, eps: f32, modulated: bool) !void {
+     var a: cuda.Args = .{};
+     for ([_]u64{ x, w, scale, shift, y }) |v| a.add(v);
+     a.add(int(width));
+     a.add(eps);
+     a.add(@as(c_int, @intFromBool(modulated)));
+-    try go(k.norm, s, .{ .x = @intCast(rows) }, 256, &a);
++    try go(k.norm, s, .{ .x = @intCast(rows) }, if (!modulated) 128 else if (rows <= 1024) 32 else 256, &a);
+ }
+
+ /// q, k heads normed and rotated, v copied: rows `stride` apart into packed q | k | v rows of 3 heads 128.
+@@ -68,7 +72,38 @@ pub fn gateAdd(k: *const Kernels, s: cuda.Stream, x: u64, y: u64, g: u64, rows:
+     try go(k.gate_add, s, .{ .x = @intCast(rows), .y = ceil(width, 256) }, 256, &a);
+ }
+
++pub fn biasAdd(k: *const Kernels, s: cuda.Stream, x: u64, b: u64, rows: usize, width: usize) !void {
++    var a: cuda.Args = .{};
++    a.add(x);
++    a.add(b);
++    a.add(int(width));
++    a.add(int(rows));
++    try go(k.bias_add, s, .{ .x = @intCast(rows), .y = ceil(width, 256) }, 256, &a);
++}
++
+ test "launch geometry: rows on grid x (past y's 65,535), 256-column strips on y" {
+     try std.testing.expectEqual(@as(u32, 12), ceil(3072, 256));
+     try std.testing.expectEqual(@as(u32, 3), ceil(24, 8));
+ }
++
++pub fn time(k: *const Kernels, s: cuda.Stream, out: u64, timestep: f32) !void {
++    var a: cuda.Args = .{};
++    a.add(out);
++    a.add(timestep);
++    try go(k.time, s, .{ .x = 1 }, 128, &a);
++}
++
++pub fn silu(k: *const Kernels, s: cuda.Stream, x: u64, width: usize) !void {
++    var a: cuda.Args = .{};
++    a.add(x);
++    a.add(int(width));
++    try go(k.silu, s, .{ .x = ceil(width, 256) }, 256, &a);
++}
++
++pub fn modulation(k: *const Kernels, s: cuda.Stream, shared: u64, out: u64, width: usize) !void {
++    var a: cuda.Args = .{};
++    a.add(shared);
++    a.add(out);
++    a.add(int(width));
++    try go(k.modulation, s, .{ .x = ceil(width, 256) }, 256, &a);
++}
+diff --git a/zig/src/families/moss_image/cuda_model.zig b/zig/src/families/moss_image/cuda_model.zig
+index 46476082b97f927188b87fb9c36c9dc257fd4c9a..929616679198ee8bd1ee4e3783fd5f408f6f448a 100644
+--- a/zig/src/families/moss_image/cuda_model.zig
++++ b/zig/src/families/moss_image/cuda_model.zig
+@@ -31,7 +31,7 @@ pub const Scratch = struct {
+         // the kernels' row counts and offsets are c_int
+         if (rows > std.math.maxInt(c_int) / (2 * F)) return error.ImageTooLarge;
+         const wide = try mul(rows, H * 2);
+-        const sums = try mul(@max(try mul(image, H), try mul(text, 3 * H)), 4);
++        const sums = try mul(@max(6 * H, @max(try mul(image, H), try mul(text, 3 * H))), 4);
+         const lat = try mul(image, cfg.channels * 2);
+         return .{ .parts = .{
+             wide,                 wide, wide, wide, wide,                           try mul(wide, 3),     wide, wide, try mul(rows, 2 * F * 2),
+@@ -59,7 +59,7 @@ pub fn seconds() f64 {
+ pub const Prompt = struct {
+     rows: usize,
+     text: cuda.DeviceBuffer,
+-    /// cos then sin, each (image rows + rows, 64) fp32 holding bf16 values.
++    /// cos then sin, each (image rows + rows, 64) fp32.
+     rope: cuda.DeviceBuffer,
+
+     pub fn deinit(p: *Prompt) void {
+@@ -134,9 +134,9 @@ pub const Model = struct {
+         errdefer t.k.unload();
+         t.vk = try cuda.vit.Kernels.load(d);
+         errdefer t.vk.unload();
+-        t.gemms = try cuda.vit.Gemms.init(gpa, d);
++        t.gemms = try cuda.vit.Gemms.initWithBiasWorkspace(gpa, d, 1 << 20);
+         errdefer t.gemms.deinit();
+-        t.att = try cuda.vit.Attention.load(d);
++        t.att = try cuda.vit.Attention.loadMoss(d);
+         errdefer t.att.unload();
+         t.w = try wts.load(gpa, io, d, dir);
+         errdefer {
+@@ -199,7 +199,7 @@ pub const Model = struct {
+         const table = (t.image + T) * half;
+         const tables = try t.gpa.alloc(f32, 2 * table);
+         defer t.gpa.free(tables);
+-        host.rotary(tables[0..table], tables[table..], &t.w.bands, T, t.rows, t.columns);
++        host.rotaryComfy(tables[0..table], tables[table..], T, t.rows, t.columns);
+         p.rope = try cuda.DeviceBuffer.fromHost(t.d, std.mem.sliceAsBytes(tables));
+         errdefer p.rope.free();
+         try t.upload(t.ctx, std.mem.sliceAsBytes(embeds));
+@@ -221,22 +221,28 @@ pub const Model = struct {
+         if (skip) |s| if (s >= cfg.layers) return error.BadSkipLayer;
+         const started = seconds();
+         var spent: f64 = 0;
+-        if (t.timestep != timestep) {
+-            var vectors: [host.vectors][H]u16 = undefined;
+-            t.timestep = null;
+-            try host.modulation(&vectors, t.gpa, t.w.modulation, timestep);
+-            try t.upload(t.mods, std.mem.sliceAsBytes(&vectors));
+-            t.timestep = timestep;
+-            spent = seconds() - started;
+-        }
+         const halves = try t.gpa.alloc(u16, latents.len);
+         defer t.gpa.free(halves);
+         for (halves, latents) |*o, v| o.* = host.bf16(v);
+         try t.upload(t.lat, std.mem.sliceAsBytes(halves));
+         const N = R + p.rows;
+         try t.marks[0].record(t.stream);
++        if (t.timestep != timestep) {
++            t.timestep = null;
++            const w = t.w.modulation;
++            try ks.time(&t.k, t.stream, t.ug, timestep);
++            try t.linearBias(t.ug, w.time_1, w.time_1_b, t.xn, 1, H, cfg.time_dim);
++            try ks.silu(&t.k, t.stream, t.xn, H);
++            try t.linearBias(t.xn, w.time_2, w.time_2_b, t.y, 1, H, H);
++            try t.linearBias(t.y, w.blocks, w.blocks_b, t.ug, 1, 6 * H, H);
++            try t.linearBias(t.y, w.head, w.head_b, t.ug + 6 * H * 2, 1, 2 * H, H);
++            try ks.modulation(&t.k, t.stream, t.ug, t.mods, H);
++            t.timestep = timestep;
++            spent = seconds() - started;
++        }
+         try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.x + R * H * 2, p.text.ptr, p.rows * H * 2, t.stream.handle), "cuMemcpyDtoDAsync");
+-        try t.linearBias(t.lat, t.w.video_in, t.w.video_in_b, t.x, R, H, cfg.channels);
++        try t.linear(t.lat, t.w.video_in, t.x, R, H, cfg.channels);
++        try ks.biasAdd(&t.k, t.stream, t.x, t.w.video_in_b, R, H);
+         for (t.w.blocks, 0..) |b, i| if (skip != i) try t.block(b, N, p.cos(), p.sin(R));
+         try t.norm(R, t.w.final_norm, .{ .scale = .scale_out, .shift = .shift_out });
+         try t.linear(t.xn, t.w.final_out, t.vel, R, cfg.channels, H);
+diff --git a/zig/src/families/moss_image/cuda_weights.zig b/zig/src/families/moss_image/cuda_weights.zig
+index 9343ef9995f1e9b3f1f847ad3e1b1e6f1c2fc69c..b8e207910c5c32c09a1f27c706449ea333d022bb 100644
+--- a/zig/src/families/moss_image/cuda_weights.zig
++++ b/zig/src/families/moss_image/cuda_weights.zig
+@@ -26,7 +26,7 @@ pub const Weights = struct {
+     /// The rotary's frequencies as the checkpoint stores them (fp32).
+     bands: [cfg.bands]f32 = undefined,
+     /// The modulation's projections, read on the host from the mapped checkpoint (host.modulation).
+-    modulation: host.Weights = undefined,
++    modulation: struct { time_1: u64, time_1_b: u64, time_2: u64, time_2_b: u64, blocks: u64, blocks_b: u64, head: u64, head_b: u64 } = undefined,
+     bytes: u64 = 0,
+
+     pub fn deinit(w: *Weights) void {
+@@ -118,14 +118,14 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
+     const bands = try w.typed("rope.bands", .f32, &.{cfg.bands});
+     @memcpy(std.mem.asBytes(&w.bands), bands.bytes);
+     w.modulation = .{
+-        .time_1 = try w.values("time_embedding.0.weight", &.{ h, cfg.time_dim }),
+-        .time_1_b = try w.values("time_embedding.0.bias", &.{h}),
+-        .time_2 = try w.values("time_embedding.2.weight", &.{ h, h }),
+-        .time_2_b = try w.values("time_embedding.2.bias", &.{h}),
+-        .blocks = try w.values("shared_block_modulation.weight", &.{ 6 * h, h }),
+-        .blocks_b = try w.values("shared_block_modulation.bias", &.{6 * h}),
+-        .head = try w.values("video_head_modulation.weight", &.{ 2 * h, h }),
+-        .head_b = try w.values("video_head_modulation.bias", &.{2 * h}),
++        .time_1 = try w.take(d, "time_embedding.0.weight", &.{ h, cfg.time_dim }),
++        .time_1_b = try w.take(d, "time_embedding.0.bias", &.{h}),
++        .time_2 = try w.take(d, "time_embedding.2.weight", &.{ h, h }),
++        .time_2_b = try w.take(d, "time_embedding.2.bias", &.{h}),
++        .blocks = try w.take(d, "shared_block_modulation.weight", &.{ 6 * h, h }),
++        .blocks_b = try w.take(d, "shared_block_modulation.bias", &.{6 * h}),
++        .head = try w.take(d, "video_head_modulation.weight", &.{ 2 * h, h }),
++        .head_b = try w.take(d, "video_head_modulation.bias", &.{2 * h}),
+     };
+     if (w.ck.unused() != 0) {
+         std.log.err("moss image: the checkpoint has {d} transformer tensors this family does not read", .{w.ck.unused()});
+diff --git a/zig/src/families/moss_image/host.zig b/zig/src/families/moss_image/host.zig
+index b442df775940fe5e643e7b852313c9c4bfb285e1..60d00e75d4e1c36c954eb12266525e0659724677 100644
+--- a/zig/src/families/moss_image/host.zig
++++ b/zig/src/families/moss_image/host.zig
+@@ -160,3 +160,51 @@ test "project sums in fp32 and adds the bias before its one rounding" {
+     project(&one, &eighth, &[_]f32{45.6}, &z);
+     try std.testing.expectEqual(@as(f32, 45.75), z[0]);
+ }
++
++/// ComfyUI keeps double-precision coordinates and float32 rotary tables.
++pub fn rotaryComfy(cos: []f32, sin: []f32, text: usize, rows: usize, columns: usize) void {
++    const half = cfg.head_dim / 2;
++    const image = rows * columns;
++    std.debug.assert(cos.len == (image + text) * half and sin.len == cos.len);
++    var frequencies: [cfg.bands]f64 = undefined;
++    for (&frequencies, 0..) |*frequency, i| frequency.* = 1.0 / std.math.pow(f64, 10000, @as(f64, @floatFromInt(i)) / cfg.bands);
++    const top = @as(f64, @floatFromInt(rows - 1)) / 2;
++    const left = @as(f64, @floatFromInt(columns - 1)) / 2;
++    for (0..image + text) |r| {
++        const at: [4]f64 = if (r < image)
++            .{ 0, @floatFromInt(text), @as(f64, @floatFromInt(r / columns)) - top, @as(f64, @floatFromInt(r % columns)) - left }
++        else
++            .{ 0, @floatFromInt(r - image), 0, 0 };
++        for (0..half) |j| {
++            const angle = at[j / cfg.bands] * frequencies[j % cfg.bands];
++            cos[r * half + j] = @floatCast(@cos(angle));
++            sin[r * half + j] = @floatCast(@sin(angle));
++        }
++    }
++}
++
++test "Comfy rotary keeps float32 tables" {
++    var cos: [(16 * 14 + 33) * 64]f32 = undefined;
++    var sin: [cos.len]f32 = undefined;
++    rotaryComfy(&cos, &sin, 33, 16, 14);
++    try std.testing.expectEqual(@as(u32, 0xbc5986b7), @as(u32, @bitCast(cos[13 * 64 + 16])));
++    try std.testing.expectEqual(@as(u32, 0x3f7ffa39), @as(u32, @bitCast(sin[13 * 64 + 16])));
++    try std.testing.expectEqual(@as(u32, 0x3f75245a), @as(u32, @bitCast(cos[13 * 64 + 17])));
++    try std.testing.expectEqual(@as(u32, 0xbe938821), @as(u32, @bitCast(sin[13 * 64 + 17])));
++    try std.testing.expectEqual(@as(u32, 0xbe8feb12), @as(u32, @bitCast(cos[13 * 64 + 21])));
++    try std.testing.expectEqual(@as(u32, 0x3f75adad), @as(u32, @bitCast(sin[13 * 64 + 21])));
++    try std.testing.expectEqual(@as(u32, 0x3f7ffedf), @as(u32, @bitCast(cos[13 * 64 + 31])));
++    try std.testing.expectEqual(@as(u32, 0x3bc04ac5), @as(u32, @bitCast(sin[13 * 64 + 31])));
++    try std.testing.expectEqual(@as(u32, 0x3eb17a2f), @as(u32, @bitCast(cos[13 * 64 + 32])));
++    try std.testing.expectEqual(@as(u32, 0xbf7020c4), @as(u32, @bitCast(sin[13 * 64 + 32])));
++    try std.testing.expectEqual(@as(u32, 0xbef323a1), @as(u32, @bitCast(cos[13 * 64 + 33])));
++    try std.testing.expectEqual(@as(u32, 0x3f614af3), @as(u32, @bitCast(sin[13 * 64 + 33])));
++    try std.testing.expectEqual(@as(u32, 0x3f7ffff1), @as(u32, @bitCast(cos[13 * 64 + 47])));
++    try std.testing.expectEqual(@as(u32, 0xbaaecfda), @as(u32, @bitCast(sin[13 * 64 + 47])));
++    try std.testing.expectEqual(@as(u32, 0x3f7a01a6), @as(u32, @bitCast(cos[13 * 64 + 48])));
++    try std.testing.expectEqual(@as(u32, 0x3e5c486a), @as(u32, @bitCast(sin[13 * 64 + 48])));
++    try std.testing.expectEqual(@as(u32, 0xbf5ef7cd), @as(u32, @bitCast(cos[13 * 64 + 49])));
++    try std.testing.expectEqual(@as(u32, 0xbefb90bb), @as(u32, @bitCast(sin[13 * 64 + 49])));
++    try std.testing.expectEqual(@as(u32, 0x3f7ffff5), @as(u32, @bitCast(cos[13 * 64 + 63])));
++    try std.testing.expectEqual(@as(u32, 0x3a9780f1), @as(u32, @bitCast(sin[13 * 64 + 63])));
++}
+diff --git a/zig/tests/cuda/contract_moss_image.zig b/zig/tests/cuda/contract_moss_image.zig
+index 4dbf0634b6d91caf8e562b773229a651a5721c4a..33936262580b264528fc5e52cba3db6071f2d0a7 100644
+--- a/zig/tests/cuda/contract_moss_image.zig
++++ b/zig/tests/cuda/contract_moss_image.zig
+@@ -8,8 +8,11 @@ const rig_ = @import("contract_rig.zig");
+ const norms = @import("contract_moss_image_norms.zig");
+ const steps = @import("contract_moss_image_steps.zig");
+ const full = @import("contract_moss_image_attn.zig");
++const elementwise = @import("contract_moss_image_elementwise.zig");
++const time = @import("contract_moss_image_time.zig");
+
+ const g = core.contract.gates;
++const rows = @import("contract_rows.zig");
+
+ const controls = struct {
+     pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
+@@ -21,11 +24,18 @@ pub const Set = struct {
+     k: moss.Kernels,
+     ctl: cuda.Module,
+     att: cuda.vit.Attention,
++    legacy_att: cuda.vit.Attention,
+     norms: [4]norms.Norm = undefined,
+     qks: [3]norms.Qk = undefined,
+     situs: [3]steps.Situ = undefined,
+     adds: [2]steps.GateAdd = undefined,
+     full: full.Full = undefined,
++    legacy: full.Full = undefined,
++    attention_control: full.Full = undefined,
++    elementwise: [6]elementwise.Elementwise = undefined,
++    times: [2]time.Time = undefined,
++    unused_norms: cuda.norms.Norms = undefined,
++    harness_controls: [5]rows.Row = undefined,
+
+     /// The set, its kernels appended to `list` (each control after the kernel it breaks).
+     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
+@@ -35,20 +45,24 @@ pub const Set = struct {
+         errdefer k.unload();
+         var ctl = try cuda.Module.load(gpu.d, &controls.bytes);
+         errdefer ctl.unload();
+-        set.* = .{ .gpa = gpu.gpa, .k = k, .ctl = ctl, .att = try cuda.vit.Attention.load(gpu.d) };
++        var attention = try cuda.vit.Attention.loadMoss(gpu.d);
++        errdefer attention.unload();
++        var legacy = try cuda.vit.Attention.load(gpu.d);
++        errdefer legacy.unload();
++        set.* = .{ .gpa = gpu.gpa, .k = k, .ctl = ctl, .att = attention, .legacy_att = legacy };
+         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
+         const ends: @import("contract_moss_image_ref.zig").Ends = .{ .a = gpu.gpa };
+         var with = k;
+         with.norm = try ctl.function("tf_ctl_moss_norm_inv");
+         set.norms[0] = .{ .rig = rig, .k = k, .modulated = false, .name = "cuda moss image tf_moss_norm", .ends = ends };
+-        set.norms[1] = .{ .rig = rig, .k = with, .modulated = false, .name = "control: moss image tf_moss_norm drops bf16(x inv)", .control = .shapes, .ends = ends };
++        set.norms[1] = .{ .rig = rig, .k = with, .modulated = false, .name = "control: moss image tf_moss_norm adds bf16(x inv)", .control = .shapes, .ends = ends };
+         with.norm = try ctl.function("tf_ctl_moss_norm_scale");
+         set.norms[2] = .{ .rig = rig, .k = k, .modulated = true, .name = "cuda moss image tf_moss_norm modulated", .ends = ends };
+-        set.norms[3] = .{ .rig = rig, .k = with, .modulated = true, .name = "control: moss image tf_moss_norm modulated drops bf16(y s)", .control = .shapes, .ends = ends };
++        set.norms[3] = .{ .rig = rig, .k = with, .modulated = true, .name = "control: moss image tf_moss_norm modulated drops folded-scale bf16", .control = .shapes, .ends = ends };
+         with = k;
+-        with.qk = try ctl.function("tf_ctl_moss_qk_cos");
++        with.qk = try ctl.function("tf_ctl_moss_qk_normalized");
+         set.qks[0] = .{ .rig = rig, .k = k, .packed_rows = false, .name = "cuda moss image tf_moss_qk q k v rows", .ends = ends };
+-        set.qks[1] = .{ .rig = rig, .k = with, .packed_rows = false, .name = "control: moss image tf_moss_qk drops bf16(q cos)", .control = .shapes, .ends = ends };
++        set.qks[1] = .{ .rig = rig, .k = with, .packed_rows = false, .name = "control: moss image tf_moss_qk adds bf16(q inv)", .control = .shapes, .ends = ends };
+         set.qks[2] = .{ .rig = rig, .k = k, .packed_rows = true, .name = "cuda moss image tf_moss_qk packed qkv rows", .ends = ends };
+         with = k;
+         with.situ = try ctl.function("tf_ctl_moss_situ_sigmoid");
+@@ -58,13 +72,40 @@ pub const Set = struct {
+         with = k;
+         with.gate_add = try ctl.function("tf_ctl_moss_gate_add_product");
+         set.adds[0] = .{ .rig = rig, .k = k, .name = "cuda moss image tf_moss_gate_add", .ends = ends };
+-        set.adds[1] = .{ .rig = rig, .k = with, .name = "control: moss image tf_moss_gate_add drops bf16(g y)", .control = .shapes, .ends = ends };
++        set.adds[1] = .{ .rig = rig, .k = with, .name = "control: moss image tf_moss_gate_add adds bf16(g y)", .control = .shapes, .ends = ends };
+         set.full = .{ .rig = rig, .att = &set.att };
++        set.legacy = .{ .rig = rig, .att = &set.legacy_att, .name = "cuda moss image legacy vision_kernel<128, 8>" };
++        set.attention_control = .{ .rig = rig, .att = &set.att, .name = "control: moss attention wrong scale", .control = .shapes, .bad_scale = true };
++        for ([_]elementwise.Kind{ .bias, .silu, .modulation }, 0..) |kind, i| {
++            with = k;
++            const names = [_][]const u8{ "cuda moss image tf_moss_bias_add", "cuda moss image tf_moss_silu", "cuda moss image tf_moss_modulation" };
++            const bad = [_][]const u8{ "control: moss bias drops tail", "control: moss silu is identity", "control: moss modulation omits one" };
++            switch (kind) {
++                .bias => with.bias_add = try ctl.function("tf_ctl_moss_bias_tail"),
++                .silu => with.silu = try ctl.function("tf_ctl_moss_silu_identity"),
++                .modulation => with.modulation = try ctl.function("tf_ctl_moss_modulation_scale"),
++            }
++            set.elementwise[2 * i] = .{ .rig = rig, .k = k, .kind = kind, .name = names[i], .ends = ends };
++            set.elementwise[2 * i + 1] = .{ .rig = rig, .k = with, .kind = kind, .name = bad[i], .control = .shapes, .ends = ends };
++        }
++        set.times[0] = .{ .rig = rig, .k = k, .name = "cuda moss image tf_moss_time integer and adapter grids", .ends = ends };
++        with = k;
++        with.time = try ctl.function("tf_ctl_moss_time_phase");
++        set.times[1] = .{ .rig = rig, .k = with, .name = "control: moss time halves phase", .control = .shapes, .ends = ends };
++
+         for (&set.norms) |*x| try list.append(a, x.kernel());
+         for (&set.qks) |*x| try list.append(a, x.kernel());
+         for (&set.situs) |*x| try list.append(a, x.kernel());
+         for (&set.adds) |*x| try list.append(a, x.kernel());
+         try list.append(a, set.full.kernel());
++        try list.append(a, set.legacy.kernel());
++        try list.append(a, set.attention_control.kernel());
++        for (&set.elementwise) |*x| try list.append(a, x.kernel());
++        for (&set.times) |*x| try list.append(a, x.kernel());
++        for ([_]rows.Which{ .fmax_max, .atomic_sum, .scribble_sum, .tail_sum, .half_dot }, &set.harness_controls) |which, *item| {
++            item.* = try rows.Row.init(gpu, s, &set.unused_norms, ctl, which);
++            try list.append(a, item.kernel());
++        }
+         return set;
+     }
+
+@@ -74,6 +115,12 @@ pub const Set = struct {
+         for (&set.situs) |*x| x.deinit();
+         for (&set.adds) |*x| x.deinit();
+         set.full.deinit();
++        set.legacy.deinit();
++        set.attention_control.deinit();
++        for (&set.elementwise) |*x| x.deinit();
++        for (&set.times) |*x| x.deinit();
++        for (&set.harness_controls) |*x| x.deinit();
++        set.legacy_att.unload();
+         set.att.unload();
+         set.ctl.unload();
+         set.k.unload();
+diff --git a/zig/tests/cuda/contract_moss_image_attn.zig b/zig/tests/cuda/contract_moss_image_attn.zig
+index 176c9cf4e029783aa776411a7f7705223b06f9df..26ca6a01156bc0fde89ef468763754bb1c429969 100644
+--- a/zig/tests/cuda/contract_moss_image_attn.zig
++++ b/zig/tests/cuda/contract_moss_image_attn.zig
+@@ -20,9 +20,9 @@ fn scale() f32 {
+ }
+
+ /// Shape: heads (rows), head width (n), rows L (k); 24 heads at prompt lengths, two stand for them at joint ones.
+-pub fn spec() c.Spec {
++pub fn spec(name: []const u8) c.Spec {
+     return .{
+-        .name = "cuda moss image vit vision_kernel<128, 8> (full attention)",
++        .name = name,
+         .accum = .f32,
+         .depth = keyChain,
+         .ops = 1,
+@@ -35,6 +35,9 @@ pub fn spec() c.Spec {
+
+ pub const Full = struct {
+     rig: rig_.Rig,
++    name: []const u8 = "cuda moss image moss_kernel<128, 8>",
++    control: ?g.Gate = null,
++    bad_scale: bool = false,
+     att: *const cuda.vit.Attention,
+     r: ?attn.Ref = null,
+     shape: c.Shape = undefined,
+@@ -50,7 +53,7 @@ pub const Full = struct {
+     }
+
+     pub fn kernel(self: *Full) g.Kernel {
+-        return .{ .spec = spec(), .ctx = self, .vt = &vt };
++        return .{ .spec = spec(self.name), .ctx = self, .vt = &vt, .control = self.control };
+     }
+
+     const vt = g.hooks(Full);
+@@ -123,7 +126,7 @@ pub const Full = struct {
+     }
+
+     pub fn run(self: *Full) !void {
+-        try self.att.full(self.rig.s, self.dev, self.out, self.shape.k, self.shape.rows, D, scale());
++        try self.att.full(self.rig.s, self.dev, self.out, self.shape.k, self.shape.rows, D, scale() * @as(f32, if (self.bad_scale) 2 else 1));
+         try self.rig.s.synchronize();
+     }
+
+diff --git a/zig/tests/cuda/contract_moss_image_elementwise.zig b/zig/tests/cuda/contract_moss_image_elementwise.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecaf68471a62e2d219c7010b9e87c933c4702145
+--- /dev/null
++++ b/zig/tests/cuda/contract_moss_image_elementwise.zig
+@@ -0,0 +1,144 @@
++//! MOSS bias, SiLU and modulation through independent FP64 formulas and guarded CUDA buffers.
++const std = @import("std");
++const cuda = @import("cuda");
++const moss = @import("moss_image_cuda");
++const rig_ = @import("contract_rig.zig");
++const mi = @import("contract_moss_image_ref.zig");
++const c = mi.c;
++const g = mi.g;
++const Range = mi.Range;
++
++pub const Kind = enum { bias, silu, modulation };
++
++pub const Elementwise = struct {
++    rig: rig_.Rig,
++    k: moss.Kernels,
++    kind: Kind,
++    name: []const u8,
++    control: ?g.Gate = null,
++    shape: c.Shape = undefined,
++    x: []u16 = &.{},
++    b: []u16 = &.{},
++    ins: [2]u64 = @splat(0),
++    out: u64 = 0,
++    ends: mi.Ends,
++
++    pub fn spec(t: *const Elementwise) c.Spec {
++        return .{
++            .name = t.name,
++            .accum = .none,
++            .depth = mi.noSums,
++            .ops = if (t.kind == .silu) 2 * (mi.exp_ulps + mi.div_ulps) + 1 else 1,
++            .out = .bf16,
++            .in_place = t.kind != .modulation,
++            .tiles = .{ .{}, .{ .size = 256 }, .{} },
++            .served = if (t.kind == .bias)
++                &.{ .{ .rows = 65536, .n = mi.hidden, .k = 1 }, .{ .rows = 4096, .n = mi.hidden, .k = 1 }, .{ .rows = 1, .n = mi.hidden, .k = 1 } }
++            else
++                &.{.{ .rows = 1, .n = mi.hidden, .k = 1 }},
++        };
++    }
++
++    fn free(t: *Elementwise) void {
++        t.rig.gpu.gpa.free(t.x);
++        t.rig.gpu.gpa.free(t.b);
++        t.x = &.{};
++        t.b = &.{};
++    }
++
++    pub fn deinit(t: *Elementwise) void {
++        t.free();
++        t.ends.deinit();
++        t.rig.deinit();
++    }
++
++    pub fn kernel(t: *Elementwise) g.Kernel {
++        return .{ .spec = t.spec(), .ctx = t, .vt = &vt, .control = t.control };
++    }
++    const vt = g.hooks(Elementwise);
++
++    pub fn prepare(t: *Elementwise, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
++        if (shape.rows == 0 or shape.n == 0) return false;
++        t.rig.reset();
++        t.free();
++        t.shape = shape;
++        const a = t.rig.gpu.gpa;
++        const n = shape.rows * shape.n * @as(usize, if (t.kind == .modulation) 8 else 1);
++        t.x = try a.alloc(u16, n);
++        t.b = try a.alloc(u16, if (t.kind == .bias) shape.n else 0);
++        var random = std.Random.DefaultPrng.init(seed);
++        mi.randomBf16(random.random(), t.x, -16, 16);
++        mi.randomBf16(random.random(), t.b, -4, 4);
++        if (fill == .nonfinite) {
++            for ([_]u16{ mi.nan16, mi.inf16, mi.ninf16 }, 0..) |v, i| t.x[i % n] = v;
++            if (t.kind == .bias) for ([_]u16{ mi.nan16, mi.inf16, mi.ninf16 }, 0..) |v, i| {
++                t.b[(i + 3) % t.b.len] = v;
++            };
++        }
++        t.ins[0] = try mi.input(&t.rig, t.x);
++        if (t.kind == .bias) t.ins[1] = try mi.input(&t.rig, t.b);
++        t.out = try t.rig.output(t.count() * 2);
++        return true;
++    }
++
++    pub fn count(t: *Elementwise) usize {
++        return t.shape.rows * t.shape.n * @as(usize, if (t.kind == .modulation) 9 else 1);
++    }
++
++    pub fn run(t: *Elementwise) !void {
++        if (t.kind != .modulation) {
++            const bytes = t.x.len * 2;
++            try (cuda.DeviceBuffer{ .d = t.rig.gpu.d, .ptr = t.out, .len = bytes }).copyFrom(0, t.ins[0], bytes, t.rig.s.handle);
++        }
++        switch (t.kind) {
++            .bias => try moss.biasAdd(&t.k, t.rig.s, t.out, t.ins[1], t.shape.rows, t.shape.n),
++            .silu => try moss.silu(&t.k, t.rig.s, t.out, t.count()),
++            .modulation => for (0..t.shape.rows) |row| {
++                const input = t.ins[0] + row * 8 * t.shape.n * 2;
++                const output = t.out + row * 9 * t.shape.n * 2;
++                try moss.modulation(&t.k, t.rig.s, input, output, t.shape.n);
++            },
++        }
++        try t.rig.s.synchronize();
++    }
++
++    pub fn reference(t: *Elementwise, want: []f64, mag: []f64) !void {
++        try t.ends.size(t.count());
++        const from = [_]usize{ 1, 0, 2, 4, 3, 5, 7, 6 };
++        for (0..t.count()) |i| {
++            const n = t.shape.n;
++            var value: f64 = undefined;
++            var range: Range = undefined;
++            switch (t.kind) {
++                .bias => {
++                    value = c.fromBf16(t.x[i]) + c.fromBf16(t.b[i % n]);
++                    range = Range.of(value).fp32(0.5).bf16();
++                },
++                .silu => {
++                    const x: f64 = c.fromBf16(t.x[i]);
++                    value = x / (1 + @exp(-x));
++                    range = Range.of(@exp(-x)).fp32(2.5).add(Range.of(1)).fp32(0.5).recip().mul(Range.of(x)).fp32(mi.div_ulps).bf16();
++                },
++                .modulation => {
++                    const sample = i / (9 * n);
++                    const row = (i / n) % 9;
++                    if (row == 8) {
++                        value = 1;
++                    } else {
++                        const x = c.fromBf16(t.x[sample * 8 * n + from[row] * n + i % n]);
++                        value = x + @as(f64, if (row == 0 or row == 3 or row == 6) 1 else 0);
++                    }
++                    range = Range.of(value).fp32(0.5).bf16();
++                },
++            }
++            t.ends.put(want, mag, i, mi.bf(value), range);
++        }
++    }
++
++    pub fn bounds(t: *Elementwise, want: []const f64, _: []const f64, allow: []f64) !void {
++        t.ends.bounds(want, allow);
++    }
++    pub fn intervals(t: *Elementwise, low: []f64, high: []f64) !void {
++        t.ends.intervals(low, high);
++    }
++};
+diff --git a/zig/tests/cuda/contract_moss_image_limits.zig b/zig/tests/cuda/contract_moss_image_limits.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..4cd834cc71436443577d1006008c1184d1819361
+--- /dev/null
++++ b/zig/tests/cuda/contract_moss_image_limits.zig
+@@ -0,0 +1,89 @@
++//! Compile records on every release SM and the companion's actual launches on this device.
++const std = @import("std");
++const cuda = @import("cuda");
++const core = @import("core");
++const check = @import("check.zig");
++const limits = core.contract.limits;
++const registry = core.contract.registry;
++const cubin = core.contract.cubin;
++const records = struct {
++    pub const cuda = core.contract.registry.moss_cuda;
++};
++const controls = struct {
++    pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
++};
++
++fn image(name: []const u8) ![]const u8 {
++    if (std.mem.eql(u8, name, "moss_image")) return cuda.kernels.moss_image;
++    if (std.mem.eql(u8, name, "prefill_attention")) return cuda.kernels.prefill_attention;
++    if (std.mem.eql(u8, name, "vit")) return cuda.kernels.vit;
++    if (std.mem.eql(u8, name, "contract_controls")) return &controls.bytes;
++    return error.UnknownImage;
++}
++
++pub fn audit(gpu: check.Gpu, record_only: bool) !usize {
++    const a = gpu.gpa;
++    var problems: usize = 0;
++    var caught: usize = 0;
++    for (records.cuda ++ registry.cuda_controls) |record| {
++        const control = std.mem.startsWith(u8, record.launch.name, "control:");
++        const bytes = try image(record.launch.image);
++        const images = try cubin.images(a, bytes);
++        defer cubin.freeImages(a, images);
++        var measured: [limits.sms.len]limits.Usage = undefined;
++        for (limits.sms, 0..) |sm, i| {
++            const im = for (images) |candidate| {
++                if (candidate.sm == sm.sm) break candidate;
++            } else return error.MissingArchitecture;
++            const kernels = try cubin.kernels(a, im.elf, sm.sm);
++            defer a.free(kernels);
++            const kernel = for (kernels) |candidate| {
++                if (std.mem.eql(u8, candidate.name, record.launch.symbol)) break candidate;
++            } else return error.MissingKernel;
++            measured[i] = kernel.usage;
++            if (record_only) continue;
++            var details: std.ArrayList(u8) = .empty;
++            defer details.deinit(a);
++            const failures = try limits.cuda(record.launch, kernel.usage, sm, &details, a);
++            if (control) {
++                if (failures > 0) caught += 1 else problems += 1;
++                std.debug.print("{s} limits sm_{d} {s}\n", .{ if (failures > 0) "RED" else "MISSED", sm.sm, record.launch.name });
++            } else {
++                const current = std.meta.eql(kernel.usage, record.usage[i]);
++                if (!current or failures > 0) problems += 1;
++                std.debug.print("{s} limits sm_{d} {s}: regs={d} shared={d} bound={d} local={d}\n", .{ if (current and failures == 0) "PASS" else "FAIL", sm.sm, record.launch.name, kernel.usage.regs, kernel.usage.static, kernel.usage.bound, kernel.usage.local });
++            }
++        }
++        if (record_only and !control) {
++            std.debug.print("RECORDJSON {s} [", .{record.launch.symbol});
++            for (measured, 0..) |u, i| std.debug.print("{s}{{\"regs\":{d},\"static\":{d},\"bound\":{d},\"local\":{d}}}", .{ if (i == 0) "" else ",", u.regs, u.static, u.bound, u.local });
++            std.debug.print("]\n", .{});
++        }
++    }
++    if (record_only) return 0;
++    const capability: u32 = @intCast(try gpu.ctx.capability());
++    const shared: u32 = @intCast(try gpu.ctx.attribute(.max_shared_memory_per_block_optin));
++    for (records.cuda ++ registry.cuda_controls) |record| {
++        const control = std.mem.startsWith(u8, record.launch.name, "control:");
++        var module = try cuda.Module.load(gpu.d, try image(record.launch.image));
++        defer module.unload();
++        const name = try a.dupeSentinel(u8, record.launch.symbol, 0);
++        defer a.free(name);
++        const function = try module.function(name);
++        const max_threads: u32 = @intCast(try function.attribute(.max_threads_per_block));
++        const static: u32 = @intCast(try function.attribute(.shared_size_bytes));
++        const regs: u32 = @intCast(try function.attribute(.num_regs));
++        const at = for (limits.sms, 0..) |sm, i| {
++            if (sm.sm == capability) break i;
++        } else return error.UnregisteredDevice;
++        const fits = record.launch.threads <= max_threads and static + record.launch.dynamic <= shared;
++        const current = static == record.usage[at].static and regs == record.usage[at].regs;
++        if (control) {
++            if (!fits) caught += 1 else problems += 1;
++        } else if (!fits or !current) problems += 1;
++        const passed = if (control) !fits else fits and current;
++        std.debug.print("{s} live sm_{d} {s}: regs={d} shared={d} threads={d}/{d}\n", .{ if (passed) (if (control) "RED" else "PASS") else "FAIL", capability, record.launch.name, regs, static, record.launch.threads, max_threads });
++    }
++    std.debug.print("SUMMARY moss limits: {d} launches, {d} compile/live controls red, {d} problems\n", .{ records.cuda.len, caught, problems });
++    return problems;
++}
+diff --git a/zig/tests/cuda/contract_moss_image_norms.zig b/zig/tests/cuda/contract_moss_image_norms.zig
+index 721bec1b158b7ed34fe290c1dc5ca0c9d7e080da..d6a87577abb0b672cfb4afd72e88168b88a3811d 100644
+--- a/zig/tests/cuda/contract_moss_image_norms.zig
++++ b/zig/tests/cuda/contract_moss_image_norms.zig
+@@ -13,11 +13,15 @@ const bf = mi.bf;
+
+ const norm_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
+
+-// --- tf_moss_norm: bf16(bf16(x inv) w), then bf16(bf16(y s) + b) when modulated ----------------------------------
++// Unrounded normalized rows, with Comfy Kitchen scale folding when modulated.
+
+ /// A thread's share of the row in turn, the warp's 5 shuffles, then the 8 warps' partials in order.
+-fn normDepth(s: c.Shape) usize {
+-    return (s.k + 255) / 256 + 5 + 8;
++fn plainDepth(s: c.Shape) usize {
++    return (s.k + 127) / 128 + 5 + 2;
++}
++
++fn modDepth(s: c.Shape) usize {
++    return if (s.rows <= 1024) (s.k + 31) / 32 + 5 else (s.k + 255) / 256 + 5 + 8;
+ }
+
+ fn normServed(comptime list: []const usize) [list.len]c.Shape {
+@@ -49,9 +53,9 @@ pub const Norm = struct {
+         return .{
+             .name = name,
+             .accum = .f32,
+-            .depth = normDepth,
+-            .ops = 2 * (mi.div_ulps + mi.sqrt_ulps) + 1,
+-            .mids = if (modulated) 3 else 1,
++            .depth = if (modulated) modDepth else plainDepth,
++            .ops = 2 * mi.rsqrt_ulps + (if (modulated) @as(f64, 7) else 4),
++            .mids = if (modulated) 2 else 0,
+             .out = .bf16,
+             .tiles = .{ .{}, .{}, .{ .size = 256 } },
+             .served = if (modulated) &modulated_rows else &plain_rows,
+@@ -121,17 +125,20 @@ pub const Norm = struct {
+
+     fn row(t: *Norm, ends: *Ends, r: usize, ss: f64, ssr: Range, want: []f64, mag: []f64) void {
+         const k = t.shape.k;
+-        const n = mi.invNorm(ss, ssr, @floatFromInt(k));
++        const n = mi.invNorm(ss, ssr, @floatFromInt(k), t.modulated);
+         for (0..k) |j| {
+             const x: f64 = c.fromBf16(t.x[r * k + j]);
+             const w: f64 = c.fromBf16(t.v[j]);
+-            var y = bf(bf(x * n.inv) * w);
+-            var yr = Range.of(x).mul(n.r).fp32(0.5).bf16().mul(Range.of(w)).fp32(0.5).bf16();
++            var y = bf((x * n.inv) * w);
++            const normalized = Range.of(x).mul(n.r).fp32(0.5);
++            var yr = normalized.mul(Range.of(w)).fp32(0.5).bf16();
+             if (t.modulated) {
+                 const s: f64 = c.fromBf16(t.v[k + j]);
+                 const b: f64 = c.fromBf16(t.v[2 * k + j]);
+-                y = bf(bf(y * s) + b);
+-                yr = yr.mul(Range.of(s)).fp32(0.5).bf16().add(Range.of(b)).fp32(0.5).bf16();
++                const folded = bf(bf(w * s) - 1);
++                y = bf((x * n.inv) * (1 + folded) + b);
++                const factor = Range.of(w * s).fp32(0.5).bf16().add(Range.of(-1)).fp32(0.5).bf16().add(Range.of(1)).fp32(0.5);
++                yr = normalized.mul(factor).add(Range.of(b)).fp32(0.5).bf16();
+             }
+             ends.put(want, mag, r * k + j, y, yr);
+         }
+@@ -141,7 +148,7 @@ pub const Norm = struct {
+         try t.ends.size(t.count());
+         const k = t.shape.k;
+         for (0..t.shape.rows) |r| {
+-            const s = mi.squares(t.x[r * k ..][0..k], normDepth(t.shape), t.fill == .stress);
++            const s = mi.squares(t.x[r * k ..][0..k], (if (t.modulated) modDepth(t.shape) else plainDepth(t.shape)), t.fill == .stress);
+             t.row(&t.ends, r, s.ss, s.r, want, mag);
+         }
+     }
+@@ -214,8 +221,8 @@ pub const Qk = struct {
+             .name = name,
+             .accum = .f32,
+             .depth = qkDepth,
+-            .ops = 2 * (mi.div_ulps + mi.sqrt_ulps) + 1,
+-            .mids = 3,
++            .ops = 2 * mi.rsqrt_ulps + 6,
++            .mids = 1,
+             .out = .bf16,
+             .tiles = .{ .{}, .{ .size = 8 }, .{} },
+             .served = if (packed_rows) &qk_prompt else &qk_joint,
+@@ -307,14 +314,14 @@ pub const Qk = struct {
+     fn head(t: *Qk, ends: *Ends, which: usize, r: usize, h: usize, ss: f64, ssr: Range, want: []f64, mag: []f64) void {
+         const x = t.qkv[which][r * t.width() + h * D ..][0..D];
+         const w = t.nw[which * D ..][0..D];
+-        const n = mi.invNorm(ss, ssr, D);
++        const n = mi.invNorm(ss, ssr, D, true);
+         var normed: [D]f64 = undefined;
+         var nr: [D]Range = undefined;
+         for (x, w, &normed, &nr) |xv, wv, *o, *orr| {
+             const f: f64 = c.fromBf16(xv);
+             const wf: f64 = c.fromBf16(wv);
+-            o.* = bf(bf(f * n.inv) * wf);
+-            orr.* = Range.of(f).mul(n.r).fp32(0.5).bf16().mul(Range.of(wf)).fp32(0.5).bf16();
++            o.* = bf((f * n.inv) * wf);
++            orr.* = Range.of(f).mul(n.r).fp32(0.5).mul(Range.of(wf)).fp32(0.5).bf16();
+         }
+         const half = t.shape.rows * D / 2;
+         const base = (r * 3 + which) * t.width() + h * D;
+@@ -324,8 +331,10 @@ pub const Qk = struct {
+             const sign: f64 = if (ch < D / 2) -1 else 1;
+             const cs: f64 = t.rot[r * D / 2 + j];
+             const sn: f64 = t.rot[half + r * D / 2 + j];
+-            const v = bf(bf(normed[ch] * cs) + bf(sign * normed[partner] * sn));
+-            const vr = nr[ch].mul(Range.of(cs)).fp32(0.5).bf16().add(nr[partner].mul(Range.of(sign * sn)).fp32(0.5).bf16()).fp32(0.5).bf16();
++            const v = bf(normed[ch] * cs + sign * normed[partner] * sn);
++            const left = nr[ch].mul(Range.of(cs));
++            const right = nr[partner].mul(Range.of(sign * sn));
++            const vr = (if (ch < D / 2) left.add(right.fp32(0.5)) else right.add(left.fp32(0.5))).fp32(0.5).bf16();
+             ends.put(want, mag, base + ch, v, vr);
+         }
+     }
+diff --git a/zig/tests/cuda/contract_moss_image_ref.zig b/zig/tests/cuda/contract_moss_image_ref.zig
+index daf1f4ff2ad7eaac48b1f12ec37c6595e81ad852..781b853690a357f8192cd09bfcce8a860b7ab338 100644
+--- a/zig/tests/cuda/contract_moss_image_ref.zig
++++ b/zig/tests/cuda/contract_moss_image_ref.zig
+@@ -13,7 +13,7 @@ pub const heads = 24;
+ pub const ffn = 8192;
+
+ /// MOSS-Image's row counts: image and prompt rows (1200x880 and 1024x1024 with 63, 34 or 10), and prompt rows alone.
+-pub const joint = [_]usize{ 4188, 4135, 4130, 4106 };
++pub const joint = [_]usize{ 4188, 4135, 4130, 4106, 1025, 1024, 296, 2 };
+ pub const prompt = [_]usize{ 63, 34, 10 };
+
+ // nvcc's error bounds under the glue flags (--prec-div, --prec-sqrt: IEEE division and sqrtf; expf, tanhf 2 ulps).
+@@ -132,10 +132,16 @@ pub fn squares(x: []const u16, depth: usize, exact: bool) struct { ss: f64, r: R
+     return .{ .ss = ss, .r = .{ .lo = ss - e, .hi = ss + e } };
+ }
+
+-/// 1 / sqrtf(ss / n + eps) in float64 and its range through the kernel's division, add, sqrtf and reciprocal.
+-pub fn invNorm(ss: f64, r: Range, n: f64) struct { inv: f64, r: Range } {
+-    const mean = (Range{ .lo = r.lo / n, .hi = r.hi / n }).fp32(div_ulps);
+-    return .{ .inv = 1 / @sqrt(ss / n + eps), .r = mean.add(Range.of(eps)).fp32(0.5).up(sqrt).fp32(sqrt_ulps).recip().fp32(div_ulps) };
++// CUDA's rsqrtf accuracy is 2 ULP from the rounded result; FP64 comparisons include its half-ULP rounding.
++pub const rsqrt_ulps = 2.5;
++
++/// FP64 inverse RMS and the range through the actual division or reciprocal-FMA mean and rsqrtf.
++pub fn invNorm(ss: f64, r: Range, n: f64, fused_mean: bool) struct { inv: f64, r: Range } {
++    const mean = if (fused_mean)
++        r.mul(Range.of(1 / n).fp32(0.5)).add(Range.of(eps)).fp32(0.5)
++    else
++        (Range{ .lo = r.lo / n, .hi = r.hi / n }).fp32(div_ulps).add(Range.of(eps)).fp32(0.5);
++    return .{ .inv = 1 / @sqrt(ss / n + eps), .r = (Range{ .lo = 1 / @sqrt(mean.hi), .hi = 1 / @sqrt(mean.lo) }).fp32(rsqrt_ulps) };
+ }
+
+ pub fn input(rig: *rig_.Rig, x: anytype) !u64 {
+diff --git a/zig/tests/cuda/contract_moss_image_steps.zig b/zig/tests/cuda/contract_moss_image_steps.zig
+index f8d12bb6261a303902783a7a958ec74999a94b24..376c9512e0d89525eeda5d0e73cdaafa452fea01 100644
+--- a/zig/tests/cuda/contract_moss_image_steps.zig
++++ b/zig/tests/cuda/contract_moss_image_steps.zig
+@@ -131,7 +131,7 @@ pub const Situ = struct {
+     }
+ };
+
+-// --- tf_moss_gate_add: x = bf16(x + bf16(g y)), in place ---------------------------------------------------------
++// tf_moss_gate_add materializes one fused residual result in place.
+
+ pub const GateAdd = struct {
+     rig: rig_.Rig,
+@@ -153,7 +153,7 @@ pub const GateAdd = struct {
+             .accum = .none,
+             .depth = mi.noSums,
+             .ops = 1,
+-            .mids = 1,
++            .mids = 0,
+             .out = .bf16,
+             .in_place = true,
+             .tiles = .{ .{}, .{ .size = 256 }, .{} },
+@@ -227,8 +227,8 @@ pub const GateAdd = struct {
+             const x: f64 = c.fromBf16(xb);
+             const y: f64 = c.fromBf16(yb);
+             const gv: f64 = c.fromBf16(t.gv[i % t.shape.n]);
+-            const r = Range.of(gv * y).fp32(0.5).bf16().add(Range.of(x)).fp32(0.5).bf16();
+-            t.ends.put(want, mag, i, bf(x + bf(gv * y)), r);
++            const r = Range.of(gv * y + x).fp32(0.5).bf16();
++            t.ends.put(want, mag, i, bf(x + gv * y), r);
+         }
+     }
+     pub fn bounds(t: *GateAdd, want: []const f64, _: []const f64, allow: []f64) !void {
+diff --git a/zig/tests/cuda/contract_moss_image_time.zig b/zig/tests/cuda/contract_moss_image_time.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..86e61c097365adba9cd34748d7a122738f9a6a6c
+--- /dev/null
++++ b/zig/tests/cuda/contract_moss_image_time.zig
+@@ -0,0 +1,101 @@
++//! Integer and actual adapter timestep grids, with FP64 sinusoids and derived FP32 transcendental ranges.
++const std = @import("std");
++const moss = @import("moss_image_cuda");
++const rig_ = @import("contract_rig.zig");
++const mi = @import("contract_moss_image_ref.zig");
++const c = mi.c;
++const g = mi.g;
++const Range = mi.Range;
++
++pub const Time = struct {
++    rig: rig_.Rig,
++    k: moss.Kernels,
++    name: []const u8,
++    control: ?g.Gate = null,
++    shape: c.Shape = undefined,
++    fill: g.Fill = .random,
++    out: u64 = 0,
++    ends: mi.Ends,
++
++    pub fn kernel(t: *Time) g.Kernel {
++        return .{ .spec = .{ .name = t.name, .accum = .none, .depth = mi.noSums, .ops = 12, .out = .bf16, .served = &.{.{ .rows = 2001, .n = 256, .k = 1 }} }, .ctx = t, .vt = &vt, .control = t.control };
++    }
++    const vt = g.hooks(Time);
++
++    pub fn deinit(t: *Time) void {
++        t.ends.deinit();
++        t.rig.deinit();
++    }
++    pub fn count(t: *Time) usize {
++        return t.shape.rows * 256;
++    }
++
++    pub fn prepare(t: *Time, shape: c.Shape, fill: g.Fill, _: u64) !bool {
++        if (shape.n != 256 or shape.rows == 0) return false;
++        var inputs: [2001 * 4]u8 = undefined;
++        for (0..2001) |row| std.mem.writeInt(u32, inputs[row * 4 ..][0..4], @bitCast(gridTime(row)), .little);
++        var digest: [32]u8 = undefined;
++        std.crypto.hash.sha2.Sha256.hash(&inputs, &digest, .{});
++        const hex = std.fmt.bytesToHex(digest, .lower);
++        if (!std.mem.eql(u8, &hex, "c60288519f0d6cb98ab71900de27efbf5b84d75e127b4b84f5b9d479e5fe7333")) return error.AdapterTimeGridChanged;
++        t.rig.reset();
++        t.shape = shape;
++        t.fill = fill;
++        t.out = try t.rig.output(t.count() * 2);
++        return true;
++    }
++
++    fn gridTime(row: usize) f32 {
++        @setFloatMode(.strict);
++        if (row <= 1000) return @floatFromInt(row);
++        const index = row - 1001;
++        const end: f32 = 1.0 / 1000.0;
++        const step: f32 = (end - 1.0) / 999.0;
++        const position: f32 = @floatFromInt(if (index < 500) index else 999 - index);
++        const product: f32 = step * position;
++        const sigma: f32 = if (index < 500) 1.0 + product else end - product;
++        return sigma * 1000.0;
++    }
++
++    fn timestep(t: *const Time, row: usize) f32 {
++        if (t.fill == .nonfinite) return switch (row % 4) {
++            0 => std.math.nan(f32),
++            1 => std.math.inf(f32),
++            2 => -std.math.inf(f32),
++            else => gridTime(row),
++        };
++        return gridTime(row);
++    }
++
++    pub fn run(t: *Time) !void {
++        for (0..t.shape.rows) |row| try moss.time(&t.k, t.rig.s, t.out + row * 256 * 2, t.timestep(row));
++        try t.rig.s.synchronize();
++    }
++
++    pub fn reference(t: *Time, want: []f64, mag: []f64) !void {
++        try t.ends.size(t.count());
++        const base: f64 = @as(f32, -9.210340371976184);
++        for (0..t.shape.rows) |row| for (0..128) |column| {
++            const i: f64 = @floatFromInt(column);
++            const step: f64 = t.timestep(row);
++            const phase = step * @exp(base * i / 128);
++            const exponent = Range.of(base * i).fp32(0.5).mul(Range.of(1.0 / 128.0)).fp32(0.5);
++            const frequency = Range.of(@exp(exponent.lo));
++            const fr = Range{ .lo = frequency.lo, .hi = @exp(exponent.hi) };
++            const pr = fr.fp32(2.5).mul(Range.of(step)).fp32(0.5);
++            const radius = @max(@abs(pr.lo - phase), @abs(pr.hi - phase));
++            for (0..2) |part| {
++                const v = if (part == 0) @cos(phase) else @sin(phase);
++                const span = Range{ .lo = @max(-1, v - radius), .hi = @min(1, v + radius) };
++                t.ends.put(want, mag, row * 256 + part * 128 + column, mi.bf(v), span.fp32(2.5).bf16());
++            }
++        };
++    }
++
++    pub fn bounds(t: *Time, want: []const f64, _: []const f64, allow: []f64) !void {
++        t.ends.bounds(want, allow);
++    }
++    pub fn intervals(t: *Time, low: []f64, high: []f64) !void {
++        t.ends.intervals(low, high);
++    }
++};
+diff --git a/zig/tests/cuda/moss_contract_main.zig b/zig/tests/cuda/moss_contract_main.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9c4ef7d4c74c32bc04ba29ff935ea97f5611381
+--- /dev/null
++++ b/zig/tests/cuda/moss_contract_main.zig
+@@ -0,0 +1,16 @@
++//! The MOSS companion's CUDA contract runner.
++const std = @import("std");
++const cuda = @import("cuda");
++
++pub fn main(init: std.process.Init) !void {
++    var driver = try cuda.Driver.open();
++    defer driver.close();
++    var context = try cuda.Context.init(&driver, 0);
++    defer context.deinit();
++    const gpu: @import("check.zig").Gpu = .{ .d = &driver, .ctx = &context, .gpa = init.gpa, .io = init.io };
++    const args = try init.minimal.args.toSlice(init.arena.allocator());
++    const record_only = args.len == 2 and std.mem.eql(u8, args[1], "--record");
++    if (!record_only) try @import("contract_moss_image.zig").run(gpu);
++    const failures = try @import("contract_moss_image_limits.zig").audit(gpu, record_only);
++    if (failures != 0) return error.KernelLimitsFailed;
++}
+diff --git a/zig/tests/moss_image_run.zig b/zig/tests/moss_image_run.zig
+index da0e873f7df497ad8c2466a65932f5c6f5a65faf..83953338fe0ca3e8059dc1b2fbfd8d1b8d84792c 100644
+--- a/zig/tests/moss_image_run.zig
++++ b/zig/tests/moss_image_run.zig
+@@ -201,7 +201,7 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
+             for (x, cond, uncond) |*o, pc, pu| o.* += (pu + guidance * (pc - pu)) * by;
+             const wall = c.wall + u.wall;
+             total += wall;
+-            std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
++            std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation setup)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
+             try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
+         }
+         try print(&out, a, "], \"denoise_s\": {d:.3}", .{total});

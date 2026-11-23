@@ -95,3 +95,77 @@ test "live half: halfOf keeps both halves when the flag is off, when a layer is 
     try t.expectEqual(@as(?u1, null), layout.halfOf(&same, 2, true));
     try t.expectEqual(@as(?u1, 0), layout.halfOf(&zero, 1, true));
 }
+
+test "cache shape: GLM-5.3-Flash's pages keep their bytes, full GLM-5.3's 79 caches of 576-wide rows and pool 1 lay out" {
+    const flash = state.Shape.of(&@import("config.zig").Config{}, 12);
+    try t.expectEqual(@as(usize, 512), flash.row);
+    try t.expectEqual(@as(usize, 557056), flash.cacheBytes());
+    try t.expectEqual(@as(u64, 13056 * state.page_rows), flash.pageBytes());
+    try t.expectEqual(@as(u64, 12 * 32768), flash.pkPageBytes());
+    const full = state.Shape.of(&@import("config.zig").Config{ .rope = 64, .kpool = 1 }, 79);
+    try t.expectEqual(@as(usize, 576), full.row);
+    try t.expectEqual(@as(usize, 512 * 576 * 2), full.latentBytes());
+    try t.expectEqual(@as(usize, 512 * 128 * 2), full.pkBytes());
+    // 79 caches' 56,950,784 bytes, padded to whole 576-wide rows and 512 tokens (4,608 bytes): 4,096 more
+    try t.expectEqual(@as(u64, 79 * (576 * 2 + 128 * 2) * state.page_rows + 4096), full.pageBytes());
+    try t.expectEqual(@as(u64, 0), full.pageBytes() % (576 * 2));
+    try t.expectEqual(@as(u64, 0), full.pageBytes() % state.page_rows);
+    try t.expectEqual(@as(u64, 49_440), full.pageBytes() / (576 * 2)); // dsa_block's page_rows: a token list's rows
+}
+
+/// Full GLM-5.3's caches on a state: 78 DSA layers and no KDA, 576-wide latent rows, a pooled key a row.
+fn fullFixture(d: *cuda.Driver, w: *weights.Weights, layers: []weights.Layer) !state.State {
+    for (layers) |*l| l.mixer = .{ .mla = undefined };
+    w.config = .{ .rope = 64, .kpool = 1 };
+    w.share = try shard.Share.of(&w.config, 0, 1);
+    w.layers = layers;
+    return state.State.init(t.allocator, d, w, 4096);
+}
+
+test "cache shape: a full GLM-5.3 state's plan carries every cache's 576-wide rows and pooled keys, no KDA half" {
+    var d = Fake.driver();
+    var layers: [78]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    var st = try fullFixture(&d, &w, &layers);
+    defer st.deinit();
+    try t.expectEqual(@as(usize, 0), st.kda_layers);
+    try t.expectEqual(@as(usize, 78), st.caches.len);
+    try t.expectEqual(@as(usize, 4096 + 2), st.caches[0].pk_rows);
+    const at = 2048;
+    const plan = try layout.Plan.init(&st, &w.config, at, at, 0);
+    try t.expectEqual(@as(?u1, null), plan.half);
+    try t.expectEqual(@as(usize, 1 + 79 * 4 + 1), plan.count); // the head, each cache's latent, rings and pooled keys, the tail
+    for (0..79) |j| {
+        try t.expectEqual(@as(usize, at * 576 * 2), plan.parts[1 + 4 * j].len);
+        try t.expectEqual(@as(usize, at * 128 * 2), plan.parts[2 + 4 * j].len);
+        try t.expectEqual(@as(usize, (at + 2) * 128 * 2), plan.parts[4 + 4 * j].len);
+    }
+}
+
+test "cache shape: on pages each cache's part is a 576-wide row's latent then its pooled keys" {
+    var d = Fake.driver();
+    var layers: [78]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    var st = try fullFixture(&d, &w, &layers);
+    defer st.deinit();
+    const s = state.shapeOf(&w);
+    try t.expectEqual(@as(usize, 79), s.caches);
+    const kv: u64 = 1 << 40;
+    st.place(&w, .{ .kv = kv, .pages = 4, .page_bytes = state.pageBytes(&w) });
+    for (st.caches, 0..) |x, j| {
+        try t.expectEqual(kv + j * (512 * 576 * 2 + 512 * 128 * 2), x.lc);
+        try t.expectEqual(x.lc + 512 * 576 * 2, x.pk);
+    }
+    try t.expectEqual(kv + 78 * s.cacheBytes(), st.mtp_caches.lc);
+}
+
+test "cache shape: index keys stay in GLM-5.3-Flash's ring of index_ring rows, a rebase keeping whole pools" {
+    var d = Fake.driver();
+    var layers: [2]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    var st = try fixture(&d, &w, &layers);
+    defer st.deinit();
+    try t.expectEqual(@as(usize, state.index_ring), state.shapeOf(&w).keys);
+    try t.expectEqual(@as(usize, state.index_ring), st.ring_rows);
+    try t.expectEqual(@as(usize, 4), st.pool);
+}

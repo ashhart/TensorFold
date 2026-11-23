@@ -99,7 +99,7 @@ inline void k_loop_bf16(thread frag<float> (&acc)[TM][2], const device T* x, int
   Y[i] = bfloat16_t(total);
 }
 
-// Flash Next's causal prompt-chunk attention on the tensor units: 64 query rows a threadgroup, 32-key cache blocks, head size 256, 12 query heads a key head, fp32 online softmax; gate bf16(bf16(o) * bsig(gate)) on the way out. P: rows, keys (position + rows), position, cache rows.
+// Flash Next causal prompt attention: 64 rows/threadgroup, 32-key blocks, fp32 softmax. P: rows, keys, pos, cache.
 constant constexpr float a_masked = -3.402823466e+38f;
 inline float a_bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
 template <bool MAX>

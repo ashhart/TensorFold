@@ -13,6 +13,7 @@ pub const Result = struct {
     calls: ?[]V,
     reasoning_tokens: usize,
     rejected: bool = false,
+    open_think: bool = false, // the think channel was still open where the tokens end
 };
 const Tag = enum { message, think, response, tools, call, argument, json };
 const Header = struct { tag: Tag, attrs: *json.Object };
@@ -210,7 +211,7 @@ pub fn parse(a: A, text: mt.Text, ids: []const u32, thinking: bool, offered: []c
             try r.prose(ids[start..at]);
         }
     }
-    return .{ .content = r.content.items, .reasoning = r.thought.items, .calls = if (!r.rejected and r.calls.items.len > 0) r.calls.items else null, .reasoning_tokens = r.reasoning_tokens, .rejected = r.rejected };
+    return .{ .content = r.content.items, .reasoning = r.thought.items, .calls = if (!r.rejected and r.calls.items.len > 0) r.calls.items else null, .reasoning_tokens = r.reasoning_tokens, .rejected = r.rejected, .open_think = r.top() == .think };
 }
 
 fn literal(a: A, text: mt.Text, ids: []const u32) A.Error!Result {
@@ -328,6 +329,6 @@ pub const Stream = struct {
                 try s.prose(ids[start..s.at]);
             }
         }
-        return .{ .content = r.content.items, .reasoning = r.thought.items, .calls = if (!r.rejected and r.calls.items.len > 0) r.calls.items else null, .reasoning_tokens = r.reasoning_tokens, .rejected = r.rejected };
+        return .{ .content = r.content.items, .reasoning = r.thought.items, .calls = if (!r.rejected and r.calls.items.len > 0) r.calls.items else null, .reasoning_tokens = r.reasoning_tokens, .rejected = r.rejected, .open_think = r.top() == .think };
     }
 };

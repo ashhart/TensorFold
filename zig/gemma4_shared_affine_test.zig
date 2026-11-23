@@ -103,14 +103,20 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        // dda89ef49's bytes: 47afc1620..dda89ef49 reworded comments only, after cf10a6b7d's pinned edit
-        try std.testing.expectEqualStrings("c959eb1f5ac8a57049c09b3aad5d20f26b64f2e47d8b082c47ebbfae90d97a8b", &std.fmt.bytesToHex(hash, .lower));
+        // GLM's opt-in nonfinite raw MMA; Hy4's mapped experts and rounded SiLU stay behind caller defines
+        try std.testing.expectEqualStrings("7a3cd96f8415a55b441c1c3b77474f86e8284013c8154574d5b8b7afb7752ba8", &std.fmt.bytesToHex(hash, .lower));
+    }
+    {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(ks.core_affine_nonfinite, &hash, .{});
+        // GLM's raw g128 accumulator and 128-element nonfinite scan
+        try std.testing.expectEqualStrings("bb82cb52a977c1b3fb9d52eef2185904b8c97bb675884dd38b79172c4c0efe4a", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_lane_projection, &hash, .{});
-        // Packed affine lanes with producer sums and independent prompt row blocks.
-        try std.testing.expectEqualStrings("7befe2028dae5036541f311f230a02d5652e634450ef16dc66dce6e15e935277", &std.fmt.bytesToHex(hash, .lower));
+        // Packed affine lanes with producer sums, prompt row blocks, inline sums and the 8-bit reg layout.
+        try std.testing.expectEqualStrings("d921d9a938d3c4f1fe5a1c89ddfd135d96845055bee1721080ba82fef7a9f8e3", &std.fmt.bytesToHex(hash, .lower));
     }
 }
 test "released lane parameters and conservative scratch size" {

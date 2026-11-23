@@ -14,7 +14,7 @@ const dory = @import("dory");
 const qwen3 = @import("qwen3_cuda");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-pub const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("dots_mocr_cuda").native, @import("lfm2_moe_cuda").native };
+pub const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("dots_mocr_cuda").native, @import("muse_spark").native, @import("lfm2_moe_cuda").native };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 5]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats, .decision_formats = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{} };
@@ -64,4 +64,18 @@ test "capability audit: CUDA Qwen3.5 lists BF16 under decisions only, the MoE en
             try std.testing.expectEqualStrings("bf16", f.decision_formats[0]);
         } else try std.testing.expectEqual(@as(usize, 0), f.decision_formats.len);
     }
+}
+
+test "capability audit: dense Qwen3.5 lists the ModelOpt formats its loader reads" {
+    for (families) |f| if (std.mem.eql(u8, f.model_type, "qwen3_5")) {
+        var nvfp4 = false;
+        var mixed = false;
+        for (f.formats) |format| {
+            nvfp4 = nvfp4 or std.mem.eql(u8, format, "modelopt-nvfp4");
+            mixed = mixed or std.mem.eql(u8, format, "modelopt-mixed");
+        }
+        try std.testing.expect(nvfp4 and mixed);
+        return;
+    };
+    return error.NoQwen35Family;
 }

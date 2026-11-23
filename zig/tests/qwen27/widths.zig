@@ -297,6 +297,7 @@ const Gpu = struct {
         const e = cb.compute(.serial);
         var start: usize = 0;
         while (start + m <= wide) : (start += m) try g.kern.quant(e, lin, .{ .buffer = x, .offset = start * lin.k * 2 }, null, .{ .buffer = x }, .{ .buffer = y, .offset = start * n * 2 }, @intCast(m));
+        e.barrier();
         try commit(cb, e);
     }
 

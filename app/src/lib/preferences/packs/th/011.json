@@ -1,5 +1,5 @@
 {
-  "Use fixed community-v1 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "ใช้ข้อมูลทดสอบ community-v1 โค้ด/แชตคงที่ ห้าตัวอย่างต่อเซลล์ บันทึกค่าและจบงานในเครื่องก่อน โมเดลต้องอยู่ในแคชและยืนยันว่าเหมาะ Mac นี้",
+  "Use fixed community-v2 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "ใช้ข้อมูลทดสอบ community-v2 โค้ด/แชตคงที่ ห้าตัวอย่างต่อเซลล์ บันทึกค่าและจบงานในเครื่องก่อน โมเดลต้องอยู่ในแคชและยืนยันว่าเหมาะ Mac นี้",
   "Use gateway-qualified model ids such as": "ใช้ ID โมเดลที่ผ่านเกตเวย์ เช่น",
   "Use installed": "ใช้ที่ติดตั้ง",
   "Use light, dark, or match your system.": "ใช้สว่าง มืด หรือตามระบบ",

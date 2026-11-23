@@ -1,4 +1,4 @@
-// Flash Next prompt rows' sparse attention on the tensor units: the indexer's block scores, then each row's attention over its selected blocks and tail (or every key while the context is short).
+// Flash Next prompt sparse attention: indexer block scores, each row over selected blocks and tail (all keys if short).
 #include "../nax.h"
 using namespace tfp;
 
@@ -25,7 +25,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
 
 }  // namespace tfa
 
-// SC[r][b] = sum of relu(q_h . k_b) over the four query heads, in fp32, then / sqrt(128); the caller reads only each row's complete blocks.
+// SC[r][b] = fp32 sum of relu(q_h.k_b) over four query heads / sqrt(128); caller reads only complete blocks.
 [[kernel]] void tf_idx_scores_nax(const device bfloat* IQ [[buffer(0)]], const device bfloat* POOLED [[buffer(1)]],
     constant int2& P [[buffer(2)]], device float* SC [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
@@ -61,7 +61,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
   }
 }
 
-// Row r's attention for key head g: the 12 query heads that read it are the 16-row operand (4 zero rows), its keys in blocks of 32 read once for all 12; all four simdgroups sum the four dim-partials in identical order, so each keeps the same fp32 online softmax; the gate bf16(bf16(o) * bsig(gate)) on the way out. P: cache rows (the keys' row stride per head).
+// Row r, key head g: 12 query heads share a 16-row operand and 32-key blocks; fp32 softmax; gate. P: cache rows.
 [[kernel]] void tf_sattn_nax(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
     const device bfloat* V [[buffer(2)]], const device int* IDS [[buffer(3)]], const device int* NK [[buffer(4)]],
     const device int* SPARSE [[buffer(5)]], const device bfloat* GP [[buffer(6)]], const device float* F [[buffer(7)]],
@@ -195,7 +195,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
   }
 }
 
-// Peak probe: `iters` dependent-free 16x32x16 tensor ops on register fragments (4 independent accumulator pairs), then one write so the work is kept. P: iters.
+// Peak probe: iters dependent-free 16x32x16 tensor ops on fragments, then one write to keep the work. P: iters.
 [[kernel]] void tf_mma_peak(const device bfloat* X [[buffer(0)]], constant int& iters [[buffer(1)]],
     device float* Y [[buffer(2)]], uint lane [[thread_index_in_simdgroup]], uint gid [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]]) {

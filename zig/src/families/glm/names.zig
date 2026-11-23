@@ -42,7 +42,8 @@ pub fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, dir: []const u8, m
     if (f.size > st.index.max_bytes) return error.BadIndex;
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{ .allocate = .alloc_always });
     var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-    var it = (try st.index.weightMap(doc)).iterator();
+    const map = try st.index.weightMap(doc);
+    var it = map.iterator();
     while (it.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
     for (files.keys(), 0..) |name, si| {
         const full = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
@@ -61,6 +62,9 @@ pub fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, dir: []const u8, m
         const data = 8 + hlen;
         const entries = try st.parseHeaderPrefixes(arena, header, size - data, &.{ lm, "language_model.", "lm_head." });
         for (entries.keys(), entries.values()) |name_in_file, entry| {
+            // the index's shard only: a combined checkpoint's shards hold tensors it takes from elsewhere
+            const listed = map.get(name_in_file) orelse continue;
+            if (listed != .string or !std.mem.eql(u8, listed.string, name)) continue;
             var buf: [240]u8 = undefined;
             const tensor = (try original(&buf, name_in_file, mtp_layer)) orelse continue;
             const got = try names.getOrPut(arena, try arena.dupe(u8, tensor));

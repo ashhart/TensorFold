@@ -8,9 +8,8 @@ pub const mask_words = (c.vocab + 31) / 32;
 
 pub const value = lanes.sampling_row.value;
 
-/// The bounded top-k draw when it applies, else core's row draw (lanes.sampling_row) under the Qwen error names.
+/// Core's row draw (lanes.sampling_row, bounded top-k included) under the Qwen error names.
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
-    if (settings) |sampling| if (try @import("draw_topk.zig").draw(logits, sampling, position, mask)) |token| return token;
     return lanes.sampling_row.draw(gpa, logits, settings, position, mask) catch |e| switch (e) {
         error.NonfiniteLogits => error.NonfiniteQwenLogits,
         error.NoAllowedToken => error.NoAllowedQwenToken,

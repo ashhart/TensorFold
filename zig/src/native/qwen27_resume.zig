@@ -2,6 +2,10 @@
 const std = @import("std");
 const modes = @import("engine_api").cache_modes;
 const pc = @import("engine_api").prompt_cache;
+/// A stream with no separate salt identity may use standing slot state.
+pub fn unsalted(salt: ?u64) bool {
+    return salt == null;
+}
 
 /// Where a prompt resumes in slot 0: where the slot stands (`here`), back at its rewind point (`back`), or not.
 pub const Resume = union(enum) { none, here: u32, back: u32 };
@@ -45,6 +49,12 @@ pub const Leaving = struct {
     }
 };
 
+/// Cancellation may retain landed prompt state, or rewind advanced recurrence to a completed history cut.
+pub fn cancelPoint(at: u32, filled: u32, rewind: u32) u32 {
+    if (at <= filled) return at;
+    return if (rewind > 0 and rewind <= filled) rewind else 0;
+}
+
 /// The tokens slot 0 stands after, their rows' canonical decoded spans, and a rewind point inside them.
 pub const Standing = struct {
     tokens: []u32 = &.{},
@@ -74,9 +84,14 @@ pub const Standing = struct {
 
     /// What stream `s` leaves in slot 0 at `at` (`stands`: the slot and its drafter stand there, nothing failed).
     pub fn left(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, stands: bool) void {
+        st.leftLanded(gpa, s, at, s.fill_at.load(.monotonic), stands);
+    }
+
+    /// As `left`, with the prompt rows the pass landed (`landed`): a rewound cancelled pass leaves its cut there.
+    pub fn leftLanded(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, landed: u32, stands: bool) void {
         if (!stands or !plain(s)) return st.deinit(gpa);
         const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
-        const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended, .remote = leftRemote(s) };
+        const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended, .remote = leftRemote(s) };
         st.leave(gpa, l, s.context.items, s.decode_spans);
     }
 
@@ -156,22 +171,14 @@ pub fn needsRewind(cache: u64, snapshot: u64) bool {
     return cache < snapshot +| snapshot;
 }
 
-/// Only the actual user-end state gets an optional pin, without taking room from required states or promises.
+/// Only the actual user-end state gets an optional pin, without displacing another state or a promise.
 pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: u32, at: u32) bool {
     if (entry.at != history) return false;
-    var bytes = entry.bytes +| store.family.vtable.bytes(store.family.ptr, at);
-    var slots: usize = 2;
+    var bytes = store.held +| store.family.vtable.bytes(store.family.ptr, at);
+    var slots = store.entries.items.len +| 1;
     if (store.reservation_guard) |g| {
         bytes +|= g.promised.bytes;
         slots +|= g.promised.slots;
-    }
-    for (store.entries.items) |other| {
-        if (other == entry) continue;
-        const protected = if (store.reservation_guard) |g| g.protects(store, other) else false;
-        // With own-only eviction, conservatively leave every other state in place.
-        if (other.borrowers == 0 and !protected and !store.keep_others) continue;
-        bytes +|= other.bytes;
-        slots +|= 1;
     }
     return bytes <= store.budget and slots <= store.most;
 }
@@ -465,6 +472,7 @@ test "qwen27 resume: a client dropping the reasoning, a cold turn or a pass that
 test {
     _ = @import("qwen27_resume_remote_test.zig");
     _ = @import("qwen27_resume_cache_test.zig");
+    _ = @import("qwen27_cancel_test.zig");
 }
 
 test "qwen27 resume: the history rewind is needed until two rounded full-context states fit" {
@@ -477,4 +485,9 @@ test "qwen27 resume: the history rewind is needed until two rounded full-context
     try t.expectEqual(@as(usize, 34078), rewindEnd(33792, 34083, 34078));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 0));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 33792));
+}
+
+test "qwen27 resume: a salted stream never uses standing slot state" {
+    try t.expect(unsalted(null));
+    try t.expect(!unsalted(1));
 }

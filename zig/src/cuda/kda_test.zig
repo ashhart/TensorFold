@@ -63,6 +63,7 @@ test "shared KDA: fused, wide, cuts and layered replay preserve every predecesso
     Capture.symbols = 0;
     const ks = try kda.Kernels.load(.{ .d = &d, .handle = null });
     try std.testing.expectEqual(@as(usize, 6), Capture.symbols);
+    try std.testing.expect(!ks.pdl); // a default load launches plain (cuLaunchKernel, as captured below)
     const prev = cast(old.Kernels, ks);
     const s: kda.Saves = .{ .out = 0x100000001, .state_out = 0x200000002, .k = 0x300000003, .v = 0x400000004, .g = 0x500000005, .b = 0x600000006 };
     const w: kda.Wide = .{ .q = 0x700000007, .y = 0x800000008 };

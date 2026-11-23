@@ -128,7 +128,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image_steps.decoderProblem } else null;
+    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .image_share = v.image_share, .explain = g.image_steps.decoderProblem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .decode_share = o.decode_share, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
     h.cache = null;
     try enableCache(h, a, o, served, @intCast(window), problem);
@@ -171,7 +171,8 @@ const Snaps = struct {
 
 /// Prompt reuse in what 70% of RAM leaves beside the streams' caches (16 GiB by default), at planned chunk starts.
 fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window: usize, problem: *[]const u8) !void {
-    const later = @as(u64, @max(served, 2)) * g.state.cacheBytes(h.model.config.geo, window);
+    // the default stays the size it had while the linears' shard bytes were resident: no default cell gets slower
+    const later = reserved(@as(u64, @max(served, 2)) * g.state.cacheBytes(h.model.config.geo, window), h.model.released(), o.prompt_cache_gib);
     const room = h.model.device.maxWorkingSet() -| h.model.device.allocated() -| (8 << 30) -| later;
     var why: []const u8 = "";
     const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, room, later, a, &why, "") catch |err| switch (err) {
@@ -188,6 +189,25 @@ fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window:
     h.host.cache = &h.cache.?;
     h.host.info_.prompt_cache = true;
     h.host.info_.prompt_cache_plan = plan;
+}
+
+/// Memory the budget counts beside the load: the streams' caches, and for the default the bytes this load released.
+fn reserved(streams: u64, released: u64, gib: ?f64) u64 {
+    return streams + if (gib == null) released else 0;
+}
+
+test "the default prompt-cache budget counts the released bytes as still held; an explicit budget is unchanged" {
+    const GiB: u64 = 1 << 30;
+    const cap: u64 = 36 * GiB / 100 * cache_fit.SHARE_PERCENT; // a 36 GB Mac
+    const streams = 2 * GiB + GiB / 2;
+    const released = 11 * GiB + GiB / 3; // the 12B 4-bit's shard span and row copies
+    const now = 7 * GiB + GiB / 2; // the footprint once loaded, without them
+    const before = try cache_fit.fitUnderDefault(cap, now + released + streams, null, false, null);
+    const after = try cache_fit.fitUnderDefault(cap, now + reserved(streams, released, null), null, false, null);
+    try std.testing.expectEqual(before.budget, after.budget);
+    try std.testing.expect(after.budget < (try cache_fit.fitUnderDefault(cap, now + streams, null, false, null)).budget);
+    try std.testing.expectEqual(streams, reserved(streams, released, 4));
+    try std.testing.expectEqual(streams, reserved(streams, released, 0));
 }
 
 /// Info.vision's prepare (on the HTTP thread); the template writes <|image|> alone: the server adds boi and eoi.

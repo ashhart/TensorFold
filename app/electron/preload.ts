@@ -33,6 +33,7 @@ import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } fro
 import type { TensorFoldStudioApi as StudioApiContract } from '../shared/studio-api'
 import type { ComposerDraftScope, ComposerDraftWrite } from '../shared/composer-drafts'
 import type { ThreadMessageEditInput } from '../shared/thread-message-edit'
+import type { ModelReadinessRequest } from '../shared/model-readiness'
 import type { AttachmentTextRequest } from './agent/types'
 
 const api = {
@@ -197,7 +198,7 @@ const api = {
 
   fetchModels: (provider: Provider): Promise<string[]> => ipcRenderer.invoke('provider:models', provider),
   testProviderResponse: (input: { provider: Provider; model: string }): Promise<ProviderGenerationProbe> => ipcRenderer.invoke('provider:testResponse', input),
-  getModelReadiness: (input: { providerId?: string | null; accountId?: string | null; model?: string | null }): Promise<Readiness> => ipcRenderer.invoke('provider:readiness', input),
+  getModelReadiness: (input: ModelReadinessRequest): Promise<Readiness> => ipcRenderer.invoke('provider:readiness', input),
   loginCliProvider: (input: { providerId: string; accountId?: string | null }): Promise<CliLoginResult> => ipcRenderer.invoke('cliAuth:login', input),
   cancelCliLogin: (providerId: string): Promise<{ cancelled: boolean }> => ipcRenderer.invoke('cliAuth:cancelLogin', providerId),
   checkCliTransport: (input: { transport: 'codex-cli' | 'claude-cli'; cliPath?: string }): Promise<{ loggedIn: boolean; binaryPresent: boolean; detail?: string; message?: string }> => ipcRenderer.invoke('cliAuth:checkTransport', input),
