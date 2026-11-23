@@ -192,6 +192,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.reached = 0;
     job.cache_promise = .{};
     job.entry = null; // looked up again at its next admission
+    job.lent = null;
     h.gpa.free(job.marks);
     job.marks = &.{};
     h.gpa.free(job.key);

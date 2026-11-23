@@ -20,12 +20,28 @@ const Box = struct {
     }
 };
 
+/// Two prompts with kept states (a, b) and one without (miss), shorter than b past b's kept rows.
+const pa = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+const pb: [40]u32 = blk: { // long past its kept state: the shorter miss fills first
+    var x: [40]u32 = undefined;
+    for (&x, 21..) |*v, i| v.* = @intCast(i);
+    break :blk x;
+};
+const miss = [_]u32{ 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52 };
+
+/// What the passes' first calls saw.
+const Seen = struct {
+    firsts: usize = 0,
+    resumed: usize = 0,
+    beside: u32 = 0, // the most borrowers another prompt's kept state had while a pass made its first call
+    filling: usize = 0, // admitted fills when the first of the first calls ran
+};
+
 const Snaps = struct {
     f: *lanes.fake.Fake,
     store: *pc.Store = undefined,
-    prompts: [2][]const u32,
-    beside: u32 = 0, // the most borrowers the other prompt's entry had while a pass made its first call
-    firsts: usize = 0,
+    host: ?*api.LaneHost = null,
+    seen: Seen = .{},
     fn of(ctx: *anyopaque) *Snaps {
         return @ptrCast(@alignCast(ctx));
     }
@@ -41,14 +57,19 @@ const Snaps = struct {
     fn drop(ctx: *anyopaque, saved: pc.Saved) void {
         of(ctx).f.drop(saved);
     }
-    /// A pass's first call, where a backend opens its cache and makes room: the other prompt's entry must be free.
+    /// A pass's first call, where a backend opens its cache and makes room: no other kept state may be pinned.
     fn hook(ctx: *anyopaque, s: *lanes.Stream, filled: usize) void {
         const x = of(ctx);
-        if (filled != 0 or s.reuse.saved == null) return;
-        s.cached = s.reuse.at;
-        x.firsts += 1;
-        const other = if (std.mem.eql(u32, s.prompt()[0..4], x.prompts[0][0..4])) x.prompts[1] else x.prompts[0];
-        if (x.store.find(other, &.{}, &.{})) |e| x.beside = @max(x.beside, e.borrowers);
+        if (filled != 0) return;
+        if (x.seen.firsts == 0) x.seen.filling = x.host.?.filling.items.len;
+        x.seen.firsts += 1;
+        if (s.reuse.saved != null) {
+            s.cached = s.reuse.at; // the backend restores in its first call
+            x.seen.resumed += 1;
+        }
+        for ([_][]const u32{ &pa, &pb }) |other| if (!std.mem.eql(u32, s.prompt()[0..4], other[0..4])) {
+            if (x.store.find(other, &.{}, &.{})) |e| x.seen.beside = @max(x.seen.beside, e.borrowers);
+        };
     }
 };
 
@@ -58,7 +79,8 @@ fn host(core: *lanes.Engine, store: *pc.Store, n: u32) api.LaneHost {
     return h;
 }
 
-test "streams admitted together hold no kept state borrowed while another's first call makes room" {
+/// `a` and `b` kept one at a time, then `queued` submitted together before a two-lane host starts.
+fn run(queued: []const []const u32) !Seen {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 4 };
@@ -66,31 +88,76 @@ test "streams admitted together hold no kept state borrowed while another's firs
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
     defer core.deinit();
-    const pa = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-    const pb = [_]u32{ 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32 };
-    var snaps: Snaps = .{ .f = &target, .prompts = .{ &pa, &pb } };
+    var snaps: Snaps = .{ .f = &target };
     var store = pc.Store.init(a, .{ .ptr = &snaps, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_prompt = 0 }, 1000);
     defer store.deinit();
     snaps.store = &store;
-    const reqs = [2]api.Request{ .{ .prompt = &pa, .max_tokens = 2, .history_len = 8 }, .{ .prompt = &pb, .max_tokens = 2, .history_len = 8 } };
-    { // each prompt's state kept, one at a time
+    {
         var h = host(&core, &store, 1);
         try h.start();
         defer h.stop();
-        for (&reqs, 1..) |*r, id| {
+        for ([_][]const u32{ &pa, &pb }, 1..) |p, id| {
+            const r: api.Request = .{ .prompt = p, .max_tokens = 2, .history_len = 8 };
             var box: Box = .{};
-            try h.engine().submit(id, r, .{ .ctx = &box, .event = Box.event });
+            try h.engine().submit(id, &r, .{ .ctx = &box, .event = Box.event });
             try box.wait();
         }
     }
     target.prefill_hook = Snaps.hook;
     target.prefill_hook_ctx = &snaps;
     var h = host(&core, &store, 2);
+    snaps.host = &h;
+    var reqs: [2]api.Request = undefined;
     var boxes: [2]Box = .{ .{}, .{} };
-    for (&reqs, &boxes, 3..) |*r, *box, id| try h.engine().submit(id, r, .{ .ctx = box, .event = Box.event }); // both queued at once
+    for (queued, reqs[0..queued.len], boxes[0..queued.len], 3..) |p, *r, *box, id| {
+        r.* = .{ .prompt = p, .max_tokens = 2, .history_len = 8 };
+        try h.engine().submit(id, r, .{ .ctx = box, .event = Box.event }); // queued before the host starts
+    }
     try h.start();
     defer h.stop();
-    for (&boxes) |*box| try box.wait();
-    try std.testing.expectEqual(@as(usize, 2), snaps.firsts); // both resumed their kept states
-    try std.testing.expectEqual(@as(u32, 0), snaps.beside); // the other's entry was not pinned beside either first call
+    for (boxes[0..queued.len]) |*box| try box.wait();
+    return snaps.seen;
+}
+
+test "streams admitted together hold no kept state borrowed while another's first call makes room" {
+    const seen = try run(&.{ &pa, &pb });
+    try std.testing.expectEqual(@as(usize, 2), seen.resumed); // both resumed their kept states, borrowed again at their calls
+    try std.testing.expectEqual(@as(u32, 0), seen.beside);
+}
+
+test "a cache miss queued ahead of a hit opens with the hit's kept state unpinned" {
+    const seen = try run(&.{ &miss, &pb });
+    try std.testing.expectEqual(@as(usize, 2), seen.firsts);
+    try std.testing.expectEqual(@as(usize, 1), seen.resumed); // the hit still resumes
+    try std.testing.expectEqual(@as(u32, 0), seen.beside); // the old admission hold let the miss admit the hit borrowed beside it
+}
+
+test "a prompt queued behind a hit not yet begun is admitted with it: no new admission wait" {
+    const seen = try run(&.{ &pb, &miss });
+    try std.testing.expectEqual(@as(usize, 2), seen.filling); // both admitted before either's first call, as on main
+    try std.testing.expectEqual(@as(u32, 0), seen.beside);
+}
+
+test "the store borrows an entry again by its serial, and not once it has expired" {
+    var target: lanes.fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var snaps: Snaps = .{ .f = &target };
+    var store = pc.Store.init(a, .{ .ptr = &snaps, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_prompt = 0 }, 1000);
+    defer store.deinit();
+    var x: u8 = 0;
+    const e = try a.create(pc.Entry);
+    e.* = .{ .tokens = try a.dupe(u32, &pa), .at = 8, .saved = &x, .bytes = 1, .born = 12, .used = 0, .last = &.{}, .serial = 7 };
+    try store.entries.append(a, e);
+    defer {
+        a.free(e.tokens);
+        a.destroy(e);
+        store.entries.clearRetainingCapacity();
+    }
+    try std.testing.expect(store.reborrow(8) == null); // no entry has that serial
+    try std.testing.expectEqual(e, store.reborrow(7).?);
+    try std.testing.expectEqual(@as(u32, 1), e.borrowers);
+    e.borrowers = 0;
+    e.expired = true; // gone from lookups: a lent job fills from the start instead
+    try std.testing.expect(store.reborrow(7) == null);
+    try std.testing.expectEqual(@as(u32, 0), e.borrowers);
 }

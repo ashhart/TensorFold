@@ -214,6 +214,7 @@ fn fillAt(h: *LaneHost, at: usize) void {
     // the trace's line, from what the job holds before the call can end it; written last, after any completion
     var line: lane_trace.Event = if (h.trace) |t| .fill(t, job.id, job.seq, if (first) job.stream.cached else job.stream.fill_at.load(.monotonic)) else undefined;
     defer if (h.trace) |t| t.end(&line);
+    if (first) job.reborrow(); // its kept state, lent since admission, borrowed for the call that restores it
     job.fill_began = true;
     load.calling(h, job);
     const cap = capRows(h, remaining(h, job)); // the engine's default caps only past the threshold rows
