@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH=1` (opt-in) captures the greedy verify round's argmax in the target graph, skips the token download greedy rounds never read and uploads per-forward metadata from pinned memory; same kernel and inputs, so tokens are unchanged (#4616).
+
 - Nemotron on CUDA: a new prompt is filled a chunk at a time between other streams' decode rounds, so a long prompt no longer stalls replies already streaming; tokens unchanged.
 
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
