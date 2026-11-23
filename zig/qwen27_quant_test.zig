@@ -338,24 +338,31 @@ test "qwen27 quant: mixed raw columns remain unordered until the caller barrier"
 }
 
 test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only its grid" {
+    const glue = @import("core_delta");
+    defer glue.flat_glue = true;
     var r: mtl.Record = .{};
     var k = quant.Kernels{ .allocator = a, .device = r.device(), .raw_tiles = false };
     defer k.deinit();
     const ref = quant.Ref{ .buffer = r.virtual() };
-    for ([_]bool{ false, true, false }) |units| {
-        r.tensor_units = units;
-        for ([_]u32{ 1, 7, 16, 17 }) |rows| {
-            r.count = 0;
-            try k.norm(r.encoder(), ref, null, ref, ref, ref, ref, ref, ref, 512, rows);
-            try k.norm(r.encoder(), ref, ref, ref, ref, ref, ref, ref, ref, 512, rows);
-            try k.mlp(r.encoder(), ref, ref, ref, ref, ref, 1024, rows);
-            try t.expectEqual(@as(usize, 3), r.count);
-            for (r.launches[0..r.count]) |l| {
-                try t.expectEqual(@as(?bool, units), l.xs);
-                try t.expectEqual(@as(usize, if (units) quant.padded(rows) else rows), l.grid.height);
+    // The flat glue's row-side MLP takes 16 rows a threadgroup, so its grid is padded rows over 16 on every chip.
+    for ([_]bool{ false, true }) |flat| {
+        glue.flat_glue = flat;
+        for ([_]bool{ false, true, false }) |units| {
+            r.tensor_units = units;
+            for ([_]u32{ 1, 7, 16, 17 }) |rows| {
+                r.count = 0;
+                try k.norm(r.encoder(), ref, null, ref, ref, ref, ref, ref, ref, 512, rows);
+                try k.norm(r.encoder(), ref, ref, ref, ref, ref, ref, ref, ref, 512, rows);
+                try k.mlp(r.encoder(), ref, ref, ref, ref, ref, 1024, rows);
+                try t.expectEqual(@as(usize, 3), r.count);
+                for (r.launches[0..r.count], 0..) |l, i| {
+                    try t.expectEqual(@as(?bool, units), l.xs);
+                    const height: usize = if (flat and i == 2) quant.padded(rows) / 16 else if (units) quant.padded(rows) else rows;
+                    try t.expectEqual(height, l.grid.height);
+                }
             }
         }
     }
-    try t.expectEqual(@as(u32, 6), k.cache.count());
-    try t.expectEqual(@as(usize, 6), r.libraries);
+    try t.expectEqual(@as(u32, 8), k.cache.count());
+    try t.expectEqual(@as(usize, 8), r.libraries);
 }

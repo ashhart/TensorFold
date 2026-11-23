@@ -30,6 +30,12 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
 }
+/// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
+pub fn setFlatGlue(on: bool) void {
+    @import("core_delta").flat_glue = on;
+    @import("core").tree_round_gpu.chunked_picks = on;
+}
+
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
 pub const Runner = struct {
@@ -93,6 +99,7 @@ pub const Runner = struct {
     }
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool) !Runner {
+        setFlatGlue(try @import("sys").environment.read(bool, "TF_Q27_FLAT_GLUE", @import("core_delta").flat_glue));
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -450,25 +457,21 @@ pub const Runner = struct {
             },
         };
     }
-
     pub fn completeDeviceKeep(r: *Runner, round: *const Round, path: []const u32) !void {
         const active = r.active orelse return error.RoundNotReady;
         if (r.failed or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
         r.offsets[round.slots[0]] = (try round.windows[0].keep(path)).length;
         r.active = null;
     }
-
     /// After a GPU failure, once no stream holds a slot: rounds run again, each slot reset by its next prompt.
     pub fn recover(r: *Runner) void {
         r.failed = false;
         r.active = null;
     }
-
     /// An idle or newly lone host may drop scratch only after the previous verify has been kept.
     pub fn trimBefore(r: *Runner) void {
         if (r.active == null) r.gdn.releaseBefore();
     }
-
     /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
     pub fn settleSlot(r: *Runner, slot: u32) void {
         const cb = r.reading[slot] orelse return;
@@ -476,7 +479,6 @@ pub const Runner = struct {
         cb.wait();
         cb.release();
     }
-
     /// `cb` reads `slot` (committed, not waited): the slot's next write settles it first.
     pub fn readingSlot(r: *Runner, slot: u32, cb: mtl.CommandBuffer) void {
         r.settleSlot(slot);
@@ -508,7 +510,7 @@ pub const Runner = struct {
 
     fn metadata(r: *Runner) @import("gdn_pool_gpu.zig").Metadata {
         const f = &r.model.frame;
-        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps) };
+        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps), .flows = f.get(.flows) };
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
@@ -564,14 +566,12 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
-
 fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
     const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
     const key = try allocation(a, m.device, owned, bytes);
     const value = try allocation(a, m.device, owned, bytes);
     return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
 }
-
 fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
     const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(a, b) catch |err| {
