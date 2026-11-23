@@ -5,6 +5,7 @@ const registry = @import("checkpoint_cli").start;
 const machine_mod = @import("sys").machine;
 const fake = @import("benchmark_fake.zig");
 const stop = @import("benchmark_stop.zig");
+const stream = @import("benchmark_stream.zig");
 const Allocator = std.mem.Allocator;
 
 const revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -306,7 +307,7 @@ test "start CLI: persistent mode requires an environment credential before model
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
 }
 
-test "start CLI: persistent caller credential reaches child env and HTTP without leaking" {
+test "start CLI: persistent caller keys preserve the child list and send only the first key" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -314,7 +315,9 @@ test "start CLI: persistent caller credential reaches child env and HTTP without
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
     const caller_key = "fixture-persistent-caller-key";
-    try r.env.put("TENSORFOLD_API_KEY", caller_key);
+    const second_key = "fixture-second-caller-key";
+    const key_list = " , " ++ caller_key ++ "," ++ second_key;
+    try r.env.put("TENSORFOLD_API_KEY", key_list);
     try r.env.put("START_TEST_UNRELATED", "caller-value-retained");
     try r.env.put("START_TEST_SHORT_LIVED", "1");
     try r.cache();
@@ -322,18 +325,26 @@ test "start CLI: persistent caller credential reaches child env and HTTP without
     const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
     defer f.stop();
     try r.standIn(f.port);
+
+    var client: std.http.Client = .{ .allocator = a, .io = std.testing.io };
+    defer client.deinit();
+    const unauthenticated = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 4096, .timeout_s = 1, .token = null });
+    try std.testing.expectEqual(.none, unauthenticated.failed);
+    try std.testing.expectEqual(@as(u16, 401), unauthenticated.status);
+
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
     try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "the model server exited after its successful first reply") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Serving Model at") != null);
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
     try std.testing.expect(r.childGone());
     const child_key = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("child-key"), a, .limited(256));
-    try std.testing.expect(std.mem.eql(u8, child_key, caller_key));
+    try std.testing.expectEqualStrings(key_list, child_key);
     const unrelated = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("unrelated"), a, .limited(256));
     try std.testing.expect(std.mem.eql(u8, unrelated, "caller-value-retained"));
     const bearer = try std.fmt.allocPrint(a, "Bearer {s}", .{caller_key});
     try std.testing.expect(f.count() > 0 and std.mem.eql(u8, f.header(f.count() - 1, "authorization") orelse "", bearer));
-    try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    try std.testing.expectEqual(@as(usize, 1), f.refusals());
     const args = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("args"), a, .limited(4096));
-    for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, caller_key) == null);
+    for ([_][]const u8{ caller_key, second_key, key_list }) |secret|
+        for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }

@@ -37,8 +37,10 @@ pub const Options = struct {
     lock: bool = true,
     /// The child in a process group of its own, so a terminal's Ctrl-C reaches only this process.
     own_group: bool = false,
-    /// The child's only API key: TENSORFOLD_API_KEY in its environment and the probes' bearer (none for a benchmark).
+    /// The probes' bearer; normally also the child's only API key (none for a benchmark).
     key: ?[]const u8 = null,
+    /// The complete caller credential list for the child environment when it differs from ``key``.
+    environment_key: ?[]const u8 = null,
     words: Words = .{},
 };
 
@@ -155,7 +157,7 @@ pub const Managed = struct {
         io.random(&rand);
         const log_path = try std.fmt.allocPrint(a, "{s}/.serve-{s}.log", .{ o.bench_dir, std.fmt.bytesToHex(rand, .lower) });
         var child_env = try environ(a, env);
-        if (o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
+        if (o.environment_key orelse o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
         const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return null else null;
         const cwd = std.Io.Dir.cwd();
         const log = cwd.createFile(io, log_path, .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch {
