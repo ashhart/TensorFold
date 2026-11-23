@@ -28,7 +28,10 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
     const key = if (lead) lanes.cost_cache.key(gpa, io, &parts) catch null else null;
     var kept = if (key) |k| lanes.cost_cache.load(Costs, gpa, io, k) else null;
     if (kept) |table| for (table.window, 0..) |w, i| {
-        if (w.width != i + 1 or !(w.ms > 0) or !std.math.isFinite(w.ms)) { kept = null; break; }
+        if (w.width != i + 1 or !(w.ms > 0) or !std.math.isFinite(w.ms)) {
+            kept = null;
+            break;
+        }
     };
     const cold = try e.agree(kept == null); // the leader decides whether both ranks measure or heal
     var scratch: Scratch = .{ .sl = sl, .io = io };
@@ -39,7 +42,9 @@ pub fn measure(sl: *Slots, gpa: std.mem.Allocator, io: std.Io) !?Costs {
         var values: [st.max_rows]f64 = @splat(0);
         var widths: [st.max_rows]u32 = undefined;
         for (&widths, 0..) |*w, i| w.* = @intCast(i + 1);
-        if (lead) for (costs.window, &values) |w, *m| { m.* = w.ms; };
+        if (lead) for (costs.window, &values) |w, *m| {
+            m.* = w.ms;
+        };
         const cursor_key = if (key) |k| lanes.cost_cache.buildKey(&k, &.{"metal-heal-v1"}) else null;
         var cursor: u64 = if (cursor_key) |k| lanes.cost_cache.load(u64, gpa, io, k) orelse 0 else 0;
         _ = try cost_rule.warm_prices.synced(WindowTimer{ .s = &scratch }, &values, &widths, &cursor, Agree{ .slots = sl }, lead);
@@ -202,6 +207,6 @@ test "the table holds every width and a head level's ms from the two chains" {
     try std.testing.expectEqual(@as(u32, 16), c.window[15].width);
     try std.testing.expectEqual(@as(f64, 55), c.window[15].ms);
     try std.testing.expectEqual(@as(f64, 0.5), c.head_ms);
-    try std.testing.expect(dipped(&.{ 10, 13, 12.5, 16 }));
-    try std.testing.expect(!dipped(&.{ 10, 13, 12.7, 16 }));
+    try std.testing.expect(cost_rule.repairAt(&.{ 10, 13, 12.5, 16 }, 2));
+    try std.testing.expect(!cost_rule.repairAt(&.{ 10, 13, 12.7, 16 }, 2));
 }

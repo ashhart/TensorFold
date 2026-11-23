@@ -3,7 +3,9 @@ const std = @import("std");
 pub const budget_ms: f64 = 200;
 pub const Stats = struct { reads: u32 = 0, ms: f64 = 0, lowered: u32 = 0 };
 pub const Local = struct {
-    pub fn decide(_: @This(), mine: bool) !bool { return mine; }
+    pub fn decide(_: @This(), mine: bool) !bool {
+        return mine;
+    }
 };
 
 pub fn valid(ms: []const f64, widths: []const u32) bool {
@@ -20,7 +22,10 @@ const Plan = struct {
     n: usize = 0,
     fn add(p: *Plan, i: usize) void {
         for (p.at[0..p.n]) |old| if (old == i) return;
-        if (p.n < p.at.len) { p.at[p.n] = i; p.n += 1; }
+        if (p.n < p.at.len) {
+            p.at[p.n] = i;
+            p.n += 1;
+        }
     }
 };
 
@@ -29,7 +34,10 @@ fn plan(widths: []const u32, cursor: u64) Plan {
     p.add(@intCast(cursor % widths.len)); // progress gets the first share of the time budget
     const tile = 16 * (1 + cursor % 3);
     var edge = widths.len - 1;
-    for (widths, 0..) |w, i| if (w >= tile) { edge = i; break; };
+    for (widths, 0..) |w, i| if (w >= tile) {
+        edge = i;
+        break;
+    };
     p.add(edge);
     if (edge > 0) p.add(edge - 1);
     return p;
