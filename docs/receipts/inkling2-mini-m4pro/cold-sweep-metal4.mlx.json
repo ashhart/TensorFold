@@ -1,0 +1,41 @@
+{
+ "label": "mlx",
+ "rows": [
+  {
+   "asked": 2048,
+   "rep": 0,
+   "prompt_tokens": 2048,
+   "cached_tokens": 0,
+   "first_token_s": 4.324,
+   "prefill_tps": 473.7,
+   "body_bytes": 12850
+  },
+  {
+   "asked": 8192,
+   "rep": 0,
+   "prompt_tokens": 8192,
+   "cached_tokens": 0,
+   "first_token_s": 17.035,
+   "prefill_tps": 480.9,
+   "body_bytes": 51634
+  },
+  {
+   "asked": 32768,
+   "rep": 0,
+   "prompt_tokens": 32768,
+   "cached_tokens": 0,
+   "first_token_s": 75.551,
+   "prefill_tps": 433.7,
+   "body_bytes": 207020
+  },
+  {
+   "asked": 65536,
+   "rep": 0,
+   "prompt_tokens": 65536,
+   "cached_tokens": 0,
+   "first_token_s": 169.7,
+   "prefill_tps": 386.2,
+   "body_bytes": 413653
+  }
+ ]
+}

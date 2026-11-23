@@ -112,6 +112,17 @@ Cold first token (seconds, tokens a second in brackets):
 | 32,768 | 81.74 (401) | 108.27 (303) |
 | 65,536 | 180.27 (364) | 249.21 (263) |
 
+The same sweep on the head `4418225fb6` (the dense prompt tile and the Metal 4 prompt queue in), on a quiet machine (load
+average 2 to 3; native then MLX, one fresh server each, one run per size, so not interleaved; the MLX column is also
+faster than in the table above, and the cause was not isolated; `cold-sweep-metal4.*` in the receipt):
+
+| Prompt tokens | MLX | Native | Native's rate over MLX's |
+| --- | --- | --- | --- |
+| 2,048 | 4.32 (474) | 5.18 (395) | 0.83 |
+| 8,192 | 17.04 (481) | 21.59 (380) | 0.79 |
+| 32,768 | 75.55 (434) | 97.05 (338) | 0.78 |
+| 65,536 | 169.70 (386) | 225.97 (290) | 0.75 |
+
 Decode after a cold prompt (one stream, plain, tokens a second and milliseconds a token; the mean inter-token latency of
 192 streamed tokens after the first few; MLX and native cells are each the mean of two fresh-server sessions in the order
 native, MLX, MLX, native, on two prompt sets; `57de097873`):
@@ -220,8 +231,8 @@ Plain and drafted greedy replies are identical. These token hashes (the server's
 
 Native plain decode is ahead of the reference at every depth measured, 1.24 to 1.30 times from 2,048 to 65,536 tokens
 (table above), and the drafter's decode is ahead of it at the two short prompts of the decode table; drafted decode was
-not measured at depth, nor concurrent streams at depth. Cold prefill is 0.72 to 0.87 of the reference's rate and falls
-more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,536). Not measured here: M1, M2, a 36 GB Mac, a quality
+not measured at depth, nor concurrent streams at depth. Cold prefill is 0.75 to 0.83 of the reference's rate on the latest
+quiet session (0.72 to 0.87 in the earlier one) and falls with the prompt's length (0.83 at 2,048 tokens, 0.75 at 65,536). Not measured here: M1, M2, a 36 GB Mac, a quality
 suite (benchmarks of task accuracy).
 
 Fidelity against MLX on the original checkpoint (`fidelity/` in the receipt; plain native server, `--no-drafts`, a binary
@@ -324,8 +335,8 @@ and passed there); the sampled-decode table at `61be67917f`; the host-test line 
 - A DSpark server refuses `--prompt-cache-gib`: the draft head keeps per-stream state a kept prompt state does not
   hold, so the served default with drafts never resumes a prompt. `--drafter` is refused (the head is the checkpoint's
   own), as are `--slide`, `--loops`, `--policy` and `--checkpoint-slots`.
-- Cold prefill is 0.72 to 0.87 of MLX's rate (the table predates the Metal 4 prompt queue, which took about 10 % off
-  the first token). The text path has no M5 tensor-unit kernel.
+- Cold prefill is 0.75 to 0.83 of MLX's rate (the latest quiet session, with the Metal 4 prompt queue; 0.72 to 0.87
+  before it). The text path has no M5 tensor-unit kernel.
 - Four drafted streams are within noise of plain, not faster; one stream is 15 to 22 % faster.
 - Admission by state bytes was tested on a 48 GiB Mac only; a 36 GB Mac (where an earlier head serialized four streams
   under memory pressure) has not run it.

@@ -1,0 +1,41 @@
+{
+ "label": "native-m4",
+ "rows": [
+  {
+   "asked": 2048,
+   "rep": 0,
+   "prompt_tokens": 2048,
+   "cached_tokens": 0,
+   "first_token_s": 5.184,
+   "prefill_tps": 395.1,
+   "body_bytes": 12838
+  },
+  {
+   "asked": 8192,
+   "rep": 0,
+   "prompt_tokens": 8192,
+   "cached_tokens": 0,
+   "first_token_s": 21.586,
+   "prefill_tps": 379.5,
+   "body_bytes": 51622
+  },
+  {
+   "asked": 32768,
+   "rep": 0,
+   "prompt_tokens": 32768,
+   "cached_tokens": 0,
+   "first_token_s": 97.049,
+   "prefill_tps": 337.6,
+   "body_bytes": 207008
+  },
+  {
+   "asked": 65536,
+   "rep": 0,
+   "prompt_tokens": 65536,
+   "cached_tokens": 0,
+   "first_token_s": 225.972,
+   "prefill_tps": 290.0,
+   "body_bytes": 413641
+  }
+ ]
+}

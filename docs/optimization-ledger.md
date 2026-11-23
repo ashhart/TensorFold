@@ -424,7 +424,7 @@ below; these are estimates for planning a port, not results.
 
     Inkling 2 Mini on Metal groups a prompt chunk's route pairs by expert from 64 rows up, decoding each expert's weights
     once a tile and summing on simdgroup matrix multiplies, and plans a drafted verify round's pairs (2 to 63 rows) by
-    expert in tiles of four; every pair keeps the one-row kernels' sums ([#4337]). Cold prompts reach 0.72 to 0.87 of MLX's
+    expert in tiles of four; every pair keeps the one-row kernels' sums ([#4337]). Cold prompts reach 0.75 to 0.83 of MLX's
     rate on an M4 Pro ([recipe](recipes/inkling-2-mini-metal.md#receipt-apple-m4-pro-48-gib)).
 
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
