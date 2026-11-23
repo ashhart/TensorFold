@@ -12,12 +12,17 @@ pub const rnn_width: u32 = 768;
 pub const intermediate: u32 = 9216;
 pub const vocab: u32 = 200058;
 pub const Ref = @import("inkling2_metal_ref").Ref;
-pub const PositionArgs = extern struct { base: u32 };
+pub const FuseArgs = extern struct { count: u32, stride_rows: u32 };
+pub const PositionArgs = extern struct { base: [8]u32 };
 pub const ContextArgs = extern struct { base: u32, rows: u32, ring: u32 };
-pub const AttentionArgs = extern struct { committed: u32, ring: u32, local: u32, from: u32 };
-pub const TokenArgs = extern struct { token: u32 };
+pub const AttentionArgs = extern struct { local: u32, streams: u32, committed: [8]u32, ring: [8]u32, from: [8]u32 };
+pub const KappaArgs = extern struct { rows: u32, stride_s: u32, row_off: u32, streams: u32 };
+pub const TokenArgs = extern struct { token: u32, step: u32, use_held: u32 };
+pub const ResidualArgs = extern struct { init: u32 };
 pub const CountArgs = extern struct { count: u32 };
 pub const BaseArgs = extern struct { rows: u32, vocab: u32 };
+pub const LogitsArgs = extern struct { count: u32, phi_stride: u32, base_stride: u32, streams: u32, step: u32, mode: u32, flags: u32 };
+pub const GroupStat = extern struct { m: f32, l: f32, best_v: f32, best_id: u32 };
 
 /// Round through binary32 and nearest-even BF16, returning an exactly representable FP64 value.
 pub fn roundBf16(v: anytype) f64 {
@@ -47,7 +52,6 @@ pub fn foldedLogit(base_value: f32, beta: f32, dot: f32) f64 {
     const logit: f32 = @floatCast(roundBf16(@as(f32, base_value + bias)));
     return roundBf16(@as(f32, 30.0) * std.math.tanh(logit / @as(f32, 30.0)));
 }
-pub const ResidualArgs = extern struct { init: u32 };
 
 pub const Kind = enum {
     init_rows,
@@ -77,6 +81,7 @@ pub const Kind = enum {
             .logits => "tf_ink2_dspark_logits",
         };
     }
+
     pub fn label(k: Kind) []const u8 {
         return switch (k) {
             inline else => |v| std.fmt.comptimePrint("metal inkling2 dspark {s} {s}", .{ @tagName(v), comptime v.symbol() }),
@@ -100,8 +105,12 @@ pub const Pipelines = struct {
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.inkling2_dspark);
     }
+
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        const prefix = "#define TF_SIMD_FRAGS 1\n";
+        const owned = if (device.tensorUnits()) null else try std.mem.concat(std.heap.page_allocator, u8, &.{ prefix, text });
+        defer if (owned) |buf| std.heap.page_allocator.free(buf);
+        const lib = try mtl.Library.fromSource(device, owned orelse text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var out: Pipelines = undefined;
         var loaded: usize = 0;
@@ -120,28 +129,10 @@ pub const Pipelines = struct {
         }
         return out;
     }
+
     pub fn deinit(p: *Pipelines) void {
         inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
         p.* = undefined;
-    }
-};
-
-/// The greedy chain's two kernels, outside `Pipelines`: its entries are the block's `Kind`s one for one.
-pub const Chain = struct {
-    step: mtl.Pipeline,
-    pick: mtl.Pipeline,
-
-    pub fn load(device: mtl.Device, text: []const u8) !Chain {
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
-        defer lib.deinit();
-        const step = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_step", false);
-        errdefer step.deinit();
-        return .{ .step = step, .pick = try mtl.Pipeline.init(device, lib, "tf_ink2_dspark_chain_pick", false) };
-    }
-    pub fn deinit(c: *Chain) void {
-        c.pick.deinit();
-        c.step.deinit();
-        c.* = undefined;
     }
 };
 
@@ -155,28 +146,32 @@ fn threads(e: mtl.ComputeEncoder, count: usize, width: usize) void {
     e.dispatchThreads(mtl.Size.of(count, 1, 1), mtl.Size.of(width, 1, 1));
 }
 
-/// Row zero copies the target's normalized anchor; the other seven rows copy the raw mask embedding.
-pub fn initializeRows(p: *const Pipelines, e: mtl.ComputeEncoder, anchor: Ref, mask_embed: Ref, out: Ref) void {
+/// Row zero of each stream copies its normalized anchor; rows 1..7 copy the raw mask embedding.
+pub fn initializeRows(p: *const Pipelines, e: mtl.ComputeEncoder, anchor: Ref, mask_embed: Ref, out: Ref, streams: u32) void {
+    std.debug.assert(streams > 0 and streams <= 8);
     e.setPipeline(p.init_rows);
     bind(e, &.{ anchor, mask_embed, out });
-    groups(e, block_rows, 256);
+    groups(e, @as(usize, streams) * block_rows, 256);
 }
 
-/// Input taps are [row][tap][H], output c is [fusion][row][H], and newest_f is one [H] row.
-pub fn fuseTaps(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, fuse_weight: Ref, norm_weight: Ref, c: Ref, newest_f: Ref, rows: u32) void {
-    std.debug.assert(rows > 0);
+/// Input taps are [row][tap][H], output c is [fusion][row_in_batch][H], and newest_f is one [H] row.
+pub fn fuseTaps(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, fuse_weight: Ref, norm_weight: Ref, c: Ref, newest_f: Ref, rows: u32, stride_rows: u32) void {
+    std.debug.assert(rows > 0 and stride_rows >= rows);
     e.setPipeline(p.fuse_taps);
     bind(e, &.{ taps, fuse_weight, norm_weight, c, newest_f });
-    e.setValue(CountArgs{ .count = rows }, 5);
+    e.setValue(FuseArgs{ .count = rows, .stride_rows = stride_rows }, 5);
     groups(e, 4 * @as(usize, rows), 256);
 }
 
-/// Raw projections become per-head RMS-normalized rotate-half Q/K and an unchanged BF16 V.
-pub fn blockQkv(p: *const Pipelines, e: mtl.ComputeEncoder, q_raw: Ref, k_raw: Ref, v_raw: Ref, q_norm: Ref, k_norm: Ref, q: Ref, k: Ref, v: Ref, base_position: u32) void {
+/// Raw projections become per-head RMS-normalized rotate-half Q/K and unchanged BF16 V across batched streams.
+pub fn blockQkv(p: *const Pipelines, e: mtl.ComputeEncoder, q_raw: Ref, k_raw: Ref, v_raw: Ref, q_norm: Ref, k_norm: Ref, q: Ref, k: Ref, v: Ref, bases: []const u32) void {
+    std.debug.assert(bases.len > 0 and bases.len <= 8);
+    var pos: PositionArgs = .{ .base = @splat(0) };
+    @memcpy(pos.base[0..bases.len], bases);
     e.setPipeline(p.block_qkv);
     bind(e, &.{ q_raw, k_raw, v_raw, q_norm, k_norm, q, k, v });
-    e.setValue(PositionArgs{ .base = base_position }, 8);
-    groups(e, 8 * 40, 128);
+    e.setValue(pos, 8);
+    groups(e, bases.len * 8 * 40, 128);
 }
 
 /// Context K/V is written at absolute-position modulo ring_capacity for committed rows only.
@@ -188,13 +183,26 @@ pub fn commitContext(p: *const Pipelines, e: mtl.ComputeEncoder, k_raw: Ref, v_r
     groups(e, @as(usize, rows) * 8, 128);
 }
 
-/// Scores is FP32 scratch sized 8*24*(retained_context+8); global layers retain all context.
-pub fn attend(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, block_k: Ref, block_v: Ref, context_k: Ref, context_v: Ref, scores: Ref, out: Ref, committed: u32, ring_capacity: u32, local: bool, from: u32) void {
-    std.debug.assert(ring_capacity > 0 and from <= committed);
+/// Online-softmax 768-thread attention across batched streams, with zero intermediate score scratch.
+pub fn attend(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, block_k: Ref, block_v: Ref, out: Ref, ctx_k: []const Ref, ctx_v: []const Ref, committed: []const u32, ring_capacity: []const u32, from: []const u32, local: bool) void {
+    const n = ctx_k.len;
+    std.debug.assert(n > 0 and n <= 8 and ctx_v.len == n and committed.len == n and ring_capacity.len == n and from.len == n);
     e.setPipeline(p.attention);
-    bind(e, &.{ q, block_k, block_v, context_k, context_v, scores, out });
-    e.setValue(AttentionArgs{ .committed = committed, .ring = ring_capacity, .local = @intFromBool(local), .from = from }, 7);
-    groups(e, 8 * 24, 128);
+    bind(e, &.{ q, block_k, block_v, out });
+    for (0..8) |i| {
+        const idx = if (i < n) i else 0;
+        e.setBuffer(ctx_k[idx].buf, ctx_k[idx].off, 4 + i);
+        e.setBuffer(ctx_v[idx].buf, ctx_v[idx].off, 12 + i);
+    }
+    var args: AttentionArgs = .{ .local = @intFromBool(local), .streams = @intCast(n), .committed = @splat(0), .ring = @splat(1), .from = @splat(0) };
+    for (0..n) |i| {
+        std.debug.assert(ring_capacity[i] > 0 and from[i] <= committed[i]);
+        args.committed[i] = committed[i];
+        args.ring[i] = ring_capacity[i];
+        args.from[i] = from[i];
+    }
+    e.setValue(args, 20);
+    e.dispatchGroups(mtl.Size.of(8, n, 1), mtl.Size.of(768, 1, 1));
 }
 
 /// Normalization consumes the FP32 residual sum, independently of the rounded BF16 residual store.
@@ -208,60 +216,61 @@ pub fn residualNorm(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, residual
 
 /// Gate and up projections are BF16 rows with 9216 entries; only this SwiGLU product is stored here.
 pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, gate: Ref, up: Ref, out: Ref, count: u32) void {
-    std.debug.assert(count == 8 * intermediate);
+    std.debug.assert(count > 0 and count % (8 * intermediate) == 0);
     e.setPipeline(p.swiglu);
     bind(e, &.{ gate, up, out });
     e.setValue(CountArgs{ .count = count }, 3);
     threads(e, count, 256);
 }
 
-/// Kappa is FP32 [rows][768], using RNN columns 512..2815 for y and 2816..5119 for newest_f.
-pub fn kappa(p: *const Pipelines, e: mtl.ComputeEncoder, y: Ref, newest_f: Ref, rnn_weight: Ref, rnn_bias: Ref, out: Ref, rows: u32) void {
-    std.debug.assert(rows > 0 and rows <= 7);
+/// Kappa is FP32 [rows][streams][768], reading transposed [2*H, 768] weights across streams.
+pub fn kappa(p: *const Pipelines, e: mtl.ComputeEncoder, y: Ref, newest_fs: []const Ref, rnn_kappa: Ref, rnn_bias: Ref, out: Ref, rows: u32, stride_s: u32, row_off: u32) void {
+    const n = newest_fs.len;
+    std.debug.assert(rows > 0 and rows <= 7 and n > 0 and n <= 8 and stride_s >= row_off + rows);
     e.setPipeline(p.kappa);
-    bind(e, &.{ y, newest_f, rnn_weight, rnn_bias, out });
-    e.setValue(CountArgs{ .count = rows }, 5);
-    threads(e, @as(usize, rows) * rnn_width, 256);
+    e.setBuffer(y.buf, y.off, 0);
+    for (0..8) |i| {
+        const f = newest_fs[if (i < n) i else 0];
+        e.setBuffer(f.buf, f.off, 1 + i);
+    }
+    e.setBuffer(rnn_kappa.buf, rnn_kappa.off, 9);
+    e.setBuffer(rnn_bias.buf, rnn_bias.off, 10);
+    e.setBuffer(out.buf, out.off, 11);
+    e.setValue(KappaArgs{ .rows = rows, .stride_s = stride_s, .row_off = row_off, .streams = @intCast(n) }, 12);
+    e.dispatchGroups(mtl.Size.of(12, n, 1), mtl.Size.of(64, 1, 1));
 }
 
-/// One recurrent step writes rounded Z, the next BF16 state and BF16 lambda for rows 1..7 in turn.
-pub fn recurrentStep(p: *const Pipelines, e: mtl.ComputeEncoder, state: Ref, kappa_row: Ref, rnn_weight: Ref, markov_w1: Ref, z: Ref, next_state: Ref, lambda: Ref, previous_token: u32) void {
+/// One recurrent step writes rounded Z, the next BF16 state and BF16 lambda across batched streams.
+pub fn recurrentStep(p: *const Pipelines, e: mtl.ComputeEncoder, state: Ref, kappa_step: Ref, rnn_rec: Ref, markov_w1: Ref, z: Ref, next_state: Ref, lambda: Ref, held: Ref, streams: u32, token: u32, step: u32, use_held: bool) void {
+    std.debug.assert(streams > 0 and streams <= 8);
     e.setPipeline(p.recurrent);
-    bind(e, &.{ state, kappa_row, rnn_weight, markov_w1, z, next_state, lambda });
-    e.setValue(TokenArgs{ .token = previous_token }, 7);
-    threads(e, rank, 256);
+    bind(e, &.{ state, kappa_step, rnn_rec, markov_w1, z, next_state, lambda, held });
+    e.setValue(TokenArgs{ .token = token, .step = step, .use_held = @intFromBool(use_held) }, 8);
+    groups(e, streams, 256);
 }
 
-/// recurrentStep on the token `held[step]` holds: the chain's previous draft, read on the GPU.
-pub fn chainStep(c: *const Chain, e: mtl.ComputeEncoder, state: Ref, kappa_row: Ref, rnn_weight: Ref, markov_w1: Ref, z: Ref, next_state: Ref, lambda: Ref, held: Ref, step: u32) void {
-    e.setPipeline(c.step);
-    bind(e, &.{ state, kappa_row, rnn_weight, markov_w1, z, next_state, lambda });
-    e.setValue(TokenArgs{ .token = step }, 7);
-    e.setBuffer(held.buf, held.off, 8);
-    threads(e, rank, 256);
-}
-
-/// held[step + 1] = the first greatest of a row of final logits: one threadgroup of 1,024.
-pub fn chainPick(c: *const Chain, e: mtl.ComputeEncoder, logits: Ref, held: Ref, step: u32) void {
-    e.setPipeline(c.pick);
-    bind(e, &.{ logits, held });
-    e.setValue(TokenArgs{ .token = step }, 2);
-    groups(e, 1, 1024);
-}
-
-/// Raw U*y rows round once to BF16, with no target unembedding softcap.
+/// Raw U*y rows round once to BF16: 8x8 simdgroup matrix tiles at rows >= 4, vectorized simd_sum below.
 pub fn base(p: *const Pipelines, e: mtl.ComputeEncoder, unembed: Ref, y: Ref, out: Ref, rows: u32, vocabulary_count: u32) void {
     std.debug.assert(rows > 0 and vocabulary_count > 0 and vocabulary_count <= vocab);
     e.setPipeline(p.base);
     bind(e, &.{ unembed, y, out });
     e.setValue(BaseArgs{ .rows = rows, .vocab = vocabulary_count }, 3);
-    std.debug.assert(rows <= 7);
-    groups(e, (@as(usize, vocabulary_count) + 7) / 8, 256);
+    if (rows < 4) {
+        groups(e, (vocabulary_count + 7) / 8, 256);
+    } else {
+        e.dispatchGroups(mtl.Size.of((vocabulary_count + 31) / 32, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
+    }
 }
-/// Folded Phi/beta correction and target-style 30 tanh softcap, restricted to Mini's 200058 logits.
-pub fn finalLogits(p: *const Pipelines, e: mtl.ComputeEncoder, base_values: Ref, phi: Ref, beta: Ref, lambda: Ref, out: Ref) void {
+
+/// Mode 0 computes logits + group stats over transposed Phi; mode 1 reduces stats into held token & softmax prob.
+pub fn finalLogits(p: *const Pipelines, e: mtl.ComputeEncoder, base_values: Ref, phi: Ref, beta: Ref, lambda: Ref, out: Ref, stats: Ref, held: Ref, probs: Ref, sample_tok: Ref, args: LogitsArgs) void {
+    std.debug.assert(args.streams > 0 and args.streams <= 8 and args.count > 0 and args.count <= vocab);
     e.setPipeline(p.logits);
-    bind(e, &.{ base_values, phi, beta, lambda, out });
-    e.setValue(CountArgs{ .count = vocab }, 5);
-    threads(e, vocab, 256);
+    bind(e, &.{ base_values, phi, beta, lambda, out, stats, held, probs, sample_tok });
+    e.setValue(args, 9);
+    if (args.mode == 0) {
+        groups(e, (args.count + 255) / 256, 256);
+    } else {
+        groups(e, args.streams, 256);
+    }
 }
