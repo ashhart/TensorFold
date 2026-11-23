@@ -9,6 +9,10 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_16", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_32", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
     .{ .name = "metal inkling2 dense_units tf_ink2_dense6_units_64", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 dense_units tf_ink2_route_scores_units_16", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 dense_units tf_ink2_route_scores_units_64", .threads = 256, .tg_memory = 8192, .reserved = 256, .offline = false },
+    .{ .name = "metal inkling2 dense_units tf_ink2_loop_blend_units", .threads = 32, .tg_memory = 0, .reserved = 32, .offline = false },
+    .{ .name = "metal inkling2 dense_units tf_ink2_rel_table_units", .threads = 32, .tg_memory = 0, .reserved = 32, .offline = false },
 };
 
 test "Inkling2 dense_units launches reserve their threads and carry no M1/M2 compile receipts" {

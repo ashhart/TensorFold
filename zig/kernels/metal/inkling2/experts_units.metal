@@ -14,7 +14,7 @@ inline tfp::frag<bfloat> ink2_units_x(device const bfloat* x0, device const bflo
 // Columns 16b + hx .. + 3 of a packed NVFP4 row as BF16 weights, each as ink2_nv_block decodes it.
 inline bfloat4 ink2_nv_quad(device const uchar* w, device const uchar* scales, float phi, uint b, uint hx) {
   const float half_scale = 0.5f * ink2_e4m3_bits(scales[b]);
-  const uint word = ink2_word(w + 8u * b + (hx & 8u) / 2u) >> (4u * (hx & 4u));
+  const uint word = uint(*(device const ushort*)(w + 8u * b + (hx >> 1u)));
   float4 v;
   for (uint j = 0; j < 4u; ++j) v[j] = ink2_e2m1_twice((word >> (4u * j)) & 15u) * half_scale * phi;
   return bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
@@ -25,7 +25,7 @@ inline bfloat4 ink2_mx_quad(device const uchar* w, device const uchar* scales, u
   const int shift = int(scales[b / 2u]) - 127;
   const int s0 = shift >> 1, s1 = shift - s0;
   const float p0 = as_type<float>(uint(s0 + 127) << 23u), p1 = as_type<float>(uint(s1 + 127) << 23u);
-  const uint word = ink2_word(w + 16u * b + hx);
+  const uint word = *(device const uint*)(w + 16u * b + hx);
   float4 v;
   for (uint j = 0; j < 4u; ++j) v[j] = (ink2_e4m3_bits((word >> (8u * j)) & 255u) * p0) * p1;
   return bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
@@ -47,10 +47,9 @@ inline void ink2_units_store(threadgroup float* part, thread tfp::frag<float>& l
         const float4 v = side == 0u ? float4(lo[4u * q], lo[4u * q + 1u], lo[4u * q + 2u], lo[4u * q + 3u])
                                     : float4(hi[4u * q], hi[4u * q + 1u], hi[4u * q + 2u], hi[4u * q + 3u]);
         if (GU) {
-          Y[pair * a.n + col / 2u] = ink2_act(v[0], v[1]);
-          Y[pair * a.n + col / 2u + 1u] = ink2_act(v[2], v[3]);
+          *(device bfloat2*)(Y + pair * a.n + (col >> 1u)) = bfloat2(ink2_act(v[0], v[1]), ink2_act(v[2], v[3]));
         } else {
-          for (uint j = 0u; j < 4u; ++j) Y[pair * a.n + col + j] = bfloat(v[j]);
+          *(device bfloat4*)(Y + pair * a.n + col) = bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
         }
       }
     }
@@ -153,10 +152,9 @@ inline void ink2_units_1(device const bfloat* X, device const uchar* W, device c
       const float4 v = side == 0u ? float4(lo0[0], lo0[1], lo0[2], lo0[3])
                                   : float4(hi0[0], hi0[1], hi0[2], hi0[3]);
       if (GU) {
-        Y[ulong(pair) * a.n + col / 2u] = ink2_act(v[0], v[1]);
-        Y[ulong(pair) * a.n + col / 2u + 1u] = ink2_act(v[2], v[3]);
+        *(device bfloat2*)(Y + ulong(pair) * a.n + (col >> 1u)) = bfloat2(ink2_act(v[0], v[1]), ink2_act(v[2], v[3]));
       } else {
-        for (uint j = 0u; j < 4u; ++j) Y[ulong(pair) * a.n + col + j] = bfloat(v[j]);
+        *(device bfloat4*)(Y + ulong(pair) * a.n + col) = bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
       }
     }
   }

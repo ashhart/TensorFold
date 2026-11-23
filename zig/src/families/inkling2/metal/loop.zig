@@ -10,6 +10,7 @@ pub const message_entries: u32 = plan.message_entries;
 pub const max_rows: u32 = 512;
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const RowsArgs = plan.RowsArgs;
+const dense_units = @import("dense_units.zig");
 
 /// Bytes of gate scratch a row: normalized [h | m] in BF16, then zeta's 64 BF16.
 const gate_row_bytes: usize = (2 * hidden + rank) * 2;
@@ -101,6 +102,31 @@ pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate
         bind(e, &.{ g.h, g.m, zetaOf(p, i), g.forget, g.gain, g.out });
         e.setValue(args, 6);
         e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(32, 1, 1));
+    }
+}
+
+fn duRef(r: Ref) dense_units.Ref {
+    return .{ .buf = r.buf, .off = r.off };
+}
+
+/// gatesEach accelerated with width-invariant M5 tensor units for zeta and blend across all widths 1..512.
+pub fn gatesEachUnits(p: *const Pipelines, du: ?*const dense_units.Pipelines, e: mtl.ComputeEncoder, items: []const Gate, rows: u32, m_stride: u32) void {
+    const units = du orelse return gatesEach(p, e, items, rows, m_stride);
+    std.debug.assert(rows > 0 and rows <= max_rows and items.len > 0 and items.len <= max_gates);
+    const args = GateArgs{ .rows = rows, .stride = m_stride };
+    for (items, 0..) |g, i| {
+        e.setPipeline(p.gates);
+        bind(e, &.{ g.h, g.m, normalizedOf(p, i) });
+        e.setValue(args, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+    e.barrier();
+    for (items, 0..) |g, i| {
+        dense_units.encode(units, e, duRef(normalizedOf(p, i)), duRef(g.down), duRef(zetaOf(p, i)), .{ .rows = rows, .n = rank, .k = 2 * hidden }) catch unreachable;
+    }
+    e.barrier();
+    for (items, 0..) |g, i| {
+        dense_units.encodeLoopBlend(units, e, duRef(g.h), duRef(g.m), duRef(zetaOf(p, i)), duRef(g.forget), duRef(g.gain), duRef(g.out), rows, m_stride);
     }
 }
 

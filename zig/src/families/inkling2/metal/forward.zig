@@ -167,7 +167,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
             const source_role = if (lp.kind == .local) 0 else role;
             g.* = .{ .h = l(arRow(s, source_role, rows, 0, false)), .m = l(messageRow(s, core, role, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(arRow(s, role, rows, 0, true)) };
         }
-        loop.gatesEach(&m.loop, e, &roles, @intCast(rows), state.message_entries * state.hidden);
+        loop.gatesEachUnits(&m.loop, if (m.dense_units) |*du| du else null, e, &roles, @intCast(rows), state.message_entries * state.hidden);
         e.barrier();
     }
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
@@ -298,7 +298,9 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     }
     e.barrier();
     const all_rr = ap.Rows{ .rows = @intCast(total), .heads = 24, .kv_heads = 8, .last_pos = max_last_pos, .streams = @intCast(all.len) };
-    attention.relTable(&m.attention, e, all_rr, a(at(s.rel_prep, 0)), a(r(w.attn.rel_projection)), a(at(s.rel_tab, 0)));
+    if (m.dense_units) |*du| {
+        dense_units.encodeRelTable(du, e, at(s.rel_prep, 0), r(w.attn.rel_projection), at(s.rel_tab, 0), @intCast(total * 24));
+    } else attention.relTable(&m.attention, e, all_rr, a(at(s.rel_prep, 0)), a(r(w.attn.rel_projection)), a(at(s.rel_tab, 0)));
     e.barrier();
     const stride = s.attn_stride;
     if (all.len == 1) {
@@ -477,12 +479,16 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        loop.gatesStrided(&m.loop, e, l(at(s.mlp_ar, 0)), l(messageRow(s, core, 3, 0)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(at(s.mlp_gated, 0)), @intCast(rows), state.message_entries * state.hidden);
+        loop.gatesEachUnits(&m.loop, if (m.dense_units) |*du| du else null, e, &.{.{ .h = l(at(s.mlp_ar, 0)), .m = l(messageRow(s, core, 3, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(at(s.mlp_gated, 0)) }}, @intCast(rows), state.message_entries * state.hidden);
         e.barrier();
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     e.barrier();
-    glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    if (m.dense_units) |*du| {
+        dense_units.encodeRouteScores(du, e, at(s.mlp_normed, 0), r(w.router_weight), at(m.glue.route_dots, 0), @intCast(rows));
+        e.barrier();
+        glue.routerSelect(&m.glue, e, r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    } else glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     e.barrier();
     try routedExperts(m, e, s, v.layer, rows);
     e.barrier();

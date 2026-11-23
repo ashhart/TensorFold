@@ -11,6 +11,7 @@ pub const Suites = struct {
     experts: @import("metal_inkling2_experts.zig").Suite,
     units: @import("metal_inkling2_units.zig").Suite,
     dense_units: @import("metal_inkling2_dense_units.zig").Suite,
+    nax_ops: @import("metal_inkling2_nax_ops.zig").Suite,
     loop: @import("metal_inkling2_loop.zig").Suite,
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
@@ -26,6 +27,7 @@ pub const Suites = struct {
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dense_units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .nax_ops = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -37,6 +39,7 @@ pub const Suites = struct {
         try s.experts.collect(only);
         try s.units.collect(only);
         try s.dense_units.collect(only);
+        try s.nax_ops.collect(only);
         try s.loop.collect(only);
         try s.runtime.collect(only);
         try s.dspark.collect(only);
@@ -50,6 +53,7 @@ pub const Suites = struct {
         s.experts.deinit();
         s.units.deinit();
         s.dense_units.deinit();
+        s.nax_ops.deinit();
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();

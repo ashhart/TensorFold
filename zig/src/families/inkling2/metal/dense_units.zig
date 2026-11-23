@@ -12,6 +12,8 @@ pub const Band = enum(u2) { b16 = 0, b32 = 1, b64 = 2 };
 
 pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 pub const Dense6Args = extern struct { rows: u32, k: u32, nq: u32, nk: u32, nv: u32, nr: u32, ns: u32, ng: u32 };
+pub const LoopBlendArgs = extern struct { rows: u32, stride: u32 };
+pub const RelTableArgs = extern struct { rows: u32 };
 
 pub const Call = struct { rows: u32, n: u32, k: u32, ldy: u32 = 0 };
 pub const Call6 = struct { rows: u32, k: u32, nq: u32, nk: u32, nv: u32, nr: u32, ns: u32, ng: u32 };
@@ -37,6 +39,10 @@ pub const Buffers6 = struct {
 pub const Pipelines = struct {
     single: [3]mtl.Pipeline,
     fused6: [3]mtl.Pipeline,
+    route_scores_16: mtl.Pipeline,
+    route_scores_64: mtl.Pipeline,
+    loop_blend: mtl.Pipeline,
+    rel_table: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, src.dense_units);
@@ -50,7 +56,10 @@ pub const Pipelines = struct {
         var made: usize = 0;
         errdefer {
             for (out.single[0..@min(made, 3)]) |pipe| pipe.deinit();
-            if (made > 3) for (out.fused6[0 .. made - 3]) |pipe| pipe.deinit();
+            if (made > 3) for (out.fused6[0..@min(made - 3, 3)]) |pipe| pipe.deinit();
+            if (made > 6) out.route_scores_16.deinit();
+            if (made > 7) out.route_scores_64.deinit();
+            if (made > 8) out.loop_blend.deinit();
         }
         for (single_names, &out.single) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
@@ -62,10 +71,23 @@ pub const Pipelines = struct {
             made += 1;
             if (pipe.maxThreads() < 256) return error.DenseUnitsThreads;
         }
+        out.route_scores_16 = try mtl.Pipeline.init(device, lib, "tf_ink2_route_scores_units_16", false);
+        made += 1;
+        if (out.route_scores_16.maxThreads() < 256) return error.DenseUnitsThreads;
+        out.route_scores_64 = try mtl.Pipeline.init(device, lib, "tf_ink2_route_scores_units_64", false);
+        made += 1;
+        if (out.route_scores_64.maxThreads() < 256) return error.DenseUnitsThreads;
+        out.loop_blend = try mtl.Pipeline.init(device, lib, "tf_ink2_loop_blend_units", false);
+        made += 1;
+        out.rel_table = try mtl.Pipeline.init(device, lib, "tf_ink2_rel_table_units", false);
         return out;
     }
 
     pub fn deinit(p: *Pipelines) void {
+        p.rel_table.deinit();
+        p.loop_blend.deinit();
+        p.route_scores_64.deinit();
+        p.route_scores_16.deinit();
         for (p.fused6) |pipe| pipe.deinit();
         for (p.single) |pipe| pipe.deinit();
     }
@@ -132,6 +154,32 @@ pub fn encode6Band(p: *const Pipelines, e: mtl.ComputeEncoder, band: Band, bufs:
     const total_tiles = tiles(c.nq) + tiles(c.nk) + tiles(c.nv) + tiles(c.nr) + tiles(c.ns) + tiles(c.ng);
     const br = bandRows(band);
     e.dispatchGroups(mtl.Size.of(total_tiles, (c.rows + br - 1) / br, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Dispatches width-invariant FP32 router dot products [rows, 2304] x [128, 2304]^T on M5 tensor units.
+pub fn encodeRouteScores(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, rows: u32) void {
+    const wide = rows > 16;
+    e.setPipeline(if (wide) p.route_scores_64 else p.route_scores_16);
+    for ([_]Ref{ x, w, y }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(DenseArgs{ .rows = rows, .n = 128, .k = 2304, .ldy = 128 }, 3);
+    const br: u32 = if (wide) 64 else 16;
+    e.dispatchGroups(mtl.Size.of(4, (rows + br - 1) / br, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Dispatches M5 tensor-unit loop gate forget/gain projections and exact four-step FP32 blend.
+pub fn encodeLoopBlend(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, zeta: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32, stride: u32) void {
+    e.setPipeline(p.loop_blend);
+    for ([_]Ref{ h, m, zeta, forget, gain, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(LoopBlendArgs{ .rows = rows, .stride = stride }, 6);
+    e.dispatchGroups(mtl.Size.of(72, (rows + 15) / 16, 1), mtl.Size.of(32, 1, 1));
+}
+
+/// Dispatches M5 tensor-unit relative bias table [rows_heads, 16] x [16, 1024] -> BF16.
+pub fn encodeRelTable(p: *const Pipelines, e: mtl.ComputeEncoder, rel: Ref, proj: Ref, tab: Ref, rows_heads: u32) void {
+    e.setPipeline(p.rel_table);
+    for ([_]Ref{ rel, proj, tab }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(RelTableArgs{ .rows = rows_heads }, 3);
+    e.dispatchGroups(mtl.Size.of(4, (rows_heads + 15) / 16, 1), mtl.Size.of(32, 1, 1));
 }
 
 test "dense_units band selection, tile math, shape validation, and ABI sizes" {
