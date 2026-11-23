@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - H3 on Macs: long image renders give way to live speech on the GPU (#N).
 
+
+
 - GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#N).
 
 - Qwen 3.5 on Metal: `TF_QWEN35_CHUNK` sets the prefill chunk size for measurement; the default stays 128 rows (#N).
