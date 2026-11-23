@@ -1,6 +1,5 @@
 #!/bin/sh
-# drama3_replay_gate.sh LOG: passes only on replay.zig's bounded PCM-only outcome, checking every chunk line.
-# replay.zig checks 2^-15 before rounding these printed measurements.
+# Accept replay.zig's bounded PCM-only outcome after checking every chunk line.
 log=$1
 tail -n 1 "$log" | grep -qx 'error: ReplayPcmOnly' || exit 1
 awk -v step=3.052e-5 '
