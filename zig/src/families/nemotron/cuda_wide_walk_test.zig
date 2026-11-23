@@ -81,3 +81,22 @@ test "wide round walk: a stream past its own window's rows is refused, however w
     try std.testing.expectError(error.ScanShape, g.mambaSegs(&.{ seg, past }, 0, 0, 0, 0, 0, 0, 0, shape)); // the batched conv
     try std.testing.expectError(error.ScanShape, g.mambaSegs(&.{past}, 0, 0, 0, 0, 0, 0, 0, shape)); // a stream alone
 }
+
+test "wide round walk: with the switch the lanes learn what a row past 16 costs, not a wider fixed overhead (REV60 4)" {
+    for ([_]bool{ false, true }) |on| {
+        var e: @import("cuda_engine.zig").Engine = undefined;
+        e.c = try lightning(on);
+        var b: @import("cuda_lanes.zig").Cuda = undefined;
+        b.e = &e;
+        b.head = null;
+        b.copy_drafts = false;
+        b.cost_count = 0;
+        b.mtp_ms = 0;
+        b.mtp_drafts = null;
+        b.mtp_confidence = null;
+        const f = b.facts();
+        // 17-32 rows are priced from the measured 16 linearly: depth.zig's row cost learns what they take here
+        try std.testing.expectEqual(on, f.learn_row_costs);
+        try std.testing.expectEqual(@as(u32, if (on) 32 else 16), f.batch_rows);
+    }
+}
