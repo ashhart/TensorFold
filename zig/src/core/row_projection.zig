@@ -92,7 +92,7 @@ pub const Pipelines = struct {
 
     /// Whether a window of `rows` of `w` takes the wide kernels.
     pub fn takesWide(p: *const Pipelines, w: Weights, rows: usize) bool {
-        return p.wide and rows >= p.wide_from[w.variant() / 2];
+        return p.wide and cut.takes(&p.wide_from, w.bits, rows);
     }
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -240,11 +240,13 @@ test "row dispatch takes the wide pipelines from the cutover at each width" {
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
         for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }
-    for ([_]usize{ 4, 8, 16, 32, never }) |from| {
-        p.wide_from = @splat(from);
+    const max = [bit_widths.len]usize{ 32, never, never, never, never, never }; // an M5 Max's: each width its own
+    for ([_]?usize{ 4, 8, 16, 32, never, null }) |uniform| {
+        p.wide_from = if (uniform) |u| @splat(u) else max;
         for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
             const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
             const i = w.variant();
+            const from = uniform orelse max[i / 2];
             for (1..33) |rows| {
                 for ([_]bool{ false, true }) |relu2| {
                     const expected = if (rows >= from) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
