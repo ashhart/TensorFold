@@ -1,4 +1,4 @@
-//! Prompt attention's real partials and gated mixer bytes against the hash-pinned parent, no checkpoint.
+//! Tensor-unit prompt attention's real partials and gated mixer bytes against the hash-pinned parent, no checkpoint.
 const std = @import("std");
 const mtl = @import("metal");
 const q = @import("qwen27");
@@ -9,17 +9,17 @@ const capacity = 32768;
 const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
-    for ([_]bool{ true, false }) |tensor| for ([_]bool{ false, true }) |paged| {
-        const text = try q.simd_attention.grouped(a, tensor, true, 6, 4, paged);
+    for ([_]bool{ false, true }) |paged| {
+        const text = try q.simd_attention.grouped(a, true, true, 6, 4, paged);
         defer a.free(text);
-        const path = try std.fmt.allocPrint(a, "{s}/{s}{s}.metal", .{ dir, if (tensor) "tensor" else "simd", if (paged) "-paged" else "" });
+        const path = try std.fmt.allocPrint(a, "{s}/tensor{s}.metal", .{ dir, if (paged) "-paged" else "" });
         defer a.free(path);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = text });
-    };
+    }
 }
 
-fn opInit(a: std.mem.Allocator, device: mtl.Device, tensor: bool, side: usize, control: u8) !attn.Attention {
-    const body = try q.simd_attention.grouped(a, tensor, true, 6, 4, false);
+fn opInit(a: std.mem.Allocator, device: mtl.Device, side: usize, control: u8) !attn.Attention {
+    const body = try q.simd_attention.grouped(a, true, true, 6, 4, false);
     defer a.free(body);
     const text = if (side == 0) try frozen.baseline(a, body) else if (control != 0) try frozen.planted(a, body, control == 2) else try a.dupe(u8, body);
     defer a.free(text);
@@ -27,11 +27,11 @@ fn opInit(a: std.mem.Allocator, device: mtl.Device, tensor: bool, side: usize, c
     defer lib.deinit();
     var op = try attn.Attention.init(device, lib);
     errdefer op.deinit();
-    if (op.units != tensor) {
+    if (!op.units) {
         if (op.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
         op.prompt = null;
-        op.prompt = try attn.Attention.promptPipelines(device, lib, tensor);
-        op.units = tensor;
+        op.prompt = try attn.Attention.promptPipelines(device, lib, true);
+        op.units = true;
     }
     if (op.prompt == null) return error.PromptUnavailable;
     return op;
@@ -56,13 +56,13 @@ fn run(queue: mtl.Queue, op: *attn.Attention, scratch: *attn.Scratch, binding: *
 }
 
 /// PM/PL on every valid packed row; PO only where the merge reads it; final gated bf16 mixer bytes everywhere.
-fn one(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ops: *[2]attn.Attention, tensor: bool, rows: u32, start: u32, poison: bool) !void {
+fn one(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ops: *[2]attn.Attention, rows: u32, start: u32, poison: bool) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const geometry = attn.planning.Geometry{ .shared_prefix = tensor, .solo_prompt = true };
+    const geometry = attn.planning.Geometry{ .shared_prefix = true, .solo_prompt = true };
     const heads = geometry.heads;
     const kvh = geometry.kv_heads;
-    const limits = attn.Limits{ .rows = rows, .streams = 1, .keys = capacity, .shared_prefix = tensor, .geometry = geometry };
+    const limits = attn.Limits{ .rows = rows, .streams = 1, .keys = capacity, .shared_prefix = true, .geometry = geometry };
     var scratch = try attn.Scratch.init(device, limits);
     defer scratch.deinit();
     var binding = try attn.Binding.init(device, limits);
@@ -92,7 +92,7 @@ fn one(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ops: *[2]attn
     for (0..rows) |row| for (0..kvh) |h| for (0..2) |kv| {
         @memcpy(inputs[kv + 1].slice(u16, sizes[kv + 1])[(row * kvh + h) * dim ..][0..dim], cache_buffers[kv].slice(u16, count)[(h * capacity + start + row) * dim ..][0..dim]);
     };
-    const fields = if (tensor) [3]attn.Field{ .poa, .pma, .pla } else [3]attn.Field{ .pob, .pmb, .plb };
+    const fields = [3]attn.Field{ .poa, .pma, .pla };
     const rp = plan.tiles * 16;
     const chunks = (start + rows + 511) / 512;
     const n: usize = @as(usize, kvh) * chunks * rp;
@@ -141,28 +141,27 @@ fn one(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, ops: *[2]attn
         };
         if (!std.mem.eql(u16, old_out, out)) return error.MixerDiffers;
     }
-    std.debug.print("PASS causal bytes: {s} rows={d} start={d} masked={s}, {d} finite partial rows, {d} empty rows, {d} mixer bytes\n", .{ if (tensor) "tensor" else "simd", rows, start, if (poison) "yes" else "no", finite_rows, empty_rows, sizes[4] * 2 });
+    std.debug.print("PASS causal tensor-unit bytes: rows={d} start={d} masked={s}, {d} finite partial rows, {d} empty rows, {d} mixer bytes\n", .{ rows, start, if (poison) "yes" else "no", finite_rows, empty_rows, sizes[4] * 2 });
 }
 
 pub fn main(init: std.process.Init) !void {
     const a = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 3 and std.mem.eql(u8, args[1], "--emit-sources")) return emit(a, init.io, args[2]);
-    var simd = false;
     var control: u8 = 0;
     for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--simd")) simd = true else if (std.mem.eql(u8, arg, "--plant-exit")) control = 1 else if (std.mem.eql(u8, arg, "--plant-cap")) control = 2 else return error.Argument;
+        if (std.mem.eql(u8, arg, "--plant-exit")) control = 1 else if (std.mem.eql(u8, arg, "--plant-cap")) control = 2 else return error.Argument;
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
     defer device.deinit();
     const queue = try device.queue();
-    const tensor = device.tensorUnits() and !simd;
-    var ops = [2]attn.Attention{ try opInit(a, device, tensor, 0, 0), try opInit(a, device, tensor, 1, control) };
+    if (!device.tensorUnits()) return error.TensorUnitsRequired;
+    var ops = [2]attn.Attention{ try opInit(a, device, 0, 0), try opInit(a, device, 1, control) };
     defer for (&ops) |*op| op.deinit();
     for ([_]u32{ 0, 519, 8192, 30000 }) |start| for ([_]bool{ false, true }) |poison| {
-        try one(a, device, queue, &ops, tensor, if (tensor) 2048 else 512, start, poison);
+        try one(a, device, queue, &ops, 2048, start, poison);
         if (control != 0) return error.ControlNotDetected;
     };
 }

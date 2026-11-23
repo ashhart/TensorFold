@@ -77,7 +77,7 @@ test "Metal launch map: paged prompt variants follow M5 and simdgroup eligibilit
         try std.testing.expectEqual(!units, launches.supported(.{ .units = false }, d));
         try std.testing.expectEqual(units, launches.supported(.{ .units = true }, d));
     }
-    try std.testing.expectEqual(@as(usize, 40), count);
+    try std.testing.expectEqual(@as(usize, 36), count);
 }
 
 test "Metal launch map: Inkling2 MMA launches resolve and support all Metal GPUs" {

@@ -9,12 +9,8 @@ pub const records = build() ++ causal_records;
 pub const causal_records = [_]M{
     .{ .name = "qwen27 prompt tensor q27_attn_prompt_8", .threads = 256, .tg_memory = 16384, .offline = false },
     .{ .name = "qwen27 prompt tensor q27_attn_prompt_masked_8", .threads = 256, .tg_memory = 16384, .offline = false },
-    .{ .name = "qwen27 prompt simd q27_attn_prompt_sg_8", .threads = 256, .tg_memory = 16384, .offline = false },
-    .{ .name = "qwen27 prompt simd q27_attn_prompt_sg_masked_8", .threads = 256, .tg_memory = 16384, .offline = false },
     .{ .name = "qwen27 prompt paged tensor q27_attn_prompt_8", .threads = 256, .tg_memory = 16384, .offline = false },
     .{ .name = "qwen27 prompt paged tensor q27_attn_prompt_masked_8", .threads = 256, .tg_memory = 16384, .offline = false },
-    .{ .name = "qwen27 prompt paged simd q27_attn_prompt_sg_8", .threads = 256, .tg_memory = 16384, .offline = false },
-    .{ .name = "qwen27 prompt paged simd q27_attn_prompt_sg_masked_8", .threads = 256, .tg_memory = 16384, .offline = false },
 };
 
 fn build() [32]M {

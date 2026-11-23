@@ -1,4 +1,4 @@
-//! Frozen causal-loop baseline and complete-source reconstruction for the prompt attention byte gate.
+//! Frozen tensor-unit causal-loop baseline and complete-source reconstruction for the prompt attention byte gate.
 const std = @import("std");
 const q = @import("qwen27");
 
@@ -20,12 +20,12 @@ pub const after =
     \\  }
     \\  kend = min(kend, kbeg + (seen_tg - kbeg + PTK - 1) / PTK * PTK);
 ;
-pub const raw = [_][]const u8{ q.runtime_sources.attention_prompt, q.runtime_sources.attention_prompt_sg };
-const pins = [_][]const u8{ "67fa58af326c188ed6881226d8232e78a50129c1eb82cf59e08b2525e4ec76e5", "32f30c60796a9c1bc6c886a11f6d08c81d53b5b20aca7ea9414d62b305fe9989" };
+pub const raw = [_][]const u8{q.runtime_sources.attention_prompt};
+const pins = [_][]const u8{"67fa58af326c188ed6881226d8232e78a50129c1eb82cf59e08b2525e4ec76e5"};
 
 pub fn baseline(a: std.mem.Allocator, text: []const u8) ![]u8 {
     const count = std.mem.count(u8, text, after ++ "\n");
-    if (count == 0 or count > 2) return error.CausalSource;
+    if (count != 1) return error.CausalSource;
     return std.mem.replaceOwned(u8, a, text, after ++ "\n", before ++ "\n");
 }
 
@@ -36,7 +36,7 @@ pub fn planted(a: std.mem.Allocator, text: []const u8, cap: bool) ![]u8 {
     return std.mem.replaceOwned(u8, a, text, from, to);
 }
 
-test "causal prompt baseline: both whole sources match the frozen parent, paged edits remain four" {
+test "causal prompt baseline: tensor-unit source matches the frozen parent, paged edits remain two" {
     const a = std.testing.allocator;
     for (raw, pins) |text, pin| {
         const old = try baseline(a, text);
@@ -44,7 +44,7 @@ test "causal prompt baseline: both whole sources match the frozen parent, paged 
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(old, &digest, .{});
         try std.testing.expectEqualStrings(pin, &std.fmt.bytesToHex(digest, .lower));
-        try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "(r, kt, kend, q, k, v, xs"));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "(r, kt, kend, q, k, v, xs"));
         const begin = std.mem.indexOf(u8, text, after ++ "\n").?;
         try std.testing.expect(std.mem.indexOf(u8, text[begin..][0..after.len], "barrier") == null);
     }
