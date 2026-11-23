@@ -146,7 +146,7 @@ pub const Served = struct {
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = if (m.rows) |b| b.cap else 16;
-        // The default prices tables so HTTP == CLI replay; the allocator opts into live timing (TF_DSV41_DRAFT_TIMED also does).
+        // Table pricing keeps HTTP == CLI replay; lane allocation and TF_DSV41_DRAFT_TIMED enable live timing.
         s.cfg.timed = lane_alloc or try @import("sys").environment.read(bool, "TF_DSV41_DRAFT_TIMED", false);
         // the depth policy as booted (the reference's "DSpark on (depth ...)"): what a check reads from the log
         const dset = s.x.policy.depth.set;
