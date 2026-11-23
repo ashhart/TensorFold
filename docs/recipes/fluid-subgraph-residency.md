@@ -1,5 +1,7 @@
 # Exact Fluid Subgraph Residency
 
+On Flash Next Metal, `--ssd-experts GIB` is an upper bound. If its original startup plan exceeds the unchanged load ceiling, the loader tries the largest smaller whole-slot pool that fits, retaining capacity for one full layer's expert union. It includes metadata, existing allocations, sessions/cache and the pack-construction peak. A pool that already fits keeps its exact size; a minimum pool that cannot fit is still refused. The startup log reports a reduced pool. Stored weights, context, prompt chunks and token arithmetic remain unchanged; smaller pools can require more SSD reads. Physical fit and speed require device qualification.
+
 [Fluid Subgraph Residency](../design/fluid-subgraph-residency.md) is TensorFold's implementation of published techniques from EdgeMoE, MoE-Infinity, Fiddler and Fate. Slotstream is an outside comparison only. The native phase covers Flash Next (`qwen4_exp`) on one Metal device. Other families, backends and the paired speed-up path refuse these options.
 
 ## Serve stored experts from SSD
