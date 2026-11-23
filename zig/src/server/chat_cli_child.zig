@@ -16,7 +16,7 @@ pub const words: server.Words = .{
     .stuck = "Model server did not exit after termination; cleanup is incomplete",
 };
 
-/// A managed child's needs. ``key`` defaults to a fresh private key; ``environment_key`` can preserve a caller list for the child.
+/// Managed child setup: request ``key`` (fresh by default), and optional full-list ``environment_key`` for the child.
 pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, key: ?[]const u8 = null, environment_key: ?[]const u8 = null, log_dir: []const u8 };
 
 /// The started server, the name it serves and the key every request to it carries.
