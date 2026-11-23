@@ -31,8 +31,8 @@ const slots = 6;
 const shared = used - 1;
 /// The inputs whose mirror carries the nudge: small, so the nudge 4 is exact in bf16 at their size.
 const nudged = 8;
-/// Gate 4's bf16 proof for a bf16 SwiGLU output: its own roundings leave the gate no wider margin to prove.
-const gate_up_why = "a mirrored row cancels exactly in the halves order, so a low-precision sum's largest miss is want itself, and the epilogue's roundings and the store already allow 4.1 u of it: at most 1 / (4.1 u) = 62x is provable";
+/// Gate 4's bf16 proof of a bf16 SwiGLU output: a mirrored row's bf16 sum is 0 in the halves order, missing by want.
+const gate_up_why = "a bf16 sum of a mirrored row is 0 in the halves order, so it misses by want itself, which the epilogue's three bf16 roundings and the store already allow 4.0393 u of: at most 1 / (4.0393 u) = 63.4x is provable";
 
 const up_rows = [4]c.Shape{ .{ .rows = 1, .n = width, .k = dims }, .{ .rows = 3, .n = width, .k = dims }, .{ .rows = 16, .n = width, .k = dims }, .{ .rows = 64, .n = width, .k = dims } };
 const prompt_rows = [2]c.Shape{ .{ .rows = 64, .n = width, .k = dims }, .{ .rows = 200, .n = width, .k = dims } };
