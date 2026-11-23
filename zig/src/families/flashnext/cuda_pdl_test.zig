@@ -91,7 +91,7 @@ fn bytes(a: *const cuda.Args) !void {
 
 test "Flash Next PDL: strict opt-in defaults off, refuses malformed values and gates sm90" {
     const name = "TF_FLASHNEXT_PDL";
-    const saved = if (std.c.getenv(name)) |p| try t.allocator.dupeZ(u8, std.mem.span(p)) else null;
+    const saved = if (std.c.getenv(name)) |p| try t.allocator.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer {
         if (saved) |v| {
             _ = env.setenv(name, v, 1);
@@ -108,7 +108,7 @@ test "Flash Next PDL: strict opt-in defaults off, refuses malformed values and g
     try t.expect(!try policy.read(&d));
     try t.expectEqual(@as(usize, 0), Mock.capability_calls);
     for ([_][]const u8{ "yes", "2", "1 ", "00" }) |bad| {
-        const z = try t.allocator.dupeZ(u8, bad);
+        const z = try t.allocator.dupeSentinel(u8, bad, 0);
         defer t.allocator.free(z);
         _ = env.setenv(name, z, 1);
         try t.expectError(error.InvalidEnvironment, policy.read(&d));
