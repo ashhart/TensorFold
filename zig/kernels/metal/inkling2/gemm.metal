@@ -34,26 +34,71 @@ inline void gemm_out(const device T* A, const device T* B, device O* D, const de
 }  // namespace tfp
 
 // Score products stay a full fp32 dot so an M5 does not cut an fp32 operand to 10 mantissa bits.
+constant constexpr int IK2_DOT_KC = 16;  // k steps a staged chunk holds
+constant constexpr int IK2_DOT_LD = 68;  // a staged row's pitch: 64 floats and 4 to stagger the banks
+
+// This thread's 4 elements of each operand chunk (k in [k0, k0 + kc), `rows` and `cols` live); zero outside.
 template <bool NT>
-inline void ik2_f32_dot(const device float* A, const device float* B, const device int* P, device float* D, uint3 tid) {
-  const int col = int(tid.x), row = int(tid.y), b = int(tid.z);
-  const int m = P[0], n = P[1], K = P[2];
-  if (col >= n || row >= m) return;
-  const int lda = P[3], ldb = P[4], ldd = P[5], sa = P[10], sb = P[11], sd = P[12];
-  const device float* a = A + long(b) * sa + long(row) * lda;
-  const device float* brow = B + long(b) * sb;
-  float s = 0;
-  for (int k = 0; k < K; ++k) {
-    s = fma(a[k], NT ? brow[long(col) * ldb + k] : brow[long(k) * ldb + col], s);
+inline void ik2_dot_fetch(const device float* a, const device float* b, int k0, int kc, int rows, int cols, int lda,
+                          int ldb, uint t, thread float* pa, thread float* pb) {
+  for (uint i = 0; i < 4; ++i) {
+    const uint e = t + i * 256;
+    const uint ka = e % IK2_DOT_KC, ra = e / IK2_DOT_KC;
+    pa[i] = (int(ka) < kc && int(ra) < rows) ? a[long(ra) * lda + k0 + ka] : 0.0f;
+    const uint kb = NT ? ka : e / 64, rb = NT ? ra : e % 64;
+    pb[i] = (int(kb) < kc && int(rb) < cols) ? (NT ? b[long(rb) * ldb + k0 + kb] : b[long(k0 + kb) * ldb + rb]) : 0.0f;
   }
-  D[long(b) * sd + long(row) * ldd + col] = s;
+}
+
+// A group takes a 64 x 64 output tile, a thread 4 x 4 outputs; each output is one fma chain over k in order.
+template <bool NT>
+inline void ik2_f32_dot(const device float* A, const device float* B, const device int* P, device float* D,
+                        threadgroup float* as, threadgroup float* bs, uint3 tg, uint t) {
+  const int m = P[0], n = P[1], K = P[2], lda = P[3], ldb = P[4], ldd = P[5];
+  const int row0 = int(tg.y) * 64, col0 = int(tg.x) * 64;
+  const int rows = min(64, m - row0), cols = min(64, n - col0);
+  const device float* a = A + long(tg.z) * P[10] + long(row0) * lda;
+  const device float* b = B + long(tg.z) * P[11] + (NT ? long(col0) * ldb : long(col0));
+  const uint ty = t / 16, tx = t % 16;
+  float acc[4][4] = {};
+  float pa[4], pb[4];
+  int kc = min(IK2_DOT_KC, K);
+  ik2_dot_fetch<NT>(a, b, 0, kc, rows, cols, lda, ldb, t, pa, pb);
+  for (int k0 = 0; k0 < K; k0 += IK2_DOT_KC) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = 0; i < 4; ++i) {
+      const uint e = t + i * 256;
+      as[(e % IK2_DOT_KC) * IK2_DOT_LD + e / IK2_DOT_KC] = pa[i];
+      bs[NT ? (e % IK2_DOT_KC) * IK2_DOT_LD + e / IK2_DOT_KC : (e / 64) * IK2_DOT_LD + e % 64] = pb[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const int here = kc, next = k0 + IK2_DOT_KC;
+    kc = min(IK2_DOT_KC, K - next);
+    if (next < K) ik2_dot_fetch<NT>(a, b, next, kc, rows, cols, lda, ldb, t, pa, pb);  // in flight during the fmas
+    for (int kk = 0; kk < here; ++kk) {
+      const float4 av = *reinterpret_cast<threadgroup const float4*>(as + kk * IK2_DOT_LD + ty * 4);
+      const float4 bv = *reinterpret_cast<threadgroup const float4*>(bs + kk * IK2_DOT_LD + tx * 4);
+      for (uint i = 0; i < 4; ++i) {
+        for (uint j = 0; j < 4; ++j) acc[i][j] = fma(av[i], bv[j], acc[i][j]);
+      }
+    }
+  }
+  device float* d = D + long(tg.z) * P[12] + long(row0) * ldd + col0;
+  for (uint i = 0; i < 4; ++i) {
+    if (int(ty * 4 + i) >= rows) break;
+    for (uint j = 0; j < 4; ++j) {
+      if (int(tx * 4 + j) < cols) d[long(ty * 4 + i) * ldd + tx * 4 + j] = acc[i][j];
+    }
+  }
 }
 
 #define IK2_F32_DOT(NAME, NT)                                                                                      \
   [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                               \
       const device float* A [[buffer(0)]], const device float* B [[buffer(1)]],                                  \
-      const device int* P [[buffer(2)]], device float* D [[buffer(3)]], uint3 tid [[thread_position_in_grid]]) { \
-    ik2_f32_dot<NT>(A, B, P, D, tid);                                                                              \
+      const device int* P [[buffer(2)]], device float* D [[buffer(3)]],                                          \
+      uint3 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {                       \
+    threadgroup float as[IK2_DOT_KC * IK2_DOT_LD], bs[IK2_DOT_KC * IK2_DOT_LD];                                  \
+    ik2_f32_dot<NT>(A, B, P, D, as, bs, tg, t);                                                                  \
   }
 
 
