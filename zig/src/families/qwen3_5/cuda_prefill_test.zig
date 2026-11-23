@@ -59,11 +59,11 @@ pub const Fake = struct {
         marks: []const u32 = &.{},
         kept: [8]usize = undefined,
         n: usize = 0,
-        pub fn open(p: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32) !?struct { cache: *Cache, plan: Plan } {
+        pub fn open(p: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32, _: ?u64) !?struct { cache: *Cache, plan: Plan } {
             if (p.cache == null) return null;
             return .{ .cache = p.cache.?, .plan = .{ .from = p.from, .marks = try t.allocator.dupe(u32, p.marks) } };
         }
-        pub fn keep(p: *Prefix, _: *Cache, _: []const u32, at: usize) error{QwenLaneTable}!void {
+        pub fn keep(p: *Prefix, _: *Cache, _: []const u32, _: ?u64, at: usize) error{QwenLaneTable}!void {
             p.kept[p.n] = at;
             p.n += 1;
         }
