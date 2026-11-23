@@ -294,7 +294,7 @@ test "start CLI: CUDA still resolves pulls and passes the selected drafter" {
     try std.testing.expect(std.mem.indexOf(u8, args, want_drafter) != null);
 }
 
-test "start CLI: persistent mode requires an environment credential before model work" {
+test "start CLI: persistent mode requires a valid environment credential before model work" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -303,8 +303,15 @@ test "start CLI: persistent mode requires an environment credential before model
     var r = try Run.init(a, &tmp);
     r.machine.gpu_limit = gib;
     try std.testing.expectEqual(@as(u8, 2), try r.command(&.{}));
-    try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "requires TENSORFOLD_API_KEY in the environment") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "persistent start requires") != null);
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
+    for ([_][]const u8{ "   ", ",", " , ", "\t,\r\n", "" }) |key| {
+        try r.env.put("TENSORFOLD_API_KEY", key);
+        try std.testing.expectEqual(@as(u8, 2), try r.command(&.{}));
+        try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "persistent start requires a nonempty TENSORFOLD_API_KEY entry") != null);
+        try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
+        try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
+    }
 }
 
 test "start CLI: persistent caller keys preserve the child list and send only the first key" {
