@@ -219,6 +219,17 @@ prompt hash on all four), the prompt took 13.9 and 15.8 s to its first token on 
 queue, and the decode streams' longest gap was 12.8 and 15.6 s against 11.7 and 11.6 s: in both builds the streams wait
 for the prompt, and the Metal 4 queue is not worse for them.
 
+One global prompt visit alone (512 rows, 31,744 keys, the production dispatch, GPU timestamps, quiet machine) takes 56 to
+58 ms for 201 GFLOP, 3.47 TFLOP/s, and 117 ms at 63,488 keys; the 26 ms floor at 7.7 TFLOP/s is not a byte floor (132 MB
+of unique K and V, 25 GB of re-reads at about 437 GB/s). Leaving out the score MMA takes it to 27.5 ms, the value MMA to
+41.2, the softmax to 45.2, the K loads to 55.2 and the V loads to 54.9 (wrong bits, timing only), so the score phase is
+the excess (about 31 ms against 15 for its MMAs) and its cost is operand preparation (the transposed K fragment), not
+load latency or barriers. A byte-equal variant (K as the A operand with no transpose, q as the B operand, a transposed
+store, the running max and sum in threadgroup memory, the merge weights once a row) was bitwise equal to the current kernel
+on 19 shapes and inputs including NaN, infinities and scale extremes (ragged, 70,000 keys, position 0) and ran the visit
+in 0.82 of the time (0.85 at 63,488 keys), which is about 2.5 % of the 32,768-token first token; an A-B-B-A on a machine
+with other jobs (load average 3 to 19) could not show it, so it was not applied.
+
 Peak physical footprint (`footprint`, 1 GB resolution, sampled every 3 s through an 8,192-token prompt and a 128-token
 reply): native about 24 GB, with `--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike;
 MLX about 23 GB.
