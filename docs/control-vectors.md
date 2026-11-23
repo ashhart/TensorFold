@@ -182,9 +182,12 @@ for a checkpoint that holds the same weights.
 ## The integration test
 
 A file that one implementation accepts has to mean the same thing to another.
-The reference implementation for this format is the `weightless` plugin's
-container reader, and this repository does not vendor it: the test takes a
-checkout and reads it as a package.
+The GLP format is defined by the `weightless` project (@msuiche); its
+`docs/spec/GLP.md` at commit `b181a07d` is the specification this reader
+implements, and `plugins/vllm/weightless_steer/container.py` at the same commit
+is the container reader the parity test compares against. This repository does
+not vendor either: the test takes a checkout of that commit and reads the
+reader as a package.
 
 ```
 zig build tf-glp-check
@@ -205,6 +208,6 @@ The reader that does the Zig half is `tf-glp-check`, which prints the reader's
 view of a file and writes its directions out as bytes, so the two sides can be
 compared exactly rather than approximately.
 
-The test needs `numpy` for the reference reader, and a `weightless` checkout.
-Nothing of the reference is committed here, and no vector is either: the file
-is supplied when the test runs.
+The test needs `numpy` for the reference reader, and a `weightless` checkout at
+commit `b181a07d`. Nothing of the reference is committed here, and no vector is
+either: the file is supplied when the test runs.

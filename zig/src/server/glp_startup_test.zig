@@ -189,6 +189,12 @@ test "a Gemma family is refused outright" {
     defer f.tmp.cleanup();
     const why = (try serve.refusal(a, f.model, "gemma4", "auto", f.g.?)).?;
     try std.testing.expect(std.mem.indexOf(u8, why, "Gemma") != null);
+    // The family speaks before the vector's width does, even when the two disagree.
+    var other = try Fixture.make(a, 4096, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer other.tmp.cleanup();
+    const family = (try serve.refusal(a, other.model, "gemma4", "auto", other.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, family, "Gemma") != null);
+    try std.testing.expect(std.mem.indexOf(u8, family, "4096") == null);
 }
 
 test "a vector the model's width does not match is refused" {
@@ -313,7 +319,34 @@ test "the report says verified only when the parsed digest was checked" {
     try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") != null);
 }
 
-test "the control-vector flags are advertised only where the engine steers" {
+/// Remove the file's parsed digest key, leaving any text that merely reads like it.
+fn dropDigestKey(bytes: []u8) void {
+    const at = std.mem.indexOf(u8, bytes, "glp.content_sha256").?;
+    bytes[at + "glp.content_sha256".len - 1] = '7';
+}
+
+test "a description that reads like a digest does not make the loaded file verified" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try vectorBytes(a, width, &.{ 1, 2 }, .{ .publication = .{ .description = "the file carries glp.content_sha256 in its description" } });
+    dropDigestKey(bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = bytes });
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "vector.gguf" });
+    var g: ?serve.Vec = serve.withPath(null, path);
+    try std.testing.expectEqual(@as(?[]const u8, null), try serve.read(a, &g));
+    try std.testing.expect(!g.?.vector.?.claims_digest);
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    serve.report(a, g.?);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "the file claims none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") == null);
+}
+
+test "the control-vector flags are the serve table's type and a file flag" {
     for (serve.flags) |f| try std.testing.expectEqual(steers, f.advertised);
     // A config file's relative --glp starts at the file's folder, as its other file flags do.
     try std.testing.expect(serve.flags[0].path);

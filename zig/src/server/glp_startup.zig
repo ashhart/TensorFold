@@ -118,6 +118,8 @@ pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, bac
 /// Why this checkpoint cannot take the vector, as the operator reads it; null: it can.
 pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, v: Vec) error{OutOfMemory}!?[]const u8 {
     const vector = v.vector orelse return null;
+    // The family's own refusal comes first: a Gemma checkpoint is never steered, whatever the vector's shape.
+    if (isGemma(model_type)) return "--glp: Gemma checkpoints are never steered: serve it without --glp";
     const model = modelOf(a, dir);
     var why: glp.Why = .{};
     if (model.hidden) |hidden| glp.checkModel(vector, hidden, model.repo, &why) catch {
@@ -128,7 +130,6 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
             if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });
         }
     }
-    if (isGemma(model_type)) return "--glp: Gemma checkpoints are never steered: serve it without --glp";
     if (!std.mem.eql(u8, model_type, steer_type)) return try std.fmt.allocPrint(a, "--glp: {s} checkpoints are not steered: only Qwen3.8-27B takes a control vector", .{model_type});
     if (model.hidden) |hidden| if (hidden != steer_hidden) return "--glp: this checkpoint is not Qwen3.8-27B: only the 5120-wide one takes a control vector";
     if (!metal(backend)) return try std.fmt.allocPrint(a, "--glp: only the Metal engine steers: this server runs the {s} engine", .{backendName(backend)});

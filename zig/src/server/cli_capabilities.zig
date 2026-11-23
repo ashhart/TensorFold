@@ -19,6 +19,11 @@ pub const Engines = struct {
 
 /// Native flags and selected supported variables; env is non-exhaustive, profiles lists registered switches.
 pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
+    return capabilitiesFor(w, e, @import("glp_startup.zig").steers);
+}
+
+/// As `capabilities`, with `steers` naming whether this build serves the flags only a steering build accepts.
+pub fn capabilitiesFor(w: *std.Io.Writer, e: Engines, steers: bool) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
     if (e.chip) |c| try w.print("\"{s}\"", .{c}) else try w.writeAll("null");
     try w.writeAll(", \"backends\": [");
@@ -40,7 +45,7 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.writeAll("}, \"serve\": {\"flags\": {");
     var first = true;
     for (cli.flags) |f| {
-        if (!f.native or !f.advertised) continue;
+        if (!f.native or (!f.advertised and !steers)) continue;
         try w.print("{s}\"{s}\": {{", .{ if (first) "" else ", ", f.name });
         first = false;
         const values = f.native_values orelse f.choices;
@@ -159,10 +164,18 @@ test "capability audit: environment table omits dead readers and slide metadata 
 }
 
 test "capability audit: a flag a build only refuses is not advertised" {
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    try capabilities(&out.writer, .{ .version = "test" });
-    // --glp is parsed on every platform so its refusal names the engine; only a steering build advertises it.
-    const listed = std.mem.indexOf(u8, out.written(), "\"--glp\":") != null;
+    // --glp is parsed on every platform so its refusal names the engine; only a steering build lists it.
+    var without: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer without.deinit();
+    try capabilitiesFor(&without.writer, .{ .version = "test" }, false);
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "\"--glp\":") == null);
+    var serving: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer serving.deinit();
+    try capabilitiesFor(&serving.writer, .{ .version = "test" }, true);
+    const listed = std.mem.indexOf(u8, serving.written(), "\"--glp\":") != null;
     try std.testing.expectEqual(@import("glp_startup.zig").steers, listed);
+    var real: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer real.deinit();
+    try capabilities(&real.writer, .{ .version = "test" });
+    try std.testing.expectEqual(listed, std.mem.indexOf(u8, real.written(), "\"--glp\":") != null);
 }

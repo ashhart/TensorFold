@@ -379,6 +379,22 @@ test "a truncated file is refused, not read past" {
     try refused(cut);
 }
 
+test "a file that ends inside its metadata is refused with a reason" {
+    const a = std.testing.allocator;
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(a);
+    // A GGUF header whose one metadata key is longer than the bytes that follow it.
+    try b.appendSlice(a, "GGUF");
+    try b.appendSlice(a, &std.mem.toBytes(@as(u32, 3)));
+    try b.appendSlice(a, &std.mem.toBytes(@as(u64, 0)));
+    try b.appendSlice(a, &std.mem.toBytes(@as(u64, 1)));
+    try b.appendSlice(a, &std.mem.toBytes(@as(u64, 100)));
+    const why = try reason(b.items);
+    defer a.free(why);
+    try std.testing.expect(why.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, why, "ends before its metadata") != null);
+}
+
 test "a written vector's digest covers its tensor bytes" {
     const a = std.testing.allocator;
     const bytes = try writeSample(a);

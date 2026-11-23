@@ -269,9 +269,23 @@ fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!gguf
     var problem: gguf.Problem = .{};
     const file = gguf.parse(a, bytes, &problem) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        // A cursor that runs out of bytes names no rule: say so rather than print an empty reason.
+        if (problem.text().len == 0) problem.set("the file ends before its metadata is complete", .{});
         return refuse(why, "{s}", .{problem.text()});
     };
     return file;
+}
+
+/// The checkpoint a vector names, escaped, with its revision when it names one; never raw log text.
+pub fn baseLine(v: Vector, buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (v.base_model.len == 0) {
+        w.writeAll("an unnamed checkpoint") catch {};
+    } else {
+        w.print("{f}", .{std.zig.fmtString(v.base_model)}) catch {};
+        if (v.base_revision.len > 0) w.print(" @ {f}", .{std.zig.fmtString(v.base_revision)}) catch {};
+    }
+    return buf[0..w.end];
 }
 
 /// What a producer writes: the vector's fields and one direction per layer.
