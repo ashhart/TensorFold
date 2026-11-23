@@ -157,6 +157,8 @@ pub fn rowTerm(costs: *const Table, timed: bool, head: alloc.HeadCost, rows: u64
 fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
     var cost: f64 = 1.0;
     if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
-    if (cost + overhead_ms <= 0) return -1;
+    // A negative total cannot price a round; a zero one is an infinitely cheap baseline no draft improves on.
+    if (cost + overhead_ms < 0) return -1;
+    if (cost + overhead_ms == 0) return std.math.inf(f64);
     return expected / (cost + overhead_ms);
 }
