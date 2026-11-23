@@ -110,8 +110,18 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     });
     const start_run = b.addRunArtifact(b.addTest(.{ .root_module = start_tests, .filters = &.{"start CLI:"} }));
     start_run.has_side_effects = true;
-    b.step("test-start-cli-host", "Automatic model choice, download consent, first reply and serve-child cleanup without devices").dependOn(&start_run.step);
+    const start_step = b.step("test-start-cli-host", "Automatic model choice, download consent, first reply and serve-child cleanup without devices");
+    start_step.dependOn(&start_run.step);
     step.dependOn(&start_run.step);
+    const windows_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });
+    const windows_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = windows_target, .optimize = .debug, .link_libc = true });
+    const windows_start = @import("server.zig").plain(b, "zig/src/server/start_cli.zig", windows_target, .debug, windows_lanes);
+    const windows_api = windows_start.import_table.get("engine_api").?;
+    const windows_core = windows_start.import_table.get("core").?;
+    const windows_none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = windows_target, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = windows_api }} });
+    windows_start.addImport("checkpoint_cli", @import("cuda.zig").checkpointCli(b, windows_target, .debug, false, windows_none, windows_core));
+    const windows_check = b.addTest(.{ .root_module = windows_start, .filters = &.{"start CLI: Windows refusal"} });
+    start_step.dependOn(&windows_check.step); // compile only: a Windows test binary is never executed
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",

@@ -14,7 +14,7 @@ const windows = builtin.os.tag == .windows;
 const Child = if (windows) void else child.Child;
 pub const usage = "usage: tensorfold start [--yes] [--check] [--startup-timeout SECONDS]\n";
 
-/// Everything the command touches; tests supply a machine, registry, cache, child executable and pull stand-in.
+/// Everything the command touches; tests supply a machine, registry, cache, child executables and inert effects.
 pub const Context = struct {
     a: Allocator,
     io: std.Io,
@@ -23,7 +23,10 @@ pub const Context = struct {
     err: *std.Io.Writer,
     input: *std.Io.Reader,
     interactive: bool,
+    /// The invoking low-level executable, or a test's deliberately different current executable.
     self_exe: ?[]const u8 = null,
+    /// The native serving executable, explicitly injected by CUDA's production route.
+    serve_exe: ?[]const u8 = null,
     signals: bool = false,
     given: ?machine.Machine = null,
     registry: ?[]const registry.Entry = null,
@@ -31,7 +34,7 @@ pub const Context = struct {
     pull: ?Pull = null,
 };
 
-/// A pull effect for tests; production calls the existing checkpoint command directly.
+/// A pull effect for tests; its output goes through the same privacy sink as production pulls.
 pub const Pull = struct {
     ctx: *anyopaque,
     run: *const fn (*anyopaque, []const u8) anyerror!u8,
@@ -62,6 +65,27 @@ fn parse(args: []const []const u8) ?Args {
 }
 
 pub fn main(init: std.process.Init, argv: []const []const u8) !u8 {
+    return mainWithServeExe(init, argv, null);
+}
+
+/// CUDA's low-level `tensorfold` routes start to its native serving sibling, never back to itself.
+pub fn mainCuda(init: std.process.Init, argv: []const []const u8) !u8 {
+    const current = try std.process.executablePathAlloc(init.io, init.arena.allocator());
+    return mainWithServeExe(init, argv, try nativeSibling(init.arena.allocator(), current));
+}
+
+pub fn nativeSibling(a: Allocator, current: []const u8) ![]const u8 {
+    const name = std.fs.path.basename(current);
+    const sibling = if (std.ascii.eqlIgnoreCase(name, "tensorfold"))
+        "tensorfold-native"
+    else if (std.ascii.eqlIgnoreCase(name, "tensorfold.exe"))
+        "tensorfold-native.exe"
+    else
+        return current;
+    return std.fs.path.join(a, &.{ std.fs.path.dirname(current) orelse ".", sibling });
+}
+
+fn mainWithServeExe(init: std.process.Init, argv: []const []const u8, serve_exe: ?[]const u8) !u8 {
     const io = init.io;
     var out_buf: [16 << 10]u8 = undefined;
     var err_buf: [4 << 10]u8 = undefined;
@@ -79,6 +103,7 @@ pub fn main(init: std.process.Init, argv: []const []const u8) !u8 {
         .err = &err.interface,
         .input = &in.interface,
         .interactive = std.Io.File.stdin().isTty(io) catch false,
+        .serve_exe = serve_exe,
         .signals = true,
     };
     return command(&ctx, argv);
@@ -94,14 +119,20 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
         try ctx.out.writeAll(usage ++
             "Pick the largest catalog model that fits this machine, ask before any download, serve on loopback, and send one reply.\n" ++
             "--yes consents to the registered download; without it a non-interactive run downloads nothing.\n" ++
-            "--check stops the server after a successful first reply; otherwise Ctrl-C stops it.\n");
+            "--check stops the server after a successful first reply and uses a private temporary key; persistent mode requires TENSORFOLD_API_KEY.\n");
         try ctx.out.flush();
         return 0;
     }
-    if (comptime windows) return fail(ctx, 2, "starting a server is not supported on Windows yet: use tensorfold serve MODEL in one console and tensorfold chat --url URL MODEL in another") else return run(ctx, args);
+    if (comptime windows) return fail(ctx, 2, "starting a server is not supported on Windows yet: use tensorfold serve MODEL in one console and tensorfold chat --url URL MODEL in another", .{}) else return run(ctx, args);
+}
+
+fn callerKey(ctx: *const Context) ?[]const u8 {
+    return if (ctx.environ.get("TENSORFOLD_API_KEY")) |key| key else null;
 }
 
 fn run(ctx: *const Context, args: Args) !u8 {
+    if (!args.check and (callerKey(ctx) == null or callerKey(ctx).?.len == 0))
+        return fail(ctx, 2, "persistent start requires TENSORFOLD_API_KEY in the environment; requests send Authorization: Bearer $TENSORFOLD_API_KEY, or use --check for a private temporary key", .{});
     if (comptime !windows) if (ctx.signals) stop.install();
     defer if (comptime !windows) if (ctx.signals) stop.restore();
     const mc = ctx.given orelse machine.detect(ctx.a, ctx.io);
@@ -132,6 +163,11 @@ fn run(ctx: *const Context, args: Args) !u8 {
 
 fn pull(ctx: *const Context, spec: []const u8) !u8 {
     try say(ctx.out, "Pulling {s}", .{spec});
+    var buffer: [4 << 10]u8 = undefined;
+    const discard: std.Io.Writer.Discarding = .init(&buffer);
+    const saved = ctx.out.*;
+    ctx.out.* = discard.writer;
+    defer ctx.out.* = saved;
     if (ctx.pull) |p| return p.run(p.ctx, spec);
     return registry.pull.run(ctx.a, ctx.io, ctx.out, ctx.err, ctx.environ, ctx.override, spec);
 }
@@ -139,7 +175,8 @@ fn pull(ctx: *const Context, spec: []const u8) !u8 {
 fn serve(ctx: *const Context, args: Args, choice: registry.Choice) !u8 {
     var problem: []const u8 = "";
     var tail: []const []const u8 = &.{};
-    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = ctx.self_exe, .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
+    const serving_exe = ctx.serve_exe orelse if (ctx.self_exe) |current| try nativeSibling(ctx.a, current) else null;
+    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = serving_exe, .key = if (args.check) null else callerKey(ctx), .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
     var extra: std.ArrayList([]const u8) = .empty;
     try extra.appendSlice(ctx.a, &.{ "--name", std.fs.path.basename(choice.entry.repo) });
     if (choice.drafter_dir) |d| try extra.appendSlice(ctx.a, &.{ "--drafter", d });
@@ -219,4 +256,18 @@ fn fail(ctx: *const Context, code: u8, comptime fmt: []const u8, args: anytype) 
     try ctx.err.print("tensorfold start: " ++ fmt ++ "\n", args);
     try ctx.err.flush();
     return code;
+}
+
+test "start CLI: Windows refusal compiles through the complete command context" {
+    if (comptime !windows) return;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    var input: std.Io.Reader = .fixed("");
+    const ctx: Context = .{ .a = a, .io = std.testing.io, .environ = &env, .out = &out.writer, .err = &err.writer, .input = &input, .interactive = false };
+    try std.testing.expectEqual(@as(u8, 2), try command(&ctx, &.{}));
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "not supported on Windows") != null);
 }

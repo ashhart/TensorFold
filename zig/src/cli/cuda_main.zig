@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len >= 2 and cluster.cli.wants(@ptrCast(args[1..]))) return cluster.cli.main(init, args[1..]);
     if (args.len >= 2 and cluster.validate.wants(@ptrCast(args[1..]))) return cluster.validate.main(init, args[1..]);
     // The checkpoint commands must work without a model, driver or GPU too.
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "start")) return server_start.main(init, args[2..]);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "start")) return server_start.mainCuda(init, args[2..]);
     if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
     // A leading flag is not a command: the usage covers it, without touching the GPU.
     if (args.len >= 2 and std.mem.startsWith(u8, args[1], "--")) {

@@ -16,8 +16,8 @@ pub const words: server.Words = .{
     .stuck = "Model server did not exit after termination; cleanup is incomplete",
 };
 
-/// What a start needs: the environment, this executable unless tests name another, and where the log is made.
-pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, log_dir: []const u8 };
+/// What a managed child needs. ``exe`` defaults to this executable; ``key`` defaults to a fresh private key.
+pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, key: ?[]const u8 = null, log_dir: []const u8 };
 
 /// The started server, the name it serves and the key every request to it carries.
 pub const Child = struct { managed: server.Managed, served: []const u8, key: []const u8 };
@@ -65,14 +65,14 @@ pub fn freshKey(a: Allocator, io: std.Io) ![]const u8 {
     return a.dupe(u8, &std.fmt.bytesToHex(raw, .lower));
 }
 
-/// The plan for ``model_arg``: a cached checkpoint and flags serve takes; null with ``problem`` set.
+/// The plan for ``model_arg``: a cached checkpoint, serving flags and the caller-supplied or fresh child key.
 pub fn plan(s: Setup, model_arg: []const u8, extra: []const []const u8, startup_timeout: ?f64, problem: *[]const u8) !?Plan {
     const dir = try hub.resolve(s.a, s.io, s.environ, model_arg, problem) orelse return null;
     const exe = s.exe orelse try std.process.executablePathAlloc(s.io, s.a);
     const child_argv = try argv(s.a, exe, dir, hub.servedName("", model_arg, dir), extra);
     const served = try check(s.a, child_argv, problem) orelse return null;
     const timeout_s = startup_timeout orelse server.startupTimeout(model.weightBytes(s.io, dir));
-    return .{ .argv = child_argv, .served = served, .timeout_s = timeout_s, .key = try freshKey(s.a, s.io) };
+    return .{ .argv = child_argv, .served = served, .timeout_s = timeout_s, .key = s.key orelse try freshKey(s.a, s.io) };
 }
 
 /// ``p`` started and ready; null with ``problem`` set ("" when stopped) and ``tail`` the child's last log lines.

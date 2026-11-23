@@ -70,23 +70,30 @@ pub fn chooseForStart(a: Allocator, io: std.Io, env: ?*const std.process.Environ
         if (e.hf_dir != null) continue;
         const revision = e.revision orelse continue;
         if (!hub.hexSha(revision)) continue;
-        if (e.drafter != null and (e.drafter_revision == null or !hub.hexSha(e.drafter_revision.?))) continue;
+        const drafting = startUsesDrafter(e, mc);
+        if (drafting and (e.drafter_revision == null or !hub.hexSha(e.drafter_revision.?))) continue;
         if (fitOf(e, mc) != .fits) continue;
         if (best == null or need(e) > need(best.?)) best = e;
     }
     const e = best orelse return null;
+    const drafting = startUsesDrafter(e, mc);
     const root = try hub.cacheDir(a, env, override);
     const main = try startSnapshot(a, io, root, e.repo, e.revision.?);
-    const draft = if (e.drafter) |d| try startSnapshot(a, io, root, d, e.drafter_revision.?) else .{ @as([]const u8, ""), true };
+    const draft = if (drafting) try startSnapshot(a, io, root, e.drafter.?, e.drafter_revision.?) else .{ @as([]const u8, ""), true };
     return .{
         .entry = e,
         .model = try pinned(e.repo, e.revision.?, a),
-        .drafter = if (e.drafter) |d| try pinned(d, e.drafter_revision.?, a) else null,
+        .drafter = if (drafting) try pinned(e.drafter.?, e.drafter_revision.?, a) else null,
         .model_dir = main[0],
-        .drafter_dir = if (e.drafter != null) draft[0] else null,
+        .drafter_dir = if (drafting) draft[0] else null,
         .download_bytes = e.download,
         .cached = main[1] and draft[1],
     };
+}
+
+/// `.m5 = .drafts` rows serve plain on pre-M5 Metal; M5 and CUDA keep their pinned drafter.
+fn startUsesDrafter(e: *const Entry, mc: *const Machine) bool {
+    return e.drafter != null and !(mc.backend == .metal and e.m5 == .drafts and !m5(mc.chip()));
 }
 
 /// A measurement on this chip, else the nearest on this backend (same chip generation first) scaled by bandwidth.
@@ -521,19 +528,29 @@ test "start CLI: a fake registry picks the largest pullable fit and refuses a ma
     const missing = try std.fmt.allocPrint(a, ".tf-start-none-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
     const entries = [_]Entry{
         .{ .title = "Small", .format = "4-bit", .repo = "Org/Small", .revision = "1111111111111111111111111111111111111111", .download = 2 * gib, .metal = true, .recipe = "small" },
-        .{ .title = "Large", .format = "4-bit", .repo = "Org/Large", .revision = "2222222222222222222222222222222222222222", .drafter = "Org/Draft", .drafter_revision = "3333333333333333333333333333333333333333", .download = 9 * gib, .metal = true, .recipe = "large" },
+        .{ .title = "Large", .format = "4-bit", .repo = "Org/Large", .revision = "2222222222222222222222222222222222222222", .drafter = "Org/Draft", .drafter_revision = "3333333333333333333333333333333333333333", .download = 9 * gib, .metal = true, .cuda = true, .m5 = .drafts, .recipe = "large" },
         .{ .title = "Unpinned", .format = "4-bit", .repo = "Org/Unpinned", .download = 20 * gib, .metal = true, .recipe = "unpinned" },
         .{ .title = "Tight", .format = "8-bit", .repo = "Org/Tight", .revision = "4444444444444444444444444444444444444444", .download = 61 * gib, .metal = true, .recipe = "tight" },
         .{ .title = "External installer", .format = "4-bit", .repo = "Org/External", .download = 12 * gib, .metal = true, .hf_dir = "External", .recipe = "external" },
         .{ .title = "Too big", .format = "8-bit", .repo = "Org/TooBig", .download = 100 * gib, .metal = true, .recipe = "too-big" },
     };
     var mc: Machine = .{ .backend = .metal, .memory = 96 * gib, .gpu_limit = 64 * gib };
+    mc.setChip("Apple M5 Max");
     const picked = (try chooseForStart(a, io, null, missing, &entries, &mc)).?;
     try std.testing.expectEqualStrings("Org/Large", picked.entry.repo);
     try std.testing.expectEqualStrings("Org/Large@2222222222222222222222222222222222222222", picked.model);
     try std.testing.expectEqualStrings("Org/Draft@3333333333333333333333333333333333333333", picked.drafter.?);
+    try std.testing.expect(picked.drafter_dir != null);
     try std.testing.expectEqual(@as(u64, 9 * gib), picked.download_bytes);
     try std.testing.expect(!picked.cached);
+    mc.setChip("Apple M4 Max");
+    const plain = (try chooseForStart(a, io, null, missing, &entries, &mc)).?;
+    try std.testing.expectEqualStrings("Org/Large", plain.entry.repo);
+    try std.testing.expect(plain.drafter == null and plain.drafter_dir == null);
+    mc = .{ .backend = .cuda, .memory = 96 * gib, .gpu_limit = 64 * gib };
+    const cuda = (try chooseForStart(a, io, null, missing, &entries, &mc)).?;
+    try std.testing.expectEqualStrings("Org/Large", cuda.entry.repo);
+    try std.testing.expect(cuda.drafter != null and cuda.drafter_dir != null);
     mc.gpu_limit = gib;
     try std.testing.expect((try chooseForStart(a, io, null, missing, &entries, &mc)) == null);
     mc = .{};
