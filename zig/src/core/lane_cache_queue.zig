@@ -27,6 +27,12 @@ const Snapshot = struct {
     }
 
     fn protect(out: *Snapshot, h: *LaneHost, current: *Job, job: *Job) !void {
+        if (job.lent) |serial| if (job != current) { // the very state it resumes at its first call, however long another
+            for (h.cache.?.entries.items) |e| if (e.serial == serial and !e.expired) {
+                if (std.mem.indexOfScalar(*const pc.Entry, out.entries.items, e) == null) try out.entries.append(h.gpa, e);
+                return;
+            };
+        };
         for (h.cache.?.by_position.items) |e| if (!e.expired and
             h.cache.?.usable(e.at, job.request.chunks) and extends(current, job, e))
         {
@@ -142,7 +148,7 @@ fn extends(current: *const Job, job: *const Job, e: *const pc.Entry) bool {
     const r = job.request;
     if (e.salt != r.cacheSalt()) return false;
     if (job == current or r.promptOnly() or r.prompt_logprobs != null or r.untaught) return false;
-    if (job.started and job.entry == null) return false;
+    if (job.started and job.entry == null and job.lent == null) return false; // a lent state stays protected
     const key = job.cacheKey();
     if (e.at >= key.len or e.tokens.len == 0 or e.tokens.len > key.len) return false;
     if (!@import("cache_images.zig").equal(e.images, r.images, @intCast(e.tokens.len))) return false;
@@ -223,4 +229,32 @@ test "queued cache: one snapshot protects each job's deepest usable prefix inclu
 
 test {
     _ = @import("lane_cache_promise_test.zig");
+}
+
+test "queued cache: a lent job's own state stays protected when a longer prefix is kept after it lent" {
+    const Fake = @import("prompt_cache_fake.zig").Fake;
+    const a = std.testing.allocator;
+    var f: Fake = .{ .gpa = a };
+    var store = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer store.deinit();
+    const words = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    _ = f.pass(&store, words[0..8], .{});
+    try std.testing.expect(store.keepBorn(&words, 8, 8, null, &.{}, &.{}));
+    const lent = store.entries.items[0];
+    var h: LaneHost = undefined;
+    h.cache = &store;
+    h.frame_key = null;
+    h.decoded_rows = false;
+    h.gpa = a;
+    const request: @import("engine_api.zig").Request = .{ .prompt = &words, .max_tokens = 1 };
+    var current: Job = .{ .host = &h, .id = 1, .request = &request, .sink = undefined };
+    var waiting: Job = .{ .host = &h, .id = 2, .request = &request, .sink = undefined, .started = true, .lent = lent.serial };
+    // another pass keeps a longer prefix of the same prompt before the lent job's first call
+    _ = f.pass(&store, words[0..12], .{});
+    try std.testing.expect(store.keepBorn(&words, 12, 12, null, &.{}, &.{}));
+    var snapshot: Snapshot = .{};
+    defer snapshot.entries.deinit(a);
+    try snapshot.protect(&h, &current, &waiting);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.entries.items.len);
+    try std.testing.expectEqual(lent, @constCast(snapshot.entries.items[0])); // the state it resumes, not the longer one
 }

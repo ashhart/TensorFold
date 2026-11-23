@@ -229,6 +229,8 @@ fn fillAt(h: *LaneHost, at: usize) void {
         };
         return;
     };
+    // a backend restores a kept state in its pass's first call: the store gets it back now, not at the pass's end
+    if (first and restoreSettled(&job.stream)) job.reported();
     load.progress(h, job);
     if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
     if (!done) return;
@@ -241,9 +243,12 @@ fn fillAt(h: *LaneHost, at: usize) void {
     _ = h.deliver(job);
 }
 
+pub const restoreSettled = @import("lane_job.zig").restoreSettled;
+
 /// Fill `at`'s next call: the rows it advanced (all it had, if it left the list); no progress shown spends any budget.
 pub fn step(h: *LaneHost, at: usize) u64 {
     const job = h.filling.items[at];
+    job.reborrow(); // a first call's kept state borrowed again first: its rows are counted from what it resumes
     const before = remaining(h, job);
     fillAt(h, took(h, at));
     // the call can finish, cancel or requeue the job: it is read again only while it is still filling
@@ -256,6 +261,7 @@ pub fn step(h: *LaneHost, at: usize) u64 {
 
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
+    h.filling.items[at].reborrow(); // as step's: its share and srpt read the rows it has left after it
     const decoding = runnable(h) > 0;
     if (h.srpt.on) return srptStep(h, at, decoding);
     // an engine default shares only while the prompt has the threshold's rows left; the flag shares every long prompt
