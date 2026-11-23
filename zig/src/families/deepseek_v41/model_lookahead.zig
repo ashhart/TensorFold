@@ -2,7 +2,7 @@
 const std = @import("std");
 const engram = @import("engram.zig");
 const hash = @import("engram_hash_core");
-const model = @import("model.zig");
+const model = @import("model_metal.zig");
 const Model = model.Model;
 const nowNs = model.nowNs;
 

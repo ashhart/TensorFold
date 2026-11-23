@@ -12,7 +12,7 @@ const source = "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/2cba
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const paths = try parseArgs(args);
-    try build(init.gpa, init.io, paths.tokenizer.?, paths.config.?, paths.output.?);
+    try build(init.gpa, init.io, paths.tokenizer, paths.config, paths.output);
 }
 
 /// Writes the map and its manifest for one release tokenizer and config, so the lane host can build it at open.
