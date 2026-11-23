@@ -300,5 +300,6 @@ test "a probe refuses non-finite and non-positive head references" {
 test {
     _ = @import("cost_rule_test.zig");
     _ = @import("metal_cost_rule_test.zig");
+    _ = @import("metal_cost_review_test.zig");
     _ = @import("cuda_cost_rule_test.zig");
 }
