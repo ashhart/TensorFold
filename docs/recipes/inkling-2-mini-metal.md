@@ -128,23 +128,24 @@ rate and falls more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,5
 Mac, images served, a quality suite.
 
 Sampled decode, `bench_concurrent --temperatures 0.7 --seed 1234 --alone --serial --levels 1,4 --tokens 256 --reps 3`
-(aggregate tokens a second), one session of three servers on a binary built from `e90ecce19a` (plus the table split of
-`metal.zig`, which changes no kernel): DSpark, plain (`--no-drafts`), DSpark again. The machine was shared with other
-builds (load average about 7) and the plain server logged a memory-pressure warning, so every rate is below the greedy
-table's and only the ratios inside this session mean anything:
+(aggregate tokens a second), `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, on an idle machine, the
+build of `61be67917f`: plain (`--no-drafts`), DSpark, DSpark again, plain again; the table gives each server's mean over
+its pair of runs, the two runs in brackets:
 
-| Prompt, streams | Plain | DSpark | DSpark again |
-| --- | --- | --- | --- |
-| code, 1 | 21.2 | 18.9 | 19.8 |
-| code, 4 | 31.7 | 25.9 | 25.5 |
-| chat, 1 | 21.0 | 18.1 | 19.5 |
-| chat, 4 | 31.3 | 31.9 | 29.3 |
+| Prompt, streams | Plain | DSpark | DSpark against plain | Greedy plain (table above) |
+| --- | --- | --- | --- | --- |
+| code, 1 | 21.4 (22.0, 20.7) | 20.7 (20.9, 20.5) | 3 % under | 31.1 |
+| code, 4 | 33.8 (34.6, 33.0) | 25.9 (25.9, 25.9) | 23 % under | 67.0 |
+| chat, 1 | 21.5 (22.1, 20.8) | 21.3 (21.5, 21.1) | 1 % under | 30.9 |
+| chat, 4 | 33.8 (35.2, 32.3) | 33.2 (34.2, 32.2) | 2 % under | 66.8 |
 
-Sampled with the draft head on, one stream is 7 to 14 % under plain and four code streams about 19 % under it. The
-client's check for sampled replies (each stream's seed is its index plus the base seed, and the same request must give
-the same text alone, and with `"draft": false`) gave all equal: 30 of 30 replies against their solo runs on each DSpark
-server and 4 of 4 against `"draft": false`, 0 unequal, 0 failed. Both DSpark servers accepted drafts (467 on code, 447
-on chat), so the check was not vacuous. The raw summaries are `sampled-*.out` in the receipt.
+Two things stand out. Plain decode with temperature 0.7 runs at 21 tokens a second against 31 greedy at one stream and at
+34 against 67 at four, so a sampled token costs about 15 ms more than a greedy one and the cost grows with the streams.
+With the draft head on, four code streams are 23 % under plain and the other cells are within the 6 % that separates the
+two plain runs. The client's check for sampled replies (each stream's seed is its index plus the base seed, and the same
+request must give the same text alone and with `"draft": false`) gave all equal on both DSpark servers: 3 and 12 of
+each count against the solo runs, 4 of 4 against `"draft": false`, 0 unequal, 0 failed. Drafts were accepted (467 on
+code, 447 on chat), so the check was not vacuous. The raw summaries are `sampled-*.out` in the receipt.
 
 ## Verification
 
@@ -185,5 +186,6 @@ lines at `e90ecce19a`.
 - Four drafted streams are within noise of plain, not faster; one stream is 15 to 22 % faster.
 - Admission by state bytes was tested on a 48 GiB Mac only; a 36 GB Mac (where an earlier head serialized four streams
   under memory pressure) has not run it.
-- With temperatures above 0 the draft head is slower than plain on this Mac (table above): serve sampled traffic with
-  `--no-drafts`. Rates in that table were taken on a shared machine and have not been repeated on an idle one.
+- With temperatures above 0 a plain token costs about 15 ms more than a greedy one (21 against 31 tokens a second at one
+  stream, 34 against 67 at four), and four drafted code streams are 23 % under plain; serve sampled traffic that
+  matters for speed with `--no-drafts` until the sampled path is faster.
