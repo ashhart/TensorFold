@@ -100,7 +100,11 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
     if (kept) |table| {
         var costs = table;
-        if (most == 0) { b.costs = costs; b.timing = .{}; return; }
+        if (most == 0) {
+            b.costs = costs;
+            b.timing = .{};
+            return;
+        }
         const cursor_key = lanes.cost_cache.buildKey(&(k orelse unreachable), &.{"metal-heal-v2"});
         var cursor = lanes.cost_cache.load([3]u64, b.gpa, io, cursor_key) orelse [3]u64{ 0, 0, 0 };
         const shared = costs.shareds > 0 and cursor[2] % 2 == 1;
@@ -108,7 +112,10 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
         const entries = if (shared) costs.shared[0..count] else costs.window[0..count];
         var values: [32]f64 = undefined;
         var widths: [32]u32 = undefined;
-        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| { m.* = c2.ms; w.* = c2.width; }
+        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| {
+            m.* = c2.ms;
+            w.* = c2.width;
+        }
         var caches: [64]st.Cache = undefined;
         var n: usize = 0;
         defer for (caches[0..n]) |*x| x.deinit(&b.pool);
@@ -317,8 +324,12 @@ const WarmTimer = struct {
     n: *usize,
     shared: bool,
     began: f64 = 0,
-    pub fn start(t: *WarmTimer) void { t.began = mtl.clock.seconds(); }
-    pub fn elapsedMs(t: *WarmTimer) f64 { return (mtl.clock.seconds() - t.began) * 1e3; }
+    pub fn start(t: *WarmTimer) void {
+        t.began = mtl.clock.seconds();
+    }
+    pub fn elapsedMs(t: *WarmTimer) f64 {
+        return (mtl.clock.seconds() - t.began) * 1e3;
+    }
     pub fn prepare(t: *WarmTimer, plan: lanes.cost_rule.warm_prices.Plan, widths: []const u32) !void {
         const needed = if (t.shared) plan.widest(widths) / 2 else 1;
         try makeEach(st.Cache, t.caches[0..needed], CacheMaker{ .b = t.b });

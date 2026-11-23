@@ -62,7 +62,10 @@ pub fn select(ms: []const f64, widths: []const u32, cursor: u64) Plan {
 }
 
 fn kind(comptime T: type) type {
-    return switch (@typeInfo(T)) { .pointer => |p| p.child, else => T };
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.child,
+        else => T,
+    };
 }
 
 fn charge(timer: anytype, stats: *Stats, measured: f64) void {
