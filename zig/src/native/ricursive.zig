@@ -137,6 +137,15 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
+fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    _ = a;
+    _ = per_stream;
+    _ = left;
+    _ = window;
+    _ = problem;
+    return @max(o.lanes, 1);
+}
+
 /// Weights, tables and scratches in one residency set for the keepalive, under the 70% limit.
 fn hold(h: *Host) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
