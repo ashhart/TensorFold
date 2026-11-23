@@ -60,13 +60,13 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     const route = try @import("pack_route.zig").plan(gpa, io, model_dir, dump_dir, home);
     defer route.deinit(gpa);
     const paired = speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null;
-    const requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
+    var requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
     errdefer device.deinit();
     const existing = device.allocated();
-    const base_extra = try std.math.add(u64, requested, existing);
+    var base_extra = try std.math.add(u64, requested, existing);
     var plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
@@ -78,6 +78,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
             selected = fitted;
             placement = try @import("fsr_layout.zig").of(source_inventory, selected);
             inventory.raw = placement.raw;
+            requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
+            base_extra = try std.math.add(u64, requested, existing);
             plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
         }
     }
