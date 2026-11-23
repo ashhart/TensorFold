@@ -258,7 +258,8 @@ cut before the final answer) "INVOICE No. 20931" and "TOTAL DUE: 1034.00 EUR", f
 the same checkpoint serves images too (no mlx_vlm needed) and read the same content; the texts differ in wording after a
 few dozen characters, as near-tie noise does. Time to first token, median of two requests after a warm-up, one image (the
 first three rows from the session above; the last two at `a305edd706`, quiet machine, A-B-B-A against `5e75f97db2`, which
-took 15.7 to 16.2 s on the invoice and 3.0 to 3.4 s on the scene there, 17.3 to 18.1 s and 3.5 to 3.9 s in the first session):
+took 15.7 to 16.2 s on the invoice and 3.0 to 3.4 s on the scene there, 17.3 to 18.1 s and 3.5 to 3.9 s in the first session;
+the invoice's 6.5 s is the bf16 score build below, quiet machine, A-B-B-A against `238f688b59`, which took 6.9 s):
 
 | Image (prompt tokens) | Native | MLX |
 | --- | --- | --- |
@@ -266,15 +267,20 @@ took 15.7 to 16.2 s on the invoice and 3.0 to 3.4 s on the scene there, 17.3 to 
 | 512 x 512 shapes (197) | 0.88 s | 0.71 s |
 | 640 x 420 chart (208) | 0.93 s | 0.73 s |
 | 1024 x 768 scene (546) | 1.9 to 2.3 s | 1.7 s |
-| 1792 x 1344 invoice (1,561) | 6.9 to 7.2 s | 4.7 to 4.8 s |
+| 1792 x 1344 invoice (1,561) | 6.5 s | 4.7 to 4.8 s |
 
 The image tower was most of a larger image's first token: on the invoice it took 12.5 s of the 15.7 s, 89 % of that in
 the two fp32 attention dots (q k^T and p v) that ran one thread an output. They now run on 64 x 64 tiles with each output
 still one fma chain over k, so the tower's output is the same bits (its hash and all 16 replies per image are equal): the
-tower takes 3.2 s on the invoice and 0.64 s on the scene. What is left of the invoice's 6.9 s is that tower and the text
-prefill of its 1,561 rows (about 3.7 s), and MLX's tower is under half of native's (the stage table is in
-`fidelity/img-ttft.txt` of the receipt). The three small rows were not re-measured quietly: their attention is small
-and a 0.1 s change is inside this machine's noise.
+tower takes 3.2 s on the invoice and 0.64 s on the scene. The softmax between those dots was at its memory floor (0.86 ms
+for a 256-row chunk of the invoice's 16 heads over 6,121 keys, 100 MB read and written, against 0.80 ms at 250 GB/s), so
+the fix is bytes: q k^T stores its scores as bf16 (bf16(bf16(sum) / 8), the two roundings the softmax applied first, in
+its epilogue), the softmax reads and writes bf16 with the same max, exps and sum order, and p v reads the bf16
+probabilities (exact in fp32). The three kernels take 74 ms a layer on the invoice instead of 95 ms, and the first token
+6.5 s instead of 6.9 s, with the tower's output hash and all 8 replies per image equal. What is left of the invoice's
+6.5 s is the tower (about 2.8 s) and the text prefill of its 1,561 rows (about 3.7 s), and MLX's tower is under half of
+native's (the stage tables are in `fidelity/img-ttft.txt` and `fidelity/img-softmax.txt` of the receipt). The three small
+rows were not re-measured quietly: their attention is small and a 0.1 s change is inside this machine's noise.
 
 Sampled decode, `bench_concurrent --temperatures 0.7 --seed 1234 --alone --serial --levels 1,4 --tokens 256 --reps 3`
 (aggregate tokens a second), `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, on an idle machine, the
