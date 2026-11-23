@@ -1,0 +1,25 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 1 streams, 8192-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.92 GiB; DSpark off, images on, prompt cache 0.00 GiB; demand 20.26 GiB (19.60 GiB fixed, 1 x 0.66 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8791/v1 (sampling: temperature 1.0; drafts: off; context: 8192; loaded in 6.7s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-cde0daf5d5ccbabcf65b11d9b3e0f8bf prompt=18 cached=0 thinking=False effort=none tokens=8 sha=14f57c547eab finish=length rounds=7 accepted=0/0 ttft=0.153 decode=0.229 elapsed=0.381 queued=0.000 tok/s=30.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-890feac76809f4e912e4becf99c22725 prompt=546 cached=0 thinking=False effort=none tokens=131 sha=95c18a954ff3 finish=stop rounds=130 accepted=0/0 ttft=3.347 decode=4.329 elapsed=7.676 queued=0.000 tok/s=30.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-7062a6511db08b2d304c9615566b937a prompt=546 cached=0 thinking=False effort=none tokens=131 sha=95c18a954ff3 finish=stop rounds=130 accepted=0/0 ttft=2.947 decode=4.321 elapsed=7.268 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-e980f4e8b258219f527257f6cf764694 prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=accdb7fc3284 finish=length rounds=159 accepted=0/0 ttft=15.748 decode=5.424 elapsed=21.172 queued=0.000 tok/s=29.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-fbfc2a683570812cff9c0a68802b1c3d prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=accdb7fc3284 finish=length rounds=159 accepted=0/0 ttft=15.743 decode=5.423 elapsed=21.167 queued=0.000 tok/s=29.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-23cac4032721de8afb279a4e6529cbab prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=30e811256ffb finish=length rounds=159 accepted=0/0 ttft=15.752 decode=5.426 elapsed=21.179 queued=0.000 tok/s=29.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-282bc816275452d079e254d183bf8430 prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=30e811256ffb finish=length rounds=159 accepted=0/0 ttft=16.144 decode=5.426 elapsed=21.570 queued=0.000 tok/s=29.3
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

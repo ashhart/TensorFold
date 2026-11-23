@@ -75,6 +75,11 @@ read `CKPT BIN WORK PY JPEG` from the environment. The pinned libjpeg-turbo rele
 | `fid_compare.py`, `compare.txt`, `fid_selfnoise.py`, `selfnoise.txt` | The comparison tables quoted in the recipe, and MLX against itself |
 | `img_make.py`, `img/` | The test images (PIL) |
 | `img_client.py`, `run_img.sh`, `img.native.json`, `img.mlx.json`, `img.*.serve.txt` | Image requests (streamed, two per image, greedy, 160 tokens) against native `--vision` and `mlx_lm.server`, with each reply's text, usage and time to first token |
+| `img-ttft.txt` | The image first-token split and its fix (`a305edd706`, after `5e75f97db2`): the tower's ms per stage at 520 and 1,530 image tokens before and after, the bits check (tower output hash on 14 requests, replies and `sha=` of four sessions, the four text hashes, the contract SUMMARY), the A-B-B-A first tokens and the MLX rerun. The stage numbers come from profile builds that cut the tower's command buffer after every stage (an uncommitted patch), run while other jobs loaded the machine |
+| `img-stage-A.serve.txt`, `img-stage-B.serve.txt` | The profile builds' server logs (`VPROF` lines: per stage ms, tower output hash) over `img_client.py`'s seven images |
+| `img_client3.py`, `img-abba-1-A.json`, `img-abba-2-B.json`, `img-abba-3-B.json`, `img-abba-4-A.json`, `img-abba-*.serve.txt` | `img_client.py` cut to the scene and the invoice (JPEG and PNG); one A-B-B-A session, A `5e75f97db2`, B `a305edd706` (the `--context 8192 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking --vision` server, quiet machine) |
+| `img-eq-1-A.json`, `img-eq-2-B.json`, `img-eq-3-B.json`, `img-eq-4-A.json` | The same four binaries over all seven images, `img_client.py`, with the replies compared byte for byte (their first tokens were taken under load) |
+| `img.mlx.rerun.json`, `text_ttft.py`, `text-ttft.mlx.txt`, `text-ttft.native-B.txt`, `hash-vision-ttft.txt` | `mlx_lm.server` on the seven images again, the text-only first-token probe (607 and 1,727 tokens) on MLX and on B, and B's server log of `chat_hashes.py` (the four known `sha=` values) |
 
 ## Not in this receipt
 

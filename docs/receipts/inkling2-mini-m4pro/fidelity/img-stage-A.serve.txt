@@ -1,0 +1,97 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 1 streams, 8192-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.92 GiB; DSpark off, images on, prompt cache 0.00 GiB; demand 20.26 GiB (19.60 GiB fixed, 1 x 0.66 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8692/v1 (sampling: temperature 1.0; drafts: off; context: 8192; loaded in 15.8s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-71edc9136f17b6488b05537e1ac03049 prompt=18 cached=0 thinking=False effort=none tokens=8 sha=14f57c547eab finish=length rounds=7 accepted=0/0 ttft=0.176 decode=0.260 elapsed=0.436 queued=0.000 tok/s=26.9
+info: VPROF prepare_ms=0.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=426bb20346d4bb0f
+info: VPROF tokens=24 total_ms=78.1 embed=0.7 ln1=3.2 qkv_gemm=10.6 qkv_glue=3.6 qk_gemm=4.8 softmax=3.3 pv_gemm=4.4 heads=2.9 out_gemm=5.5 res_att=3.1 ln2=2.8 fc1=8.7 gelu=3.1 fc2=17.2 res_mlp=3.0 merger=1.0 tail=0.0
+info: VPROF encode_wall_ms=78.5
+[tensorfold] done chatcmpl-acb409286cf635e31f2806df2dcfa6b5 prompt=56 cached=0 thinking=False effort=none tokens=91 sha=972e00c69dd8 finish=stop rounds=90 accepted=0/0 ttft=0.435 decode=3.284 elapsed=3.719 queued=0.000 tok/s=27.4
+info: VPROF prepare_ms=0.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=426bb20346d4bb0f
+info: VPROF tokens=24 total_ms=73.0 embed=0.5 ln1=3.1 qkv_gemm=10.0 qkv_glue=3.6 qk_gemm=4.6 softmax=3.7 pv_gemm=4.2 heads=2.8 out_gemm=5.4 res_att=2.9 ln2=3.0 fc1=8.9 gelu=3.3 fc2=13.0 res_mlp=2.9 merger=1.0 tail=0.0
+info: VPROF encode_wall_ms=73.1
+[tensorfold] done chatcmpl-865d99a62349f1355e3551f2fbe8eb17 prompt=56 cached=0 thinking=False effort=none tokens=91 sha=972e00c69dd8 finish=stop rounds=90 accepted=0/0 ttft=0.430 decode=3.239 elapsed=3.669 queued=0.000 tok/s=27.8
+info: VPROF prepare_ms=2.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=6d5ca418edcf7e06
+info: VPROF tokens=169 total_ms=301.7 embed=1.3 ln1=3.6 qkv_gemm=21.0 qkv_glue=6.3 qk_gemm=87.3 softmax=17.5 pv_gemm=73.4 heads=12.7 out_gemm=9.0 res_att=3.5 ln2=3.5 fc1=23.8 gelu=6.8 fc2=25.8 res_mlp=3.5 merger=2.6 tail=0.0
+info: VPROF encode_wall_ms=302.2
+[tensorfold] done chatcmpl-8c03269dc0a1ab0c97a9fa3e8827b52f prompt=197 cached=0 thinking=False effort=none tokens=67 sha=39a47b4fb9c2 finish=stop rounds=66 accepted=0/0 ttft=1.001 decode=2.423 elapsed=3.425 queued=0.000 tok/s=27.2
+info: VPROF prepare_ms=2.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=6d5ca418edcf7e06
+info: VPROF tokens=169 total_ms=304.8 embed=0.9 ln1=3.9 qkv_gemm=20.6 qkv_glue=7.0 qk_gemm=88.9 softmax=18.2 pv_gemm=74.4 heads=12.7 out_gemm=8.9 res_att=3.3 ln2=3.8 fc1=23.7 gelu=6.2 fc2=26.1 res_mlp=3.6 merger=2.4 tail=0.0
+info: VPROF encode_wall_ms=305.1
+[tensorfold] done chatcmpl-ed083f4db09eaf653304a6fe94006fb0 prompt=197 cached=0 thinking=False effort=none tokens=67 sha=39a47b4fb9c2 finish=stop rounds=66 accepted=0/0 ttft=1.002 decode=2.399 elapsed=3.401 queued=0.000 tok/s=27.5
+info: VPROF prepare_ms=2.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=d355a93afc2593b9
+info: VPROF tokens=176 total_ms=311.6 embed=0.6 ln1=3.5 qkv_gemm=20.0 qkv_glue=5.5 qk_gemm=93.7 softmax=18.4 pv_gemm=79.4 heads=12.8 out_gemm=9.4 res_att=3.7 ln2=3.6 fc1=23.9 gelu=5.1 fc2=25.1 res_mlp=4.3 merger=2.4 tail=0.0
+info: VPROF encode_wall_ms=311.9
+[tensorfold] done chatcmpl-c32351e479886b3fbdaae57b589f0fb2 prompt=208 cached=0 thinking=False effort=none tokens=79 sha=56bd7447a620 finish=stop rounds=78 accepted=0/0 ttft=1.047 decode=2.840 elapsed=3.888 queued=0.000 tok/s=27.5
+info: VPROF prepare_ms=2.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=d355a93afc2593b9
+info: VPROF tokens=176 total_ms=310.3 embed=1.3 ln1=4.1 qkv_gemm=20.6 qkv_glue=4.9 qk_gemm=95.2 softmax=16.6 pv_gemm=78.1 heads=13.1 out_gemm=9.5 res_att=3.9 ln2=3.5 fc1=24.0 gelu=4.1 fc2=25.0 res_mlp=4.1 merger=2.4 tail=0.0
+info: VPROF encode_wall_ms=310.7
+[tensorfold] done chatcmpl-baeb1d51f2d95095b6f014e78463a34b prompt=208 cached=0 thinking=False effort=none tokens=79 sha=56bd7447a620 finish=stop rounds=78 accepted=0/0 ttft=1.042 decode=2.863 elapsed=3.905 queued=0.000 tok/s=27.2
+info: VPROF prepare_ms=0.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=1ad18b422483ada
+info: VPROF tokens=176 total_ms=324.3 embed=1.0 ln1=4.0 qkv_gemm=20.8 qkv_glue=8.1 qk_gemm=96.5 softmax=21.3 pv_gemm=79.3 heads=13.0 out_gemm=9.3 res_att=4.7 ln2=3.4 fc1=23.8 gelu=8.1 fc2=25.1 res_mlp=3.5 merger=2.4 tail=0.0
+info: VPROF encode_wall_ms=324.6
+[tensorfold] done chatcmpl-08e57fbe946b23c76ef3d6902ae0415c prompt=208 cached=0 thinking=False effort=none tokens=74 sha=901bdc9d6903 finish=stop rounds=73 accepted=0/0 ttft=1.064 decode=2.675 elapsed=3.739 queued=0.000 tok/s=27.3
+info: VPROF prepare_ms=0.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=1ad18b422483ada
+info: VPROF tokens=176 total_ms=313.4 embed=0.6 ln1=4.3 qkv_gemm=21.0 qkv_glue=5.8 qk_gemm=93.5 softmax=19.2 pv_gemm=79.1 heads=12.7 out_gemm=9.2 res_att=3.8 ln2=3.4 fc1=23.8 gelu=4.7 fc2=25.2 res_mlp=4.6 merger=2.4 tail=0.0
+info: VPROF encode_wall_ms=313.7
+[tensorfold] done chatcmpl-d82729cff24c144e021a159d495b05c4 prompt=208 cached=0 thinking=False effort=none tokens=74 sha=901bdc9d6903 finish=stop rounds=73 accepted=0/0 ttft=1.046 decode=2.694 elapsed=3.740 queued=0.000 tok/s=27.1
+info: VPROF prepare_ms=2.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=5dee538e1ef7c759
+info: VPROF tokens=520 total_ms=1820.9 embed=1.3 ln1=4.0 qkv_gemm=63.4 qkv_glue=17.0 qk_gemm=753.6 softmax=91.0 pv_gemm=630.3 heads=42.8 out_gemm=29.4 res_att=3.2 ln2=4.5 fc1=75.3 gelu=19.3 fc2=77.9 res_mlp=2.9 merger=4.8 tail=0.0
+info: VPROF encode_wall_ms=1821.8
+[tensorfold] done chatcmpl-d4bb84fe741afde66d0c6c1c200786a7 prompt=546 cached=0 thinking=False effort=none tokens=131 sha=95c18a954ff3 finish=stop rounds=130 accepted=0/0 ttft=3.492 decode=4.886 elapsed=8.378 queued=0.000 tok/s=26.6
+info: VPROF prepare_ms=2.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=5dee538e1ef7c759
+info: VPROF tokens=520 total_ms=1823.5 embed=1.6 ln1=4.7 qkv_gemm=64.1 qkv_glue=18.1 qk_gemm=752.7 softmax=82.5 pv_gemm=633.5 heads=43.5 out_gemm=34.2 res_att=3.6 ln2=4.1 fc1=75.7 gelu=18.1 fc2=78.7 res_mlp=2.9 merger=5.1 tail=0.0
+info: VPROF encode_wall_ms=1824.3
+[tensorfold] done chatcmpl-4d92e5428be1ec77c97ab41b18fb0219 prompt=546 cached=0 thinking=False effort=none tokens=131 sha=95c18a954ff3 finish=stop rounds=130 accepted=0/0 ttft=4.054 decode=4.684 elapsed=8.738 queued=0.000 tok/s=27.8
+info: VPROF prepare_ms=9.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=f22ac81ecaa4d511
+info: VPROF tokens=1530 total_ms=12936.9 embed=3.3 ln1=6.3 qkv_gemm=161.6 qkv_glue=43.7 qk_gemm=5837.1 softmax=615.3 pv_gemm=5613.9 heads=123.4 out_gemm=68.6 res_att=3.5 ln2=6.0 fc1=192.9 gelu=42.3 fc2=202.0 res_mlp=3.8 merger=12.3 tail=0.0
+info: VPROF encode_wall_ms=12940.1
+[tensorfold] done chatcmpl-ab4b214ba9bc0a5cc53385fe7c7287c9 prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=accdb7fc3284 finish=length rounds=159 accepted=0/0 ttft=18.086 decode=5.950 elapsed=24.036 queued=0.000 tok/s=26.7
+info: VPROF prepare_ms=7.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=f22ac81ecaa4d511
+info: VPROF tokens=1530 total_ms=12815.6 embed=4.5 ln1=8.1 qkv_gemm=162.6 qkv_glue=40.9 qk_gemm=5809.2 softmax=602.6 pv_gemm=5531.1 heads=129.1 out_gemm=69.5 res_att=3.6 ln2=5.9 fc1=194.1 gelu=36.1 fc2=202.5 res_mlp=3.4 merger=11.7 tail=0.0
+info: VPROF encode_wall_ms=12817.8
+[tensorfold] done chatcmpl-390ac0fb8f1441f6658e0396ce1b8f38 prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=accdb7fc3284 finish=length rounds=159 accepted=0/0 ttft=17.091 decode=5.489 elapsed=22.580 queued=0.000 tok/s=29.0
+info: VPROF prepare_ms=19.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=6d64bb00397b5445
+info: VPROF tokens=1530 total_ms=12086.6 embed=3.4 ln1=6.3 qkv_gemm=164.5 qkv_glue=35.1 qk_gemm=5555.5 softmax=547.2 pv_gemm=5154.9 heads=105.2 out_gemm=69.4 res_att=3.6 ln2=5.9 fc1=187.8 gelu=30.1 fc2=200.6 res_mlp=3.6 merger=13.0 tail=0.0
+info: VPROF encode_wall_ms=12088.7
+[tensorfold] done chatcmpl-46f2effa39b00e07469f05087691e184 prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=30e811256ffb finish=length rounds=159 accepted=0/0 ttft=16.366 decode=5.464 elapsed=21.830 queued=0.000 tok/s=29.1
+info: VPROF prepare_ms=20.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: VPROF outhash=6d64bb00397b5445
+info: VPROF tokens=1530 total_ms=12244.0 embed=3.4 ln1=6.1 qkv_gemm=160.5 qkv_glue=34.2 qk_gemm=5641.1 softmax=555.2 pv_gemm=5215.7 heads=110.1 out_gemm=69.8 res_att=3.5 ln2=5.9 fc1=190.0 gelu=29.3 fc2=203.0 res_mlp=3.5 merger=12.0 tail=0.0
+info: VPROF encode_wall_ms=12247.5
+[tensorfold] done chatcmpl-fa9e27b603358566c94df7b8d379be5c prompt=1561 cached=0 thinking=False effort=none tokens=160 sha=30e811256ffb finish=length rounds=159 accepted=0/0 ttft=17.071 decode=5.523 elapsed=22.594 queued=0.000 tok/s=28.8
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

@@ -1,0 +1,69 @@
+Image time to first token, where it goes and the fix (Apple M4 Pro 48 GiB, 2026-11-23, one model process at a time, --context 8192 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking --vision)
+
+Binaries (zig build native -Dcpu=apple_m1 -Doptimize=ReleaseFast):
+  A  5e75f97db2 (the head the fidelity images ran on)       SHA-256 621c81f000c2d5fe98103223df80707bcdd70a1a030c5369104e46453d07bc6c
+  B  a305edd706 (tiled fp32 score dots, gemm.metal)          SHA-256 abf74c9e12698854c97a408daa37713ddcafa89d3c14526f6de4556eb22d3aeb
+  Stage profile builds (not committed): A and B with the tower's command buffer cut, committed and waited after every stage
+  (one wait a stage), and a Wyhash of the tower's bf16 output printed per request:
+  A SHA-256 247fd4982940e781b6acf280ee356dc38ab21f0978bea7b0c83327cda1778251, B 4b4d8566e9d745398a160389082b0046bde0c567880e0042567e599bf66d180d.
+  (B's profile build predates two comment-only lines in gemm.metal; the shader's code is the commit's.)
+
+1. Where the time goes: ms in the tower per stage, median of the requests of img-stage-{A,B}.serve.txt (VPROF lines).
+   The machine had other jobs (load about 3.5) during these runs; read the stage shares.
+
+   stage (all 23 layers)        scene 520 image tokens      invoice 1,530 image tokens
+                                  A        B                   A         B
+   patchify embed + pre-norm      1.5      1.7                 3.4       3.3
+   ln_1                           4.3      4.3                 6.3       6.2
+   q k v projections             63.8     60.8               162.1     160.2
+   q k v bias + rotary           17.6     14.6                38.0      34.9
+   scores q k^T (fp32 dot)      753.2    121.2              5725.1     845.3
+   softmax                       86.8     66.7               578.9     541.0
+   p v (fp32 dot)               631.9    138.2              5373.4     999.5
+   heads to rows                 43.1     32.5               116.8      97.3
+   output projection             31.8     27.9                69.5      68.8
+   residual after attention       3.4      3.0                 3.5       3.5
+   ln_2                           4.3      4.2                 5.9       5.8
+   fc1                           75.5     71.2               191.4     187.9
+   gelu                          18.7     12.5                33.1      29.6
+   fc2                           78.3     76.8               202.2     200.6
+   residual after mlp             2.9      3.0                 3.5       3.5
+   merger (proj_in, gelu, proj_out) 4.9    4.9                12.2      11.6
+   tower total                 1822.2    643.8             12529.8    3197.8
+
+   Outside the tower (same builds): decoding, resizing and patchifying the image on the HTTP thread took 2.3 ms (scene
+   JPEG), 8 ms (invoice JPEG) and 20 ms (invoice PNG); the tower's CPU side (patch copy and the position tables) takes 2 to 4 ms (encode wall time minus the
+   tower total in the same log); the splice of the image rows into the prompt is one copy inside the first prefill pass. Everything else of the
+   first token is the text prefill of the prompt's 546 / 1,561 rows: first token minus tower is 3.7 s at 1,561 tokens
+   on B and about 3.2 s on A (first token of the quiet session below minus the tower of the profile run).
+
+   A's tower was 80 % of its first token on the invoice, and 89 % of the tower was the two fp32 attention dots
+   (ik2_gemm_f32_nt, ik2_gemm_f32_nn: one thread an output, 150 GFMA/s). B's dots are 64 x 64 tiles of 4 x 4 outputs a
+   thread, operands staged through threadgroup memory, 1.2 to 1.4 TFMA/s on the benchmark shapes (q k^T 3.2 ms, p v 2.9 ms
+   for 16 heads x 640 rows x 6,121 keys; A 27 and 22 ms), every output still one fma chain over k from zero.
+
+2. Bits: the tower's bf16 output hash, per image request, A against B (img-stage-*.serve.txt, 14 requests): all 14 equal.
+   Greedy answers, 4 sessions A, B, B, A, all seven images, two requests each, 160 tokens (img-eq-{1-A,2-B,3-B,4-A}.json):
+   the 16 replies of every image are one text, byte for byte (usage included); the sha= lines of the four servers are the
+   same 15 values in order (14f57c547eab for the warm-up, then twice each 972e00c69dd8 39a47b4fb9c2 56bd7447a620
+   901bdc9d6903 95c18a954ff3 accdb7fc3284 30e811256ffb). The four text hashes of chat_hashes.py on B at --context 8192 (no --vision):
+   0b037128ee78 b37d8a0e39c4 77bf7c99cc66 538175732cc7 (hash-vision-ttft.txt).
+   Contract on B: SUMMARY 86 kernels: 86 pass gates 1-4, 0 fail, 0 known findings; 133 controls: 133 red as planted,
+   0 missed; 0 limit problems.
+
+3. First token, A-B-B-A on a quiet machine (load 1.3), two requests each (img-abba-{1-A,2-B,3-B,4-A}.json, img_client3.py:
+   the scene and the invoice only), seconds:
+
+   image (prompt tokens)           A (1)          B (2)          B (3)          A (4)
+   scene.jpg (546)                 3.16, 2.95     1.94, 1.94     1.94, 2.33     3.35, 2.95
+   invoice-large.jpg (1,561)       15.75, 16.18   7.16, 6.93     6.93, 6.93     15.75, 15.74
+   invoice-large.png (1,561)       16.17, 15.96   6.94, 6.94     6.94, 6.94     15.75, 16.14
+
+   B is 0.58 to 0.79 of A on the scene (1.9 to 2.3 s against 2.95 to 3.35 s) and 0.44 to 0.46 on the invoice. The full seven-image sessions of img-eq-* ran
+   with other jobs on the machine (load 3 to 4, one build); their first tokens for the 56 to 208-token images
+   (0.35 to 1.4 s, A and B alike) are not separable from that noise.
+
+4. MLX on the same images (mlx_lm.server, same checkpoint, alone; img.mlx.rerun.json): scene 1.67, 1.68 s; invoice JPEG
+   4.79, 4.68 s; invoice PNG 4.70, 4.71 s. Text-only prompts of 607 and 1,727 tokens (text_ttft.py): MLX 1.43 and 3.77 to
+   3.91 s; native B 1.76 to 1.89 s and 4.90 to 5.98 s, measured under load (text-ttft.*.txt). So MLX's tower is about
+   0.3 s (scene) and 1.2 s (invoice) against B's 0.64 and 3.2 s, and its text prefill is faster than native's.
