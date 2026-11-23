@@ -16,21 +16,32 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     var now: i96 = undefined;
     var tokens: u64 = 0;
     while (true) {
+        n = 0;
         const v1 = h.st.seq.load(.acquire);
-        if (v1 % 2 == 0) {
-            s = h.st.snap;
-            now = std.Io.Clock.awake.now(h.io).toNanoseconds();
-            tokens = 0;
-            for (h.st.decode_slots[s.decode_slot].items) |m| {
-                if (m.at >= now - window_ns) tokens += m.tokens;
-            }
-            if (s.live_len > 0) {
-                const buf = h.st.live_slots[s.live_slot].items;
-                n = @min(stream_tokens.len, s.live_len);
-                @memcpy(stream_tokens[0..n], buf[0..n]);
-            }
-            if (h.st.seq.load(.acquire) == v1) break;
+        if (v1 % 2 != 0) {
+            std.atomic.spinLoopHint();
+            continue;
         }
+        s = h.st.snap;
+        const slot = s.slot;
+        _ = h.st.readers[slot].fetchAdd(1, .acq_rel);
+        if (h.st.seq.load(.acquire) != v1) {
+            _ = h.st.readers[slot].fetchSub(1, .acq_rel);
+            continue;
+        }
+        now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        tokens = 0;
+        for (h.st.decode_slots[slot].items) |m| {
+            if (m.at >= now - window_ns) tokens += m.tokens;
+        }
+        if (s.live_len > 0) {
+            const buf = h.st.live_slots[slot].items;
+            n = @min(stream_tokens.len, s.live_len);
+            @memcpy(stream_tokens[0..n], buf[0..n]);
+        }
+        const stable = h.st.seq.load(.acquire) == v1;
+        _ = h.st.readers[slot].fetchSub(1, .acq_rel);
+        if (stable) break;
     }
     out.* = .{
         .healthy = !h.closing.load(.acquire) and !h.stale.load(.acquire) and (if (h.health) |source| source.read(source.ctx) else true),
@@ -56,6 +67,7 @@ pub const State = struct {
     seq: std.atomic.Value(u32) = .init(0), // odd while the engine thread publishes
     live_slots: [2]std.ArrayList(u32) = .{ .empty, .empty },
     decode_slots: [2]std.ArrayList(Mark) = .{ .empty, .empty },
+    readers: [2]std.atomic.Value(u32) = .{ .init(0), .init(0) }, // registered before slot access; writers drain their target
     live_tokens: std.ArrayList(u32) = .empty,
     live_generated: u64 = 0,
     cache_status: ?api.Status.PromptCache = null,
@@ -84,6 +96,8 @@ pub fn takeEngineLock(h: *LaneHost) bool {
 
 /// Frees the status state when the host stops.
 pub fn freeSlots(h: *LaneHost) void {
+    h.st.seq.store(h.st.seq.load(.monotonic) | 1, .release); // teardown admits no new slot readers
+    for (&h.st.readers) |*readers| while (readers.load(.acquire) != 0) std.atomic.spinLoopHint();
     h.st.live_tokens.deinit(h.gpa);
     for (&h.st.live_slots) |*slot| slot.deinit(h.gpa);
     for (&h.st.decode_slots) |*slot| slot.deinit(h.gpa);
@@ -91,11 +105,10 @@ pub fn freeSlots(h: *LaneHost) void {
 
 /// The lane host's status state: the published snapshot, its seqlock, the live slots and the round-wait counter.
 pub const Snapshot = struct {
-    live_slot: usize = 0,
+    slot: usize = 0,
     live_len: usize = 0,
     running: usize = 0,
     waiting: usize = 0,
-    decode_slot: usize = 0,
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     generation_tokens: u64 = 0,
@@ -113,23 +126,22 @@ pub fn publish(h: *LaneHost) void {
     defer h.unlock();
     var tmp: api.Status = .{};
     fillTotals(h, &tmp);
-    const slot = (h.st.snap.live_slot + 1) % 2;
-    const decode_slot = (h.st.snap.decode_slot + 1) % 2;
+    const slot = (h.st.snap.slot + 1) % 2;
     h.st.seq.store(h.st.seq.load(.monotonic) | 1, .release); // odd: a reader retries
+    while (h.st.readers[slot].load(.acquire) != 0) std.atomic.spinLoopHint();
     var len: usize = 0;
     if (h.st.live_tokens.items.len > 0) {
         h.st.live_slots[slot].clearRetainingCapacity();
         h.st.live_slots[slot].appendSlice(h.gpa, h.st.live_tokens.items) catch {};
         len = h.st.live_slots[slot].items.len;
     }
-    h.st.decode_slots[decode_slot].clearRetainingCapacity();
-    h.st.decode_slots[decode_slot].appendSlice(h.gpa, h.decoded.items) catch {};
+    h.st.decode_slots[slot].clearRetainingCapacity();
+    h.st.decode_slots[slot].appendSlice(h.gpa, h.decoded.items) catch {};
     h.st.snap = .{
-        .live_slot = slot,
+        .slot = slot,
         .live_len = len,
         .running = h.admitted.items.len,
         .waiting = h.queued.items.len,
-        .decode_slot = decode_slot,
         .prefill_rate = h.st.prefill_rate,
         .prefill_at = h.st.prefill_at,
         .generation_tokens = h.st.live_generated,
@@ -185,8 +197,8 @@ pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
         }
         h.decoded.shrinkRetainingCapacity(keep);
         h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
+        @import("lane_host_load.zig").decoded(h, n, first);
     }
-    @import("lane_host_load.zig").decoded(h, n, first);
     publish(h);
 }
 
