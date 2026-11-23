@@ -215,7 +215,10 @@ pub const RoundProf = struct {
     pub fn write(p: *const RoundProf, w: *std.Io.Writer) !void {
         if (p.rounds == p.since) {
             var pending = false;
-            for (p.ev) |s| if (s.n > 0) { pending = true; break; };
+            for (p.ev) |s| if (s.n > 0) {
+                pending = true;
+                break;
+            };
             if (!pending) return;
         } else try w.print("dsv41 round profile: rounds {d} to {d} ({d} rounds; mean and percentiles cover these rounds); ms mean/p50/p95\n", .{ p.since + 1, p.rounds, p.rounds - p.since });
         for (p.groups, 0..) |bs, slots| for (bs, 0..) |ds, b| for (ds, 0..) |g, drafted| if (g) |gg| if (gg.n > 0) {

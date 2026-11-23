@@ -432,7 +432,7 @@ test "a branched tree launch books its phases in the round summary" {
     defer p.deinit();
     p.clock = profileClock;
     profile_now = 10;
-    var rec = beginLaunch(p, o.n_chains, rows).?;
+    var rec = Tree.beginLaunch(p, o.n_chains, rows).?;
     profile_now += 4_000_000;
     rec.lap(.prepare);
     profile_now += 5_000_000;
