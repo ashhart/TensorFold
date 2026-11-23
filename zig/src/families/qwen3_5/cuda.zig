@@ -30,6 +30,8 @@ test {
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
+    _ = @import("cuda_pdl.zig");
+    _ = @import("cuda_pdl_contract_test.zig");
     _ = prompt_int8;
     _ = native;
     _ = native_moe;
