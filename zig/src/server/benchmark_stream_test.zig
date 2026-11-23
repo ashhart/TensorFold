@@ -4,6 +4,8 @@ const suite = @import("benchmark_suite.zig");
 const stream = @import("benchmark_stream.zig");
 const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
+const history = @import("chat_cli_history.zig");
+const turn = @import("chat_cli_turn.zig");
 const Write = fake.Write;
 
 const golden_chat = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 1.0, \"seed\": 1234, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"presence_penalty\": 0.0, \"frequency_penalty\": 0.0, \"top_k\": 20, \"top_p\": 0.95, \"draft\": false, \"messages\": [{\"role\": \"user\", \"content\": \"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.\"}], \"chat_template_kwargs\": {\"enable_thinking\": false}}";
@@ -283,6 +285,38 @@ test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
     const refused = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = "fixture-\u{20ac}" });
     try std.testing.expectEqual(.network, refused.failed);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+}
+
+test "chat CLI: a streamed reply uses Latin-1 bearer bytes and refuses unsupported keys" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const replies = [_]Write{
+        .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream") },
+        .{ .bytes = try fake.event(a, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Ready.\"},\"finish_reason\":\"stop\"}]}") },
+        .{ .bytes = try fake.event(a, "[DONE]") },
+    };
+    const responses = [_][]const Write{&replies};
+    const f = try fake.Fake.start(a, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &responses }});
+    defer f.stop();
+    var h: history.History = .{ .a = a };
+    var out: std.Io.Writer.Allocating = .init(a);
+    const token = "fixture-caf\u{e9}";
+    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token,
+        try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    switch (ended) {
+        .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
+    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}",
+        try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    switch (refused) {
+        .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expectEqual(@as(usize, 1), f.count());
 }
 
