@@ -1,0 +1,42 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 1 streams, 65552-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.96 GiB; DSpark off, images off, prompt cache 0.00 GiB; demand 21.24 GiB (18.97 GiB fixed, 1 x 2.27 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:18440/v1 (sampling: temperature 1.0; drafts: off; context: 65552; loaded in 10.8s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-29d5e48f473aa15dc432b24af19d87ff prompt=28 cached=0 thinking=False effort=none tokens=8 sha=0b037128ee78 finish=length rounds=7 accepted=0/0 ttft=0.206 decode=0.232 elapsed=0.438 queued=0.000 tok/s=30.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-0df5e825c4fa2226646b0c186106da49 prompt=28 cached=0 thinking=False effort=none tokens=64 sha=b37d8a0e39c4 finish=length rounds=63 accepted=0/0 ttft=0.184 decode=2.077 elapsed=2.261 queued=0.000 tok/s=30.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-b68fa5cc9157eb0c942d9b4eb802e17d prompt=416 cached=0 thinking=False effort=none tokens=16 sha=77bf7c99cc66 finish=length rounds=15 accepted=0/0 ttft=1.128 decode=0.524 elapsed=1.652 queued=0.000 tok/s=28.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-b2d5aa64c8f2e5c65eb8e809678a6881 prompt=1036 cached=0 thinking=False effort=none tokens=24 sha=538175732cc7 finish=length rounds=23 accepted=0/0 ttft=3.249 decode=0.810 elapsed=4.058 queued=0.000 tok/s=28.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /v1/v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-27974ce13f3d3c2691b23f648d30cbbc prompt=15 cached=0 thinking=False effort=none tokens=256 sha=6667e139c86e finish=length rounds=255 accepted=0/0 ttft=0.117 decode=8.456 elapsed=8.573 queued=0.000 tok/s=30.2
+[tensorfold] 127.0.0.1 "POST /v1/v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-8da1d3375fbb4f35b1bb24f1802cbbf3 prompt=15 cached=0 thinking=False effort=none tokens=256 sha=6667e139c86e finish=length rounds=255 accepted=0/0 ttft=0.117 decode=8.461 elapsed=8.579 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-4893e3206ff7b76f4c607125a1be4870 prompt=15 cached=0 thinking=False effort=none tokens=256 sha=6667e139c86e finish=length rounds=255 accepted=0/0 ttft=0.119 decode=8.468 elapsed=8.587 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-54c67d09595290108e8482e1d07c22b9 prompt=15 cached=0 thinking=False effort=none tokens=256 sha=6667e139c86e finish=length rounds=255 accepted=0/0 ttft=0.117 decode=8.448 elapsed=8.565 queued=0.000 tok/s=30.2
+[tensorfold] 127.0.0.1 "POST /v1/v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-c9e9526db3c0eda885b1d8cd5fddd268 prompt=33 cached=0 thinking=False effort=none tokens=256 sha=ea5692a0e8dc finish=length rounds=255 accepted=0/0 ttft=0.214 decode=8.486 elapsed=8.700 queued=0.000 tok/s=30.0
+[tensorfold] 127.0.0.1 "POST /v1/v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-eafa25167c5ee4d8f66846bfaace1d31 prompt=33 cached=0 thinking=False effort=none tokens=256 sha=ea5692a0e8dc finish=length rounds=255 accepted=0/0 ttft=0.213 decode=8.486 elapsed=8.699 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-4143170a85db9fa03e39e6ea1b307eb6 prompt=33 cached=0 thinking=False effort=none tokens=256 sha=ea5692a0e8dc finish=length rounds=255 accepted=0/0 ttft=0.216 decode=8.477 elapsed=8.693 queued=0.000 tok/s=30.1
+[tensorfold] 127.0.0.1 "POST /v1/v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-46fa4f856e5d23bb5f1197321ce1246e prompt=33 cached=0 thinking=False effort=none tokens=256 sha=ea5692a0e8dc finish=length rounds=255 accepted=0/0 ttft=0.213 decode=8.464 elapsed=8.678 queued=0.000 tok/s=30.1
+[tensorfold] done cmpl-66739502cdffb13331aae5a20aa2166d prompt=1 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=0.033 decode=0.000 elapsed=0.033 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-76315920db50803941d493e04bfb17d7 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=419cacb4c297 finish=length rounds=0 accepted=0/0 ttft=24.859 decode=0.000 elapsed=24.859 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-1f5a11d64aab93a3038406cb65f67ba5 prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=8a44904f45d6 finish=length rounds=0 accepted=0/0 ttft=116.568 decode=0.000 elapsed=116.568 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
