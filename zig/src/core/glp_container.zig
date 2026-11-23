@@ -7,6 +7,9 @@ pub const Error = error{BadGguf} || std.mem.Allocator.Error;
 /// The alignment a container pads its tensor data to when its metadata names none.
 pub const default_alignment = 32;
 
+/// The deepest an array inside an array may nest; a real file names none.
+const max_array_depth = 4;
+
 /// The ggml type a tensor of floats carries.
 pub const f32_type = 0;
 
@@ -137,7 +140,8 @@ pub const File = struct {
         const size = std.math.mul(usize, count, width) catch return null;
         const offset = std.math.cast(usize, t.offset) orelse return null;
         const start = std.math.add(usize, self.data_start, offset) catch return null;
-        if (start < self.data_start or size > self.bytes.len or start + size > self.bytes.len) return null;
+        // Subtract rather than add: a start past the end must be refused, not wrap into the file.
+        if (start < self.data_start or start > self.bytes.len or size > self.bytes.len - start) return null;
         return self.bytes[start..][0..size];
     }
 };
@@ -237,7 +241,7 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, problem: *Problem) Error!F
         const key = try c.string();
         const kind = std.enums.fromInt(Type, try c.u32v()) orelse
             return refuse(problem, "the container holds an unknown metadata type", .{});
-        const value = try readValue(a, &c, kind);
+        const value = try readValue(a, &c, kind, 0, problem);
         try entries.append(a, .{ .key = key, .value = value });
     }
 
@@ -255,17 +259,18 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, problem: *Problem) Error!F
 
     const alignment = alignmentOf(entries.items) orelse default_alignment;
     if (alignment == 0 or !std.math.isPowerOfTwo(alignment)) return refuse(problem, "the container's alignment is {d}", .{alignment});
+    const data_start = alignUp(c.o, alignment) orelse return refuse(problem, "the container's alignment is {d}", .{alignment});
 
     return .{
         .entries = entries.items,
         .tensors = tensors.items,
-        .data_start = alignUp(c.o, alignment),
+        .data_start = data_start,
         .alignment = alignment,
         .bytes = bytes,
     };
 }
 
-fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type) Error!Value {
+fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type, depth: u8, problem: *Problem) Error!Value {
     return switch (kind) {
         .u8v => .{ .u8v = try c.u8v() },
         .i8v => .{ .i8v = @bitCast(try c.u8v()) },
@@ -280,11 +285,13 @@ fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type) Error!Value {
         .i64v => .{ .i64v = @bitCast(try c.u64v()) },
         .f64v => .{ .f64v = @bitCast(try c.u64v()) },
         .array => blk: {
-            const elem = std.enums.fromInt(Type, try c.u32v()) orelse return error.BadGguf;
+            if (depth >= max_array_depth) return refuse(problem, "the container's metadata nests arrays deeper than {d}", .{max_array_depth});
+            const elem = std.enums.fromInt(Type, try c.u32v()) orelse
+                return refuse(problem, "an array holds an unknown metadata type", .{});
             const n = try c.u64v();
-            if (n > 1 << 20) return error.BadGguf;
+            if (n > 1 << 20) return refuse(problem, "an array holds {d} items", .{n});
             const items = try a.alloc(Value, @intCast(n));
-            for (items) |*it| it.* = try readValue(a, c, elem);
+            for (items) |*it| it.* = try readValue(a, c, elem, depth + 1, problem);
             break :blk .{ .array = .{ .elem = elem, .items = items } };
         },
     };
@@ -300,7 +307,7 @@ pub fn write(a: std.mem.Allocator, entries: []const Entry, tensors: []const OutT
     defer a.free(offsets);
     var data_len: usize = 0;
     for (tensors, offsets) |t, *off| {
-        data_len = alignUp(data_len, alignment);
+        data_len = alignUp(data_len, alignment) orelse return error.BadGguf;
         off.* = data_len;
         data_len = std.math.add(usize, data_len, t.data.len) catch return error.BadGguf;
     }
@@ -372,8 +379,10 @@ fn writeValue(a: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) Error!voi
     }
 }
 
-fn alignUp(x: usize, a: usize) usize {
-    return (x + a - 1) / a * a;
+/// The first place at or after x that a divides; null when that place does not fit.
+fn alignUp(x: usize, a: usize) ?usize {
+    const last = std.math.add(usize, x, a - 1) catch return null;
+    return last / a * a;
 }
 
 fn putU16(a: std.mem.Allocator, out: *std.ArrayList(u8), x: u16) Error!void {

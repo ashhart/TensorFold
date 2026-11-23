@@ -293,3 +293,28 @@ test "the control vector's flags are the serve table's flag type" {
     const cli = @import("cli.zig");
     try std.testing.expect(@TypeOf(serve.flags[0]) == cli.Flag);
 }
+
+test "the report says verified only when the parsed digest was checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    var sink: Sink = .{ .a = a };
+    log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
+    defer log.Test.sink = null;
+    var unchecked = f.g.?;
+    unchecked.vector.?.claims_digest = false;
+    serve.report(a, unchecked);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "the file claims none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") == null);
+    sink.list.clearRetainingCapacity();
+    serve.report(a, f.g.?);
+    try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "(verified)") != null);
+}
+
+test "the control-vector flags are advertised only where the engine steers" {
+    for (serve.flags) |f| try std.testing.expectEqual(steers, f.advertised);
+    // A config file's relative --glp starts at the file's folder, as its other file flags do.
+    try std.testing.expect(serve.flags[0].path);
+}

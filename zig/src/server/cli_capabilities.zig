@@ -40,7 +40,7 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.writeAll("}, \"serve\": {\"flags\": {");
     var first = true;
     for (cli.flags) |f| {
-        if (!f.native) continue;
+        if (!f.native or !f.advertised) continue;
         try w.print("{s}\"{s}\": {{", .{ if (first) "" else ", ", f.name });
         first = false;
         const values = f.native_values orelse f.choices;
@@ -140,4 +140,13 @@ test "capability audit: environment table omits dead readers and slide metadata 
         try std.testing.expect(row.object.get("stable").? == .null);
     }
     try std.testing.expectEqual(@as(usize, 1), groups);
+}
+
+test "capability audit: a flag a build only refuses is not advertised" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test" });
+    // --glp is parsed on every platform so its refusal names the engine; only a steering build advertises it.
+    const listed = std.mem.indexOf(u8, out.written(), "\"--glp\":") != null;
+    try std.testing.expectEqual(@import("glp_startup.zig").steers, listed);
 }

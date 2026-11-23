@@ -151,11 +151,13 @@ test "serve --config: a relative path in the file starts at the file's folder" {
         \\drafter = "./drafter"
         \\name = "plain/name"
         \\kv-cache = "bf16"
+        \\glp = "vec.gguf"
+        \\glp-alpha = 0.5
     ;
     const sep = std.fs.path.sep_str;
     const argv: []const []const u8 = &.{ "--config", "conf" ++ sep ++ "f.toml" };
     const out = try config.merge(a, argv, (try config.locate(a, argv, &f.u)).?, text, &f.u);
-    const want = [_][]const u8{ "conf" ++ sep ++ "weights/m", "--chat-template=conf" ++ sep ++ "t.jinja", "--api-key-file=conf" ++ sep ++ "../keys", "--learn-dir=/abs/learn", "--drafter=conf" ++ sep ++ "drafter", "--name=plain/name", "--kv-cache=bf16" };
+    const want = [_][]const u8{ "conf" ++ sep ++ "weights/m", "--chat-template=conf" ++ sep ++ "t.jinja", "--api-key-file=conf" ++ sep ++ "../keys", "--learn-dir=/abs/learn", "--drafter=conf" ++ sep ++ "drafter", "--name=plain/name", "--kv-cache=bf16", "--glp=conf" ++ sep ++ "vec.gguf", "--glp-alpha=0.5" };
     try t.expectEqual(want.len, out.argv.len);
     for (want, out.argv) |w, g| try t.expectEqualStrings(w, g);
     // a repo id, or a folder named without ./, is left as written: the hub resolves it as it does a typed model

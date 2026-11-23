@@ -19,11 +19,15 @@ const Shape = struct {
     /// Every component's value, when a test needs one that is not finite.
     value: ?f32 = null,
     digest: enum { correct, wrong, absent } = .correct,
+    /// A digest key holding a number, which no file reports as verified.
+    digest_not_text: bool = false,
     base_model: ?[]const u8 = "Qwen/Qwen3.8-27B",
     layer_ids_key: bool = true,
     layer_ids: ?[]const u8 = null,
     /// Tensor names to write instead of "direction.<id>", so a test can name one layer twice.
     tensor_names: ?[]const []const u8 = null,
+    /// A general.description value, so its text can read like a metadata key.
+    description: ?[]const u8 = null,
 };
 
 /// The metadata a fixture writes: the key's bytes and how many keys there are.
@@ -111,11 +115,14 @@ fn writeFixture(shape: Shape) ![]u8 {
             try kv.text("glp.layer_ids_zero_based", list.items);
         }
     }
-    switch (shape.digest) {
+    if (shape.digest_not_text) {
+        try kv.number("glp.content_sha256", 0);
+    } else switch (shape.digest) {
         .correct => try kv.text("glp.content_sha256", &hex),
         .wrong => try kv.text("glp.content_sha256", "0000000000000000000000000000000000000000000000000000000000000000"),
         .absent => {},
     }
+    if (shape.description) |d| try kv.text("general.description", d);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -522,4 +529,27 @@ test "a file that names one layer twice is refused" {
     const why = try reason(bytes);
     defer std.testing.allocator.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "two directions for layer 5") != null);
+}
+
+test "a description that names the digest key is not a claimed digest" {
+    const absent = try writeFixture(.{ .digest = .absent, .description = "the file carries glp.content_sha256 in its description" });
+    defer std.testing.allocator.free(absent);
+    var no_digest = try readOk(absent);
+    defer no_digest.deinit();
+    try std.testing.expect(!no_digest.vector.claims_digest);
+
+    const present = try writeFixture(.{ .description = "the file carries glp.content_sha256 in its description" });
+    defer std.testing.allocator.free(present);
+    var digest = try readOk(present);
+    defer digest.deinit();
+    try std.testing.expect(digest.vector.claims_digest);
+}
+
+test "a digest key that is not text is refused" {
+    const bytes = try writeFixture(.{ .digest_not_text = true });
+    defer std.testing.allocator.free(bytes);
+    try refused(bytes);
+    const why = try reason(bytes);
+    defer std.testing.allocator.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "glp.content_sha256 is not text") != null);
 }
