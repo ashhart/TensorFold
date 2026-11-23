@@ -330,7 +330,6 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (l.draft) |*d| d.media = if (l.seq.media) |*m| m.view() else null;
 
-                try @import("cuda_lanes_snap.zig").reuse(self, l, s, ids);
                 if (self.ranks != null) try snaps.resumeKept(self, s, l, ids.len);
                 return l;
             }

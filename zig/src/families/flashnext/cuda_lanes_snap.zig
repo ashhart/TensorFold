@@ -81,12 +81,18 @@ pub fn Snaps(comptime of: anytype) type {
             const saved = s.reuse.saved orelse return;
             const kept: *snap.Snap = @ptrCast(@alignCast(saved));
             if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= len) {
+                std.log.warn("flashnext: kept state at {d} not restored for reuse at {d} of {d} ids", .{
+                    kept.at, s.reuse.at, len,
+                });
                 s.reuse_failed = true;
             } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
                 l.filled = kept.at;
                 s.cached = @intCast(kept.at);
             } else |err| switch (err) {
-                error.SequenceTooShort, error.NoHeadState => s.reuse_failed = true,
+                error.SequenceTooShort, error.NoHeadState => {
+                    std.log.warn("flashnext: kept state at {d} not restored ({t})", .{ kept.at, err });
+                    s.reuse_failed = true;
+                },
                 else => return err,
             }
         }
@@ -112,24 +118,4 @@ pub fn Snaps(comptime of: anytype) type {
             snap.drop(self.gpa, self.stream, @ptrCast(@alignCast(saved)));
         }
     };
-}
-
-/// Restore the stream's kept prompt state when its cache mark can be reused.
-pub fn reuse(self: anytype, l: anytype, s: *lanes.Stream, ids: []const u32) !void {
-    s.cached = 0;
-    const saved = s.reuse.saved orelse return;
-    const kept: *snap.Snap = @ptrCast(@alignCast(saved));
-    if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
-        std.log.warn("flashnext: kept state at {d} not restored for reuse at {d} of {d} ids", .{ kept.at, s.reuse.at, ids.len });
-        s.reuse_failed = true;
-    } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
-        l.filled = kept.at;
-        s.cached = @intCast(kept.at);
-    } else |err| switch (err) {
-        error.SequenceTooShort, error.NoHeadState => {
-            std.log.warn("flashnext: kept state at {d} not restored ({t})", .{ kept.at, err });
-            s.reuse_failed = true;
-        },
-        else => return err,
-    }
 }
