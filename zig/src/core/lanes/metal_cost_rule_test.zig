@@ -39,3 +39,37 @@ test "Metal window prices: a high outlier below the dip threshold is retimed and
     for ([_]usize{ 15, 31, 47 }) |i| try std.testing.expect(ms[i] > ms[i - 1] + 1);
     try std.testing.expect(timer.calls <= ms.len);
 }
+
+test "Metal window prices: a bad saved table heals across bounded warm loads without raising costs" {
+    const cache = @import("cost_cache.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    const key = cache.buildKey("same-binary", &.{"same-shape"});
+    const cursor_key = cache.buildKey(&key, &.{"metal-heal-v1"});
+    var original: [64]f64 = undefined;
+    var widths: [64]u32 = undefined;
+    for (&original, &widths, 0..) |*m, *w, i| {
+        m.* = truth(i) * 1.08;
+        w.* = @intCast(i + 1);
+    }
+    cache.saveAt([64]f64, a, io, key, original, dir);
+    for (0..64) |_| {
+        var kept = cache.loadAt([64]f64, a, io, key, dir).?;
+        var cursor = cache.loadAt(u64, a, io, cursor_key, dir) orelse 0;
+        var timer: Timer = .{};
+        // Today's cache-hit branch returns the saved table; the shared healing policy is added with the fix.
+        if (comptime @hasDecl(rule, "healWindows")) _ = try rule.healWindows(&timer, &kept, &widths, &cursor);
+        for (kept, original) |m, before| try std.testing.expect(m <= before);
+        try std.testing.expect(timer.total <= 200);
+        try std.testing.expect(timer.calls <= 7);
+        cache.saveAt([64]f64, a, io, key, kept, dir);
+        cache.saveAt(u64, a, io, cursor_key, cursor, dir);
+    }
+    const healed = cache.loadAt([64]f64, a, io, key, dir).?;
+    for (healed, 0..) |m, i| try std.testing.expectApproxEqRel(truth(i), m, 0.01);
+    try std.testing.expectEqual(@as(u64, 64), cache.loadAt(u64, a, io, cursor_key, dir).?);
+}
