@@ -8,6 +8,7 @@ const B = liquid.lanes.Backend(struct {
     pub const kern = @import("cuda_kernels.zig");
     pub const snap = @import("cuda_snap.zig");
     pub const text_only = error.Lfm3TextOnly;
+    pub const request_starts = false;
 });
 
 pub const Liquid = B.Liquid;
