@@ -237,6 +237,9 @@ pub const MergeVec = struct {
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
+    /// The label and shapes it registers at: llama's, or another family's that runs it.
+    name: []const u8 = "llama glue ll_merge_vec",
+    served: []const c.Shape = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 } },
     pm: []f32 = &.{},
     pl: []f32 = &.{},
     po: []f32 = &.{},
@@ -267,7 +270,7 @@ pub const MergeVec = struct {
     const vt = g.hooks(MergeVec);
 
     pub fn kernel(p: *MergeVec) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = "llama glue ll_merge_vec", .accum = .f32, .depth = mergeDepth, .ops = 6, .out = .bf16, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 16, .n = family.nanbeige43.heads, .k = 128 }, .{ .rows = 4, .n = family.nanbeige41.heads, .k = 64 } }, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = mergeDepth, .ops = 6, .out = .bf16, .tiles = .{ .{ .size = 16, .step = 1, .min = 1 }, .{}, .{ .size = 32, .step = 1, .min = 1 } }, .served = p.served, .sums = softmax_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows rows of n heads over k blocks of partials, as decode leaves them: every fourth block past the first empty.

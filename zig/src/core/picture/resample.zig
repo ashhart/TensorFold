@@ -1,4 +1,4 @@
-//! Resizes of 8-bit RGB: Keys' cubic (a = -0.5) or Pillow's triangle, widened by the shrink factor, width then height.
+//! Resizes of 8-bit RGB: Keys' cubic (a = -0.5), Pillow's triangle or Lanczos-3, widened when shrinking, width first.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -9,15 +9,17 @@ pub const Kind = enum {
     torch, // torch's antialiased uint8 bicubic: int16 weights at the most bits (at most 22) the largest allows
 };
 
-/// The kernel: Keys' cubic, or the triangle of Pillow's BILINEAR (Step3-VL's processor).
+/// The kernel: Keys' cubic, the triangle of Pillow's BILINEAR (Step3-VL), or Pillow's LANCZOS (MiniMax-H3-Image).
 pub const Filter = enum {
     bicubic,
     bilinear,
+    lanczos,
 
     fn support(f: Filter) f64 {
         return switch (f) {
             .bicubic => 2,
             .bilinear => 1,
+            .lanczos => 3,
         };
     }
 
@@ -25,9 +27,17 @@ pub const Filter = enum {
         return switch (f) {
             .bicubic => cubic(x),
             .bilinear => if (@abs(x) < 1) 1 - @abs(x) else 0,
+            .lanczos => if (@abs(x) < 3) sinc(x) * sinc(x / 3) else 0,
         };
     }
 };
+
+/// sin(pi x) / (pi x), and 1 at 0.
+fn sinc(x: f64) f64 {
+    if (x == 0) return 1;
+    const t = x * std.math.pi;
+    return @sin(t) / t;
+}
 
 /// RGB rows `stride` bytes apart.
 pub const View = struct {
@@ -362,4 +372,77 @@ test "bilinear matches Pillow 12.3's Image.resize(BILINEAR), shrinking and enlar
         105, 142, 51, 97,  134, 107, 107, 123, 160, 180, 111, 148, 127, 100, 137, 54, 91,  128,
         199, 236, 17, 127, 164, 73,  73,  110, 147, 146, 183, 220, 93,  130, 167, 20, 57,  94,
     }, big);
+}
+
+test "lanczos: sinc(x) sinc(x / 3) within 3, normalized taps, flat stays flat, ringing clamped" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(f64, 1), Filter.lanczos.at(0));
+    for ([_]f64{ 1, 2, -1, -2 }) |x| try std.testing.expectApproxEqAbs(@as(f64, 0), Filter.lanczos.at(x), 1e-16);
+    try std.testing.expectApproxEqAbs(@as(f64, 6.0) / (std.math.pi * std.math.pi), Filter.lanczos.at(0.5), 1e-15);
+    try std.testing.expectEqual(@as(f64, 0), Filter.lanczos.at(3));
+    try std.testing.expect(Filter.lanczos.at(1.5) < 0);
+    for ([_][2]usize{ .{ 2720, 1280 }, .{ 1536, 720 }, .{ 7, 13 } }) |s| {
+        var w = try Weights.init(a, .lanczos, s[0], s[1]);
+        defer w.deinit(a);
+        for (0..s[1]) |i| {
+            var total: f64 = 0;
+            for (w.at(i)[1]) |v| total += v;
+            try std.testing.expectApproxEqAbs(@as(f64, 1), total, 1e-12);
+        }
+    }
+    const px = try a.alloc(u8, 9 * 4 * 3);
+    defer a.free(px);
+    @memset(px, 77);
+    for ([_][2]usize{ .{ 4, 2 }, .{ 20, 9 }, .{ 9, 4 } }) |s| {
+        const out = try resizeWith(a, .pillow, .lanczos, View.of(px, 9, 4), s[0], s[1]);
+        defer a.free(out);
+        for (out) |v| try std.testing.expectEqual(@as(u8, 77), v);
+    }
+    // a hard edge enlarged rings past 0 and 255, and both passes clamp
+    var edge: [4 * 1 * 3]u8 = .{ 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255 };
+    const up = try resizeWith(a, .pillow, .lanczos, View.of(&edge, 4, 1), 16, 1);
+    defer a.free(up);
+    for (0..16) |i| try std.testing.expectEqual(@as(usize, 255), @as(usize, up[3 * i]) + up[3 * (15 - i)]);
+    try std.testing.expectEqual(@as(u8, 0), std.mem.min(u8, up[3 * 2 .. 3 * 6]));
+    try std.testing.expectEqual(@as(u8, 255), std.mem.max(u8, up[3 * 10 .. 3 * 14]));
+    try std.testing.expect(up[3 * 1] > 0 and up[3 * 14] < 255);
+}
+
+test "lanczos matches Pillow 13's Image.resize(LANCZOS): shrinking, enlarging, both at once, and a canvas's ratio" {
+    const a = std.testing.allocator;
+    var px: [7 * 5 * 3]u8 = undefined;
+    for (&px, 0..) |*p, i| p.* = @intCast((i * 37 + 11) % 256);
+    const small = try resizeWith(a, .pillow, .lanczos, .of(&px, 7, 5), 3, 2);
+    defer a.free(small);
+    try std.testing.expectEqualSlices(u8, &.{ 109, 85, 138, 172, 134, 98, 125, 180, 133, 84, 120, 157, 134, 96, 131, 160, 155, 75 }, small);
+    const big = try resizeWith(a, .pillow, .lanczos, .of(px[0 .. 4 * 2 * 3], 4, 2), 6, 3);
+    defer a.free(big);
+    try std.testing.expectEqualSlices(u8, &.{
+        0,   7,   79, 38,  110, 164, 167, 153, 187, 249, 5,   40,  170, 48,  86,  79, 151, 188,
+        110, 144, 41, 83,  136, 103, 107, 122, 173, 200, 112, 154, 131, 98,  132, 37, 90,  127,
+        242, 255, 2,  128, 161, 41,  47,  90,  158, 150, 218, 255, 92,  147, 177, 0,  28,  65,
+    }, big);
+    const both = try resizeWith(a, .pillow, .lanczos, .of(&px, 7, 5), 4, 9);
+    defer a.free(both);
+    try std.testing.expectEqualSlices(u8, &.{
+        67,  94,  129, 182, 75,  120, 128, 173, 67,  119, 154, 176, 70,  97,  132, 183, 78,  123,
+        131, 174, 68,  122, 157, 194, 76,  103, 138, 188, 84,  129, 137, 179, 74,  128, 163, 198,
+        83,  109, 144, 212, 89,  132, 142, 203, 89,  134, 170, 133, 86,  113, 148, 201, 94,  134,
+        147, 192, 103, 138, 173, 59,  85,  116, 152, 125, 103, 138, 156, 116, 109, 141, 172, 48,
+        86,  121, 158, 59,  113, 144, 166, 50,  113, 146, 173, 72,  91,  127, 164, 63,  119, 150,
+        172, 54,  119, 152, 178, 77,  95,  130, 167, 81,  120, 153, 173, 72,  122, 155, 182, 78,
+    }, both);
+    // 1280 x 720 drawn on 2720 x 1536 scales by 0.4706 and 0.4688: here 170 x 96 to 80 x 45, its bytes' FNV-1a
+    const w = 170;
+    const h = 96;
+    const pic = try a.alloc(u8, w * h * 3);
+    defer a.free(pic);
+    for (0..h) |y| for (0..w) |x| for (0..3) |c| {
+        pic[(y * w + x) * 3 + c] = @intCast((x * 13 + y * 7 + c * 91 + (x * y) % 29) % 256);
+    };
+    const out = try resizeWith(a, .pillow, .lanczos, .of(pic, w, h), 80, 45);
+    defer a.free(out);
+    var f: u64 = 0xcbf29ce484222325;
+    for (out) |b| f = (f ^ b) *% 0x100000001b3;
+    try std.testing.expectEqual(@as(u64, 0x06d024b99dfb8c23), f);
 }

@@ -174,6 +174,7 @@ pub const Caches = struct {
     /// Sets the table from page `at` to `ids`; the caller's references move into it and replaced pages are released.
     pub fn set(c: *Caches, gpa: Allocator, at: usize, ids: []const u32) !void {
         try c.table.ensureTotalCapacity(gpa, at + ids.len);
+        try c.put(at, ids);
         for (ids, at..) |id, i| {
             if (i < c.table.items.len) {
                 if (c.table.items[i] == id) {
@@ -187,7 +188,6 @@ pub const Caches = struct {
                 c.table.appendAssumeCapacity(id);
             }
         }
-        try c.put(at, c.table.items[at..][0..ids.len]);
     }
 
     /// Copies each shared page holding positions `from .. to`; `out` gets its table index, old and new page.
@@ -198,9 +198,11 @@ pub const Caches = struct {
             const old = c.table.items[i];
             if (c.pool.ids.refs[old] < 2) continue;
             const fresh = c.pool.take() orelse return error.OutOfPages;
-            errdefer c.pool.release(fresh);
+            var table_owns = false;
+            errdefer if (!table_owns) c.pool.release(fresh);
             try c.pool.copyPage(old, fresh, stream);
             c.table.items[i] = fresh;
+            table_owns = true;
             c.pool.release(old);
             try c.put(i, c.table.items[i..][0..1]);
             try out.append(gpa, .{ @intCast(i), old, fresh });

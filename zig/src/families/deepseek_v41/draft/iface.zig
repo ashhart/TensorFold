@@ -11,6 +11,7 @@ pub const Segment = struct {
     parents: ?[]const i32, // each row's parent row (row 0: -1); null: a chain
     draws: []const u64,
     sampling: ?lanes.Sampling,
+    masks: []const u32 = &.{}, // structured output: each row's allowed bits (rows x words, lanes/grammar.zig); empty: none
 };
 
 /// A slot's last rows' taps (bf16 [rows, 3 x hidden] at `address`); `map`: tree window row -> taps row (branches.zig).
@@ -48,6 +49,8 @@ pub const Target = struct {
         warm: ?*const fn (ptr: *anyopaque, asks: []const Warm) void = null,
         /// Before `prefill`: the slot's prompt images (their rows replace placeholder ids); borrowed until it returns.
         images: ?*const fn (ptr: *anyopaque, slot: u32, images: []const lanes.stream.Image) anyerror!void = null,
+        /// Before prompt completion: the first token's allowed bits; empty means no grammar.
+        first_mask: ?*const fn (ptr: *anyopaque, slot: u32, bits: []const u32) void = null,
         /// After `prefill`: the prompt rows the slot took from kept state (its first row computed is this one).
         resumed: ?*const fn (ptr: *anyopaque, slot: u32) u64 = null,
         /// Committed rows' taps for positions [start, start + rows), in order; null: not kept. null fn: none kept.
@@ -87,6 +90,17 @@ pub const Target = struct {
 
     pub fn admit(t: Target, slot: u32, max_new: u64) void {
         if (t.vtable.admit) |f| f(t.ptr, slot, max_new);
+    }
+
+    /// Whether the target draws rows among their grammar's tokens (`first_mask`, Segment.masks).
+    pub fn masks(t: Target) bool {
+        return t.vtable.first_mask != null;
+    }
+
+    /// The slot's next first token's bits; error.StructuresUnsupported when the target takes no masks.
+    pub fn firstMask(t: Target, slot: u32, bits: []const u32) !void {
+        const f = t.vtable.first_mask orelse return if (bits.len > 0) error.StructuresUnsupported else {};
+        f(t.ptr, slot, bits);
     }
 
     pub fn pieces(t: Target) bool {

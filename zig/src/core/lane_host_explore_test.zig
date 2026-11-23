@@ -61,6 +61,7 @@ const Explorer = struct {
     boxes: []Box,
     calls: []usize, // each request's prompt calls so far (its chunk index next)
     next: usize = 0, // the next request to arrive
+    active: usize = 0, // yield points in progress; the test thread sends only when none is
     lanes: usize, // the host's lanes: the backend never holds more
     budget: u64, // prompt rows a visit beside decoders (0: none)
     rows: u64 = 0, // prompt rows stepped beside a decoder since the core's last round
@@ -92,6 +93,10 @@ const Explorer = struct {
     fn send(x: *Explorer) void {
         x.mutex.lockUncancelable(io);
         defer x.mutex.unlock(io);
+        x.sendLocked();
+    }
+
+    fn sendLocked(x: *Explorer) void {
         if (x.next >= x.requests.len) return;
         const i = x.next;
         x.next += 1;
@@ -163,7 +168,10 @@ const Explorer = struct {
         const n = x.sent();
         for (x.boxes[0..n]) |*b| if (!b.finished()) return false;
         if (n == x.requests.len) return true;
-        x.send(); // no yield point comes while nothing is in flight: this send races none of the engine thread's
+        x.mutex.lockUncancelable(io);
+        defer x.mutex.unlock(io);
+        if (x.active != 0) return false; // a yield point is still deciding this schedule
+        x.sendLocked(); // no yield point starts while nothing is in flight: the send cannot race one
         return false;
     }
 
@@ -206,7 +214,15 @@ var inner_vt: *const be.Backend.VTable = undefined;
 /// The target's own vtable with a yield point before each call a schedule can interleave with.
 const Wrapped = struct {
     fn yield(at: Point) void {
-        if (current) |x| x.point(at);
+        if (current) |x| {
+            x.mutex.lockUncancelable(io);
+            x.active += 1;
+            x.mutex.unlock(io);
+            x.point(at);
+            x.mutex.lockUncancelable(io);
+            x.active -= 1;
+            x.mutex.unlock(io);
+        }
     }
     fn refused(e: anyerror) anyerror {
         if (e == error.LaneMemory) if (current) |x| {

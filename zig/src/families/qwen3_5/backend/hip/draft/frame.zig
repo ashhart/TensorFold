@@ -101,10 +101,11 @@ pub fn absorb(o: Ops, net: Net, k: Chunk) !void {
 /// The device addresses a frame leaves its drafts' candidates at.
 pub const Out = struct { top_ids: u64, top_vals: u64, hp: u64 };
 
-/// One block frame of `streams` streams over the uploaded scalars at `dev`: the draft rows' top-k and selector rows.
-pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
+/// One frame of `streams` streams, `block` rows each (2 to the config's), over the scalars at `dev`: candidates.
+pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize, block: usize) !Out {
     const c = net.c;
-    const B = streams * c.block;
+    if (block < 2 or block > c.block) return error.BadDraftFrame;
+    const B = streams * block;
     const hd = c.hidden;
     const h = try fwd.take(o, net.act, B * hd);
     try o.embedRows(net.m.embed, dev + l.ids, B, h);
@@ -112,7 +113,7 @@ pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
     const h2 = try fwd.take(o, net.act, B * hd);
     const at: dops.Attention = .{
         .rows = B,
-        .block_rows = c.block,
+        .block_rows = block,
         .heads = c.heads,
         .kv_heads = c.kv_heads,
         .ring_rows = c.ringRows(),
@@ -125,7 +126,7 @@ pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
         try o.rms(h, w.input_norm, x, B, hd, c.eps);
         const dyn = try o.project(x, w.attn_conv, B, false);
         const xin = try fwd.take(o, net.act, B * hd);
-        try dops.dynConv(o, x, dyn, w.attn_base, null, xin, B, hd, c.group, 0, c.block);
+        try dops.dynConv(o, x, dyn, w.attn_base, null, xin, B, hd, c.group, 0, block);
         var outs: [4]Tensor = undefined;
         const q, const k, const v = if (try o.projectGroup(xin, &.{ w.q, w.k, w.v }, B, &outs))
             .{ outs[0], outs[1], outs[2] }
@@ -147,10 +148,10 @@ pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
         // the ring holds absorbed rows only (block keys come from k32 and v); no mask: a row sees its whole block
         try dops.attention(o, q32, k32, v, null, dev + l.segs, shape, parts, att);
         const attn = try o.project(att, w.o, B, false);
-        try dops.dynConv(o, attn, dyn, w.attn_base, h, h2, B, hd, c.group, 1, c.block);
+        try dops.dynConv(o, attn, dyn, w.attn_base, h, h2, B, hd, c.group, 1, block);
         try o.rms(h2, w.post_norm, x, B, hd, c.eps);
         const mdyn = try o.project(x, w.mlp_conv, B, false);
-        try dops.dynConv(o, x, mdyn, w.mlp_base, null, xin, B, hd, c.group, 0, c.block);
+        try dops.dynConv(o, x, mdyn, w.mlp_base, null, xin, B, hd, c.group, 0, block);
         const gate, const up = if (try o.projectGroup(xin, &.{ w.gate, w.up }, B, &outs))
             .{ outs[0], outs[1] }
         else
@@ -158,12 +159,12 @@ pub fn forward(o: Ops, net: Net, l: Layout, dev: u64, streams: usize) !Out {
         const act = try fwd.take(o, net.act, B * c.intermediate);
         try o.siluMul(gate, up, act, B * c.intermediate);
         const down = try o.project(act, w.down, B, false);
-        try dops.dynConv(o, down, mdyn, w.mlp_base, h2, h, B, hd, c.group, 1, c.block);
+        try dops.dynConv(o, down, mdyn, w.mlp_base, h2, h, B, hd, c.group, 1, block);
     }
     // the draft rows: every stream's block but its pending row, final-normed, through the target's head
-    const rows = streams * (c.block - 1);
+    const rows = streams * (block - 1);
     const masked = try fwd.take(o, net.act, rows * hd);
-    try dops.maskRows(o, h, masked, streams, hd, c.block);
+    try dops.maskRows(o, h, masked, streams, hd, block);
     try o.rms(masked, net.w.final_norm, x, rows, hd, c.eps);
     const logits = try o.project(x, net.m.head, rows, false);
     const top_ids = try o.arena.of(i32, rows * c.topk);
@@ -185,4 +186,17 @@ test "the scalars' layout keeps every region apart and aligned" {
     try std.testing.expect(l.top_vals >= l.top_ids + 4 * 21 * 16 and l.hp >= l.top_vals + 2 * 21 * 16);
     try std.testing.expect(l.total >= l.hp + 2 * 21 * 256);
     for ([_]usize{ l.segs, l.top_ids, l.hp }) |o| try std.testing.expectEqual(@as(usize, 0), o % 8);
+}
+
+test "a frame refuses a block under two rows or past the config's, before it takes or launches anything" {
+    var net: Net = undefined;
+    net.c.block = 8;
+    var arena = hip.Arena.counting();
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = hip.counting, .arena = &arena };
+    var l: Layout = undefined;
+    l.ids = 0;
+    for ([_]usize{ 0, 1, 9, 16 }) |block| {
+        try std.testing.expectError(error.BadDraftFrame, forward(o, net, l, 1 << 40, 2, block));
+        try std.testing.expectEqual(@as(usize, 0), arena.peak);
+    }
 }

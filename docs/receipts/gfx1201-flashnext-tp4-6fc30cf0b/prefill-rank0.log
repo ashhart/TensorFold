@@ -1,0 +1,33 @@
+[tensorfold] HIP rank 0 of 4: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots
+info: HIP memory budget from the card's memory: 31.8 of 31.9 GiB free, 1.0 GiB reserve
+[tensorfold] chat template: the checkpoint's
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] HIP gfx1201 device 0, rank 0 of 4: Flash Next, 15.72 GiB on the device, 1 stream of 41024 positions, 0.95 GiB each; prompts in 1024-row chunks
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving 0a1bf6faa0a2f16a314da889e8e6c80226455dbf at http://127.0.0.1:8092/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: MTP + copies; context: 40960; loaded in 73.6s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/tokenize HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/tokenize HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/tokenize HTTP/1.1" 200 -
+[tensorfold] done cmpl-84271f53ff517e80b10c706f026c29ce prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=2.058 decode=0.000 elapsed=2.058 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-84fc3840e7fac4b7cdc87fec5bc0072a prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=1.449 decode=0.000 elapsed=1.449 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-ead4e877da413aca25730466e7280316 prompt=2048 cached=0 thinking=False effort=none tokens=1 sha=30e26cef13a6 finish=length rounds=0 accepted=0/0 ttft=1.443 decode=0.000 elapsed=1.443 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-0b7f209a4d04a9b720aad613c33c6fb3 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=6.872 decode=0.000 elapsed=6.872 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-696fab5b7795c300d4582482ccaf78e3 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=6.018 decode=0.000 elapsed=6.018 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-3447af8778a5154388189f507de88267 prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=2452984f72ef finish=length rounds=0 accepted=0/0 ttft=6.031 decode=0.000 elapsed=6.031 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-ec94d591d7a5c1336b12a1abf1f52dee prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=28.579 decode=0.000 elapsed=28.579 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-5772fa5274e60b99d066a67f24432242 prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=25.892 decode=0.000 elapsed=25.892 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-b2ba90590b85f9c014086e49c504b255 prompt=32768 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=25.931 decode=0.000 elapsed=25.931 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
