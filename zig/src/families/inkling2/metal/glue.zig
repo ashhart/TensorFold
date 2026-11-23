@@ -129,6 +129,16 @@ pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, b
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
+/// Top-8 router selection reading precomputed FP32 dots from p.route_dots.
+pub fn routerSelect(p: *const Pipelines, e: mtl.ComputeEncoder, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
+    std.debug.assert(rows > 0 and rows <= max_rows);
+    e.setPipeline(p.router);
+    e.setBuffer(p.route_dots, 0, 0);
+    inline for (.{ bias, ids, weights }, 1..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 4);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
 const ActArgs = extern struct { rows: u32, width: u32 };
 pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, gu: Ref, out: Ref, rows: u32, width: u32) void {
     std.debug.assert(rows > 0 and width > 0);
