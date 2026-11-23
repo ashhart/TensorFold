@@ -93,7 +93,7 @@ pub fn keepSeqsCheck(gpu: check.Gpu, checkpoint: []const u8, id_path: []const u8
     var failed = false;
     for ([_]bool{ false, true }) |kv8| {
         set.kv8 = kv8;
-        const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, rank, world, .{ .capacity = 8192, .mtp = true, .settings = set });
+        const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, @intCast(rank), @intCast(world), .{ .capacity = 8192, .mtp = true, .settings = set });
         try check.expect(e.keepsSequence(1), "glm-keep-seqs-check needs TF_GLM_KEEP_SEQS=1", .{});
         defer e.deinit();
         var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, 8192);
