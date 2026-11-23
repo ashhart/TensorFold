@@ -2,6 +2,9 @@
 const std = @import("std");
 
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, engines: *std.Build.Module, core: *std.Build.Module, test_step: *std.Build.Step) void {
+    const route = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/pull_route.zig"), .target = target, .optimize = optimize, .link_libc = true }) }));
+    b.step("test-pull-route-host", "Proxy configuration, refusal names and routing rules without a network").dependOn(&route.step);
+    test_step.dependOn(&route.step);
     // rm's tests make their own cache of links, hard links and copies, so they run on every OS
     const rm = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/cli/rm_test.zig"),

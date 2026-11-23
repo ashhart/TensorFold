@@ -24,6 +24,7 @@ pub const Ask = struct {
 /// Questions waiting for the engine thread (under the host's lock).
 pub const Queue = struct {
     asks: std.ArrayList(*Ask) = .empty,
+    answered: std.Io.Condition = .init, // askers alone wait here, untimed: the lane thread's timed waits use `wake`
 };
 
 /// Engine.score: queued for the engine thread, which runs it between two rounds; Failed when the host is closing.
@@ -59,7 +60,7 @@ fn put(h: *LaneHost, ask: *Ask) error{Failed}!void {
     if (h.closing) return error.Failed;
     h.scores.asks.append(h.gpa, ask) catch return error.Failed;
     h.wake.broadcast(h.io);
-    while (!ask.done) h.wake.waitUncancelable(h.io, &h.mutex);
+    while (!ask.done) h.scores.answered.waitUncancelable(h.io, &h.mutex);
     if (ask.failed) return error.Failed;
 }
 
@@ -115,7 +116,7 @@ pub fn answer(h: *LaneHost) void {
     }
     h.lock();
     for (list) |a| a.done = true;
-    h.wake.broadcast(h.io);
+    h.scores.answered.broadcast(h.io);
     h.unlock();
 }
 
@@ -128,6 +129,7 @@ pub fn close(h: *LaneHost) void {
         a.done = true;
     }
     h.scores.asks.clearAndFree(h.gpa);
+    h.scores.answered.broadcast(h.io);
     h.wake.broadcast(h.io);
     h.unlock();
 }
