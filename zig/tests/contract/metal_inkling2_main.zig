@@ -9,6 +9,8 @@ pub const Suites = struct {
     experts: @import("metal_inkling2_experts.zig").Suite,
     units: @import("metal_inkling2_units.zig").Suite,
     mma: @import("metal_inkling2_mma.zig").Suite,
+    dense_mma: @import("metal_inkling2_dense_mma.zig").Suite,
+    blend_mma: @import("metal_inkling2_blend_mma.zig").Suite,
     logits_units: @import("metal_inkling2_logits_units.zig").Suite,
     dense_units: @import("metal_inkling2_dense_units.zig").Suite,
     loop: @import("metal_inkling2_loop.zig").Suite,
@@ -23,6 +25,8 @@ pub const Suites = struct {
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dense_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .blend_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .logits_units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dense_units = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -35,6 +39,8 @@ pub const Suites = struct {
         try s.experts.collect(only);
         try s.units.collect(only);
         try s.mma.collect(only);
+        try s.dense_mma.collect(only);
+        try s.blend_mma.collect(only);
         try s.logits_units.collect(only);
         try s.dense_units.collect(only);
         try s.loop.collect(only);
@@ -48,6 +54,8 @@ pub const Suites = struct {
         s.experts.deinit();
         s.units.deinit();
         s.mma.deinit();
+        s.dense_mma.deinit();
+        s.blend_mma.deinit();
         s.logits_units.deinit();
         s.dense_units.deinit();
         s.loop.deinit();

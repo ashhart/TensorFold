@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("inkling2_metal");
+const dense = @import("dense.zig");
 pub const plan = @import("inkling2_loop_plan");
 
 pub const hidden: u32 = plan.hidden;
@@ -18,11 +19,27 @@ pub const Pipelines = struct {
     gates: mtl.Pipeline,
     zeta: mtl.Pipeline,
     blend: mtl.Pipeline,
+    /// The down projection on simdgroup matrices, where the GPU has no tensor units: zeta's sums.
+    zeta_mma: ?dense.Mma = null,
+    /// The blend on simdgroup matrices, where the GPU has no tensor units.
+    blend_mma: ?mtl.Pipeline = null,
     /// The gates' intermediates for up to 1,024 rows of each of `max_gates` tuples.
     scratch: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
-        return loadSource(device, sources.loop);
+        var out = try loadSource(device, sources.loop);
+        errdefer out.deinit();
+        if (device.tensorUnits()) return out;
+        out.zeta_mma = try dense.Mma.loadSource(device, sources.dense_mma);
+        try out.loadMma(device, sources.loop_mma);
+        return out;
+    }
+
+    /// The blend on simdgroup matrices from `text`; the contract's controls pass an edited one.
+    pub fn loadMma(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        p.blend_mma = try mtl.Pipeline.init(device, lib, "tf_ink2_loop_blend_mma", false);
     }
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
@@ -39,6 +56,8 @@ pub const Pipelines = struct {
         return .{ .messages = messages, .gates = gate_pipeline, .zeta = zeta, .blend = blend, .scratch = scratch };
     }
     pub fn deinit(p: *Pipelines) void {
+        if (p.blend_mma) |pipe| pipe.deinit();
+        if (p.zeta_mma) |mma| mma.deinit();
         p.scratch.deinit();
         p.blend.deinit();
         p.zeta.deinit();
@@ -89,6 +108,12 @@ pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate
     }
     e.barrier();
     for (items, 0..) |g, i| {
+        // The same sums as zeta: a rank is a weight row of 2 H columns.
+        const call = dense.Call{ .rows = rows, .n = rank, .k = 2 * hidden, .ldy = rank };
+        if (p.zeta_mma) |mma| if (dense.Mma.serves(call)) {
+            mma.launch(e, denseRef(normalizedOf(p, i)), denseRef(g.down), denseRef(zetaOf(p, i)), call);
+            continue;
+        };
         e.setPipeline(p.zeta);
         bind(e, &.{ normalizedOf(p, i), g.down, zetaOf(p, i) });
         e.setValue(args, 3);
@@ -96,11 +121,20 @@ pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate
     }
     e.barrier();
     for (items, 0..) |g, i| {
-        e.setPipeline(p.blend);
         bind(e, &.{ g.h, g.m, zetaOf(p, i), g.forget, g.gain, g.out });
         e.setValue(args, 6);
+        if (p.blend_mma) |pipe| if (rows >= dense.min_rows) {
+            e.setPipeline(pipe);
+            e.dispatchGroups(mtl.Size.of(hidden / 16, (rows + 15) / 16, 1), mtl.Size.of(32, 1, 1));
+            continue;
+        };
+        e.setPipeline(p.blend);
         e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(32, 1, 1));
     }
+}
+
+fn denseRef(r: Ref) dense.Ref {
+    return .{ .buf = r.buf, .off = r.off };
 }
 
 fn normalizedOf(p: *const Pipelines, tuple: usize) Ref {

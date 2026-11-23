@@ -8,6 +8,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const dense_mma = @import("dense.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 const Model = model_file.Model;
@@ -112,11 +113,17 @@ pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: R
     }
 }
 
-/// A visit's projection: a prompt's rows on the tensor units, a round's rows as `dense`.
+/// A visit's projection: a prompt's rows on the tensor units or the simdgroup matrices, a round's rows as `dense`.
 fn project(m: *const Model, e: mtl.ComputeEncoder, prompt: bool, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) !void {
     const k = weight.shape[weight.rank - 1];
-    if (!prompt or m.experts.units == null or (k != 2304 and k != 3072)) return dense(m, e, weight, input, out, rows);
-    try experts.denseUnits(&m.experts, e, x(input), x(.{ .buf = weight.buffer, .off = weight.offset }), x(out), @intCast(rows), @intCast(weight.shape[weight.rank - 2]), @intCast(k));
+    const n = weight.shape[weight.rank - 2];
+    if (prompt and m.experts.units != null and (k == 2304 or k == 3072))
+        return experts.denseUnits(&m.experts, e, x(input), x(.{ .buf = weight.buffer, .off = weight.offset }), x(out), @intCast(rows), @intCast(n), @intCast(k));
+    if (prompt) if (m.dense_mma) |mma| {
+        const call = dense_mma.Call{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) };
+        if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
+    };
+    return dense(m, e, weight, input, out, rows);
 }
 
 /// One row because M2's AR ABI is [sources,H] -> [queries,H]. Batch composition never mixes rows.

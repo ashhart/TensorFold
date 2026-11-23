@@ -7,6 +7,8 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 mma tf_ink2_nvfp4_down_mma", .threads = 256, .tg_memory = 12288, .reserved = 256 },
     .{ .name = "metal inkling2 mma tf_ink2_mxfp8_gu_mma", .threads = 256, .tg_memory = 24576, .reserved = 256 },
     .{ .name = "metal inkling2 mma tf_ink2_mxfp8_down_mma", .threads = 256, .tg_memory = 24576, .reserved = 256 },
+    .{ .name = "metal inkling2 mma tf_ink2_dense_mma", .threads = 128, .tg_memory = 4096, .reserved = 128 },
+    .{ .name = "metal inkling2 mma tf_ink2_loop_blend_mma", .threads = 32, .tg_memory = 0, .reserved = 32 },
 };
 
 test "Inkling2 simdgroup-matrix launches reserve their threads and carry no M1/M2 compile receipts" {

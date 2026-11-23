@@ -8,5 +8,7 @@ pub const experts = @import("inkling2/experts_sources.zig").experts;
 pub const experts_units = @import("inkling2/experts_sources.zig").experts_units;
 pub const experts_mma = @import("inkling2/experts_sources.zig").experts_mma;
 pub const loop = @import("inkling2/loop_sources.zig").loop;
+pub const loop_mma = @import("inkling2/loop_sources.zig").loop_mma;
+pub const dense_mma = @import("inkling2/dense_sources.zig").dense_mma;
 pub const runtime = @import("inkling2/runtime_sources.zig").runtime;
 pub const inkling2_dspark = @import("inkling2/dspark_sources.zig").dspark;

@@ -10,6 +10,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const dense = @import("dense.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -203,6 +204,8 @@ pub const Model = struct {
     experts: experts.Pipelines,
     loop: loop.Pipelines,
     dense: [6]mtl.Pipeline,
+    /// A prompt's projections on simdgroup matrices, where the GPU has no tensor units.
+    dense_mma: ?dense.Mma,
     norm: mtl.Pipeline,
     runtime: [runtime_names.len]mtl.Pipeline,
 
@@ -247,6 +250,8 @@ pub const Model = struct {
         errdefer m.experts.deinit();
         m.loop = try loop.Pipelines.load(m.device);
         errdefer m.loop.deinit();
+        m.dense_mma = try dense.Mma.load(m.device);
+        errdefer if (m.dense_mma) |mma| mma.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, sources.spark25_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
             defer lib.deinit();
@@ -282,6 +287,7 @@ pub const Model = struct {
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
+        if (m.dense_mma) |mma| mma.deinit();
         m.loop.deinit();
         m.experts.deinit();
         m.glue.deinit();
