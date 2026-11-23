@@ -1,44 +1,76 @@
-//! DSpark's Markov chain on the GPU over the whole vocabulary: a pass's drafts and confidences behind its head.
+//! DSpark's Markov chain on the GPU: default full-vocab mode, plus opt-in shared-w2 and top-K resident modes.
 const std = @import("std");
 const mtl = @import("metal");
+const host = @import("dsv41");
 const sources = @import("kernel_sources");
 
 /// Whether the kernels take a Markov head's rank: 32, 64, 128 or 256 (1 to 8 values a lane of a simdgroup).
 pub fn takes(rank: u32) bool {
     return rank == 32 or rank == 64 or rank == 128 or rank == 256;
 }
-/// Threadgroups an ask's search of the vocabulary is cut into.
+/// Threadgroups an ask's full-vocab search is cut into.
 pub const parts = 256;
+/// Slices a row's logits are split into for top-K extraction.
+pub const topk_slices = 16;
+/// Maximum top-K candidates per row supported by the GPU top-K extractor and single-TG chain.
+pub const max_topk = 256;
 const simdgroups = 8;
 /// Rows of a launch (the drafter's 16).
 const R = 16;
 
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 const Args = extern struct { vocab: u32, rows: u32, step: u32, parts: u32, dim: u32 };
+const CertArgs = extern struct { vocab: u32, rows: u32, step: u32, parts: u32, dim: u32, asks: u32, topk: u32 };
 
 pub const Pipelines = struct {
     z: mtl.Pipeline,
     pick: mtl.Pipeline,
     hid: mtl.Pipeline,
+    topk_part: ?mtl.Pipeline = null,
+    topk_merge: ?mtl.Pipeline = null,
+    chain_topk: ?mtl.Pipeline = null,
+    cert: bool = false,
 
-    /// The kernels of a head of `rank` (`takes`).
+    /// The default kernels of a head of `rank` (`takes`), from upstream `markov.metal`.
     pub fn load(device: mtl.Device, rank: u32) !Pipelines {
+        return loadMode(device, rank, false);
+    }
+
+    /// The opt-in kernels of a head of `rank` (shared-w2 multi-ask + 2-stage radix top-K + single-TG chain).
+    pub fn loadCert(device: mtl.Device, rank: u32) !Pipelines {
+        return loadMode(device, rank, true);
+    }
+
+    fn loadMode(device: mtl.Device, rank: u32, cert: bool) !Pipelines {
         if (!takes(rank)) return error.MarkovRank;
-        const lib = try mtl.Library.fromSource(device, sources.dsv41.keyed ++ sources.dsv41.markov, mtl.CompileOptions.mlx());
+        const src = if (cert) sources.dsv41.keyed ++ sources.dsv41.markov_cert else sources.dsv41.keyed ++ sources.dsv41.markov;
+        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var zb: [32]u8 = undefined;
         var pb: [32]u8 = undefined;
+        var cb: [40]u8 = undefined;
         const z = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&zb, "tf_dsv41_markov_z_{d}", .{rank / 32}), false);
         errdefer z.deinit();
         const pick = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&pb, "tf_dsv41_markov_pick_{d}", .{rank / 32}), false);
         errdefer pick.deinit();
-        return .{ .z = z, .pick = pick, .hid = try mtl.Pipeline.init(device, lib, "tf_dsv41_markov_hid", false) };
+        const hid = try mtl.Pipeline.init(device, lib, "tf_dsv41_markov_hid", false);
+        errdefer hid.deinit();
+        if (!cert) return .{ .z = z, .pick = pick, .hid = hid };
+        const topk_part = try mtl.Pipeline.init(device, lib, "tf_dsv41_markov_topk_part", false);
+        errdefer topk_part.deinit();
+        const topk_merge = try mtl.Pipeline.init(device, lib, "tf_dsv41_markov_topk_merge", false);
+        errdefer topk_merge.deinit();
+        const chain_topk = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&cb, "tf_dsv41_markov_chain_topk_{d}", .{rank / 32}), false);
+        return .{ .z = z, .pick = pick, .hid = hid, .topk_part = topk_part, .topk_merge = topk_merge, .chain_topk = chain_topk, .cert = true };
     }
 
     pub fn deinit(p: *Pipelines) void {
         p.z.deinit();
         p.pick.deinit();
         p.hid.deinit();
+        if (p.topk_part) |x| x.deinit();
+        if (p.topk_merge) |x| x.deinit();
+        if (p.chain_topk) |x| x.deinit();
     }
 };
 
@@ -65,10 +97,27 @@ pub const Tables = struct {
     }
 };
 
-/// An ask's draws as the kernels read them: greedy, or keyed at positions pos0 + i (markov.metal's TfMarkovAsk).
+/// Default ask descriptor matching upstream `markov.metal` TfMarkovAsk (24 bytes; pos0 at offset 8).
 pub const Ask = extern struct { seed: u64 = 0, pos0: u64 = 0, t: f32 = 1, sampled: u32 = 0 };
 
-/// The chain's asks, results and scratch: drafts [asks][rows] u32, confidences and hidden parts f32, the parts' best.
+/// Opt-in ask descriptor matching `markov_cert_full.metal` TfMarkovAsk (40 bytes; pos0 at offset 8).
+pub const CertAsk = extern struct {
+    seed: u64 = 0,
+    pos0: u64 = 0,
+    t: f32 = 1,
+    sampled: u32 = 0,
+    top_k: u32 = 0,
+    top_p: f32 = 1,
+    min_p: f32 = 0,
+    pad: u32 = 0,
+};
+
+comptime {
+    if (@offsetOf(Ask, "pos0") != 8 or @sizeOf(Ask) != 24) @compileError("Ask layout mismatch");
+    if (@offsetOf(CertAsk, "pos0") != 8 or @sizeOf(CertAsk) != 40) @compileError("CertAsk layout mismatch");
+}
+
+/// The chain's asks, results and scratch: drafts, confidences, hidden parts, full-vocab parts, and top-K candidates.
 pub const Out = struct {
     buf: mtl.Buffer,
 
@@ -76,10 +125,14 @@ pub const Out = struct {
     const conf_at = 4 * R;
     const hid_at = 8 * R;
     pub const asks_at = 12 * R;
-    const ps_at = asks_at + @sizeOf(Ask) * R;
+    const ps_at = asks_at + @sizeOf(CertAsk) * R;
     const pz_at = ps_at + 4 * R * parts;
     const pid_at = pz_at + 4 * R * parts;
-    const bytes = pid_at + 4 * R * parts;
+    const cand_at = pid_at + 4 * R * parts;
+    const base_at = cand_at + 4 * R * max_topk;
+    const pval_at = base_at + 4 * R * max_topk;
+    const ptid_at = pval_at + 4 * R * topk_slices * max_topk;
+    const bytes = ptid_at + 4 * R * topk_slices * max_topk;
 
     pub fn init(device: mtl.Device) !Out {
         const buf = try device.buffer(bytes, mtl.ResourceOptions.shared);
@@ -87,16 +140,18 @@ pub const Out = struct {
         return .{ .buf = buf };
     }
 
-    /// Ask j's draws.
     pub fn asks(o: *const Out) []Ask {
         return @alignCast(std.mem.bytesAsSlice(Ask, o.buf.contents()[asks_at..][0 .. @sizeOf(Ask) * R]));
+    }
+
+    pub fn certAsks(o: *const Out) []CertAsk {
+        return @alignCast(std.mem.bytesAsSlice(CertAsk, o.buf.contents()[asks_at..][0 .. @sizeOf(CertAsk) * R]));
     }
 
     pub fn deinit(o: *Out) void {
         o.buf.deinit();
     }
 
-    /// The drafts and confidences of the launch's first `n` rows (ask j's at j * rows).
     pub fn drafts(o: *const Out, n: usize) []const u32 {
         return o.buf.slice(u32, R)[0..n];
     }
@@ -104,22 +159,71 @@ pub const Out = struct {
     pub fn conf(o: *const Out, n: usize) []const f32 {
         return @as([]const f32, @alignCast(std.mem.bytesAsSlice(f32, o.buf.contents()[conf_at..][0 .. 4 * R])))[0..n];
     }
+
+    pub fn cand(o: *const Out, n: usize, k: usize) []const i32 {
+        return @as([]const i32, @alignCast(std.mem.bytesAsSlice(i32, o.buf.contents()[cand_at..][0 .. 4 * n * k])));
+    }
+
+    pub fn base(o: *const Out, n: usize, k: usize) []const f32 {
+        return @as([]const f32, @alignCast(std.mem.bytesAsSlice(f32, o.buf.contents()[base_at..][0 .. 4 * n * k])));
+    }
 };
 
-/// The chain of `asks` asks of `rows` drafts (each ask's anchor its first row of `ids`), barriers between the steps.
+/// The GPU chain's kernels, the heads' tables on the device, its results, and top-K width (0: full-vocab).
+pub const Chain = struct {
+    p: Pipelines,
+    t: Tables,
+    o: Out,
+    topk: u32 = 0,
+
+    pub fn init(device: mtl.Device, m: host.dspark.Markov, cert: bool, topk: u32) !Chain {
+        var p = if (cert) try Pipelines.loadCert(device, m.rank) else try Pipelines.load(device, m.rank);
+        errdefer p.deinit();
+        var t = try Tables.init(device, m.w1, m.w2, m.conf.?);
+        errdefer t.deinit();
+        return .{ .p = p, .t = t, .o = try Out.init(device), .topk = if (cert) topk else 0 };
+    }
+
+    pub fn deinit(ch: *Chain) void {
+        ch.p.deinit();
+        ch.t.deinit();
+        ch.o.deinit();
+    }
+
+    pub fn writeAsk(ch: *const Chain, j: usize, p: host.dspark.Params) void {
+        if (ch.p.cert) {
+            ch.o.certAsks()[j] = .{
+                .seed = p.seed,
+                .pos0 = p.pos0,
+                .t = @floatCast(@max(p.temperature, 1e-6)),
+                .sampled = @intFromBool(p.sampled),
+                .top_k = p.top_k,
+                .top_p = @floatCast(p.top_p),
+                .min_p = @floatCast(p.min_p),
+            };
+        } else {
+            ch.o.asks()[j] = .{ .seed = p.seed, .pos0 = p.pos0, .t = @floatCast(@max(p.temperature, 1e-6)), .sampled = @intFromBool(p.sampled) };
+        }
+    }
+};
+
+/// Full-vocab chain of `asks` asks of `rows` drafts (upstream or opt-in shared-w2 multi-ask mode).
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, t: *const Tables, o: *const Out, logits: Ref, hf: Ref, ids: Ref, vocab: u32, dim: u32, asks: u32, rows: u32) void {
     var a: Args = .{ .vocab = vocab, .rows = rows, .step = 0, .parts = parts, .dim = dim };
+    var ca: CertArgs = .{ .vocab = vocab, .rows = rows, .step = 0, .parts = parts, .dim = dim, .asks = asks, .topk = 0 };
     e.setPipeline(p.hid);
-    e.setValue(a, 0);
+    if (p.cert) e.setValue(ca, 0) else e.setValue(a, 0);
     e.setBuffer(hf.buf, hf.off, 1);
     e.setBuffer(t.buf, t.cw, 2);
     e.setBuffer(o.buf, Out.hid_at, 3);
     e.dispatchGroups(mtl.Size.of(asks * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+    const y_groups = if (p.cert) (asks + 3) / 4 else asks;
     for (0..rows) |i| {
         a.step = @intCast(i);
+        ca.step = @intCast(i);
         e.barrier();
         e.setPipeline(p.z);
-        e.setValue(a, 0);
+        if (p.cert) e.setValue(ca, 0) else e.setValue(a, 0);
         e.setBuffer(logits.buf, logits.off, 1);
         e.setBuffer(t.buf, 0, 2);
         e.setBuffer(t.buf, t.w2, 3);
@@ -129,10 +233,10 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, t: *const Tables, o: *
         e.setBuffer(o.buf, Out.pz_at, 7);
         e.setBuffer(o.buf, Out.pid_at, 8);
         e.setBuffer(o.buf, Out.asks_at, 9);
-        e.dispatchGroups(mtl.Size.of(parts, asks, 1), mtl.Size.of(32 * simdgroups, 1, 1));
+        e.dispatchGroups(mtl.Size.of(parts, y_groups, 1), mtl.Size.of(32 * simdgroups, 1, 1));
         e.barrier();
         e.setPipeline(p.pick);
-        e.setValue(a, 0);
+        if (p.cert) e.setValue(ca, 0) else e.setValue(a, 0);
         e.setBuffer(o.buf, Out.ps_at, 1);
         e.setBuffer(o.buf, Out.pz_at, 2);
         e.setBuffer(o.buf, Out.pid_at, 3);
@@ -144,4 +248,47 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, t: *const Tables, o: *
         e.setBuffer(o.buf, Out.conf_at, 9);
         e.dispatchGroups(mtl.Size.of(asks, 1, 1), mtl.Size.of(32, 1, 1));
     }
+}
+
+/// Top-K GPU candidate extraction + single-TG resident Markov chain (all B steps in 1 dispatch + GPU cand/base).
+pub fn encodeTopK(p: *const Pipelines, e: mtl.ComputeEncoder, t: *const Tables, o: *const Out, logits: Ref, hf: Ref, ids: Ref, vocab: u32, dim: u32, asks: u32, rows: u32, topk: u32) void {
+    const total_rows = asks * rows;
+    const a: CertArgs = .{ .vocab = vocab, .rows = rows, .step = 0, .parts = parts, .dim = dim, .asks = asks, .topk = topk };
+    e.setPipeline(p.hid);
+    e.setValue(a, 0);
+    e.setBuffer(hf.buf, hf.off, 1);
+    e.setBuffer(t.buf, t.cw, 2);
+    e.setBuffer(o.buf, Out.hid_at, 3);
+    e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(1024, 1, 1));
+
+    e.setPipeline(p.topk_part.?);
+    e.setValue(a, 0);
+    e.setBuffer(logits.buf, logits.off, 1);
+    e.setBuffer(o.buf, Out.pval_at, 2);
+    e.setBuffer(o.buf, Out.ptid_at, 3);
+    e.dispatchGroups(mtl.Size.of(topk_slices, total_rows, 1), mtl.Size.of(256, 1, 1));
+
+    e.barrier();
+    e.setPipeline(p.topk_merge.?);
+    e.setValue(a, 0);
+    e.setBuffer(o.buf, Out.pval_at, 1);
+    e.setBuffer(o.buf, Out.ptid_at, 2);
+    e.setBuffer(o.buf, Out.cand_at, 3);
+    e.setBuffer(o.buf, Out.base_at, 4);
+    e.dispatchGroups(mtl.Size.of(1, total_rows, 1), mtl.Size.of(256, 1, 1));
+
+    e.barrier();
+    e.setPipeline(p.chain_topk.?);
+    e.setValue(a, 0);
+    e.setBuffer(o.buf, Out.cand_at, 1);
+    e.setBuffer(o.buf, Out.base_at, 2);
+    e.setBuffer(t.buf, 0, 3);
+    e.setBuffer(t.buf, t.w2, 4);
+    e.setBuffer(t.buf, t.cw, 5);
+    e.setBuffer(o.buf, Out.hid_at, 6);
+    e.setBuffer(ids.buf, ids.off, 7);
+    e.setBuffer(o.buf, Out.drafts_at, 8);
+    e.setBuffer(o.buf, Out.conf_at, 9);
+    e.setBuffer(o.buf, Out.asks_at, 10);
+    e.dispatchGroups(mtl.Size.of(asks, 1, 1), mtl.Size.of(256, 1, 1));
 }

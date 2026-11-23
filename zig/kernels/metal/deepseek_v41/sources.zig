@@ -67,6 +67,10 @@ pub const glue_tmp = @embedFile("glue_tmp.metal");
 pub const early = @embedFile("early.metal");
 /// DeepSeek-V4.1's DSpark Markov chain over the whole vocabulary on the GPU (greedy drafts and confidences).
 pub const markov = @embedFile("markov.metal");
+/// DeepSeek-V4.1 opt-in DSpark Markov chain (shared-w2 multi-ask full-vocab + top-K single-TG resident chain).
+pub const markov_cert_full = @embedFile("markov_cert_full.metal");
+pub const markov_cert_topk = @embedFile("markov_cert_topk.metal");
+pub const markov_cert = markov_cert_full ++ "\n" ++ markov_cert_topk;
 /// DeepSeek-V4.1's keyed draws on the GPU (the host sampler's keys and Gumbel noise), prepended to early and markov.
 pub const keyed = @embedFile("keyed.metal");
 /// DeepSeek V4.1's vision tower: epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge.
