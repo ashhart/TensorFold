@@ -109,8 +109,6 @@ pub const Job = struct {
             job.entry = e;
             return;
         }
-        job.stream.reuse.saved = null; // nothing to restore: the backend opens it cold
-        job.stream.reuse.at = 0;
-        job.stream.fill_at.store(0, .monotonic);
+        @import("lane_stream.zig").lookAgain(job.host, job); // gone since: marks, promise and fill as a fresh admission's
     }
 };

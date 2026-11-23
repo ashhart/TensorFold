@@ -8,6 +8,7 @@ test {
     _ = @import("lane_host_score_test.zig");
     _ = @import("lane_host_step_borrow_test.zig");
     _ = @import("lane_host_admit_borrow_test.zig");
+    _ = @import("lane_host_lend_test.zig");
     _ = @import("lane_review_test.zig");
     _ = @import("lane_init_test.zig");
     _ = @import("lane_failure_review_test.zig");
