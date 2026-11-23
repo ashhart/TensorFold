@@ -1,6 +1,7 @@
 //! Nemotron and LFM3 on the XPU server: their lane host (a family behind the lane core, one stream, host sampling).
 const std = @import("std");
 const xpu = @import("xpu");
+const admit = @import("xpu_admit.zig");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const lane = @import("xpu_lane.zig");
@@ -58,6 +59,13 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 fn freeMemory(ctx: *xpu.Context) u64 {
     const mem = ctx.gpu.memory() catch return 0;
     return @min(mem.free, mem.size -| xpu.rt.alloc_now);
+}
+
+fn admittedStreams(o: api.Open, memory: admit.Memory, sequence_bytes: u64, cache_reserve: u64) !u32 {
+    _ = memory;
+    _ = sequence_bytes;
+    _ = cache_reserve;
+    return @max(1, o.lanes);
 }
 
 /// One loaded model behind the lane host: the device, the engine, the lane backend and the round loop.
@@ -179,4 +187,20 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.host.explain = .{ .text = lane.explain };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host(S).close, .ctx = h };
+}
+
+const gib: u64 = 1 << 30;
+
+test "XPU MTP admission: automatic 64 degrades to the complete sequences that fit" {
+    const memory: admit.Memory = .{ .free = 20 * gib, .size = 32 * gib, .allocated = 12 * gib };
+    const o: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 64 };
+    try std.testing.expectEqual(@as(u32, 5), try admittedStreams(o, memory, 3 * gib, 4 * gib));
+}
+
+test "XPU MTP admission: fixed requests stay exact and refuse over-capacity" {
+    const memory: admit.Memory = .{ .free = 20 * gib, .size = 32 * gib, .allocated = 12 * gib };
+    const exact: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 5, .lanes_fixed = true };
+    try std.testing.expectEqual(@as(u32, 5), try admittedStreams(exact, memory, 3 * gib, 4 * gib));
+    const excess: api.Open = .{ .dir = "", .model_type = "nemotron_h", .lanes = 6, .lanes_fixed = true };
+    try std.testing.expectError(error.ParallelPastMemory, admittedStreams(excess, memory, 3 * gib, 4 * gib));
 }
