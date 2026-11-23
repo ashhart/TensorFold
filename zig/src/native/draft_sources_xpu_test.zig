@@ -70,8 +70,8 @@ test "draft sources: XPU MTP sequence pricing covers newSeq's complete allocatio
     var kc: [3]@import("xpu").rt.Buffer = undefined;
     e.own.cstate = &cstate;
     e.own.kc = &kc;
-    var head: n.mtp.Mtp = undefined;
-    e.head = &head;
+    const head: n.mtp.Mtp = undefined;
+    e.head = head;
 
     const c = e.cfg;
     const conv = @as(u64, c.conv_kernel - 1) * c.convDim() * 2;
