@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: the checkpoint's `config.json` sets the routing width and the shared expert's width (`num_experts_per_tok`, `shared_expert_intermediate_size`): top-10 with a 640-wide shared expert as before, or top-5 with a 1280-wide one; any other value is refused at load by the field's name, and a captured kernel set or the MLX 4-bit path refuses the top-5 shape by name (#3523, refs #3368). Thanks to @BadAd84.
+
 - CUDA: Ripple-65B-Preview (ricursive) serves on the native engine from the publisher's NVFP4 release as published, with prompt chunks and decode, lane rounds as CUDA graphs, greedy and sampled draws, kept states and the prompt cache; the bf16 release is refused by name, and structured output and forced tool calls are refused until masked sampling lands (#2302, fixes #2300). Thanks to @jrb-ai.
 
 - Qwen3.8-27B family on Metal: tied embedding heads are accepted, binding the output projection to the embedding weights; small tied Qwen shapes still wait for their own size qualification (#N).
