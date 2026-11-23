@@ -186,7 +186,7 @@ pub const RollbackKey = struct {
 
     pub fn init(seq: anytype, d: anytype, keep: usize, s: *const parts.Scratch) RollbackKey {
         var h: Hash = .{};
-        h.values(&[_]u64{ seq.gen, d.gen, seq.tail.ptr, d.saved.ptr, s.h, s.cap });
+        h.values(&[_]u64{ seq.gen, d.gen, seq.tail.ptr, d.saved.ptr, d.saved_tail, d.saved_nrow, s.h, s.cap });
         for (seq.conv) |b| h.values(&[_]u64{b.ptr});
         for (seq.state) |b| h.values(&[_]u64{b.ptr});
         h.keep(&d.keep);

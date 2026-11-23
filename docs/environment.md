@@ -197,6 +197,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GATHER_EARLY` | Exactly `0` or `1`; default off. `1` gathers a shared pass's n-gram rows for every stream in one pool call, so the pass shares one distinct-row read and one set of parked readers; the rows, their order and every reply are the per-stream call's |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_STATE_PAGES` | Exactly `0` or `1`; default off; `1` needs `TF_FLASHNEXT_KV_PAGES` |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |
