@@ -269,18 +269,20 @@ pub fn clean(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
     return std.mem.trim(u8, out.items, " ");
 }
 
-/// Terminal/error text with every supplied credential replaced, longest first at each byte.
+/// Terminal/error text with credentials replaced, longest first; bytes may be literal or one %XX escape.
 pub fn redact(a: Allocator, text: []const u8, secrets: []const []const u8) ![]const u8 {
+    var scratch = try MatchScratch.init(a, text, secrets);
+    defer scratch.deinit(a);
     var scan: usize = 0;
-    while (scan < text.len and secretAt(text, scan, secrets).len == 0) scan += 1;
+    while (scan < text.len and secretAt(text, scan, secrets, &scratch).consumed == 0) scan += 1;
     if (scan == text.len) return text;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) {
-        const found = secretAt(text, i, secrets);
-        if (found.len > 0) {
+        const found = secretAt(text, i, secrets, &scratch);
+        if (found.consumed > 0) {
             try out.appendSlice(a, "[redacted]");
-            i += found.len;
+            i += found.consumed;
         } else {
             try out.append(a, text[i]);
             i += 1;
@@ -291,29 +293,25 @@ pub fn redact(a: Allocator, text: []const u8, secrets: []const []const u8) ![]co
 
 pub const RedactedPiece = struct { text: []const u8, rest: []const u8 };
 
-/// One streamed piece: emit complete safe text and retain only a suffix that may begin a credential.
+/// One streamed piece: emit safe text and retain a suffix that may still become a credential.
 pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) !RedactedPiece {
+    var scratch = try MatchScratch.init(a, text, secrets);
+    defer scratch.deinit(a);
     var out: std.ArrayList(u8) = .empty;
     var changed = false;
     var i: usize = 0;
     while (i < text.len) {
-        const found = secretAt(text, i, secrets);
+        const found = secretAt(text, i, secrets, &scratch);
         const rest = text[i..];
-        var holds = false;
-        if (found.len == 0) for (secrets) |secret| {
-            if (secret.len > rest.len and std.mem.startsWith(u8, secret, rest)) {
-                holds = true;
-                break;
-            }
-        };
-        if (found.len > 0 or holds) {
+        if (found.consumed > 0 or found.hold) {
             if (!changed) {
                 try out.appendSlice(a, text[0..i]);
                 changed = true;
             }
-            if (holds) return .{ .text = out.items, .rest = rest };
+            // A complete shorter key stays pending while the whole suffix can still become a longer key.
+            if (found.hold) return .{ .text = out.items, .rest = rest };
             try out.appendSlice(a, "[redacted]");
-            i += found.len;
+            i += found.consumed;
         } else {
             if (changed) try out.append(a, text[i]);
             i += 1;
@@ -322,12 +320,97 @@ pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) 
     return .{ .text = if (changed) out.items else text, .rest = "" };
 }
 
-fn secretAt(text: []const u8, i: usize, secrets: []const []const u8) []const u8 {
-    var found: []const u8 = "";
+const Match = struct { secret_len: usize = 0, consumed: usize = 0, hold: bool = false };
+
+/// The longest complete credential at ``i``; ``hold`` outranks it only for a longer possible credential.
+fn secretAt(text: []const u8, i: usize, secrets: []const []const u8, scratch: *MatchScratch) Match {
+    var found: Match = .{};
+    var possible: usize = 0;
     for (secrets) |secret| {
-        if (secret.len > found.len and std.mem.startsWith(u8, text[i..], secret)) found = secret;
+        const m = matchSecret(text[i..], secret, scratch);
+        if (m.consumed > 0 and m.secret_len > found.secret_len) found = m;
+        if (m.hold) possible = @max(possible, m.secret_len);
     }
+    found.hold = found.hold or possible > found.secret_len;
     return found;
+}
+
+const MatchScratch = struct {
+    states: []bool,
+    next: []bool,
+
+    fn init(a: Allocator, text: []const u8, secrets: []const []const u8) !MatchScratch {
+        var longest: usize = 0;
+        for (secrets) |secret| longest = @max(longest, secret.len);
+        const has_percent = std.mem.indexOfScalar(u8, text, '%') != null;
+        const encoded_span = std.math.mul(usize, longest, 3) catch text.len;
+        const span = if (has_percent) @min(text.len, encoded_span) else 0;
+        const room = if (has_percent) span + 1 else 0;
+        const states = try a.alloc(bool, room);
+        errdefer a.free(states);
+        return .{ .states = states, .next = try a.alloc(bool, room) };
+    }
+
+    fn deinit(s: *MatchScratch, a: Allocator) void {
+        a.free(s.states);
+        a.free(s.next);
+    }
+};
+
+/// A raw or mixed single-layer percent-encoded match, or a proper prefix ending at ``rest``'s end.
+fn matchSecret(rest: []const u8, secret: []const u8, scratch: *MatchScratch) Match {
+    if (secret.len == 0) return .{};
+    if (std.mem.indexOfScalar(u8, rest, '%') == null) {
+        if (std.mem.startsWith(u8, rest, secret)) return .{ .secret_len = secret.len, .consumed = secret.len };
+        if (rest.len < secret.len and std.mem.startsWith(u8, secret, rest)) return .{ .secret_len = secret.len, .hold = true };
+        return .{};
+    }
+    var states = scratch.states;
+    var next = scratch.next;
+    @memset(states, false);
+    states[0] = true;
+    var hold = false;
+    for (secret) |wanted| {
+        @memset(next, false);
+        var any = false;
+        for (states, 0..) |active, at| {
+            if (!active) continue;
+            if (at == rest.len) {
+                hold = true;
+                continue;
+            }
+            if (rest[at] == '%') {
+                const left = rest.len - at;
+                if (left < 3 and (left == 1 or std.ascii.isHex(rest[at + 1]))) hold = true;
+                if (at + 2 < states.len and left >= 3 and std.ascii.isHex(rest[at + 1]) and std.ascii.isHex(rest[at + 2])) {
+                    const byte = (hex(rest[at + 1]).? << 4) | hex(rest[at + 2]).?;
+                    if (byte == wanted) {
+                        next[at + 3] = true;
+                        any = true;
+                    }
+                }
+            }
+            if (at + 1 < states.len and rest[at] == wanted) {
+                next[at + 1] = true;
+                any = true;
+            }
+        }
+        if (!any) return .{ .secret_len = secret.len, .hold = hold };
+        const swap = states;
+        states = next;
+        next = swap;
+    }
+    var consumed: usize = 0;
+    for (states, 0..) |active, at| {
+        if (active) consumed = at;
+    }
+    return .{ .secret_len = secret.len, .consumed = consumed, .hold = hold };
+}
+
+fn hex(c: u8) ?u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    const lower = std.ascii.toLower(c);
+    return if (lower >= 'a' and lower <= 'f') lower - 'a' + 10 else null;
 }
 
 /// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.

@@ -428,3 +428,7 @@ fn fail(ctx: *const Context, message: []const u8) !u8 {
     try ctx.err.flush();
     return 1;
 }
+
+test {
+    if (comptime !windows) _ = @import("chat_cli_kp50_test.zig");
+}

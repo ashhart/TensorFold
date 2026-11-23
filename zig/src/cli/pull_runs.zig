@@ -198,6 +198,7 @@ pub fn resolve(a: Allocator, client: *std.http.Client, auth: Auth, url: []const 
     defer req.deinit();
     if (response.head.status.class() == .redirect) {
         const to = response.head.location orelse return error.HttpRedirectLocationMissing;
+        if (auth.reflects(to)) return error.HubCredentialRedirect;
         if (!std.mem.startsWith(u8, to, "https://") and !std.mem.startsWith(u8, to, "http://")) return error.RelativeRedirect;
         return a.dupe(u8, to);
     }
