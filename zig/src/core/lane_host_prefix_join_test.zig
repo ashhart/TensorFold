@@ -203,6 +203,25 @@ test "single-flight: cold cache — nothing will be kept, so the join does not a
     try std.testing.expect(on.leader_open_most > 1); // every prompt's stream open beside the leader's
 }
 
+test "single-flight: a pulled fill with no cut of its own is never a join leader" {
+    var job: LaneHost.Job = undefined;
+    job.stream = undefined;
+    job.stream.reuse = .{};
+    const at = [_]u32{16};
+    // its own fill: a leader like any other
+    try std.testing.expect(prefix.joinLeader(&job));
+    job.stream.reuse.pulled = true;
+    // a fresh pull with no hook: the keeper never runs, so waiters would wait for nothing
+    try std.testing.expect(!prefix.joinLeader(&job));
+    job.stream.reuse.hook = @import("lanes").stream.MarkHook{ .ptr = &job, .at = ignoreMark };
+    job.stream.reuse.marks = &at;
+    try std.testing.expect(prefix.joinLeader(&job)); // a pull that planned a cut after its end
+    job.stream.reuse.marks = &.{};
+    try std.testing.expect(!prefix.joinLeader(&job)); // a hook with no cut past the pull's end keeps nothing
+}
+
+fn ignoreMark(_: *anyopaque, _: *@import("lanes").Stream, _: u32) void {}
+
 test "single-flight: fail-open, the leader cancelled — every waiter prefills its own prompt and matches a solo run" {
     const cancel_at = 2; // the leader dies on its second prompt chunk
     var on: Run = .{};

@@ -52,6 +52,7 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request) or l.request.cacheSalt() != r.cacheSalt()) continue;
+        if (!joinLeader(l)) continue; // a fresh pull with no cut of its own keeps nothing to resume
         // a single-flight join: the leader's prompt is the waiter's own; armed only when its fill keeps anything
         if (joinable(h, r, spans, l) and room(h, job, l) and l.marks.len > 0 and store.most != 0 and exports.keeps(l, l.cut[0])) {
             best = .{ .leader = l, .id = l.id, .whole = true };
@@ -72,6 +73,11 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     h.prefix.waits += 1;
     if (best.whole) h.prefix.joins += 1;
     return true;
+}
+
+/// Whether filling `l` may lead a join: a fresh pull with no cut of its own keeps nothing to resume (lock held).
+pub fn joinLeader(l: *const Job) bool {
+    return !(l.stream.reuse.pulled and (l.stream.reuse.hook == null or l.stream.reuse.marks.len == 0));
 }
 
 /// Whether filling `l` is the waiter's own prompt: key tokens, raw tokens and spans, no mark consulted (lock held).
