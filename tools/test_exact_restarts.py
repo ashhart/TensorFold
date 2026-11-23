@@ -1,6 +1,10 @@
 """tools/exact_restarts.py low-level checks against a stub server scripting its own token_ids."""
+import contextlib
+import hashlib
+import io
 import json
 import sys
+import tempfile
 import threading
 import urllib.error
 import unittest
@@ -12,7 +16,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import exact_restarts as er  # noqa: E402
 
 BASE_IDS = list(range(100, 116))
+FAILING_BINARY = b"#!/bin/sh\nexit 1\n"
 PROMPT = {"name": "p", "kind": "completion", "prompt": "x"}
+RECEIPT_PROMPT = {"name": "near-tie", "kind": "chat", "prompt": "Choose one and explain.",
+                  "followup": "Now give the other one.", "expected_token_ids": list(range(8)),
+                  "near_tie_offset": 0, "recording_sha256": "a" * 64,
+                  "near_tie": {"ids": [0, 1], "logits": [16.0, 15.9375], "position": 0}}
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -114,6 +123,49 @@ class ExactRestartTests(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--prompt-cache-gib", "0"])
         self.assertIn("--parallel", argv)
         self.assertIn("--drafter", argv)
+
+    def launch_failure_receipt(self, candidate=False, existing=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "reference.bin"
+            prompts, output = Path(tmp) / "prompts.json", Path(tmp) / "report.json"
+            if existing:
+                missing.write_bytes(FAILING_BINARY)
+                missing.chmod(0o755)
+            prompts.write_text(json.dumps([RECEIPT_PROMPT]))
+            argv = ["exact_restarts.py", "--bin", str(missing), "--model", "public-model",
+                    "--prompts", str(prompts), "--output", str(output),
+                    "--checkpoint-id", "public-checkpoint", "--checkpoint-sha256", "b" * 64,
+                    "--family", "public-family", "--quant", "public-quant", "--streams", "1",
+                    "--sampling", "greedy", "--stops", "budget", "--skip", "restart", "--skip", "draft"]
+            if candidate:
+                argv += ["--candidate-bin", str(Path(tmp) / "missing-candidate.bin"),
+                         "--build-id", "public-reference"]
+            with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                code = er.main()
+            return code, json.loads(output.read_text())
+
+    def test_missing_reference_binary_writes_failure_receipt(self):
+        code, report = self.launch_failure_receipt()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["builds"], {"reference": None})
+        self.assertEqual(report["failures"], [{"request": "runtime:reference", "runtime": "reference",
+                                               "reason": "server launch or readiness failed"}])
+
+    def test_missing_candidate_binary_writes_failure_receipt(self):
+        code, report = self.launch_failure_receipt(candidate=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["builds"], {"reference": "public-reference", "candidate": None})
+        self.assertIn({"request": "runtime:candidate", "runtime": "candidate",
+                       "reason": "server launch or readiness failed"}, report["failures"])
+
+    def test_existing_binary_launch_failure_keeps_its_hash(self):
+        code, report = self.launch_failure_receipt(existing=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "fail")
+        expected = "sha256:" + hashlib.sha256(FAILING_BINARY).hexdigest()
+        self.assertEqual(report["builds"], {"reference": expected})
 
 
 if __name__ == "__main__":
