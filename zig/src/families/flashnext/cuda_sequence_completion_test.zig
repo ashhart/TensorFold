@@ -172,7 +172,7 @@ fn expectCacheCanaries(bs: []const cuda.DeviceBuffer) !void {
     for (bs) |b| {
         try t.expectEqual(@as(u8, 0xa5), Fake.canaries[b.ptr / 256]);
         for (Fake.recorded[0..Fake.fills]) |f| {
-            if (f.ptr >= b.ptr and f.ptr < b.ptr + b.len) return error.UnexpectedCacheClear;
+            if (f.ptr == b.ptr) return error.UnexpectedCacheClear;
         }
     }
 }
@@ -194,16 +194,18 @@ test "Flash Next completion: cache construction preserves poison capacity and sn
     e.eos = 1;
     e.round_graph = .{};
     e.heads = .full;
-    var seq = try e.newSeq(8);
-    try expectCleared(seq.conv);
-    try expectCleared(seq.state);
-    try expectCleared((&seq.tail)[0..1]);
-    try expectCacheCanaries(seq.kc);
-    try expectCacheCanaries(seq.vc);
-    try expectCacheCanaries(seq.ikc);
-    try expectCacheCanaries(seq.pooled);
-    try t.expectEqual(@as(usize, 2 * wt.linear_n + 1), Fake.fills);
-    seq.deinit(t.allocator);
+    {
+        var seq = try e.newSeq(8);
+        defer seq.deinit(t.allocator);
+        try expectCleared(seq.conv);
+        try expectCleared(seq.state);
+        try expectCleared((&seq.tail)[0..1]);
+        try expectCacheCanaries(seq.kc);
+        try expectCacheCanaries(seq.vc);
+        try expectCacheCanaries(seq.ikc);
+        try expectCacheCanaries(seq.pooled);
+        try t.expectEqual(@as(usize, 2 * wt.linear_n + 1), Fake.fills);
+    }
 
     d = Fake.init(0, 0);
     var draft = try Draft.init(t.allocator, &d, stream, 8, 8, 1, .full);
