@@ -88,6 +88,12 @@ pub fn smoothSynced(ctx: anytype, ms: []f64, agree: anytype, lead: bool) !void {
     }
 }
 
+pub const warm_prices = @import("metal_cost_heal.zig");
+
+pub fn healWindows(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64) !warm_prices.Stats {
+    return warm_prices.local(timer, ms, widths, cursor);
+}
+
 /// True when any entry is more than `drift` from the reference's, or the reference has another shape.
 pub fn drifted(ms: []const f64, reference: []const f64) bool {
     if (ms.len != reference.len) return true;
