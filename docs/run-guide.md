@@ -24,21 +24,25 @@ a container and the tests that need no GPU.
 After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
 fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
 `--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
-run accepts only `y` or `yes`. A cached model and its drafter need no prompt or download.
+run accepts only `y` or `yes`. A cached model needs no prompt or download. Rows whose Gemma 4 drafts need M5 tensor units are
+served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
 
 The command starts a loopback server and sends one deterministic request. `--check` stops that server after a nonempty
-reply and exits 0; without `--check`, the checked server stays in the foreground and Ctrl-C stops it. A failed first reply
-is fatal and the started server is stopped. The request key is not printed. No existing `serve` default or flag changes.
-
-Windows refuses managed server startup: use `tensorfold serve` in one console and `tensorfold chat --url` in another.
+reply and exits 0; this ephemeral check replaces any caller API key with a private temporary key. Without `--check`, set
+`TENSORFOLD_API_KEY` in the environment first: persistent `start` requires that caller credential, reuses it only through
+the child environment, and stays in the foreground until Ctrl-C. Send requests with `Authorization: Bearer
+$TENSORFOLD_API_KEY`; the key is never printed or placed in the child arguments. A failed first reply is fatal and the
+started server is stopped. No existing `serve` default or flag changes.
 
 ## Send a request
 
-Leave the server running. In another terminal, on either platform:
+Leave the server running. In another terminal, on either platform (the authorization header is the persistent `start`
+credential flow; an unauthenticated manual `serve` does not need it):
 
 ```sh
 curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${TENSORFOLD_API_KEY}" \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 
