@@ -4,6 +4,8 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const fl = @import("uocr_cuda");
+const refusals = @import("cuda_refusal.zig");
+const device = @import("cuda_device.zig");
 
 pub const family: api.Family = .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} };
 
@@ -46,8 +48,31 @@ const Host = struct {
 /// The context a 16 GiB card holds beside the weights and scratch (its caches take 63 KiB a token).
 pub const default_context = 65536;
 
+/// The family as the CUDA server's per-family refusals read it: page images, no drafter, no kept prompt states.
+const Admission = struct {
+    pub const Options = struct { vision: ?api.VisionOpen };
+    pub const drafter_refusal = "--drafter: Unlimited-OCR-2 has no drafter; serve it without --drafter";
+    pub const keeps_no_prompts = true;
+};
+
+/// A flag the family has no use for, refused by name rather than ignored; null when `o` may open.
+fn flagRefusal(o: api.Open) ?[]const u8 {
+    if (refusals.family(Admission, o)) |why| return why;
+    if (o.precision != null) return "--precision: Unlimited-OCR-2 reads its bf16 release only; serve it without --precision";
+    if (o.record != null) return "--record: Unlimited-OCR-2 gives no rows to record on CUDA; serve it without --record";
+    if (o.recall) return "--recall: Unlimited-OCR-2 keeps no draft record; serve it without --recall";
+    if (o.segments != null) return "--segments: Unlimited-OCR-2 on CUDA does not split its prompt into segments; serve it without --segments";
+    if (o.decode_share != null) return "--decode-share: Unlimited-OCR-2 serves one request at a time; serve it without --decode-share";
+    if (o.keep != null) return "--checkpoint-slots: Unlimited-OCR-2 keeps no prompt states; serve it without --checkpoint-slots";
+    return null;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
+    if (flagRefusal(o)) |why| {
         problem.* = why;
         return null;
     }
@@ -64,7 +89,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = try std.fmt.allocPrint(a, "--context {d}: Unlimited-OCR-2 runs to {d} tokens", .{ context, fl.config.max_context });
         return null;
     }
-    const h = start(a, gpa, io, o, vis_open, context, problem) catch |err| switch (err) {
+    const ordinal = try device.setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+    const h = start(a, gpa, io, o, vis_open, context, ordinal, problem) catch |err| switch (err) {
         error.Refused => return null,
         else => return err,
     };
@@ -72,7 +98,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 }
 
 /// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
-fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, vis_open: api.VisionOpen, context: i64, problem: *[]const u8) !*Host {
+fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, vis_open: api.VisionOpen, context: i64, ordinal: u32, problem: *[]const u8) !*Host {
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .io = io, .driver = undefined, .ctx = undefined, .model = undefined, .config = undefined, .clock = .{ .io = io }, .core = undefined, .host = undefined };
@@ -81,7 +107,13 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
         return error.Refused;
     };
     errdefer h.driver.close();
-    h.ctx = try cuda.Context.init(&h.driver, 0);
+    const count: u32 = @intCast(try h.driver.deviceCount());
+    if (ordinal >= count) {
+        const named = if (o.device != null) "--device " else "TF_CUDA_DEVICE=";
+        problem.* = try std.fmt.allocPrint(a, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, ordinal, count, if (count == 1) "" else "s", @max(count, 1) - 1 });
+        return error.Refused;
+    }
+    h.ctx = try cuda.Context.init(&h.driver, @intCast(ordinal));
     errdefer h.ctx.deinit();
     try h.ctx.makeCurrent();
     h.model = fl.serve.Model.load(gpa, io, &h.driver, o.dir, @intCast(context)) catch |err| {
@@ -154,4 +186,63 @@ test "Unlimited-OCR-2 on CUDA offers --vision-image-share's value, as the Metal 
         try std.testing.expectEqual(3 * fl.serve.maxPageTokens(), v.image_tokens);
     }
     try std.testing.expectEqual(@as(u32, 700), offer(&h, .{ .image_tokens = 700, .image_tokens_set = true }).image_tokens);
+}
+
+test "Unlimited-OCR-2 on CUDA refuses each flag it has no use for by name, before reading the checkpoint or the device" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const base: api.Open = .{ .dir = "missing", .model_type = "unlimited-ocr", .vision = .{} };
+    const Case = struct { flag: []const u8, o: api.Open };
+    var cases: [14]Case = undefined;
+    cases[0] = .{ .flag = "--drafter", .o = base };
+    cases[0].o.drafter = "drafter";
+    cases[1] = .{ .flag = "--kv-cache fp8", .o = base };
+    cases[1].o.kv8 = true;
+    cases[2] = .{ .flag = "--prompt-precision int8", .o = base };
+    cases[2].o.prompt_int8 = true;
+    cases[3] = .{ .flag = "--loops", .o = base };
+    cases[3].o.loops = 2;
+    cases[4] = .{ .flag = "--prompt-cache-gib", .o = base };
+    cases[4].o.prompt_cache_gib = 4;
+    cases[5] = .{ .flag = "--learn-conversations", .o = base };
+    cases[5].o.learn = "states";
+    cases[5].o.learn_conversations = true;
+    cases[6] = .{ .flag = "--spill-gib", .o = base };
+    cases[6].o.learn = "states";
+    cases[6].o.learn_conversations = true;
+    cases[6].o.spill = .evicted;
+    cases[7] = .{ .flag = "--precision", .o = base };
+    cases[7].o.precision = .checkpoint;
+    cases[8] = .{ .flag = "--record", .o = base };
+    cases[8].o.record = "rows";
+    cases[9] = .{ .flag = "--recall", .o = base };
+    cases[9].o.recall = true;
+    cases[10] = .{ .flag = "--segments", .o = base };
+    cases[10].o.segments = 2;
+    cases[11] = .{ .flag = "--decode-share", .o = base };
+    cases[11].o.decode_share = 0.5;
+    cases[12] = .{ .flag = "--checkpoint-slots", .o = base };
+    cases[12].o.keep = 3;
+    cases[13] = .{ .flag = "this CUDA family has no tensor-parallel ranks", .o = base };
+    cases[13].o.tp = 2;
+    for (cases) |c| {
+        var problem: []const u8 = "";
+        try std.testing.expectEqual(null, try open(arena.allocator(), std.testing.allocator, std.testing.io, c.o, &problem));
+        std.testing.expectStringStartsWith(problem, c.flag) catch |err| {
+            std.debug.print("asked {s}, refused: {s}\n", .{ c.flag, problem });
+            return err;
+        };
+    }
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(null, try open(arena.allocator(), std.testing.allocator, std.testing.io, cases[0].o, &problem));
+    try std.testing.expectEqualStrings(Admission.drafter_refusal, problem);
+}
+
+test "Unlimited-OCR-2 on CUDA reads --device and refuses a device the machine lacks before loading" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const asked: api.Open = .{ .dir = "missing", .model_type = "unlimited-ocr", .vision = .{}, .device = 4096 };
+    try std.testing.expectEqual(null, try open(arena.allocator(), std.testing.allocator, std.testing.io, asked, &problem));
+    try std.testing.expect(std.mem.startsWith(u8, problem, "--device 4096: this machine has ") or std.mem.startsWith(u8, problem, "no CUDA driver ("));
 }
