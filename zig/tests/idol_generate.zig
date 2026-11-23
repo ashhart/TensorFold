@@ -24,7 +24,8 @@ const usage =
     \\The denoiser starts from torch.Generator("cpu").manual_seed(seed)'s randn [8192, 16] then [5], as idol_case.py
     \\case draws it (the SDK draws on its device's generator). The VAE posterior's noise and the octree's draws come from
     \\native seeded generators. --noise FILE gives the posterior's noise instead (`noise` [128, 128, 32], as idol_case.py
-    \\vae records the SDK's) and, if it holds them, the starting `latent` [8192, 16] and `camera` [5]. --features FILE
+    \\vae records the SDK's; without it the noise stays native, as the JSON's vae_noise says) and, if it holds them,
+    \\the starting `latent` [8192, 16] and `camera` [5]. --features FILE
     \\(once or twice) gives feature1 [1, 4101, 1280] and feature2 [1, 4101, 128] and skips both encoders (PICTURE: -).
     \\Writes OUT_DIR/generate.ply, camera.json, start.f32 (the starting latent and camera), sample.f32 and
     \\tf-idol-generate.json (each stage's seconds). Each model is freed once its stage is done.
@@ -154,7 +155,8 @@ const Times = struct {
 };
 
 /// feature1 and feature2 from the encoders, or from --features files.
-fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:0]const u8, o: Options, t: *Times, pt: *id.photo.Timing, metal_peak: *u64) ![2][]f32 {
+fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:0]const u8, o: Options, t: *Times, pt: *id.photo.Timing, metal_peak: *u64, vae_noise: *id.run_noise.VaeNoise) ![2][]f32 {
+    vae_noise.* = .unused;
     if (o.features[0]) |first| {
         var f1: ?[]f32 = null;
         var f2: ?[]f32 = null;
@@ -196,6 +198,7 @@ fn encode(a: std.mem.Allocator, io: std.Io, device: mtl.Device, args: []const [:
             given = true;
         }
     }
+    vae_noise.* = .of(false, given);
     if (!given) {
         var rng = std.Random.DefaultPrng.init(o.seed +% 0x9e3779b97f4a7c15);
         for (noise) |*v| v.* = rng.random().floatNorm(f32);
@@ -291,7 +294,8 @@ pub fn main(init: std.process.Init) !u8 {
     const device = try mtl.Device.init();
     std.debug.print("{s}: seed {d}, {d} steps, guidance {d}, {d} Gaussians; starting noise {s}\n", .{ device.name(), o.seed, o.steps, o.guidance, o.gaussians, if (start_given) "given" else "torch CPU-seeded" });
     var pt: id.photo.Timing = .{};
-    const features = try encode(a, io, device, args, o, &t, &pt, &metal_peak);
+    var vae_noise: id.run_noise.VaeNoise = undefined;
+    const features = try encode(a, io, device, args, o, &t, &pt, &metal_peak, &vae_noise);
     try denoise(a, io, device, args[1], features, x, o, &t, &metal_peak);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/sample.f32", .{out_dir}), .data = std.mem.sliceAsBytes(x) });
 
@@ -321,7 +325,7 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("PLY: {d} Gaussians, {d} bytes in {d:.3} s; camera {s}", .{ r.gaussians.count(), bytes.len, t.ply, cam_json });
     std.debug.print("total {d:.2} s: load {d:.2}, dino {d:.3}, vae {d:.3}, condition {d:.3}, denoise {d:.2}, octree {d:.3}, Gaussian decoder {d:.3} (+ activation {d:.3}), PLY {d:.3}; Metal peak {d:.2} GB\n", .{ t.total, load, t.dino, t.vae, t.condition, t.denoise, t.octree, t.gaussian_decoder, t.activation, t.ply, gb(metal_peak) });
     var out: std.ArrayList(u8) = .empty;
-    try print(&out, a, "{{\"device\": \"{s}\", \"seed\": {d}, \"steps\": {d}, \"cfg\": {d}, \"gaussians\": {d}, \"start_noise\": \"{s}\", \"vae_noise\": \"{s}\", \"features_given\": {}", .{ device.name(), o.seed, o.steps, o.guidance, r.gaussians.count(), if (start_given) "given" else "torch_cpu", if (o.features[0] != null) "unused" else if (o.noise != null) "given" else "native", o.features[0] != null });
+    try print(&out, a, "{{\"device\": \"{s}\", \"seed\": {d}, \"steps\": {d}, \"cfg\": {d}, \"gaussians\": {d}, \"start_noise\": \"{s}\", \"vae_noise\": \"{s}\", \"features_given\": {}", .{ device.name(), o.seed, o.steps, o.guidance, r.gaussians.count(), if (start_given) "given" else "torch_cpu", @tagName(vae_noise), o.features[0] != null });
     try print(&out, a, ", \"load_s\": {d:.4}", .{load});
     inline for (@typeInfo(Times).@"struct".field_names) |name| try print(&out, a, ", \"{s}_s\": {d:.4}", .{ name, @field(t, name) });
     if (id.photo.isPhoto(args[4]) and o.features[0] == null) try print(&out, a, ", \"preprocess_s\": {d:.4}, \"birefnet_s\": {d:.4}", .{ pt.preprocess, pt.birefnet });
