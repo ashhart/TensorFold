@@ -113,6 +113,8 @@ fn smoothGrid(ctx: anytype, ms: []f64, widths: ?[]const u32, agree: anytype, lea
     }
 }
 
+pub const context = @import("cost_context.zig");
+
 pub const warm_prices = @import("metal_cost_heal.zig");
 
 pub fn healWindows(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64) !warm_prices.Stats {

@@ -109,3 +109,58 @@ test "Metal review: both entries in a two-wide high plateau are retimed" {
     try rule.smooth(&timer, &ms);
     try t.expectEqualSlices(f64, &.{ 10, 10, 10, 10, 10, 10 }, &ms);
 }
+
+
+test "Metal review: shared17 cannot heal below the live narrow16 price" {
+    var timer: Timer = .{ .value = 10 };
+    var ms = [_]f64{ 13, 14 };
+    var cursor: u64 = 0;
+    if (comptime @hasDecl(warm, "prepared")) {
+        _ = try warm.prepared(&timer, &ms, &.{ 17, 18 }, &cursor, 12, warm.Local{}, true);
+    } else _ = try rule.healWindows(&timer, &ms, &.{ 17, 18 }, &cursor);
+    try t.expectEqualSlices(f64, &.{ 13, 14 }, &ms);
+}
+
+test "Metal review: clamped edge pairs contain only the available boundary widths" {
+    if (comptime @hasDecl(warm, "select")) {
+        const p = warm.select(&.{ 10, 11, 12 }, &.{ 17, 18, 19 }, 0);
+        try t.expectEqual(@as(usize, 1), p.n);
+        try t.expectEqual(@as(u32, 17), p.widest(&.{ 17, 18, 19 }));
+        const q = warm.select(&.{ 10, 11 }, &.{ 15, 16 }, 1);
+        try t.expectEqual(@as(usize, 1), q.n);
+        try t.expectEqual(@as(usize, 1), q.at[0]);
+    }
+}
+
+test "Metal review: repair uses real coordinates on exponentially spaced prices" {
+    const WidthTimer = struct {
+        calls: usize = 0,
+        pub fn time(s: *@This(), i: usize) !f64 {
+            s.calls += 1;
+            return 10 + @as(f64, @floatFromInt(([_]u32{ 4, 8, 16, 32, 64, 128 })[i]));
+        }
+    };
+    const widths = [_]u32{ 4, 8, 16, 32, 64, 128 };
+    var ms = [_]f64{ 14, 18, 26, 42, 74, 138 };
+    var timer: WidthTimer = .{};
+    if (comptime @hasDecl(rule, "smoothWidths")) try rule.smoothWidths(&timer, &ms, &widths) else try rule.smooth(&timer, &ms);
+    try t.expectEqual(@as(usize, 0), timer.calls);
+    ms[3] *= 1.1;
+    if (comptime @hasDecl(rule, "smoothWidths")) try rule.smoothWidths(&timer, &ms, &widths) else try rule.smooth(&timer, &ms);
+    try t.expectEqual(@as(f64, 42), ms[3]);
+}
+
+test "Metal review: each width's head observation spans the interleaved passes" {
+    const Observer = struct {
+        timer: *Timer,
+        before_end: usize = 0,
+        pub fn afterWidth(o: *@This(), _: usize) !void {
+            if (o.timer.n < 7) o.before_end += 1;
+        }
+    };
+    var timer: Timer = .{};
+    var observer: Observer = .{ .timer = &timer };
+    var ms: [1]f64 = undefined;
+    try rule.interleaveWidths(&timer, &observer, &ms, false);
+    try t.expectEqual(@as(usize, 1), observer.before_end);
+}
