@@ -48,9 +48,9 @@ test "original Mini bundled DSpark rows and Markov scores match the FP64 referen
     const ids = try probe.drafts(dr, &stream, anchor, n);
     const r = fx.Reference.fromCheckpoint(&ad.core.w.ckpt, &cfg, target);
     const rows = try r.blockRows(a, feats, n, anchor);
-    const got = probe.xBits(ad, d.block, d.D);
-    for (0..d.block) |i| {
-        const err = probe.relError(got[i * d.D ..][0..d.D], rows[i * d.D ..][0..d.D]);
+    const got = probe.xBits(ad, d.block - 1, d.D); // the final rows 1 .. block - 1: the anchor's output is not kept
+    for (0..d.block - 1) |i| {
+        const err = probe.relError(got[i * d.D ..][0..d.D], rows[(i + 1) * d.D ..][0..d.D]);
         if (err >= 0.05) std.debug.print("draft row {d}: relative RMS error {d}\n", .{ i, err });
         try t.expect(err < 0.05);
     }

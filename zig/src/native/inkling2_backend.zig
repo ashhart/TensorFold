@@ -351,10 +351,7 @@ pub const Target = struct {
         const self = of(ptr);
         if (windows.len == 0 or windows.len != out.len or windows.len > self.options.streams) return error.InvalidInklingWindows;
         var items: [max_items]fl.Item = undefined;
-        var copies: [max_items]Copy = undefined;
         var ids: [max_items * window_rows]u32 = undefined;
-        var copy_count: usize = 0;
-        var tap_base: usize = 0;
         var total: usize = 0;
         const words = (self.vocab() + 31) / 32;
         for (windows, out, 0..) |w, result, i| {
@@ -368,19 +365,18 @@ pub const Target = struct {
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             const tapping = self.options.drafts and w.stream.drafts;
-            items[i] = .{ .state = &lane.state, .ids = ids[total..][0..n], .logit_rows = @intCast(n), .taps = tapping };
-            if (tapping) {
-                copies[copy_count] = .{ .lane = lane, .start = lane.state.len, .rows = @intCast(n), .tap_base = tap_base };
-                copy_count += 1;
-                tap_base += n;
-            }
+            items[i] = .{ .state = &lane.state, .ids = ids[total..][0..n], .logit_rows = @intCast(n), .taps = tapping, .tap_into = if (tapping) lane.taps else null };
             lane.first_ready = false;
             lane.verify_start = lane.state.len;
             lane.verify_rows = @intCast(n);
             total += n;
         }
         try self.model.forward(items[0..windows.len]);
-        try self.capture(copies[0..copy_count]);
+        for (windows) |w| if (self.options.drafts and w.stream.drafts) { // the forward wrote each lane's own taps
+            const lane = self.active.get(w.stream).?;
+            lane.tap_start = lane.verify_start;
+            lane.tap_rows = lane.verify_rows;
+        };
         const logits = self.model.logits.slice(f32, total * self.vocab());
         var base: usize = 0;
         for (windows, out) |w, result| {

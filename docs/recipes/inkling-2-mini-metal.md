@@ -45,15 +45,17 @@ Concurrency, `bench_concurrent` (aggregate tokens a second, per stream in bracke
 
 | Prompt, streams | MLX | Native plain | Native DSpark |
 | --- | --- | --- | --- |
-| code, 1 | 23.4, 0.25 s | 26.5, 0.13 s | 36.4, 0.14 s |
-| code, 4 | 23.3 (23.6), 33.8 s | 64.5 (16.4), 0.50 s | 55.4 (15.5), 0.55 s |
-| chat, 1 | 23.3, 0.37 s | 30.6, 0.24 s | 33.8, 0.25 s |
-| chat, 4 | 23.3 (23.9), 33.9 s | 64.4 (16.3), 0.97 s | 60.4 (15.5), 1.00 s |
+| code, 1 | 23.4, 0.25 s | 31.1, 0.12 s | 37.7, 0.13 s |
+| code, 4 | 23.3 (23.6), 33.8 s | 67.0 (16.9), 0.52 s | 65.1 (16.6), 0.52 s |
+| chat, 1 | 23.3, 0.37 s | 30.9, 0.23 s | 35.8, 0.23 s |
+| chat, 4 | 23.3 (23.9), 33.9 s | 66.8 (17.1), 0.90 s | 66.9 (17.1), 0.91 s |
 
-The reference server answers four requests one after another here. A DSpark server times its verify forward by total
-rows at load (2.6 s), so the lane host prices shared rounds: it drafted every stream 7 deep at four streams before (213 ms
-for 32 rows, 54.7 and 39.8 tokens a second in an earlier run) and now drafts only where a priced round beats plain. At
-four streams DSpark is still 6 to 14 % under plain in these runs, and at one stream it is 10 to 37 % over it.
+The reference server answers four requests one after another here. Native columns are one A-B-B-A session (plain, DSpark,
+DSpark, plain; the mean of each pair). A DSpark server times its verify forward by total rows at load (2.6 s), so the lane
+host prices shared rounds: it drafted every stream 7 deep at four streams before (213 ms for 32 rows, 54.7 and 39.8 tokens
+a second in an earlier run) and now drafts only where a priced round beats plain. The head runs the drafting streams of a
+round in one pass (a four-stream hold takes 11 to 15 ms, four single-stream blocks took 46), and a plain round runs no head
+work, so four DSpark streams are within noise of plain (code 3 % under, chat level) and one stream is 15 to 22 % over it.
 
 Cold first token (seconds, tokens a second in brackets):
 

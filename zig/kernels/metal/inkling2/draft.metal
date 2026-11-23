@@ -312,42 +312,55 @@ struct Ik2dStep {
   uint unpadded;
   uint rank;
   float cap;
+  uint lanes;        // latents (at most 8), each scored against every fold_w row from one read of it
+  uint base_stride;  // elements between a lane's base logits and the next lane's
+  uint groups;       // vocabulary groups of 8: entries between a lane's bests and the next lane's
 };
 
-// y = bf16(cap * tanh(bf16(base + bias) / cap)), bias = bf16(fold_b + latent . fold_w[v]); ids >= unpadded -inf.
+// Per lane: y = bf16(cap * tanh(bf16(base + latent . fold_w[v] + fold_b[v]))); each group of 8's winner lands in best.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ik2d_step_logits(
     const device bfloat* base [[buffer(0)]], const device bfloat* latent [[buffer(1)]], const device bfloat* fold_w [[buffer(2)]],
     const device bfloat* fold_b [[buffer(3)]], device float* best [[buffer(4)]], device uint* best_id [[buffer(5)]],
     constant Ik2dStep& p [[buffer(6)]], uint tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float tv[8];
-  threadgroup uint ti[8];
+  threadgroup float tv[8][8];
+  threadgroup uint ti[8][8];
   const uint v = tg * 8 + sg;
-  float y = -INFINITY;
+  float s[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   if (v < p.vocab) {
-    float s = 0.0f;
-    for (uint k = lane; k < p.rank; k += 32) s += float(latent[k]) * float(fold_w[ulong(v) * p.rank + k]);
-    s = simd_sum(s);
-    const float bias = tf_vis_bf(float(fold_b[v]) + s);
-    const float z = tf_vis_bf(float(base[v]) + bias);
-    y = v < p.unpadded ? tf_vis_bf(p.cap * metal::precise::tanh(z / p.cap)) : -INFINITY;
-  }
-  if (lane == 0) {
-    tv[sg] = y;
-    ti[sg] = v;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0 && lane == 0) {
-    float bv = tv[0];
-    uint bi = ti[0];
-    for (uint i = 1; i < 8; i++) {
-      if (tv[i] > bv) {
-        bv = tv[i];
-        bi = ti[i];
+    for (uint k = lane; k < p.rank; k += 32) {
+      const float w = float(fold_w[ulong(v) * p.rank + k]);
+      for (uint j = 0; j < 8; j++) {
+        if (j < p.lanes) s[j] += float(latent[ulong(j) * p.rank + k]) * w;
       }
     }
-    best[tg] = bv;
-    best_id[tg] = bi;
+  }
+  for (uint j = 0; j < 8; j++) {
+    if (j >= p.lanes) break;
+    float y = -INFINITY;
+    const float sum = simd_sum(s[j]);
+    if (v < p.vocab) {
+      const float bias = tf_vis_bf(float(fold_b[v]) + sum);
+      const float z = tf_vis_bf(float(base[ulong(j) * p.base_stride + v]) + bias);
+      y = v < p.unpadded ? tf_vis_bf(p.cap * metal::precise::tanh(z / p.cap)) : -INFINITY;
+    }
+    if (lane == 0) {
+      tv[j][sg] = y;
+      ti[j][sg] = v;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0 && lane < p.lanes) {
+    float bv = tv[lane][0];
+    uint bi = ti[lane][0];
+    for (uint i = 1; i < 8; i++) {
+      if (tv[lane][i] > bv) {
+        bv = tv[lane][i];
+        bi = ti[lane][i];
+      }
+    }
+    best[ulong(lane) * p.groups + tg] = bv;
+    best_id[ulong(lane) * p.groups + tg] = bi;
   }
 }
 

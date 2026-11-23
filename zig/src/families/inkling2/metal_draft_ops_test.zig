@@ -179,8 +179,8 @@ test "step logits are capped, bias-corrected, masked past the real vocabulary, a
     defer best.deinit();
     const ids = try g.device.buffer(3 * 4, mtl.ResourceOptions.shared);
     defer ids.deinit();
-    const Step = extern struct { vocab: u32, unpadded: u32, rank: u32, cap: f32 };
-    try g.run("ik2d_step_logits", &.{ base_b, latent, fw, fb, best, ids }, Step{ .vocab = vocab, .unpadded = unpadded, .rank = rank, .cap = 30 }, mtl.Size.of(3, 1, 1), 256, true);
+    const Step = extern struct { vocab: u32, unpadded: u32, rank: u32, cap: f32, lanes: u32, base_stride: u32, groups: u32 };
+    try g.run("ik2d_step_logits", &.{ base_b, latent, fw, fb, best, ids }, Step{ .vocab = vocab, .unpadded = unpadded, .rank = rank, .cap = 30, .lanes = 1, .base_stride = 0, .groups = 3 }, mtl.Size.of(3, 1, 1), 256, true);
     var ys: [vocab]f64 = undefined;
     for (0..vocab) |v| {
         ys[v] = if (v < unpadded) blk: {

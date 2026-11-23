@@ -26,7 +26,7 @@ const kernels = [_]M{
     .{ .name = "inkling2 draft ik2d_swiglu", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "inkling2 draft ik2d_rnn", .threads = 256, .tg_memory = reduce, .reserved = 256 },
     .{ .name = "inkling2 draft ik2d_cell", .threads = 64, .tg_memory = 0, .reserved = 256 },
-    .{ .name = "inkling2 draft ik2d_step_logits", .threads = 256, .tg_memory = 4 * 16, .reserved = 256 },
+    .{ .name = "inkling2 draft ik2d_step_logits", .threads = 256, .tg_memory = 8 * 8 * 8, .reserved = 256 },
     .{ .name = "inkling2 draft ik2d_pick", .threads = 1024, .tg_memory = 4 * 2048, .reserved = 1024 },
     .{ .name = "inkling2 draft ik2d_fold_b", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "inkling2 draft ik2d_alpha", .threads = 64, .tg_memory = 0, .reserved = 64 },

@@ -25,6 +25,8 @@ pub const Item = struct {
     logit_rows: u32 = 1,
     /// Capture the draft taps of every row of this item.
     taps: bool = false,
+    /// With `taps`: write them to this buffer (bf16 [rows, taps_n, hidden]), not to the model's shared tap buffer.
+    tap_into: ?mtl.Buffer = null,
 };
 
 /// Image-tower rows substituted for the embeddings of `ids[row .. row + rows]` (raw projector output, BF16 [rows, H]).
@@ -122,12 +124,12 @@ pub const Run = struct {
             try r.m.ops.copyRows(r.e, .{
                 .src = rows16(src, r.base[k], h),
                 .src_ld = h,
-                .dst = v(taps, (@as(usize, row) * mtp.taps_n + ti) * h * 2),
+                .dst = if (it.tap_into) |own| v(own, @as(usize, ti) * h * 2) else v(taps, (@as(usize, row) * mtp.taps_n + ti) * h * 2),
                 .dst_ld = mtp.taps_n * h,
                 .rows = n,
                 .cols = h,
             });
-            row += n;
+            if (it.tap_into == null) row += n;
         }
     }
 

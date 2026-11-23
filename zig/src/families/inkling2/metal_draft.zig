@@ -13,6 +13,11 @@ const Ref = gm.Ref;
 
 pub const Target = core_mod.Target;
 
+/// Streams whose blocks one pass runs together (the scratch holds this many); more streams go in further passes.
+const max_batch: u32 = 8;
+/// Absorb pieces one pass takes at most.
+const max_pieces = 16;
+
 pub const Options = struct {
     /// Streams the adapter keeps lanes for at once (`open` refuses more).
     streams: u32 = 1,
@@ -43,7 +48,7 @@ pub const Adapter = struct {
         const m = cfg.mtp orelse return error.NoDraftHead;
         const a = try gpa.create(Adapter);
         errdefer gpa.destroy(a);
-        a.* = .{ .gpa = gpa, .core = try Core.init(gpa, dir, device, queue, cfg, target, opts.capacity), .opts = opts, .depth = @min(m.block - 1, if (opts.depth == 0) m.block - 1 else opts.depth) };
+        a.* = .{ .gpa = gpa, .core = try Core.init(gpa, dir, device, queue, cfg, target, opts.capacity, @min(opts.streams, max_batch)), .opts = opts, .depth = @min(m.block - 1, if (opts.depth == 0) m.block - 1 else opts.depth) };
         errdefer a.core.deinit();
         try a.warm();
         return a;
@@ -102,6 +107,7 @@ pub const Adapter = struct {
         }
         call(f.ctx, l.f);
         call(f.ctx, l.seq);
+        call(f.ctx, l.pend);
     }
 
     fn self(ptr: *anyopaque) *Adapter {
@@ -158,6 +164,48 @@ pub const Adapter = struct {
         }
     };
 
+    /// Lanes' pieces waiting for one pass (it takes at most `absorb_rows` rows together).
+    const Batch = struct {
+        pieces: [max_pieces]Core.Piece = undefined,
+        n: usize = 0,
+        rows: u32 = 0,
+
+        fn add(b: *Batch, pass: *Pass, piece: Core.Piece) !void {
+            if (b.n > 0 and (b.n == max_pieces or b.rows + piece.n > core_mod.absorb_rows)) try b.encode(pass);
+            b.pieces[b.n] = piece;
+            b.n += 1;
+            b.rows += piece.n;
+        }
+
+        fn encode(b: *Batch, pass: *Pass) !void {
+            if (b.n == 0) return;
+            try pass.a.core.absorb(pass.encoder(), b.pieces[0..b.n]);
+            b.n = 0;
+            b.rows = 0;
+        }
+    };
+
+    /// The rows a lane kept on the host go to the head's context, before anything that reads or rewrites it.
+    fn drain(l: *Lane, pass: *Pass, batch: *Batch) !void {
+        if (l.pend_rows == 0) return;
+        try batch.add(pass, .{ .l = l, .feats = .{ .buf = l.pend }, .start = l.end - l.pend_rows, .n = l.pend_rows });
+        l.pend_rows = 0;
+    }
+
+    /// Decode rows that continue a lane's context wait in its host buffer: a plain round runs no GPU work for the head.
+    fn defers(l: *Lane, item: dr.Absorb, row_bytes: u32) bool {
+        const f = item.features;
+        if (f.space != .device or item.start != l.end or l.end == 0 or l.pend_rows + f.rows > core_mod.pending_rows) return false;
+        const n = @as(usize, f.rows) * row_bytes;
+        const buffer: mtl.Buffer = .{ .id = @ptrFromInt(f.buffer) };
+        const dst = l.pend.slice(u8, (l.pend_rows + f.rows) * row_bytes)[@as(usize, l.pend_rows) * row_bytes ..];
+        @memcpy(dst, buffer.slice(u8, @as(usize, @intCast(f.offset)) + n)[@intCast(f.offset)..]);
+        l.pend_rows += f.rows;
+        l.end += f.rows;
+        l.held_len = 0;
+        return true;
+    }
+
     fn absorb(ptr: *anyopaque, items: []const dr.Absorb) !void {
         const a = self(ptr);
         const k = a.core;
@@ -166,11 +214,14 @@ pub const Adapter = struct {
         var pass: Pass = .{ .a = a };
         errdefer pass.flush() catch {};
         const row_bytes: u32 = k.m.taps_n * k.hidden * 2;
+        var batch: Batch = .{};
         for (items) |item| {
             const l = a.lanes.get(item.stream) orelse return error.DraftStreamUnknown;
             const f = item.features;
             if (f.dtype != .bf16 or f.ready != .none or f.row_bytes != row_bytes or item.rows != null or f.rows == 0) return error.BadDraftFeatures;
             if (item.start + f.rows > k.capacity) return error.DraftContextFull;
+            if (defers(l, item, row_bytes)) continue;
+            try drain(l, &pass, &batch);
             if (item.start > l.end or l.end == 0) {
                 // rows before `start` never reached this head (a restored prefix): the context begins at `start`
                 l.from = item.start;
@@ -188,19 +239,21 @@ pub const Adapter = struct {
                 switch (f.space) {
                     .device => src = .{ .buf = .{ .id = @ptrFromInt(f.buffer) }, .off = @intCast(base) },
                     .host => {
-                        try pass.flush(); // the staging buffer is read by the passes before it
+                        try batch.encode(&pass); // the staging buffer is read by the passes before it
+                        try pass.flush();
                         const stage = try a.staging();
                         const source: [*]const u8 = @ptrFromInt(f.buffer + base);
                         @memcpy(stage.slice(u8, @as(usize, n) * row_bytes), source[0 .. @as(usize, n) * row_bytes]);
                         src = .{ .buf = stage };
                     },
                 }
-                try k.absorb(pass.encoder(), l, src, l.end, n);
+                try batch.add(&pass, .{ .l = l, .feats = src, .start = l.end, .n = n });
                 l.end += n;
                 done += n;
             }
             l.held_len = 0;
         }
+        try batch.encode(&pass);
         try pass.flush();
     }
 
@@ -225,11 +278,23 @@ pub const Adapter = struct {
         defer pool.pop();
         var pass: Pass = .{ .a = a };
         errdefer pass.flush() catch {};
-        for (items) |item| {
-            const l = a.lanes.get(item.stream).?;
-            l.held_len = 0;
-            l.seq.slice(u32, k.m.block)[0] = item.pending;
-            try k.block(pass.encoder(), l, l.end, item.depth);
+        var batch: Batch = .{};
+        for (items) |item| try drain(a.lanes.get(item.stream).?, &pass, &batch);
+        try batch.encode(&pass); // the rows kept since the last hold, in the pass that drafts from them
+        var at: usize = 0;
+        while (at < items.len) {
+            const chunk = items[at..@min(items.len, at + k.batch)];
+            var group: [max_batch]*const Lane = undefined;
+            var steps: u32 = 0;
+            for (chunk, group[0..chunk.len]) |item, *g| {
+                const l = a.lanes.get(item.stream).?;
+                l.held_len = 0;
+                l.seq.slice(u32, k.m.block)[0] = item.pending;
+                g.* = l;
+                steps = @max(steps, item.depth);
+            }
+            try k.blocks(pass.encoder(), group[0..chunk.len], steps);
+            at += chunk.len;
         }
         try pass.flush();
         for (items) |item| a.lanes.get(item.stream).?.held_len = item.depth;
@@ -241,7 +306,7 @@ pub const Adapter = struct {
         l.seq.slice(u32, k.m.block)[0] = pending;
         var pass: Pass = .{ .a = a };
         errdefer pass.flush() catch {};
-        try k.block(pass.encoder(), l, l.end, k.m.block - 1);
+        try k.blocks(pass.encoder(), &.{l}, k.m.block - 1);
         try pass.flush();
     }
 

@@ -100,7 +100,7 @@ test "a block over committed rows matches the f64 reference: rows, Markov steps,
     try absorb(d, &s1, rows, 6, 0, row_bytes);
     const first = try drafts(d, &s1, anchor, 6);
     const ref = try fx.ref.blockRows(a, rows, 6, anchor);
-    try t.expect(relError(xBits(ad, fx.d.block, D), ref) < 0.02);
+    try t.expect(relError(xBits(ad, depth, D), ref[D..]) < 0.02); // x keeps the final rows 1 .. depth
     var best: [depth]f64 = undefined;
     var got: [depth]f64 = undefined;
     try fx.ref.steps(a, ref, rows[5 * row_words ..][0..row_words], anchor, &first, null, &best, &got);
@@ -112,12 +112,12 @@ test "a block over committed rows matches the f64 reference: rows, Markov steps,
     try absorb(d, &s2, rows, 2, 0, row_bytes);
     try absorb(d, &s2, rows[2 * row_words ..], 4, 2, row_bytes);
     try t.expectEqual(first, try drafts(d, &s2, anchor, 6));
-    const bits = try a.dupe(u16, xBits(ad, fx.d.block, D));
+    const bits = try a.dupe(u16, xBits(ad, depth, D));
     try absorb(d, &s2, rows[4 * row_words ..], 8, 4, row_bytes);
     _ = try drafts(d, &s2, anchor, 12);
     try absorb(d, &s2, rows[4 * row_words ..], 2, 4, row_bytes);
     try t.expectEqual(first, try drafts(d, &s2, anchor, 6));
-    try t.expectEqualSlices(u16, bits, xBits(ad, fx.d.block, D));
+    try t.expectEqualSlices(u16, bits, xBits(ad, depth, D));
     // another stream's rows in between change nothing
     try absorb(d, &s2, rows[6 * row_words ..], 6, 6, row_bytes);
     try t.expectEqual(first, try drafts(d, &s1, anchor, 6));
@@ -130,6 +130,22 @@ test "a block over committed rows matches the f64 reference: rows, Markov steps,
     try d.held(&.{ &s2, &s1 }, &.{ &held[0], &held[1] });
     try t.expectEqual(other, held[0]);
     try t.expectEqual(first, held[1]);
+    // streams holding to different depths in one call each draft what a hold alone does
+    try d.hold(&.{
+        .{ .stream = &s1, .pending = anchor, .position = 7, .depth = 3 },
+        .{ .stream = &s2, .pending = anchor + 1, .position = 13, .depth = depth },
+    });
+    var mixed: [2][depth]u32 = undefined;
+    try d.held(&.{ &s1, &s2 }, &.{ mixed[0][0..3], &mixed[1] });
+    try t.expectEqualSlices(u32, first[0..3], mixed[0][0..3]);
+    try t.expectEqual(other, mixed[1]);
+    // two streams' rows in one absorb give each lane the context of its own absorb
+    var both = [2]dr.Absorb{ features(rows, 6, 0, row_bytes), features(rows, 6, 0, row_bytes) };
+    both[0].stream = &s1;
+    both[1].stream = &s2;
+    try d.absorb(&both);
+    try t.expectEqual(first, try drafts(d, &s1, anchor, 6));
+    try t.expectEqual(first, try drafts(d, &s2, anchor, 6));
     // refusals
     try t.expectError(error.DraftContextGap, d.hold(&.{.{ .stream = &s1, .pending = 1, .position = 9, .depth = 3 }}));
     try t.expectError(error.DraftDepth, d.hold(&.{.{ .stream = &s1, .pending = 1, .position = 7, .depth = 8 }}));
@@ -164,6 +180,49 @@ test "a block over committed rows matches the f64 reference: rows, Markov steps,
     d.release(&third);
 }
 
+test "decode rows that continue a context wait on the host and draft what absorbing them at once drafts" {
+    const g = try Gpu.init();
+    defer g.deinit();
+    const fx = try fxm.Fixture.init(t.allocator, t.io, g.device);
+    defer fx.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const row_bytes: u32 = @intCast(fx.d.taps * fx.d.D * 2);
+    const ad = try draft.Adapter.init(t.allocator, t.io, fx.dir, g.device, g.queue, &fx.cfg, fx.tensors(), .{ .streams = 2, .capacity = 64 });
+    defer ad.deinit();
+    const d = ad.drafter();
+    var s1: lanes.Stream = undefined;
+    var s2: lanes.Stream = undefined;
+    try d.open(&s1);
+    try d.open(&s2);
+    const rows = try fxm.features(a, fx.d, 12, 7);
+    const device = try g.device.buffer(rows.len * 2, mtl.ResourceOptions.shared);
+    defer device.deinit();
+    @memcpy(device.slice(u16, rows.len), rows);
+    const anchor: u32 = 1234;
+    try absorb(d, &s1, rows, 6, 0, row_bytes);
+    const first = try drafts(d, &s1, anchor, 6);
+    // s2: two rows now, then one device row a round, each kept on the host: no pass runs before the hold
+    try absorb(d, &s2, rows, 2, 0, row_bytes);
+    for (2..6) |i| {
+        const item: dr.Absorb = .{ .stream = &s2, .features = .{ .buffer = @intFromPtr(device.id), .offset = i * row_bytes, .rows = 1, .row_bytes = row_bytes, .space = .device, .dtype = .bf16 }, .start = i, .follow = &.{} };
+        try d.absorb(&.{item});
+    }
+    try t.expectEqual(@as(u32, 4), ad.lanes.get(&s2).?.pend_rows);
+    try t.expectEqual(first, try drafts(d, &s2, anchor, 6));
+    try t.expectEqual(@as(u32, 0), ad.lanes.get(&s2).?.pend_rows);
+    // rows past a rollback replace the ones kept: two lanes' rows of one call, one kept and one rewritten
+    const keep: dr.Absorb = .{ .stream = &s2, .features = .{ .buffer = @intFromPtr(device.id), .offset = 6 * row_bytes, .rows = 2, .row_bytes = row_bytes, .space = .device, .dtype = .bf16 }, .start = 6, .follow = &.{} };
+    try d.absorb(&.{keep});
+    try t.expectEqual(@as(u32, 2), ad.lanes.get(&s2).?.pend_rows);
+    const back: dr.Absorb = .{ .stream = &s2, .features = .{ .buffer = @intFromPtr(device.id), .offset = 4 * row_bytes, .rows = 2, .row_bytes = row_bytes, .space = .device, .dtype = .bf16 }, .start = 4, .follow = &.{} };
+    try d.absorb(&.{back});
+    try t.expectEqual(first, try drafts(d, &s2, anchor, 6));
+    d.release(&s1);
+    d.release(&s2);
+}
+
 test "a context past the sliding window and the ring matches the reference: sliding layers read the last 1024 rows" {
     const g = try Gpu.init();
     defer g.deinit();
@@ -183,7 +242,7 @@ test "a context past the sliding window and the ring matches the reference: slid
     try absorb(d, &s, rows, p, 0, @intCast(fx.d.taps * fx.d.D * 2)); // two passes: 1024 rows and 146
     _ = try drafts(d, &s, 77, p);
     const ref = try fx.ref.blockRows(a, rows, p, 77);
-    try t.expect(relError(xBits(ad, fx.d.block, fx.d.D), ref) < 0.02);
+    try t.expect(relError(xBits(ad, depth, fx.d.D), ref[fx.d.D..]) < 0.02);
 }
 
 test "the draft head's host-side numbers: lane bytes, refusals before any allocation" {
@@ -193,7 +252,7 @@ test "the draft head's host-side numbers: lane bytes, refusals before any alloca
     const D = c.text.hidden;
     // two sliding layers of 1152 slots and one full layer of `capacity`, K and V, bf16 [kv_heads * 128] a slot
     const slot: u64 = 2 * 128 * 2;
-    try t.expectEqual(2 * slot * (2 * 1152 + 2048) + D * 2 + c.mtp.?.block * @sizeOf(u32), draft.laneBytes(&c, 2048));
+    try t.expectEqual(2 * slot * (2 * 1152 + 2048) + D * 2 + c.mtp.?.block * @sizeOf(u32) + 32 * c.mtp.?.taps_n * D * 2, draft.laneBytes(&c, 2048));
     var no_head = c;
     no_head.mtp = null;
     try t.expectEqual(@as(u64, 0), draft.laneBytes(&no_head, 2048));

@@ -15,7 +15,7 @@ pub const control = struct {
     pub const to = "v == tv[t] && id > ti[t]";
 };
 
-const Step = extern struct { vocab: u32, unpadded: u32, rank: u32, cap: f32 };
+const Step = extern struct { vocab: u32, unpadded: u32, rank: u32, cap: f32, lanes: u32, base_stride: u32, groups: u32 };
 const cap: f64 = 30;
 const step = 3;
 const served = [_]c.Shape{ .{ .rows = 8, .n = 8209, .k = 256 }, .{ .rows = 8, .n = 19, .k = 256 }, .{ .rows = 8, .n = 257, .k = 33 } };
@@ -117,7 +117,7 @@ pub const Probe = struct {
         @memset(p.rig.bytes(p.refs[6], 8 * 4), 0xfe);
         e.setPipeline(p.logits);
         for (p.refs[0..6], 0..) |v, i| e.setBuffer(v.buf, v.off, i);
-        e.setValue(Step{ .vocab = @intCast(p.s.n), .unpadded = @intCast(p.unpadded), .rank = @intCast(p.s.k), .cap = cap }, 6);
+        e.setValue(Step{ .vocab = @intCast(p.s.n), .unpadded = @intCast(p.unpadded), .rank = @intCast(p.s.k), .cap = cap, .lanes = 1, .base_stride = 0, .groups = @intCast(n) }, 6);
         e.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
         e.setPipeline(p.pick);
         for (p.refs[4..7], 0..) |v, i| e.setBuffer(v.buf, v.off, i);
