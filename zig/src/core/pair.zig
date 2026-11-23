@@ -4,7 +4,7 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const sources = @import("kernel_sources");
-const settings = @import("../families/flashnext/tp_settings.zig");
+const settings = @import("tp_settings.zig");
 
 pub const Settings = settings.Settings;
 pub const Ref = @import("exlr8_projection.zig").Ref;
