@@ -14,11 +14,16 @@ const Model = model_file.Model;
 
 pub const Ref = state.Ref;
 pub const Segment = struct { cache: *state.Cache, rows: usize };
+pub const LogitMode = enum(u32) { logits = 0, argmax = 1, both = 2 };
+pub const Meta = extern struct { seg: ap.Seg, pos: i32, seg_of: i32 };
 pub const Options = struct {
     all: bool = false,
     ids: ?Ref = null,
+    meta: ?Ref = null,
     flight: ?*mtl.CommandBuffer = null,
     taps: ?state.Ref = null,
+    logits_mode: LogitMode = .logits,
+    argmax_out: ?Ref = null,
 };
 
 pub const FinalPlan = struct { work_rows: usize, logits_rows: usize, logits_row: usize, capture_rows: usize };
@@ -199,7 +204,7 @@ const Attend = struct {
 };
 
 /// Every stream's attention a step at a time: a step's launches run side by side, and a barrier ends each step.
-fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment) !void {
+fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, meta: ?Ref) !void {
     const w = &m.weights.layers[v.layer];
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     var items: [state.max_segments]Attend = undefined;
@@ -213,7 +218,11 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             .rows = seg.rows,
             .rr = .{ .rows = @intCast(seg.rows), .heads = 24, .kv_heads = 8, .last_pos = @intCast(cache.len + seg.rows - 1), .streams = 1 },
             .layer = .{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau },
-            .meta = .{ .pos = a(at(s.pos, base * 4)), .seg_of = a(at(s.seg_of, base * 4)), .segs = a(at(s.segs, si * @sizeOf(ap.Seg))) },
+            .meta = if (meta) |mref| .{
+                .pos = a(.{ .buf = mref.buf, .off = mref.off + @offsetOf(Meta, "pos") }),
+                .seg_of = a(.{ .buf = mref.buf, .off = mref.off + @offsetOf(Meta, "seg_of") }),
+                .segs = a(.{ .buf = mref.buf, .off = mref.off + @offsetOf(Meta, "seg") }),
+            } else .{ .pos = a(at(s.pos, base * 4)), .seg_of = a(at(s.seg_of, base * 4)), .segs = a(at(s.segs, si * @sizeOf(ap.Seg))) },
             .kv = .{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) },
         };
         base += seg.rows;
@@ -329,7 +338,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
 }
 
 /// A visit's launches in dependency order; a barrier follows every step a later launch reads.
-fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, rows: usize, taps: ?state.Ref) !void {
+fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, rows: usize, taps: ?state.Ref, meta: ?Ref) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
     if (taps) |to| {
@@ -356,7 +365,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     dense(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
     dense(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
     e.barrier();
-    try attendSegments(m, e, s, v, segments);
+    try attendSegments(m, e, s, v, segments, meta);
     dense(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     e.barrier();
     postConv(m, e, segments, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
@@ -395,7 +404,8 @@ pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const
 
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
-    if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
+    if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1) or (options.all and rows > state.batch_rows)) return error.Inkling2RowsExceeded;
+    if (options.meta != null and (segments.len != 1 or rows != 1)) return error.Inkling2Segments;
     var total: usize = 0;
     var base: usize = 0;
     for (segments, 0..) |seg, si| {
@@ -403,14 +413,20 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         if (seg.rows > state.window_rows and seg.cache.pending != null) return error.Inkling2CacheTransaction;
         if (seg.cache.pending) |pending| if (pending != seg.rows) return error.Inkling2CacheTransaction;
         total += seg.rows;
-        for (0..seg.rows) |i| {
-            s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-            s.seg_of.slice(i32, rows)[base + i] = 0;
+        if (options.meta == null) {
+            for (0..seg.rows) |i| {
+                s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
+                s.seg_of.slice(i32, rows)[base + i] = 0;
+            }
+            s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         }
-        s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         base += seg.rows;
     }
     if (total != rows) return error.Inkling2Segments;
+    if (options.meta) |mref| {
+        const meta: *Meta = @ptrCast(@alignCast(mref.buf.contents() + mref.off));
+        meta.* = .{ .seg = .{ .row0 = 0, .n = 1, .p0 = @intCast(segments[0].cache.len), .off = 0 }, .pos = @intCast(segments[0].cache.len), .seg_of = 0 };
+    }
     if (options.ids == null) {
         for (ids) |id| if (id >= m.config.text.vocab) return error.Inkling2Token;
         @memcpy(s.ids.slice(u32, rows), ids);
@@ -427,7 +443,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     e.barrier();
     for (m.weight_plan.visits[0..m.weight_plan.n_visits], 0..) |*v, vi| {
-        try visit(m, e, s, v, segments, rows, options.taps);
+        try visit(m, e, s, v, segments, rows, options.taps, options.meta);
         if (n_parts < cuts.len and vi + 1 == cuts[n_parts]) {
             e.end();
             cb.commit();
@@ -451,7 +467,25 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     e.barrier();
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
-    if (m.experts.units != null) try experts.logitsUnits(&m.experts, e, x(at(s.mlp_normed, final.logits_row * state.hidden * 2)), x(r(m.weights.unembed)), x(logits), @intCast(final.logits_rows), m.config.text.unpadded_vocab) else glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
+    const hidden_rows = at(s.mlp_normed, final.logits_row * state.hidden * 2);
+    const argmax_out = options.argmax_out orelse at(s.argmax_ids, 0);
+    const vocab = m.config.text.unpadded_vocab;
+    const rows_u32: u32 = @intCast(final.logits_rows);
+    if (m.experts.units != null) {
+        switch (options.logits_mode) {
+            .logits => try experts.logitsUnits(&m.experts, e, x(hidden_rows), x(r(m.weights.unembed)), x(logits), rows_u32, vocab),
+            .argmax, .both => {
+                const n_arg_parts = try experts.logitsUnitsArgmax(&m.experts, e, x(hidden_rows), x(r(m.weights.unembed)), x(logits), x(at(s.argmax_vals, 0)), x(at(s.argmax_part_ids, 0)), rows_u32, vocab, options.logits_mode == .both);
+                e.barrier();
+                glue.argmax(&m.glue, e, at(s.argmax_vals, 0), at(s.argmax_part_ids, 0), argmax_out, rows_u32, n_arg_parts);
+            },
+        }
+    } else {
+        switch (options.logits_mode) {
+            .logits => glue.logits(&m.glue, e, hidden_rows, r(m.weights.unembed), logits, rows_u32, vocab),
+            .argmax, .both => glue.logitsArgmax(&m.glue, e, hidden_rows, r(m.weights.unembed), logits, at(s.argmax_vals, 0), at(s.argmax_part_ids, 0), argmax_out, rows_u32, vocab, options.logits_mode == .both),
+        }
+    }
     commitFullHistories(m, e, s, segments);
     e.end();
     cb.commit();

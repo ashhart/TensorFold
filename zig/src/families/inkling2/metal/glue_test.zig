@@ -20,6 +20,10 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.logits)].threads);
+    try t.expectEqual(@as(u32, 0), records[@backingInt(p.Kind.logits)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.argmax)].threads);
+    try t.expectEqual(@as(u32, 64), records[@backingInt(p.Kind.argmax)].tg_memory);
 }
 
 test "shape admission fixes Mini's hidden and routed dimensions" {
@@ -29,6 +33,8 @@ test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expect(!p.valid(.conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));
     try t.expect(p.valid(.logits, .{ .rows = 1, .n = 200058, .k = p.hidden }));
+    try t.expect(p.valid(.argmax, .{ .rows = 1, .n = 200058, .k = p.hidden }));
+    try t.expectEqual(@as(usize, 5), p.count(.argmax, .{ .rows = 5, .n = 128, .k = p.hidden }));
     try t.expectEqual(@as(usize, 8 * 1152), p.count(.expert_pick, .{ .rows = 1, .n = 1152, .k = 8 }));
 }
 

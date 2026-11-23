@@ -266,6 +266,9 @@ test "Mini Metal serving matches the host reference token for token" {
     defer restored.deinit();
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
+    var greedy = try serve(opened_once, 3, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = null, .history_len = ids.len });
+    defer greedy.deinit();
+    try std.testing.expectEqualSlices(u32, &refs.first.tokens, greedy.tokens.items);
 }
 
 test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back exactly" {

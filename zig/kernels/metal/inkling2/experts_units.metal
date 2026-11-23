@@ -135,12 +135,26 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
   ink2_units<true, false>(X, W, S, 1.0f, counts, members, Y, a, tg, sg, lane, part);
 }
 
-struct Ink2LogitArgs { uint rows, vocab; };
+struct Ink2LogitArgs { uint rows, vocab, flags, part_stride; };
+
+inline bool ink2_argmax_better(float a, uint ia, float b, uint ib) {
+  if (ia == 0xffffffffu) return false;
+  if (ib == 0xffffffffu) return true;
+  const bool na = isnan(a), nb = isnan(b);
+  if (na || nb) {
+    if (na && ia == 0u) return !(nb && ib == 0u);
+    if (nb && ib == 0u) return false;
+    if (na != nb) return !na;
+    return ia < ib;
+  }
+  return a > b || (a == b && ia < ib);
+}
 
 // Threadgroup (x, y): vocabulary rows 32x .. + 31 by rows 16y .. + 15 of h, summed as the expert products are.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_logits_units(
     device const bfloat* X [[buffer(0)]], device const bfloat* W [[buffer(1)]],
-    device float* Y [[buffer(2)]], constant Ink2LogitArgs& a [[buffer(3)]],
+    device float* Y [[buffer(2)]], device float* part_vals [[buffer(3)]],
+    device uint* part_ids [[buffer(4)]], constant Ink2LogitArgs& a [[buffer(5)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float part[4096];
@@ -168,13 +182,43 @@ struct Ink2LogitArgs { uint rows, vocab; };
   ink2_part_sum(part, lo, hi, lane);
   // Element e of lo is row r0 + hy + 8 (e >> 2), vocabulary row n0 + hx + (e & 3); hi is 16 vocabulary rows on.
   for (uint q = 0u; q < 2u; ++q) {
-    if (!(q == 0u ? live0 : live1)) continue;
+    const bool live = q == 0u ? live0 : live1;
     const ulong row = r0 + hy + 8u * q;
-    for (uint side = 0u; side < 2u; ++side)
-      for (uint j = 0u; j < 4u; ++j) {
-        const uint v = n0 + 16u * side + hx + j;
-        const float dot = side == 0u ? lo[4u * q + j] : hi[4u * q + j];
-        if (v < a.vocab) Y[row * a.vocab + v] = 30.0f * precise::tanh(precise::divide(float(bfloat(dot)), 30.0f));
+    float bv = 0.0f;
+    uint bid = 0xffffffffu;
+    if (live) {
+      for (uint side = 0u; side < 2u; ++side)
+        for (uint j = 0u; j < 4u; ++j) {
+          const uint v = n0 + 16u * side + hx + j;
+          const float dot = side == 0u ? lo[4u * q + j] : hi[4u * q + j];
+          if (v < a.vocab) {
+            const float y = 30.0f * precise::tanh(precise::divide(float(bfloat(dot)), 30.0f));
+            if ((a.flags & 1u) != 0u) Y[row * a.vocab + v] = y;
+            if ((a.flags & 2u) != 0u && ink2_argmax_better(y, v, bv, bid)) {
+              bv = y;
+              bid = v;
+            }
+          }
+        }
+    }
+    if ((a.flags & 2u) != 0u) {
+      const float ov1 = simd_shuffle_xor(bv, ushort(1u));
+      const uint oid1 = simd_shuffle_xor(bid, ushort(1u));
+      if (ink2_argmax_better(ov1, oid1, bv, bid)) {
+        bv = ov1;
+        bid = oid1;
       }
+      const float ov8 = simd_shuffle_xor(bv, ushort(8u));
+      const uint oid8 = simd_shuffle_xor(bid, ushort(8u));
+      if (ink2_argmax_better(ov8, oid8, bv, bid)) {
+        bv = ov8;
+        bid = oid8;
+      }
+      if (live && hx == 0u) {
+        const size_t idx = size_t(row) * a.part_stride + tg.x;
+        part_vals[idx] = bv;
+        part_ids[idx] = bid;
+      }
+    }
   }
 }

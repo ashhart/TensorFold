@@ -174,3 +174,25 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
 }
+
+test "verify batch plans argmax, mixed, and logits-only modes accurately" {
+    const det = backend.SlotReq{ .rows = 4, .sampling = null, .has_masks = false, .has_logprobs = false };
+    const zero_temp = backend.SlotReq{ .rows = 2, .sampling = .{ .seed = 1, .temperature = 0 }, .has_masks = false, .has_logprobs = false };
+    const sampled_slot = backend.SlotReq{ .rows = 4, .sampling = .{ .seed = 1, .temperature = 0.7 }, .has_masks = false, .has_logprobs = false };
+    const masked_slot = backend.SlotReq{ .rows = 2, .sampling = null, .has_masks = true, .has_logprobs = false };
+    const logprob_slot = backend.SlotReq{ .rows = 2, .sampling = null, .has_masks = false, .has_logprobs = true };
+
+    const pure = backend.planVerifyBatch(&.{ det, zero_temp });
+    try std.testing.expectEqual(fwd.LogitMode.argmax, pure.mode);
+    try std.testing.expect(!pure.write_logits);
+
+    for ([_]backend.SlotReq{ sampled_slot, masked_slot, logprob_slot }) |other| {
+        const mixed = backend.planVerifyBatch(&.{ det, other });
+        try std.testing.expectEqual(fwd.LogitMode.both, mixed.mode);
+        try std.testing.expect(mixed.write_logits);
+    }
+
+    const logits_only = backend.planVerifyBatch(&.{ sampled_slot, masked_slot });
+    try std.testing.expectEqual(fwd.LogitMode.logits, logits_only.mode);
+    try std.testing.expect(logits_only.write_logits);
+}

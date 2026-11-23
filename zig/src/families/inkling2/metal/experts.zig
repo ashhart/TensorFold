@@ -231,14 +231,29 @@ pub fn units(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: 
     e.dispatchGroups(mtl.Size.of((weight_rows + 31) / 32, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
 
-const LogitArgs = extern struct { rows: u32, vocab: u32 };
+const LogitArgs = extern struct { rows: u32, vocab: u32, flags: u32, part_stride: u32 };
 /// Rows of h against the vocabulary on the tensor units: fp32 out[row][v], bf16-rounded and capped as the glue's.
 pub fn logitsUnits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, rows: u32, vocab: u32) !void {
+    std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
     const pipes = p.units orelse return error.NoTensorUnits;
-    for ([_]Ref{ h, unembed, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
-    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
+    const dummy = Ref{ .buf = p.groups };
+    for ([_]Ref{ h, unembed, out, dummy, dummy }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab, .flags = 1, .part_stride = 0 }, 5);
     e.setPipeline(pipes[4]);
     e.dispatchGroups(mtl.Size.of((vocab + 31) / 32, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Stage-1 logits + partial argmax on the tensor units; caller follows with a barrier and glue.argmax(..., parts).
+pub fn logitsUnitsArgmax(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, part_vals: Ref, part_ids: Ref, rows: u32, vocab: u32, write_logits: bool) !u32 {
+    std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
+    const pipes = p.units orelse return error.NoTensorUnits;
+    const parts: u32 = (vocab + 31) / 32;
+    const flags: u32 = if (write_logits) 3 else 2;
+    for ([_]Ref{ h, unembed, out, part_vals, part_ids }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab, .flags = flags, .part_stride = parts }, 5);
+    e.setPipeline(pipes[4]);
+    e.dispatchGroups(mtl.Size.of(parts, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
+    return parts;
 }
 
 /// The down products after group, as guGrouped.
