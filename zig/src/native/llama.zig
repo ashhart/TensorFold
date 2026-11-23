@@ -168,6 +168,20 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
     return names;
 }
 
+fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    _ = a;
+    _ = per_stream;
+    _ = left;
+    _ = window;
+    _ = problem;
+    return @max(o.lanes, 1);
+}
+
+fn longestWindow(c: *const fl.config.Config, dc: *const fl.config.Config, budget: u64, most: usize, o: api.Open) usize {
+    const drafted: fl.budget.Drafted = .{ .c = dc, .streams = @max(o.lanes, 1) };
+    return fl.budget.longestWith(c, drafted, budget, most);
+}
+
 /// --drafter's refusal for a target its drafts were not measured to pay for (Nanbeige4.3-33B-INT4 on the M5 Ultra).
 fn undrafted(a: std.mem.Allocator, q: *const fl.config.Qualified) !?[]const u8 {
     if (q.drafted) return null;
@@ -295,4 +309,33 @@ test "llama host: cache callback with no configured cache leaves no state to mut
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+test "llama host: automatic 64 fits cache memory before advertisement" {
+    const a = std.testing.allocator;
+    const per_stream: u64 = 3 << 30;
+    const left: u64 = 10 << 30;
+    var why: []const u8 = "";
+    const auto: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 64 };
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, auto, 8192, &why));
+    var three = auto;
+    three.lanes = 3;
+    three.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, three, 8192, &why));
+    var fixed = auto;
+    fixed.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, null), try admitStreams(a, per_stream, left, fixed, 8192, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "; 3 fit") != null);
+}
+
+test "llama host: drafted window prices one stream before automatic lanes are fitted" {
+    const c: fl.config.Config = .{ .hidden = 256, .intermediate = 512, .layers = 2, .heads = 4, .kv_heads = 2, .vocab = 1024, .eps = 0.00001, .theta = 10000, .context = 4096 };
+    const one: fl.budget.Drafted = .{ .c = &c, .streams = 1 };
+    const sixty_four: fl.budget.Drafted = .{ .c = &c, .streams = 64 };
+    const budget = fl.budget.needed(&c, one, 4096);
+    try std.testing.expect(fl.budget.needed(&c, sixty_four, 4096) > budget);
+    const auto: api.Open = .{ .dir = "", .model_type = "llama", .lanes = 64 };
+    try std.testing.expectEqual(@as(usize, 4096), longestWindow(&c, &c, budget, 4096, auto));
 }

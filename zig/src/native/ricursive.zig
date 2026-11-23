@@ -107,6 +107,15 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
+fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    _ = a;
+    _ = per_stream;
+    _ = left;
+    _ = window;
+    _ = problem;
+    return @max(o.lanes, 1);
+}
+
 /// Weights, tables and scratches in one residency set for the keepalive, under the 70% limit.
 fn hold(h: *Host) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
@@ -140,4 +149,23 @@ fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const
         }
     };
     _ = store.giveBack(restoring, prompt, Left{ .s = store });
+}
+
+test "ricursive host: automatic 64 fits cache memory before advertisement" {
+    const a = std.testing.allocator;
+    const per_stream: u64 = 3 << 30;
+    const left: u64 = 10 << 30;
+    var why: []const u8 = "";
+    const auto: api.Open = .{ .dir = "", .model_type = "ricursive", .lanes = 64 };
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, auto, 8192, &why));
+    var three = auto;
+    three.lanes = 3;
+    three.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, three, 8192, &why));
+    var fixed = auto;
+    fixed.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, null), try admitStreams(a, per_stream, left, fixed, 8192, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "; 3 fit") != null);
 }
