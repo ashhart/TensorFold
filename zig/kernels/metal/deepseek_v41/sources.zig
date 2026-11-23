@@ -9,6 +9,12 @@ pub const fp8_mma = @embedFile("fp8_mma.metal");
 pub const fp8_rows = @embedFile("fp8_rows.metal");
 /// DeepSeek V4.1 release FP8 dense projections of 2-16 rows on simdgroup MMA, bit-equal to fp8_rows.
 pub const fp8_tile = @embedFile("fp8_tile.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 prompt kernels (Apple M5 Ultra Metal 4.1).
+pub const fp8_mma_cert = @embedFile("fp8_mma_cert.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 decode rows (1-16 rows, exact double-float).
+pub const fp8_rows_cert = @embedFile("fp8_rows_cert.metal");
+/// DeepSeek V4.1 opt-in FP64-certified BF16 dense FP8 verify tile (1-16 rows, exact double-float).
+pub const fp8_tile_cert = @embedFile("fp8_tile_cert.metal");
 /// DeepSeek V4.1 CSA2 attention: window, selected compressed rows and the sink over one shared latent row.
 pub const csa2_attn = segs_h ++ @embedFile("csa2_attn.metal");
 /// DeepSeek V4.1's copy of Kimi's expert plan, chains and combine: the E8M0 scale over its full range.

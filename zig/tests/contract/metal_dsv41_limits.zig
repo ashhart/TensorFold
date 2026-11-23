@@ -6,9 +6,9 @@ const sources = @import("kernel_sources");
 const limits = @import("contract").limits;
 const Launch = @import("metal_limits.zig").Launch;
 
-/// The tensor-unit prompt expert kernels: built only with tensor units, and the loader has no M1/M2 library.
+/// The tensor-unit kernels: built only with tensor units, and the loader has no M1/M2 library.
 pub fn tensorOnly(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "dsv41 xmma units ");
+    return std.mem.startsWith(u8, name, "dsv41 xmma units ") or std.mem.startsWith(u8, name, "dsv41 fp8 cert ");
 }
 
 /// The dsv41 launch's sources, or null when the name belongs to another family.
@@ -22,6 +22,18 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         const b = try tf.dsv41_metal.xmma.source(a, "", &.{}, false);
         return .{ .decl = d, .function = fun, .here = b, .pre_m5 = b };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 cert tile ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_tile_cert, .pre_m5 = "" };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 cert rows ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_rows_cert, .pre_m5 = "" };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41 fp8 cert ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.fp8_mma_cert, .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
         if (!assemble) return @as(Launch, undefined);

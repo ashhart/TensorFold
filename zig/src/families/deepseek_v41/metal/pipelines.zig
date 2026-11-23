@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const Config = @import("dsv41").config.Config;
 pub const fp8 = @import("fp8_rows.zig");
 pub const fp8_mma = @import("fp8_mma.zig");
+pub const fp8_mma_cert = @import("fp8_mma_cert.zig");
 pub const fp8_tile = @import("fp8_tile.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const index = @import("index.zig");
@@ -44,6 +45,8 @@ pub const Pipelines = struct {
     /// the decode rows' FP8 projections at 2-16 rows
     tile: fp8_tile.Pipelines,
     mma: fp8_mma.Pipelines,
+    /// opt-in FP64-certified BF16 prompt dense FP8 kernels (Apple M5 Ultra Metal 4.1 only)
+    mma_cert: ?fp8_mma_cert.Pipelines = null,
     attn: attn.Pipelines,
     index: index.Pipelines,
     experts: experts.Pipelines,
@@ -67,14 +70,21 @@ pub const Pipelines = struct {
     fold: fold.Pipelines,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device, c: *const Config) !Pipelines {
+        return loadWith(a, device, c, false);
+    }
+
+    pub fn loadWith(a: std.mem.Allocator, device: mtl.Device, c: *const Config, fp64_bf16: bool) !Pipelines {
         try check(c);
+        if (fp64_bf16 and !fp8_mma_cert.supported(device)) return error.UnsupportedFp64Bf16;
         var p: Pipelines = undefined;
-        p.fp8 = try fp8.Pipelines.load(device);
+        p.fp8 = if (fp64_bf16) try fp8.Pipelines.loadSource(device, sources.dsv41.fp8_rows_cert) else try fp8.Pipelines.load(device);
         errdefer p.fp8.deinit();
-        p.tile = try fp8_tile.Pipelines.load(device);
+        p.tile = if (fp64_bf16) try fp8_tile.Pipelines.loadSource(device, sources.dsv41.fp8_tile_cert) else try fp8_tile.Pipelines.load(device);
         errdefer p.tile.deinit();
         p.mma = try fp8_mma.Pipelines.load(device);
         errdefer p.mma.deinit();
+        p.mma_cert = if (fp64_bf16) try fp8_mma_cert.Pipelines.load(a, device) else null;
+        errdefer if (p.mma_cert) |*mc| mc.deinit();
         p.attn = try attn.Pipelines.load(device);
         errdefer p.attn.deinit();
         p.index = try index.Pipelines.load(device);
@@ -87,7 +97,7 @@ pub const Pipelines = struct {
         errdefer p.mv_mma.deinit();
         p.compress = try compress.Pipelines.load(device);
         errdefer p.compress.deinit();
-        p.engram = try engram.Pipelines.load(device);
+        p.engram = if (fp64_bf16) try engram.Pipelines.loadWith(device, sources.dsv41.engram, sources.dsv41.fp8_rows_cert) else try engram.Pipelines.load(device);
         errdefer p.engram.deinit();
         p.route = try routeAt(a, device, c.experts, c.topk, "tf_dsv41_route_select");
         errdefer p.route.deinit();
@@ -117,6 +127,7 @@ pub const Pipelines = struct {
         p.fp8.deinit();
         p.tile.deinit();
         p.mma.deinit();
+        if (p.mma_cert) |*mc| mc.deinit();
         p.attn.deinit();
         p.index.deinit();
         p.experts.deinit();

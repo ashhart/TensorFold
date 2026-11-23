@@ -45,6 +45,8 @@ pub const Options = struct {
     /// a request's image tokens in all, and its images (--vision-image-tokens, --vision-max-images)
     image_tokens: u32 = 4096,
     max_images: u32 = 4,
+    /// opt-in FP64-certified BF16 dense FP8 kernels on Apple M5 Ultra Metal 4.1 (null: read TF_DSV41_FP64_BF16)
+    fp64_bf16: ?bool = null,
 };
 
 /// The family's queue: Metal 4 under TF_METAL4=1, or by default when `metal4` holds, else Metal 3; the same kernels.
@@ -92,9 +94,17 @@ pub const Boot = struct {
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
+        const fp64_bf16 = o.fp64_bf16 orelse try environment.read(bool, "TF_DSV41_FP64_BF16", false);
+        if (fp64_bf16) {
+            if (!pipelines.fp8_mma_cert.supported(b.device)) {
+                std.log.err("dsv41 metal: TF_DSV41_FP64_BF16=1 requires Apple M5 Ultra with Metal 4.1 (macOS 27+); found {s} (gen {d}, macOS {d})", .{ std.mem.span(b.device.name()), b.device.generation(), mtl.objc.osVersion().major });
+                return error.UnsupportedFp64Bf16;
+            }
+            std.log.info("dsv41 metal: TF_DSV41_FP64_BF16=1 active (FP64-certified BF16 dense FP8 kernels on {s})", .{std.mem.span(b.device.name())});
+        }
         b.queue = try openQueue(b.device, b.device.hasMetal4());
         errdefer b.queue.deinit();
-        b.p = try pipelines.Pipelines.load(a, b.device, c);
+        b.p = try pipelines.Pipelines.loadWith(a, b.device, c, fp64_bf16);
         errdefer b.p.deinit();
         var pack = try host.pack.Pack.open(a, io, dir);
         defer pack.deinit();
@@ -113,7 +123,7 @@ pub const Boot = struct {
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .identity = try identity(a, io, dir, b.device, b.ds != null) });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .identity = try identity(a, io, dir, b.device, b.ds != null, fp64_bf16) });
     }
 
     /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
@@ -150,11 +160,11 @@ pub const Boot = struct {
         return if (n > checkpoint) .{ .wide = n, .narrow = checkpoint } else .{ .wide = n, .narrow = 0 };
     }
 
-    /// What a stored cost table is specific to: the chip, the config, the weight index and whether DSpark is loaded.
-    fn identity(a: Allocator, io: std.Io, dir: []const u8, device: mtl.Device, drafts: bool) !u64 {
+    /// What a stored cost table is specific to: chip, config, weight index, DSpark and FP64-certified BF16 mode.
+    fn identity(a: Allocator, io: std.Io, dir: []const u8, device: mtl.Device, drafts: bool, fp64_bf16: bool) !u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.span(device.name()));
-        h.update(&.{@intFromBool(drafts)});
+        h.update(&.{ @intFromBool(drafts), @intFromBool(fp64_bf16) });
         for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
             const path = try std.fs.path.join(a, &.{ dir, name });
             defer a.free(path);

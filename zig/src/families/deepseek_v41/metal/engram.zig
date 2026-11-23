@@ -21,11 +21,16 @@ pub const Pipelines = struct {
     fp8: fp8.Pipelines,
 
     pub fn load(device: mtl.Device) !Pipelines {
-        return loadSource(device, sources.dsv41.engram);
+        return loadWith(device, sources.dsv41.engram, sources.dsv41.fp8_rows);
     }
 
     /// The same kernels from other text: the contract's planted controls prefix a TF_CTL define.
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
+        return loadWith(device, text, sources.dsv41.fp8_rows);
+    }
+
+    /// Loads Engram with the chosen FP8 row kernel text (default or opt-in FP64-certified BF16).
+    pub fn loadWith(device: mtl.Device, text: []const u8, fp8_text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
@@ -33,7 +38,7 @@ pub const Pipelines = struct {
         p.aq = try mtl.Pipeline.init(device, lib, "tf_dsv41_engram_aq", false);
         p.gate = try mtl.Pipeline.init(device, lib, "tf_dsv41_engram_gate", false);
         p.add = try mtl.Pipeline.init(device, lib, "tf_dsv41_engram_add", false);
-        p.fp8 = try fp8.Pipelines.load(device);
+        p.fp8 = try fp8.Pipelines.loadSource(device, fp8_text);
         return p;
     }
 

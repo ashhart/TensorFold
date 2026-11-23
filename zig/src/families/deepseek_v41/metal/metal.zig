@@ -47,6 +47,7 @@ pub const calib = @import("calib.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = pipelines.fp8_mma_cert;
     _ = ctx;
     _ = forward;
     _ = prompt;

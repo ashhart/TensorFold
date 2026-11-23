@@ -518,8 +518,13 @@ pub const Prompt = struct {
         if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
         const st = plus(streams, @as(usize, r0) * 8 * x.c.hidden);
         try eng.encodeAq(ep, e, cv(eng.Ref, plus(b.rows[li], @as(usize, r0) * w.wkv.k * 2)), cv(eng.Ref, b.emb), call);
-        const mma = pipelines.fp8_mma;
-        try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
+        if (x.p.mma_cert) |*mc| {
+            const mma_c = pipelines.fp8_mma_cert;
+            try mma_c.encode(mc, e, cv(mma_c.Ref, b.emb), cv(mma_c.Ref, w.wkv.w), cv(mma_c.Ref, w.wkv.s), cv(mma_c.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
+        } else {
+            const mma = pipelines.fp8_mma;
+            try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
+        }
         try eng.encodeGate(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, plus(b.mask, r0)), cv(eng.Ref, b.gate), call);
         try eng.encodeAdd(ep, e, cv(eng.Ref, st), cv(eng.Ref, b.ekv), cv(eng.Ref, b.gate), cv(eng.Ref, st), call);
     }

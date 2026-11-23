@@ -264,3 +264,15 @@ test "stable profile: GLM's direct switches register their off and on directions
     // timing sections and waiting for an upload choose no policy
     for ([_][]const u8{ "TF_GLM_PROF", "TF_GLM_LINK_WAIT" }) |name| try t.expect(p.registered(name) == null);
 }
+
+test "stable profile: DeepSeek Metal FP64-certified BF16 opt-in registers as arithmetic exact-one" {
+    const e = p.entry(.TF_DSV41_FP64_BF16);
+    try t.expectEqual(p.Class.arithmetic, e.class);
+    try t.expectEqual(p.Syntax.one, e.syntax);
+    try t.expectEqualStrings("metal", e.backend);
+    try t.expect(e.applies("deepseek_v41", "metal"));
+    try t.expect(!e.applies("deepseek_v41", "cuda") and !e.applies("glm5_next", "metal"));
+    try t.expect(p.resolve(.stable, .TF_DSV41_FP64_BF16, null) == null);
+    try t.expect(e.differs("1"));
+    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+}

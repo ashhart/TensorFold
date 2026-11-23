@@ -1,5 +1,6 @@
 //! DeepSeek-V4.1's Metal family behind one export: tf.dsv41_metal.NAME (families/deepseek_v41/metal).
 pub const fp8_mma = @import("fp8_mma.zig");
+pub const fp8_mma_cert = @import("fp8_mma_cert.zig");
 pub const index = @import("index.zig");
 pub const engram = @import("engram.zig");
 pub const fp8_rows = @import("fp8_rows.zig");

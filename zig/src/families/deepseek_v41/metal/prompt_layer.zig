@@ -57,8 +57,17 @@ pub const Px = struct {
         return .{ .buf = x.tables.of(if (x.c.compressRatio(layer) > 0) .compressed else .window) };
     }
 
-    /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's).
+    /// A dense FP8 projection by the prompt MMA tiles (or opt-in FP64-certified BF16 kernels when active).
     fn proj(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32) !void {
+        return x.projReuse(e, in, w, out, rows, false);
+    }
+
+    /// Same as `proj`, skipping `prep_x` when the prior certified call already prepared this exact input.
+    fn projReuse(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32, reuse_x: bool) !void {
+        if (x.p.mma_cert) |*mc| {
+            const mma_c = pipelines.fp8_mma_cert;
+            return mma_c.encode(mc, e, cv(mma_c.Ref, in), cv(mma_c.Ref, w.w), cv(mma_c.Ref, w.s), cv(mma_c.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16, .reuse_x = reuse_x });
+        }
         try mma.encode(&x.p.mma, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16 });
     }
 
@@ -166,7 +175,7 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     try cut(x, .kv);
     if (no == 0) return;
     // q: wq_a, q_norm, wq_b and RoPE on each head's last 64 dims
-    try x.proj(e, x.at(s.hq, o, 2 * H), w.wq_a, x.at(s.qa, o, 2 * c.q_lora), no);
+    try x.projReuse(e, x.at(s.hq, o, 2 * H), w.wq_a, x.at(s.qa, o, 2 * c.q_lora), no, k == o);
     try cl.normq(x.p, e, x.at(s.qa, o, 2 * c.q_lora), w.q_norm, x.at(s.qr, o, 2 * c.q_lora), x.at(s.qrq, o, 2 * c.q_lora), no, c.q_lora, c.eps);
     const QH = c.heads * D;
     try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.wq_b, x.at(s.q, o, 2 * QH), no);
@@ -229,7 +238,7 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
     const gp = &x.p.glue;
     const n = x.b - o;
     const IX = c.index_heads * c.index_dim;
-    try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), n);
+    try x.projReuse(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), n, true);
     try g.rope(gp, e, x.at(s.ixq, o, 2 * IX), x.at(s.ixqr, o, 2 * IX), x.rec(s.rec.pos, o), x.table(w.layer), n, c.index_heads, c.index_dim, @intCast(x.tables.positions));
     cp.fp4pack(&x.p.compress, e, x.at(s.ixqr, o, 2 * IX), x.at(s.ixqc, o, IX / 2), x.at(s.ixqs, o, IX / 32), n, .{ .blocks = IX / 32, .in_stride = IX, .code_row = IX / 2, .scale_row = IX / 32 });
     try x.mv(e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
@@ -268,9 +277,14 @@ fn output(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) 
     const kg = c.heads / G * c.head_dim;
     const ol = c.o_lora;
     try cl.actq(x.p, e, x.at(s.o, o, 2 * c.heads * c.head_dim), s.oq, .{ .k = kg, .nb = R, .na = G, .sa = kg, .sb = c.heads * c.head_dim, .ta = R * kg, .tb = kg });
-    for (0..G) |gi| {
-        const wg: weights.Fp8 = .{ .w = plus(w.wo_a.w, gi * ol * kg), .s = plus(w.wo_a.s, gi * ol / 32 * (kg / 32)), .k = kg, .n = ol };
-        try x.proj(e, plus(s.oq, gi * R * kg * 2), wg, plus(s.oa, gi * R * ol * 2), R);
+    if (x.p.mma_cert) |*mc| {
+        const mma_c = pipelines.fp8_mma_cert;
+        try mma_c.encodeBatched(mc, e, cv(mma_c.Ref, s.oq), cv(mma_c.Ref, w.wo_a.w), cv(mma_c.Ref, w.wo_a.s), cv(mma_c.Ref, s.oa), G, .{ .k = kg, .n = ol, .rows = R, .out = .bf16 });
+    } else {
+        for (0..G) |gi| {
+            const wg: weights.Fp8 = .{ .w = plus(w.wo_a.w, gi * ol * kg), .s = plus(w.wo_a.s, gi * ol / 32 * (kg / 32)), .k = kg, .n = ol };
+            try x.proj(e, plus(s.oq, gi * R * kg * 2), wg, plus(s.oa, gi * R * ol * 2), R);
+        }
     }
     try cl.actq(x.p, e, s.oa, s.ob, .{ .k = ol, .nb = R, .na = G, .sa = R * ol, .sb = ol, .ta = ol, .tb = G * ol });
     try x.proj(e, s.ob, w.wo_b, x.at(s.aout, o, 2 * c.hidden), R);
@@ -295,7 +309,7 @@ fn moe(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) !vo
     try cut(x, .experts);
     try cl.actqRows(x.p, e, hn2, x.at(s.hq2, o, 2 * H), R, H);
     try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[0], x.at(s.sg, o, 2 * W), R);
-    try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[2], x.at(s.su, o, 2 * W), R);
+    try x.projReuse(e, x.at(s.hq2, o, 2 * H), w.shared[2], x.at(s.su, o, 2 * W), R, true);
     cl.swiglu(x.p, e, x.at(s.sg, o, 2 * W), x.at(s.su, o, 2 * W), x.at(s.sact, o, 2 * W), x.at(s.sactq, o, 2 * W), R * W, c.swiglu_limit);
     try x.proj(e, x.at(s.sactq, o, 2 * W), w.shared[1], x.at(s.sout, o, 2 * H), R);
     cl.join(x.p, e, x.at(s.yr, o, 4 * H), x.at(s.sout, o, 2 * H), x.at(s.mout, o, 2 * H), R * H);

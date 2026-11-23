@@ -46,9 +46,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .small = try env.read(bool, "TF_DSV41_SMALL", false),
         .steps = steps,
         .decode_share = o.decode_share,
+        .fp64_bf16 = try env.read(bool, "TF_DSV41_FP64_BF16", false),
     };
     const m = pkg.boot.Boot.open(gpa, io, o.dir, opts) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 Metal engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        problem.* = switch (e) {
+            error.UnsupportedFp64Bf16 => "TF_DSV41_FP64_BF16=1 requires Apple M5 Ultra with Metal 4.1 (macOS 27+); unset TF_DSV41_FP64_BF16 on other Macs",
+            else => try std.fmt.allocPrint(a, "the DeepSeek-V4.1 Metal engine cannot load {s} ({s})", .{ o.dir, @errorName(e) }),
+        };
         return null;
     };
     const s = serve_lanes.Served.open(gpa, io, m.model(), o.dir, o.context) catch |e| {
