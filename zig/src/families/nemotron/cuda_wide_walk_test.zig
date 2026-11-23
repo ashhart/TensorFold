@@ -128,3 +128,28 @@ test "wide round walk: with the switch off a direct draft call past 8 streams is
     const shape: glue.Shape = .{ .proj = 1, .xd = 1, .cd = 1, .heads = 1, .dh = 32, .groups = 1, .state = 128, .rmax = 16 };
     try std.testing.expectError(error.ScanShape, g.conv(0, 0, 0, 0, 0, 0, 0, 17, shape));
 }
+
+test "wide round walk: with the switch off every host buffer is sized for main's 8 streams (REV83 2)" {
+    const off = try lightning(false);
+    const on = try lightning(true);
+    const engine = @import("cuda_engine.zig");
+    // the engine's pinned words: a shared window's streams before the draw, main's 8 off
+    try std.testing.expectEqual(engine.pinDraw(on) - 8 * engine.pin_prompt, engine.pinDraw(off));
+    // the lanes' mapped logprob rows: main's 8 streams of 32 rows, then the first token's
+    try std.testing.expectEqual(@as(usize, 8 * state.max_rows + 1), @import("cuda_lanes.zig").rowSlots(off));
+    // the head's pinned words and device buffers: sized by the switch's streams
+    const mtp = @import("cuda_mtp.zig");
+    try std.testing.expectEqual(mtp.hostWords(16) - 8 * (1 + state.max_rows + 8 + 1), mtp.hostWords(wide.streams(off)));
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_mtp.zig"), "const S: usize = @import(\"cuda_wide.zig\").streams(c);") != null);
+}
+
+test "wide round walk: with the switch off the 17-32-row kernel paths refuse as main did (REV83 2)" {
+    const src = @embedFile("cuda_kernels.zig");
+    // the dense call routes past 16 rows only with the switch (shared qlinear.decode is main's)
+    try std.testing.expect(std.mem.indexOf(u8, src, "if (o.k.wide and q == .affine4 and rows > cuda.qlinear.Affine4Kernels.max_rows) return o.k.affine.verify(") != null);
+    // the routed plan admits 32 rows only with it, main's 16 without
+    try std.testing.expect(std.mem.indexOf(u8, src, "if (rows > @as(usize, if (o.k.wide) plan_rows else 16) or slots > 8 or count > 128) return error.PlanTooWide;") != null);
+    // the kernels' flag is the switch's, set before any buffer, and false until then
+    try std.testing.expect(std.mem.indexOf(u8, src, "var k: Kernels = undefined;\n        k.wide = false;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_engine.zig"), "e.k.wide = e.c.wide_rounds;") != null);
+}
