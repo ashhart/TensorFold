@@ -96,6 +96,9 @@ pub const Pass = struct {
     plan: plan_.Plan,
     /// act_quant of the taps rows [16][targets * hidden]
     quant: mtl.Buffer,
+    /// opt-in concurrent ingest scratch (up to window rows x all stages) + 4-slot ring plan under TF_DSV41_FP64_BF16=1
+    ib: ?st.IngestBuf = null,
+    ingest_ring: u32 = 0,
     /// one ring buffer a stage: [slots][window + block][head_dim] bf16
     rings: []mtl.Buffer,
     runs: []Run,
@@ -126,6 +129,8 @@ pub const Pass = struct {
         errdefer x.plan.deinit();
         x.quant = try device.buffer(@as(usize, R) * c.dspark_targets.len * c.hidden * 2, mtl.ResourceOptions.shared);
         errdefer x.quant.deinit();
+        if (p.mma_cert != null) x.ib = try st.IngestBuf.init(device, c);
+        errdefer if (x.ib) |*ib| ib.deinit();
         x.rings = try a.alloc(mtl.Buffer, c.mtp_layers);
         errdefer a.free(x.rings);
         var made: usize = 0;
@@ -142,7 +147,7 @@ pub const Pass = struct {
         x.wide = try a.alloc(bool, opt.slots);
         errdefer a.free(x.wide);
         @memset(x.wide, false);
-        x.undo = try undo_.Undo.init(a, c, x.rings, opt.slots);
+        x.undo = try undo_.Undo.init(a, device, c, x.rings, opt.slots);
         errdefer x.undo.deinit();
         if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) x.mk = try Chain.init(device, w.markov(c));
         x.resident = x.holdResident();
@@ -153,7 +158,8 @@ pub const Pass = struct {
     fn holdResident(x: *const Pass) ?mtl.ResidencySet {
         const set = x.device.residencySet(64) catch return null;
         for (x.rings) |r| set.add(r);
-        for ([_]mtl.Buffer{ x.quant, x.plan.buf, x.b.buf, x.w.arena }) |b| set.add(b);
+        for ([_]mtl.Buffer{ x.quant, x.undo.saved, x.plan.buf, x.b.buf, x.w.arena }) |b| set.add(b);
+        if (x.ib) |ib| for ([_]mtl.Buffer{ ib.buf, ib.plan_buf }) |b| set.add(b);
         for (x.w.stages) |*l| {
             set.add(l.arena);
             set.add(l.table);
@@ -180,6 +186,7 @@ pub const Pass = struct {
         x.a.free(x.rings);
         x.a.free(x.runs);
         x.a.free(x.wide);
+        if (x.ib) |*ib| ib.deinit();
         x.quant.deinit();
         x.plan.deinit();
         x.b.deinit();
@@ -285,25 +292,53 @@ pub const Pass = struct {
         try x.settle();
     }
 
+    /// Queue a GPU blit restoring overwritten ring rows for `slot` from `end` on (or host settle when default off).
+    pub fn restoreUndo(x: *Pass, slot: u32, end: u64) !void {
+        if (!x.undo.pending(slot, end)) return;
+        if (x.ib == null) {
+            try x.settle();
+            x.undo.settle(slot, end);
+            return;
+        }
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = x.queue.commandBuffer();
+        _ = x.undo.encodeSettle(cb, slot, end);
+        try x.hold(cb);
+    }
+
     /// `ingest` whose last launch is left queued (`settle` waits); the taps must stay as they are until then.
     pub fn ingestQueued(x: *Pass, slot: u32, start: u64, taps: Taps, rows: []const u32) !void {
         if (slot >= x.runs.len) return error.Slots;
         if (rows.len == 0) return;
         for (rows, 0..) |r, i| if (r != rows[0] + i) return error.NotAPrefix;
         if (rows[rows.len - 1] >= taps.rows) return error.NotAPrefix;
-        // older rows than the window are never read
         const sp = ingestSpan(rows.len, x.c.window);
         const keep = sp.count;
         const skip = sp.skip;
-        // the rings as the GPU leaves them: a cut window's rows from this ingest's end put back, its own rows kept
+        if (x.ib) |*ib| {
+            const kn: u32 = @intCast(keep);
+            if (start + skip + kn > x.tables.positions) return error.PastLimit;
+            if (x.queued[x.queued.len - 1] != null) try x.settle();
+            const refs = try ib.writePlan(x.c, x.ingest_ring, slot, start + skip, kn);
+            x.ingest_ring = (x.ingest_ring + 1) % st.IngestBuf.ring_slots;
+            const tap_ref: Ref = .{ .buf = taps.buf, .off = taps.off + @as(usize, rows[skip]) * x.c.dspark_targets.len * x.c.hidden * 2 };
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = x.queue.commandBuffer();
+            const cx = x.ctx(kn);
+            try st.encodeIngestCb(cb, &cx, x.w, ib, &x.undo, slot, start + rows.len, start + skip, tap_ref, x.rings, refs.pos, refs.dest);
+            try x.hold(cb);
+            x.runs[slot].land(start + skip, keep);
+            return;
+        }
         try x.settle();
         x.undo.settle(slot, start + rows.len);
         x.undo.save(slot, start + skip, @intCast(keep));
         var at: usize = 0;
         while (at < keep) : (at += R) {
             const n: u32 = @intCast(@min(R, keep - at));
-            const row0: usize = rows[skip] + at;
-            try x.ingestRows(slot, start + skip + at, taps, row0, n);
+            try x.ingestRows(slot, start + skip + at, taps, rows[skip] + at, n);
         }
         x.runs[slot].land(start + skip, keep);
     }
@@ -313,7 +348,6 @@ pub const Pass = struct {
         if (start + n > x.tables.positions) return error.PastLimit;
         try x.settle();
         try x.plan.writeIngest(x.c, slot, start, n);
-        const row_bytes = x.c.dspark_targets.len * x.c.hidden * 2;
         const refs = x.plan.ingestRefs();
         const job = struct {
             x: *const Pass,
@@ -325,14 +359,23 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.queue1(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
+        try x.queue1(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * x.c.dspark_targets.len * x.c.hidden * 2 }, .refs = refs }, .serial);
     }
 
-    /// The ingest's encoders for `n` rows of `taps` (from its first row) with the plan's ingest rows, in `e` (serial).
-    pub fn encodeIngest(x: *const Pass, e: mtl.ComputeEncoder, taps: Taps, n: u32) !void {
+    /// The ingest's encoders for `n` rows of `taps` using plan ingest rows `[r0 .. r0 + n)`.
+    pub fn encodeIngestAt(x: *const Pass, e: mtl.ComputeEncoder, taps: Taps, r0: u32, n: u32) !void {
         const cx = x.ctx(n);
         const refs = x.plan.ingestRefs();
-        try st.ingest(&cx, e, x.w, .{ .buf = taps.buf, .off = taps.off }, .{ .buf = x.quant }, x.rings, refs.pos, refs.dest);
+        const off = @as(usize, r0) * 4;
+        const p: Ref = .{ .buf = refs.pos.buf, .off = refs.pos.off + off };
+        const d: Ref = .{ .buf = refs.dest.buf, .off = refs.dest.off + off };
+        if (x.ib) |*ib| return st.ingestConcurrent(&cx, e, x.w, ib, .{ .buf = taps.buf, .off = taps.off }, x.rings, p, d);
+        try st.ingest(&cx, e, x.w, .{ .buf = taps.buf, .off = taps.off }, .{ .buf = x.quant }, x.rings, p, d);
+    }
+
+    /// The ingest's encoders for `n` rows of `taps` (from its first row) with the plan's ingest rows.
+    pub fn encodeIngest(x: *const Pass, e: mtl.ComputeEncoder, taps: Taps, n: u32) !void {
+        return x.encodeIngestAt(e, taps, 0, n);
     }
 
     // propose ------------------------------------------------------------------------------------------------------
@@ -356,12 +399,17 @@ pub const Pass = struct {
         if (l.gpu) for (asks, x.mk.?.o.asks()[0..asks.len]) |a, *k| {
             k.* = askOf(a.params);
         };
-        for (asks) |a| if (a.slot < x.runs.len and x.undo.pending(a.slot, a.start)) try x.settle();
+        if (x.ib != null) {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            if (x.undo.encodeSettleAsks(x.queue, asks)) |cb| try x.hold(cb);
+        } else {
+            for (asks) |a| if (a.slot < x.runs.len and x.undo.pending(a.slot, a.start)) try x.settle();
+        }
         const ids: []u32 = @alignCast(std.mem.bytesAsSlice(u32, x.b.bytes(x.b.ids, 4 * l.rows)));
         for (asks, 0..) |a, j| {
             if (a.slot >= x.runs.len) return error.Slots;
-            // a block reads the context before it: rows a cut window's ingest wrote from its start on put back
-            x.undo.settle(a.slot, a.start);
+            if (x.ib == null) x.undo.settle(a.slot, a.start);
             x.runs[a.slot].cut(a.start);
             for (asks[0..j]) |o| if (o.slot == a.slot) return error.DuplicateSlot;
             if (a.start + n > x.tables.positions or a.anchor >= x.c.vocab) return error.PastLimit;
@@ -436,19 +484,9 @@ pub const Pass = struct {
             const cv = base[j * n * k ..][0 .. n * k];
             for (hid[0 .. n * D], hf[j * n * D ..][0 .. n * D]) |*h, v| h.* = host.dspark.bf16(v);
             try host.dspark.chain(sa, mk, cd, cv, k, a.anchor, a.params, if (mk.conf != null) hid[0 .. n * D] else null, o.drafts[0..n], o.conf[0..n]);
-            // a narrow pass's missing drafts never land: no confidence, so no depth verifies them
             @memset(o.drafts[n..], o.drafts[n - 1]);
             @memset(o.conf[n..], 0);
-            if (o.cand) |t| {
-                if (t.len != B * k) return error.BadOutput;
-                @memcpy(t[0..cd.len], cd);
-                @memset(t[cd.len..], -1);
-            }
-            if (o.base) |t| {
-                if (t.len != B * k) return error.BadOutput;
-                @memcpy(t[0..cv.len], cv);
-                @memset(t[cv.len..], -std.math.inf(f32));
-            }
+            try copyCands(o, B, k, cd, cv);
         }
     }
 
@@ -469,16 +507,30 @@ pub const Pass = struct {
             const cd = cand[j * n * k ..][0 .. n * k];
             const cv = base[j * n * k ..][0 .. n * k];
             try host.dspark.candidateRows(logits[j * n * x.c.vocab ..][0 .. n * x.c.vocab], x.c.vocab, k, cd, cv);
-            if (o.cand) |t| {
-                @memcpy(t[0..cd.len], cd);
-                @memset(t[cd.len..], -1);
-            }
-            if (o.base) |t| {
-                @memcpy(t[0..cv.len], cv);
-                @memset(t[cv.len..], -std.math.inf(f32));
-            }
+            try copyCands(o, B, k, cd, cv);
         }
     }
+
+    fn copyCands(o: *Proposal, B: usize, k: usize, cd: []const i32, cv: []const f32) !void {
+        if (o.cand) |t| {
+            if (t.len != B * k) return error.BadOutput;
+            @memcpy(t[0..cd.len], cd);
+            @memset(t[cd.len..], -1);
+        }
+        if (o.base) |t| {
+            if (t.len != B * k) return error.BadOutput;
+            @memcpy(t[0..cv.len], cv);
+            @memset(t[cv.len..], -std.math.inf(f32));
+        }
+    }
+
+    const AllJob = struct {
+        x: *const Pass,
+        l: *const Launch,
+        fn encode(j: @This(), e: mtl.ComputeEncoder) !void {
+            try j.x.encodeAll(e, j.l);
+        }
+    };
 
     /// Drafts for every ask: groups of at most `group` slots, one launch each; `out[i]` answers `asks[i]`.
     pub fn propose(x: *Pass, asks: []const Ask, out: []Proposal) !void {
@@ -488,14 +540,7 @@ pub const Pass = struct {
         while (at < asks.len) : (at += g) {
             const m = @min(g, asks.len - at);
             const l = try x.prepare(asks[at..][0..m]);
-            const job = struct {
-                x: *const Pass,
-                l: *const Launch,
-                fn encode(j: @This(), e: mtl.ComputeEncoder) !void {
-                    try j.x.encodeAll(e, j.l);
-                }
-            };
-            try x.run(job, .{ .x = x, .l = &l }, .concurrent);
+            try x.run(AllJob, .{ .x = x, .l = &l }, .concurrent);
             try x.finish(&l, out[at..][0..m]);
         }
     }
@@ -511,14 +556,7 @@ pub const Pass = struct {
             x.begun = null;
             return e;
         };
-        const job = struct {
-            x: *const Pass,
-            l: *const Launch,
-            fn encode(j: @This(), e: mtl.ComputeEncoder) !void {
-                try j.x.encodeAll(e, j.l);
-            }
-        };
-        x.queue1(job, .{ .x = x, .l = &b.l }, .concurrent) catch |e| {
+        x.queue1(AllJob, .{ .x = x, .l = &b.l }, .concurrent) catch |e| {
             x.begun = null;
             return e;
         };

@@ -61,6 +61,8 @@ pub const Pipelines = struct {
     route_dspark: ?mtl.Pipeline,
     /// the backbone's gate matvec, route and experts' plan in one launch (moe.zig's decode MoE)
     gate_plan: mtl.Pipeline,
+    /// opt-in fused gate+route+plan for DSpark blocks under TF_DSV41_FP64_BF16=1
+    gate_plan_dspark: ?mtl.Pipeline = null,
     topk512: mtl.Pipeline,
     cand: mtl.Pipeline,
     cand_segs: mtl.Pipeline,
@@ -112,6 +114,8 @@ pub const Pipelines = struct {
         errdefer if (p.route_dspark) |r| r.deinit();
         p.gate_plan = try routeAt(a, device, c.experts, c.topk, "tf_dsv41_route_gate_plan");
         errdefer p.gate_plan.deinit();
+        p.gate_plan_dspark = if (fp64_bf16 and c.mtp_layers > 0 and c.dspark_experts > 0) try routeAt(a, device, c.dspark_experts, c.dspark_topk, "tf_dsv41_route_gate_plan") else null;
+        errdefer if (p.gate_plan_dspark) |gp| gp.deinit();
         p.topk512 = try one(device, sources.dsv41.topk512, "tf_topk512");
         errdefer p.topk512.deinit();
         p.cand = try cand.load(device);
@@ -147,6 +151,7 @@ pub const Pipelines = struct {
         p.route.deinit();
         if (p.route_dspark) |r| r.deinit();
         p.gate_plan.deinit();
+        if (p.gate_plan_dspark) |gp| gp.deinit();
         p.topk512.deinit();
         p.cand.deinit();
         p.cand_segs.deinit();
