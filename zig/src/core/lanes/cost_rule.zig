@@ -62,6 +62,12 @@ pub fn measureWindows(windows: anytype, ms: []f64, keep: bool) !void {
     try interleaveWidths(windows, &observer, ms, keep);
 }
 
+/// Time each width to completion, then repair dips serially; a stateful scratch timer keeps its original order.
+pub fn serialWindows(windows: anytype, ms: []f64) !void {
+    for (ms, 0..) |*m, i| m.* = try fastest(windows, i);
+    try smoothSerial(windows, ms);
+}
+
 /// Retime a high local outlier or both sides of a dip, never changing a real step to an interpolated value.
 pub fn repairAt(ms: []const f64, i: usize) bool {
     return repairGrid(ms, null, i);
