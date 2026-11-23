@@ -213,9 +213,11 @@ pub const RoundProf = struct {
 
     /// The summary: one line a launch shape (slots, rows, drafted or plain), the command buffers, the drafter's passes.
     pub fn write(p: *const RoundProf, w: *std.Io.Writer) !void {
-        // no round since the last summary: nothing to say (the summary at close after a periodic one)
-        if (p.rounds == p.since) return;
-        try w.print("dsv41 round profile: rounds {d} to {d} ({d} rounds; mean and percentiles cover these rounds); ms mean/p50/p95\n", .{ p.since + 1, p.rounds, p.rounds - p.since });
+        if (p.rounds == p.since) {
+            var pending = false;
+            for (p.ev) |s| if (s.n > 0) { pending = true; break; };
+            if (!pending) return;
+        } else try w.print("dsv41 round profile: rounds {d} to {d} ({d} rounds; mean and percentiles cover these rounds); ms mean/p50/p95\n", .{ p.since + 1, p.rounds, p.rounds - p.since });
         for (p.groups, 0..) |bs, slots| for (bs, 0..) |ds, b| for (ds, 0..) |g, drafted| if (g) |gg| if (gg.n > 0) {
             try w.print("slots {d} rows {s} {s} n {d}:", .{ slots, row_buckets[b], if (drafted == 1) "drafted" else "plain", gg.n });
             for (&gg.phase, 0..) |*s, i| if (s.n > 0) try p.cell(w, @tagName(@as(Phase, @fromBackingInt(@intCast(i)))), s);
@@ -380,4 +382,28 @@ test "a summary with no round since the last one writes nothing" {
     r.end();
     try p.write(&w);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "rounds 1 to 1 (1 rounds;") != null);
+}
+
+test "drafter timings drained after an exact periodic boundary reach the final summary" {
+    const a = std.testing.allocator;
+    const p = try RoundProf.init(a);
+    defer p.deinit();
+    p.clock = fakeClock;
+    fake_now = 1;
+    for (0..report_every) |_| {
+        var r = p.begin(1, 1);
+        fake_now += 1000;
+        r.lap(.wait);
+        r.end();
+    }
+    try std.testing.expectEqual(@as(u64, report_every), p.since);
+    p.event(.chain_gpu, 7_000_000);
+    p.event(.finish, 2_000_000);
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try p.write(&w);
+    const text = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "drafter n 1: chain_gpu 7.000/7.000/7.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "drafter n 1: finish 2.000/2.000/2.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "0 rounds") == null);
 }
