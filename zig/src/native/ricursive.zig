@@ -6,7 +6,7 @@ const tf = @import("tensorfold");
 const fr = tf.ricursive;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
-
+const metal_admit = @import("metal_admit.zig");
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -70,7 +70,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     }
     std.log.info("ricursive: {d:.1} GiB for caches, context up to {d} tokens ({d:.2} GiB a full stream)", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window, @as(f64, @floatFromInt(fr.state.cacheBytes(&model.config, @intCast(window + 1)))) / (1 << 30) });
-    const streams: u32 = @max(o.lanes, 1);
+    const streams = try admitStreams(a, @intCast(fr.state.cacheBytes(&model.config, @intCast(window + 1))), budget, o, @intCast(window), problem) orelse {
+        model.deinit();
+        return null;
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
@@ -85,7 +88,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fr.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = streams, .context_window = @intCast(window), .prefill_step = fr.state.prompt_rows, .structures = true, .logprobs = true });
     h.host.info_.reasoning_optional = true; // Ripple writes `<think>` itself when it thinks, and answers bare otherwise
     h.host.info_.thinking_budget = false; // its think markers are spelled, not one token each: no close can be forced
     h.cache = null;
@@ -108,12 +111,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 }
 
 fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
-    _ = a;
-    _ = per_stream;
-    _ = left;
-    _ = window;
-    _ = problem;
-    return @max(o.lanes, 1);
+    return metal_admit.streams(a, "ricursive", per_stream, left, o, window, problem);
 }
 
 /// Weights, tables and scratches in one residency set for the keepalive, under the 70% limit.
