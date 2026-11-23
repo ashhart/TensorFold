@@ -41,11 +41,11 @@ fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Op
 }
 
 fn admittedWindow(a: std.mem.Allocator, c: *const s5.config.Config, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
-    return admittedStreams(a, s5.state.cacheBytes(c, @intCast(window)), left, o, window, problem);
+    return admittedStreams(a, s5.state.cacheBytes(c, @intCast(window + 1)), left, o, window, problem);
 }
 
 fn longestWindow(c: *const s5.config.Config, budget: u64, most: usize) usize {
-    return s5.budget.longest(c, budget, most);
+    return s5.budget.longest(c, budget, most + 1) -| 1;
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
