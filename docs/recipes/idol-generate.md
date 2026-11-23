@@ -26,8 +26,9 @@ zig-out/bin/tf-idol-generate WEIGHTS KLEIN/vae DINO - out/ --features dino.safet
 Noise:
 
 - **The starting noise** is `torch.Generator("cpu").manual_seed(seed)`'s randn: [8192, 16], then [5], as
-  `idol_case.py case` draws it. The tool reimplements torch's mt19937 and its Box-Muller. The camera's 5 values are
-  bit-equal to torch's. 28 of the 131,072 latent values are 1 ulp off, from torch's float cos and sin.
+  `idol_case.py case` draws it. The tool reimplements torch's mt19937 and its Box-Muller (`torch_rng.zig`). The
+  camera's 5 values are bit-equal to torch's, which `torch_rng.zig`'s test pins for seed 42. 28 of the 131,072 latent
+  values are 1 ulp off on the Mac, from torch's float cos and sin (glibc's put 5,854 up to 3 ulps off).
 - **The VAE posterior's noise and the octree's draws** come from native seeded generators.
 - **`--noise FILE`** gives the posterior's noise (`noise`, as `idol_case.py vae` records it). If FILE also holds
   `latent` and `camera`, they replace the starting noise.
