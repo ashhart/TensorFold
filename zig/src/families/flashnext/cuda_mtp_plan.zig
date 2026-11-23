@@ -24,7 +24,8 @@ pub fn reserveRows(total: usize) usize {
 
 /// Two scratch rows per prompt-only token, bounded at the wider opt-in piece.
 pub fn reservePrefillRows(total: usize) usize {
-    return @max(@as(usize, 32), 2 * @min(total, prefill_piece_rows));
+    const rows: usize = @min(total, prefill_piece_rows);
+    return @max(@as(usize, 32), 2 * rows);
 }
 
 /// The head's plan from the admitted capacity and the rows to draft.
