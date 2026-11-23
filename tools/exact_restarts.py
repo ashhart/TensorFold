@@ -298,6 +298,16 @@ def main():
             report["comparisons"] += [{**r, "runtime": label} for r in matrix["comparisons"]]
         report["failures"] += [{**r, "runtime": label} for r in matrix["failures"]]
 
+    def build_identity(matrix, path, supplied):
+        if supplied:
+            return supplied
+        try:
+            return rc.binary_sha256(path)
+        except OSError:
+            if any(f["reason"] == "server launch or readiness failed" for f in matrix["failures"]):
+                return None
+            raise
+
     if args.base:
         fold("attached", execute("attached"))
         report["builds"]["attached"] = args.build_id
@@ -306,11 +316,11 @@ def main():
     else:
         reference = execute("reference", args.bin)
         fold("reference", reference)
-        report["builds"]["reference"] = args.build_id or rc.binary_sha256(args.bin)
+        report["builds"]["reference"] = build_identity(reference, args.bin, args.build_id)
         if args.candidate_bin:
             candidate = execute("candidate", args.candidate_bin)
             fold("candidate", candidate)
-            report["builds"]["candidate"] = args.candidate_build_id or rc.binary_sha256(args.candidate_bin)
+            report["builds"]["candidate"] = build_identity(candidate, args.candidate_bin, args.candidate_build_id)
             report["comparisons"] += [{**r, "runtime": "reference_vs_candidate"}
                                       for r in rc.compare_results(reference, candidate, "cross_binary")]
         if "restart" not in args.skip:
