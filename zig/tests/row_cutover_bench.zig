@@ -70,14 +70,16 @@ pub fn main() !void {
     defer p.deinit();
     if (!p.wide) return error.NoTensorUnits;
     var narrow = p;
-    narrow.wide_from = max_rows + 1;
+    narrow.wide_from = @splat(max_rows + 1);
     var wide = p;
-    wide.wide_from = 1;
+    wide.wide_from = @splat(1);
     const a = try device.buffer(max_rows * n * 2, opts);
     defer a.deinit();
     const b = try device.buffer(max_rows * n * 2, opts);
     defer b.deinit();
-    std.debug.print("generation {d}, table cutover {d}\n", .{ device.generation(), p.wide_from });
+    var line: [256]u8 = undefined;
+    const name = std.mem.span(device.name()); // the name the key reads, printed beside it
+    std.debug.print("{s}\n", .{try row.keyLine(&line, name, row.chipOf(device.generation(), name))});
     for (row.bit_widths) |bits| {
         const m = try matrix(device, bits);
         defer for ([_]mtl.Buffer{ m.w.w, m.w.scales, m.w.biases, m.x }) |x| x.deinit();
