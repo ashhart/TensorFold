@@ -15,7 +15,12 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
         return h.cancel(job);
     };
     h.prefilled(job, began);
-    if (h.cache) |store| _ = if (keepsEnd(store, job)) store.keepBornFrame(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request), job.request.images, job.frame) else false;
+    if (h.cache) |store| {
+        const previous_salt = store.salt;
+        store.salt = job.request.cacheSalt();
+        defer store.salt = previous_salt;
+        _ = if (keepsEnd(store, job)) store.keepBornFrame(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request), job.request.images, job.frame) else false;
+    }
     be.release(&job.stream);
     h.remove(job);
     h.finish(job, .length, "");
@@ -26,4 +31,10 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
 fn keepsEnd(store: *const Store, job: *const Job) bool {
     return !job.request.untaught and store.rules.lookahead == 0 and
         (!store.rules.warm_usable or store.usable(@intCast(job.request.prompt.len), job.request.chunks));
+}
+
+/// Work a background pass gives way to: a queued foreground request, another prompt filling, a decoding stream.
+pub fn otherWork(h: *const LaneHost, job: *const Job) bool {
+    for (h.filling.items) |j| if (j != job) return true; // the lane thread's own list: the pass runs on it
+    return h.foregroundWaiting() or h.core.activeCount() > 0;
 }

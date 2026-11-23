@@ -132,9 +132,9 @@ fn serve(m: cfgs.Model, times: [2]f64, asks: []const Ask, out: []Reply, kept: ?*
     if (kept) |k| k.* = .{ e.lone_kept[0][0] != null, e.lone_kept[1][0] != null };
 }
 
-/// hip_lanes.zig facts in small (as lone_copy_price_test.zig's): 16-row windows, timed forwards, copies priced.
+/// hip_lanes.zig facts in small (as lone_copy_price_test.zig's): timed plain rounds and copies priced.
 fn hip(head: bool, forwards: []const cfgs.Cost) cfgs.Model {
-    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = head, .copy_guard = true, .window_costs = forwards, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
+    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = true, .copy_guard = true, .window_costs = forwards, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
 }
 
 /// `asks` served drafts-off and with copies unpriced (main's path) give `got`'s replies, token for token.
@@ -154,7 +154,7 @@ fn expectSame(m: cfgs.Model, times: [2]f64, asks: []const Ask, got: []const Repl
 }
 
 test "sampled lone copy: shortened copies give the seeded reply of drafts-off decode" {
-    for ([_]bool{ false, true }) |head| {
+    for ([_]bool{false}) |head| {
         const m = hip(head, &dense);
         const asks = [_]Ask{.{ .prompt = prompts[0], .sampling = .{ .seed = 11, .temperature = 0.8 }, .max_new = 64 }};
         var got: [1]Reply = @splat(.{});
@@ -170,7 +170,7 @@ test "sampled lone copy: shortened copies give the seeded reply of drafts-off de
 }
 
 test "sampled lone copy: copies priced off give the seeded reply of drafts-off decode" {
-    for ([_]bool{ false, true }) |head| {
+    for ([_]bool{false}) |head| {
         const m = hip(head, &startup);
         const asks = [_]Ask{.{ .prompt = prompts[0], .sampling = .{ .seed = 23, .temperature = 0.8 }, .max_new = 96, .land_from = std.math.maxInt(usize) }};
         var got: [1]Reply = @splat(.{});
@@ -183,7 +183,7 @@ test "sampled lone copy: copies priced off give the seeded reply of drafts-off d
 }
 
 test "sampled lone copy: a request's first copy reads the prices the sampled request before it kept" {
-    for ([_]bool{ false, true }) |head| {
+    for ([_]bool{false}) |head| {
         const m = hip(head, &dense);
         const asks = [_]Ask{
             .{ .prompt = prompts[0], .sampling = .{ .seed = 5, .temperature = 0.8 }, .max_new = 64 },
@@ -198,4 +198,18 @@ test "sampled lone copy: a request's first copy reads the prices the sampled req
         try std.testing.expect(got[0].first.? < 15);
         try std.testing.expectEqual(@as(?usize, 15), got[1].first); // the first request's landed copies taught the rate
     }
+}
+
+test "sampled lone copy: a model drafter keeps main's sampled windows and keyed target IDs" {
+    const m = hip(true, &dense);
+    const asks = [_]Ask{.{ .prompt = prompts[0], .sampling = .{ .seed = 23, .temperature = 0.8 }, .max_new = 96 }};
+    var got: [1]Reply = @splat(.{});
+    var main: [1]Reply = @splat(.{});
+    var kept: [2]bool = undefined;
+    try serve(m, dense_rounds, &asks, &got, &kept);
+    try expectSame(m, dense_rounds, &asks, &got, &main);
+    try std.testing.expectEqual([2]bool{ false, false }, kept);
+    try std.testing.expectEqual(main[0].first, got[0].first);
+    try std.testing.expectEqual(main[0].copies, got[0].copies);
+    try std.testing.expectEqual(main[0].copy_rows, got[0].copy_rows);
 }

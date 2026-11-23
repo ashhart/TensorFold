@@ -93,6 +93,8 @@ pub const Backend = struct {
     chunk_invariant: bool = false,
     /// Rows a prompt chunk is cut to while a stream decodes, so decode rounds wait less; 0: no cut. Wrappers copy it.
     decoding_rows: u32 = 0,
+    /// Whether image requests may run a background warm prefill; wrappers preserve the target policy.
+    warm_images: bool = true,
     ptr: *anyopaque,
     vtable: *const VTable,
 

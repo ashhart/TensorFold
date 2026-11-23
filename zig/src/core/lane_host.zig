@@ -80,10 +80,8 @@ pub const LaneHost = struct {
     disk: rows_host.Disk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
     unread_limits: @import("lane_host_backlog.zig").Limits = .{}, // how far a streamed reply's reader may fall behind
     scores: scoring.Queue = .{}, // decisions' label scores waiting for the engine thread (lane_host_score.zig)
-    /// Runs first on the engine thread: a backend whose API state is per thread (a CUDA context) binds it there.
-    on_thread: ?ThreadInit = null,
-    /// opt-in: a family round planner (prompt pieces, decode rows in one pass); null: whole or `prefill_step` prompts
-    rounds: ?Rounds = null,
+    on_thread: ?ThreadInit = null, // runs first on the engine thread: binds a per-thread backend such as CUDA
+    rounds: ?Rounds = null, // opt-in family round planner: prompt pieces, decode rows in one pass; null: whole prompts
     pieces: std.ArrayList(Rounds.Piece) = .empty,
     share: fill.Share = .{}, // prompt work's share of wall time beside decoding streams (lane_host_fill.zig)
     srpt: @import("lane_host_srpt.zig").Srpt = .{}, // TENSORFOLD_PREFILL_ORDER=srpt: less work left goes first
@@ -203,7 +201,9 @@ pub const LaneHost = struct {
     }
 
     fn infoFn(ctx: *anyopaque) Info {
-        return self(ctx).info_;
+        var i = self(ctx).info_;
+        i.cache_salt = self(ctx).cache != null; // its store goes by the cache key, and Recall skips salted requests
+        return i;
     }
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
@@ -256,12 +256,12 @@ pub const LaneHost = struct {
         return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
-    /// A background pass's yield hook: a foreground request waits or a stream decodes (read under the lock).
+    /// A background pass's yield hook: a foreground request waits, a prompt fills or a stream decodes (under the lock).
     pub fn yieldsTo(ctx: *anyopaque) bool {
         const job: *Job = @ptrCast(@alignCast(ctx));
         job.host.lock();
         defer job.host.unlock();
-        return job.host.foregroundWaiting() or job.host.core.activeCount() > 0;
+        return @import("lane_host_warm.zig").otherWork(job.host, job);
     }
 
     /// A foreground request is queued (they queue ahead of every background one); the caller holds the lock.
@@ -274,7 +274,7 @@ pub const LaneHost = struct {
         const until: std.Io.Timeout = .{ .deadline = .fromNow(h.io, .{ .raw = .fromNanoseconds(h.warm_quiet), .clock = .awake }) };
         h.lock();
         defer h.unlock();
-        while (!h.closing and !h.foregroundWaiting() and h.core.activeCount() == 0 and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
+        while (!h.closing and !@import("lane_host_warm.zig").otherWork(h, job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
             h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
         }
         h.load.yields += @intFromBool(!h.closing and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
@@ -466,8 +466,8 @@ pub const LaneHost = struct {
             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
             if (job.request.promptOnly()) {
                 // never kept, so a repeat of it is not worth noting
-            } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
-                store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
+            } else if (job.request.images.len == 0 and (job.request.cache_key.len == 0 or job.request.salted)) {
+                store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey()); // a text prompt, by its salt
             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }

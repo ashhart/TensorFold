@@ -1,4 +1,4 @@
-//! A lone stream's copy windows priced as its head's drafts are: the depth rule on the stream's own timed rounds.
+//! Copies-only lone streams price copy prefixes against their own timed plain rounds.
 const Engine = @import("engine.zig").Engine;
 const Stream = @import("stream.zig").Stream;
 const win = @import("windows.zig");
@@ -8,11 +8,11 @@ const ev = @import("events.zig");
 const trail = @import("trail.zig");
 const f = ev.f;
 
-/// A lone stream whose copies compete with its plain rounds (copy_guard), timed, its head priced by the rule's chain.
+/// Only opted-in copies-only streams; every model head/drafter and shared round keeps its existing path.
 pub fn enabled(e: *const Engine, s: *const Stream) bool {
     const c = e.cfg;
-    return e.alone and s.drafts and c.timed and c.copy_guard and e.trim == null and !c.root_copies and
-        !c.context_copies and !c.node_probabilities and c.lone_cost_tile == 0 and !c.family_costs.empty() and e.windowed(s);
+    return e.alone and s.drafts and c.timed and c.copy_guard and c.max_copy > 0 and !c.family_mtp and e.trim == null and !c.root_copies and
+        !c.context_copies and !c.node_probabilities and c.lone_cost_tile == 0 and !c.family_costs.empty() and (!c.pipelined or s.logprobs != null or s.grammar != null);
 }
 
 /// The copy's rows to verify, a prefix (none: plain or the head's drafts take the round); `take`: the round's plan.
@@ -61,7 +61,7 @@ fn seed(e: *Engine, s: *Stream) !void {
 
 /// A finished stream's copy prices for the next one starting in its band; plain times too when only copies read them.
 pub fn keep(e: *Engine, s: *const Stream) void {
-    if (!e.cfg.copy_guard or e.cfg.lone_cost_tile > 0) return;
+    if (!e.cfg.copy_guard or e.cfg.family_mtp or e.cfg.lone_cost_tile > 0) return;
     const st = s.depth orelse return;
     const band = st.copy_band orelse return;
     if (st.copy_rounds < kept_rounds) return;

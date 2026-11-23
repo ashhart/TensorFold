@@ -20,9 +20,14 @@ const Parts = struct {
     biases: []u16,
 
     fn init(gpa: std.mem.Allocator, count: usize, n: usize, k: usize) !Parts {
-        const words = try gpa.alloc(u32, count * n * k / 8);
+        const elements = try mtp.checkedMul(count, try mtp.checkedMul(n, k));
+        const word_count = elements / 8;
+        _ = try mtp.checkedMul(word_count, @sizeOf(u32));
+        const words = try gpa.alloc(u32, word_count);
         errdefer gpa.free(words);
-        const scales = try gpa.alloc(u16, count * n * k / host4.group);
+        const scale_count = elements / host4.group;
+        _ = try mtp.checkedMul(scale_count, @sizeOf(u16));
+        const scales = try gpa.alloc(u16, scale_count);
         errdefer gpa.free(scales);
         return .{ .words = words, .scales = scales, .biases = try gpa.alloc(u16, scales.len) };
     }
@@ -96,7 +101,7 @@ const Loader = struct {
 };
 
 /// The MTP layer's experts: fused gate_up_proj split into the pair table, down apart, the shared expert last.
-fn experts(l: *Loader) !engine.Mlp {
+fn routedMlp(l: *Loader) !engine.Mlp {
     const g = l.e.g;
     const ni = g.intermediate;
     const d = g.hidden;
@@ -142,31 +147,46 @@ fn experts(l: *Loader) !engine.Mlp {
     return .{ .moe = .{ .router = router, .experts = .{ .format = .affine4, .up = pair, .down = down, .width = ni, .dims = d, .experts = g.experts + 1, .swiglu = true } } };
 }
 
+/// A dense checkpoint's BF16 MTP SwiGLU, packed to the affine-4 tables used by the drafter.
+fn mlp(l: *Loader) !engine.Mlp {
+    const g = l.e.g;
+    if (g.moe()) return routedMlp(l);
+    const p = "mtp.layers.0.mlp.";
+    return .{ .dense = .{
+        .gate = try l.linear(p ++ "gate_proj.weight", g.intermediate, g.hidden),
+        .up = try l.linear(p ++ "up_proj.weight", g.intermediate, g.hidden),
+        .down = try l.linear(p ++ "down_proj.weight", g.hidden, g.intermediate),
+    } };
+}
+
 /// The `mtp.*` tensors of the checkpoint in `dir` into the same tables `mtp.load` packs from mtp-4bit.safetensors.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mtp.Weights {
     const g = e.g;
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
     defer core.checkpoint.cache.close(&ck);
     if (!ck.has("mtp.fc.weight")) return error.NoMtpLayer;
-    std.log.info("qwen3.6 mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)", .{});
-    var w: mtp.Weights = .{ .arena = try DeviceBuffer.alloc(e.d, mtp.total(g)), .fc_e = undefined, .fc_h = undefined, .norm_e = 0, .norm_h = 0, .input_norm = 0, .post_norm = 0, .q_norm = 0, .k_norm = 0, .norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined, .mlp = undefined };
+    std.log.info("qwen mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)", .{});
+    var w: mtp.Weights = .{ .arena = try DeviceBuffer.alloc(e.d, try mtp.total(g)), .fc_e = undefined, .fc_h = undefined, .norm_e = 0, .norm_h = 0, .input_norm = 0, .post_norm = 0, .q_norm = 0, .k_norm = 0, .norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined, .mlp = undefined };
     errdefer w.arena.free();
     try w.arena.fill8(0, null);
-    var stage = try DeviceBuffer.alloc(e.d, mtp.stageBytes(g));
+    var stage = try DeviceBuffer.alloc(e.d, try mtp.stageBytes(g));
     defer stage.free();
     const aw = g.attnWidth();
     const kvw = g.kv_heads * head_dim;
     // the largest matrix put stages: fc's halves, q (with its gate), k and v, o, or an expert
-    const values = try gpa.alloc(f32, g.hidden * @max(g.hidden, 2 * aw, kvw, g.intermediate));
+    const values_count = try mtp.checkedMul(g.hidden, @max(g.hidden, try mtp.checkedMul(2, aw), kvw, g.intermediate));
+    _ = try mtp.checkedMul(values_count, @sizeOf(f32));
+    const values = try gpa.alloc(f32, values_count);
     defer gpa.free(values);
     var l: Loader = .{ .gpa = gpa, .e = e, .w = &w, .ck = &ck, .stage = &stage, .values = values };
     const fc = try ck.expect("mtp.fc.weight", .bf16, &.{ g.hidden, 2 * g.hidden });
-    const cut = try gpa.alloc(u8, g.hidden * g.hidden * 2);
+    const cut_bytes = try mtp.checkedMul(try mtp.checkedMul(g.hidden, g.hidden), 2);
+    const cut = try gpa.alloc(u8, cut_bytes);
     defer gpa.free(cut);
     columns(cut, fc.bytes, g.hidden, 2 * g.hidden, 0, g.hidden); // the embedding's half first, as fc reads them
-    w.fc_e = (try l.pack(cut, g.hidden, g.hidden)).a4;
+    w.fc_e = try l.pack(cut, g.hidden, g.hidden);
     columns(cut, fc.bytes, g.hidden, 2 * g.hidden, g.hidden, g.hidden);
-    w.fc_h = (try l.pack(cut, g.hidden, g.hidden)).a4;
+    w.fc_h = try l.pack(cut, g.hidden, g.hidden);
     w.norm_e = try l.norm("mtp.pre_fc_norm_embedding.weight", g.hidden);
     w.norm_h = try l.norm("mtp.pre_fc_norm_hidden.weight", g.hidden);
     w.norm = try l.norm("mtp.norm.weight", g.hidden);
@@ -178,7 +198,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mt
     w.k = try l.linear("mtp.layers.0.self_attn.k_proj.weight", kvw, g.hidden);
     w.v = try l.linear("mtp.layers.0.self_attn.v_proj.weight", kvw, g.hidden);
     w.o = try l.linear("mtp.layers.0.self_attn.o_proj.weight", g.hidden, aw);
-    w.mlp = try experts(&l);
+    w.mlp = try mlp(&l);
     return w;
 }
 

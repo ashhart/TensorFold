@@ -33,7 +33,7 @@ const Backend = struct {
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *Cache) = .empty, // streams beside: none decodes
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, void) = .empty,
     prefix: ?struct {
-        pub fn keep(_: @This(), _: *Cache, _: []const u32, _: usize) !void {}
+        pub fn keep(_: @This(), _: *Cache, _: []const u32, _: ?u64, _: usize) !void {}
     } = null,
     pages: ?struct {
         pub fn log(_: @This(), _: usize, _: u32) void {}

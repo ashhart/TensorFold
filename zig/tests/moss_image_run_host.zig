@@ -36,6 +36,12 @@ const Backend = struct {
         };
         pub const Model = @import("moss_image_run_host.zig").Model;
         pub const Prompt = @import("moss_image_run_host.zig").Prompt;
+        pub const noise = struct {
+            /// The driver's --seed path without a torch stream: a fixed ramp, so a seeded run still runs.
+            pub fn latents(_: std.mem.Allocator, _: u64, _: usize, _: usize, out: []f32) !void {
+                for (out, 0..) |*v, i| v.* = @floatFromInt(i);
+            }
+        };
     };
     pub fn seconds() f64 {
         return 0;

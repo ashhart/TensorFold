@@ -58,3 +58,16 @@ test "incremental reply text: a long reply decodes the previous chunk and the ne
     try std.testing.expectEqualStrings(want.items, inc.text.items);
     try std.testing.expect(t.longest <= 4);
 }
+
+test "reply text: an optional think block, a reply that opens one splits, a bare reply is all answer" {
+    const m: reply_text.Markers = .{ .open = "", .close = "</think>", .optional = true };
+    for ([_]struct { []const u8, bool, []const u8, []const u8 }{
+        .{ "<think>\nAdd them.\n</think>\n\n42", true, "Add them.\n", "42" },
+        .{ "17 * 23 = 391.", true, "", "17 * 23 = 391." },
+        .{ "Sure. <tool_ca", false, "", "Sure. " },
+    }) |case| {
+        const got = try reply_text.splitThinking(std.testing.allocator, case[0], case[1], m);
+        try std.testing.expectEqualStrings(case[2], got.reasoning);
+        try std.testing.expectEqualStrings(case[3], got.answer);
+    }
+}

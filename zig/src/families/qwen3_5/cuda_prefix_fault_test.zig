@@ -58,9 +58,9 @@ const World = struct {
         errdefer t.allocator.free(w.ids);
         w.next = try prompt(t.allocator, 9100);
         errdefer t.allocator.free(w.next);
-        const r = try w.x.open(w.ids, 16, 9000, &.{});
+        const r = try w.x.open(w.ids, 16, 9000, &.{}, null);
         defer w.x.gpa.free(r.plan.marks);
-        try w.x.keep(r.cache, w.ids, 4096);
+        try w.x.keep(r.cache, w.ids, null, 4096);
         try t.expect(w.p.close(r.cache));
         try settled(w.p);
         try t.expectEqual(@as(usize, 4096 / page), w.p.pool.census().kept);
@@ -79,7 +79,7 @@ const World = struct {
 
     /// A resume of `next` that succeeds: from the kept 4096, a mark at 8192, its lane closed again.
     fn resumes(w: *World) !void {
-        const r = try w.x.open(w.next, 16, 9100, &.{});
+        const r = try w.x.open(w.next, 16, 9100, &.{}, null);
         defer w.x.gpa.free(r.plan.marks);
         try t.expectEqual(@as(u32, 4096), r.plan.from);
         try t.expectEqualSlices(u32, &.{8192}, r.plan.marks);
@@ -96,7 +96,7 @@ test "Qwen share faults: each allocation of a resume failing in turn leaves the 
     var i: usize = 0;
     while (true) : (i += 1) {
         failing.fail_index = failing.alloc_index + i;
-        const r = w.x.open(w.next, 16, 9100, &.{}) catch |err| {
+        const r = w.x.open(w.next, 16, 9100, &.{}, null) catch |err| {
             try t.expectEqual(error.OutOfMemory, err);
             try settled(w.p);
             failures += 1;
@@ -120,7 +120,7 @@ test "Qwen share faults: a resume's table upload or state copy failing leaves th
     var n: usize = 1;
     while (true) : (n += 1) {
         D.fail_wait_in = n;
-        const r = w.x.open(w.next, 16, 9100, &.{}) catch |err| {
+        const r = w.x.open(w.next, 16, 9100, &.{}, null) catch |err| {
             try t.expectEqual(error.NotReady, err);
             try t.expectEqual(@as(usize, 0), D.fail_wait_in);
             try settled(w.p);
@@ -143,14 +143,14 @@ test "Qwen share faults: a resume without a lane or a promise leaves the pages s
     // every lane open: the resume's adopted pages go back
     const a = try w.p.open(100, 16);
     const b = try w.p.open(100, 16);
-    try t.expectError(error.LaneMemory, w.x.open(w.next, 16, 9100, &.{}));
+    try t.expectError(error.LaneMemory, w.x.open(w.next, 16, 9100, &.{}, null));
     try t.expect(w.p.close(b));
     try t.expect(w.p.close(a));
     try settled(w.p);
     // every free page promised elsewhere: the store gives back no page the resume holds, and the promise fails
     var hog: @import("core").kv_pool.Lease = .{};
     try w.p.pool.promise(&hog, w.p.pool.available());
-    try t.expectError(error.LaneMemory, w.x.open(w.next, 16, 9100, &.{}));
+    try t.expectError(error.LaneMemory, w.x.open(w.next, 16, 9100, &.{}, null));
     w.p.pool.finish(&hog);
     try settled(w.p);
     try w.resumes();
@@ -171,13 +171,26 @@ test "Qwen share faults: a keep whose swapped table fails to upload leaves the l
     const mine = try t.allocator.dupe(u32, lane.lease.ids.items[0 .. 4096 / page]);
     defer t.allocator.free(mine);
     D.fail_wait_in = 2; // keep's own wait, then the swap's table upload
-    try t.expectError(error.QwenLaneTable, w.x.keep(c, w.ids, 4096));
+    try t.expectError(error.QwenLaneTable, w.x.keep(c, w.ids, null, 4096));
     try t.expectEqualSlices(u32, mine, lane.lease.ids.items[0..mine.len]);
     for (mine) |id| try t.expect(w.p.pool.leased[id] == 1);
     // a keep that uploads: the lane maps the store's pages and its own copies go back
-    try w.x.keep(c, w.ids, 4096);
+    try w.x.keep(c, w.ids, null, 4096);
     for (mine, lane.lease.ids.items[0..mine.len]) |own, now| try t.expect(own != now and w.p.pool.refs[own] == 0);
     try t.expect(w.p.close(c));
     try settled(w.p);
+    try w.deinit();
+}
+
+test "Qwen share faults: an unsalted snapshot is not restored under a salt" {
+    var w: World = undefined;
+    try w.init(t.allocator);
+    const r = try w.x.open(w.next, 16, 9100, &.{}, 1);
+    const gpa = w.x.gpa;
+    defer gpa.free(r.plan.marks);
+    try t.expectEqual(@as(u32, 0), r.plan.from);
+    try t.expect(w.p.close(r.cache));
+    try settled(w.p);
+    try w.resumes(); // the unsalted request still resumes its own state
     try w.deinit();
 }

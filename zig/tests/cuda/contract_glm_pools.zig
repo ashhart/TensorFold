@@ -107,7 +107,7 @@ pub const Pools = struct {
         const x = self.shape;
         const t = glm.index.tile(x.n);
         var a: cuda.Args = .{};
-        inline for (.{ self.in, self.out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), @as(u64, 0) }) |v| a.add(v);
+        inline for (.{ self.in, self.out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), @as(u64, 0), @as(c_int, sparse.pool) }) |v| a.add(v);
         try cuda.launch.launch(self.fast, .{ .grid = .{ .x = @intCast(x.rows) }, .block = .{ .x = glm.index.pool_threads } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -116,7 +116,7 @@ pub const Pools = struct {
     pub fn replaced(self: *Pools) ![]const u8 {
         const x = self.shape;
         var a: cuda.Args = .{};
-        inline for (.{ self.in, self.base, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)) }) |v| a.add(v);
+        inline for (.{ self.in, self.base, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, sparse.pool) }) |v| a.add(v);
         try cuda.launch.launch(self.narrow, .{ .grid = .{ .x = @intCast(x.rows) }, .block = .{ .x = 128 } }, self.rig.s, &a);
         return self.rig.bytes(self.base, self.outBytes());
     }

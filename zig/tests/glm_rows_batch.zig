@@ -64,7 +64,7 @@ pub fn headsCheck(g: *const Gpu, mm: affine_mm.Pipes, bits: u8, n: usize, k: usi
             bs[3].slice(u16, m * k)[i * k ..][0..k],
             bs[0].slice(u16, m * ldx)[i * ldx + h * k ..][0..k],
         );
-        try g.run(mmDense, .{ mm, w.part(h, nh), ref(bs[3]), ref(bs[1]), ref(bs[4]), @as(u32, m) });
+        try g.run(mmDense, .{ mm, g.p.mm_bm, w.part(h, nh), ref(bs[3]), ref(bs[1]), ref(bs[4]), @as(u32, m) });
         for (0..m) |i| try eql(all[(i * nh + h) * n ..][0..n], bs[4].slice(u16, m * n)[i * n ..][0..n]);
         t.pairs += m * n;
     }
@@ -117,7 +117,7 @@ pub fn splitMmCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8
     for (ms[0..ns.len], 0..) |x, i| {
         const run = q.run(i);
         if (wide.mm(&g.p, x.q) != null and run.n % 64 == 0) {
-            try g.run(mmDense, .{ wide.mm(&g.p, x.q).?, x.q, ref(bs[0]), ref(bs[1]), ref(bs[3]), @as(u32, m) });
+            try g.run(mmDense, .{ wide.mm(&g.p, x.q).?, g.p.mm_bm, x.q, ref(bs[0]), ref(bs[1]), ref(bs[3]), @as(u32, m) });
             on_mm += 1;
         } else try g.run(
             dense,

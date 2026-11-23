@@ -1,5 +1,7 @@
 //! The landed CUDA forward with optional learner taps and pocket contributions.
+const std = @import("std");
 const E = @import("cuda_engine.zig");
+const tap_window = @import("cuda_cache.zig").tap_window;
 const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
@@ -19,6 +21,34 @@ const rowanc_at = E.Engine.rowanc_at;
 const params_at = E.Engine.params_at;
 const mpos_at = E.Engine.mpos_at;
 const src_at = E.Engine.src_at;
+
+pub fn promptTapKeepRows(prompt: bool, total: usize, mode: E.PromptTapMode, tap_from: ?usize) c_int {
+    if (!prompt) return 0;
+    if (mode == .mtp_direct) return 1; // The final prompt row is fetched after the first target token.
+    if (mode == .mtp) if (tap_from) |from| {
+        if (from > 0) return @intCast(total - from);
+    };
+    return switch (mode) {
+        // Shared tap consumers may need any live ring row; only MTP narrows to its computed prompt suffix.
+        .normal => 0,
+        .mtp => @intCast(tap_window + 1),
+        .mtp_direct => 1,
+        .none => 0,
+    };
+}
+
+test "MTP tap boundary includes the first of its 2048 rows plus the separately absorbed prompt row" {
+    const keep: usize = @intCast(promptTapKeepRows(true, 4096, .mtp, null));
+    try std.testing.expectEqual(@as(usize, 2049), keep);
+    try std.testing.expectEqual(@as(usize, 6143), 8192 - keep);
+    try std.testing.expectEqual(@as(usize, 2047), 4096 - keep);
+    try std.testing.expectEqual(@as(c_int, 1145), promptTapKeepRows(true, 4096, .mtp, 2951));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(true, 4096, .normal, null));
+    try std.testing.expectEqual(@as(c_int, 1), promptTapKeepRows(true, 4096, .mtp_direct, null));
+    try std.testing.expectEqual(@as(c_int, 1), promptTapKeepRows(true, 4096, .mtp_direct, 2048));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(false, 4096, .mtp, null));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(true, 4096, .none, null));
+}
 
 pub fn promptMoe(prompt: bool, rows: usize) bool {
     return prompt and rows > prompt_moe_cutoff;
@@ -53,7 +83,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
     const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
     const unread = prompt and ends and shape.unread; // nothing reads this chunk: its last layer stops after its keys and values
-    const tail_at: ?usize = if (prompt and ends and !unread) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
+    const tail_at: ?usize = if (prompt and ends and !unread) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows, shape.taps, shape.tap_from) else null;
     for (e.layers, 0..) |l, i| {
         const last_layer = i + 1 == e.layers.len;
         const tail = last_layer and tail_at != null;
@@ -144,7 +174,8 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
-            try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
+            const keep_rows = promptTapKeepRows(prompt, total, e.mtp_prompt.mode, shape.tap_from);
+            try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), keep_rows, t_params });
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
@@ -179,7 +210,6 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) 
 }
 
 test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row boundary" {
-    const std = @import("std");
     try std.testing.expectEqual(@as(usize, 64), E.most_window);
     var mismatches: usize = 0;
     for ([_]usize{ 16, 17, 32, 64, 65 }) |rows| {
@@ -197,13 +227,12 @@ test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row bou
 }
 
 test "prompt MoE precision: every prompt piece through 128 and admitted verify width keeps its recipe" {
-    const std = @import("std");
     for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
     for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
 }
 
 /// The same scan selected by body, exposed for host launch-contract fixtures.
-pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+pub fn deltaScan(e: anytype, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
     const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
         1 => e.fns.gdn_slots_1,
         2 => e.fns.gdn_slots_2,
