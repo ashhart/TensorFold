@@ -10,12 +10,19 @@ pub const Tier = enum { base, pro, max, ultra };
 /// What the cutover is keyed on: the GPU generation (applegpu_gN) and the tier its name gives (null: none read).
 pub const Chip = struct { generation: u32, tier: ?Tier = null };
 
-/// The chip of a device's generation and name: "Max", "Ultra" or "Pro" as its name's last word, else base.
+/// A device's chip: "Apple M<n>" is base, "Apple M<n> Pro|Max|Ultra" that tier; any other name keys no tier.
 pub fn chipOf(generation: u32, name: []const u8) Chip {
-    const last = name[if (std.mem.lastIndexOfScalar(u8, name, ' ')) |i| i + 1 else 0..];
-    const tiers = [_]struct { []const u8, Tier }{ .{ "Max", .max }, .{ "Ultra", .ultra }, .{ "Pro", .pro } };
-    for (tiers) |t| if (std.mem.eql(u8, last, t[0])) return .{ .generation = generation, .tier = t[1] };
-    return .{ .generation = generation, .tier = if (std.mem.startsWith(u8, name, "Apple M")) .base else null };
+    var words = std.mem.tokenizeScalar(u8, name, ' ');
+    const apple = words.next() orelse "";
+    const model = words.next() orelse "";
+    const tier = words.next();
+    const unknown: Chip = .{ .generation = generation };
+    if (!std.mem.eql(u8, apple, "Apple") or model.len < 2 or model[0] != 'M' or words.next() != null) return unknown;
+    for (model[1..]) |ch| if (!std.ascii.isDigit(ch)) return unknown;
+    const t = tier orelse return .{ .generation = generation, .tier = .base };
+    const tiers = [_]struct { []const u8, Tier }{ .{ "Pro", .pro }, .{ "Max", .max }, .{ "Ultra", .ultra } };
+    for (tiers) |x| if (std.mem.eql(u8, t, x[0])) return .{ .generation = generation, .tier = x[1] };
+    return unknown;
 }
 
 /// Never: the wide kernels lose at every window to 32 rows.
@@ -76,9 +83,11 @@ test "an M5 Max keeps the narrow kernel to 32 rows, at 2 bits wide only at 32 (#
 test "the chip key reads the tier from the device name, and nothing it does not know" {
     try std.testing.expectEqual(Chip{ .generation = 17, .tier = .ultra }, chipOf(17, "Apple M5 Ultra"));
     try std.testing.expectEqual(Chip{ .generation = 17, .tier = .pro }, chipOf(17, "Apple M5 Pro"));
+    try std.testing.expectEqual(Chip{ .generation = 17, .tier = .max }, chipOf(17, "Apple M5 Max "));
     try std.testing.expectEqual(Chip{ .generation = 17, .tier = .base }, chipOf(17, "Apple M5"));
-    try std.testing.expectEqual(Chip{ .generation = 17, .tier = null }, chipOf(17, "Some GPU"));
-    try std.testing.expectEqual(Chip{ .generation = 17, .tier = null }, chipOf(17, ""));
+    // names it does not know key no tier (REV75 2): a new tier word, a suffix, a non-M chip, another vendor
+    for ([_][]const u8{ "Apple M5 Extreme", "Apple M5 Max (40-core)", "Apple Mx", "Apple A19 Pro", "AMD Radeon Pro", "Foo Max", "Apple Paravirtual device", "Some GPU", "" }) |name|
+        try std.testing.expectEqual(Chip{ .generation = 17, .tier = null }, chipOf(17, name));
 }
 
 test "tf-row-cutover prints the key it uses and the table's cutover at each width" {
