@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const cfg = @import("cuda_config.zig");
 const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
+const ag = @import("cuda_argmax_graph.zig");
 const snap = @import("cuda_snap.zig");
 const cv = @import("cuda_vision.zig");
 const be = lanes.backend;
@@ -100,6 +101,7 @@ pub const Gemma = struct {
             b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) cfg.vocab * 2 else @sizeOf(cuda.sample.Rule));
             made += 1;
         }
+        try ag.enable(d, m); // TF_GEMMA4_ARGMAX_GRAPH
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
@@ -247,14 +249,7 @@ pub const Gemma = struct {
 
     /// Entries [at, at + out.len) as tokens, after the stream's work; a pick over non-finite logits is an error.
     fn tokens(x: *Gemma, at: usize, out: []u32) !void {
-        try x.s.synchronize();
-        var picks: [round_rows]Pick = undefined;
-        try x.tok.download(at * 4, std.mem.sliceAsBytes(out));
-        try x.picks.download(at * @sizeOf(Pick), std.mem.sliceAsBytes(picks[0..out.len]));
-        for (out, picks[0..out.len], x.greedy[at..][0..out.len]) |*t, p, g| if (g) {
-            if (p.nonfinite != 0) return error.NonFiniteLogits;
-            t.* = p.token;
-        };
+        return ag.tokens(x, at, out);
     }
 
     pub fn saveState(x: *Gemma, owner: ?*anyopaque, at: u32) !*snap.Saved {
@@ -492,12 +487,16 @@ pub const Gemma = struct {
         if (total > round_rows) return error.RoundTooWide;
         // before the forward: a refusal after it would strand its rows
         for (windows) |w| if (w.masks.len != 0 and w.masks.len != w.rows() * words) return error.InvalidGrammarMasks;
+        const fold = ag.fold(x, windows); // every row's argmax in the target graph, into the round's picks
+        x.m.argmax_to = if (fold) x.picks.ptr + ring * @sizeOf(Pick) else 0;
+        defer x.m.argmax_to = 0;
         try x.run(chains, false, 0, total);
+        if (fold) @memset(x.greedy[ring..][0..total], true);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
             l.tap = .{ .row = at, .start = l.base, .rows = l.rows.items.len, .gen = x.gen };
-            try x.drawRows(l, x.m.s.logits, at, l.rows.items.len, w.positions[0], ring + at, i, w.masks, at);
+            if (!fold) try x.drawRows(l, x.m.s.logits, at, l.rows.items.len, w.positions[0], ring + at, i, w.masks, at);
             at += l.rows.items.len;
         }
         var got: [round_rows]u32 = undefined;
