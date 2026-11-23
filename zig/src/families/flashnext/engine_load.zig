@@ -43,7 +43,8 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
     return loadConfigured(gpa, io, model_dir, dump_dir, speed_up, .{});
 }
 
-pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, window: fz.WindowSettings) !*Engine {
+pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, requested_window: fz.WindowSettings) !*Engine {
+    var window = requested_window;
     try @import("env_validate.zig").startup();
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
@@ -52,7 +53,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     const memory = @import("flashnext_memory");
     const weights = try memory.weightBytes(@import("core").checkpoint_host, gpa, io, model_dir);
     var inventory = try memory.weights_plan.read(@import("core").checkpoint_host.Checkpoint, @import("core").quant.mlx, gpa, io, model_dir);
-    const placement = try @import("fsr_layout.zig").of(inventory, window);
+    const source_inventory = inventory;
+    var placement = try @import("fsr_layout.zig").of(inventory, window);
     inventory.raw = placement.raw;
     const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
     const route = try @import("pack_route.zig").plan(gpa, io, model_dir, dump_dir, home);
@@ -65,10 +67,20 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     errdefer device.deinit();
     const existing = device.allocated();
     const base_extra = try std.math.add(u64, requested, existing);
-    const plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
+    var plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
+    if (plain.forPhase(route.needs_build) > limit and window.ssd_experts != null and !paired) {
+        const fitted = try @import("fsr_layout.zig").fit(source_inventory, window, .{ .limit = limit, .existing = existing, .extra = window.startup_extra, .needs_build = route.needs_build, .paired = paired });
+        if (fitted.ssd_experts != window.ssd_experts) {
+            std.log.info("flash next: requested SSD expert maximum {d} bytes exceeds the load ceiling; using {d} bytes", .{ window.ssd_experts.?, fitted.ssd_experts.? });
+            window = fitted;
+            placement = try @import("fsr_layout.zig").of(source_inventory, window);
+            inventory.raw = placement.raw;
+            plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
+        }
+    }
     const cache = @import("rotary_cache.zig");
     const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
     const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
