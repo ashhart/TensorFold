@@ -5,6 +5,10 @@ pub fn tests(b: *std.Build, api: *std.Build.Module, all: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{filter} }));
     b.step("test-rows-host", "Spill lifecycle and file exactness without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    // the row projection's cutover table and chip key, without Metal (#3396)
+    const cutover = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_cutover.zig"), .target = b.graph.host, .optimize = .debug }) }));
+    b.step("test-row-cutover-host", "The row kernels' cutover by chip: each key, unlisted chips, tf-row-cutover's key line").dependOn(&cutover.step);
+    all.dependOn(&cutover.step);
     const scale = b.createModule(.{
         .root_source_file = b.path("zig/src/core/rows_startup_scale_test.zig"),
         .target = b.graph.host,
