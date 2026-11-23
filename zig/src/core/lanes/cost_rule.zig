@@ -42,7 +42,9 @@ pub fn interleaveWidths(windows: anytype, observer: anytype, ms: []f64, keep: bo
     for (0..ms.len) |i| _ = try windows.time(i);
     if (!keep) @memset(ms, std.math.inf(f64));
     for (0..reps) |pass| {
-        for (ms, 0..) |*m, i| {
+        for (0..ms.len) |slot| {
+            const i = if (pass % 2 == 0) ms.len - 1 - slot else slot;
+            const m = &ms[i];
             const measured = try windows.time(i);
             if (measured > 0 and std.math.isFinite(measured)) m.* = @min(m.*, measured);
             if (i % reps == pass) try observer.afterWidth(i);
