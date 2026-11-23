@@ -13,7 +13,17 @@ pub fn on() bool {
 
 /// Where a 17-32-row round keeps each row's bits: GB10, one rank, non-latent, not Bolt, no e4m3/bf16 experts, no slide.
 pub fn allowed(c: Config, gb10: bool, slide: bool) bool {
-    return gb10 and c.latent == 0 and !c.bolt and !c.ck and !c.salm and c.world == 1 and !slide;
+    return refusal(c, gb10, slide) == null;
+}
+
+/// Why the switch leaves rounds at 8 streams here (null: it applies), for the line the engine logs when it is set.
+pub fn refusal(c: Config, gb10: bool, slide: bool) ?[]const u8 {
+    if (!gb10) return "only GB10's affine-4 has the 32-row verify";
+    if (c.latent > 0) return "a latent checkpoint keeps its own 32-row window";
+    if (c.bolt or c.ck or c.salm) return "Bolt, e4m3 checkpoint rows and bf16 experts are not proved at 17-32 rows";
+    if (c.world != 1) return "it runs on one rank only";
+    if (slide) return "Sliding Weights route lessons to 8 streams a pass";
+    return null;
 }
 
 /// Whether a shared window of `rows` rows fits (its streams' Mamba rows stay at windowRows each, the scan's stride).
@@ -109,4 +119,16 @@ test "wide rounds: the shared-widths check's rounds reach 17 to 32 rows with the
             if (switched) try std.testing.expect(widest > window); // the check now sends the rounds the switch allows
         }
     }
+}
+
+test "wide rounds: the switch set where it cannot apply says why, so it is never silently ignored (REV60 7)" {
+    try std.testing.expect(refusal(small, true, false) == null);
+    try std.testing.expect(refusal(small, false, false) != null);
+    try std.testing.expect(refusal(small, true, true) != null);
+    inline for (.{ "bolt", "ck", "salm" }) |f| {
+        var x: Config = small;
+        @field(x, f) = true;
+        try std.testing.expect(refusal(x, true, false) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_engine.zig"), "if (wide.on()) if (wide.refusal(") != null);
 }

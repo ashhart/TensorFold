@@ -158,7 +158,9 @@ pub const Engine = struct {
             e.side.join.deinit();
         };
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
-        e.c.wide_rounds = @import("cuda_wide.zig").on() and @import("cuda_wide.zig").allowed(e.c, e.k.gb10, opts.slide); // before any buffer
+        const wide = @import("cuda_wide.zig");
+        e.c.wide_rounds = wide.on() and wide.allowed(e.c, e.k.gb10, opts.slide); // before any buffer
+        if (wide.on()) if (wide.refusal(e.c, e.k.gb10, opts.slide)) |why| std.log.warn("TF_NEMOTRON_WIDE_ROUNDS is set but rounds stay at 8 streams: {s}", .{why});
         errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
