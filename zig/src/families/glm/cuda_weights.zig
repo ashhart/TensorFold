@@ -384,7 +384,7 @@ const Loader = struct {
         var routed: cuda.experts.Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
         var x3: ?exl3.Experts = null;
         if (c.exl3) { // the MTP layer's experts too
-            x3 = try exl3.load(L, i, count, d, c.moe_inter, cut);
+            x3 = try exl3.load(L, i, count, d, c.moe_inter, cut, c.dsa);
         } else routed = try L.nvfp4Experts(i);
         const sh = L.w.share.shared;
         const sw: []const formats.Format = if (i == c.layers) &.{ .bf16, .fp8_pb, .mxfp8 } else &.{ .bf16, .fp8_pb }; // MTP's MXFP8
