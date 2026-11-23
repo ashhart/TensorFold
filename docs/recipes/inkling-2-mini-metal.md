@@ -125,7 +125,41 @@ Plain and drafted greedy replies are identical. These token hashes (the server's
 
 Native decode is ahead of the reference with and without the drafter. Cold prefill is 0.72 to 0.87 of the reference's
 rate and falls more with the prompt's length (0.87 at 8,192 tokens, 0.72 at 65,536). Not measured here: M1, M2, a 36 GB
-Mac, images served, a quality suite.
+Mac, a quality suite (benchmarks of task accuracy).
+
+Fidelity against MLX on the original checkpoint (`fidelity/` in the receipt; plain native server, `--no-drafts`, a binary
+copied from the PR checkout's `zig-out`, SHA-256 `fa04538b…` [INFERENCE: built from the head `57de097873`], one model
+process at a time). Seven text prompts (Python and Zig source, prose, a maths problem, a three-language prompt, and
+documents of 7,998 and 31,998 tokens), each continued by MLX's own greedy 256 tokens. The native backend has no
+`prompt_logprobs` (HTTP 400), so the continuation was forced by restarts: native greedy from the prompt plus MLX's ids
+so far, and at the first token that differs, MLX's token is forced and the request restarts after it (prompt token counts
+checked). Result: native's top-1 equals MLX's at 1,762 of 1,792 positions (98.33 %; per prompt 95.7 % to 99.6 %, the lowest
+on the Python source), the mean absolute difference of the forced token's logprob over agreeing positions is 0.005 to
+0.028 (signed mean 0.0002 to 0.0021, no trend across the four 64-token blocks of the continuation, largest single difference 0.14 to 0.53), and
+all 30 disagreements are near ties in MLX (top-1 minus top-2 at most 0.386 nats, median 0.090, 15 under 0.1). The first
+free greedy divergence is at token 14, 43, 47, 57, 57, 0 and 1 of the seven prompts. As a control, MLX against itself with
+`prefill_step_size` 256 instead of 2048 diverges at token 14, 43 and 51 on the first three prompts (and not on the other
+two), at the same near ties. The comparison is agreement under BF16 rounding order, not equality; the
+logits themselves, per layer, were not compared here.
+
+Images served (`--vision`, `--context 8192 --parallel 1 --no-drafts --no-thinking`, the pinned libjpeg-turbo release built from its
+release tarball, greedy, 160 tokens, streamed; PNG and JPEG; Pillow-made images, text, bar chart, shapes, a gradient
+scene, a 1792 x 1344 invoice). Native read "TensorFold 4821 / Metal on Apple M4 Pro", the five bar values and "Thursday ...
+9", red circle, blue square and green triangle, the scene's sun, mountains and sea, and (inside the 160-token thinking text,
+cut before the final answer) "INVOICE No. 20931" and "TOTAL DUE: 1034.00 EUR", from both PNG and JPEG. `mlx_lm.server` of
+the same checkpoint serves images too (no mlx_vlm needed) and read the same content; the texts differ in wording after a
+few dozen characters, as near-tie noise does. Time to first token, median of two requests after a warm-up, one image:
+
+| Image (prompt tokens) | Native | MLX |
+| --- | --- | --- |
+| 320 x 120 text (56) | 0.37 s | 0.55 to 0.99 s |
+| 512 x 512 shapes (197) | 0.88 s | 0.71 s |
+| 640 x 420 chart (208) | 0.93 s | 0.73 s |
+| 1024 x 768 scene (546) | 3.5 to 3.9 s | 1.7 s |
+| 1792 x 1344 invoice (1,561) | 17.3 to 18.1 s | 4.8 to 5.1 s |
+
+Native's time to first token on larger images is 2.3 to 3.6 times MLX's on this M4 Pro (no tensor units); the split
+between the image tower and the text prefill was not profiled.
 
 Sampled decode, `bench_concurrent --temperatures 0.7 --seed 1234 --alone --serial --levels 1,4 --tokens 256 --reps 3`
 (aggregate tokens a second), `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, on an idle machine, the
@@ -177,6 +211,8 @@ host-test line at `e90ecce19a`.
 - JPEG images need the pinned libjpeg-turbo release (the decoder is core's picture decoder; the version and where the
   server looks are in [image input](../vision.md#jpeg-input)); without it each JPEG is refused by name and PNG and text
   still serve. Images need `--vision`.
+- The native backend refuses `prompt_logprobs` (HTTP 400, "not supported by this model or backend"); `logprobs` on a
+  completion or chat reply work (`fidelity/fid_native.py` uses them).
 - Replies carry the model's raw delimiters (`<|message_model|><|content_thinking|>` and the like): they are not split
   into `reasoning_content`.
 - A DSpark server refuses `--prompt-cache-gib`: the draft head keeps per-stream state a kept prompt state does not

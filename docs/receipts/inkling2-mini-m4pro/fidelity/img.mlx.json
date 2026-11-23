@@ -1,0 +1,240 @@
+[
+ {
+  "image": "text-small.png",
+  "question": "What text is written in this image? Answer with the text only.",
+  "runs": [
+   {
+    "ttft": 0.9923551669926383,
+    "total": 4.035185709013604,
+    "text": "<|message_model|><|content_thinking|>The user wants the text in the image. I can see \"TensorFold 4821\" in large black text and \"Metal on Apple M4 Pro\" in smaller blue text. Need answer with text only. Preserve line break likely. No extra explanation.<|end_message|><|message_model|><|content_text|>TensorFold 4821\nMetal on Apple M4 Pro<|end_message|>",
+    "usage": {
+     "prompt_tokens": 56,
+     "completion_tokens": 72,
+     "total_tokens": 128,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 0.5493456249823794,
+    "total": 3.512117040983867,
+    "text": "<|message_model|><|content_thinking|>The user wants the text in the image. I can see \"TensorFold 4821\" in large black text and \"Metal on Apple M4 Pro\" in smaller blue text. Need answer with text only. Preserve line break likely. No extra explanation.<|end_message|><|message_model|><|content_text|>TensorFold 4821\nMetal on Apple M4 Pro<|end_message|>",
+    "usage": {
+     "prompt_tokens": 56,
+     "completion_tokens": 72,
+     "total_tokens": 128,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "shapes.png",
+  "question": "List the shapes in this image and their colors.",
+  "runs": [
+   {
+    "ttft": 0.7061899589607492,
+    "total": 3.5072885419940576,
+    "text": "<|message_model|><|content_thinking|>The user wants me to list shapes and colors in the image. I can see: a red circle in the upper left, a blue square in the upper right, and a green triangle in the lower center. Let me provide a clear answer.<|end_message|><|message_model|><|content_text|>- Red circle\n- Blue square\n- Green triangle<|end_message|>",
+    "usage": {
+     "prompt_tokens": 197,
+     "completion_tokens": 67,
+     "total_tokens": 264,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 0.7077629999839701,
+    "total": 3.5161425410187803,
+    "text": "<|message_model|><|content_thinking|>The user wants me to list shapes and colors in the image. I can see: a red circle in the upper left, a blue square in the upper right, and a green triangle in the lower center. Let me provide a clear answer.<|end_message|><|message_model|><|content_text|>- Red circle\n- Blue square\n- Green triangle<|end_message|>",
+    "usage": {
+     "prompt_tokens": 197,
+     "completion_tokens": 67,
+     "total_tokens": 264,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "chart.png",
+  "question": "Which weekday has the highest sales, and what is its value?",
+  "runs": [
+   {
+    "ttft": 0.7384419169975445,
+    "total": 3.8495621669571847,
+    "text": "<|message_model|><|content_thinking|>The user is asking about a bar chart. Let me read the values:\n- Mon: 3\n- Tue: 7\n- Wed: 5\n- Thu: 9\n- Fri: 4\n\nThe highest is Thursday with 9.<|end_message|><|message_model|><|content_text|>Thursday has the highest sales, with a value of 9.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 208,
+     "completion_tokens": 74,
+     "total_tokens": 282,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 0.7349150000372902,
+    "total": 3.8342592080007307,
+    "text": "<|message_model|><|content_thinking|>The user is asking about a bar chart. Let me read the values:\n- Mon: 3\n- Tue: 7\n- Wed: 5\n- Thu: 9\n- Fri: 4\n\nThe highest is Thursday with 9.<|end_message|><|message_model|><|content_text|>Thursday has the highest sales, with a value of 9.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 208,
+     "completion_tokens": 74,
+     "total_tokens": 282,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "chart.jpg",
+  "question": "Which weekday has the highest sales, and what is its value?",
+  "runs": [
+   {
+    "ttft": 0.7343105420004576,
+    "total": 4.079556500015315,
+    "text": "<|message_model|><|content_thinking|>The user is asking about a bar chart showing sales per weekday. Let me read the values:\n- Mon: 3\n- Tue: 7\n- Wed: 5\n- Thu: 9\n- Fri: 4\n\nThe highest value is 9 on Thursday.<|end_message|><|message_model|><|content_text|>Thursday has the highest sales, with a value of 9.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 208,
+     "completion_tokens": 80,
+     "total_tokens": 288,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 0.8015473329578526,
+    "total": 4.272357957961503,
+    "text": "<|message_model|><|content_thinking|>The user is asking about a bar chart showing sales per weekday. Let me read the values:\n- Mon: 3\n- Tue: 7\n- Wed: 5\n- Thu: 9\n- Fri: 4\n\nThe highest value is 9 on Thursday.<|end_message|><|message_model|><|content_text|>Thursday has the highest sales, with a value of 9.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 208,
+     "completion_tokens": 80,
+     "total_tokens": 288,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "scene.jpg",
+  "question": "Describe this image in two sentences.",
+  "runs": [
+   {
+    "ttft": 1.6942144169588573,
+    "total": 7.54367404198274,
+    "text": "<|message_model|><|content_thinking|>The user wants a two-sentence description of the image. Let me analyze: It shows a stylized sunset/sunrise over water with two dark green triangular mountains, a yellow sun on the right, gradient sky from orange at top to light blue near horizon, and deep blue water gradient at bottom. Need concise two sentences. Ensure no claim beyond image. Final only.<|end_message|><|message_model|><|content_text|>A stylized sunset scene shows two dark green triangular mountains rising from a deep blue gradient sea. A bright yellow sun sits low on the right against a sky that fades from orange at the top to pale blue near the horizon.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 546,
+     "completion_tokens": 132,
+     "total_tokens": 678,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 1.6649049160187133,
+    "total": 7.852968041028362,
+    "text": "<|message_model|><|content_thinking|>The user wants a two-sentence description of the image. Let me analyze: It shows a stylized sunset/sunrise over water with two dark green triangular mountains, a yellow sun on the right, gradient sky from orange at top to light blue near horizon, and deep blue water gradient at bottom. Need concise two sentences. Ensure no claim beyond image. Final only.<|end_message|><|message_model|><|content_text|>A stylized sunset scene shows two dark green triangular mountains rising from a deep blue gradient sea. A bright yellow sun sits low on the right against a sky that fades from orange at the top to pale blue near the horizon.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 546,
+     "completion_tokens": 132,
+     "total_tokens": 678,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "invoice-large.jpg",
+  "question": "What is the total due and what is the invoice number?",
+  "runs": [
+   {
+    "ttft": 5.078583375026938,
+    "total": 12.783350625017192,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. I can read directly: INVOICE No. 20931, TOTAL DUE: 1034.00 EUR. But let me verify the total by calculation.\n\nItem 1: qty 2, price 10.50 \u2192 21.00\nItem 2: qty 3, price 20.50 \u2192 61.50\nItem 3: qty 4, price 30.50 \u2192 122.00\nItem 4: qty 5, price 40.50 \u2192 202.50\nItem 5: qty 6, price 50.50 \u2192 303.00\nItem 6: qty ",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 5.0834405409987085,
+    "total": 12.787672290985938,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. I can read directly: INVOICE No. 20931, TOTAL DUE: 1034.00 EUR. But let me verify the total by calculation.\n\nItem 1: qty 2, price 10.50 \u2192 21.00\nItem 2: qty 3, price 20.50 \u2192 61.50\nItem 3: qty 4, price 30.50 \u2192 122.00\nItem 4: qty 5, price 40.50 \u2192 202.50\nItem 5: qty 6, price 50.50 \u2192 303.00\nItem 6: qty ",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "invoice-large.png",
+  "question": "What is the total due and what is the invoice number?",
+  "runs": [
+   {
+    "ttft": 4.801484833005816,
+    "total": 12.221933374996297,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. Let me read the image carefully.\n\nThe image shows:\n\"INVOICE No. 20931\"\n\nItem 1: widget type A qty 2 price 10.50\nItem 2: widget type B qty 3 price 20.50\nItem 3: widget type C qty 4 price 30.50\nItem 4: widget type D qty 5 price 40.50\nItem 5: widget type E qty 6 price 50.50\nItem 6: widget type F qty 7 price 60.50\nItem 7: widget type G qty 8 price 70.50",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 4.830743083031848,
+    "total": 11.914061375020538,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. Let me read the image carefully.\n\nThe image shows:\n\"INVOICE No. 20931\"\n\nItem 1: widget type A qty 2 price 10.50\nItem 2: widget type B qty 3 price 20.50\nItem 3: widget type C qty 4 price 30.50\nItem 4: widget type D qty 5 price 40.50\nItem 5: widget type E qty 6 price 50.50\nItem 6: widget type F qty 7 price 60.50\nItem 7: widget type G qty 8 price 70.50",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ }
+]

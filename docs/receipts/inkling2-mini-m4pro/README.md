@@ -56,9 +56,25 @@ rebuilt arrays matched the run's byte for byte, and MLX and native were sent the
 Request bodies are `{"model": "m", "prompt": TEXT, "max_tokens": 1, "temperature": 0, "stream": false}` with TEXT the
 decoded array; their sizes are in each row's `body_bytes`.
 
+## Fidelity against MLX and images (`fidelity/`)
+
+Measured 2026-11-23 on the same machine, one model process at a time, under `/tmp/tf-gpu.lock`. The native binary was
+copied from the PR checkout's `zig-out/native` (SHA-256 `fa04538bd2219170aedcc01b354d54831d6d219a099cc7fea16a57ca4374d752`;
+built from the head `57de097873` [INFERENCE]). Scripts take paths from their arguments; `run_native.sh` and `run_img.sh`
+read `CKPT BIN WORK PY JPEG` from the environment. The pinned libjpeg-turbo release was built from its release tarball.
+
+| File | What it is |
+| --- | --- |
+| `fid_prompts.py` | Builds the seven text prompts (from this repository's files and docs at the base head; the written `prompts.json` has SHA-256 `bcd9c82e4d4499da1bccf04affaf192c21f496076fd7dac32ddfe37f7f3a4c2b` and is not stored, its token ids are in `mlx.json`; token counts 1,500, 1,500, 900, 70, 62, 7,998, 31,998) |
+| `fid_mlx.py`, `mlx.json`, `mlx.step256.json` | MLX greedy 256 tokens (ids, chosen logprob, top 5) with `prefill_step_size` 2048, and 256 on five prompts (the noise control) |
+| `fid_native.py`, `run_native.sh`, `native.json`, `native.client.txt`, `native.serve.txt` | Native teacher forcing by restarts (no `prompt_logprobs` on this backend) with `--context 65552 --parallel 1 --no-drafts --prompt-cache-gib 0 --no-thinking` |
+| `fid_compare.py`, `compare.txt`, `fid_selfnoise.py`, `selfnoise.txt` | The comparison tables quoted in the recipe, and MLX against itself |
+| `img_make.py`, `img/` | The test images (PIL) |
+| `img_client.py`, `run_img.sh`, `img.native.json`, `img.mlx.json`, `img.*.serve.txt` | Image requests (streamed, two per image, greedy, 160 tokens) against native `--vision` and `mlx_lm.server`, with each reply's text, usage and time to first token |
+
 ## Not in this receipt
 
-- Anything greedy at the head `e90ecce19a`, other chips, a 36 GB Mac, images served, a quality suite.
+- Anything greedy at the head `e90ecce19a`, other chips, a 36 GB Mac, a quality suite (task accuracy).
 - The earlier round-one and round-two results the PR description records; the recipe no longer cites them.
 - The M3 Pro, M4 Max and M5 Ultra figures in the recipe's platforms table: they are contributors' runs, quoted from the
   PR's comments and not reproduced here.

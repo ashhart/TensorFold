@@ -1,0 +1,9 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[transformers] You are using a model of type `inkling2_loop` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+code-python [(0, 1500, 15.2), (15, 1515, 14.5), (16, 1516, 14.7), (102, 1602, 11.2), (110, 1610, 11.0), (139, 1639, 9.8), (144, 1644, 10.7), (159, 1659, 8.6), (176, 1676, 8.5), (180, 1680, 8.8), (184, 1684, 8.6), (193, 1693, 7.7)]
+code-zig [(0, 1500, 14.8), (44, 1544, 13.0), (218, 1718, 6.5)]
+prose [(0, 900, 12.4), (48, 948, 10.6), (52, 952, 11.4), (57, 957, 10.3), (58, 958, 10.7), (62, 962, 10.5), (79, 979, 10.0)]
+math [(0, 70, 9.6), (58, 128, 7.6), (86, 156, 6.8)]
+multilingual [(0, 62, 9.6), (58, 120, 7.6)]
+doc-8k [(0, 7998, 36.1), (1, 7999, 37.1), (97, 8095, 33.6), (149, 8147, 33.0), (216, 8214, 30.6)]
+doc-32k [(0, 31998, 137.7), (2, 32000, 138.3), (33, 32031, 140.0), (140, 32138, 135.1), (163, 32161, 135.2)]
