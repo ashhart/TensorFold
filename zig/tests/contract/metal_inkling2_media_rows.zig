@@ -23,7 +23,7 @@ pub fn name(comptime k: Kind) []const u8 {
 
 pub const controls = .{
     .{ Kind.layer_norm, "inkling2 vision layer norm control repeats channels", "#define IK2V_ROW(i) float(xr[i])", "#define IK2V_ROW(i) float(xr[(i) % 2])", c.Gate.shapes },
-    .{ Kind.softmax, "inkling2 vision softmax control ignores NaN exp", "const float e = metal::precise::exp(s[i] - m);", "const float e = isnan(s[i] - m) ? 0.0f : metal::precise::exp(s[i] - m);", c.Gate.nonfinite },
+    .{ Kind.softmax, "inkling2 vision softmax control ignores NaN exp", "const float e = metal::precise::exp(float(s[i]) - m);", "const float e = isnan(float(s[i]) - m) ? 0.0f : metal::precise::exp(float(s[i]) - m);", c.Gate.nonfinite },
     .{ Kind.mix_rms, "inkling2 draft mix_rms control repeats first tap", "float(fr[ulong(k) * p.width + i]) * float(alpha[k]);\n    s += m * m;", "float(fr[i]) * float(alpha[k]);\n    s += m * m;", c.Gate.shapes },
     .{ Kind.embed_block, "inkling2 draft embed_block control drops the norm weight", "r[i] = bfloat(float(embed_w[i]) * (float(e[i]) * inv));", "r[i] = bfloat(float(e[i]) * inv);", c.Gate.shapes },
     .{ Kind.rms, "inkling2 draft rms control drops the norm weight", "yr[i] = bfloat(float(xr[i]) * inv * float(w[i]));", "yr[i] = bfloat(float(xr[i]) * inv);", c.Gate.shapes },
@@ -52,7 +52,6 @@ pub const Probe = struct {
     mask: []const u16 = &.{},
     weights: []const u16 = &.{},
     bias: []const u16 = &.{},
-    scores: []const f32 = &.{},
     refs: [5]r.Ref = undefined,
     out: r.Ref = undefined,
     stress: bool = false,
@@ -80,8 +79,7 @@ pub const Probe = struct {
             .depth = depth,
             .ops = 12,
             .in_place = soft or p.kind == .add_rms,
-            .out = if (soft) .f32 else .bf16,
-            .store = if (soft) .bf16 else null,
+            .out = .bf16,
             .tiles = .{ .{}, .{}, .{ .size = 256 } },
             .served = switch (p.kind) {
                 .layer_norm => &vision_shapes,
@@ -100,18 +98,18 @@ pub const Probe = struct {
         p.s = s;
         p.stress = fill == .stress;
         if (p.kind == .softmax) {
-            const x = try a.alloc(f32, s.rows * s.k);
+            const x = try a.alloc(u16, s.rows * s.k);
             var prng = std.Random.DefaultPrng.init(seed);
-            for (x) |*v| v.* = prng.random().float(f32) * 16 - 8;
+            for (x) |*v| v.* = u.word(prng.random().float(f32) * 16 - 8);
             if (fill == .nonfinite) {
-                x[0] = std.math.nan(f32);
-                x[s.k + s.k / 2] = std.math.inf(f32);
-                x[2 * s.k] = -std.math.inf(f32);
-                x[3 * s.k] = std.math.inf(f32);
-                x[4 * s.k - 1] = -std.math.inf(f32);
+                x[0] = u.nan_bits;
+                x[s.k + s.k / 2] = u.pinf_bits;
+                x[2 * s.k] = u.ninf_bits;
+                x[3 * s.k] = u.pinf_bits;
+                x[4 * s.k - 1] = u.ninf_bits;
             }
-            p.scores = x;
-            p.out = try p.rig.output(x.len * 4);
+            p.words = x;
+            p.out = try p.rig.output(x.len * 2);
             return true;
         }
         const base = try rows.Rows.init(a, if (p.kind == .layer_norm) .layer_norm else .rms, s);
@@ -176,11 +174,10 @@ pub const Probe = struct {
         const n: u32 = @intCast(p.s.rows);
         e.setPipeline(p.pipe);
         if (p.kind == .softmax) {
-            const data = std.mem.sliceAsBytes(p.scores);
+            const data = std.mem.sliceAsBytes(p.words);
             @memcpy(p.rig.bytes(p.out, data.len), data);
             e.setBuffer(p.out.buf, p.out.off, 0);
             e.setValue(w, 1);
-            e.setValue(@as(f32, 0.125), 2);
         } else {
             if (p.kind == .add_rms) {
                 const src = std.mem.sliceAsBytes(p.res);
@@ -234,9 +231,9 @@ pub const Probe = struct {
             const mag = if (mags) |m| m[i * k ..][0..k] else null;
             if (p.kind == .softmax) {
                 var top = -std.math.inf(f64);
-                const src = p.scores[i * k ..][0..k];
+                const src = p.words[i * k ..][0..k];
                 for (terms, src) |*x, v| {
-                    x.* = u.val(u.word(u.val(u.word(v)) / 8));
+                    x.* = u.val(v);
                     top = @max(top, x.*);
                 }
                 for (terms) |*x| x.* = @exp(x.* - top);

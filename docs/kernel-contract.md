@@ -607,9 +607,11 @@ Inkling 2 Mini on Metal (`zig/tests/contract/metal_inkling2_*.zig`; run `tf-kern
 loop's glue, gates and attention, the packed NVFP4 and MXFP8 experts in their one-row, grouped prompt and deduplicated
 verify forms (the one-row kernels' bytes are the bound), the dense MMA tiles, the 8-row prompt attention, the DSpark head
 and the vision tower's GEMMs. On an M4 Pro at `61be67917f`: 86 kernels pass gates 1 to 4, 133 controls red as planted,
-0 missed, 0 limit problems. The media GEMM's `f32_nt` and `f32_nn` kinds are filled with fp32 values whose low fraction
-bits are set: a bf16 dyadic fits in 10 fraction bits, so the M5 tensor units' operand cut matched and a gate that should
-have spent part of the bound read 0. The grouped MMA kernels (`experts_group_mma.metal`, `dense_mma.metal`, the loop
+0 missed, 0 limit problems; with the tower's bf16 score store (`score_nt` writes bf16(bf16(sum) * scale); the softmax
+and `prob_nn` read bf16) the media suite plants one control more, 134 in all, that drops the scale. The media GEMM's
+`score_nt` (q and k) and `prob_nn` (v) are filled with fp32 values whose low fraction bits are set: a bf16 dyadic fits
+in 10 fraction bits, so the M5 tensor units' operand cut matched and a gate that should have spent part of the bound
+read 0. The grouped MMA kernels (`experts_group_mma.metal`, `dense_mma.metal`, the loop
 gates) assume an 8x8x8 `simdgroup_matrix` multiply-accumulate adds its products in k order from the accumulator; the
 byte-equality gates against the one-row kernels hold on an M4 Pro, an M4 Max and an M5 Ultra (`9a255bb79e`). An M5 Ultra
 counts one control fewer than the M4 chips (131 against 132 at `e6cb02e09e`, 132 against 133 after the dense tile): the
