@@ -71,13 +71,13 @@ pub const CancelCheck = struct {
 
 /// A kept prompt state to restore before prefill, and destinations for new states.
 pub const Reuse = struct {
-    saved: ?*anyopaque = null,
-    at: u32 = 0, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
+    saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
+    at: u32 = 0,
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
     progress: ?MarkHook = null, // the hand-off's: after each prompt segment the GPU finished
-    remote: bool = false,
-    pulled: bool = false, // another machine's prefix (pulled now, or kept then restored); #1594 step 2b
+    remote: bool = false, // built on another machine's prefix, pulled or kept (#1594 step 2b): not its own rows
+    pulled: bool = false, // pulled for this stream just now (a fresh remote prefix), not a kept remote state restored
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).
