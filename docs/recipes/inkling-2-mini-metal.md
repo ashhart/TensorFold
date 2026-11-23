@@ -151,6 +151,20 @@ own short-prompt run gave 31.3 and 31.2 tokens a second (`bench_openai`, `fibona
 32.0 ms), so 2,048 tokens of depth cost 3 ms a token, which the global and sliding visits' time at that depth would
 explain [INFERENCE: the short-prompt kernel times were not taken].
 
+Where a plain decode token goes (one stream, short prompt, one command buffer of 1,560 dispatches, GPU span 31.0 ms; host
+encode 0.29 ms and the gap between forwards 0.32 ms). The weights a token reads are 5,487 MB (the dense matvecs 1,904,
+`wo` 680, logits 922, 48 expert visits 1,839), which is 21.95 ms at 250 GB/s. Replayed alone with rotating weight
+buffers, the fused dense matvec ran at 256 GB/s, `wo` at 248 and logits at 263, so those are at the floor; the routed
+experts and the router are each about 1.7 ms over, and about 1,200 small latency-bound dispatches (convs, q/rel/kv prep,
+residuals, attention-residual mixes, loop gates) account for most of the remaining 4 to 6 ms. A no-op dispatch costs about
+1 us, so the 1,560 launches are 1.6 to 2.3 ms. Two byte-equal attempts did not pay: matvecs with 16-byte loads ran at 0.80
+to 1.00 of the baseline, and routing the 1-row attention-residual and loop mixes to their one-group kernels (312 fewer
+dispatches, all four hashes equal) was 8 to 15 % slower, since a one-threadgroup kernel costs more than the launches it
+saves. The family times other than the floors come from skipping dispatches in a loaded session (wrong bits, 34.3 ms
+baseline) and are a ranking, not a split. Fusing the elementwise chains (conv and store with the residual adds, q/rel/kv
+prep, router select) would remove about 430 dispatches, roughly 1 ms (3 %), and needs a launch record and a planted
+control per new kernel; it was not written.
+
 The dense projection tile (`61be67917f`, a different build from the table) took the first token from 23.8 s to 22.7 s at
 8,192 tokens (4.7 %) and from 104.8 s to 102.0 s at 32,768 (2.7 %): one A-B-B-A session, the mean of each pair, plain
 server, same hashes. The table above predates it.
@@ -189,6 +203,10 @@ same token hashes on all four servers and the four chat hashes above. Why the Me
 its stage times were not stamped, and the Metal 4 stage spans equal the first token. Decode stays on the Metal 3 queue
 and is unchanged (27.4 to 30.1 tok/s in both builds, on a machine slower than the decode table's); a build with the
 whole model on a Metal 4 queue showed no decode gain in one A-P-P-A session.
+With three decoding streams and a cold 4,096-token prompt arriving at 8 s (`mixed_load.py`, `--parallel 4`, A-B-B-A, same
+prompt hash on all four), the prompt took 13.9 and 15.8 s to its first token on Metal 3 and 13.2 and 13.0 s on the Metal 4
+queue, and the decode streams' longest gap was 12.8 and 15.6 s against 11.7 and 11.6 s: in both builds the streams wait
+for the prompt, and the Metal 4 queue is not worse for them.
 
 Peak physical footprint (`footprint`, 1 GB resolution, sampled every 3 s through an 8,192-token prompt and a 128-token
 reply): native about 24 GB, with `--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike;

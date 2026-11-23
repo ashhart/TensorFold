@@ -1,0 +1,11 @@
+# mixed_load.py: three greedy decoding streams (700 tokens), a cold 4,096-token prompt at t = 8 s, --parallel 4 --context 8192
+# --no-drafts plain servers, A = 5e75f97db2 (Metal 3 prompt chunks), B = the Metal 4 prompt queue, order A1 B1 B2 A2.
+# prompt_window_s: from the prompt's start to its first token; decode_max_gap_s: the longest gap between a stream's chunks after that start.
+{"label": "A1", "prompt_window_s": 13.86, "decode_chunks_during_prompt": 66, "decode_max_gap_s": [12.83, 12.83, 12.83], "decode_end_s": [56.7, 56.7, 56.7], "decode_chunks": [702, 702, 702]}
+A1 prompt=4096 sha=8a44904f45d6
+{"label": "B1", "prompt_window_s": 13.2, "decode_chunks_during_prompt": 78, "decode_max_gap_s": [11.67, 11.67, 11.67], "decode_end_s": [56.8, 56.8, 56.8], "decode_chunks": [702, 702, 702]}
+B1 prompt=4096 sha=8a44904f45d6
+{"label": "B2", "prompt_window_s": 13.04, "decode_chunks_during_prompt": 84, "decode_max_gap_s": [11.6, 11.6, 11.6], "decode_end_s": [55.8, 55.8, 55.8], "decode_chunks": [702, 702, 702]}
+B2 prompt=4096 sha=8a44904f45d6
+{"label": "A2", "prompt_window_s": 15.8, "decode_chunks_during_prompt": 78, "decode_max_gap_s": [15.61, 15.61, 15.61], "decode_end_s": [60.7, 60.7, 60.7], "decode_chunks": [702, 702, 702]}
+A2 prompt=4096 sha=8a44904f45d6
