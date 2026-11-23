@@ -156,6 +156,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "noise", "schedule" }) |name| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
     }
+    @import("zig/build/metal_cost_host.zig").compile(b, draft_ids);
     const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/cost_rule_cases.zig"),
         .target = target,
