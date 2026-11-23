@@ -4,20 +4,26 @@ const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const lanes = @import("tensorfold").lanes;
 const be = lanes.backend;
+const Probe = struct { enabled: bool = true, shared_next: ?*bool = null, from: usize = 0 };
+
 pub fn measure(b: anytype, io: std.Io) !void {
+    const has_shared = b.tensor_units and b.runner.slots > 1 and
+        ((b.window < 64 and b.runner.capacity > 64) or (b.window < 32 and b.runner.capacity > 32));
+    var probe_shared = false;
+    const probe: Probe = .{ .shared_next = if (has_shared) &probe_shared else null };
     switch (b.window) {
-        16 => try sized(b, io, 16, "qwen27-lanes"),
-        32 => try sized(b, io, 32, "qwen27-lanes"),
-        64 => try sized(b, io, 64, "qwen27-lanes"),
+        16 => try sized(b, io, 16, "qwen27-lanes", probe),
+        32 => try sized(b, io, 32, "qwen27-lanes", probe),
+        64 => try sized(b, io, 64, "qwen27-lanes", probe),
         else => return error.WindowTooWide,
     }
     if (!b.tensor_units or b.runner.slots == 1) return;
-    if (b.window < 64 and b.runner.capacity > 64) return shared(b, io, 64);
-    if (b.window < 32 and b.runner.capacity > 32) return shared(b, io, 32);
+    if (b.window < 64 and b.runner.capacity > 64) return shared(b, io, 64, probe_shared);
+    if (b.window < 32 and b.runner.capacity > 32) return shared(b, io, 32, probe_shared);
 }
 
 /// Price wider unfused forwards without taking another stream's caches or changing the lone window's prices.
-fn shared(b: anytype, io: std.Io, comptime width: usize) !void {
+fn shared(b: anytype, io: std.Io, comptime width: usize, probe: bool) !void {
     const window = b.window;
     const draft = b.draft;
     const profile = b.pass_profile;
@@ -38,10 +44,10 @@ fn shared(b: anytype, io: std.Io, comptime width: usize) !void {
         b.costs = costs;
         b.timed = timed;
     }
-    try sized(b, io, width, "qwen27-shared-rows");
+    try sized(b, io, width, "qwen27-shared-rows", .{ .enabled = probe, .from = window });
 }
 
-fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void {
+fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe: Probe) !void {
     const r = b.runner;
     if (b.owners[0] != null or r.active != null) return error.StreamBusy;
     var shape: [128]u8 = undefined;
@@ -49,9 +55,21 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void 
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
     var kept = if (k) |key| lanes.cost_cache.load([width]lanes.config.Cost, b.gpa, io, key) else null;
     if (kept) |table| for (table, 0..) |c, i| {
-        if (c.width != i + 1 or !(c.ms > 0) or !std.math.isFinite(c.ms)) { kept = null; break; }
+        if (c.width != i + 1 or !(c.ms > 0) or !std.math.isFinite(c.ms)) {
+            kept = null;
+            break;
+        }
     };
-    if (kept) |table| if (r.capacity <= width + 7) {
+    var probe_now = probe.enabled;
+    if (kept != null) if (probe.shared_next) |next| {
+        const current = k orelse unreachable;
+        const phase_key = lanes.cost_cache.buildKey(&current, &.{"metal-family-phase-v1"});
+        const phase = lanes.cost_cache.load(u64, b.gpa, io, phase_key) orelse 0;
+        probe_now = phase % 2 == 0;
+        next.* = !probe_now;
+        lanes.cost_cache.save(u64, b.gpa, io, phase_key, phase +% 1);
+    };
+    if (kept) |table| if (!probe_now or r.capacity <= width) {
         @memcpy(b.costs[0..width], &table);
         b.timed = width;
         return;
@@ -62,8 +80,9 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void 
     }
     var ids: [192]u32 = undefined;
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
-    // A warm probe keeps at most seven rows; reserve them so a tight context does not repeat its prompt fill.
-    const prompt = ids[0..@min(ids.len, r.capacity - width - (if (kept != null) @as(usize, 7) else 0))];
+    // Reserve probe rows where they fit; a tighter context refills its smaller scratch prompt as needed.
+    const spare = if (kept != null) @min(@as(usize, 7), r.capacity - width - 1) else 0;
+    const prompt = ids[0..@min(ids.len, r.capacity - width - spare)];
     try b.refill(prompt);
     var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
     defer s.deinit(b.gpa);
@@ -71,11 +90,16 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void 
     if (kept) |table| {
         var ms: [width]f64 = undefined;
         var widths: [width]u32 = undefined;
-        for (table, &ms, &widths) |c, *m, *w| { m.* = c.ms; w.* = c.width; }
+        for (table, &ms, &widths) |c, *m, *w| {
+            m.* = c.ms;
+            w.* = c.width;
+        }
         const current = k orelse unreachable;
         const cursor_key = lanes.cost_cache.buildKey(&current, &.{"metal-heal-v1"});
         var cursor = lanes.cost_cache.load(u64, b.gpa, io, cursor_key) orelse 0;
-        _ = try lanes.cost_rule.healWindows(timer, &ms, &widths, &cursor);
+        var selected_timer = timer;
+        selected_timer.from = probe.from;
+        _ = try lanes.cost_rule.healWindows(selected_timer, ms[probe.from..], widths[probe.from..], &cursor);
         for (b.costs[0..width], ms, 0..) |*c, m, i| c.* = .{ .width = @intCast(i + 1), .ms = m };
         b.timed = width;
         lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, current, b.costs[0..width].*);
@@ -100,9 +124,11 @@ fn Timer(comptime B: type) type {
         b: B,
         s: *lanes.Stream,
         prompt: []const u32,
+        from: usize = 0,
         pub fn time(t: @This(), i: usize) !f64 {
-            if (t.b.runner.offsets[0] + i + 1 > t.b.runner.capacity) try t.b.refill(t.prompt);
-            return timeWindow(t.b, t.s, i + 1);
+            const rows = t.from + i + 1;
+            if (t.b.runner.offsets[0] + rows > t.b.runner.capacity) try t.b.refill(t.prompt);
+            return timeWindow(t.b, t.s, rows);
         }
     };
 }
