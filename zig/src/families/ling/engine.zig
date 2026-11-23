@@ -123,7 +123,8 @@ pub const Engine = struct {
         e.pairs = try cuda.DeviceBuffer.alloc(d, 8 * window_rows);
         errdefer e.pairs.free();
         errdefer {
-            for (0..e.seqs.items.len) |i| e.free(i);
+            const settled = weights.drains(e.stream); // else the arenas leak, as e.w: a queued launch may write them
+            for (0..e.seqs.items.len) |i| e.dropSeq(i, settled);
             e.seqs.deinit(gpa);
         }
         try e.bind(0);
@@ -145,7 +146,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
-        e.stream.synchronize() catch {};
+        cuda.completion.drain(e.d, e.stream, "the Ling engine did not drain before it closed");
         if (e.graphs) |g| g.destroy();
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
@@ -233,16 +234,17 @@ pub const Engine = struct {
     }
 
     fn free(e: *Engine, slot: usize) void {
-        const q = e.seqs.items[slot] orelse return;
-        e.stream.synchronize() catch {};
-        e.freeSeq(q);
-        e.gpa.destroy(q);
-        e.seqs.items[slot] = null;
+        if (e.seqs.items[slot] == null) return;
+        cuda.completion.drain(e.d, e.stream, "a Ling sequence release did not drain");
+        e.dropSeq(slot, true);
     }
 
-    fn freeSeq(e: *Engine, q: *Seq) void {
-        _ = e;
-        q.st.deinit();
+    /// Slot `slot`'s sequence gone: its arena freed when `settled`, else leaked (queued work may still write it).
+    fn dropSeq(e: *Engine, slot: usize, settled: bool) void {
+        const q = e.seqs.items[slot] orelse return;
+        if (settled) q.st.deinit() else e.gpa.free(q.st.cur);
+        e.gpa.destroy(q);
+        e.seqs.items[slot] = null;
     }
 
     /// Bytes one more stream's sequence takes: its arena.
