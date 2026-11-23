@@ -216,3 +216,13 @@ test "GLM logit gather: startup byte counts cover both stages before admission, 
         }
     };
 }
+
+test "GLM logit gather: two sampled windows keep each row's own seed and absolute position" {
+    var plan: glm.sampler.RowRules = .{};
+    const left = glm.sampler.rule(.{ .seed = 7719, .temperature = 0.7, .top_k = 20 });
+    const right = glm.sampler.rule(.{ .seed = 91, .temperature = 0.5, .top_k = 8 });
+    plan.append(3, 1031203, left);
+    plan.append(2, 17, right);
+    try t.expectEqualSlices(i32, &.{ 1031202, 1031203, 1031204, 16, 17 }, plan.meta[0..plan.len]);
+    try t.expectEqualSlices(glm.sampler.Rule, &.{ left, left, left, right, right }, plan.rules[0..plan.len]);
+}

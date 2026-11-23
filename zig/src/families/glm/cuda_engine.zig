@@ -491,22 +491,32 @@ pub const Engine = struct {
         var segs: [max_shared]fw.Seg = undefined;
         var ids: [shared_rows]u32 = undefined;
         var rows: usize = 0;
+        var sampled: sampler.RowRules = .{};
         for (parts, 0..) |p, i| {
             if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
+            if (!e.structured) {
+                if (e.cur.sampling) |r| sampled.append(p.ids.len, e.cur.st.pos + 1, sampler.rule(r));
+            }
             rows += p.ids.len;
         }
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
         const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
         try f.run(@ptrCast(ids[0..rows]));
         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
+        var picks: [shared_rows]u32 = undefined;
+        if (sampled.len == rows) try sampler.drawShared(e, b.logits, &sampled, &picks);
         for (parts, segs[0..parts.len]) |p, g| {
             try e.bind(p.slot);
             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
-            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
+            if (sampled.len == rows) {
+                @memcpy(p.out[0..g.rows], picks[g.row0..][0..g.rows]);
+            } else {
+                try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
+            }
         }
     }
 

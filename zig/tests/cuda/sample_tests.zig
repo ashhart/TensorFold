@@ -158,6 +158,7 @@ pub fn draws(gpu: Gpu) !void {
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});
     try @import("sample_proposal_tests.zig").run(gpu);
+    try glmWindows(gpu);
 }
 
 /// topkRows' two stages against tf_logprob_rows: the same k ids and logits, word for word, on every row kind and width.
@@ -302,4 +303,51 @@ pub fn q35Argmax(gpu: Gpu) !void {
     std.debug.print("RESULT q35-argmax: {d} rows, {d} differ from the host rule\n", .{ cases, differ });
     try check.expect(differ == 0, "q35-argmax: {d} of {d} rows differ", .{ differ, cases });
     check.pass("q35-argmax: {d} rows equal the host rule's greedy token", .{cases});
+}
+
+/// The GLM rank gather and sliced draws return each window's serial picks under its own rule.
+pub fn glmWindows(gpu: Gpu) !void {
+    const glm = @import("glm_cuda");
+    const width = 154880;
+    const half = width / 2;
+    const left = 3;
+    const right = 5;
+    const n = left + right;
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    var sampler = try glm.sampler.Sampler.init(gpu.d, width, n);
+    defer sampler.deinit();
+    var shards = try cuda.DeviceBuffer.alloc(gpu.d, n * width * 2);
+    defer shards.free();
+    const host = try gpu.gpa.alloc(u16, n * width);
+    defer gpu.gpa.free(host);
+    const wide = try gpu.gpa.alloc(f32, width);
+    defer gpu.gpa.free(wide);
+    const a = glm.sampler.rule(.{ .seed = 7719, .temperature = 0.7, .top_k = 20 });
+    const b = glm.sampler.rule(.{ .seed = 91, .temperature = 0.5, .top_k = 8, .top_p = 0.8 });
+    var plan: glm.sampler.RowRules = .{};
+    plan.append(left, 1031203, a);
+    plan.append(right, 17, b);
+    for (std.enums.values(Kind)) |kind| {
+        for (0..n) |row| {
+            const scores = host[row * width ..][0..width];
+            fill(kind, 534 + row, scores, wide);
+            for (0..2) |rank| {
+                const offset = (rank * n + row) * half * 2;
+                try shards.uploadAsync(offset, std.mem.sliceAsBytes(scores[rank * half ..][0..half]), stream.handle);
+            }
+        }
+        var serial: [n]u32 = undefined;
+        try sampler.full.uploadAsync(0, std.mem.sliceAsBytes(host[0 .. left * width]), stream.handle);
+        try sampler.drawFull(stream, left, 1031203, a, serial[0..left]);
+        try sampler.full.uploadAsync(0, std.mem.sliceAsBytes(host[left * width ..]), stream.handle);
+        try sampler.drawFull(stream, right, 17, b, serial[left..]);
+        const spans = [_]glm.shard.Span{ .{ .lo = 0, .hi = half }, .{ .lo = half, .hi = width } };
+        const mine = [_]glm.sampler.Local{ .{ .rank = 0, .logits = shards.ptr }, .{ .rank = 1, .logits = shards.ptr + n * half * 2 } };
+        try sampler.gather(stream, .local, &spans, &mine, n, sampler.stage.ptr, sampler.full.ptr);
+        var shared: [n]u32 = undefined;
+        try sampler.drawRows(stream, &plan, &shared);
+        try check.expect(std.mem.eql(u32, &serial, &shared), "GLM shared draws differ from the serial {t} windows", .{kind});
+    }
+    check.pass("GLM shared sampled windows match serial draws", .{});
 }
