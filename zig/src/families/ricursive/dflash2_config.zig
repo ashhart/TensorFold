@@ -1,5 +1,6 @@
 //! ricursiveAI's DFlash2 drafter for Ripple (Ripple-65B-Preview-DFlash2): its config and bf16 weights as published.
 const std = @import("std");
+const lane = @import("lanes");
 const ck = @import("../../core/checkpoint_metal.zig");
 const wts = @import("weights.zig");
 const cfg = @import("config.zig");
@@ -8,6 +9,13 @@ const cfg = @import("config.zig");
 pub const global_window = 16384;
 /// Streams a drafted server serves at most: each stream drafts in its own pass, so more tie plain, then trail it.
 pub const max_streams = 2;
+
+/// The --drafter server's backend: it advertises logprobs, so the wrapper must offer Ripple's first-token row.
+pub fn wrap(gpa: std.mem.Allocator, target: lane.backend.Backend, drafter: lane.drafter.Drafter) !lane.drafted.Drafted {
+    var w = try lane.drafted.Drafted.init(gpa, target, drafter);
+    w.first_rows = true;
+    return w;
+}
 
 /// Streams a drafted server opens: a named --parallel up to `max_streams`, else `max_streams`; null refuses more.
 pub fn streams(lanes: u32, named: bool) ?u32 {
