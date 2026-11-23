@@ -542,15 +542,9 @@ pub fn close(ptr: *anyopaque) void {
     h.gpa.destroy(h);
 }
 
-test "qwen27 startup: the adaptive block hooks are analyzed" {
-    _ = &lb.Metal.init;
-    _ = &lb.Metal.backend;
-    _ = &lb.Metal.lone;
-}
-
 test {
+    _ = @import("qwen27_served_startup_test.zig");
     _ = @import("qwen27_draft_block.zig");
     _ = @import("qwen27_share_fit.zig");
-    _ = @import("qwen27_startup_line.zig");
     _ = @import("qwen27_served_test.zig");
 }
