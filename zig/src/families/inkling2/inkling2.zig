@@ -15,6 +15,17 @@ pub const loop_model = @import("loop_model.zig");
 pub const loop_math_cuda = @import("loop_math_cuda.zig");
 pub const native = @import("cuda_native.zig");
 pub const dspark_ops = @import("dspark_ops.zig");
+pub const pictures = @import("pictures.zig");
+pub const chat = @import("chat.zig");
+pub const admit = @import("admit.zig");
+pub const forward = @import("forward.zig");
+pub const prompt_dense = @import("prompt_dense.zig");
+pub const sampler = @import("sampler.zig");
+pub const kept = @import("kept.zig");
+pub const engine = @import("engine.zig");
+pub const follow = @import("follow.zig");
+pub const lanes = @import("lanes.zig");
+pub const native_exl3 = @import("native.zig");
 
 /// config.json's name in the release.
 pub const model_type = "inkling2";
@@ -36,4 +47,15 @@ test {
     _ = loop_math_cuda;
     _ = dspark_ops;
     _ = @import("shared_kernels_test.zig");
+    _ = pictures;
+    _ = chat;
+    _ = admit;
+    _ = forward;
+    _ = prompt_dense;
+    _ = sampler;
+    _ = kept;
+    _ = engine;
+    _ = follow;
+    _ = lanes;
+    _ = native_exl3;
 }

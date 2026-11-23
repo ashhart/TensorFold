@@ -38,6 +38,7 @@ pub const Config = struct {
     eos: [4]u32 = .{ 200006, 0, 0, 0 },
     eos_count: u32 = 1,
     layer: [max_layers]Kind = undefined,
+    vision: shared.Vision = undefined, // the tower's shape, for the image path
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -114,6 +115,7 @@ pub fn from(s: *const shared.Config) Error!Config {
         .context = t.max_context,
         .eos = .{ s.eos, 0, 0, 0 },
         .eos_count = 1,
+        .vision = s.vision,
     };
     for (c.layer[0..c.layers], 0..) |*k, i| k.* = if (shared.isGlobal(@intCast(i))) .global else .sliding;
     try validate(&c);
