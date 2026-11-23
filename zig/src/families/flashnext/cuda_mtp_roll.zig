@@ -22,7 +22,7 @@ pub fn lateRoll(o: anytype, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
         t.j[n] = .{ .win = seq.conv[n].ptr, .hist = lk.hist, .rows = lk.proj, .stride = @intCast(gdn.proj_width), .taps = @intCast(gdn.taps - 1), .c = @intCast(gdn.conv_dim) };
         n += 1;
     }
-    t.j[n] = .{ .win = seq.tail.ptr, .hist = d.saved.ptr + d.layout.tail_at, .rows = d.saved.ptr + d.layout.nrow_at, .stride = @intCast(wt.wide), .taps = @intCast(wt.ple_tail_n), .c = @intCast(wt.wide) };
+    t.j[n] = .{ .win = seq.tail.ptr, .hist = d.saved_tail, .rows = d.saved_nrow, .stride = @intCast(wt.wide), .taps = @intCast(wt.ple_tail_n), .c = @intCast(wt.wide) };
     n += 1;
     t.n = @intCast(n);
     var a: cuda.Args = .{};
@@ -44,8 +44,8 @@ const Replay = struct {
     pub fn run(r: @This()) !void {
         const k = &r.e.batch_k;
         const rs = r.s;
-        try copyAsync(r.st, r.seq.tail.ptr, r.d.saved.ptr + r.d.layout.tail_at, wt.ple_tail_n * wt.wide * 2);
-        try shift(k, r.st, r.seq.tail.ptr, r.d.saved.ptr + r.d.layout.nrow_at, wt.wide, r.keep, wt.ple_tail_n, wt.wide);
+        try copyAsync(r.st, r.seq.tail.ptr, r.d.saved_tail, wt.ple_tail_n * wt.wide * 2);
+        try shift(k, r.st, r.seq.tail.ptr, r.d.saved_nrow, wt.wide, r.keep, wt.ple_tail_n, wt.wide);
         var li: usize = 0;
         for (r.e.layers[0..r.e.n_layers], 0..) |*lw, layer| {
             if (!lw.linear) continue;
