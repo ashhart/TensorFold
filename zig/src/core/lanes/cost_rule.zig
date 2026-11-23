@@ -24,7 +24,7 @@ pub fn fastest(ctx: anytype, i: usize) !f64 {
 }
 
 /// Retime both entries around a dip up to twice, retaining their faster values.
-pub fn smooth(ctx: anytype, ms: []f64) !void {
+pub fn smoothSerial(ctx: anytype, ms: []f64) !void {
     for (0..2) |_| {
         var dipped = false;
         for (1..ms.len) |i| {
@@ -34,6 +34,57 @@ pub fn smooth(ctx: anytype, ms: []f64) !void {
             dipped = true;
         }
         if (!dipped) return;
+    }
+}
+
+/// One warm pass and seven interleaved measured passes; observers run once per width on the last pass.
+pub fn interleaveWidths(windows: anytype, observer: anytype, ms: []f64, keep: bool) !void {
+    for (0..ms.len) |i| _ = try windows.time(i);
+    if (!keep) @memset(ms, std.math.inf(f64));
+    for (0..reps) |pass| {
+        for (ms, 0..) |*m, i| {
+            m.* = @min(m.*, try windows.time(i));
+            if (pass + 1 == reps) try observer.afterWidth(i);
+        }
+    }
+}
+
+pub const NoObserver = struct {
+    pub fn afterWidth(_: *@This(), _: usize) !void {}
+};
+
+pub fn measureWindows(windows: anytype, ms: []f64, keep: bool) !void {
+    var observer: NoObserver = .{};
+    try interleaveWidths(windows, &observer, ms, keep);
+}
+
+/// Retime a high local outlier or both sides of a dip, never changing a real step to an interpolated value.
+pub fn repairAt(ms: []const f64, i: usize) bool {
+    const value = ms[i];
+    if (!(value > 0) or !std.math.isFinite(value)) return true;
+    if (i > 0 and value < ms[i - 1] * (1 - dip)) return true;
+    if (i + 1 < ms.len and ms[i + 1] < value * (1 - dip)) return true;
+    const predicted = if (i > 0 and i + 1 < ms.len) (ms[i - 1] + ms[i + 1]) / 2 else
+        if (i == 0 and ms.len > 2) 2 * ms[1] - ms[2] else
+        if (i > 1) 2 * ms[i - 1] - ms[i - 2] else value;
+    return predicted > 0 and value > predicted * (1 + dip);
+}
+
+const Local = struct {
+    pub fn decide(_: @This(), mine: bool) !bool { return mine; }
+};
+
+/// At most one extra warm read per width: at most one eighth of the initial window timing calls.
+pub fn smooth(ctx: anytype, ms: []f64) !void {
+    return smoothSynced(ctx, ms, Local{}, true);
+}
+
+/// Both ranks retime the same entries; the leader alone selects them from its table.
+pub fn smoothSynced(ctx: anytype, ms: []f64, agree: anytype, lead: bool) !void {
+    for (ms, 0..) |*m, i| {
+        if (!try agree.decide(lead and repairAt(ms, i))) continue;
+        const measured = try ctx.time(i);
+        if (measured > 0 and std.math.isFinite(measured)) m.* = if (m.* > 0 and std.math.isFinite(m.*)) @min(m.*, measured) else measured;
     }
 }
 
@@ -105,7 +156,7 @@ pub fn measure(windows: anytype, heads: anytype, ms: []f64, head_ms: ?*f64, keep
         }
     };
     var observer: Observer = .{ .heads = heads, .enabled = head_ms != null };
-    try measureWidths(windows, &observer, ms, keep);
+    try interleaveWidths(windows, &observer, ms, keep);
     if (head_ms) |h| h.* = if (keep) @min(h.*, observer.best) else observer.best;
 }
 
@@ -149,14 +200,14 @@ test "a dip times both entries again and keeps the faster values; a real dip sta
     var next = [_]usize{ 0, 0 };
     const s: Script = .{ .runs = &.{ &first, &second }, .next = &next };
     var ms = [_]f64{ 6.5, 6 };
-    try smooth(s, &ms);
+    try smoothSerial(s, &ms);
     try std.testing.expectEqualSlices(f64, &.{ 4, 6 }, &ms);
     const slow: [16]f64 = @splat(6.5);
     const fast: [16]f64 = @splat(6);
     var real_next = [_]usize{ 0, 0 };
     const real: Script = .{ .runs = &.{ &slow, &fast }, .next = &real_next };
     var kept = [_]f64{ 6.5, 6 };
-    try smooth(real, &kept);
+    try smoothSerial(real, &kept);
     try std.testing.expectEqualSlices(f64, &.{ 6.5, 6 }, &kept);
     try std.testing.expectEqual(@as(usize, 16), real_next[0]);
 }
@@ -242,5 +293,6 @@ test "a probe refuses non-finite and non-positive head references" {
 
 test {
     _ = @import("cost_rule_test.zig");
+    _ = @import("metal_cost_rule_test.zig");
     _ = @import("cuda_cost_rule_test.zig");
 }
