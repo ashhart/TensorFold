@@ -53,6 +53,16 @@ pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     });
 }
 
+pub fn startModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, checkpoint: *std.Build.Module, api: *std.Build.Module, core: *std.Build.Module, j: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "checkpoint_cli", .module = checkpoint }, .{ .name = "engine_api", .module = api }, .{ .name = "core", .module = core }, .{ .name = "json", .module = j } },
+    });
+}
+
 /// Attach a server's shared JSON module (tests run apart), and Living Weights' families where the build gave none.
 pub fn addTo(
     b: *std.Build,

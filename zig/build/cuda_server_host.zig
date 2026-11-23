@@ -96,6 +96,22 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-benchmark-routing-host", "Benchmark command routing from explicit model capabilities").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark routing:"} })).step);
     b.step("test-benchmark-cancel-host", "A cancelled local benchmark saves its receipt, exits 130 and never publishes").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a cancelled local run"} })).step);
     b.step("test-chat-cli-host", "tensorfold chat's flags, stream, history, Ctrl-C and serve child against a fake server").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"chat CLI:"} })).step);
+    const start_tests = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli_test.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "engine_api", .module = native_modules.api },
+            .{ .name = "core", .module = mods.core },
+            .{ .name = "json", .module = server_json },
+            .{ .name = "checkpoint_cli", .module = @import("cuda.zig").checkpointCli(b, host, .debug, false, native_modules.engines, mods.core) },
+        },
+    });
+    const start_run = b.addRunArtifact(b.addTest(.{ .root_module = start_tests, .filters = &.{"start CLI:"} }));
+    start_run.has_side_effects = true;
+    b.step("test-start-cli-host", "Automatic model choice, download consent, first reply and serve-child cleanup without devices").dependOn(&start_run.step);
+    step.dependOn(&start_run.step);
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",
