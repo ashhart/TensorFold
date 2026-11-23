@@ -10,7 +10,7 @@ const Call = struct {
     block: [3]u32,
     shared: u32,
     geo: Geo,
-    args: [12]u64 = @splat(0),
+    args: [13]u64 = @splat(0),
 };
 const Trace = struct {
     var calls: std.ArrayList(Call) = .empty;
@@ -60,6 +60,7 @@ const Trace = struct {
             call.args[7] = @as(u32, @bitCast(read(f32, a, 7)));
             if (long) call.args[8] = @intCast(read(c_int, a, 8));
             for (8 + @as(usize, @intFromBool(long))..11 + @as(usize, @intFromBool(long))) |i| call.args[i] = read(u64, a, i);
+            if (id == 2) call.args[12] = @intFromBool(read(bool, a, 12));
         }
         calls.append(T.allocator, call) catch return 2;
         return 0;
@@ -113,6 +114,7 @@ fn partial(call: Call, form: adapter.Form, long: bool, rows: usize, first: usize
     if (long) try T.expectEqual(rows, call.args[8]);
     const at: usize = if (long) 9 else 8;
     try T.expectEqualSlices(u64, &.{ p[0] + first * 24 * 64 * 4, p[1] + first * 24 * 64 * 4, p[2] + first * 24 * 64 * 256 * 4 }, call.args[at..][0..3]);
+    if (form.cache == .bf16) try T.expectEqual(form.all_rows and rows > 1, call.args[12] != 0);
 }
 fn merge(call: Call, rows: usize, p: [3]u64, out: u64) !void {
     try T.expectEqual(@as(usize, 3), call.id);
@@ -125,18 +127,18 @@ fn merge(call: Call, rows: usize, p: [3]u64, out: u64) !void {
 test "q35 contract host: actual adapter launches short and long TC paths then merge for both caches" {
     defer Trace.deinit();
     var d = driver();
-    for (adapter.forms) |form| for ([_]usize{ 1, 9, 10, 11, 16, 64, 128 }) |rows| {
-        // Both entries are needed even for mixed streams: length-based selection happens on the device.
+    for (adapter.forms) |form| for ([_]usize{ 1, 4, 8, 9, 10, 11, 16, 17, 64, 128 }) |rows| {
         for ([_]usize{ 700, 8191, 8192, 9000 }) |keys| {
             Trace.reset();
             var q = try make(&d, form, rows, keys);
             defer q.deinit();
             try q.run();
-            try T.expectEqual(@as(usize, 3), Trace.calls.items.len);
+            const rows_only = form.all_rows and rows > 1;
+            try T.expectEqual(@as(usize, if (rows_only) 2 else 3), Trace.calls.items.len);
             const z: u32 = if (form.control) 9 else 64;
-            try partial(Trace.calls.items[0], form, false, rows, 0, z, q.part);
-            try partial(Trace.calls.items[1], form, true, rows, 0, z, q.part);
-            try merge(Trace.calls.items[2], rows, q.part, q.out);
+            if (!rows_only) try partial(Trace.calls.items[0], form, false, rows, 0, z, q.part);
+            try partial(Trace.calls.items[@intFromBool(!rows_only)], form, true, rows, 0, z, q.part);
+            try merge(Trace.calls.items[if (rows_only) 1 else 2], rows, q.part, q.out);
             try T.expect(!Trace.bad_attribute);
             try T.expectEqualSlices(usize, if (form.cache == .bf16) &.{ 1, 2 } else &.{}, Trace.attrs.items);
         }

@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM, MiniMax and Nemotron on CUDA: each is placed by `--tp`, `--rank`, `--master` and `--master-port`, and `--master` with `--master-port` sets `NCCL_COMM_ID` when it is unset (a different one refuses); `TF_GLM_RANK`/`TF_GLM_WORLD`, `TF_MINIMAX_RANK`/`TF_MINIMAX_WORLD` and `TF_NEMOTRON_RANK`/`TF_NEMOTRON_WORLD` still work as aliases until 1.3.1, with a start-up warning, and a flag and an alias that differ refuse (#2919, part of #2560). Thanks to @laudney.
+
+- Gemma 4 on Metal: a new stream's prompt fills one chunk per call at the same chunk cuts as before, with other streams' decode rounds running between chunks, so a long prompt no longer freezes their replies; a cancel between chunks keeps the last finished chunk, and a drafting stream's drafter takes each chunk's tapped rows as it lands (#3025, fixes #3021).
+
+- Qwen3.5/3.8 on CUDA: `TF_QWEN35_ATTN_ALL_ROWS=1` sends multi-row BF16 decode windows to the existing rows attention kernel at every context length (it already matches the one-row kernel's score and reduction order), removing the dead second launch below 8K; off by default (#N).
+
 - Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#N).
 
 - Flash Next on Metal: `TF_FLASHNEXT_BATCH_GDN_WIDE=1` runs 8- and 16-row batch segments on the existing non-replay GDN kernel instead of the recorded pipe; off by default until the M3 and M5 checks (#N).

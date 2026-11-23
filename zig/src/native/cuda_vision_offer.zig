@@ -115,7 +115,7 @@ fn omniVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u3
 
 /// The device bytes a family's tower takes beside its text weights on this rank, 0 without --vision.
 pub fn weightBytes(comptime F: type, a: Allocator, io: std.Io, o: api.Open) !u64 {
-    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null and o.rank == 0) return F.visionBytes(a, io, o.dir);
+    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null) return F.visionBytes(a, io, o.dir, o.rank, o.tp); // its holder's rank
     return 0;
 }
 
