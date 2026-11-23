@@ -167,27 +167,11 @@ fn expectPlain(m: cfgs.Model, times: [2]f64, got: Run, streams: usize, max_new: 
     for (0..streams) |i| try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], got.tokens[i][0..got.lens[i]]);
 }
 
-test "lone copy price: model drafters keep main's windows, depths and complete decision trail" {
-    for ([_][2]f64{ long_context, short_context }) |times| {
-        for ([_]usize{ 0, std.math.maxInt(usize), prompts[0].len + 40 }) |land| {
-            const on = hip(true);
-            var off = on;
-            off.copy_guard = false;
-            var a = ev.Log.init(gpa);
-            defer a.deinit();
-            var b = ev.Log.init(gpa);
-            defer b.deinit();
-            trail = &a;
-            defer trail = null;
-            const got = try run(on, times, .{ .land_from = land }, 1, 96);
-            trail = &b;
-            const main = try run(off, times, .{ .land_from = land }, 1, 96);
-            try std.testing.expectEqual(digest(main), digest(got));
-            try std.testing.expectEqual(try hashed(&b, b.events.items.len), try hashed(&a, a.events.items.len));
-            try std.testing.expectEqualSlices(u32, main.tokens[0][0..main.lens[0]], got.tokens[0][0..got.lens[0]]);
-            try std.testing.expect(got.drafted > 0);
-        }
-    }
+test "lone copy price: copies that lose at a long context are priced off, the head drafts, the reply as plain decode" {
+    const got = try run(hip(true), long_context, .{}, 1, 96);
+    try expectPlain(hip(true), long_context, got, 1, 96);
+    try std.testing.expect(got.copy_rows < got.lens[0]); // a few copies measure them, then a probe now and then
+    try std.testing.expect(got.drafted - got.copy_rows > got.lens[0] / 2); // the head's drafts take their rounds
 }
 
 test "lone copy price: a copies-only stream times its rounds and prices its copies off the same way" {
@@ -198,7 +182,7 @@ test "lone copy price: a copies-only stream times its rounds and prices its copi
 }
 
 test "lone copy price: copies priced off come back after a backoff once they land" {
-    for ([_]bool{false}) |head| {
+    for ([_]bool{ true, false }) |head| {
         const land_from = prompts[0].len + 40;
         Watch.split = land_from;
         defer Watch.split = std.math.maxInt(u64);
@@ -210,7 +194,7 @@ test "lone copy price: copies priced off come back after a backoff once they lan
 }
 
 test "lone copy price: at a short context copies that land stay whole" {
-    for ([_]bool{false}) |head| {
+    for ([_]bool{ true, false }) |head| {
         const got = try run(hip(head), short_context, .{ .land_from = 0 }, 1, 96);
         try expectPlain(hip(head), short_context, got, 1, 96);
         try std.testing.expect(got.rounds * 8 < got.lens[0]);
@@ -286,16 +270,16 @@ test "lone copy price: copy_guard is off unless a family opts in, whatever plain
     }
 }
 
-test "lone copy price: copies without plain_guard use their own rounds rather than the load-time forward" {
-    var m = hip(false);
-    m.plain_guard = false; // only the opt-in copy rule reads these own-round times
+test "lone copy price: a head without plain_guard prices copies against its own rounds, not the load-time forward" {
+    var m = hip(true);
+    m.plain_guard = false; // copy_guard alone: the head's depths keep the rule's greedy rounds, plain is never timed
     const got = try run(m, long_context, .{ .land_from = 0 }, 1, 96);
     try expectPlain(m, long_context, got, 1, 96);
     try std.testing.expect(got.rounds * 8 < got.lens[0]); // landing copies stay on, many rows a round
 }
 
 test "lone copy price: copyAhead reads the price the plan takes, backoff probes included, and counts nothing" {
-    var cfg = try cfgs.Config.init(gpa, hip(false), 16, 15);
+    var cfg = try cfgs.Config.init(gpa, hip(true), 16, 15);
     defer cfg.deinit(gpa);
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
@@ -373,7 +357,7 @@ fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_ne
 }
 
 test "lone copy price: a request's first copies are priced from the copy rounds the request before it timed" {
-    for ([_]bool{false}) |head| {
+    for ([_]bool{ false, true }) |head| {
         var got: [2]Request = @splat(.{});
         try sequential(hip(head), short_context, 4, &got, 64);
         const plain = try run(hip(head), short_context, null, 2, 64);
@@ -386,7 +370,7 @@ test "lone copy price: a request's first copies are priced from the copy rounds 
 }
 
 test "lone copy price: kept copy prices need two timed copies on a lone stream and leave depth-rule times out" {
-    for ([_]bool{false}) |head| {
+    for ([_]bool{ false, true }) |head| {
         var cfg = try cfgs.Config.init(gpa, hip(head), 16, 15);
         defer cfg.deinit(gpa);
         var target: fake.Fake = .{ .gpa = gpa };
@@ -460,7 +444,7 @@ test "lone copy price: a request reads the copy prices of the one before that st
     const long = try gpa.alloc(u32, 8150);
     defer gpa.free(long);
     for (long, 0..) |*t, i| t.* = @intCast(i % fake.vocab);
-    for ([_]bool{false}) |head| {
+    for ([_]bool{ false, true }) |head| {
         var asks = [_]Ask{
             .{ .prompt = prompts[0], .quiet = 2, .max_new = 8, .times = long_context },
             .{ .prompt = long, .quiet = 4, .max_new = 64, .times = short_context },
@@ -482,7 +466,7 @@ test "lone copy price: a request reads the copy prices of the one before that st
     }
 }
 
-test "lone copy price: a model drafter never records or retains copy prices, including a slow head" {
+test "lone copy price: a head stream's copy rounds are timed by their verify, without the head's next drafting" {
     var cfg = try cfgs.Config.init(gpa, hip(true), 16, 15);
     defer cfg.deinit(gpa);
     var target: fake.Fake = .{ .gpa = gpa };
@@ -496,7 +480,9 @@ test "lone copy price: a model drafter never records or retains copy prices, inc
     try e.addStream(&s);
     while (e.activeCount() > 0) try e.step();
     try std.testing.expect(target.drafts_calls > 0);
-    try std.testing.expect(e.lone_kept[0][lone_costs.band(prompts[0].len)] == null);
+    // the kept copy prices hold each whole copy's verify time, 10 ms plus 0.1 ms a row, and none of the drafting
+    const kept = e.lone_kept[0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
+    try std.testing.expectEqual(@as(?f64, short_context[0] + short_context[1] * 16), kept.copy_ms.get(15));
 }
 
 /// A dense model's forwards: a row costs 11.6 ms past a 65 ms round, so a 15-row copy costs about three plain rounds.
@@ -523,4 +509,53 @@ test "lone copy price: a request's first copy is priced at the landing rate the 
     try std.testing.expect(got[0].first.? < 15);
     // the second starts at the rate the first's landed copies taught: its first copy is whole
     try std.testing.expectEqual(@as(?usize, 15), got[1].first);
+}
+
+const WrappedClock = struct {
+    target: *const fake.Fake,
+    head: *const @import("drafted_test.zig").FakeDrafter,
+    before: u32 = 0,
+    fn clock(c: *@This()) be.Clock {
+        return .{ .ptr = c, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
+    }
+    fn start(ptr: *anyopaque) void {
+        const c: *@This() = @ptrCast(@alignCast(ptr));
+        c.before = c.head.holds;
+    }
+    fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
+        const c: *@This() = @ptrCast(@alignCast(ptr));
+        return short_context[0] + short_context[1] * @as(f64, @floatFromInt(c.target.last_rows)) + 30 * @as(f64, @floatFromInt(c.head.holds - c.before));
+    }
+};
+
+test "lone copy price: an actual external drafter keeps verify-only copy prices before its next hold" {
+    const fixtures = @import("drafted_test.zig");
+    const Drafted = @import("drafted.zig").Drafted;
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var head: fixtures.FakeDrafter = .{};
+    defer head.deinit();
+    var wrapped = try Drafted.init(gpa, target.backend(), head.drafter());
+    defer wrapped.deinit();
+    var cfg = try cfgs.Config.init(gpa, wrapped.facts(hip(false)), 16, 15);
+    defer cfg.deinit(gpa);
+    try std.testing.expect(cfg.copy_guard and cfg.family_mtp);
+    var clock: WrappedClock = .{ .target = &target, .head = &head };
+    var e = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer e.deinit();
+    var c: Copier = .{ .land_from = 0, .quiet_until = prompts[0].len + 4 };
+    var s = try sm.Stream.init(gpa, .{ .id = "wrapped-price", .prompt = prompts[0], .max_new = 64, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
+    defer s.deinit(gpa);
+    try e.addStream(&s);
+    while (e.activeCount() > 0) try e.step();
+    try std.testing.expect(head.holds > 0 and head.helds > 0);
+    const kept = e.lone_kept[0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
+    try std.testing.expectEqual(@as(?f64, short_context[0] + short_context[1] * 16), kept.copy_ms.get(15));
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, prompts[0]);
+    for (s.emitted()) |token| {
+        try std.testing.expectEqual(fake.next(history.items, null, history.items.len), token);
+        try history.append(gpa, token);
+    }
 }
