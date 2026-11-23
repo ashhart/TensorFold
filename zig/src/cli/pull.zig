@@ -36,7 +36,6 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         return 2;
     }
     const auth = try Auth.init(a, io, env, err_out) orelse return 1;
-    const endpoint = auth.endpoint;
     if (!try routes(a, io, err_out, env)) return 2;
     const root = try hub.cacheDir(a, env, override);
     const w = std.Io.Dir.cwd();
@@ -61,7 +60,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             return 1;
         },
         else => {
-            try err_out.print("{s}@{s}: the hub at {s} is unreachable: ", .{ repo, revision, endpoint });
+            try err_out.print("{s}@{s}: the hub at the configured HF_ENDPOINT is unreachable: ", .{ repo, revision });
             try route.explain(io, err_out, e);
             try err_out.writeAll("; check the network, HF_ENDPOINT or the proxy settings\n");
             return 1;
@@ -73,6 +72,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         error.HubDenied => return auth.refuse(err_out, repo),
         error.HubTooLarge => {
             try err_out.print("{s}@{s}: file tree exceeds its decompressed byte cap\n", .{ repo, revision });
+            return 1;
+        },
+        error.HubCredentialPath, error.HubUnsafePath => {
+            try err_out.print("{s}@{s}: the hub returned an unsafe file path\n", .{ repo, sha });
             return 1;
         },
         else => {
@@ -100,11 +103,11 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const kind = configKind(a, config_bytes);
     const model_type = kind.model_type;
     if (kind.drafter) {
-        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, model_type });
+        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
     } else if (hub.family(model_type)) |family| {
         try out.print("{s}: {s} ({s})\n", .{ repo, family.title, family.model_type });
     } else {
-        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, model_type });
+        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
         return 1;
     }
 
@@ -276,6 +279,8 @@ pub fn listTree(a: Allocator, client: *std.http.Client, auth: Auth, repo: []cons
         if (kind != .string or !std.mem.eql(u8, kind.string, "file")) continue;
         const path_v = o.get("path") orelse continue;
         if (path_v != .string) continue;
+        if (auth.reflects(path_v.string)) return error.HubCredentialPath;
+        if (!validEntryText(path_v.string)) return error.HubUnsafePath;
         const size_v = o.get("size");
         const size: u64 = if (size_v != null and size_v.? == .integer and size_v.?.integer >= 0) @intCast(size_v.?.integer) else 0;
         var sha256: ?[32]u8 = null;
@@ -309,6 +314,26 @@ fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, 
     const t = parsed.value.object.get("model_type");
     const model_type = if (t != null and t.? == .string) a.dupe(u8, t.?.string) catch "unknown" else "unknown";
     return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };
+}
+
+/// Server-controlled model text made safe for output, with its hub credential removed.
+fn safeModelType(a: Allocator, text: []const u8, auth: Auth) ![]const u8 {
+    var out = text;
+    if (auth.bearer) |bearer| {
+        const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer["Bearer ".len..] else bearer;
+        if (secret.len > 0 and std.mem.indexOf(u8, out, secret) != null) out = try std.mem.replaceOwned(u8, a, out, secret, "[redacted]");
+    }
+    for (out) |ch| if (ch <= 0x20 or ch >= 0x7f) return "[unprintable model_type]";
+    return out;
+}
+
+/// Valid UTF-8 without terminal controls, for a path before it reaches a URL, log or local filename.
+fn validEntryText(path: []const u8) bool {
+    if (path.len == 0) return false;
+    const view = std.unicode.Utf8View.init(path) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| if (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return false;
+    return true;
 }
 
 fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {

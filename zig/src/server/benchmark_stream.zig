@@ -339,7 +339,7 @@ pub fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
     var it = view.iterator();
     var n = prefix.len;
     while (it.nextCodepoint()) |cp| {
-        if (cp > 0xff or cp < 0x20 or cp == 0x7f) return null;
+        if (cp > 0xff or cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return null;
         buf[n] = @intCast(cp);
         n += 1;
     }

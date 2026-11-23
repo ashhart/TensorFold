@@ -256,7 +256,7 @@ pub fn validKey(key: []const u8) bool {
     if (key.len == 0 or key.len > 256) return false;
     var view = std.unicode.Utf8View.init(key) catch return false;
     var it = view.iterator();
-    while (it.nextCodepoint()) |cp| if (cp > 0xff or cp < 32 or cp == 0x7f or isSpace(cp)) return false;
+    while (it.nextCodepoint()) |cp| if (cp > 0xff or cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or isSpace(cp)) return false;
     return true;
 }
 

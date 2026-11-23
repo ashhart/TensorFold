@@ -17,6 +17,9 @@ const error_limit = 2000;
 pub const Reply = struct {
     a: Allocator,
     sink: Sink,
+    secrets: []const []const u8 = &.{},
+    answer_stream: Stream = .{},
+    reason_stream: Stream = .{},
     pending: std.ArrayList(u8) = .empty,
     frames: sse.Frames = .{},
     /// The answer so far: what a kept turn holds.
@@ -27,6 +30,29 @@ pub const Reply = struct {
     /// An error event's message, cleaned for a terminal.
     failure: ?[]const u8 = null,
     done: bool = false,
+
+    /// Release a final non-secret prefix after the stream stops.
+    pub fn end(r: *Reply) Failure!void {
+        try r.flush(.reasoning);
+        try r.flush(.content);
+    }
+
+    fn redacted(r: *Reply, kind: Kind, text: []const u8) ![]const u8 {
+        const state = streamFor(r, kind);
+        const whole = if (state.pending.len > 0) try std.mem.concat(r.a, u8, &.{ state.pending, text }) else text;
+        const got = try sse.redactPiece(r.a, whole, r.secrets);
+        state.pending = got.rest;
+        return got.text;
+    }
+
+    fn flush(r: *Reply, kind: Kind) Failure!void {
+        const state = streamFor(r, kind);
+        if (state.pending.len == 0) return;
+        const text = state.pending;
+        state.pending = "";
+        if (kind == .content) try r.content.appendSlice(r.a, text);
+        try r.sink.piece(r.sink.ctx, kind, text);
+    }
 
     /// Bytes as they were read: whole lines are handled now, a cut line waits for the rest.
     pub fn feed(r: *Reply, bytes: []const u8) Failure!void {
@@ -70,7 +96,7 @@ pub const Reply = struct {
         };
         if (chunk != .object) return error.InvalidStream;
         if (chunk.field("error")) |e| {
-            r.failure = try errorText(r.a, e);
+            r.failure = try errorText(r.a, e, r.secrets);
             return;
         }
         const choices = chunk.get("choices") orelse return; // a usage event carries none
@@ -80,11 +106,13 @@ pub const Reply = struct {
             const thought = delta.strField("reasoning_content") orelse delta.strField("reasoning");
             if (thought) |t| if (t.len > 0) {
                 r.reasoned = true;
-                try r.sink.piece(r.sink.ctx, .reasoning, t);
+                const safe = try r.redacted(.reasoning, t);
+                if (safe.len > 0) try r.sink.piece(r.sink.ctx, .reasoning, safe);
             };
             if (delta.strField("content")) |c| if (c.len > 0) {
-                try r.content.appendSlice(r.a, c);
-                try r.sink.piece(r.sink.ctx, .content, c);
+                const safe = try r.redacted(.content, c);
+                try r.content.appendSlice(r.a, safe);
+                if (safe.len > 0) try r.sink.piece(r.sink.ctx, .content, safe);
             };
         }
         if (choice.field("finish_reason")) |f| if (f == .string) {
@@ -93,10 +121,16 @@ pub const Reply = struct {
     }
 };
 
-/// An error event's ``message`` (or the error itself when it is text), without terminal control sequences.
-fn errorText(a: Allocator, e: json.Value) ![]const u8 {
+const Stream = struct { pending: []const u8 = "" };
+
+fn streamFor(r: *Reply, kind: Kind) *Stream {
+    return if (kind == .content) &r.answer_stream else &r.reason_stream;
+}
+
+/// An error event's ``message`` with credentials removed before terminal cleaning and truncation.
+fn errorText(a: Allocator, e: json.Value, secrets: []const []const u8) ![]const u8 {
     const text = e.strField("message") orelse e.str() orelse "the server reported an error without a message";
-    return sse.clean(a, text, error_limit);
+    return sse.clean(a, try sse.redact(a, text, secrets), error_limit);
 }
 
 const Seen = struct {
