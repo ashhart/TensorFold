@@ -101,7 +101,7 @@ pub const Model = struct {
         };
         defer if (generation) |g| a.free(g);
         var problem: cfg.Problem = .{};
-        const c = cfg.parseWhy(a, text, generation, &problem) catch |e| {
+        const c = parseServed(a, text, generation, &problem) catch |e| {
             if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
             return e;
         };
@@ -247,8 +247,8 @@ const sizes = [_]Size{
 };
 
 /// The served config: a dense tied head is admitted only under TF_QWEN27_TIED_HEAD=1.
-pub fn parseServed(a: std.mem.Allocator, text: []const u8, problem: *cfg.Problem) !cfg.Config {
-    return cfg.parseTied(a, text, null, problem, try platform.environment.read(bool, @import("tied_head.zig").flag, false));
+pub fn parseServed(a: std.mem.Allocator, text: []const u8, generation: ?[]const u8, problem: *cfg.Problem) !cfg.Config {
+    return cfg.parseTied(a, text, generation, problem, try platform.environment.read(bool, @import("tied_head.zig").flag, false));
 }
 
 fn qualifiedSize(c: cfg.Config) bool {
