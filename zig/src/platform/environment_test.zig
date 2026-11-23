@@ -42,6 +42,8 @@ const valid = [_]Case{
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
+    .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
+    .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
@@ -79,6 +81,8 @@ const valid = [_]Case{
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN_PDL", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_PDL", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_COST_KEY_TRACE", .raw = "0", .n = 0 },
@@ -340,7 +344,6 @@ test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_EXL3_ROUTED", "host"));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_PLE_READ", "map"));
 }
-
 test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
     const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
     const previous: ?[:0]u8 = if (sys.getenv(name)) |raw| try a.dupeSentinel(u8, raw, 0) else null;
@@ -592,7 +595,6 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
 }
-
 test {
     _ = @import("environment_tier_test.zig");
 }

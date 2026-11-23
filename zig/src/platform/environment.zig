@@ -39,6 +39,7 @@ pub fn isReal(kind: Kind) bool {
 }
 
 pub const rules = [_]Rule{
+    .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
@@ -183,6 +184,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN_PDL", .scope = .common, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -491,10 +493,8 @@ pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
 
 /// A `.path` setting from the process environment, or null when unset or blank; a refusal is logged without its text.
 pub fn readPath(name: [:0]const u8) Error!?[]const u8 {
-    std.debug.assert(rule(name).kind == .path);
     const raw = sys.getenv(name);
-    _ = (try checked(name, raw)) orelse return null;
-    return std.mem.trim(u8, raw.?, rule(name).trim);
+    return if ((try checked(name, raw)) == null) null else try path(name, raw);
 }
 /// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
 pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
