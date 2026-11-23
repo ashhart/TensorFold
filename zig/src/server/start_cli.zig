@@ -179,20 +179,22 @@ fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?
     var problem: []const u8 = "";
     var tail: []const []const u8 = &.{};
     const serving_exe = ctx.serve_exe orelse if (ctx.self_exe) |current| try nativeSibling(ctx.a, current) else null;
-    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = serving_exe, .key = caller_key, .environment_key = if (args.check) null else ctx.environ.get("TENSORFOLD_API_KEY"), .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
+    var setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = serving_exe, .key = caller_key, .environment_key = if (args.check) null else ctx.environ.get("TENSORFOLD_API_KEY"), .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
     var extra: std.ArrayList([]const u8) = .empty;
     try extra.appendSlice(ctx.a, &.{ "--name", std.fs.path.basename(choice.entry.repo) });
     if (choice.drafter_dir) |d| try extra.appendSlice(ctx.a, &.{ "--drafter", d });
     const plan = try child.plan(setup, choice.model_dir, extra.items, args.startup_timeout, &problem) orelse return fail(ctx, 1, "{s}", .{problem});
+    const credentials = try turn.Credentials.init(ctx.a, try chat.callerCredentials(ctx.a, ctx.environ, plan.key));
+    setup.secrets = credentials.forms;
     try say(ctx.err, "Loading {s}; Ctrl-C cancels", .{choice.entry.repo});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, 1, "{s}", .{problem});
-        try lastLines(ctx, tail);
+        const code = try fail(ctx, 1, "{s}", .{try credentials.redact(ctx.a, problem)});
+        try lastLines(ctx, tail, credentials);
         return code;
     };
     errdefer _ = own.managed.stop();
-    const code = try firstReply(ctx, &own);
+    const code = try firstReply(ctx, &own, credentials);
     if (code != 0) {
         if (own.managed.stop()) |why| try say(ctx.err, "tensorfold start: {s}", .{why});
         return code;
@@ -203,17 +205,17 @@ fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?
         return 0;
     }
     try say(ctx.out, "Serving {s} at {s}/v1; Ctrl-C stops the server", .{ own.served, own.managed.base() });
-    return wait(ctx, &own);
+    return wait(ctx, &own, credentials);
 }
 
 /// One deterministic short request proves answer content, not only a listening socket.
-fn firstReply(ctx: *const Context, own: *Child) !u8 {
+fn firstReply(ctx: *const Context, own: *Child, credentials: turn.Credentials) !u8 {
     var problem: []const u8 = "";
     const url = try stream.endpoint(ctx.a, own.managed.base(), true, &problem) orelse return fail(ctx, 1, "{s}", .{problem});
     var h: history.History = .{ .a = ctx.a };
     const request = try turn.body(ctx.a, .{ .model = own.served, .temperature = 0, .max_tokens = 32 }, &h, "Reply with a short confirmation that the server is ready.");
     try say(ctx.out, "First reply:", .{});
-    switch (try turn.run(ctx.a, ctx.io, url, own.key, request, ctx.out, .{})) {
+    switch (try turn.run(ctx.a, ctx.io, url, own.key, credentials, request, ctx.out, .{ .terminal = true })) {
         .finished => |f| {
             if (f.content.len == 0) return fail(ctx, 1, "first reply failed: the model returned no answer content", .{});
             return 0;
@@ -224,7 +226,7 @@ fn firstReply(ctx: *const Context, own: *Child) !u8 {
 }
 
 /// Keep the checked server in the foreground until a signal or its own exit.
-fn wait(ctx: *const Context, own: *Child) !u8 {
+fn wait(ctx: *const Context, own: *Child, credentials: turn.Credentials) !u8 {
     while (true) {
         if (stop.requested()) |sig| {
             if (own.managed.stop()) |why| try say(ctx.err, "tensorfold start: {s}", .{why});
@@ -232,17 +234,17 @@ fn wait(ctx: *const Context, own: *Child) !u8 {
         }
         if (try own.managed.exitedTail(ctx.a)) |tail| {
             const code = try fail(ctx, 1, "the model server exited after its successful first reply", .{});
-            try lastLines(ctx, tail);
+            try lastLines(ctx, tail, credentials);
             return code;
         }
         ctx.io.sleep(.fromMilliseconds(200), .awake) catch {};
     }
 }
 
-fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
-    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{tail[0]});
+fn lastLines(ctx: *const Context, tail: []const []const u8, credentials: turn.Credentials) !void {
+    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{try credentials.redact(ctx.a, tail[0])});
     if (tail.len > 1) try ctx.err.writeAll("Last server log lines:\n");
-    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{line});
+    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{try credentials.redact(ctx.a, line)});
     try ctx.err.flush();
 }
 

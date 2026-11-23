@@ -199,6 +199,79 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
 }
 
+test "chat CLI: attached responses redact credentials before every output boundary" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const first = "fixture";
+    const second = "fixture-secret";
+    const third = "fixture-\u{00c3}\u{00a9}";
+    const latin1 = "fixture-\xc3\xa9";
+    const json_reflection = try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"{s} and {s}\"}}}}", .{ first, second });
+    const event_head = try fake.headOf(a, "200 OK", "text/event-stream");
+    const event_error = try fake.event(a, try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"{s}\"}}}}", .{second}));
+    const event_content = try std.mem.concat(a, u8, &.{ try chunk(a, "{\"content\": \"split-\"}"), try chunk(a, "{\"content\": \"secret\"}") });
+    var filler: [299]u8 = undefined;
+    @memset(&filler, 'x');
+    const truncated = try std.mem.concat(a, u8, &.{ &filler, second });
+    const quoted = try std.fmt.allocPrint(a, "\"{s}", .{filler[0..255]});
+    @memset(filler[0..100], 'y');
+    const escaped = try std.mem.concat(a, u8, &.{ "{\"error\":{\"message\":\"", filler[0..100], "\\\"", quoted[1..], "\"}}}" });
+    const replies = try a.dupe([]const fake.Write, &.{
+        try fake.jsonReply(a, "401 Unauthorized", json_reflection),
+        try fake.jsonReply(a, "500 Internal Server Error", second),
+        &.{.{ .bytes = try std.mem.concat(a, u8, &.{ event_head, event_error, try fake.event(a, "[DONE]") }) }},
+        try fake.jsonReply(a, "500 Internal Server Error", truncated),
+        try fake.jsonReply(a, "500 Internal Server Error", escaped),
+        try fake.jsonReply(a, "500 Internal Server Error", "{\"error\":{\"message\":\"fixture-\\u00c3\\u00a9\"}}"),
+        &.{.{ .bytes = try std.mem.concat(a, u8, &.{ event_head, event_content, try fake.event(a, "[DONE]") }) }},
+    });
+    const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{second});
+    const f = try world(a, models, replies);
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", try std.mem.concat(a, u8, &.{ first, ",", second, ",", third, ",split-secret", ",", quoted }));
+    r.input = "hi";
+    var shown: std.ArrayList(u8) = .empty;
+    for (0..7) |i| {
+        try std.testing.expectEqual(@as(u8, if (i < 6) 1 else 0), try r.command(&.{ "--url", try f.url(a, "") }));
+        try shown.appendSlice(a, r.out.written());
+        try shown.appendSlice(a, r.err.written());
+    }
+    r.interactive = true;
+    r.input = "/bye\n";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    try shown.appendSlice(a, r.out.written());
+    for ([_][]const u8{ first, second, third, latin1, "split-secret", quoted, quoted[0..100] }) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, shown.items, secret) == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown.items, "[redacted]") != null);
+}
+
+test "chat CLI: C1 controls in any key entry are refused before any request" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const replies = try a.dupe([]const fake.Write, &.{try streamed(a)});
+    const f = try world(a, models_doc, replies);
+    defer f.stop();
+    r.input = "hi";
+    var ok = true;
+    for ([_][]const u8{ "fixture-\u{009b}", "good-key,fixture-\u{009b}" }) |key| {
+        try r.env.put("TENSORFOLD_API_KEY", key);
+        const code = try r.command(&.{ "--url", try f.url(a, "") });
+        ok = ok and code == 1;
+        ok = ok and f.count() == 0;
+        ok = ok and std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null;
+        ok = ok and std.mem.indexOf(u8, r.err.written(), key) == null;
+    }
+    try std.testing.expect(ok);
+}
+
 test "chat CLI: --no-thinking sends the documented switch, and is refused before any turn when the model has none" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

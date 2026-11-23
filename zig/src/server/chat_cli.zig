@@ -8,6 +8,7 @@ const history = @import("chat_cli_history.zig");
 const turn = @import("chat_cli_turn.zig");
 const child = @import("chat_cli_child.zig");
 const stream = @import("benchmark_stream.zig");
+const sse = @import("benchmark_sse.zig");
 const stop = @import("benchmark_stop.zig");
 const environment = @import("sys").environment;
 const Allocator = std.mem.Allocator;
@@ -83,6 +84,7 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
     if (windows and args.url == null) return fail(ctx, windows_child);
     // a running server's key comes from TENSORFOLD_API_KEY; the server the chat starts gets a fresh one of its own
     const key = if (args.url == null) null else envKey(ctx.environ) catch return fail(ctx, bad_key);
+    const credentials: turn.Credentials = if (args.url != null) try turn.Credentials.init(ctx.a, try callerCredentials(ctx.a, ctx.environ, null)) else .{};
     if (comptime !windows) if (ctx.signals) signals.install();
     defer if (comptime !windows) if (ctx.signals) signals.restore();
     // a piped message is read before any server starts, so an empty one costs no model load
@@ -91,7 +93,7 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
         .text => |text| message = text,
         .code => |code| return code,
     };
-    if (args.url) |url| return session(ctx, args, .{ .base = url, .model = args.model, .key = key, .denied = denied(key != null) }, message);
+    if (args.url) |url| return session(ctx, args, .{ .base = url, .model = args.model, .key = key, .credentials = credentials, .denied = denied(key != null) }, message);
     if (comptime windows) return fail(ctx, windows_child) else return served(ctx, args, message);
 }
 
@@ -111,6 +113,19 @@ pub fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u
     return selected;
 }
 
+/// Every configured caller credential, including an optional managed server's private key.
+pub fn callerCredentials(a: Allocator, environ: *const std.process.Environ.Map, extra: ?[]const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    if (extra) |key| if (key.len > 0) try out.append(a, key);
+    const raw = environ.get("TENSORFOLD_API_KEY") orelse return out.items;
+    var keys = std.mem.splitScalar(u8, raw, ',');
+    while (keys.next()) |entry| {
+        const key = std.mem.trim(u8, entry, " \t\r\n\x0b\x0c");
+        if (key.len > 0) try out.append(a, key);
+    }
+    return out.items;
+}
+
 /// What a running server's 401 adds: whether TENSORFOLD_API_KEY gave the key it refused.
 fn denied(sent: bool) []const u8 {
     return if (sent) "the server refused the key in TENSORFOLD_API_KEY" else "set TENSORFOLD_API_KEY to a key the server accepts";
@@ -120,17 +135,19 @@ fn denied(sent: bool) []const u8 {
 fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
     var problem: []const u8 = "";
     var tail: []const []const u8 = &.{};
-    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = ctx.self_exe, .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
+    var setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = ctx.self_exe, .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
     const plan = try child.plan(setup, args.model.?, args.serve, args.startup_timeout, &problem) orelse return fail(ctx, problem);
+    const credentials = try turn.Credentials.init(ctx.a, try callerCredentials(ctx.a, ctx.environ, plan.key));
+    setup.secrets = credentials.forms;
     try say(ctx.err, "Loading {s}; Ctrl-C cancels.", .{args.model.?});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, problem);
-        try lastLines(ctx, tail);
+        const code = try fail(ctx, try credentials.redact(ctx.a, problem));
+        try lastLines(ctx, tail, credentials);
         return code;
     };
     errdefer _ = own.managed.stop();
-    const code = try session(ctx, args, .{ .base = own.managed.base(), .model = own.served, .key = own.key, .own = &own }, message);
+    const code = try session(ctx, args, .{ .base = own.managed.base(), .model = own.served, .key = own.key, .credentials = credentials, .own = &own }, message);
     if (own.managed.stop()) |why| {
         const failed = try fail(ctx, why);
         return if (code == 0) failed else code;
@@ -139,15 +156,15 @@ fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
 }
 
 /// An exited child's last log lines after its failure, as the benchmark prints them.
-fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
-    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{tail[0]});
+fn lastLines(ctx: *const Context, tail: []const []const u8, credentials: turn.Credentials) !void {
+    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{try credentials.redact(ctx.a, tail[0])});
     if (tail.len > 1) try ctx.err.writeAll("Last server log lines:\n");
-    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{line});
+    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{try credentials.redact(ctx.a, line)});
     try ctx.err.flush();
 }
 
 /// The server a session talks to: its address, the model to ask for, its key, and what its 401 adds.
-const Target = struct { base: []const u8, model: ?[]const u8, key: ?[]const u8 = null, denied: ?[]const u8 = null, own: ?*Child = null };
+const Target = struct { base: []const u8, model: ?[]const u8, key: ?[]const u8 = null, credentials: turn.Credentials = .{}, denied: ?[]const u8 = null, own: ?*Child = null };
 
 const Session = struct {
     ctx: *const Context,
@@ -161,7 +178,7 @@ const Session = struct {
     /// One message and its streamed reply, in an arena of its own that lives until the turn is kept.
     fn ask(s: *Session, a: Allocator, message: []const u8) !turn.Ended {
         const request = try turn.body(a, s.settings, &s.history, message);
-        return turn.run(a, s.ctx.io, s.url, s.target.key, request, s.ctx.out, s.show);
+        return turn.run(a, s.ctx.io, s.url, s.target.key, s.target.credentials, request, s.ctx.out, s.show);
     }
 
     /// A finished reply's notes: cut at its token limit, or nothing but reasoning that was hidden.
@@ -176,7 +193,7 @@ const Session = struct {
         _ = try fail(s.ctx, if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason);
         if (comptime !windows) if (f.connect) if (s.target.own) |own| if (try own.managed.exitedTail(s.ctx.a)) |tail| {
             try s.ctx.err.writeAll("The model server has exited.\n");
-            try lastLines(s.ctx, tail);
+            try lastLines(s.ctx, tail, s.target.credentials);
             return 1;
         };
         return if (s.ctx.interactive) null else 1;
@@ -297,7 +314,7 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
         .ok => |v| doc = v,
         .err => {},
     };
-    const name = target.model orelse first(doc) orelse {
+    const raw_name = target.model orelse first(doc) orelse {
         if (got.failed == .none and got.status == 401) if (target.denied) |hint|
             return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} answered HTTP 401; {s}", .{ url, hint }) };
         const why = switch (got.failed) {
@@ -309,7 +326,8 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
         };
         return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} {s}; name one after the URL", .{ url, why }) };
     };
-    return .{ .model = name, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, name) else null };
+    const name = if (target.model == null) try target.credentials.clean(ctx.a, raw_name, sse.line_limit) else raw_name;
+    return .{ .model = name, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, raw_name) else null };
 }
 
 /// The first ``data[].id`` of a ``/v1/models`` document.
