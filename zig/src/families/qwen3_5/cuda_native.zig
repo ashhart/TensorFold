@@ -153,7 +153,6 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
 pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
     return if (@as(*Lanes, @ptrCast(@alignCast(p))).pages) |pg| &pg.pool else null;
 }
-
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const clef = try decide.check(gpa, io, dir, .{ .drafter = o.drafter != null, .slide = o.slide, .vision = o.vision != null, .kv8 = o.kv8, .prompt_int8 = o.prompt_int8 });
     var loaded = try openLanes(gpa, io, ctx, dir, kernels, o);

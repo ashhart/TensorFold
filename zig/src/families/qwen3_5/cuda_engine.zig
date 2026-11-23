@@ -313,7 +313,6 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
@@ -343,7 +342,6 @@ pub const Engine = struct {
         e.stream.deinit();
         e.gpa.destroy(e);
     }
-
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         return e.streamBytesWithTaps(cap, e.n_taps);
