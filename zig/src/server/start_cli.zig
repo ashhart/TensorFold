@@ -83,7 +83,12 @@ pub fn nativeSibling(a: Allocator, current: []const u8) ![]const u8 {
         "tensorfold-native.exe"
     else
         return current;
-    return std.fs.path.join(a, &.{ std.fs.path.dirname(current) orelse ".", sibling });
+    const directory = std.fs.path.dirname(current) orelse ".";
+    if (std.ascii.eqlIgnoreCase(std.fs.path.basename(directory), "bin")) {
+        const prefix = std.fs.path.dirname(directory) orelse ".";
+        return std.fs.path.join(a, &.{ prefix, "native", "bin", sibling });
+    }
+    return std.fs.path.join(a, &.{ directory, sibling });
 }
 
 fn mainWithServeExe(init: std.process.Init, argv: []const []const u8, serve_exe: ?[]const u8) !u8 {

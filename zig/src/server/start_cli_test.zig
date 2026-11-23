@@ -103,8 +103,10 @@ const Run = struct {
     }
 
     fn cudaStandIn(r: *Run, port: u16) !void {
-        try standInAt(r, port, "tensorfold-native");
-        const low_level = try r.path("tensorfold");
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, try r.path("bin"));
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, try r.path("native/bin"));
+        try standInAt(r, port, "native/bin/tensorfold-native");
+        const low_level = try r.path("bin/tensorfold");
         const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\ntouch {s}\nexit 2\n", .{try r.path("low-level-called")});
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = low_level, .data = text, .flags = .{ .permissions = .fromMode(0o755) } });
         r.self_exe = low_level;
