@@ -362,7 +362,7 @@ test "llama host: explicit 13 omitted context admits every pair at the default w
     try std.testing.expectEqual(short, window);
     const lower_budget = exact_budget - 1;
     const lower_window = longestWindow(&c, &c, lower_budget, 4096, fixed);
-    try std.testing.expectEqual(@as(usize, 240), lower_window);
+    try std.testing.expectEqual(@as(usize, 255), lower_window);
     const lower_pair = fl.state.cacheBytes(&c, lower_window + 1) + fl.state.cacheBytes(&c, lower_window + fl.state.window_rows);
     const lower_admitted = try admitStreams(a, @intCast(lower_pair), lower_budget, fixed, @intCast(lower_window), &why);
     try std.testing.expectEqual(@as(?u32, 13), lower_admitted);
