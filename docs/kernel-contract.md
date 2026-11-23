@@ -621,11 +621,15 @@ down, each bit-equal to the decode instance it replaces; the scaled-code prompt 
 CUDA also checks Flash Next's GPTQ int4 experts and head (`fn_int4.cu`, `zig/tests/cuda/contract_int4.zig`) at the
 checkpoint's widths: gate/up with SwiGLU, down to fp32 and bf16, the head's dense rows and the two prompt forms
 bit-equal to the plain ones, each output against float64 at the weights `qweight` and the fp16 scales store. A gate/up
-output's allowance is derived from its own epilogue (`int4_ref.zig`): the two fp32 sums through silu's slope and the up
-value, then bf(g), bf(u), bf(silu) and the store, each at its own value's size, and the silu 0 that expf's fp32
-overflow leaves where float64 keeps a denormal-sized value. Gate 4's bf16 proof of that epilogue stops at
-1 / (4.1 u) = 62x, because a mirrored row cancels exactly in the halves order, so the registration states 60. Two
-controls: a group sum rounded to bf16 before its scale (gate 4), and a head whose words are packed unshuffled (gate 3).
+output's allowance is its epilogue's own worst case (`int4_ref.zig`; the arithmetic is in
+[int4 contract allowances](int4-contract-allowances.md)): the two fp32 sums through silu's slope and the up value,
+then bf(g), bf(u), bf(silu) and the store, each at its own value's size, and the silu 0 that expf's fp32 overflow
+leaves where float64 keeps a denormal-sized value. Gate 4's bf16 proof of that epilogue stops at 1 / (4.0393 u) =
+63.4x, because the halves of a mirrored row cancel and a bf16 sum misses by want itself, so the registration states
+60. The epilogue's scalar model (`tf_ctl_int4_swiglu` at fault 0) passes the same gates. Five controls: a group sum
+rounded to bf16 before its scale (gate 4, the down), each group's sums rounded to bf16 (gate 4, the gate/up), a head
+whose words are packed unshuffled (gate 3), and on the gate/up silu of the up sum times the gate sum (gate 3) and
+gate, up and silu cut toward zero (gate 3).
 A plan whose shared expert's slot is skipped must leave those rows untouched. nvcc 13.3's usage of its 21 launches is in
 `measurements/pending_133.zig`; a 13.0 record stays pending.
 CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
