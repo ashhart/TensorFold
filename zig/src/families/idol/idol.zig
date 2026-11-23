@@ -23,6 +23,8 @@ pub const dino = @import("dino.zig");
 pub const picture = @import("picture.zig");
 /// torch's CPU generator, for the starting noise.
 pub const torch_rng = @import("torch_rng.zig");
+/// Which posterior noise a tf-idol-generate run used.
+pub const run_noise = @import("run_noise.zig");
 /// BiRefNet background removal and the SDK's host preprocessing for raw photos.
 pub const preprocess = @import("preprocess.zig");
 pub const photo = @import("photo.zig");
@@ -56,6 +58,7 @@ test {
     _ = dino;
     _ = picture;
     _ = torch_rng;
+    _ = run_noise;
     _ = preprocess;
     _ = photo;
     _ = birefnet;
