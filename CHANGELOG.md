@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flint on Metal: a shared round's sampled rows draw in one launch instead of one serial launch a row, with the same tokens (#4780).
+
 - HIP Qwen: use the policy prompt step on lone RDNA 3.5 iGPUs while preserving admitted streams and requested prompt caches (#4207). Thanks to @AbrahamCete.
 
 - GLM-5.3-Flash on CUDA: with `--learn-conversations`, conversation states are kept on disk through the rows store, so after an eviction or a restart the next turn reads its state back instead of prefilling the whole conversation; at TP>1 every rank's part goes to rank 0's disk, so a state is read back on every rank or none (#1411, fixes #1312). Thanks to @wojo.
