@@ -240,6 +240,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         return 0;
     };
+    try @import("sys").environment.checkScope(.nemotron, @import("sys").environment.Process{}); // as the server's open does
     const engine = nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null, .precision = opts.math }) catch |err| {
         cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this error
         return err;
