@@ -611,9 +611,9 @@ and the vision tower's GEMMs. On an M4 Pro at `61be67917f`: 86 kernels pass gate
 bits are set: a bf16 dyadic fits in 10 fraction bits, so the M5 tensor units' operand cut matched and a gate that should
 have spent part of the bound read 0. The grouped MMA kernels (`experts_group_mma.metal`, `dense_mma.metal`, the loop
 gates) assume an 8x8x8 `simdgroup_matrix` multiply-accumulate adds its products in k order from the accumulator; the
-byte-equality gates against the one-row kernels hold on an M4 Pro and an M4 Max. An M5 Ultra held them at an earlier
-head (`e6cb02e09e`, a contributor's run counting 131 controls where the M4 chips then counted 132; the dense tile's
-ordering pass added the 133rd) and was not rerun at this one.
+byte-equality gates against the one-row kernels hold on an M4 Pro, an M4 Max and an M5 Ultra (`9a255bb79e`). An M5 Ultra
+counts one control fewer than the M4 chips (131 against 132 at `e6cb02e09e`, 132 against 133 after the dense tile): the
+media suite plants the `bf16_nt` row control only on chips without tensor units (`metal_inkling2_media_suite.zig`).
 
 ## CUDA records per nvcc release
 

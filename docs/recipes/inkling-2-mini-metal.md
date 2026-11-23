@@ -53,7 +53,7 @@ kernel with a planted control for each rule it states. Images (PNG, JPEG) go thr
 | --- | --- | --- |
 | M4 Pro, 48 GiB | The served receipt below, the contract and the host tests | Here, at the heads named in the receipt and under Verification |
 | M4 Max, 128 GiB | `tf-kernel-contract --only inkling2` only: 86 kernels pass, 132 controls red, 0 missed, 0 limit problems at `e6cb02e09e` | A contributor (@akol1); no served run |
-| M5 Ultra | Plain decode 55.5 and 55.4 tok/s over 16 chat prompts, two blocks, at `e6cb02e09e`; DSpark 59.2 and 59.1 against plain 52.1 and 52.0 at `8f4071726b`; the contract at `e6cb02e09e`: 86 pass, 131 controls red, 0 missed | A contributor (@SashaMIT), not reproduced here; the contract line counted 131 controls where the M4 chips count 132 |
+| M5 Ultra | At `9a255bb79e`: the contract 86 pass, 132 controls red, 0 missed, 0 limit problems; plain decode 55.4 and 55.8 tok/s over 16 chat prompts, two blocks; first token at 6,964 prompt tokens 4.73 s (4.91 s at `e6cb02e09e`). DSpark 59.2 and 59.1 against plain 52.1 and 52.0 at `8f4071726b`; sampled and DSpark not run at `9a255bb79e` | A contributor (@SashaMIT), not reproduced here; his contract line counts one control fewer than the M4 chips because the media suite plants the `bf16_nt` row control only on chips without tensor units |
 | M3 Pro, 36 GB | Contract 86/86, 80 controls red, and plain decode 12.0 to 12.4 tok/s with DSpark 14.4 to 14.6, at `f3a6a992f2` | A contributor (@jschmied); not rerun at any later head |
 | M1, M2 | Not run | |
 | M5 tensor-unit prompt path | Not written; the text path has no tensor-unit kernel (only the vision tower's GEMMs use them) | |
