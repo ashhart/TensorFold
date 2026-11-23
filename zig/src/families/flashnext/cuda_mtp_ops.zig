@@ -82,6 +82,36 @@ pub const Main = struct {
     rollback: *const fn (*anyopaque, *prompt.Seq, *Draft, usize) anyerror!void,
 };
 
+/// Tail work only on one GPU; rank-side Ops has no head, so its eager pass and draw keep their own reductions.
+fn verifyTail(o: anytype, seq: *prompt.Seq, d: *Draft, ids: []const u32, hooks: batch.Hooks, keeps: bool) !void {
+    const n = ids.len;
+    const ahead = d.best_ahead;
+    d.best_ahead = false;
+    d.best_queued = false;
+    if (graph_tail.on() and o.e.collective == null) {
+        // the same copies and row best in the same order, inside the window's graph when it has one
+        var tail: graph_tail.Tail = .{};
+        if (keeps) {
+            tail.before = .{ .dst = d.saved.ptr + d.layout.tail_at, .src = seq.tail.ptr, .n = ple_tail_n * wide * 2 };
+            tail.after = .{ .dst = d.saved.ptr + d.layout.nrow_at, .n = n * wide * 2 };
+        }
+        if (ahead) {
+            tail.head = o.h;
+            tail.scores = d.logits.ptr;
+            tail.vocab = vocab;
+            tail.rows = n;
+            tail.best = d.best.ptr;
+        }
+        var with = hooks;
+        with.tail = &tail;
+        try o.e.forward(@TypeOf(o.tri), o.tri, seq, ids, with);
+        d.best_queued = ahead;
+    } else {
+        if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
+        try o.e.forward(@TypeOf(o.tri), o.tri, seq, ids, hooks);
+        if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
+    }
+}
 /// The head's work over a sequence: prompt pass, verify windows, rollback, forward and chains; `Tri` launches kernels.
 pub fn Ops(comptime Tri: type) type {
     return struct {
@@ -290,32 +320,7 @@ pub fn Ops(comptime Tri: type) type {
             d.history = seq.history;
             @memcpy(d.ids[0..n], ids);
             const hooks: batch.Hooks = .{ .logits = .all, .logits_out = d.logits.ptr, .keep = if (keeps) &d.keep else null, .streams = d.streams.ptr, .host_logits = @import("cuda_batch_state.zig").verifyHostLogits() };
-            const ahead = d.best_ahead;
-            d.best_ahead = false;
-            d.best_queued = false;
-            if (graph_tail.on()) {
-                // the same copies and row best in the same order, inside the window's graph when it has one
-                var tail: graph_tail.Tail = .{};
-                if (keeps) {
-                    tail.before = .{ .dst = d.saved.ptr + d.layout.tail_at, .src = seq.tail.ptr, .n = ple_tail_n * wide * 2 };
-                    tail.after = .{ .dst = d.saved.ptr + d.layout.nrow_at, .n = n * wide * 2 };
-                }
-                if (ahead) {
-                    tail.head = o.h;
-                    tail.scores = d.logits.ptr;
-                    tail.vocab = vocab;
-                    tail.rows = n;
-                    tail.best = d.best.ptr;
-                }
-                var with = hooks;
-                with.tail = &tail;
-                try o.e.forward(Tri, o.tri, seq, ids, with);
-                d.best_queued = ahead;
-            } else {
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.tail_at, seq.tail.ptr, ple_tail_n * wide * 2);
-                try o.e.forward(Tri, o.tri, seq, ids, hooks);
-                if (keeps) try copyAsync(o.stream(), d.saved.ptr + d.layout.nrow_at, o.e.batch_s.?.ple_nrow, n * wide * 2);
-            }
+            try verifyTail(o, seq, d, ids, hooks, keeps);
             d.open = keeps;
         }
 
@@ -443,6 +448,63 @@ test "a grouped head's lane carries its draft's page table" {
     try std.testing.expectEqual(d.pg, l.seq.pg);
     try std.testing.expectEqual(@as(usize, 300), l.pos);
     try std.testing.expectEqual(@as(usize, 3), l.rows);
+}
+
+test "graph tail: a rank keeps eager copies and its draw's row best with the switch on" {
+    const f = @import("cuda_mtp_nonfinite_fixture.zig");
+    const D = f.Device;
+    const Scratch = struct { ple_nrow: u64 };
+    const Engine = struct {
+        stream: *const cuda.Stream,
+        batch_s: ?*const Scratch,
+        collective: ?*const anyopaque = @ptrFromInt(0x10),
+        fn forward(e: *@This(), comptime Tri: type, _: Tri, _: *prompt.Seq, _: []const u32, hooks: batch.Hooks) !void {
+            if (hooks.tail) |tail| try tail.first(e.stream.*);
+            D.note(.pass);
+            if (hooks.tail) |tail| try tail.last(e.stream.*, e.batch_s.?.ple_nrow);
+        }
+    };
+    const Rig = struct {
+        e: *Engine,
+        h: *mtp.Head,
+        tri: struct {} = .{},
+        fn stream(r: @This()) cuda.Stream {
+            return r.e.stream.*;
+        }
+    };
+    const env = @import("sys").env;
+    _ = env.setenv("TF_FLASHNEXT_GRAPH_TAIL", "1", 1);
+    defer _ = env.unsetenv("TF_FLASHNEXT_GRAPH_TAIL");
+    var driver = D.driver();
+    defer cuda.download_stage.closeDriver(&driver);
+    var h = try f.head(&driver);
+    defer h.artifact.deinit();
+    const host = try std.testing.allocator.alloc(u16, vocab);
+    defer std.testing.allocator.free(host);
+    var d = f.draft(&driver, host);
+    d.saved = .{ .d = &driver, .ptr = 0x5000, .len = 0 };
+    d.layout.tail_at = 0x40;
+    d.layout.nrow_at = 0x80;
+    d.best_ahead = true;
+    var seq: prompt.Seq = undefined;
+    seq.tail = .{ .d = &driver, .ptr = 0x6000, .len = 0 };
+    const st: cuda.Stream = .{ .d = &driver, .handle = null };
+    const scratch: Scratch = .{ .ple_nrow = 0x8800 };
+    var e: Engine = .{ .stream = &st, .batch_s = &scratch };
+    // A valid recording head makes the defective rank branch observable instead of dereferencing undefined memory.
+    const o: Rig = .{ .e = &e, .h = &h };
+    try verifyTail(o, &seq, &d, &.{1}, .{ .logits = .all }, true);
+    try std.testing.expect(!d.best_ahead and !d.best_queued);
+    try std.testing.expectEqual(@as(usize, 0), D.best_calls);
+    try std.testing.expectEqualSlices(D.Event, &.{ .copy, .pass, .copy }, D.events[0..D.events_n]);
+    try std.testing.expectEqualSlices(u64, &.{ 0x6000, 0x8800 }, D.copy_src[0..2]);
+    D.best = f.reduction(3.5, 4, 7);
+    var out: [1]u32 = undefined;
+    try draw.draws(&h, st, std.testing.allocator, &d, null, &.{}, &out);
+    try std.testing.expectEqual(@as(u32, 7), out[0]);
+    try std.testing.expect(!d.best_queued);
+    try std.testing.expectEqual(@as(usize, 1), D.best_calls);
+    try std.testing.expectEqualSlices(D.Event, &.{ .copy, .pass, .copy, .best, .wait, .read_best }, D.events[0..D.events_n]);
 }
 
 /// One shared head loop over its operator boundary: forward work, reductions, guarded picks and stop policy.
