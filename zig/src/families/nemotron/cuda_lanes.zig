@@ -475,7 +475,7 @@ pub const Cuda = struct {
                 break :blk first[0..];
             };
             const v = h.vocab(r.stream.context.items);
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.sharedRows(self.e.c)) {
+            if (drafting < 2 or r.depth == 0 or !@import("cuda_wide.zig").batches(self.e.c, batched, rows, follow.len)) {
                 try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;
