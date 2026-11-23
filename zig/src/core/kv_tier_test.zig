@@ -571,6 +571,17 @@ test "a stream cannot end while it holds the last pin of a dirty page, its own t
 }
 
 
+test "a retired page's sentinel in a lease's pages is skipped when the stream finishes" {
+    var r: Rig = undefined;
+    try r.open(2, 1);
+    defer r.close();
+    var l = try r.lease(1, 1);
+    // a page retired mid-stream leaves the pool's sentinel where its id was
+    try l.pages.ids.append(gpa, kt.none);
+    try std.testing.expect(r.tier.canFinish(&l));
+    r.tier.finish(&l);
+}
+
 test "a stream ends cleanly once the dirty pages it pins are flushed, and one that shares a dirty page of its own cannot" {
     var r: Rig = undefined;
     try r.open(4, 2);
