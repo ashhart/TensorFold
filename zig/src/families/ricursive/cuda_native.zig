@@ -204,6 +204,7 @@ pub const Opened = struct {
     close: *const fn (*anyopaque) void,
     reserve: *const fn (*anyopaque, u32) anyerror!void,
     prepare: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } = null,
+    first_rows: bool = true, // logprobs: the first token's row from the target, through cuda_drafted.wrap
 };
 
 /// --drafter's folder over open p's streams, before any stream or graph; served bf16 as published, bits unread.
