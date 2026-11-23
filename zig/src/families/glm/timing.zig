@@ -156,9 +156,15 @@ const WindowTimer = struct {
 const WarmTimer = struct {
     s: *Scratch,
     wall: lanes.backend.WallClock,
-    pub fn start(t: *WarmTimer) void { t.wall.clock().start(); }
-    pub fn elapsedMs(t: *WarmTimer) f64 { return t.wall.clock().elapsedMs(.cost); }
-    pub fn prepare(t: *WarmTimer, _: anytype, _: []const u32) !void { try t.s.start(); }
+    pub fn start(t: *WarmTimer) void {
+        t.wall.clock().start();
+    }
+    pub fn elapsedMs(t: *WarmTimer) f64 {
+        return t.wall.clock().elapsedMs(.cost);
+    }
+    pub fn prepare(t: *WarmTimer, _: anytype, _: []const u32) !void {
+        try t.s.start();
+    }
     pub fn time(t: *WarmTimer, i: usize) !f64 {
         const ms = try (WindowTimer{ .s = t.s }).time(i);
         try t.s.sl.flush();

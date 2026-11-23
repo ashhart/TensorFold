@@ -6,8 +6,12 @@ const lanes = @import("tensorfold").lanes;
 const be = lanes.backend;
 const Phase = struct { key: ?[32]u8 = null, value: u64 = 0, reads: u32 = 0 };
 const Probe = struct {
-    enabled: bool = true, shared_next: ?*bool = null, from: usize = 0, floor: f64 = 0,
-    seed: ?lanes.cost_cache.KeySeed = null, phase: ?*Phase = null,
+    enabled: bool = true,
+    shared_next: ?*bool = null,
+    from: usize = 0,
+    floor: f64 = 0,
+    seed: ?lanes.cost_cache.KeySeed = null,
+    phase: ?*Phase = null,
 };
 
 pub fn measure(b: anytype, io: std.Io) !void {
@@ -25,8 +29,7 @@ pub fn measure(b: anytype, io: std.Io) !void {
         else => return error.WindowTooWide,
     }
     if (!b.tensor_units or b.runner.slots == 1) return;
-    if (b.window < 64 and b.runner.capacity > 64) try shared(b, io, 64, probe_shared, seed, &phase)
-    else if (b.window < 32 and b.runner.capacity > 32) try shared(b, io, 32, probe_shared, seed, &phase);
+    if (b.window < 64 and b.runner.capacity > 64) try shared(b, io, 64, probe_shared, seed, &phase) else if (b.window < 32 and b.runner.capacity > 32) try shared(b, io, 32, probe_shared, seed, &phase);
 }
 
 /// Price wider unfused forwards without taking another stream's caches or changing the lone window's prices.
@@ -74,7 +77,10 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
         const phase = lanes.cost_cache.load(u64, b.gpa, io, phase_key) orelse 0;
         probe_now = phase % 2 == 0;
         next.* = !probe_now;
-        if (probe.phase) |p| { p.key = phase_key; p.value = phase; }
+        if (probe.phase) |p| {
+            p.key = phase_key;
+            p.value = phase;
+        }
     };
     if (kept) |table| if (!probe_now or r.capacity <= width) {
         @memcpy(b.costs[0..width], &table);
@@ -84,7 +90,10 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
     if (r.capacity <= width) return error.ContextFull;
     var ms: [width]f64 = undefined;
     var widths: [width]u32 = undefined;
-    if (kept) |table| for (table, &ms, &widths) |c, *m, *w| { m.* = c.ms; w.* = c.width; };
+    if (kept) |table| for (table, &ms, &widths) |c, *m, *w| {
+        m.* = c.ms;
+        w.* = c.width;
+    };
     const cursor_key = if (k) |key| lanes.cost_cache.buildKey(&key, &.{"metal-heal-v2"}) else null;
     var cursor = if (cursor_key) |key| lanes.cost_cache.load(u64, b.gpa, io, key) orelse 0 else 0;
     if (kept != null and lanes.cost_rule.warm_prices.select(ms[probe.from..], widths[probe.from..], cursor).n == 0) {
@@ -92,7 +101,9 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8, probe:
         b.timed = width;
         return;
     }
-    defer { if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {}; }
+    defer {
+        if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
+    }
     var ids: [192]u32 = undefined;
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
     const prompt = ids[0..lanes.cost_rule.context.promptRows(r.capacity, width, width + 5)];
@@ -158,9 +169,17 @@ fn WarmTimer(comptime B: type) type {
     return struct {
         timer: Timer(B),
         began: f64 = 0,
-        pub fn start(t: *@This()) void { t.began = mtl.clock.seconds(); }
-        pub fn elapsedMs(t: *@This()) f64 { return (mtl.clock.seconds() - t.began) * 1e3; }
-        pub fn prepare(t: *@This(), _: anytype, _: []const u32) !void { try t.timer.b.refill(t.timer.prompt); }
-        pub fn time(t: *@This(), i: usize) !f64 { return t.timer.time(i); }
+        pub fn start(t: *@This()) void {
+            t.began = mtl.clock.seconds();
+        }
+        pub fn elapsedMs(t: *@This()) f64 {
+            return (mtl.clock.seconds() - t.began) * 1e3;
+        }
+        pub fn prepare(t: *@This(), _: anytype, _: []const u32) !void {
+            try t.timer.b.refill(t.timer.prompt);
+        }
+        pub fn time(t: *@This(), i: usize) !f64 {
+            return t.timer.time(i);
+        }
     };
 }
