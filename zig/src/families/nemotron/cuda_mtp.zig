@@ -19,9 +19,16 @@ const host_drafts = meta_words; // pinned layout: meta, drafts, confidences, the
 const host_probs = host_drafts + max_chain;
 const host_tokens = host_probs + max_chain;
 const host_metas = host_tokens + state.pass_rows; // a meta row a stream for `chains`
-const host_rules = host_metas + streams * meta_words; // a Rule a stream
-const host_pos = host_rules + streams * 8;
-const host_words = host_pos + streams;
+/// The pinned layout past the metas, for `n` streams (the switch's: main's 8 off): a Rule a stream, then positions.
+fn hostRules(n: usize) usize {
+    return host_metas + n * meta_words;
+}
+fn hostPos(n: usize) usize {
+    return hostRules(n) + n * 8;
+}
+pub fn hostWords(n: usize) usize {
+    return hostPos(n) + n;
+}
 
 /// The output rows a draft level reads: the draft vocabulary's (the draft head), or the target's whole head.
 pub const Vocab = @import("cuda_mtp_projection.zig").Vocab;
@@ -128,7 +135,7 @@ pub const Head = struct {
         const R: usize = state.pass_rows;
         const kv: usize = @as(usize, e.max_len) * c.kv_heads * c.head_dim * 2;
         const n = if (e.w.draft_coverage != null) c.vocab else e.w.draft_count;
-        const S: usize = streams;
+        const S: usize = @import("cuda_wide.zig").streams(c); // main's 8 with the switch off
         const sizes = [_]usize{ kv, kv, meta_words * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, S * n * 4, S * sampler.max_candidates * 4, S * sampler.max_candidates * 8, S * sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(S, n), 4, S * 32, S * 4, S * 4, S * 4 };
         var total: usize = 0;
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
@@ -145,7 +152,7 @@ pub const Head = struct {
             at += std.mem.alignForward(usize, s, 256);
         }
         try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
-        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, host_words * 4);
+        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, hostWords(S) * 4);
         h.has_pinned = true;
         h.copied = try cuda.Event.init(e.ctx.d, false);
         h.has_copied = true;
@@ -258,14 +265,9 @@ pub const Head = struct {
         try o.dense(h.cat, h.cxs, m.eh_proj, h.x, rows);
         try t.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
         try o.dense(b.y, b.xs, m.attn.qkv, b.qkv, rows);
-        var segs_buf: [glue.max_segs]glue.AttnSeg = undefined;
-        var at0: usize = 0;
-        while (at0 < spans.len) {
-            const take = @min(glue.max_segs, spans.len - at0);
-            for (spans[at0..][0..take], segs_buf[0..take]) |s, *sg| sg.* = .{ .kc = s.k_cache, .vc = s.v_cache, .meta = s.meta, .row0 = s.row0, .rows = s.rows, .pt = s.table };
-            try t.attentionSegs(segs_buf[0..take], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, f.ashape());
-            at0 += take;
-        }
+        var segs_buf: [streams]glue.AttnSeg = undefined; // attentionSegs launches them in parts it rebases
+        for (spans, segs_buf[0..spans.len]) |s, *sg| sg.* = .{ .kc = s.k_cache, .vc = s.v_cache, .meta = s.meta, .row0 = s.row0, .rows = s.rows, .pt = s.table };
+        try t.attentionSegs(segs_buf[0..spans.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, f.ashape());
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
         if (!tail) return;
         if (spans.len == 1) {
@@ -422,13 +424,13 @@ pub const Head = struct {
         const e = h.e;
         const o = e.ops();
         const D: u64 = e.c.hidden;
-        if (parts.len < 1 or parts.len > streams) return error.BadDraftRequest;
+        if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadDraftRequest; // 8 off
         var total: usize = 0;
         for (parts) |p| {
-            if (p.keep < 1 or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
+            if (p.keep < 1 or p.keep > state.windowRows(e.c) or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
             total += p.keep;
         }
-        if (total > state.windowRows(e.c)) return error.BadDraftRequest;
+        if (total > state.sharedRows(e.c)) return error.BadDraftRequest;
         // the deepest first: the streams still drafting at a level are the leading rows of the last level's output
         std.mem.sort(Part, parts, {}, struct {
             fn deeper(_: void, x: Part, y: Part) bool {
@@ -447,10 +449,10 @@ pub const Head = struct {
         var batched = e.k.triton == null and parts.len > 1;
         for (parts) |p| batched = batched and p.vocab == parts[0].vocab and (p.rule != null) == sampled and (!sampled or p.rule_host != null);
         if (batched and sampled) {
-            const rules = std.mem.sliceAsBytes(h.pinned.slice(u32)[host_rules..][0 .. parts.len * 8]);
+            const rules = std.mem.sliceAsBytes(h.pinned.slice(u32)[hostRules(@import("cuda_wide.zig").streams(e.c))..][0 .. parts.len * 8]);
             for (parts, 0..) |p, k| @memcpy(rules[k * 32 ..][0..32], std.mem.asBytes(&p.rule_host.?));
             try o.upload(h.rules, rules);
-            const pos = h.pinned.slice(u32)[host_pos..][0..parts.len];
+            const pos = h.pinned.slice(u32)[hostPos(@import("cuda_wide.zig").streams(e.c))..][0..parts.len];
             for (parts, 0..) |p, k| pos[k] = @intCast(p.pos + p.keep);
             try o.upload(h.pos_slab, std.mem.sliceAsBytes(pos));
         }

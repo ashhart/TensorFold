@@ -143,6 +143,7 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []
     var sites = try sites_mod.Sites.init(gpa, e.ctx.d, c, state.prefill_rows, saved.lessons.len);
     errdefer sites.deinit();
     const blocks = try Living.fill(&saved, c, &sites);
+    if (@import("cuda_wide.zig").withLessons(&e.c)) |why| std.log.warn("TF_NEMOTRON_WIDE_ROUNDS is set but rounds stay at 8 streams: {s}", .{why});
     sites.attach(&e.w, true);
     try recapture(e);
     std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});

@@ -119,6 +119,8 @@ const valid = [_]Case{
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_HCA", .raw = "rocep1s0f0,rocep1s0f1", .n = 2 },
     .{ .name = "TF_ROCE_HCA", .raw = "=mlx5_0:1", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },

@@ -158,6 +158,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
     .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .scope = .nemotron, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },

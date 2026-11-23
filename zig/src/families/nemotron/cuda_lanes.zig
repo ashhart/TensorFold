@@ -21,8 +21,10 @@ const fill = @import("cuda_lanes_fill.zig");
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
 const row_words = lanes.logprob.words;
-/// Host-mapped words for every row a shared window holds, then the first token's row.
-const row_slots = engine.max_streams * state.max_rows + 1;
+/// Host-mapped words for every row a shared window holds (the switch's streams), then the first token's row.
+pub fn rowSlots(c: config.Config) usize {
+    return @import("cuda_wide.zig").streams(c) * state.max_rows + 1;
+}
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 /// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
@@ -45,7 +47,7 @@ pub const Cuda = struct {
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
-    rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
+    rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (rowSlots of row_words)
     rows_dev: u64,
     prompt_out: cuda.HostBuffer, // a prompt pass's rows (batch_rows of row_words), then its picks; apart from pending window rows
     prompt_dev: u64,
@@ -56,14 +58,15 @@ pub const Cuda = struct {
     measured: ?costs.Measured = null, // a lone stream's depth rules price its rounds by these
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
-    bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
+    bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (rowSlots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
-        var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
+        const slots = rowSlots(e.c);
+        var pinned = try cuda.HostBuffer.alloc(e.ctx.d, @import("cuda_wide.zig").streams(e.c) * state.max_rows * 4);
         errdefer pinned.free();
-        var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
+        var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, slots * row_words * 4);
         errdefer rows_out.free();
         var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, prompt_rows.batch_rows * (row_words + 1) * 4);
         errdefer prompt_out.free();
@@ -112,9 +115,9 @@ pub const Cuda = struct {
     pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
         if (masks.len == 0) return .{};
-        if (masks.len % words != 0 or slot * words + masks.len > row_slots * words) return error.InvalidGrammarMasks;
+        if (masks.len % words != 0 or slot * words + masks.len > rowSlots(self.e.c) * words) return error.InvalidGrammarMasks;
         if (self.bits == null) {
-            self.bits = try cuda.HostBuffer.allocMapped(self.e.ctx.d, row_slots * words * 4);
+            self.bits = try cuda.HostBuffer.allocMapped(self.e.ctx.d, rowSlots(self.e.c) * words * 4);
             self.bits_dev = try self.bits.?.device();
         }
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
@@ -127,7 +130,7 @@ pub const Cuda = struct {
         if (position != s.prompt_len) return error.PositionMismatch;
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         self.e.bind(l.seq);
-        return self.take(try self.e.redrawFirst(position, try self.putBits(row_slots - 1, mask)));
+        return self.take(try self.e.redrawFirst(position, try self.putBits(rowSlots(self.e.c) - 1, mask)));
     }
 
     /// The head's drafts in the stream's window rows after the pending one, once they land (Backend.held).
@@ -172,8 +175,9 @@ pub const Cuda = struct {
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = true, // copy-only models retain the landed shared target forward
-            .batch_rows = @intCast(width),
-            .max_streams = engine.max_streams,
+            .batch_rows = @intCast(state.sharedRows(self.e.c)), // 32 with TF_NEMOTRON_WIDE_ROUNDS; 17-32 priced linearly
+            .learn_row_costs = self.e.c.wide_rounds, // 17-32 rows are unmeasured: learn their cost, not a fixed overhead
+            .max_streams = @intCast(@import("cuda_wide.zig").streams(self.e.c)),
         };
     }
 
@@ -408,7 +412,7 @@ pub const Cuda = struct {
     /// Several windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
     fn verifyShared(self: *Cuda, windows: []const be.Window, out: []be.Verified) !void {
         const e = self.e;
-        if (windows.len > engine.max_streams) return error.WindowTooWide;
+        if (windows.len > @import("cuda_wide.zig").streams(self.e.c)) return error.WindowTooWide; // 8 with the switch off
         var parts: [engine.max_streams]engine.Shared = undefined;
         var ids: [engine.max_streams][state.max_rows]u32 = undefined;
         var bits_row: usize = 0;
@@ -474,7 +478,7 @@ pub const Cuda = struct {
                 break :blk first[0..];
             };
             const v = h.vocab(r.stream.context.items);
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
+            if (drafting < 2 or r.depth == 0 or !@import("cuda_wide.zig").batches(self.e.c, batched, rows, follow.len)) {
                 try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;

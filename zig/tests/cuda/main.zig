@@ -28,6 +28,7 @@ const affine8_tests = @import("affine8_tests.zig");
 const native_fp_tests = @import("native_fp_tests.zig");
 const affine4_decode_tests = @import("affine4_decode_tests.zig");
 const absorb_batch_tests = @import("absorb_batch_tests.zig");
+const wide_rounds_tests = @import("wide_rounds_tests.zig");
 const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
@@ -240,6 +241,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "absorb-batch")) return absorb_batch_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "wide-rounds")) return wide_rounds_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3") or std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_tests.runCmd(gpu, cmd);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
