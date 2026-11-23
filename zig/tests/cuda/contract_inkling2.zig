@@ -27,6 +27,7 @@ pub const Set = struct {
         try set.loop_math.init(gpu, s, a, list);
         errdefer set.loop_math.deinit();
         try set.loop.init(gpu, s, a, list);
+        errdefer set.loop.deinit();
         return set;
     }
 
