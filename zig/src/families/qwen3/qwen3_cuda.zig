@@ -19,5 +19,6 @@ test {
     _ = gemm;
     _ = engine;
     _ = native;
+    _ = pass;
     _ = @import("cuda/weights.zig");
 }

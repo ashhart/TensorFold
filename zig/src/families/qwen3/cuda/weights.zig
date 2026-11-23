@@ -41,7 +41,11 @@ pub const Model = struct {
         var ck = try Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         ck.scope = names.scopeOf(&ck);
-        return fromCheckpoint(gpa, d, &ck, spec, names.headKey(spec.tied, ck.scope));
+        var m = try fromCheckpoint(gpa, d, &ck, spec, names.headKey(spec.tied, ck.scope));
+        errdefer m.deinit();
+        _ = try ck.stored(m.head); // the head's rows are read on the host later (names.readRows); its tensor still counts
+        if (ck.unused() != 0) return error.UnusedQwen3Tensors;
+        return m;
     }
 
     /// `spec`'s tensors from an open checkpoint under its scope (a model whose Qwen3 sits beside other parts).
@@ -51,9 +55,7 @@ pub const Model = struct {
         m.embed = try projection(ck, &m.st, "embed_tokens.weight", spec.vocab, spec.hidden);
         m.final_norm = try norm(ck, &m.st, "norm.weight", spec.hidden);
         m.layers = try gpa.alloc(Layer, spec.layers);
-        for (m.layers, 0..) |*l, i| l.* = try layer(&ck, &m.st, spec, i);
-        _ = try ck.stored(m.head); // the head's rows are read on the host later (names.readRows); its tensor still counts
-        if (ck.unused() != 0) return error.UnusedQwen3Tensors;
+        for (m.layers, 0..) |*l, i| l.* = try layer(ck, &m.st, spec, i);
         return m;
     }
 
