@@ -99,6 +99,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_MINIMAX_RANK` | MiniMax-M3.1-Flash on CUDA: a whole rank index, 0 or 1 at two ranks, set with `TF_MINIMAX_WORLD`; unset with it gives one rank |
 | `TF_MINIMAX_WORLD` | MiniMax-M3.1-Flash on CUDA: a whole rank count, 2 at CUDA, set with `TF_MINIMAX_RANK`; unset with it gives one rank |
 | `TF_MINIMAX_GRAPHS` | MiniMax-M3.1-Flash on CUDA: exactly `0` or `1`, the same on every rank; default off. `1` records each one-stream decode verify window's launches as a CUDA graph and updates the held graph with that round's arguments before launching it (one graph per row count, sparse or dense attention, and taps); the same kernels with the same arguments in the same order, so tokens keep their bits. A refused capture or refresh on any rank sends every rank back to eager launches |
+| `TF_GLM_KEEP_SEQS` | Exactly `0` or `1`; default off (a released stream's sequence stays allocated for the next request on its slot, as slot 0's always does, so a request starts with no allocation, fill or free) |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
 | `TF_LFM3_METAL_WARM_TURNS` | Exactly `0` or `1`; default off. Uses one-row LFM3 Metal prefill even with caching disabled. A prompt cache enables background warm turns. |
