@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the lone-driver third-prompt test no longer hangs when its poller is descheduled (#4783).
+
 - Metal: Nemotron, Qwen3.8-27B and LFM2 build their prompt pick kernels from one source, with tokens unchanged (#4739). Thanks @jschmied.
 
 - Draft depth: a lone stream with a fixed-block drafter, such as Inkling 2 Mini's DSpark, is now priced for the full block it runs, as shared rounds already were, so single requests propose full blocks (#4457). Thanks @gilby.
