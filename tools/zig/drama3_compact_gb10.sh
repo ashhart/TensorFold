@@ -26,7 +26,7 @@ run "$main_tree" "$fp8" fp8-main
 run "$root" "$fp8" fp8-head
 cmp "$out/fp8-main.codes" "$out/fp8-head.codes"
 # --replay 1 gates frames, graph, poison/reset and chunk 1 vs 1; main's CUDA codec may differ at chunk 4 or 16 (below)
-replay() { # NAME [ARGS...]: every check passes, or a codec chunk 4 or 16 PCM compare is the only one that fails
+replay() { # NAME [ARGS...]: exact checks pass; codec PCM differences stay within replay.zig's bound
     name=$1
     shift
     run "$root" "$compact" "$name" --codec "$codec" --replay 1 "$@" && return
