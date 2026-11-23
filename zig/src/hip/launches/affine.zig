@@ -22,8 +22,8 @@ const Error = runtime.Error;
 /// Matrix cores for products: `off` keeps every product on dot2 tiles; `auto` and `on` use them where a tile exists.
 pub const Matrix = enum { auto, on, off };
 
-/// Which product tiles a run takes; every one defaults on. On gfx12, `matrix = .off` changes a prompt's bytes.
-pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true };
+/// Which product tiles a run takes; every one defaults on but gfx12's matrix tiles (`gfx12`, TF_HIP_GFX12_WMMA).
+pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: bool = true, gfx12: bool = false };
 
 /// quant/mlx.hpp's GroupTable, Routing and Affine as the kernels take them by value.
 pub const GroupTable = extern struct { p: u64, kind: c_int };
@@ -152,7 +152,8 @@ pub const Kernels = struct {
         const wmma = caps.act == .bf16;
         k.caps = caps;
         k.wmma = wmma;
-        k.matrix = wmma and caps.matrix != .none;
+        // gfx12's tiles sum a group in another order than dot2, so a prompt's bytes change: only when asked
+        k.matrix = wmma and (caps.matrix == .wmma11 or (caps.matrix == .wmma12 and choices.gfx12));
         k.matrix_item = wmma and caps.matrix == .wmma11;
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;

@@ -399,9 +399,8 @@ pub fn kernelsOn(gfx: []const u8) affine.Registry {
 
 pub fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
     const caps = Caps.of(gfx).?;
-    const matrix = caps.act == .bf16 and caps.matrix != .none;
-    const few_rows = matrix and caps.matrix == .wmma11;
-    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_item = few_rows, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on };
+    const matrix = caps.act == .bf16 and caps.matrix == .wmma11; // gfx12's matrix tiles off (TF_HIP_GFX12_WMMA)
+    return .{ .bf16 = caps.act == .bf16, .matrix = matrix, .matrix_item = matrix, .matrix_on = matrix and matrix_on, .stream_on = stream_on, .gemm_on = gemm_on };
 }
 
 test {

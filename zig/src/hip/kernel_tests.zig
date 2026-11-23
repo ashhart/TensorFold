@@ -38,7 +38,7 @@ test "the code objects load on this device and every kernel the launchers use re
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
     try std.testing.expectEqualStrings(kernels.arch, arch);
-    var l = try Launcher.load(&r, .{}, kernels.images);
+    var l = try Launcher.load(&r, .{ .products = .{ .gfx12 = true } }, kernels.images);
     defer l.unload();
 }
 

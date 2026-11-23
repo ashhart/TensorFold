@@ -1,4 +1,4 @@
-//! gfx1201's prompt choices in the mlx tiles' registry: the dot2 tiles with the matrix cores off, its matrix tiles on.
+//! gfx1201's prompt choices in the mlx registry: the dot2 tiles by default, its matrix tiles with TF_HIP_GFX12_WMMA=1.
 
 const std = @import("std");
 const registry = @import("core").registry;
@@ -8,6 +8,15 @@ const rows12 = @import("matrix_rows.zig");
 const Shape = registry.Shape;
 const kernelsOn = entries.kernelsOn;
 const envOn = entries.envOn;
+
+/// gfx1201 with TF_HIP_GFX12_WMMA=1 (Kernels.env): its matrix tiles, a family of their own.
+fn envOn12(matrix_on: bool) registry.Env {
+    var e = envOn("gfx1201", true, true, matrix_on);
+    e.matrix = true;
+    e.matrix_item = false;
+    e.matrix_on = matrix_on;
+    return e;
+}
 
 test "gfx1201 takes the K-parallel tile for short routed prompts, up to its items and pairs per item" {
     const r = kernelsOn("gfx1201");
@@ -30,7 +39,7 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
 
 test "gfx1201 takes its matrix tiles for a prompt at every row count, the dot2 tiles where they do not fit" {
     const r = kernelsOn("gfx1201");
-    const on = envOn("gfx1201", true, true, true);
+    const on = envOn12(true);
     var shape: Shape = .{ .m = 1, .n = 4096, .k = 4096, .bits = 4, .group = 64, .fp16 = false };
     for ([_]struct { u32, []const u8 }{ .{ 1, "rows16" }, .{ 32, "rows16" }, .{ 33, "rows64" }, .{ 64, "rows64" }, .{ 65, "matrix12" }, .{ 2048, "matrix12" } }) |w| {
         shape.m = w[0];
@@ -59,7 +68,7 @@ test "gfx1201 takes its matrix tiles for a prompt at every row count, the dot2 t
     shape.words_aligned = false;
     try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .prefill, shape).?.id, "block"));
     shape.words_aligned = true;
-    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn("gfx1201", true, true, false), .mlx, .project, .prefill, shape).?.id, "kp0"));
+    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn12(false), .mlx, .project, .prefill, shape).?.id, "kp0"));
     // a decode call keeps the dot2 tiles: gfx12's matrix tile has no decode entry
     shape.m = 32;
     try std.testing.expect(std.mem.endsWith(u8, r.select(on, .mlx, .project, .decode, shape).?.id, ".decode.gemm"));
@@ -80,7 +89,7 @@ test "a plain product takes a shorter tier only while its 128-row blocks leave c
 
 test "gfx1201 keeps a routed prompt in the matrix12 family over its items, pairs and expert rows" {
     const r = kernelsOn("gfx1201");
-    const on = envOn("gfx1201", true, true, true);
+    const on = envOn12(true);
     // Qwen3.6, Nemotron and Flash Next's routed products; past 64 expert rows or 1,024 rows the 128-row tile
     const models = [_]struct { u32, u32, u16, u8 }{
         .{ 1024, 2048, 64, 4 },
@@ -106,4 +115,42 @@ test "gfx1201 keeps a routed prompt in the matrix12 family over its items, pairs
             }
         }
     }
+}
+
+/// Every gfx12 pick over the served models' products, rows and plans, and the policy's switches, as one hash.
+fn gfx12Picks(gfx: []const u8) [2]u64 {
+    const r = kernelsOn(gfx);
+    var h = std.hash.Wyhash.init(0);
+    var count: u64 = 0;
+    const models = [_]struct { u32, u32, u16, u8 }{ .{ 1024, 2048, 64, 4 }, .{ 1856, 2688, 64, 4 }, .{ 1280, 2560, 32, 2 }, .{ 4096, 4096, 64, 4 }, .{ 2048, 512, 32, 8 }, .{ 6144, 2048, 128, 3 } };
+    const rows = [_]u32{ 1, 2, 3, 4, 8, 9, 15, 16, 17, 32, 33, 64, 65, 128, 129, 512, 1024, 2048 };
+    for (0..8) |bits| {
+        const env = envOn(gfx, bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+        for ([_]registry.Op{ .project, .group, .routed, .routed_act }) |op| for ([_]registry.Path{ .decode, .prefill }) |path| for (models) |md| for (rows) |m| for ([_]bool{ true, false }) |aligned| {
+            const base: Shape = .{ .m = m, .n = md[0], .k = md[1], .bits = md[3], .group = md[2], .fp16 = false, .words_aligned = aligned };
+            const plain = op == .project or op == .group;
+            const item_counts: []const u32 = if (plain) &.{0} else &.{ 8, 64, 300, 401, 507, 513, 545, 2000 };
+            for (item_counts) |items| for (if (plain) &[_]u32{0} else &[_]u32{ 1, 2, 3, 4, 6, 7, 12 }) |per_item| for (if (plain) &[_]u32{0} else &[_]u32{ 1, 5, 16, 17, 27, 28, 64, 300 }) |expert_rows| {
+                var s = base;
+                s.items = items;
+                s.plan_pairs = items * per_item;
+                s.expert_rows = expert_rows;
+                const id = if (r.select(env, .mlx, op, path, s)) |e| e.id else "-";
+                h.update(id);
+                h.update("\n");
+                count += 1;
+            };
+        };
+    }
+    return .{ h.final(), count };
+}
+
+test "without TF_HIP_GFX12_WMMA, gfx1200 and gfx1201 pick exactly main's tiles" {
+    // main's picks (281d81b8b) over the same sweep, in the same order
+    for ([_][]const u8{ "gfx1200", "gfx1201" }) |gfx| try std.testing.expectEqual([2]u64{ 0xbd8557c4188b8b63, 3103488 }, gfx12Picks(gfx));
+}
+
+test "with TF_HIP_GFX12_WMMA=1 a lane round and a prompt each keep one family on gfx1201" {
+    const r = kernelsOn("gfx1201");
+    for ([_]bool{ true, false }) |matrix_on| try r.verify(envOn12(matrix_on), .mlx);
 }

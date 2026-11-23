@@ -147,7 +147,7 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     }
     var s = try hip.Stream.init(&r);
     defer s.deinit();
-    var l = try hip.Launcher.load(&r, .{}, hip.kernels.images);
+    var l = try hip.Launcher.load(&r, .{ .products = .{ .gfx12 = true } }, hip.kernels.images);
     defer l.unload();
     var ctl = try hip.Module.load(&r, &controls.bytes);
     defer ctl.unload();
