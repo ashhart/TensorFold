@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
+
 - Qwen 3.5 on Metal: `TF_QWEN35_CHUNK` sets the prefill chunk size for measurement; the default stays 128 rows (#N).
 
 - Host status: the lane host's status read copies a snapshot the engine thread publishes, so a monitoring client polling the status no longer holds the lock every decode round takes; a torn read retries and the round waits for no reader (#3200).
