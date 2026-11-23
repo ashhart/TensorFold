@@ -425,6 +425,11 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const shape_tests = b.addRunArtifact(b.addTest(.{ .root_module = shape }));
     b.step("test-qwen27-config-xpu-host", "The XPU 27B runner's config.json shape and layer pattern without devices or ocloc").dependOn(&shape_tests.step);
     step.dependOn(&shape_tests.step);
+    // Shared selection for Qwen27 and the TP benchmark: its fake opener needs no device
+    const device = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze }} });
+    const device_tests = b.addRunArtifact(b.addTest(.{ .root_module = device }));
+    b.step("test-xpu-device-id-host", "XPU peer opens honor detected B60 and B70 IDs and the explicit override").dependOn(&device_tests.step);
+    step.dependOn(&device_tests.step);
     const tail_tests = b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"xpu prompt tail:"} }));
     b.step("test-qwen27-prompt-tail-xpu-host", "The XPU 27B layer-63 prompt-tail plan without devices").dependOn(&tail_tests.step);
     step.dependOn(&tail_tests.step);
