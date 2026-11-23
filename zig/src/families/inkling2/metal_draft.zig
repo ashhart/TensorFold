@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const config = @import("config.zig");
 const core_mod = @import("metal_draft_core.zig");
 const gm = @import("metal_vision_gemm.zig");
+const snap = @import("metal_draft_snapshot.zig");
 
 const dr = lanes.drafter;
 const Core = core_mod.Core;
@@ -12,6 +13,7 @@ const Lane = core_mod.Lane;
 const Ref = gm.Ref;
 
 pub const Target = core_mod.Target;
+pub const Snapshot = snap.Snapshot;
 
 /// Streams whose blocks one pass runs together (the scratch holds this many); more streams go in further passes.
 const max_batch: u32 = 8;
@@ -190,6 +192,35 @@ pub const Adapter = struct {
         if (l.pend_rows == 0) return;
         try batch.add(pass, .{ .l = l, .feats = .{ .buf = l.pend }, .start = l.end - l.pend_rows, .n = l.pend_rows });
         l.pend_rows = 0;
+    }
+
+    /// A copy of the stream's context after `at` rows for a kept prompt state; null: it holds no whole context to copy.
+    pub fn save(a: *Adapter, s: *lanes.Stream, at: u32) !?Snapshot {
+        const l = a.lanes.get(s) orelse return null;
+        // rows before `from` never reached this head, and an overwritten ring slot below the window is gone
+        if (l.end != at or l.from != 0 or l.lfrom > at -| a.core.m.window) return null;
+        if (l.pend_rows > 0) {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            var pass: Pass = .{ .a = a };
+            errdefer pass.flush() catch {};
+            var batch: Batch = .{};
+            try drain(l, &pass, &batch);
+            try batch.encode(&pass);
+            try pass.flush();
+        }
+        return try snap.save(a.core, l, at);
+    }
+
+    /// Makes a stream's empty context the snapshot's: the rows after it continue at `saved.len`.
+    pub fn restore(a: *Adapter, s: *lanes.Stream, saved: *const Snapshot) !void {
+        const l = a.lanes.get(s) orelse return error.DraftStreamUnknown;
+        if (l.end != 0 or saved.layers != a.core.m.layers or saved.len > a.core.capacity) return error.DraftSnapshotGeometry;
+        try snap.restore(a.core, l, saved);
+        l.end = saved.len;
+        l.from = 0;
+        l.lfrom = saved.len -| a.core.m.window;
+        l.held_len = 0;
     }
 
     /// Decode rows that continue a lane's context wait in its host buffer: a plain round runs no GPU work for the head.

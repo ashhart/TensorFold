@@ -7,6 +7,7 @@ const api = @import("engine_api");
 const fl = tf.inkling2_metal;
 const lanes = tf.lanes;
 const native = @import("native/inkling2_backend.zig");
+const kept_states = @import("native/inkling2_kept.zig");
 const t = std.testing;
 
 fn fixture() ![]const u8 {
@@ -203,6 +204,88 @@ test "inkling2 Mini Metal loop forward, shared rows, exact rollback, snapshots, 
     while (drafted.activeCount() != 0) try drafted.step();
     try t.expectEqualSlices(u32, expected_sampled, one.emitted());
     try t.expectEqualSlices(u32, other, two.emitted());
+}
+
+/// Keeps the target's state, and the head's context beside it, where a prompt pass stands at a mark.
+const Keeper = struct {
+    target: *native.Target,
+    saved: ?*anyopaque = null,
+
+    fn at(ptr: *anyopaque, s: *lanes.Stream, n: u32) void {
+        const k: *Keeper = @ptrCast(@alignCast(ptr));
+        const snaps = k.target.snapshots();
+        k.saved = snaps.vtable.save(snaps.ptr, s, n) catch null;
+    }
+};
+
+const Run = struct { tokens: []u32, drafted: u64, accepted: u64, cached: u32 };
+
+fn run(engine: *lanes.Engine, prompt: []const u32, drafts: bool, settings: ?lanes.Sampling, reuse: lanes.stream.Reuse) !Run {
+    var stream = try lanes.Stream.init(t.allocator, .{ .id = "inkling2-kept", .prompt = prompt, .max_new = 24, .drafts = drafts, .sampling = settings, .reuse = reuse });
+    defer stream.deinit(t.allocator);
+    try engine.addStream(&stream);
+    while (engine.activeCount() != 0) try engine.step();
+    if (stream.reason == .@"error") return error.InklingReplyFailed;
+    return .{ .tokens = try t.allocator.dupe(u32, stream.emitted()), .drafted = stream.drafted, .accepted = stream.accepted, .cached = stream.cached };
+}
+
+test "inkling2 Mini resumes a drafted stream from a kept state: its tokens and draft counts equal a fresh pass's" {
+    const dir = try fixture();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const m = try fl.Model.load(t.allocator, t.io, dir, .{ .capacity = 128, .streams = 2, .rows = 32, .drafts = true });
+    defer m.deinit();
+    const target = try native.Target.init(t.allocator, m, .{ .capacity = 128, .streams = 2, .rows = 32, .drafts = true });
+    defer target.deinit();
+    const draft = try fl.draft.Adapter.init(t.allocator, t.io, dir, m.device, m.queue, &m.config, .{ .embed = m.weights.embed, .embed_norm = m.weights.embed_norm, .unembed = m.weights.unembed }, .{ .streams = 2, .capacity = 128 });
+    defer draft.deinit();
+    target.head = draft;
+    var wrapped = try lanes.drafted.Drafted.init(t.allocator, target.backend(), draft.drafter());
+    defer wrapped.deinit();
+    wrapped.first_rows = true;
+    var plain_cfg = try lanes.Config.init(t.allocator, target.facts(), 16, 15);
+    defer plain_cfg.deinit(t.allocator);
+    var drafted_cfg = try lanes.Config.init(t.allocator, wrapped.facts(target.facts()), 16, 15);
+    defer drafted_cfg.deinit(t.allocator);
+    var clock = lanes.backend.WallClock{ .io = t.io };
+    var plain = lanes.Engine.init(t.allocator, &plain_cfg, target.backend(), clock.clock());
+    defer plain.deinit();
+    var drafted = lanes.Engine.init(t.allocator, &drafted_cfg, wrapped.backend(), clock.clock());
+    defer drafted.deinit();
+    var prompt: [70]u32 = undefined;
+    for (&prompt, 0..) |*id, i| id.* = @intCast(5 + i % 20); // a cycle: the head drafts and the target accepts some
+    const marks = [_]u32{32};
+    const sampled: lanes.Sampling = .{ .seed = 7, .temperature = 0.7, .top_k = 20, .top_p = 0.95 };
+    for ([_]?lanes.Sampling{ null, sampled }) |settings| {
+        var keeper: Keeper = .{ .target = target };
+        const fresh = try run(&drafted, &prompt, true, settings, .{ .marks = &marks, .hook = .{ .ptr = &keeper, .at = Keeper.at } });
+        defer t.allocator.free(fresh.tokens);
+        const snaps = target.snapshots();
+        const saved = keeper.saved orelse return error.NothingKept;
+        defer snaps.vtable.drop(snaps.ptr, saved);
+        try t.expect(@as(*const kept_states.Kept, @ptrCast(@alignCast(saved))).head != null); // the drafting stream's head had a context
+        try t.expect(fresh.drafted > 0);
+        const resumed = try run(&drafted, &prompt, true, settings, .{ .saved = saved, .at = 32 });
+        defer t.allocator.free(resumed.tokens);
+        try t.expectEqual(@as(u32, 32), resumed.cached);
+        try t.expectEqualSlices(u32, fresh.tokens, resumed.tokens);
+        try t.expectEqual(fresh.drafted, resumed.drafted); // the head drafted from the same context, so rounds are the same
+        try t.expectEqual(fresh.accepted, resumed.accepted);
+        const serial = try run(&plain, &prompt, false, settings, .{});
+        defer t.allocator.free(serial.tokens);
+        try t.expectEqualSlices(u32, serial.tokens, resumed.tokens);
+        // a state kept by a stream that did not draft holds no head context: same tokens, the head begins past it
+        var bare: Keeper = .{ .target = target };
+        const plain_kept = try run(&plain, &prompt, false, settings, .{ .marks = &marks, .hook = .{ .ptr = &bare, .at = Keeper.at } });
+        defer t.allocator.free(plain_kept.tokens);
+        const headless = bare.saved orelse return error.NothingKept;
+        defer snaps.vtable.drop(snaps.ptr, headless);
+        try t.expect(@as(*const kept_states.Kept, @ptrCast(@alignCast(headless))).head == null);
+        const begun = try run(&drafted, &prompt, true, settings, .{ .saved = headless, .at = 32 });
+        defer t.allocator.free(begun.tokens);
+        try t.expectEqual(@as(u32, 32), begun.cached);
+        try t.expectEqualSlices(u32, serial.tokens, begun.tokens);
+    }
 }
 
 test {
