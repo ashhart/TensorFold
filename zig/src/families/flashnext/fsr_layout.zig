@@ -1,7 +1,8 @@
 //! Whole-path residency prices computed before device buffers or checkpoint payloads are loaded.
 const std = @import("std");
 pub const plan = @import("../../core/fsr/plan.zig");
-const prompt = @import("flashnext_memory").prompt;
+const memory = @import("flashnext_memory");
+const prompt = memory.prompt;
 pub const Plan = struct { pool: ?plan.Pool = null, ple: ?u64 = null, raw: u64, extra: u64 = 0 };
 
 pub fn of(inventory: anytype, settings: anytype) !Plan {
@@ -17,4 +18,35 @@ pub fn of(inventory: anytype, settings: anytype) !Plan {
     }
     p.raw = try plan.resident(inventory.raw, inventory.routed, inventory.ple, p.pool, p.ple);
     return p;
+}
+
+/// Only a refused maximum shrinks; every admitted setting and every impossible fit keeps its original policy.
+pub fn fit(inventory: anytype, settings: anytype, context: anytype) !@TypeOf(settings) {
+    if (context.paired or settings.ssd_experts == null) return settings;
+    const current = try of(inventory, settings);
+    if ((try budget(inventory, settings, context)).forPhase(context.needs_build) <= context.limit) return settings;
+    const pool = current.pool.?;
+    var next = settings;
+    next.ssd_experts = try std.math.mul(u64, 512, pool.stride);
+    if ((try budget(inventory, next, context)).forPhase(context.needs_build) > context.limit) return settings;
+    var lo: usize = 512;
+    var hi = pool.slots;
+    while (lo < hi) {
+        const mid = lo + (hi - lo + 1) / 2;
+        next.ssd_experts = try std.math.mul(u64, mid, pool.stride);
+        if ((try budget(inventory, next, context)).forPhase(context.needs_build) <= context.limit)
+            lo = mid
+        else
+            hi = mid - 1;
+    }
+    next.ssd_experts = try std.math.mul(u64, lo, pool.stride);
+    return next;
+}
+
+fn budget(inventory: anytype, settings: anytype, context: anytype) !memory.Budget {
+    const p = try of(inventory, settings);
+    var resident = inventory;
+    resident.raw = p.raw;
+    const extra = try std.math.add(u64, context.extra, try std.math.add(u64, context.existing, p.extra));
+    return memory.budgetLiveFor(0, settings.capacity, resident, extra, context.existing, settings.sibling(context.paired));
 }
