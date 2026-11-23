@@ -53,7 +53,7 @@ pub const Probe = struct {
     phi: []u16 = &.{},
     refs: [8]rig_.Ref = undefined,
     outs: [3]rig_.Ref = undefined,
-    score_scratch: rig_.Ref = undefined,
+    aux: [4]rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: host.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.inkling2_dspark);
@@ -65,14 +65,7 @@ pub const Probe = struct {
             .fuse_taps => self.setServed(&.{ .{ .rows = 5, .n = H, .k = 0 }, .{ .rows = 1, .n = H, .k = 0 }, .{ .rows = 3, .n = H, .k = 0 }, .{ .rows = 7, .n = H, .k = 0 } }),
             .block_qkv => self.setServed(&.{ .{ .rows = 8, .n = Q, .k = 17 }, .{ .rows = 8, .n = Q, .k = 67 } }),
             .context_kv => self.setServed(&.{ .{ .rows = 5, .n = KV, .k = 17 }, .{ .rows = 1, .n = KV, .k = 31 }, .{ .rows = 3, .n = KV, .k = 47 }, .{ .rows = 8, .n = KV, .k = 67 } }),
-            .attention => self.setServed(&.{
-                .{ .rows = 8, .n = 0, .k = 0 },
-                .{ .rows = 8, .n = 1, .k = 0 },
-                .{ .rows = 8, .n = 3, .k = 0 },
-                .{ .rows = 8, .n = 3, .k = 5 },
-                .{ .rows = 8, .n = 1025, .k = 1 },
-                .{ .rows = 8, .n = 1025, .k = 7 },
-            }),
+            .attention => self.setServed(&.{ .{ .rows = 8, .n = 0, .k = 0 }, .{ .rows = 8, .n = 1, .k = 0 }, .{ .rows = 8, .n = 3, .k = 0 }, .{ .rows = 8, .n = 3, .k = 5 }, .{ .rows = 8, .n = 1025, .k = 1 }, .{ .rows = 8, .n = 1025, .k = 7 } }),
             .residual_norm => self.setServed(&.{ .{ .rows = 8, .n = H, .k = 1 }, .{ .rows = 8, .n = H, .k = 0 } }),
             .swiglu => self.setServed(&.{.{ .rows = 8, .n = INTER, .k = 0 }}),
             .kappa => self.setServed(&.{ .{ .rows = 5, .n = RNN, .k = 0 }, .{ .rows = 1, .n = RNN, .k = 0 }, .{ .rows = 3, .n = RNN, .k = 0 }, .{ .rows = 7, .n = RNN, .k = 0 } }),
@@ -132,8 +125,23 @@ pub const Probe = struct {
         for (bits, values) |*b, v| b.* = c.toBf16(v);
         return self.rig.input(std.mem.sliceAsBytes(bits));
     }
+    fn prepInputs(self: *Probe, lens: []const usize, nf: bool, rng: std.Random) !void {
+        for (lens, 0..) |n, j| {
+            self.f[j] = try self.floats(n, rng);
+            if (j == 0 and nf) self.f[0][0] = std.math.nan(f32);
+            rounded(self.f[j]);
+            self.refs[j] = try self.input(self.f[j], true);
+        }
+    }
     fn output(self: *Probe, slot: usize, elements: usize, elem: c.Elem) !void {
         self.outs[slot] = try self.rig.output(elements * c.size(elem));
+    }
+    fn rnnInput(self: *Probe, raw: []const f32, col0: usize, cols: usize) !rig_.Ref {
+        const bits = try self.arena.allocator().alloc(u16, cols * RNN);
+        for (0..RNN) |ch| for (0..cols) |d| {
+            bits[d * RNN + ch] = c.toBf16(raw[ch * 5120 + col0 + d]);
+        };
+        return self.rig.input(std.mem.sliceAsBytes(bits));
     }
     fn first(self: *const Probe) usize {
         const from = self.shape.k / 2;
@@ -159,13 +167,7 @@ pub const Probe = struct {
         const rows = shape.rows;
         switch (self.kind) {
             .init_rows => {
-                self.f[0] = try self.floats(H, rng);
-                self.f[1] = try self.floats(H, rng);
-                if (nf) self.f[0][0] = std.math.nan(f32);
-                rounded(self.f[0]);
-                rounded(self.f[1]);
-                self.refs[0] = try self.input(self.f[0], true);
-                self.refs[1] = try self.input(self.f[1], true);
+                try self.prepInputs(&.{ H, H }, nf, rng);
                 try self.output(0, 8 * H, .bf16);
             },
             .fuse_taps => {
@@ -182,62 +184,36 @@ pub const Probe = struct {
                 try self.output(1, H, .bf16);
             },
             .block_qkv => {
-                const sizes = [_]usize{ 8 * Q, 8 * KV, 8 * KV, 128, 128 };
-                for (sizes, 0..) |n, j| {
-                    self.f[j] = try self.floats(n, rng);
-                    rounded(self.f[j]);
-                    self.refs[j] = try self.input(self.f[j], true);
-                }
-                if (nf) {
-                    self.f[0][0] = std.math.nan(f32);
-                    self.refs[0] = try self.input(self.f[0], true);
-                }
+                try self.prepInputs(&.{ 8 * Q, 8 * KV, 8 * KV, 128, 128 }, nf, rng);
                 try self.output(0, 8 * Q, .bf16);
                 try self.output(1, 8 * KV, .bf16);
                 try self.output(2, 8 * KV, .bf16);
             },
             .context_kv => {
-                self.f[0] = try self.floats(rows * KV, rng);
-                self.f[1] = try self.floats(rows * KV, rng);
-                self.f[2] = try self.floats(128, rng);
-                if (nf) self.f[0][0] = std.math.nan(f32);
-                for (self.f[0..3]) |values| rounded(values);
-                for (0..3) |j| self.refs[j] = try self.input(self.f[j], true);
+                try self.prepInputs(&.{ rows * KV, rows * KV, 128 }, nf, rng);
                 try self.output(0, rows * KV, .bf16);
                 try self.output(1, rows * KV, .bf16);
             },
             .attention => {
                 const ring = @max(shape.n, 1);
-                const sizes = [_]usize{ 8 * Q, 8 * KV, 8 * KV, ring * KV, ring * KV };
-                for (sizes, 0..) |n, j| {
-                    self.f[j] = try self.floats(n, rng);
-                    rounded(self.f[j]);
-                    self.refs[j] = try self.input(self.f[j], true);
-                }
-                if (nf) {
-                    self.f[0][0] = std.math.nan(f32);
-                    self.refs[0] = try self.input(self.f[0], true);
-                }
-                self.score_scratch = try self.rig.scratch(8 * 24 * (shape.n - self.first() + 8) * 4);
-                self.refs[5] = self.score_scratch;
+                try self.prepInputs(&.{ 8 * Q, 8 * KV, 8 * KV, ring * KV, ring * KV }, nf, rng);
                 try self.output(0, 8 * Q, .bf16);
             },
             .residual_norm => {
-                self.f[0] = try self.floats(8 * H, rng);
-                self.f[1] = try self.floats(8 * H, rng);
-                self.f[2] = try self.floats(H, rng);
-                if (nf) self.f[0][0] = std.math.nan(f32);
-                for (self.f[0..3]) |values| rounded(values);
-                for (0..3) |j| self.refs[j] = try self.input(self.f[j], true);
+                try self.prepInputs(&.{ 8 * H, 8 * H, H }, nf, rng);
+                if (!nf and shape.k == 0) {
+                    @memset(self.f[0][0..H], 0);
+                    @memset(self.f[1][0..H], 0);
+                    self.f[0][0] = 1;
+                    self.f[1][0] = 0.00390625;
+                    self.f[2][0] = 1;
+                    for (0..3) |j| self.refs[j] = try self.input(self.f[j], true);
+                }
                 try self.output(0, 8 * H, .bf16);
                 try self.output(1, 8 * H, .bf16);
             },
             .swiglu => {
-                self.f[0] = try self.floats(8 * INTER, rng);
-                self.f[1] = try self.floats(8 * INTER, rng);
-                if (nf) self.f[0][0] = std.math.nan(f32);
-                for (self.f[0..2]) |values| rounded(values);
-                for (0..2) |j| self.refs[j] = try self.input(self.f[j], true);
+                try self.prepInputs(&.{ 8 * INTER, 8 * INTER }, nf, rng);
                 try self.output(0, 8 * INTER, .bf16);
             },
             .kappa => {
@@ -247,7 +223,10 @@ pub const Probe = struct {
                 self.f[3] = try self.floats(RNN, rng);
                 if (nf) self.f[0][0] = std.math.nan(f32);
                 for (self.f[0..4]) |values| rounded(values);
-                for (0..4) |j| self.refs[j] = try self.input(self.f[j], true);
+                self.refs[0] = try self.input(self.f[0], true);
+                self.refs[1] = try self.input(self.f[1], true);
+                self.refs[2] = try self.rnnInput(self.f[2], 2 * RANK, 2 * H);
+                self.refs[3] = try self.input(self.f[3], true);
                 try self.output(0, rows * RNN, .f32);
             },
             .recurrent => {
@@ -256,15 +235,19 @@ pub const Probe = struct {
                 self.f[2] = try self.floats(RNN * 5120, rng);
                 self.f[3] = try self.floats(2 * RANK, rng);
                 if (nf) self.f[0][0] = std.math.nan(f32);
-                for (self.f[0..4]) |values| rounded(values);
+                for ([_]usize{ 0, 2, 3 }) |j| rounded(self.f[j]);
                 @memset(self.f[0], 99.5);
                 self.f[1][0] = c.fromBf16(c.toBf16(0.6));
                 self.f[1][RANK] = c.fromBf16(c.toBf16(0.8));
                 self.f[1][2 * RANK] = c.fromBf16(c.toBf16(0.3));
                 for ([_]usize{ 0, RANK, 2 * RANK }) |channel| @memset(self.f[2][channel * 5120 ..][0..512], 0);
                 if (nf) self.f[0][0] = std.math.nan(f32);
-                // kappa arrives as the kappa kernel wrote it, in FP32; the other three are BF16.
-                for (0..4) |j| self.refs[j] = try self.input(self.f[j], j != 1);
+                self.refs[0] = try self.input(self.f[0], true);
+                self.refs[1] = try self.input(self.f[1], false);
+                self.refs[2] = try self.rnnInput(self.f[2], 0, 2 * RANK);
+                self.refs[3] = try self.input(self.f[3], true);
+                const dummy_held = [_]u32{ 1, 0, 0, 0, 0, 0, 0, 0 };
+                self.refs[4] = try self.rig.input(std.mem.sliceAsBytes(&dummy_held));
                 try self.output(0, RNN, .bf16);
                 try self.output(1, RANK, .bf16);
                 try self.output(2, RANK, .bf16);
@@ -285,11 +268,19 @@ pub const Probe = struct {
                 for (self.phi) |*v| v.* = c.toBf16(rng.float(f32) * 0.5 - 0.25);
                 @memset(self.phi[0..RANK], 0);
                 self.phi[0] = c.toBf16(1);
+                const phi_t = try self.arena.allocator().alloc(u16, host.vocab * RANK);
+                for (0..host.vocab) |v| for (0..RANK) |d| {
+                    phi_t[d * host.vocab + v] = self.phi[v * RANK + d];
+                };
                 self.refs[0] = try self.input(self.f[0], true);
-                self.refs[1] = try self.rig.input(std.mem.sliceAsBytes(self.phi));
+                self.refs[1] = try self.rig.input(std.mem.sliceAsBytes(phi_t));
                 self.refs[2] = try self.input(self.f[1], true);
                 self.refs[3] = try self.input(self.f[2], true);
                 try self.output(0, host.vocab, .bf16);
+                self.aux[0] = try self.rig.scratch(((host.vocab + 255) / 256) * @sizeOf(host.GroupStat));
+                self.aux[1] = try self.rig.scratch(8 * 4);
+                self.aux[2] = try self.rig.scratch(8 * 4);
+                self.aux[3] = try self.rig.scratch(4);
             },
             .base => {
                 self.f[0] = try self.floats(shape.n * H, rng);
@@ -319,17 +310,20 @@ pub const Probe = struct {
         const O = self.outs;
         const p = &self.pipes;
         switch (self.kind) {
-            .init_rows => host.initializeRows(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0])),
-            .fuse_taps => host.fuseTaps(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), hostRef(O[1]), @intCast(self.shape.rows)),
-            .block_qkv => host.blockQkv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), @intCast(self.shape.k)),
+            .init_rows => host.initializeRows(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0]), 1),
+            .fuse_taps => host.fuseTaps(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), hostRef(O[1]), @intCast(self.shape.rows), @intCast(self.shape.rows)),
+            .block_qkv => host.blockQkv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), &.{@intCast(self.shape.k)}),
             .context_kv => host.commitContext(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), hostRef(O[1]), @intCast(self.shape.k), @intCast(self.shape.rows), @intCast(self.shape.rows)),
-            .attention => host.attend(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(self.score_scratch), hostRef(O[0]), @intCast(self.shape.n), @intCast(@max(self.shape.n, 1)), self.shape.k % 2 != 0, @intCast(self.shape.k / 2)),
+            .attention => host.attend(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), &.{hostRef(R[3])}, &.{hostRef(R[4])}, &.{@intCast(self.shape.n)}, &.{@intCast(@max(self.shape.n, 1))}, &.{@intCast(self.shape.k / 2)}, self.shape.k % 2 != 0),
             .residual_norm => host.residualNorm(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), hostRef(O[1]), 8, self.shape.k != 0),
             .swiglu => host.swiglu(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0]), 8 * INTER),
-            .kappa => host.kappa(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), @intCast(self.shape.rows)),
-            .recurrent => host.recurrentStep(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), 1),
+            .kappa => host.kappa(p, e, hostRef(R[0]), &.{hostRef(R[1])}, hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), @intCast(self.shape.rows), @intCast(self.shape.rows), 0),
+            .recurrent => host.recurrentStep(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), hostRef(R[4]), 1, 1, 0, false),
             .base => host.base(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0]), @intCast(self.shape.rows), @intCast(self.shape.n)),
-            .logits => host.finalLogits(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0])),
+            .logits => {
+                host.finalLogits(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(self.aux[0]), hostRef(self.aux[1]), hostRef(self.aux[2]), hostRef(self.aux[3]), .{ .count = host.vocab, .phi_stride = host.vocab, .base_stride = 0, .streams = 1, .step = 0, .mode = 0, .flags = 0 });
+                host.finalLogits(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(self.aux[0]), hostRef(self.aux[1]), hostRef(self.aux[2]), hostRef(self.aux[3]), .{ .count = host.vocab, .phi_stride = host.vocab, .base_stride = 0, .streams = 1, .step = 0, .mode = 1, .flags = 0 });
+            },
         }
         try self.rig.finish(pass);
     }
@@ -528,22 +522,29 @@ pub const Probe = struct {
                 if (std.math.isNan(w)) {
                     if (!std.math.isNan(c.fromBf16(bits))) return "BF16 NaN was not propagated";
                 } else if (bits != expected) {
+                    if (self.kind == .residual_norm and gate == .shapes and self.shape.k == 0 and i == 8 * H) return "BF16 endpoint differs from the explicit FP32/FP64 reference";
                     const relative: f64 = switch (self.kind) {
-                        .fuse_taps, .block_qkv, .context_kv, .swiglu, .logits, .base => 0.02,
+                        .fuse_taps, .block_qkv, .context_kv, .residual_norm, .swiglu, .base, .logits => 0.02,
                         .attention => 0.03,
                         else => 0,
                     };
-                    const got = c.fromBf16(bits);
-                    if (@abs(@as(f64, got) - w) > @max(1e-5, relative * @abs(w))) return "BF16 endpoint differs from the explicit FP32/FP64 reference";
+                    if (@abs(@as(f64, c.fromBf16(bits)) - w) > @max(1e-5, relative * @abs(w))) return "BF16 endpoint differs from the explicit FP32/FP64 reference";
                 }
             }
         }
         if (self.kind == .logits and gate == .shapes) {
             if (!(want[1] <= 30 and want[1] > 29.9)) return "the planted large logit does not prove softcap saturation";
+            var want_best: usize = 0;
+            for (want, 0..) |w, idx| if (w > want[want_best]) {
+                want_best = idx;
+            };
+            var exp_sum: f64 = 0;
+            for (want) |w| exp_sum += @exp(w - want[want_best]);
+            const got_tok = std.mem.readInt(u32, self.rig.bytes(self.aux[1], 8)[4..8], .little);
+            const got_prob: f32 = @bitCast(std.mem.readInt(u32, self.rig.bytes(self.aux[2], 4)[0..4], .little));
+            if (got_tok != want_best or @abs(@as(f64, got_prob) - 1.0 / exp_sum) > 0.02) return "softmax mode=1 mismatch";
         }
-        if (self.kind == .base and gate == .shapes and self.f[0][0] == 1) {
-            if (want[0] != 2304) return "raw base projection was softened instead of rounded once";
-        }
+        if (self.kind == .base and gate == .shapes and self.f[0][0] == 1 and want[0] != 2304) return "raw base projection was softened instead of rounded once";
         return null;
     }
 };

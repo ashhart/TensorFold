@@ -24,7 +24,9 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
         const width: u32 = switch (kind) {
-            .block_qkv, .context_kv, .attention => 128,
+            .block_qkv, .context_kv => 128,
+            .attention => 768,
+            .kappa => 64,
             else => 256,
         };
         try t.expectEqual(width, record.threads);
@@ -33,20 +35,28 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
         const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
         const threadgroup: u32 = switch (kind) {
-            .fuse_taps => 32,
-            .block_qkv, .context_kv, .residual_norm => 16,
-            .attention => 528,
+            .fuse_taps => 48,
+            .block_qkv, .context_kv => 16,
+            .attention => 20736,
+            .residual_norm => 32,
+            .recurrent => 1024,
+            .base => 5120,
+            .logits => 4224,
             else => 0,
         };
         try t.expectEqual(threadgroup, record.tg_memory);
     }
-    try t.expectEqual(@as(usize, 4), @sizeOf(k.PositionArgs));
+    try t.expectEqual(@as(usize, 8), @sizeOf(k.FuseArgs));
+    try t.expectEqual(@as(usize, 32), @sizeOf(k.PositionArgs));
     try t.expectEqual(@as(usize, 12), @sizeOf(k.ContextArgs));
-    try t.expectEqual(@as(usize, 16), @sizeOf(k.AttentionArgs));
+    try t.expectEqual(@as(usize, 104), @sizeOf(k.AttentionArgs));
+    try t.expectEqual(@as(usize, 16), @sizeOf(k.KappaArgs));
     try t.expectEqual(@as(usize, 4), @sizeOf(k.ResidualArgs));
-    try t.expectEqual(@as(usize, 4), @sizeOf(k.TokenArgs));
+    try t.expectEqual(@as(usize, 12), @sizeOf(k.TokenArgs));
     try t.expectEqual(@as(usize, 4), @sizeOf(k.CountArgs));
     try t.expectEqual(@as(usize, 8), @sizeOf(k.BaseArgs));
+    try t.expectEqual(@as(usize, 28), @sizeOf(k.LogitsArgs));
+    try t.expectEqual(@as(usize, 16), @sizeOf(k.GroupStat));
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "DSP_SCALE = 0x1.6a09e6p-4f") != null);
 }

@@ -22,7 +22,7 @@ test "Metal launch map: every DSpark limit pipeline has a resolver branch" {
         try launches.requireMapped(d);
         count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 13), count);
+    try std.testing.expectEqual(@as(usize, 11), count);
 }
 
 test "Metal launch map: unknown registrations stay errors on every chip" {

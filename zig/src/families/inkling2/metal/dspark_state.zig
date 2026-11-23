@@ -9,27 +9,32 @@ pub const intermediate = 9216;
 pub const rank = 256;
 pub const vocabulary = 200058;
 pub const block = 8;
+pub const max_streams = 8;
 pub const absorb_rows = 64;
 pub const local_ring = std.mem.alignForward(usize, 1024 + block, 128);
+pub const logit_groups = (vocabulary + 255) / 256;
 pub const tap_row_bytes: usize = 4 * hidden * 2;
 pub const Tail = struct { buf: mtl.Buffer, off: usize = 0 };
 
 const fields = [_][]const u8{
-    "ids",    "resid", "next_resid", "x",    "y",     "q_raw", "k_raw", "v_raw", "q",     "kb",         "vb", "attn",
-    "gate",   "up",    "act",        "base", "fused", "ck",    "cv",    "kappa", "state", "next_state", "z",  "lambda",
-    "logits",
+    "ids",    "resid", "next_resid", "x",           "y",          "q_raw",     "k_raw",     "v_raw", "q",     "kb",         "vb", "attn",
+    "gate",   "up",    "act",        "base",        "fused",      "ck",        "cv",        "kappa", "state", "next_state", "z",  "lambda",
+    "logits", "held",  "probs",      "group_stats", "sample_tok", "sample_ck", "sample_ci",
 };
 
 fn sizes() [fields.len]usize {
-    const r = block;
+    const r = max_streams * block;
+    const s = max_streams;
     const a = absorb_rows;
     const b = 2;
     return .{
-        r * 4,                r * hidden * b,     r * hidden * b,       r * hidden * b,       r * hidden * b,
-        r * query * b,        r * kv * b,         r * kv * b,           r * query * b,        r * kv * b,
-        r * kv * b,           r * query * b,      r * intermediate * b, r * intermediate * b, r * intermediate * b,
-        (r - 1) * 201024 * b, 4 * a * hidden * b, a * kv * b,           a * kv * b,           (r - 1) * 3 * rank * 4,
-        rank * b,             rank * b,           3 * rank * b,         rank * b,             vocabulary * b,
+        s * 4,              r * hidden * b,     r * hidden * b,        r * hidden * b,       r * hidden * b,
+        r * query * b,      r * kv * b,         r * kv * b,            r * query * b,        r * kv * b,
+        r * kv * b,         r * query * b,      r * intermediate * b,  r * intermediate * b, r * intermediate * b,
+        r * vocabulary * b, 4 * a * hidden * b, 3 * a * kv * b,        3 * a * kv * b,       (block - 1) * s * 3 * rank * 4,
+        s * rank * b,       s * rank * b,       s * 3 * rank * b,      s * rank * b,         s * vocabulary * b,
+        s * block * 4,      s * block * 4,      s * logit_groups * 16, s * 4,                s * 32 * 64 * 4,
+        s * 32 * 64 * 4,
     };
 }
 
@@ -65,6 +70,12 @@ pub const Scratch = struct {
     z: mtl.Buffer,
     lambda: mtl.Buffer,
     logits: mtl.Buffer,
+    held: mtl.Buffer,
+    probs: mtl.Buffer,
+    group_stats: mtl.Buffer,
+    sample_tok: mtl.Buffer,
+    sample_ck: mtl.Buffer,
+    sample_ci: mtl.Buffer,
 
     pub fn init(device: mtl.Device) !Scratch {
         @setEvalBranchQuota(10_000);
@@ -88,8 +99,8 @@ pub fn globalRing(capacity: usize) usize {
     return std.mem.alignForward(usize, capacity, 128);
 }
 
-pub fn scoreBytes(capacity: usize) u64 {
-    return @as(u64, 8 * 24 * 4) * (capacity + block);
+pub fn scoreBytes(_: usize) u64 {
+    return 0;
 }
 
 /// Two sliding layers hold two fixed K/V rings; layer 1 holds two global K/V rings.
@@ -113,7 +124,9 @@ pub const Lane = struct {
     from: u64 = 0,
     end: u64 = 0,
     held: [7]u32 = @splat(0),
+    probs: [7]f32 = @splat(0),
     held_len: u32 = 0,
+    sampled: bool = false,
 
     pub fn init(device: mtl.Device, capacity: usize) !Lane {
         if (capacity == 0 or capacity > 1048576) return error.DSparkLaneGeometry;
@@ -267,17 +280,16 @@ comptime {
     if (local_ring != 1152 or laneTokenBytes() != 4096) @compileError("DSpark ring geometry drift");
 }
 
-test "DSpark stream accounting includes sliding, global and shared attention scratch" {
+test "DSpark stream accounting includes sliding and global context without attention score scratch" {
     try std.testing.expectEqual(@as(u64, 9_437_184 + 4608), laneFixedBytes());
     try std.testing.expectEqual(laneFixedBytes() + 128 * 4096, laneBytes(1));
     try std.testing.expectEqual(laneFixedBytes() + 1152 * 4096, laneBytes(1025));
-    try std.testing.expectEqual(@as(u64, 768 * 1032), scoreBytes(1024));
+    try std.testing.expectEqual(@as(u64, 0), scoreBytes(1024));
     try std.testing.expect(Snap.bytes(0) >= exactSnapBytes(0, false));
     try std.testing.expect(Snap.bytes(1) >= exactSnapBytes(0, true));
     try std.testing.expect(Snap.bytes(1024) >= exactSnapBytes(1024, false));
     try std.testing.expect(Snap.bytes(2048) >= exactSnapBytes(2047, true));
     try std.testing.expectEqual(@as(u64, (2048 + 2 * local_ring) * 4096 + hidden * 2 + tap_row_bytes), Snap.bytes(2048));
-    // Ring and scores bytes are reserved with the target cache before the lane opens.
 }
 
 fn blitCopy(queue: mtl.Queue, src: mtl.Buffer, src_off: usize, dst: mtl.Buffer, dst_off: usize, bytes: usize) !void {
