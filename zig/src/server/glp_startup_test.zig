@@ -331,7 +331,7 @@ test "a description that reads like a digest does not make the loaded file verif
     const a = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const bytes = try vectorBytes(a, width, &.{ 1, 2 }, .{ .publication = .{ .description = "the file carries glp.content_sha256 in its description" } });
+    const bytes = try vectorBytes(a, width, &.{ 1, 2 }, .{ .layers = &.{}, .publication = .{ .description = "the file carries glp.content_sha256 in its description" } });
     dropDigestKey(bytes);
     try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = bytes });
     const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "vector.gguf" });
