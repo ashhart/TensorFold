@@ -112,6 +112,7 @@ Omit `--parallel` to use `auto`, which asks for up to eight streams as memory an
 Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
 Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
 For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
+On Metal, a GLM-5.3-Flash shared round holds 16 rows, one per active stream. Drafts fill only the rows left over: 8 spare rows at 8 streams, none at 16, so drafting speeds up fewer streams as the stream count rises. Replies are the same tokens either way. See #4311 for the measurements.
 Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
 
 Leave the server running and check it from another terminal:
