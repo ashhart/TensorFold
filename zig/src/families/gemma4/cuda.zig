@@ -50,6 +50,7 @@ test {
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_disk.zig");
     _ = @import("cuda_backend.zig");
+    _ = @import("cuda_argmax_graph.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_solo.zig");
     _ = @import("cuda_shared.zig");
