@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - DeepSeek V4.1 on Metal: the EXL3 register-only decode body now serves every speculative window's fused gate+up call, up to the eight-token window; a four-draft window no longer switches to the tensor-unit compact body for its seventy rows, so its replies match plain decode again (the 8 reference and the 10 code prompts, four-draft against plain), its 5-row round's event p50 falls from ~104 ms to 61 ms, and the default config's hashes and timings are unchanged.
+- Metal: DeepSeek V4.1's concurrent dispatch mode (`TF_DSV41_CONCURRENT=1`) put the attention sparse scan before the dense-table pass and the split merge before the scan that feeds it; both barriers are now explicit, so the mode no longer changes the reply.
 - Metal: the row projection picks its narrow or wide kernel per chip (generation plus Pro/Max/Ultra), so an M5 Max no longer runs 8-row and wider windows on the kernel that is slower there; M5 Ultra and unlisted chips are unchanged, tokens unchanged (refs #3396). Thanks to @Spectre056 for the M5 Max measurements.
 - Metal: a stream whose setup fails partway no longer leaves the prompt cache smaller by its bytes in Llama, Ripple, Spark2.5, Flint, Step-5 and MiniMax-M3.
 
