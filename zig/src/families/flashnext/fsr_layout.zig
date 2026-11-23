@@ -28,13 +28,17 @@ pub fn fit(inventory: anytype, settings: anytype, context: anytype) !@TypeOf(set
     const pool = current.pool.?;
     var next = settings;
     next.ssd_experts = try std.math.mul(u64, 512, pool.stride);
-    if ((try budget(inventory, next, context)).forPhase(context.needs_build) > context.limit) return settings;
+    var growth: u64 = if (@hasField(@TypeOf(context), "rotary_growth")) context.rotary_growth else 0;
+    if (!try fits(inventory, next, context, growth)) {
+        if (!try fits(inventory, next, context, 0)) return settings;
+        growth = 0; // the complete-demand minimum still admits when the optional cache cannot fit
+    }
     var lo: usize = 512;
     var hi = pool.slots;
     while (lo < hi) {
         const mid = lo + (hi - lo + 1) / 2;
         next.ssd_experts = try std.math.mul(u64, mid, pool.stride);
-        if ((try budget(inventory, next, context)).forPhase(context.needs_build) <= context.limit)
+        if (try fits(inventory, next, context, growth))
             lo = mid
         else
             hi = mid - 1;
@@ -49,4 +53,10 @@ fn budget(inventory: anytype, settings: anytype, context: anytype) !memory.Budge
     resident.raw = p.raw;
     const extra = try std.math.add(u64, context.extra, try std.math.add(u64, context.existing, p.extra));
     return memory.budgetLiveFor(0, settings.capacity, resident, extra, context.existing, settings.sibling(context.paired));
+}
+
+fn fits(inventory: anytype, settings: anytype, context: anytype, growth: u64) !bool {
+    var b = try budget(inventory, settings, context);
+    b.steady = try std.math.add(u64, b.steady, growth);
+    return b.forPhase(context.needs_build) <= context.limit;
 }

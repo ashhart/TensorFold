@@ -70,12 +70,15 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     var plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    const cache = @import("rotary_cache.zig");
+    var pool_fitted = false;
     const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
     if (plain.forPhase(route.needs_build) > limit and selected.ssd_experts != null and !paired) {
-        const fitted = try @import("fsr_layout.zig").fit(source_inventory, selected, .{ .limit = limit, .existing = existing, .extra = selected.startup_extra, .needs_build = route.needs_build, .paired = paired });
+        const fitted = try @import("fsr_layout.zig").fit(source_inventory, selected, .{ .limit = limit, .existing = existing, .extra = selected.startup_extra, .needs_build = route.needs_build, .paired = paired, .rotary_growth = if (device.tensorUnits()) cache.growth else 0 });
         if (fitted.ssd_experts != selected.ssd_experts) {
             std.log.info("flash next: requested SSD expert maximum {d} bytes exceeds the load ceiling; using {d} bytes", .{ selected.ssd_experts.?, fitted.ssd_experts.? });
             selected = fitted;
+            pool_fitted = true;
             placement = try @import("fsr_layout.zig").of(source_inventory, selected);
             inventory.raw = placement.raw;
             requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
@@ -83,8 +86,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
             plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
         }
     }
-    const cache = @import("rotary_cache.zig");
     const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
+    if (pool_fitted and device.tensorUnits() and !rotary_enabled) std.log.warn("flash next: minimum SSD pool leaves no rotary-cache room; learned states use the scalar rotary identity", .{});
     const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
     const startup = try memory.budgetLiveFor(weights, selected.capacity, inventory, extra, existing, selected.sibling(paired));
     const load_limit = memory.admitBudget(limit, startup, route.needs_build) catch |err| {
