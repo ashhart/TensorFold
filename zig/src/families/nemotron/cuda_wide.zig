@@ -44,6 +44,11 @@ pub fn checkRows(round: usize, k: usize, room: usize, waiting: usize, window: us
     return @min(1 + (round * 7 + k * 5 + round / 3) % cap, left);
 }
 
+/// Whether Head.chains batches one more stream of `more` rows: the switch's streams (main's 8 off) and shared rows.
+pub fn batches(c: Config, batched: usize, rows: usize, more: usize) bool {
+    return batched < streams(c) and rows + more <= @import("cuda_state.zig").sharedRows(c);
+}
+
 /// A shared round's streams at most.
 pub fn streams(c: Config) usize {
     return if (c.wide_rounds) wide_streams else narrow_streams;
@@ -148,4 +153,14 @@ test "wide rounds: saved lessons loaded after init put rounds back at 8 streams 
     try std.testing.expect(!c.wide_rounds);
     try std.testing.expectEqual(@as(usize, 8), streams(c));
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_slide.zig"), "if (@import(\"cuda_wide.zig\").withLessons(&e.c)) |why|") != null);
+}
+
+test "wide rounds: a draft call batches the switch's streams, main's 8 with it off (REV83 1)" {
+    var c: Config = small;
+    try std.testing.expect(batches(c, 7, 0, 1));
+    try std.testing.expect(!batches(c, 8, 0, 1)); // the ninth drafts alone, as on main
+    try std.testing.expect(!batches(c, 0, 16, 1)); // and past the shared rows
+    c.wide_rounds = true;
+    try std.testing.expect(batches(c, 15, 0, 1) and !batches(c, 16, 0, 1));
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_lanes.zig"), "!@import(\"cuda_wide.zig\").batches(self.e.c, batched, rows, follow.len)") != null);
 }
