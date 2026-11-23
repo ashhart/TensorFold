@@ -49,11 +49,13 @@ struct Raw {
   uint32_t lo, hi, sc;
 };
 
+constexpr int kDecodeTiles = 1;  // n8 tiles a decode warp (modelopt.zig decode_columns = 8 x this); prompt: NTW
 constexpr int kRowBytes = 144;  // a staged row: 128 code bytes + 16, so the 8 rows a load touches use distinct banks
 
-// A warp's tile in registers: up to 128 code bytes of its 32 rows (8 lanes a row), the lane's row's scales; K % 32 == 0
-struct Tile {
-  uint4 codes[8];
+// A warp's tile in registers: up to 128 code bytes of its 8 NT rows (8 lanes a row), the lane's row's scales
+template <int NT>
+struct Tile {  // K % 32 == 0
+  uint4 codes[2 * NT];
   uint32_t scales[4];
 };
 
@@ -66,17 +68,19 @@ __device__ __forceinline__ uint32_t scale_word(const uint8_t* p, int n) {
   return v;
 }
 
-__device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int g0, int steps, int lane, Tile& t) {
+template <int NT>
+__device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int g0, int steps, int lane, Tile<NT>& t) {
   const int bytes = steps * (w.format ? 32 : 16);
 #pragma unroll
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < 2 * NT; ++i) {
     const int q = lane + 32 * i, lr = q >> 3, chunk = q & 7;
     if (chunk * 16 >= bytes) continue;
-    const long long row = w.row0 + w.row_step * (cb * 32 + lr);
+    const long long row = w.row0 + w.row_step * (cb * 8 * NT + lr);
     const long long z = (e * w.N + row) * w.K + 32LL * g0;  // first element of the tile
     t.codes[i] = __ldg(reinterpret_cast<const uint4*>(w.codes + (w.format ? z : z / 2) + chunk * 16));
   }
-  const long long row = w.row0 + w.row_step * (cb * 32 + lane);
+  if (lane >= 8 * NT) return;
+  const long long row = w.row0 + w.row_step * (cb * 8 * NT + lane);
   const long long z = (e * w.N + row) * w.K + 32LL * g0;
   const int n = w.format ? steps : 2 * steps;  // the row's scale bytes in this tile; unpadded, the last ends the data
   const uint8_t* src = w.scales + z / w.G;
@@ -88,16 +92,18 @@ __device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int 
                                             : scale_word(src + 4 * i, n - 4 * i);
 }
 
-__device__ __forceinline__ void put(const Weight& w, int steps, int lane, const Tile& t, uint8_t* __restrict__ codes,
-                                    uint8_t* __restrict__ scales) {
+template <int NT>
+__device__ __forceinline__ void put(const Weight& w, int steps, int lane, const Tile<NT>& t,
+                                    uint8_t* __restrict__ codes, uint8_t* __restrict__ scales) {
   const int bytes = steps * (w.format ? 32 : 16);
 #pragma unroll
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < 2 * NT; ++i) {
     const int q = lane + 32 * i, lr = q >> 3, chunk = q & 7;
     if (chunk * 16 < bytes) *reinterpret_cast<uint4*>(codes + lr * kRowBytes + chunk * 16) = t.codes[i];
   }
+  if (lane < 8 * NT)
 #pragma unroll
-  for (int i = 0; i < 4; ++i) reinterpret_cast<uint32_t*>(scales + lane * 16)[i] = t.scales[i];
+    for (int i = 0; i < 4; ++i) reinterpret_cast<uint32_t*>(scales + lane * 16)[i] = t.scales[i];
 }
 
 // Step gg of a staged tile, fragment rows 8j + lane / 4: the bytes ld_w used to read from global memory.
@@ -144,14 +150,36 @@ __device__ __forceinline__ uint4 decode(const Weight& w, const Raw& r, float out
   return o;
 }
 
-template <int RT, int WARPS>
+// experts.cuh's bf16 epilogue for NT n8 tiles; with `up`, w13 rows: even to gate[col / 2], odd to up[col / 2].
+template <int RT, int NT>
+__device__ __forceinline__ void store(const float (&acc)[1][RT][NT][4], int r, void* out, void* up, int N, int col0,
+                                      int pr0, int pr1, bool v0, bool v1) {
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    if (!(h ? v1 : v0)) continue;
+    const size_t row = (size_t)(h ? pr1 : pr0) * N;
+#pragma unroll
+    for (int j = 0; j < NT; ++j) {
+      const __nv_bfloat162 o = __floats2bfloat162_rn(acc[0][r][j][2 * h], acc[0][r][j][2 * h + 1]);
+      if (up) {
+        reinterpret_cast<__nv_bfloat16*>(out)[row + (col0 + 8 * j) / 2] = o.x;
+        reinterpret_cast<__nv_bfloat16*>(up)[row + (col0 + 8 * j) / 2] = o.y;
+      } else {
+        *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + row + col0 + 8 * j) = o;
+      }
+    }
+  }
+}
+
+template <int RT, int WARPS, int NT>
 __device__ __forceinline__ void body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, Weight w,
                                      int KG, int NB, const int* __restrict__ items, const int* __restrict__ item_count,
-                                     const int* __restrict__ members, void* __restrict__ out, int N, int skip) {
+                                     const int* __restrict__ members, void* __restrict__ out, int N, int skip,
+                                     void* __restrict__ up = nullptr) {
   const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int units = __ldg(item_count) * NB;
-  __shared__ __align__(16) uint8_t tiles[WARPS][32 * kRowBytes];
-  __shared__ __align__(16) uint8_t tile_scales[WARPS][32 * 16];
+  __shared__ __align__(16) uint8_t tiles[WARPS][8 * NT * kRowBytes];
+  __shared__ __align__(16) uint8_t tile_scales[WARPS][8 * NT * 16];
   uint8_t* codes = tiles[threadIdx.x >> 5];
   uint8_t* scales = tile_scales[threadIdx.x >> 5];
   for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS) {
@@ -172,11 +200,11 @@ __device__ __forceinline__ void body(const __nv_bfloat16* __restrict__ X, int x_
           pr[r][h] = v[r][h] ? __ldg(members + first + i) : 0;
           x[r][h] = X + (size_t)(slots ? pr[r][h] / slots : pr[r][h]) * x_stride + 4 * t;
         }
-      float acc[1][RT][NTW][4];
+      float acc[1][RT][NT][4];
 #pragma unroll
       for (int r = 0; r < RT; ++r)
 #pragma unroll
-        for (int j = 0; j < NTW; ++j) acc[0][r][j][0] = acc[0][r][j][1] = acc[0][r][j][2] = acc[0][r][j][3] = 0.f;
+        for (int j = 0; j < NT; ++j) acc[0][r][j][0] = acc[0][r][j][1] = acc[0][r][j][2] = acc[0][r][j][3] = 0.f;
       const uint2 zero = make_uint2(0u, 0u);
       const int ts = w.format ? 4 : 8;  // steps a staged tile
       uint2 xn[2][2] = {{zero, zero}, {zero, zero}};  // decode: the next step's inputs
@@ -186,7 +214,7 @@ __device__ __forceinline__ void body(const __nv_bfloat16* __restrict__ X, int x_
           xn[0][q] = v[0][0] ? __ldg(reinterpret_cast<const uint2*>(x[0][0] + 16 * q)) : zero;
           xn[1][q] = v[0][1] ? __ldg(reinterpret_cast<const uint2*>(x[0][1] + 16 * q)) : zero;
         }
-      Tile next;  // decode (RT 1) fetches the next tile while this one sums; prompt tiles load in place
+      Tile<NT> next;  // decode (RT 1) fetches the next tile while this one sums; prompt tiles load in place
       if (RT == 1) fetch(w, e, cb, 0, KG < ts ? KG : ts, lane, next);
       for (int g0 = 0; g0 < KG; g0 += ts) {
         const int steps = KG - g0 < ts ? KG - g0 : ts;
@@ -209,9 +237,9 @@ __device__ __forceinline__ void body(const __nv_bfloat16* __restrict__ X, int x_
               xn[1][q] = g + 1 < KG && v[0][1] ? __ldg(pb) : zero;
             }
           }
-          uint4 ww[NTW];
+          uint4 ww[NT];
 #pragma unroll
-          for (int j = 0; j < NTW; ++j) ww[j] = decode(w, staged(w, codes, scales, gg, lane, j), outer);
+          for (int j = 0; j < NT; ++j) ww[j] = decode(w, staged(w, codes, scales, gg, lane, j), outer);
 #pragma unroll
           for (int r = 0; r < RT; ++r) {
             uint2 xa[2], xb[2];
@@ -228,14 +256,18 @@ __device__ __forceinline__ void body(const __nv_bfloat16* __restrict__ X, int x_
 #pragma unroll
             for (int q = 0; q < 2; ++q)
 #pragma unroll
-              for (int j = 0; j < NTW; ++j)
+              for (int j = 0; j < NT; ++j)
                 mma(acc[0][r][j], xa[q].x, xb[q].x, xa[q].y, xb[q].y, q ? ww[j].z : ww[j].x, q ? ww[j].w : ww[j].y);
           }
         }
       }
 #pragma unroll
-      for (int r = 0; r < RT; ++r)
-        epilogue<3, 1, RT>(acc, r, out, N, cb * COLS + 2 * t, pr[r][0], pr[r][1], v[r][0], v[r][1], 0.f);
+      for (int r = 0; r < RT; ++r) {
+        if constexpr (NT == NTW)
+          epilogue<3, 1, RT>(acc, r, out, N, cb * COLS + 2 * t, pr[r][0], pr[r][1], v[r][0], v[r][1], 0.f);
+        else
+          store<RT, NT>(acc, r, out, up, N, cb * 8 * NT + 2 * t, pr[r][0], pr[r][1], v[r][0], v[r][1]);
+      }
     }
   }
 }
@@ -307,14 +339,19 @@ extern "C" __global__ void __launch_bounds__(32) tf_ink2moe_plan(const int32_t* 
   *item_count = at;
 }
 
-#define TF_INK2_MOE(NAME, RT)                                                                                         \
+#define TF_INK2_MOE(NAME, RT, NT)                                                                                     \
   extern "C" __global__ void __launch_bounds__(128) NAME(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, \
       ink2o::Weight w, int KG, int NB, const int* __restrict__ items, const int* __restrict__ item_count,            \
       const int* __restrict__ members, void* __restrict__ out, int N, int skip) {                                    \
-    ink2o::body<RT, 4>(X, x_stride, slots, w, KG, NB, items, item_count, members, out, N, skip);                       \
+    ink2o::body<RT, 4, NT>(X, x_stride, slots, w, KG, NB, items, item_count, members, out, N, skip);                   \
   }
-TF_INK2_MOE(tf_ink2moe_up, 1)
-TF_INK2_MOE(tf_ink2moe_prompt_up, 4)
+// Decode: `up` set means the gate and up projections at once over w13's rows in order (row_step 1).
+extern "C" __global__ void __launch_bounds__(128) tf_ink2moe_up(const __nv_bfloat16* __restrict__ X, int x_stride,
+    int slots, ink2o::Weight w, int KG, int NB, const int* __restrict__ items, const int* __restrict__ item_count,
+    const int* __restrict__ members, void* __restrict__ out, int N, int skip, void* __restrict__ up) {
+  ink2o::body<1, 4, ink2o::kDecodeTiles>(X, x_stride, slots, w, KG, NB, items, item_count, members, out, N, skip, up);
+}
+TF_INK2_MOE(tf_ink2moe_prompt_up, 4, NTW)
 extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_act(const __nv_bfloat16* g, const __nv_bfloat16* u, __nv_bfloat16* o, int n, float gc, float uc) {
   ink2o::act(g, u, o, n, gc, uc);
 }
