@@ -93,6 +93,7 @@ pub const Job = struct {
     pub fn lending(job: *Job) *Job {
         const e = job.entry orelse return job;
         const store = job.host.cache orelse return job;
+        if (e.serial == 0) return job; // not the index's (it numbers every entry it adds): the borrow stays
         job.lent = e.serial;
         job.entry = null;
         store.release(e);
