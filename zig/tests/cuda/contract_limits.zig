@@ -48,8 +48,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     return error.UnknownContractImage;
 }
 
-/// Gate 5 on this GPU, each record against the loaded function; plain words in `only`: the launches so named, no
-/// offline audit. `-word`s leave every record in: they drop only a kernel's gates 1-4.
+/// Gate 5 on this GPU, each record against the loaded function; plain words in `only` pick launches, `-word`s keep all.
 pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
     const after = @import("contract_after.zig");
     const full = !after.filtered(only);
