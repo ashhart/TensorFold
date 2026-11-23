@@ -18,6 +18,13 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
     test_step.dependOn(&loop_cfg_run.step);
     b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
+    const tree_contract = b.createModule(.{ .root_source_file = b.path("zig/src/core/tree_round.zig"), .target = b.graph.host, .optimize = .debug });
+    const recording_metal = b.createModule(.{ .root_source_file = b.path("zig/qwen27_dflash_argmax_metal.zig"), .target = b.graph.host });
+    const recording_tree = b.createModule(.{ .root_source_file = b.path("zig/src/core/tree_round_gpu.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{ .{ .name = "metal", .module = recording_metal }, .{ .name = "tree_round", .module = tree_contract }, .{ .name = "tree_round_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/tree_round_sources.zig") }) } } });
+    const recording_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_dflash_argmax_core.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "tree_round", .module = tree_contract }, .{ .name = "tree_round_gpu", .module = recording_tree } } });
+    const dflash_argmax = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_dflash_argmax_host.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{ .{ .name = "metal", .module = recording_metal }, .{ .name = "core", .module = recording_core } } }) }));
+    b.step("test-qwen27-dflash-argmax-host", "DFlash2 matcher keeps main's one-pass argmax without a device").dependOn(&dflash_argmax.step);
+    test_step.dependOn(&dflash_argmax.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
