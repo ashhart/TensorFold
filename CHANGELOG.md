@@ -11,6 +11,16 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: grouped prompt experts, the dense prompt and loop-gate MMA tiles, 8-row prompt attention, deduplicated verify experts for drafted rounds of 2 to 63 rows and one DSpark head pass for all drafting streams of a round all keep the one-row kernels' bytes, and the kernel contract registers them with launch records and planted controls. On an M4 Pro a cold prompt reaches its first token at 0.87 (8,192 tokens) to 0.72 (65,536) of `mlx_lm`'s rate, `fibonacci-raw` decodes at 31.1 tokens a second plain and 35.8 with DSpark against MLX's 23.1, and four drafted streams are within noise of plain (code 3 % under, chat level); token hashes and drafted-equals-plain are unchanged. Raw results, their sources and the build are in [the receipt](docs/receipts/inkling2-mini-m4pro/README.md) (#4337).
 
+- Docs: a plan for Inkling 2 Mini on CUDA and Metal in slices a contributor can claim (#4274). Thanks @akol1.
+
+- Docs: the Flash Next HIP recipe adds the measured four-rank serve path and fixes its receipt link (#4669). Thanks @timmyit.
+
+- Desktop: the app changelog lists the Room, Kanban and saved-bot changes (#4376). Thanks @garvrao80.
+
+- Speech: Drama 3 voice startup and listing move into one module, and speech sampling can take a caller's defaults and top-k ceiling; existing limits are unchanged (#4609). Thanks @BobClawblaw.
+
+- Tests: the CUDA Idol decoders' contract reference rounds tiled attention's P to fp16 at each 64-key tile's running maximum, as the kernel and torch's CUDA flash and memory-efficient attention do, instead of at the final maximum, which went red at 16x1000x65 on an RTX 5090; a host test checks it against an fp32 online-softmax simulation, and the decoder self attention's gate 4 computes its alike keys' outputs once instead of for all 8,192 tokens (#4508, after #1858). Thanks to @AIFlowML.
+
 - Docs: the optimization ledger's cells catch up with PRs that landed since it was last updated (#4580). Thanks @jschmied.
 
 - Unlimited-OCR-2: a cancelled request now stops before image encoding, between images and between decoder prefill chunks instead of running the whole prefill; uncancelled replies are unchanged (#N).
@@ -30,8 +40,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: the row projection picks its narrow or wide kernel per chip (generation plus Pro/Max/Ultra), so an M5 Max no longer runs 8-row and wider windows on the kernel that is slower there; M5 Ultra and unlisted chips are unchanged, tokens unchanged (refs #3396). Thanks to @Spectre056 for the M5 Max measurements.
 - Metal: a stream whose setup fails partway no longer leaves the prompt cache smaller by its bytes in Llama, Ripple, Spark2.5, Flint, Step-5 and MiniMax-M3.
 
-
-
 - CUDA: `TF_CUDA_POOL_AFTER_WARMUP=1` (opt-in) sizes dense Qwen3.5's still-empty KV page pool again after warm-up, from the free memory then measured under the same reserve and cap, so pages the first plan held back for warm-up become KV capacity; `/memory` reports the decision; tokens are unchanged, and other modes keep today's pool (#4591).
 
 - Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH=1` (opt-in) captures the greedy verify round's argmax in the target graph, skips the token download greedy rounds never read and uploads per-forward metadata from pinned memory; same kernel and inputs, so tokens are unchanged (#4616).
@@ -42,8 +50,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
 - Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending.
-
-
 
 - Flash Next on Metal: `TF_FN_GX_GATEUP_MB2=1` (opt-in) decodes each expert's gate/up weights once for two rows; about 2% faster at 4 code streams on an M5 Ultra, tokens unchanged (refs #1486).
 
@@ -69,6 +75,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on).
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
+
 
 ## 1.3.4
 
