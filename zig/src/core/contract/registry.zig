@@ -229,7 +229,11 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
-    if (@import("exl3_prompt_pending.zig").owns(r.launch.name)) return none;
+    if (@import("exl3_prompt_pending.zig").owns(r.launch.name)) {
+        const v = release orelse return none;
+        if (v.major == 13 and v.minor == 3) return @import("pending_132.zig").lookup(r.launch.name, v) orelse none;
+        return none;
+    }
     if (release) |v| if (v.major == 13 and v.minor == 0) if (@import("measurements/main_130.zig").lookup(r.launch.name)) |u| return u;
     var u = r.usage;
     const rel = release orelse return u;

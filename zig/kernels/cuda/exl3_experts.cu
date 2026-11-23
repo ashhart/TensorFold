@@ -315,24 +315,15 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_k6(const 
     prompt_gu<6>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
 }
 
-// Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
-template <int K2>
-__device__ __forceinline__ void prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
-        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
-        float* __restrict__ y, int K, int D, int skip) {
-
-    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<K2>()];
-    __shared__ int rows_sh[TPM];
-    const int cb = blockIdx.x, item = blockIdx.y;
-    if (item >= counts[0]) return;
-    const int e = items[3 * item];
-    if (e == skip) return;
-    const int first = items[3 * item + 1], cnt = items[3 * item + 2];
-    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
-    __syncthreads();
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    float acc[TMT][TNB][4];
-    tmain<1, TPM, K2>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
+template <int K2, int NBA, bool Pipelined>
+__device__ __forceinline__ void prompt_down_rows(const half* Xd, const uint64_t* Td, const half* svh_d, float* y, int K, int D,
+        unsigned char* smem_raw, const int* rows_sh, int cb, int e, int cnt, int warp, int lane) {
+    float acc[TMT][NBA][4];
+    if constexpr (Pipelined) {
+        pipelined_main<1, TPM, K2, NBA, 4>(Xd, Xd, Td, Td, rows_sh, e, K, D >> 4, cb, 1, smem_raw, acc);
+    } else {
+        tmain<1, TPM, K2>(Xd, Xd, Td, Td, rows_sh, cnt, e, K, D >> 4, cb, 1, reinterpret_cast<half*>(smem_raw), acc);
+    }
     float* Ed = reinterpret_cast<float*>(smem_raw);
     for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
         if (hf) __syncthreads();
@@ -352,6 +343,34 @@ __device__ __forceinline__ void prompt_down(const half* __restrict__ Xd, const u
                 for (int j = 0; j < 4; ++j) o[j] = v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]);
             }
         }
+    }
+}
+
+// Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
+template <int K2>
+__device__ __forceinline__ void prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip) {
+
+    __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes<K2>()];
+    __shared__ int rows_sh[TPM];
+    const int cb = blockIdx.x, item = blockIdx.y;
+    if (item >= counts[0]) return;
+    const int e = items[3 * item];
+    if (e == skip) return;
+    const int first = items[3 * item + 1], cnt = items[3 * item + 2];
+    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
+    __syncthreads();
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+#if __CUDA_ARCH__ == 1210
+    if constexpr (K2 == 8) {
+#define TF_EXL3_PROMPT_DN(NBA) prompt_down_rows<K2, NBA, true>(Xd, Td, svh_d, y, K, D, smem_raw, rows_sh, cb, e, cnt, warp, lane)
+        TF_EXL3_PROMPT_NBA(cnt, TF_EXL3_PROMPT_DN)
+#undef TF_EXL3_PROMPT_DN
+    } else
+#endif
+    {
+        prompt_down_rows<K2, TNB, false>(Xd, Td, svh_d, y, K, D, smem_raw, rows_sh, cb, e, cnt, warp, lane);
     }
 }
 
