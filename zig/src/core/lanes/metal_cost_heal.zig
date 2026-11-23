@@ -57,11 +57,12 @@ pub const Plan = struct {
 pub fn select(ms: []const f64, widths: []const u32, cursor: u64) Plan {
     var p: Plan = .{};
     if (!valid(ms, widths) or ms[ms.len - 1] >= budget_ms) return p;
-    const position = cursor % widths.len;
+    const raw = cursor & ~cooldown;
+    const position = raw % widths.len;
     var rotating: usize = @intCast(position);
     while (ms[rotating] >= budget_ms) rotating = (rotating + 1) % widths.len;
     p.add(rotating);
-    const tile = 16 * (1 + (position % 3 + (cursor / widths.len) % 3) % 3);
+    const tile = 16 * (1 + (position % 3 + (raw / widths.len) % 3) % 3);
     var below: usize = 0;
     var above = widths.len - 1;
     for (widths, 0..) |w, i| {
@@ -155,4 +156,14 @@ pub fn synced(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, agre
 
 pub fn local(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64) !Stats {
     return synced(timer, ms, widths, cursor, Local{}, true);
+}
+
+test "Metal window prices: cooldown leaves the rotating entry and tile edges unchanged" {
+    const ms: [7]f64 = @splat(10);
+    const widths = [_]u32{ 1, 16, 17, 32, 33, 48, 49 };
+    for (0..3 * widths.len) |raw| {
+        const plain = select(&ms, &widths, raw);
+        const flagged = select(&ms, &widths, @as(u64, raw) | cooldown);
+        try std.testing.expectEqualSlices(usize, plain.at[0..plain.n], flagged.at[0..flagged.n]);
+    }
 }
