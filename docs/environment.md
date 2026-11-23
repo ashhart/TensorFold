@@ -290,11 +290,9 @@ These settings retain their existing boolean policies rather than gaining new al
   even empty or `0`, and `TF_KV_POISON` (also read by Nemotron) is on only for exact `1`.
 - The existing tool-grammar, rows-sync, log-time, memory-pressure and XPU-MTP boolean policies are unchanged.
 - Flash Next keeps its lenient readers where they are: `TF_FLASHNEXT_TP` and `TF_FLASHNEXT_LOGITS` take a path,
-  `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence,
-  and the tool-only sampling settings of the MTP check and the `FZ_` developer switches keep their semantics.
+  `TF_FLASHNEXT_OWNED` a list, and `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence.
+  The tool-only sampling settings of the MTP check and the `FZ_` developer switches are strict rows above.
 The fabric/tp config helper keeps its runtime-name lookup instead of gaining a startup row: it carries the lenient switches above and transport names read only by tools, which no server would set.
-  `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence.
-  The tool-only sampling settings of the MTP check and the `FZ_` developer switches are now strict rows above.
 
 The profile registry reports selected arithmetic/experimental overrides; it does not change their parsing or defaults.
 See [profiles](profiles.md) for classes, scopes and grouped slide-learning names.
