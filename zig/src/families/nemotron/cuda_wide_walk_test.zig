@@ -100,3 +100,16 @@ test "wide round walk: with the switch the lanes learn what a row past 16 costs,
         try std.testing.expectEqual(@as(u32, if (on) 32 else 16), f.batch_rows);
     }
 }
+
+test "wide round walk: a round past 8 streams with lessons attached is refused, not served without them (REV74 1)" {
+    const weights = @import("cuda_weights.zig");
+    const fwd = @import("cuda_forward.zig");
+    var blk: weights.Block = .{ .kind = .attention, .norm = 0 };
+    blk.attn.adapter = @as(weights.Adapter, undefined);
+    var w: weights.Weights = undefined;
+    w.blocks = (&blk)[0..1];
+    var f: fwd.Forward = undefined;
+    f.w = &w;
+    var segs: [9]fwd.Seg = undefined;
+    try std.testing.expectError(error.LessonsPastRoute, f.windowSegs(&segs));
+}

@@ -26,6 +26,13 @@ pub fn refusal(c: Config, gb10: bool, slide: bool) ?[]const u8 {
     return null;
 }
 
+/// Lessons attached after init (saved ones, which load without --slide): rounds back to 8 streams, and why; else null.
+pub fn withLessons(c: *Config) ?[]const u8 {
+    if (!c.wide_rounds) return null;
+    c.wide_rounds = false; // every buffer was sized for 16 streams: 8 use less of each
+    return "saved lessons route to 8 streams a pass";
+}
+
 /// Whether a shared window of `rows` rows fits (its streams' Mamba rows stay at windowRows each, the scan's stride).
 pub fn windowFits(c: Config, rows: usize) bool {
     return rows <= @import("cuda_state.zig").sharedRows(c);
@@ -131,4 +138,14 @@ test "wide rounds: the switch set where it cannot apply says why, so it is never
         try std.testing.expect(refusal(x, true, false) != null);
     }
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_engine.zig"), "if (wide.on()) if (wide.refusal(") != null);
+}
+
+test "wide rounds: saved lessons loaded after init put rounds back at 8 streams and say why (REV74 1)" {
+    var c: Config = small;
+    try std.testing.expect(withLessons(&c) == null); // the switch off: nothing to undo
+    c.wide_rounds = true;
+    try std.testing.expect(withLessons(&c) != null);
+    try std.testing.expect(!c.wide_rounds);
+    try std.testing.expectEqual(@as(usize, 8), streams(c));
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_slide.zig"), "if (@import(\"cuda_wide.zig\").withLessons(&e.c)) |why|") != null);
 }
