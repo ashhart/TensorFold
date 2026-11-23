@@ -8,6 +8,7 @@ const ops = @import("ops.zig");
 const attention = @import("kernels.zig");
 const modelopt = @import("modelopt.zig");
 const loop_math = @import("loop_math_cuda.zig");
+const kept_state = @import("kept_state.zig");
 
 pub const prompt_rows: usize = 2048;
 pub const window_rows: usize = 16;
@@ -95,8 +96,11 @@ const Scratch = struct {
     logits: u64,
     backup: u64,
     hist: u64,
-    rewind_sites: u64,
 };
+
+/// A stream's state (every visit's K/V rows and conv states, its rewind sites); at most `max_slots`, one in use.
+const Slot = struct { cache: cuda.DeviceBuffer, sites: cuda.DeviceBuffer };
+pub const max_slots = 16;
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -104,9 +108,42 @@ pub const Model = struct {
     w: *const weights_.Weights,
     context: usize,
     layout: loop.CacheLayout,
-    cache: cuda.DeviceBuffer,
+    slots: [max_slots]Slot = undefined,
+    n_slots: usize = 0,
+    slot: usize = 0, // the slot forwards, snapshots and rewinds use; forwards share the scratch
+    recorded: ?usize = null, // the slot whose window `backup` and `hist` hold
     s: Scratch = undefined,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+
+    fn slotBase(m: *const Model) u64 {
+        return m.slots[m.slot].cache.ptr;
+    }
+
+    /// Allocates slots until `n` exist, each with zeroed conv states and its own rewind sites.
+    pub fn addSlots(m: *Model, s: cuda.Stream, n: usize) !void {
+        if (n > max_slots) return error.TooManySlots;
+        const keep = m.slot;
+        defer m.slot = keep;
+        const kv: usize = @as(usize, m.w.c.text.local.kv) * m.w.c.text.local.dim;
+        var sites: [config.max_visits * 4]ops.RewindSite = undefined;
+        while (m.n_slots < n) {
+            var cache = try cuda.DeviceBuffer.alloc(m.d, m.layout.bytes);
+            errdefer cache.free();
+            var table = try cuda.DeviceBuffer.alloc(m.d, m.w.p.n_visits * 4 * @sizeOf(ops.RewindSite));
+            errdefer table.free();
+            m.slots[m.n_slots] = .{ .cache = cache, .sites = table };
+            m.slot = m.n_slots;
+            for (0..m.w.p.n_visits) |v| for (0..4) |site| {
+                const c = if (site < 2) kv else m.w.c.text.hidden;
+                const hist = m.histOf(@intCast(v), site) - m.s.hist;
+                sites[v * 4 + site] = .{ .state = m.convOf(@intCast(v), site), .hist = @intCast(hist), .backup = @intCast(m.backupOf(@intCast(v), site)), .c = @intCast(c) };
+            };
+            try m.upload(s, table.ptr, std.mem.sliceAsBytes(sites[0 .. m.w.p.n_visits * 4]));
+            try m.reset(s);
+            try s.synchronize();
+            m.n_slots += 1;
+        }
+    }
 
     fn alloc(m: *Model, bytes: usize) !u64 {
         var b = try cuda.DeviceBuffer.alloc(m.d, @max(bytes, 256));
@@ -136,7 +173,7 @@ pub const Model = struct {
 
     fn cacheOf(m: *const Model, visit: u32) attention.Cache {
         const slot = m.layout.at(visit);
-        const base = m.cache.ptr + slot.kv_offset;
+        const base = m.slotBase() + slot.kv_offset;
         return .{ .k = base, .v = base + slot.kv_bytes / 2 };
     }
 
@@ -145,7 +182,7 @@ pub const Model = struct {
         const kv: usize = @as(usize, c.local.kv) * c.local.dim;
         const h: usize = c.hidden;
         const widths = [4]usize{ kv, kv, h, h };
-        var at = m.cache.ptr + m.layout.at(visit).conv_offset;
+        var at = m.slotBase() + m.layout.at(visit).conv_offset;
         for (0..site) |i| at += 3 * widths[i] * 4;
         return at;
     }
@@ -161,7 +198,7 @@ pub const Model = struct {
     }
 
     fn backupOf(m: *const Model, visit: u32, site: usize) usize {
-        return m.convOf(visit, site) - (m.cache.ptr + m.layout.at(0).conv_offset);
+        return m.convOf(visit, site) - (m.slotBase() + m.layout.at(0).conv_offset);
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const weights_.Weights, context: usize) !Model {
@@ -172,9 +209,7 @@ pub const Model = struct {
             .w = w,
             .context = context,
             .layout = layout,
-            .cache = try cuda.DeviceBuffer.alloc(d, layout.bytes),
         };
-        errdefer m.cache.free();
         errdefer m.deinitBuffers();
         const c = w.c.text;
         const h: usize = c.hidden;
@@ -229,22 +264,9 @@ pub const Model = struct {
             .logits = try m.alloc(window_rows * c.unpadded_vocab * 4),
             .backup = try m.alloc(layout.bytes - layout.at(0).conv_offset),
             .hist = try m.alloc(hist_values * 4),
-            .rewind_sites = try m.alloc(w.p.n_visits * 4 * @sizeOf(ops.RewindSite)),
         };
         for (0..ops.max_blocks) |i| m.s.blocks[i] = try m.alloc(rows * h * 2);
-        var sites: [config.max_visits * 4]ops.RewindSite = undefined;
-        for (0..w.p.n_visits) |v| for (0..4) |site| {
-            const kv_site = site < 2;
-            sites[v * 4 + site] = .{
-                .state = m.convOf(@intCast(v), site),
-                .hist = @intCast(m.histOf(@intCast(v), site) - m.s.hist),
-                .backup = @intCast(m.backupOf(@intCast(v), site)),
-                .c = @intCast(if (kv_site) kv else h),
-            };
-        };
-        try m.upload(s, m.s.rewind_sites, std.mem.sliceAsBytes(sites[0 .. w.p.n_visits * 4]));
-        try m.zeros(s, m.cache.ptr + m.layout.at(0).conv_offset, layout.bytes - m.layout.at(0).conv_offset);
-        try s.synchronize();
+        try m.addSlots(s, 1);
         return m;
     }
 
@@ -255,17 +277,18 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         m.deinitBuffers();
-        m.cache.free();
+        for (m.slots[0..m.n_slots]) |*slot| for ([2]*cuda.DeviceBuffer{ &slot.sites, &slot.cache }) |b| b.free();
         m.* = undefined;
     }
 
     pub fn reset(m: *const Model, s: cuda.Stream) !void {
-        try m.zeros(s, m.cache.ptr + m.layout.at(0).conv_offset, m.layout.bytes - m.layout.at(0).conv_offset);
+        try m.zeros(s, m.slotBase() + m.layout.at(0).conv_offset, m.layout.bytes - m.layout.at(0).conv_offset);
     }
 
     pub fn rewind(m: *const Model, k: *const Kernels, s: cuda.Stream, kept: usize) !void {
         if (kept > window_rows) return error.WindowTooWide;
-        try ops.rewind(&k.glue, s, m.s.rewind_sites, m.w.p.n_visits * 4, m.w.c.text.hidden, m.s.backup, m.s.hist, 0, 0, kept);
+        if (m.recorded != m.slot) return error.RewindOfAnotherSlot;
+        try ops.rewind(&k.glue, s, m.slots[m.slot].sites.ptr, m.w.p.n_visits * 4, m.w.c.text.hidden, m.s.backup, m.s.hist, 0, 0, kept);
     }
 
     fn arBlocks(m: *const Model, blocks: []const u64, partial: u64, query: u64, out: u64, nq: usize, partial_bf16: bool, rows: usize) loop_math.ArArgs {
@@ -321,7 +344,8 @@ pub const Model = struct {
         try m.upload(s, m.s.seg_of, std.mem.sliceAsBytes(seg_of[0..rows]));
         const seg: attention.Seg = .{ .row0 = 0, .n = @intCast(rows), .p0 = @intCast(p0), .off = 0 };
         try m.upload(s, m.s.segs, std.mem.asBytes(&seg));
-        if (record) try m.copy(s, m.s.backup, m.cache.ptr + m.layout.at(0).conv_offset, m.layout.bytes - m.layout.at(0).conv_offset);
+        m.recorded = if (record) m.slot else null;
+        if (record) try m.copy(s, m.s.backup, m.slotBase() + m.layout.at(0).conv_offset, m.layout.bytes - m.layout.at(0).conv_offset);
 
         try ops.embed(&k.glue, s, m.s.ids, rows, m.w.embed, m.w.embed_norm, m.s.partial_a, h, c.eps);
         var partial = m.s.partial_a;
@@ -369,8 +393,8 @@ pub const Model = struct {
             const kv_width: usize = @as(usize, layer.heads.kv) * layer.heads.dim;
             try loop_math.projectQkv(&k.loop, s, u_q, u_k, u_v, lw.attn.wq, lw.attn.wk, lw.attn.wv, m.s.q_raw, m.s.k_raw, m.s.v_raw, rows, h, q_width, kv_width);
             try ops.rowdot(&k.glue, s, u_q, lw.attn.wr, m.s.rel_raw, rows, layer.heads.q * c.d_rel, h, true, false);
-            try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, true);
-            try ops.rowdot(&k.glue, s, u_q, lw.attn.sink, m.s.sink, rows, layer.heads.q, h, true, true);
+            try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, false);
+            try ops.rowdot(&k.glue, s, u_q, lw.attn.sink, m.s.sink, rows, layer.heads.q, h, true, false);
 
             const geometry = m.layerGeometry(visit.layer);
             const cache = m.cacheOf(visit.cache_slot);
@@ -484,48 +508,34 @@ pub const Model = struct {
         buf: cuda.DeviceBuffer,
     };
 
+    /// Every visit's caches as the shared kept-state walk sees them: head-major `[kv head][ring][dim]` (attention.cu).
+    pub fn keptVisits(m: *const Model, out: *[config.max_visits]kept_state.Visit) []const kept_state.Visit {
+        for (out[0..m.w.p.n_visits], m.w.p.visits[0..m.w.p.n_visits]) |*kv, visit| {
+            const layer = m.w.p.at(visit.layer);
+            const cache = m.cacheOf(visit.cache_slot);
+            const ring = m.layerGeometry(visit.layer).ring;
+            kv.* = .{ .k = cache.k, .v = cache.v, .heads = layer.heads.kv, .ring = ring, .row = @as(u64, layer.heads.dim) * 2, .global = layer.kind == .global };
+        }
+        return out[0..m.w.p.n_visits];
+    }
+
     /// Compact bytes for all valid K/V rows and every convolution state of all 48 visits.
     pub fn snapshotBytes(m: *const Model, at: usize) u64 {
-        var bytes = m.layout.bytes - m.layout.at(0).conv_offset;
-        for (0..m.w.p.n_visits) |v| {
-            const layer = m.w.p.at(m.w.p.visits[v].layer);
-            const global = layer.kind == .global;
-            const count = if (global) at else @min(at, m.w.c.text.window - 1);
-            const row = @as(u64, layer.heads.kv) * layer.heads.dim * 2;
-            bytes += 2 * count * row;
-        }
-        return bytes;
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        return m.layout.bytes - m.layout.at(0).conv_offset + kept_state.bytes(m.keptVisits(&visits), m.w.c.text.window, at);
     }
 
     fn copyState(m: *const Model, s: cuda.Stream, saved: *const Saved, out: bool) !void {
-        const at: usize = saved.at;
-        var off: usize = 0;
-        for (0..m.w.p.n_visits) |v| {
-            const visit = m.w.p.visits[v];
-            const layer = m.w.p.at(visit.layer);
-            const geometry = m.layerGeometry(visit.layer);
-            const rb = @as(usize, layer.heads.kv) * layer.heads.dim * 2;
-            const global = layer.kind == .global;
-            const count = if (global) at else @min(at, m.w.c.text.window - 1);
-            const first = at - count;
-            const cache = m.cacheOf(visit.cache_slot);
-            for ([2]u64{ cache.k, cache.v }) |base| {
-                var pos = first;
-                while (pos < at) {
-                    const row = pos % geometry.ring;
-                    const n = @min(at - pos, geometry.ring - row);
-                    const dev = base + row * rb;
-                    const src = if (out) dev else saved.buf.ptr + off;
-                    const dst = if (out) saved.buf.ptr + off else dev;
-                    try m.copy(s, dst, src, n * rb);
-                    off += n * rb;
-                    pos += n;
-                }
-            }
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        var walk = kept_state.Walk.init(m.keptVisits(&visits), m.w.c.text.window, saved.at);
+        while (walk.next()) |p| {
+            const kept = saved.buf.ptr + p.offset;
+            try m.copy(s, if (out) kept else p.cache, if (out) p.cache else kept, p.len);
         }
-        const conv = m.cache.ptr + m.layout.at(0).conv_offset;
+        const conv = m.slotBase() + m.layout.at(0).conv_offset;
         const bytes = m.layout.bytes - m.layout.at(0).conv_offset;
-        try m.copy(s, if (out) saved.buf.ptr + off else conv, if (out) conv else saved.buf.ptr + off, bytes);
+        const off = saved.buf.ptr + walk.offset;
+        try m.copy(s, if (out) off else conv, if (out) conv else off, bytes);
     }
 
     pub fn save(m: *const Model, s: cuda.Stream, at: u32) !*Saved {
@@ -545,6 +555,8 @@ pub const Model = struct {
         if (saved.visits != m.w.p.n_visits or saved.passes != lp.passes or saved.hidden != m.w.c.text.hidden)
             return error.StateOfAnotherModel;
         if (saved.at == 0 or saved.at > m.context or saved.buf.len < snapshotBytes(m, saved.at)) return error.BadLoopSnapshot;
+        var visits: [config.max_visits]kept_state.Visit = undefined;
+        if (!kept_state.fits(m.keptVisits(&visits), m.w.c.text.window, saved.at)) return error.BadLoopSnapshot;
         try m.copyState(s, saved, false);
     }
 

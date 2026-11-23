@@ -120,7 +120,7 @@ namespace ink2l {
 // One block handles one token and role, sharing each bank's normalization across all 12 core queries.
 __device__ void messages(const uint16_t* __restrict__ bank0, const uint16_t* __restrict__ bank1,
                           const float* __restrict__ qm, const float* __restrict__ qkv,
-                          float* __restrict__ out, int core_layers, int c, float eps) {
+                          float* __restrict__ out, int rows, int core_layers, int c, float eps) {
     __shared__ float sh[2 * 32];
     __shared__ float inv[2], w[2];
     const size_t row = blockIdx.x;
@@ -154,7 +154,8 @@ __device__ void messages(const uint16_t* __restrict__ bank0, const uint16_t* __r
         if (threadIdx.x == 0)
             softmax2(__fmul_rn(dots[0], queryScale(c)), __fmul_rn(dots[1], queryScale(c)), w);
         __syncthreads();
-        float* dst = out + ((static_cast<size_t>(row * core_layers + j) * 4 + role) * static_cast<size_t>(c));
+        // Plane-major [core][role][rows][c]: the gates read each role's rows as one contiguous plane.
+        float* dst = out + ((static_cast<size_t>(j) * 4 + role) * rows + row) * static_cast<size_t>(c);
         for (int i = threadIdx.x; i < c; i += blockDim.x) {
             const float b0 = __fmul_rn(bf(banks[0][i]), inv[0]);
             const float b1 = __fmul_rn(bf(banks[1][i]), inv[1]);
@@ -230,8 +231,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_ink2_loop_messages(const uint16_t* __restrict__ bank0, const uint16_t* __restrict__ bank1,
                           const float* __restrict__ qm, const float* __restrict__ qkv, float* __restrict__ out,
                           int rows, int core_layers, int c, float eps) {
-    (void)rows;  // grid x is rows * core_layers; row derives from pair/core_layers, explicitly visit-local.
-    ink2l::messages(bank0, bank1, qm, qkv, out, core_layers, c, eps);
+    ink2l::messages(bank0, bank1, qm, qkv, out, rows, core_layers, c, eps);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
