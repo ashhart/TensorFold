@@ -1,5 +1,6 @@
 //! Inkling 2 Mini DSpark: batched async context absorb, online-softmax block pass, and GPU chain draw.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const ck = @import("../../../core/checkpoint_metal.zig");
@@ -559,6 +560,7 @@ pub const Drafter = struct {
 };
 
 fn nowNs() i128 {
+    if (comptime !builtin.os.tag.isDarwin()) return 0;
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
@@ -586,6 +588,7 @@ test "Mini taps and block depth match checkpoint section eight" {
 }
 
 test "DSpark exposes batched priced chances, sampled fallback, and copy_first" {
+    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
     var d: Drafter = .{ .gpa = std.testing.allocator, .target = undefined, .weights = undefined, .pipelines = undefined, .sampler = undefined, .scratch = undefined, .capacity = 128, .step_ms = 0.25 };
     d.hold_costs[0] = .{ .streams = 1, .depth = 1, .ms = 1.5 };
     d.hold_timed = 1;
