@@ -74,6 +74,8 @@ export interface ModelBenchmarkSample {
   prefill_seconds: number | null
   token_sha: string | null
   error_code: string | null
+  finish_reason?: 'stop' | 'length' | null
+  route?: '/v1/chat/completions' | '/v1/completions'
 }
 /** Exact community benchmark export schema (BENCHMARK_SUITES). Supplemental GUI state stays outside this object. */
 export interface ModelBenchmarkReceipt {
@@ -84,6 +86,6 @@ export interface ModelBenchmarkReceipt {
   runtime: { tensorfold_version: string; backend: 'mlx' | 'cuda' | 'rocm'; python_version: string; platform: 'macos' | 'linux'; dependencies: Record<string, string | null> }
   model: { repo_id: string; revision: string | null; family: string | null; config_sha256: string | null; tokenizer_sha256: string | null; quantization: string | null; drafter_repo_id: string | null; local: boolean }
   hardware: { cpu_model: string | null; system_memory_bytes: number | null; memory_type: 'unified' | 'dedicated' | 'unknown'; gpus: { name: string; memory_bytes: number | null; cores: number | null }[]; gpu_count: number | null; source: 'detected' | 'partial' | 'unavailable' }
-  settings: { tokens: number; repetitions: number; temperatures: number[]; serial: boolean; context_tokens: number | null; managed: boolean; rank_count: number | null }
+  settings: { tokens: number; repetitions: number; temperatures: number[]; serial: boolean; context_tokens: number | null; managed: boolean; rank_count: number | null; kv_cache?: 'bf16' | 'fp8' | null; thinking_mode?: 'server_default' }
   samples: ModelBenchmarkSample[]
 }
