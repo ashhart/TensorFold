@@ -14,6 +14,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: grouped prompt experts, the dense prompt and loop-gate MMA tiles, 8-row prompt attention, deduplicated verify experts for drafted rounds of 2 to 63 rows and one DSpark head pass for all drafting streams of a round all keep the one-row kernels' bytes, and the kernel contract registers them with launch records and planted controls. On an M4 Pro a cold prompt reaches its first token at 0.87 (8,192 tokens) to 0.72 (65,536) of `mlx_lm`'s rate, `fibonacci-raw` decodes at 31.1 tokens a second plain and 35.8 with DSpark against MLX's 23.1, and four drafted streams are within noise of plain (code 3 % under, chat level); token hashes and drafted-equals-plain are unchanged. Raw results, their sources and the build are in [the receipt](docs/receipts/inkling2-mini-m4pro/README.md) (#4337).
 
+- GLM, MiniMax and Nemotron on CUDA: each is placed by `--tp`, `--rank`, `--master` and `--master-port`, and `--master` with `--master-port` sets `NCCL_COMM_ID` when it is unset (a different one refuses); `TF_GLM_RANK`/`TF_GLM_WORLD`, `TF_MINIMAX_RANK`/`TF_MINIMAX_WORLD` and `TF_NEMOTRON_RANK`/`TF_NEMOTRON_WORLD` still work as aliases until 1.3.1, with a start-up warning, and a flag and an alias that differ refuse (#2919, part of #2560). Thanks to @laudney.
+
+- Gemma 4 on Metal: a new stream's prompt fills one chunk per call at the same chunk cuts as before, with other streams' decode rounds running between chunks, so a long prompt no longer freezes their replies; a cancel between chunks keeps the last finished chunk, and a drafting stream's drafter takes each chunk's tapped rows as it lands (#3025, fixes #3021).
+
+- Qwen3.5/3.8 on CUDA: `TF_QWEN35_ATTN_ALL_ROWS=1` sends multi-row BF16 decode windows to the existing rows attention kernel at every context length (it already matches the one-row kernel's score and reduction order), removing the dead second launch below 8K; off by default (#N).
+
 - Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#N).
 
 - Flash Next on Metal: `TF_FLASHNEXT_BATCH_GDN_WIDE=1` runs 8- and 16-row batch segments on the existing non-replay GDN kernel instead of the recorded pipe; off by default until the M3 and M5 checks (#N).
