@@ -7,6 +7,7 @@ comptime {
     _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
     _ = @import("xpu_dflash2_depth_test.zig"); // the core depth sweep on the XPU adapter
     _ = @import("xpu_logrow.zig"); // the logprob row's own test
+    _ = @import("xpu_nem.zig"); // the MTP stream-admission host tests
 }
 
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
