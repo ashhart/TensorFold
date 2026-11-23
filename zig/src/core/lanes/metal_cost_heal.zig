@@ -1,7 +1,26 @@
 //! Plan warm probes before scratch setup; retain only measured, consistent lower prices.
 const std = @import("std");
 pub const budget_ms: f64 = 200;
+const cooldown: u64 = 1 << 63;
 pub const Stats = struct { reads: u32 = 0, ms: f64 = 0, lowered: u32 = 0 };
+pub const Turn = struct {
+    value: u64 = 0,
+    attempted: bool = false,
+
+    pub fn preferredShared(turn: Turn) bool {
+        return turn.value % 2 == 1;
+    }
+
+    pub fn order(turn: Turn) [2]bool {
+        const shared = turn.preferredShared();
+        return .{ shared, !shared };
+    }
+
+    pub fn next(turn: Turn) u64 {
+        return turn.value +% 1;
+    }
+};
+
 pub const Local = struct {
     pub fn decide(_: @This(), mine: bool) !bool {
         return mine;
@@ -34,12 +53,15 @@ pub const Plan = struct {
     }
 };
 
-/// Empty means no scratch setup; one useful read per selected entry, in increasing width order.
+/// Empty means no scratch setup; the rotating entry comes first, followed by the narrower and wider edges.
 pub fn select(ms: []const f64, widths: []const u32, cursor: u64) Plan {
     var p: Plan = .{};
     if (!valid(ms, widths) or ms[ms.len - 1] >= budget_ms) return p;
-    p.add(@intCast(cursor % widths.len));
-    const tile = 16 * (1 + cursor % 3);
+    const position = cursor % widths.len;
+    var rotating: usize = @intCast(position);
+    while (ms[rotating] >= budget_ms) rotating = (rotating + 1) % widths.len;
+    p.add(rotating);
+    const tile = 16 * (1 + (position % 3 + (cursor / widths.len) % 3) % 3);
     var below: usize = 0;
     var above = widths.len - 1;
     for (widths, 0..) |w, i| {
@@ -57,8 +79,16 @@ pub fn select(ms: []const f64, widths: []const u32, cursor: u64) Plan {
         fits.add(i);
         estimate += ms[i];
     };
-    std.mem.sort(usize, fits.at[0..fits.n], {}, std.sort.asc(usize));
     return fits;
+}
+
+/// Skip one warm turn after setup leaves too little time for the rotating read.
+pub fn admit(ms: []const f64, widths: []const u32, cursor: *u64) bool {
+    if (cursor.* & cooldown != 0) {
+        cursor.* &= ~cooldown;
+        return false;
+    }
+    return select(ms, widths, cursor.*).n != 0;
 }
 
 fn kind(comptime T: type) type {
@@ -94,7 +124,7 @@ fn broadcast(p: Plan, len: usize, agree: anytype, lead: bool) !Plan {
 pub fn prepared(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, floor: f64, agree: anytype, lead: bool) !Stats {
     var stats: Stats = .{};
     if (comptime @hasDecl(kind(@TypeOf(timer)), "start")) timer.start();
-    const mine = if (lead) select(ms, widths, cursor.*) else Plan{};
+    const mine = if (lead and admit(ms, widths, cursor)) select(ms, widths, cursor.*) else Plan{};
     if (!try agree.decide(lead and mine.n > 0)) return stats;
     const selected = try broadcast(mine, ms.len, agree, lead);
     if (comptime @hasDecl(kind(@TypeOf(timer)), "prepare")) try timer.prepare(selected, widths);
@@ -112,7 +142,10 @@ pub fn prepared(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, fl
         ms[i] = measured;
         stats.lowered += 1;
     }
-    if (lead and stats.reads > 0) cursor.* +%= 1;
+    if (lead) {
+        cursor.* = (cursor.* +% 1) & ~cooldown;
+        if (stats.reads == 0) cursor.* |= cooldown;
+    }
     return stats;
 }
 
