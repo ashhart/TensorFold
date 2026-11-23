@@ -28,12 +28,22 @@ pub const Model = struct {
     committed_end: u64 = 0,
     fuse_out: ?mtl.Buffer = null, // fc's rows before hidden_norm, for the target's taps pass
     fuse_rows: u32 = 0,
+    absorb_batch: bool = false, // TF_Q27_DFLASH_ABSORB_BATCH: a shared round's streams absorb in one pass
+    absorb_batches: u64 = 0, // stacked absorb passes
+    absorb_batch_rows: u64 = 0, // rows those passes took
+    absorb_passes_saved: u64 = 0, // per-stream weight passes they replaced
     pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode) !*Model {
         return loadSpan(a, io, target, dir, mode, 0);
     }
     /// `history`: positions a v1 drafter keeps for its full layers (the served span); 0 keeps the window.
     pub fn loadSpan(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode, history: u32) !*Model {
-        return loadBoundSpan(a, io, backend_mod.Target.qwen(target), dir, mode, history);
+        return optIn(try loadBoundSpan(a, io, backend_mod.Target.qwen(target), dir, mode, history));
+    }
+    /// The 27B's own switch: a family that shares this drafter through a bound target keeps the per-stream absorb.
+    fn optIn(m: *Model) !*Model {
+        errdefer m.deinit();
+        m.absorb_batch = try @import("sys").environment.read(bool, "TF_Q27_DFLASH_ABSORB_BATCH", false);
+        return m;
     }
     pub fn loadBound(a: std.mem.Allocator, io: std.Io, target: backend_mod.Target, dir: []const u8, mode: op.Mode) !*Model {
         return loadBoundSpan(a, io, target, dir, mode, 0);
@@ -65,6 +75,10 @@ pub const Model = struct {
         model.committed_end = 0;
         model.fuse_out = null;
         model.fuse_rows = 0;
+        model.absorb_batch = false;
+        model.absorb_batches = 0;
+        model.absorb_batch_rows = 0;
+        model.absorb_passes_saved = 0;
         model.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer model.checkpoint.deinit();
         // q4 drafts read their linears only through prepared copies: those stay in the file until prepare reads them
@@ -83,6 +97,7 @@ pub const Model = struct {
         return model;
     }
     pub fn deinit(m: *Model) void {
+        if (m.absorb_batches > 0) std.log.info("qwen27: DFlash2 absorb batches {d}, rows {d}, weight passes saved {d}", .{ m.absorb_batches, m.absorb_batch_rows, m.absorb_passes_saved });
         if (m.fuse_out) |b| b.deinit();
         m.graph.deinit();
         m.backend.deinit();
@@ -267,7 +282,7 @@ pub const Model = struct {
         const plan = absorb_batch.plan(counts[0..news.len], spans) orelse return null;
         const last = plan[plan.len - 1];
         const rows = last.first + last.rows;
-        const width = m.graph.config.tapWidth();
+        const width = m.graph.config.ringWidth();
         const stride = @as(usize, width) * 2;
         const taps = try m.backend.frame.alloc(rows, width, .bf16);
         const out = try m.backend.frame.ref(taps);
