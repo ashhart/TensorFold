@@ -11,7 +11,8 @@ pub fn of(inventory: anytype, settings: anytype) !Plan {
         // One full layer's union fits at every admitted prompt and concurrent window width.
         p.pool = try plan.pool(bytes, inventory.expert_parts, 49 * 512, 512);
         // Bounded demand IDs, forecast logits/routes and metadata for the source descriptor owner.
-        p.extra = 1024 * 1024;
+        const forecast = try std.math.mul(u64, p.pool.?.slots, @sizeOf(@import("../../core/fsr/arena.zig").ArenaOf(void, 9).Job));
+        p.extra = try std.math.sub(u64, 1024 * 1024, forecast); // reclassify prepaid jobs, preserving the total
     }
     if (settings.ple_on_ssd) {
         p.ple = try std.math.add(u64, try plan.pleRows(prompt.PMAX * 16, 160, 8, 32), 128 * 3 * 32);

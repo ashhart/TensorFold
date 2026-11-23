@@ -41,7 +41,7 @@ pub fn poolOf(comptime count: usize, requested: u64, parts: [count]u64, keys: us
     if (slots > std.math.maxInt(i32)) return error.InvalidPoolCapacity;
     const slabs = try std.math.mul(u64, slots, stride);
     // CPU CLOCK slots and read tickets, the persistent CPU/GPU map, demand bits and owner bookkeeping.
-    const per_slot = @sizeOf(cache.Slot) + @sizeOf(arena.ArenaOf(void, count).Job) + @sizeOf(usize);
+    const per_slot = @sizeOf(cache.Slot) + 2 * @sizeOf(arena.ArenaOf(void, count).Job) + @sizeOf(usize);
     const per_key = count * (@sizeOf(reader.Span) + @sizeOf(u64)) + 2 * @sizeOf(i32) + @sizeOf(bool) + @sizeOf(u64);
     const descriptors = try std.math.mul(u64, keys, per_key);
     const metadata = try std.math.add(u64, try std.math.mul(u64, slots, per_slot), try std.math.add(u64, descriptors, arena.worker_stack_bytes + 4096));
