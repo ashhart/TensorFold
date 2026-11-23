@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const cp = @import("core").checkpoint_metal;
 const st = @import("core").safetensors;
 const exl3 = @import("core").exl3_projection;
-const load = @import("load.zig");
+const load = @import("load_metal.zig");
 
 pub const Tensor = cp.Tensor;
 pub const Matrix = exl3.Matrix;

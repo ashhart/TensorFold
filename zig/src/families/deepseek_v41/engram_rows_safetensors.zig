@@ -5,6 +5,7 @@
 // A row is two positional reads, a bounded LRU keeps the window, and the mapped shard serves rows by address.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const f = @import("engram_rows.zig");
 const eh = @import("engram_host.zig");
 const st = @import("core").safetensors;
@@ -147,6 +148,7 @@ pub const Rows = struct {
 
     /// Turn the shard's cache bypass on or off for the gather that is about to run.
     fn setNoCache(r: *Rows, li: usize, on: bool) void {
+        if (builtin.os.tag != .macos) return;
         if (!noCache()) return;
         if (li >= r.tables.len) return;
         _ = std.c.fcntl(r.tables[li].file.handle, std.c.F.NOCACHE, @as(c_int, if (on) 1 else 0));
