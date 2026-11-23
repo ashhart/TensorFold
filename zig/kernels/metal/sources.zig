@@ -42,8 +42,10 @@ pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 pub const core_copy_u32 = @embedFile("core/copy_u32.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
-/// gemm_nax and the image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax.
-const vision_glue = gemm_nax ++ @embedFile("prefill/vision_glue.metal");
+/// The image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax, LayerNorm, bias.
+const vision_helpers = @embedFile("prefill/vision_glue.metal");
+/// gemm_nax and the image towers' shared glue.
+const vision_glue = gemm_nax ++ vision_helpers;
 /// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
 pub const gemma4_vision = vision_glue ++ @embedFile("gemma4/vision.metal");
 
@@ -172,14 +174,14 @@ pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
 pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
-pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ vision_helpers ++ @embedFile("qwen_image.metal");
 /// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
-pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
-pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
+pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ vision_helpers ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
 /// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
-pub const uocr = @embedFile("uocr/vision.metal");
-pub const uocr_decoder = @embedFile("uocr/decoder.metal");
+pub const uocr = vision_helpers ++ @embedFile("uocr/vision.metal");
+pub const uocr_decoder = vision_helpers ++ @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
@@ -187,7 +189,7 @@ pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
 pub const idol_vae = @embedFile("idol_vae.metal");
 /// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
-pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol_dino.metal");
+pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol_dino.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.

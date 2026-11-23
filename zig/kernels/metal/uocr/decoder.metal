@@ -17,22 +17,6 @@ inline float ud_bf(float x) { return float(bfloat(x)); }
 // The release's clamp at +-1e4: NaN stays NaN.
 inline float ud_clamp(float x) { return isnan(x) ? x : clamp(x, -UD_CLAMP, UD_CLAMP); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float ud_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 // Gathered rows: y[i] = x[rows[i]] (1280 wide).
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_gather(
     const device bfloat* x [[buffer(0)]], const device uint* rows [[buffer(1)]], device bfloat* y [[buffer(2)]],
@@ -93,7 +77,7 @@ struct UdNorm {
     v[i] = x;
     ss += x * x;
   }
-  ss = ud_sum(ss, part, 256, lane, sg);
+  ss = tf_vis_sum(ss, part, 256, lane, sg);
   const float inv = precise::rsqrt(ss / float(UD_H) + p.eps);
   for (uint i = 0; i < 5; i++) {
     const uint c = t + 256 * i;
@@ -116,7 +100,7 @@ inline float ud_rope(float x, float partner, uint d, const device bfloat* cs, co
 // The router's norm of a 128-wide row in fp32, (1 + w) scaled, clamped at +-1e4 before and after the scale; bf16 out.
 inline float ud_router_norm(float x, const device bfloat* w, uint d, float eps, threadgroup float* part, uint lane,
                             uint sg) {
-  const float ss = ud_sum(x * x, part, UD_RD, lane, sg);
+  const float ss = tf_vis_sum(x * x, part, UD_RD, lane, sg);
   const float n = ud_clamp(x * precise::rsqrt(ss / float(UD_RD) + eps));
   return ud_bf(ud_clamp(n * (1.0f + float(w[d]))));
 }
@@ -215,7 +199,7 @@ inline UdTwo ud_two_add(UdTwo a, float b) {
     own += cand ? 1.0f : 0.0f;
   }
   // no candidate on the query's page among the remote blocks: every remote block is one
-  if (ud_sum(own, part, 256, lane, sg) == 0.0f) {
+  if (tf_vis_sum(own, part, 256, lane, sg) == 0.0f) {
     for (uint c = t; c < nrem; c += 256) {
       const device float* kb = KB + ulong(c) * UD_RD;
       float z = 0.0f;
@@ -304,22 +288,6 @@ struct UdAttend {
   uint bf16_bias;  // 1: the blocks' biases round to bf16 first (the prompt's mask is bf16)
 };
 
-// The largest of every thread's `v` in a threadgroup, returned to all of them.
-inline float ud_max(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_max(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : -INFINITY;
-    s = simd_max(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 // One (head, row) of fp32 attention over the last 128 keys and the read blocks (biased); simdgroups stride keys.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_attend(
     const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]], const device bfloat* V [[buffer(2)]],
@@ -372,14 +340,14 @@ inline float ud_max(float v, threadgroup float* part, uint n, uint lane, uint sg
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float top = -INFINITY;
   for (uint i = t; i < total; i += 256) top = max(top, sc[i]);
-  top = ud_max(top, part, 256, lane, sg);
+  top = tf_vis_max(top, part, 256, lane, sg);
   float mass = 0.0f;
   for (uint i = t; i < total; i += 256) {
     const float e = precise::exp(sc[i] - top);
     sc[i] = e;
     mass += e;
   }
-  mass = ud_sum(mass, part, 256, lane, sg);
+  mass = tf_vis_sum(mass, part, 256, lane, sg);
   for (uint i = t; i < total; i += 256) sc[i] = precise::divide(sc[i], mass);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float4 acc = 0.0f;
