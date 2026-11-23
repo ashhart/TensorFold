@@ -178,8 +178,7 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
     const drafted = facts.exact_width > 1;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted and !@hasDecl(S.Engine, "copy_only")) S.promptRows(h.engine) else 0 });
-    // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
-    // Sysman only when a cache can use it: zesInit faults inside the driver under WSL2 (Iris Xe, NEO 23.43)
+    // --prompt-cache-gib defaults to 4 GiB past 2 GiB; Sysman with a cache only: zesInit faults under WSL2
     const free = if (drafted) freeMemory(&h.ctx) else 0;
     const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
     h.cache = null;
