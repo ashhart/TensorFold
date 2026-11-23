@@ -87,6 +87,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    const served = try admittedStreams(a, fl.state.cacheBytes(&model.config, @intCast(window)), budget, o, @intCast(window), problem) orelse {
+        model.deinit();
+        return null;
+    };
     std.log.info("minimax_m3: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -104,10 +108,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     } else null;
-    const served = try admittedStreams(a, fl.state.cacheBytes(&model.config, @intCast(window)), budget, o, @intCast(window), problem) orelse {
-        model.deinit();
-        return null;
-    };
     h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget, .drafts = dspark != null or df2 != null });
     errdefer h.metal.deinit();
     try h.metal.warm();
