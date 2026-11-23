@@ -130,7 +130,8 @@ never stepped. `steps=N` on the released weights makes their own grid of N + 1 p
 same zero-copy mappings. Missing or truncated shards fail the load before any forward runs.
 
 `TF_LOAD_PREFETCH` selects 0–16 reader threads (16 by default); `0` disables read-ahead and leaves page faults to the
-mapping. This affects only transformer loading, not the prompt encoder or decoder.
+mapping. The same reader serves MiniMax-H3-Image's `tf-h3-image-prompt`, which reads only its text-encoder and
+token-refiner tensors, and `tf-h3-image-decoder`, which reads only the decoder tensors it converts to bf16.
 
 Receipt, `tf-h3-dit` at main against this branch, alternating, on an M5 Ultra with macOS 27.0: FastH3-8-Step-V2
 (revision `3da2ddfe`), 8 steps, 22 frames, seed 2077, audio rows on. Cold evicts the 66 GB of shards from the page

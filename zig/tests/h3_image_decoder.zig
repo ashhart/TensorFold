@@ -40,7 +40,7 @@ pub const Vae = struct {
         const loading = mtl.clock.seconds();
         const d = try dec.Decoder.init(init.gpa, device, vae.layers, config.rope_theta);
         errdefer d.deinit();
-        try d.load(try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
+        try d.load(init.io, try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
         d.give_way = .{ .io = init.io };
         std.debug.print("{s}: decoder weights in bf16 in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
         return .{ .config = config, .d = d };
