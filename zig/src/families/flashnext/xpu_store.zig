@@ -321,34 +321,7 @@ pub fn off(p: *anyopaque, bytes: usize) *anyopaque {
     return @ptrFromInt(@intFromPtr(p) + bytes);
 }
 
-/// Discover the first Xe2 GPU's PCI device ID on the system (defaulting to 0xe211 B70 if XPU_DEVICE_ID is unset).
-pub fn detectDeviceId() !u32 {
-    if (try @import("sys").environment.read(?u32, "XPU_DEVICE_ID", null)) |id| return id;
-    var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
-    defer lib.close();
-    const api = try ze.resolve(ze.Api, &lib);
-    try ze.check(api.zeInit(1));
-    var nd: u32 = 0;
-    try ze.check(api.zeDriverGet(&nd, null));
-    var drivers: [8]ze.H = @splat(null);
-    nd = @min(nd, drivers.len);
-    try ze.check(api.zeDriverGet(&nd, &drivers));
-    for (drivers[0..nd]) |drv| {
-        if (drv == null) continue;
-        var nv: u32 = 0;
-        try ze.check(api.zeDeviceGet(drv, &nv, null));
-        var devs: [16]ze.H = @splat(null);
-        nv = @min(nv, devs.len);
-        try ze.check(api.zeDeviceGet(drv, &nv, &devs));
-        for (devs[0..nv]) |dev| {
-            if (dev == null) continue;
-            var p: ze.DeviceProperties = .{};
-            try ze.check(api.zeDeviceGetProperties(dev, &p));
-            if (p.deviceId != 0) return p.deviceId;
-        }
-    }
-    return error.NoDevice;
-}
+pub const detectDeviceId = @import("../../xpu/device_id.zig").detectDeviceId;
 
 // Safetensors Store (drops non-PLE shard pages during load to preserve host RAM)
 
