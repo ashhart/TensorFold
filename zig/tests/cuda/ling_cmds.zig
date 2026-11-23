@@ -11,7 +11,7 @@ pub const usage =
     \\  ling-clamp <dir>          Ling's SwiGLU order min(silu(g), L): glue and the dir's grouped experts vs float64
     \\  ling-lanes <dir> <out> [ref] [--layers a,b]   the lane backend: chunked, drafted, resumed, concurrent
     \\  ling-slots                the lane backend's slots over reused map buckets (no GPU work)
-    \\  ling-ckpt-check <dir> [index]   every tensor's name, dtype and shape against the loader's (headers alone)
+    \\  ling-ckpt-check <dir> [index]   every tensor's name, dtype and shape against the loader's (headers and markers)
     \\  ling-exl3-layers <dir> <ref> <out>   real EXL3 layers on exllamav3's inputs (prompt and decode), outputs saved
     \\  ling-init-faults <dir> [--every N]   the backend opened with each driver call, then each allocation, failing
     \\  ling-exl3-clamp <dir> [layer]   an EXL3 MoE layer's grouped gate-up in Ling's clamp order vs float64

@@ -151,15 +151,16 @@ pub const Reader = struct {
     /// One EXL3 group as main's exl3_load admits it: trellis int16 [k/16][n/16][16 bits], fp16 suh [k] and svh [n].
     pub const Group = struct { trellis: Tensor, suh: Tensor, svh: Tensor, halves: u32, codebook: cuda.exl3.Codebook, n: usize };
 
-    pub fn exl3Group(r: *Reader, module: []const u8, n: usize, k: usize) !Group {
-        const t = try r.ck.get(try r.name(module, "trellis"));
+    pub fn exl3Group(ck: *core.Checkpoint, module: []const u8, n: usize, k: usize) !Group {
+        var b: [256]u8 = undefined;
+        const t = try ck.get(try std.fmt.bufPrint(&b, "{s}.trellis", .{module}));
         const halves = if (t.rank == 3) t.shape[2] / 8 else 0;
         // exllamav3 pads a width off the 128 grid up to it (kv_a_proj_with_mqa's 576 is stored as 640)
         const np = if (n % 128 == 0) n else std.mem.alignForward(usize, n, 128);
         if (t.dtype != .i16 or t.rank != 3 or t.shape[0] != k / 16 or t.shape[1] != np / 16 or t.shape[2] % 8 != 0 or halves < 2 or halves > 16 or k % 128 != 0) return wrong(module, .exl3, t, n, k);
         var codebook: cuda.exl3.Codebook = .inst3;
-        for (core.exl3_load.markers) |m| if (r.ck.has(try r.name(module, m.name))) {
-            const v = try r.ck.get(try r.name(module, m.name));
+        for (core.exl3_load.markers) |m| if (ck.has(try std.fmt.bufPrint(&b, "{s}.{s}", .{ module, m.name }))) {
+            const v = try ck.get(try std.fmt.bufPrint(&b, "{s}.{s}", .{ module, m.name }));
             if (v.bytes.len != 4 or std.mem.readInt(u32, v.bytes[0..4], .little) != m.value) return wrong(module, .exl3, v, n, k);
             codebook = switch (m.codebook) {
                 .inst3 => .inst3,
@@ -168,15 +169,15 @@ pub const Reader = struct {
             };
         };
         if (halves % 2 == 1 and codebook != .mul1) return wrong(module, .exl3, t, n, k); // half steps are mul1's alone
-        const suh = try r.ck.get(try r.name(module, "suh"));
-        const svh = try r.ck.get(try r.name(module, "svh"));
+        const suh = try ck.get(try std.fmt.bufPrint(&b, "{s}.suh", .{module}));
+        const svh = try ck.get(try std.fmt.bufPrint(&b, "{s}.svh", .{module}));
         if (!suh.is(.f16, &.{k}) or !svh.is(.f16, &.{np})) return wrong(module, .exl3, suh, n, k);
         return .{ .trellis = t, .suh = suh, .svh = svh, .halves = @intCast(halves), .codebook = codebook, .n = np };
     }
 
     /// An n-by-k EXL3 projection, its trellis as stored (exl3.Dense reads the stored layout), on qlinear's exl3 arm.
     fn exl3Linear(r: *Reader, module: []const u8, n: usize, k: usize) !cuda.exl3.Weight {
-        const g = try r.exl3Group(module, n, k);
+        const g = try Reader.exl3Group(r.ck, module, n, k);
         const st = cuda.exl3.strides(k, g.n, g.halves, false);
         return .{
             .trellis = try r.store.keep(g.trellis.bytes, module),
@@ -325,7 +326,7 @@ pub const Reader = struct {
             defer r.gpa.free(parts);
             var at: usize = 0;
             for (0..count) |e| {
-                const g = try r.exl3Group(try expertModule(&b, i, e, proj), n, k);
+                const g = try Reader.exl3Group(r.ck, try expertModule(&b, i, e, proj), n, k);
                 if (codebook) |c| (if (c != g.codebook) return error.MixedExperts) else codebook = g.codebook;
                 parts[e] = if (cut) |s| try cuts.expertTrellis(arena.allocator(), g, k, m < 2, s) else g.trellis.bytes;
                 ptrs[e] = at; // offsets until the one upload below

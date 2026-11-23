@@ -85,7 +85,7 @@ pub fn linear(r: *Reader, module: []const u8, n: usize, k: usize, cut: Cut) !Pro
 
 /// An EXL3 linear's cut as its own stored matrix: each tile row's spans of tile columns, or whole tile rows.
 fn exl3(r: *Reader, module: []const u8, n: usize, k: usize, cut: Cut) !cuda.exl3.Weight {
-    const g = try r.exl3Group(module, n, k);
+    const g = try Reader.exl3Group(r.ck, module, n, k);
     const tile = g.trellis.shape[2] * 2;
     const nt = g.n / 16;
     var host: std.ArrayList(u8) = .empty;
