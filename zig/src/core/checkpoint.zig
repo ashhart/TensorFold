@@ -1,6 +1,5 @@
 //! A model folder's safetensors as one namespace (every backend's index): shards, mapped tensors, leftovers refused.
 
-const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const st = @import("safetensors.zig");
@@ -210,7 +209,7 @@ pub const Checkpoint = struct {
         var n: usize = 0;
         for (self.files.items) |*f| for (f.names.keys()) |k| {
             if (self.used.contains(k)) continue;
-            if (n < 5 and !builtin.is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+            if (n < 5) std.log.err("unused checkpoint tensor {s}", .{k});
             n += 1;
         };
         return n;

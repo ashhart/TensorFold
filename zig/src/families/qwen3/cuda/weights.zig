@@ -44,7 +44,7 @@ pub const Model = struct {
         var m = try fromCheckpoint(gpa, d, &ck, spec, names.headKey(spec.tied, ck.scope));
         errdefer m.deinit();
         _ = try ck.stored(m.head); // the head's rows are read on the host later (names.readRows); its tensor still counts
-        if (ck.unused() != 0) return error.UnusedQwen3Tensors;
+        try refuseLeftovers(&ck);
         return m;
     }
 
@@ -64,6 +64,17 @@ pub const Model = struct {
         m.gpa.free(m.layers);
     }
 };
+
+/// A direct load's unbound names, refused without changing core's test logging for other loaders.
+fn refuseLeftovers(ck: *const Checkpoint) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return error.UnusedQwen3Tensors;
+}
 
 /// A BF16 matrix `key` of shape (n, k), uploaded as stored.
 fn projection(ck: *Checkpoint, st: *store.Store, name: []const u8, n: usize, k: usize) !u64 {
