@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server web fetches: hostname lookup now uses the shared bounded resolver, so a request's deadline holds even when the system lookup is slow, and long answer lists are read while they arrive (#N).
+
 - Qwen 3.5 and 3.8: one EOS rule for every family reader, and qwen27 now reads `generation_config.json`, so its stop tokens match the served set on the ten configs that declare `<|im_end|>` (#4678). Thanks @devopsfortunato.
 
 - Nemotron on CUDA: `TF_NEMOTRON_WIDE_ROUNDS=1` (opt-in) runs decode rounds of up to 16 streams; +2% to +6% at 16 streams on a GB10, tokens unchanged; off changes nothing.
