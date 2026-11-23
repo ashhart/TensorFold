@@ -245,7 +245,7 @@ pub const Kernels = struct {
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
-    group: ?cuda.qmmf_group.Group = null, // TF_Q35_GROUP_PROJ: same-input projections in one launch (cuda_group_proj.zig)
+    group: ?cuda.qmmf_group.Group = null, // TF_Q35_GROUP_PROJ: grouped same-input projections
 
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
