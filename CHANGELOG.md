@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP Qwen: use the policy prompt step on lone RDNA 3.5 iGPUs while preserving admitted streams and requested prompt caches (#4207). Thanks to @AbrahamCete.
+
 - MOSS-Image contract: the reference for `tf_me_conv` now follows fp32 `expf` overflow, so its sums check no longer fails on inputs near -89 (#4794).
 
 - HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
