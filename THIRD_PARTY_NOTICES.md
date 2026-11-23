@@ -681,3 +681,11 @@ Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.p
 ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): `Inkling2SlidingDecoderLayer`,
 `Inkling2FullDecoderLayer` and `Inkling2TextModel`. The two-rank engine, the lanes and the prompt path are TensorFold's
 own.
+
+## Inkling 2 Mini loop kernels
+
+`zig/kernels/cuda/inkling2/loop.cu` and `zig/src/families/inkling2/loop_ops.zig` compute the loop layers of Hugging Face
+transformers' `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the cross-pass message from
+`Inkling2LoopMessageAttentionResidual`, the rank-64 gates from `Inkling2LoopMessageGate`, and their norms from
+`Inkling2LoopUnweightedRMSNorm`. The kernels, their fixed sum order and their rounding points are TensorFold's own.

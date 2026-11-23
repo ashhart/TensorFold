@@ -26,6 +26,7 @@ pub const engine = @import("engine.zig");
 pub const follow = @import("follow.zig");
 pub const lanes = @import("lanes.zig");
 pub const native_exl3 = @import("native.zig");
+pub const loop_ops = @import("loop_ops.zig");
 
 /// config.json's name in the release.
 pub const model_type = "inkling2";
@@ -58,4 +59,5 @@ test {
     _ = follow;
     _ = lanes;
     _ = native_exl3;
+    _ = loop_ops;
 }
