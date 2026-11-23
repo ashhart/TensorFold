@@ -1,4 +1,6 @@
-// The Engram token map builder's CLI; the lane host runs the same build to write a missing map.
+//! Builds the canonical Engram token map from the release tokenizer and typed configuration.
+
+// Algorithm: DeepSeek AI inference/engram.py, MIT; the pinned revision is retained in source below.
 const std = @import("std");
 const tok = @import("src/core/tokenizer/tokenizer.zig");
 const unicode = @import("src/core/tokenizer/unicode.zig");
