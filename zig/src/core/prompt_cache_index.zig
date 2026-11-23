@@ -17,7 +17,6 @@ pub fn find(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []con
             const suffix: usize = prompt.len - e.at;
             if (pc.chunkClass(suffix) != pc.chunkClass(pc.freshLast(s.rules.grid, prompt.len))) continue;
         }
-        // A tail state off the grid resumes with its own chunk.
         const n = e.tokens.len;
         if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
         if (!modes.equal(e.decode_spans, spans, e.at) or !@import("cache_images.zig").matches(s, e)) continue;
