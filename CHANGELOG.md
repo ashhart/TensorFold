@@ -10,6 +10,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Nemotron on CUDA: a new prompt is filled a chunk at a time between other streams' decode rounds, so a long prompt no longer stalls replies already streaming; tokens unchanged.
 
+- Qwen3.8 on CUDA: `TF_QWEN_PDL=1` (opt-in) uses programmatic dependent launch on the ModelOpt NVFP4 lanes and the qwen35 glue kernels; about 1.5% faster decode and prompt on a GB10, tokens unchanged.
+
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
 - Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending.
 
