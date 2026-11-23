@@ -207,6 +207,231 @@ kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const devi
   ink_attn_store(part_o, part_ml, slot, top, total, acc, lane);
 }
 
+inline void ink_attn_step_v(float score, float4 vv, thread float& top, thread float& total, thread float* acc) {
+  if (score <= top && isfinite(top)) {
+    const float pf = float(bfloat(precise::exp2(score - top)));
+    total += pf;
+    acc[0] += pf * vv[0];
+    acc[1] += pf * vv[1];
+    acc[2] += pf * vv[2];
+    acc[3] += pf * vv[3];
+    return;
+  }
+  const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
+  const float pf = float(bfloat(b0));
+  total = total * a0 + pf;
+  acc[0] = acc[0] * a0 + pf * vv[0];
+  acc[1] = acc[1] * a0 + pf * vv[1];
+  acc[2] = acc[2] * a0 + pf * vv[2];
+  acc[3] = acc[3] * a0 + pf * vv[3];
+  top = next;
+}
+
+inline void ink_attn_reduce8(threadgroup float2* s_ml, threadgroup float* s_o, device float* part_o,
+    device float2* part_ml, size_t slot, float top, float tot, const thread float* acc, uint sg, uint lane) {
+  if (lane == 0u) s_ml[sg] = float2(top, tot);
+  for (uint i = 0u; i < 4u; ++i) s_o[sg * D + lane * 4u + i] = acc[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0u) {
+    float m = -INFINITY;
+    for (uint o = 0u; o < 8u; ++o) {
+      const float2 ml = s_ml[o];
+      m = (isnan(m) || isnan(ml.x) || isnan(ml.y)) ? NAN : max(m, ml.x);
+    }
+    float sum_tot = 0.0f;
+    float out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (m != -INFINITY) {
+      for (uint o = 0u; o < 8u; ++o) {
+        const float2 ml = s_ml[o];
+        if (ml.x != -INFINITY || isnan(m)) {
+          const float w = precise::exp2(ml.x - m);
+          sum_tot += ml.y * w;
+          for (uint i = 0u; i < 4u; ++i) out[i] += s_o[o * D + lane * 4u + i] * w;
+        }
+      }
+    }
+    ink_attn_store(part_o, part_ml, slot, m, sum_tot, out, lane);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// GQA 3:1 KV-sharing decode/verify kernel (3 Q-heads x 1 row, or x 2 rows on global verify), bit-identical to scalar.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_ink2_attn_gqa(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
+    const device InkSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
+    const device int* rpos [[buffer(7)]], const device int* rseg [[buffer(8)]], constant InkAttnArgs& a [[buffer(9)]],
+    uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint kvh = tg.x % a.kv_heads;
+  const uint rb = tg.x / a.kv_heads;
+  const bool pair_rows = (a.window == 0u && a.c0 > 1u);
+  const uint rows_total = a.c0;
+  const uint r0 = pair_rows ? 2u * rb : rb;
+  if (r0 >= rows_total) return;
+  const bool has_r1 = pair_rows && (r0 + 1u < rows_total);
+  const uint r1 = has_r1 ? (r0 + 1u) : r0;
+  const uint pos0 = uint(rpos[r0]);
+  const uint pos1 = has_r1 ? uint(rpos[r1]) : pos0;
+  const uint lo0 = a.window && pos0 + 1u > a.window ? pos0 + 1u - a.window : 0u;
+  const uint first = a.window ? lo0 / a.chunk : 0u;
+  const uint c = first + tg.y;
+  const uint max_pos = has_r1 ? max(pos0, pos1) : pos0;
+  if (c > max_pos / a.chunk || (a.window && c < lo0 / a.chunk)) return;
+  const uint from = max(lo0, c * a.chunk);
+  const uint to_max = min(max_pos + 1u, (c + 1u) * a.chunk);
+  const InkSeg s = segs[rseg[r0]];
+  const size_t head = s.off + size_t(kvh) * a.ring * D;
+  const size_t h0 = size_t(kvh) * 3u;
+  const size_t prow0 = size_t(r0) * a.heads + h0;
+  const float4 q00 = float4(*(const device bfloat4*)(q + (prow0 + 0u) * D + lane * 4u));
+  const float4 q01 = float4(*(const device bfloat4*)(q + (prow0 + 1u) * D + lane * 4u));
+  const float4 q02 = float4(*(const device bfloat4*)(q + (prow0 + 2u) * D + lane * 4u));
+  float acc0[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+  float top0[3] = {-INFINITY, -INFINITY, -INFINITY}, tot0[3] = {0.0f, 0.0f, 0.0f};
+  if (!has_r1) {
+    for (uint kp = from; kp < to_max; ++kp) {
+      const size_t at = head + size_t(kp % a.ring) * D;
+      const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4u));
+      const float4 vv = float4(*(const device bfloat4*)(vc + at + lane * 4u));
+      const float d0 = ink_warp_sum(dot(q00, kv));
+      const float d1 = ink_warp_sum(dot(q01, kv));
+      const float d2 = ink_warp_sum(dot(q02, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow0 + 0u, pos0, kp)) * LOG2E, vv, top0[0], tot0[0], acc0[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow0 + 1u, pos0, kp)) * LOG2E, vv, top0[1], tot0[1], acc0[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow0 + 2u, pos0, kp)) * LOG2E, vv, top0[2], tot0[2], acc0[2]);
+    }
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_store(part_o, part_ml, (prow0 + g) * a.chunks + tg.y, top0[g], tot0[g], acc0[g], lane);
+    return;
+  }
+  const size_t prow1 = size_t(r1) * a.heads + h0;
+  const float4 q10 = float4(*(const device bfloat4*)(q + (prow1 + 0u) * D + lane * 4u));
+  const float4 q11 = float4(*(const device bfloat4*)(q + (prow1 + 1u) * D + lane * 4u));
+  const float4 q12 = float4(*(const device bfloat4*)(q + (prow1 + 2u) * D + lane * 4u));
+  float acc1[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+  float top1[3] = {-INFINITY, -INFINITY, -INFINITY}, tot1[3] = {0.0f, 0.0f, 0.0f};
+  for (uint kp = from; kp < to_max; ++kp) {
+    const size_t at = head + size_t(kp % a.ring) * D;
+    const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4u));
+    const float4 vv = float4(*(const device bfloat4*)(vc + at + lane * 4u));
+    if (kp <= pos0) {
+      const float d0 = ink_warp_sum(dot(q00, kv));
+      const float d1 = ink_warp_sum(dot(q01, kv));
+      const float d2 = ink_warp_sum(dot(q02, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow0 + 0u, pos0, kp)) * LOG2E, vv, top0[0], tot0[0], acc0[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow0 + 1u, pos0, kp)) * LOG2E, vv, top0[1], tot0[1], acc0[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow0 + 2u, pos0, kp)) * LOG2E, vv, top0[2], tot0[2], acc0[2]);
+    }
+    if (kp <= pos1) {
+      const float d0 = ink_warp_sum(dot(q10, kv));
+      const float d1 = ink_warp_sum(dot(q11, kv));
+      const float d2 = ink_warp_sum(dot(q12, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow1 + 0u, pos1, kp)) * LOG2E, vv, top1[0], tot1[0], acc1[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow1 + 1u, pos1, kp)) * LOG2E, vv, top1[1], tot1[1], acc1[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow1 + 2u, pos1, kp)) * LOG2E, vv, top1[2], tot1[2], acc1[2]);
+    }
+  }
+  if (c <= pos0 / a.chunk) {
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_store(part_o, part_ml, (prow0 + g) * a.chunks + tg.y, top0[g], tot0[g], acc0[g], lane);
+  }
+  if (c <= pos1 / a.chunk) {
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_store(part_o, part_ml, (prow1 + g) * a.chunks + tg.y, top1[g], tot1[g], acc1[g], lane);
+  }
+}
+
+// 8-simdgroup split-K global attention with 3:1 GQA and 2-row verify KV sharing (4160 B TG scratch).
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_attn_split(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
+    const device InkSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
+    const device int* rpos [[buffer(7)]], const device int* rseg [[buffer(8)]], constant InkAttnArgs& a [[buffer(9)]],
+    uint3 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float2 s_ml[8];
+  threadgroup float s_o[8 * D];
+  const uint kvh = tg.x % a.kv_heads;
+  const uint rb = tg.x / a.kv_heads;
+  const uint rows_total = a.c0;
+  const bool pair_rows = rows_total > 1u;
+  const uint r0 = pair_rows ? 2u * rb : rb;
+  if (r0 >= rows_total) return;
+  const bool has_r1 = pair_rows && (r0 + 1u < rows_total);
+  const uint r1 = has_r1 ? (r0 + 1u) : r0;
+  const uint pos0 = uint(rpos[r0]);
+  const uint pos1 = has_r1 ? uint(rpos[r1]) : pos0;
+  const uint c = tg.y;
+  const uint max_pos = has_r1 ? max(pos0, pos1) : pos0;
+  if (c > max_pos / a.chunk) return;
+  const uint from = c * a.chunk;
+  const uint to_max = min(max_pos + 1u, (c + 1u) * a.chunk);
+  const uint n_keys = to_max > from ? to_max - from : 0u;
+  const uint step = (n_keys + 7u) >> 3u;
+  const uint s_from = from + sg * step;
+  const uint s_to = min(s_from + step, to_max);
+  const InkSeg s = segs[rseg[r0]];
+  const size_t head = s.off + size_t(kvh) * a.ring * D;
+  const size_t h0 = size_t(kvh) * 3u;
+  const size_t prow0 = size_t(r0) * a.heads + h0;
+  const float4 q00 = float4(*(const device bfloat4*)(q + (prow0 + 0u) * D + lane * 4u));
+  const float4 q01 = float4(*(const device bfloat4*)(q + (prow0 + 1u) * D + lane * 4u));
+  const float4 q02 = float4(*(const device bfloat4*)(q + (prow0 + 2u) * D + lane * 4u));
+  float acc0[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+  float top0[3] = {-INFINITY, -INFINITY, -INFINITY}, tot0[3] = {0.0f, 0.0f, 0.0f};
+  if (!has_r1) {
+    for (uint kp = s_from; kp < s_to; ++kp) {
+      const size_t at = head + size_t(kp % a.ring) * D;
+      const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4u));
+      const float4 vv = float4(*(const device bfloat4*)(vc + at + lane * 4u));
+      const float d0 = ink_warp_sum(dot(q00, kv));
+      const float d1 = ink_warp_sum(dot(q01, kv));
+      const float d2 = ink_warp_sum(dot(q02, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow0 + 0u, pos0, kp)) * LOG2E, vv, top0[0], tot0[0], acc0[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow0 + 1u, pos0, kp)) * LOG2E, vv, top0[1], tot0[1], acc0[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow0 + 2u, pos0, kp)) * LOG2E, vv, top0[2], tot0[2], acc0[2]);
+    }
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_reduce8(s_ml, s_o, part_o, part_ml, (prow0 + g) * a.chunks + tg.y, top0[g], tot0[g], acc0[g], sg, lane);
+    return;
+  }
+  const size_t prow1 = size_t(r1) * a.heads + h0;
+  const float4 q10 = float4(*(const device bfloat4*)(q + (prow1 + 0u) * D + lane * 4u));
+  const float4 q11 = float4(*(const device bfloat4*)(q + (prow1 + 1u) * D + lane * 4u));
+  const float4 q12 = float4(*(const device bfloat4*)(q + (prow1 + 2u) * D + lane * 4u));
+  float acc1[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+  float top1[3] = {-INFINITY, -INFINITY, -INFINITY}, tot1[3] = {0.0f, 0.0f, 0.0f};
+  for (uint kp = s_from; kp < s_to; ++kp) {
+    const size_t at = head + size_t(kp % a.ring) * D;
+    const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4u));
+    const float4 vv = float4(*(const device bfloat4*)(vc + at + lane * 4u));
+    if (kp <= pos0) {
+      const float d0 = ink_warp_sum(dot(q00, kv));
+      const float d1 = ink_warp_sum(dot(q01, kv));
+      const float d2 = ink_warp_sum(dot(q02, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow0 + 0u, pos0, kp)) * LOG2E, vv, top0[0], tot0[0], acc0[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow0 + 1u, pos0, kp)) * LOG2E, vv, top0[1], tot0[1], acc0[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow0 + 2u, pos0, kp)) * LOG2E, vv, top0[2], tot0[2], acc0[2]);
+    }
+    if (kp <= pos1) {
+      const float d0 = ink_warp_sum(dot(q10, kv));
+      const float d1 = ink_warp_sum(dot(q11, kv));
+      const float d2 = ink_warp_sum(dot(q12, kv));
+      ink_attn_step_v((d0 * a.scale + ink_attn_bias(tab, prow1 + 0u, pos1, kp)) * LOG2E, vv, top1[0], tot1[0], acc1[0]);
+      ink_attn_step_v((d1 * a.scale + ink_attn_bias(tab, prow1 + 1u, pos1, kp)) * LOG2E, vv, top1[1], tot1[1], acc1[1]);
+      ink_attn_step_v((d2 * a.scale + ink_attn_bias(tab, prow1 + 2u, pos1, kp)) * LOG2E, vv, top1[2], tot1[2], acc1[2]);
+    }
+  }
+  if (c <= pos0 / a.chunk) {
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_reduce8(s_ml, s_o, part_o, part_ml, (prow0 + g) * a.chunks + tg.y, top0[g], tot0[g], acc0[g], sg, lane);
+  }
+  if (c <= pos1 / a.chunk) {
+    for (uint g = 0u; g < 3u; ++g)
+      ink_attn_reduce8(s_ml, s_o, part_o, part_ml, (prow1 + g) * a.chunks + tg.y, top1[g], tot1[g], acc1[g], sg, lane);
+  }
+}
+
 // Batches up to 8 streams in one launch; rseg[row] selects the slot's ring, chunk, and KV cache.
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_ink2_attn_slots(const device bfloat* q [[buffer(0)]], const device bfloat* tab [[buffer(1)]],
