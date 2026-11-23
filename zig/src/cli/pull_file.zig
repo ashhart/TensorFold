@@ -1,6 +1,7 @@
 //! One file from the hub into the blob store: range resume, size and sha256 checks, retries, and its snapshot link.
 const std = @import("std");
 const platform = @import("sys");
+const route = @import("pull_route.zig");
 const Allocator = std.mem.Allocator;
 const Auth = @import("pull_auth.zig").Auth;
 
@@ -8,6 +9,8 @@ const Auth = @import("pull_auth.zig").Auth;
 pub const Entry = struct { path: []const u8, size: u64, sha256: ?[32]u8 = null, git_sha1: ?[20]u8 = null };
 
 const attempts = 5;
+/// Resumes after no-progress timeouts before pull gives up on a file.
+pub const max_resumes = 3;
 
 /// The blob's cache name, as huggingface_hub names it: the LFS sha256, else the git blob sha1, else the path.
 pub fn blobName(a: Allocator, e: Entry) ![]const u8 {
@@ -30,8 +33,16 @@ pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, auth
     var wait_ms: i64 = 250;
     var restarted = false;
     var attempt: u32 = 1;
+    var resumes: u32 = 0;
     while (true) : (attempt += 1) {
+        const stalls = route.stalls();
         if (download(a, io, client, auth, out, url, blobs_dir, e)) |name| return name else |err| {
+            if (route.stalls() != stalls) { // no bytes within the stall timeout: resume from the .incomplete bytes now
+                resumes += 1;
+                if (resumes > max_resumes) return error.Stalled;
+                attempt -= 1;
+                continue;
+            }
             if (attempt == attempts or err == error.HubDenied or (err == error.ShaMismatch and restarted)) return err;
             if (err == error.ShaMismatch) {
                 restarted = true;
@@ -100,13 +111,27 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     var chunk: [32 << 10]u8 = undefined;
     var offset = resume_from;
     while (true) {
-        const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
-        if (n == 0) break;
-        if (n > e.size - offset) return error.SizeMismatch;
-        hash.update(chunk[0..n]);
-        if (check_git) git.update(chunk[0..n]);
-        try file.writePositionalAll(io, chunk[0..n], offset);
-        offset += n;
+        const prefix = r.buffered(); // persist progress before any underlying read can fail and advance
+        for ([_][]const u8{prefix}) |bytes| {
+            if (bytes.len > e.size - offset) return error.SizeMismatch;
+            hash.update(bytes);
+            if (check_git) git.update(bytes);
+            try file.writePositionalAll(io, bytes, offset);
+            offset += bytes.len;
+        }
+        r.toss(prefix.len);
+        var vecs = [_][]u8{&chunk};
+        const got = r.readVec(&vecs);
+        const left = r.buffered();
+        for ([_][]const u8{ chunk[0 .. got catch 0], left }) |bytes| {
+            if (bytes.len > e.size - offset) return error.SizeMismatch;
+            hash.update(bytes);
+            if (check_git) git.update(bytes);
+            try file.writePositionalAll(io, bytes, offset);
+            offset += bytes.len;
+        }
+        r.toss(left.len);
+        _ = got catch |err| if (err == error.EndOfStream) break else return error.ReadFailed;
     }
     const total = offset;
     if (total != e.size) return error.SizeMismatch;
@@ -122,6 +147,33 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     try std.Io.Dir.cwd().rename(partial_path, std.Io.Dir.cwd(), final_path, io);
     try out.print("  {s}: {d:.2} MiB\n", .{ e.path, @as(f64, @floatFromInt(total)) / (1 << 20) });
     return final_name;
+}
+
+/// Whether an existing cached blob still has the digest and byte count the hub advertised.
+pub fn cachedMatches(io: std.Io, path: []const u8, e: Entry) !bool {
+    if (try fileStat(io, path) != e.size) return false;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var git = std.crypto.hash.Sha1.init(.{});
+    var git_head: [32]u8 = undefined;
+    if (e.git_sha1 != null) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
+    var buf: [64 << 10]u8 = undefined;
+    var at: u64 = 0;
+    while (at < e.size) {
+        const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, e.size - at))], at);
+        if (n == 0) return false;
+        hash.update(buf[0..n]);
+        if (e.git_sha1 != null) git.update(buf[0..n]);
+        at += n;
+    }
+    if (e.sha256) |want| {
+        var got: [32]u8 = undefined;
+        hash.final(&got);
+        return std.mem.eql(u8, &got, &want);
+    }
+    if (e.git_sha1) |want| return std.mem.eql(u8, &git.finalResult(), &want);
+    return false;
 }
 
 pub fn fileStat(io: std.Io, path: []const u8) !u64 {

@@ -143,3 +143,12 @@ test "an unplanned family's names ignore chunk starts" {
     try std.testing.expectEqualSlices(Name, &a, &b);
     try std.testing.expectEqual(state(k, &t, &.{}, &.{3}, 8), state(k, &t, &.{}, &.{ 2, 5 }, 8));
 }
+
+/// A planned state's starts with its own position last: its blocks' last chunk ends by it.
+pub fn withAt(a: std.mem.Allocator, starts: []const u32, at: u32, planned: bool) ![]u32 {
+    if (!planned) return a.alloc(u32, 0);
+    var out = try a.alloc(u32, starts.len + 1);
+    @memcpy(out[0..starts.len], starts);
+    out[starts.len] = at;
+    return out;
+}

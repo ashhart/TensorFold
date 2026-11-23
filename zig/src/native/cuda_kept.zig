@@ -7,32 +7,13 @@ const disk_identity = @import("disk_identity.zig");
 const rows = api.prompt_cache.rows;
 const Allocator = std.mem.Allocator;
 
-/// What the prompt's tokens came from, beside the weights the checkpoint's stamps bind.
-const prompt_files = [_][]const u8{
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "tokenizer.model",
-    "chat_template.jinja",
-    "chat_template.json",
-};
-
 /// The words of a state that holds nothing but its position (and its family's Words otherwise).
 const Position = extern struct { at: u64, pad: u64 = 0 };
 
 /// The tokenizer's and template's bytes, then the drafter's checkpoint: what a family's image cannot show.
 pub fn promptHash(a: Allocator, io: std.Io, dir: []const u8, drafter: ?[]const u8) !u64 {
     var h = std.hash.Wyhash.init(0x6b70);
-    for (prompt_files) |name| {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        defer a.free(path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |e| switch (e) {
-            error.FileNotFound => continue,
-            else => return e,
-        };
-        defer a.free(bytes);
-        h.update(name);
-        h.update(bytes);
-    }
+    try disk_identity.promptFiles(&h, a, io, dir);
     if (drafter) |d| try disk_identity.checkpoint(&h, a, io, d);
     return h.final();
 }

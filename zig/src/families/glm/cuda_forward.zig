@@ -7,6 +7,7 @@ const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
 const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
+const cuda_pdl = @import("cuda_pdl.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
 const sparse = @import("cuda_sparse.zig");
@@ -47,6 +48,7 @@ pub const Modules = struct {
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
     dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
+    moe_direct: bool, // TF_GLM_MOE_DIRECT (default off): a decode window's EXL3 MoE without row copies (cuda_moe.direct)
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
@@ -54,9 +56,11 @@ pub const Modules = struct {
     pack_dense: cuda.Function,
     quant: quant.Kernels,
     q4: q4.Kernels,
+    mla: ?cuda.mla.Mla, // `roped` (Config.rope: full GLM-5.3's 576-wide latent rows): the roped MLA image
 
     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values, roped: bool) !Modules {
+        try cuda_pdl.bind(ctx);
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;
@@ -83,6 +87,8 @@ pub const Modules = struct {
         m.exl3 = try exl3.Kernels.load(d);
         errdefer m.exl3.unload();
         m.mm = try mm_mod.Kernels.load(m.mods[7]);
+        m.mla = if (roped) try cuda.mla.Mla.load(d) else null;
+        errdefer if (m.mla) |*x| x.unload();
         m.index = null;
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
@@ -100,6 +106,8 @@ pub const Modules = struct {
                 break :blk null;
             };
         } else std.log.warn("TF_GLM_DSCORES=0: a decode window's index scores keep tf_glm_scores", .{});
+        m.moe_direct = try @import("sys").environment.read(bool, "TF_GLM_MOE_DIRECT", false);
+        if (m.moe_direct) std.log.info("TF_GLM_MOE_DIRECT=1: a decode window's EXL3 experts read flat picks, one slot sum", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
@@ -117,6 +125,7 @@ pub const Modules = struct {
     pub fn deinit(m: *Modules) void {
         if (m.index) |*x| x.unload();
         if (m.dscore) |*x| x.unload();
+        if (m.mla) |*x| x.unload();
         m.exl3.unload();
         for (&m.mods) |*x| x.unload();
         m.lane.unload();
@@ -165,6 +174,7 @@ pub const Forward = struct {
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     images: ?ImageRows = null, // a prompt pass's image rows over their placeholders' embeddings (its sequence only)
     prof: ?*prof_mod.Prof = null, // TF_GLM_PROF=1: events between the sections
+    pair_experts: bool = false, // TF_GLM_PAIR_EXPERTS=1: paired NVFP4 MoE layers route both chunks together
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
@@ -175,7 +185,7 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null };
     }
 
     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
@@ -264,8 +274,8 @@ pub const Forward = struct {
         return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows };
     }
 
-    fn moeKernels(f: *const Forward) moe.Kernels {
-        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof };
+    pub fn moeKernels(f: *const Forward) moe.Kernels {
+        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof, .direct = f.m.moe_direct };
     }
 
     pub const Site = enum { mixer, ffn };
@@ -309,14 +319,15 @@ pub const Forward = struct {
 
     const exchangePieces = @import("cuda_forward_pieces.zig").exchangePieces;
 
-    /// hc_post of rows lo..hi from partials `g` [world][hi - lo][D] (a gathered room or a split one's own rows).
-    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64) !void {
+    /// hc_post of rows lo..hi from ranked partials g; nonzero own replaces only rank me's gathered slot.
+    fn postRows(f: *const Forward, r: Rank, lo: usize, hi: usize, g: u64, own: u64) !void {
         const c = &r.w.config;
         const b = r.b;
         const S: usize = c.hc;
         const D: usize = c.hidden;
         const x = b.x + lo * S * D * 2;
-        try glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
+        if (own != 0) return glue.hcPostOwn(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world, own, r.w.share.rank);
+        return glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
     }
 
     /// forward._pre of rows lo..hi.
@@ -329,12 +340,12 @@ pub const Forward = struct {
     }
 
     /// One piece's glue after a site: hc_post, then the next layer's hc_pre or (after the last layer) the stream mean.
-    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64) !void {
+    pub fn glueRows(f: *const Forward, r: Rank, j: usize, site: Site, lo: usize, hi: usize, g: u64, own: u64) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
         const layers = r.w.layers;
-        try f.postRows(r, lo, hi, g);
+        try f.postRows(r, lo, hi, g, own);
         if (site == .mixer) return f.preRows(r, layers[j].ffn_hc, layers[j].post_norm, lo, hi);
         if (j + 1 < layers.len) return f.preRows(r, layers[j + 1].attn_hc, layers[j + 1].in_norm, lo, hi);
         try glue.streamMean(f.set(), f.stream, r.b.x + lo * c.hc * c.hidden * 2, r.b.hidden + lo * c.hidden * 2, hi - lo, c.hidden, c.hc);
@@ -372,6 +383,11 @@ pub const Forward = struct {
 
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
+        return f.runMode(ids, true);
+    }
+
+    /// The same pass with `lm_head` only when its logits are read; final norms always cover every row.
+    pub fn runMode(f: *const Forward, ids: []const i32, head: bool) !void {
         const R = ids.len;
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
@@ -392,7 +408,7 @@ pub const Forward = struct {
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
         if (pieces > 1 or (pieces == 1 and f.splits(R))) try f.pieced(f.pieces.?, R, cut[0..pieces]) else try f.whole(R);
-        try f.finish(R);
+        try f.finish(R, head);
         if (f.prof) |p| p.mark(f.stream, .head);
     }
 
@@ -436,7 +452,7 @@ pub const Forward = struct {
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
-    pub fn finish(f: *const Forward, R: usize) !void {
+    pub fn finish(f: *const Forward, R: usize, head: bool) !void {
         prof_mod.context(f.prof, null, null, .chunk);
         const stamp = prof_mod.span(f.prof, f.stream, .head);
         defer stamp.end();
@@ -448,6 +464,7 @@ pub const Forward = struct {
                 try shared.heads(f, r);
                 continue;
             }
+            if (!head) continue;
             const head_rows: usize = if (b.prefill) 1 else R;
             const first = if (b.prefill) R - 1 else 0;
             try projection.matmul(f.set(), f.stream, r.w.head, b.fnormed + first * c.hidden * 2, c.hidden, b.logits, b.kda.mm_part, head_rows, r.w.share.vocab.len(), c.hidden, false);

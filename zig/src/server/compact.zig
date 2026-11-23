@@ -102,6 +102,7 @@ pub fn run(srv: *Server, cx: *Cx, input: chat.Input, sink: ?chat.Sink, gone: any
 }
 
 pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype) chat.Failure!Ready {
+    cx.cache_salt = input.cache_salt; // the notes this compaction writes keep their states under the same salt
     const at = srv.config.compact_at orelse {
         const prepared = try chat.prepare(srv, cx, input, gone);
         return .{ .prepared = prepared, .stamp = .{ .window = srv.info.context_window, .used = prepared.prompt_len } };
@@ -136,7 +137,7 @@ pub fn stamp(cx: *Cx, reply: *chat.Reply, s: Stamp) chat.Failure!void {
 fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactAt, msgs: []Value) chat.Failure!Ready {
     const a = cx.a;
     const marker = try findMarker(a, msgs);
-    const slot = stored.loadMem(srv, a, msgs);
+    const slot = stored.loadMem(srv, a, msgs, cx.cache_salt);
     const hash_ok = if (slot) |m| stored.hashes(a, msgs, m) else false;
     var prev: []const u8 = "";
     if (hash_ok) {
@@ -174,7 +175,7 @@ fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactA
         var next = input;
         next.messages = .{ .array = built };
         if (chat.prepare(srv, cx, next, gone)) |prepared| {
-            stored.storeMem(srv, a, msgs, tail, note);
+            stored.storeMem(srv, a, msgs, tail, note, cx.cache_salt);
             return .{
                 .prepared = prepared,
                 .stamp = .{
