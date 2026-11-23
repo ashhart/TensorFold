@@ -23,8 +23,8 @@ fn sums(r: *Rig, x: []const u16, rows: usize, k: usize) ![]f32 {
     return out;
 }
 
-/// A weight of either format: MLX affine-4 (packed as served) or NVFP4 (random codes, e4m3 scales near 1).
-const W = union(enum) { affine4: qlinear.Affine4, nvfp4: cuda.qmmf.Weight };
+/// A weight in each format a wide round takes: MLX affine-4 (packed as served), NVFP4, and ModelOpt's FP8 and bf16.
+const W = union(enum) { affine4: qlinear.Affine4, nvfp4: cuda.qmmf.Weight, fp8: cuda.qmmf.Weight, bf16: cuda.qmmf.Weight };
 
 fn affine(r: *Rig, a4: *const qlinear.Affine4Kernels, n: usize, k: usize) !W {
     const words = try r.a.alloc(u32, n * k / 8);
@@ -50,19 +50,33 @@ fn fp4(r: *Rig, n: usize, k: usize) !W {
     return .{ .nvfp4 = .{ .mode = .fp4, .codes = try r.dev(codes), .scales = try r.dev(scales), .scale = 1, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(npad) } };
 }
 
+/// ModelOpt FP8: finite e4m3 codes on the lane's padded rows, one scale.
+fn fp8(r: *Rig, n: usize, k: usize) !W {
+    const codes = try r.a.alloc(u8, cuda.modelopt.padded(n) * k);
+    for (codes) |*c| c.* = r.rng.uintLessThan(u8, 0x70) | (r.rng.int(u8) & 0x80);
+    return .{ .fp8 = cuda.modelopt.fp8Weight(try r.dev(codes), 0.75, n, k) };
+}
+
+/// ModelOpt bf16: small finite values on the lane's padded rows.
+fn bf16(r: *Rig, n: usize, k: usize) !W {
+    const vals = try r.a.alloc(u16, cuda.modelopt.padded(n) * k);
+    for (vals) |*v| v.* = quant_ref.helpers.bf16Of((r.rng.float(f32) - 0.5) * 0.05);
+    return .{ .bf16 = cuda.modelopt.bf16Weight(try r.dev(std.mem.sliceAsBytes(vals)), n, k) };
+}
+
 /// One call of `rows` rows from row `at`, as the engine's dense projection makes it.
 fn call(l: qlinear.Linear, r: *Rig, w: W, x: u64, xs: u64, part: u64, out: u64, at: usize, rows: usize) !void {
     const k: usize = switch (w) {
-        .affine4 => |q| q.k,
-        .nvfp4 => |q| q.k,
+        inline else => |q| q.k,
     };
     const n: usize = switch (w) {
-        .affine4 => |q| q.n,
-        .nvfp4 => |q| q.n,
+        inline else => |q| q.n,
     };
     const weight: qlinear.Weight = switch (w) {
         .affine4 => |q| .{ .affine4 = q },
         .nvfp4 => |q| .{ .nvfp4 = q },
+        .fp8 => |q| .{ .fp8 = q },
+        .bf16 => |q| .{ .bf16 = q },
     };
     try l.decode(r.s, weight, .{ .x = x + at * k * 2, .sums = xs + at * (k / 64) * 4, .part = part }, out + at * n * 2, rows);
 }
@@ -99,7 +113,7 @@ pub fn run(gpu: Gpu) !void {
     const l: qlinear.Linear = .{ .affine4 = &a4, .lane = &lane };
     const part = try r.zeros(64 << 20); // slice partials where the lane reduces them
     var cells: usize = 0;
-    for (shapes) |sh| for ([_]bool{ false, true }) |nv| {
+    for (shapes) |sh| for ([_]std.meta.Tag(W){ .affine4, .nvfp4, .fp8, .bf16 }) |format| {
         const mark = r.bufs.items.len;
         defer {
             for (r.bufs.items[mark..]) |*b| b.free();
@@ -107,7 +121,12 @@ pub fn run(gpu: Gpu) !void {
         }
         const n = sh[0];
         const k = sh[1];
-        const w = if (nv) try fp4(&r, n, k) else try affine(&r, &a4, n, k);
+        const w = switch (format) {
+            .affine4 => try affine(&r, &a4, n, k),
+            .nvfp4 => try fp4(&r, n, k),
+            .fp8 => try fp8(&r, n, k),
+            .bf16 => try bf16(&r, n, k),
+        };
         const x = try r.bfs(32 * k, 1.0);
         for ([_]u16{ 0x7FC0, 0x7F80, 0xFF80 }, [_]usize{ 2, 19, 30 }) |special, row| x[row * k + 5] = special; // NaN, +-Inf
         const dx = try r.dev(std.mem.sliceAsBytes(x));
@@ -118,7 +137,7 @@ pub fn run(gpu: Gpu) !void {
             try call(l, &r, w, dx, dxs, part, wide, 0, rows);
             try call(l, &r, w, dx, dxs, part, narrow, 0, 16);
             try call(l, &r, w, dx, dxs, part, narrow, 16, rows - 16);
-            try check.sameBytes(if (nv) "wide rounds: NVFP4 rows equal their 16-row calls" else "wide rounds: affine-4 rows equal their 16-row calls", try r.back(wide, rows * n * 2), try r.back(narrow, rows * n * 2));
+            try check.sameBytes("wide rounds: each format's rows equal their 16-row calls", try r.back(wide, rows * n * 2), try r.back(narrow, rows * n * 2));
             cells += 1;
         }
         // planted control: row 20's input moved changes row 20 of the wide call and no other row
@@ -136,5 +155,5 @@ pub fn run(gpu: Gpu) !void {
         try check.sameBytes("wide rounds: rows after the planted one stay", a[21 * n * 2 ..], b[21 * n * 2 ..]);
         x[20 * k] ^= 0x0040;
     };
-    check.pass("wide-rounds: {d} cells, Lightning's dense shapes in affine-4 and NVFP4 at 17/25/32 rows byte-equal to 16 + the rest, NaN/Inf planted, control caught", .{cells});
+    check.pass("wide-rounds: {d} cells, Lightning's dense shapes in affine-4, NVFP4, FP8 and bf16 at 17/25/32 rows byte-equal to 16 + the rest, NaN/Inf planted, control caught", .{cells});
 }
