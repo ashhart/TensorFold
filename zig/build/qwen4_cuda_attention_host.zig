@@ -21,6 +21,7 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
     merge = try edit.once(a, merge, "__global__ ", "");
     return std.mem.concat(a, u8, &.{
         \\#include "hc_native_support.h"
+        \\namespace flashnext_pdl { inline void enter() {} }
         \\namespace ca {
         \\constexpr int HD=256,JT=1;static uint3 blockIdx,threadIdx;
         \\inline float tf_exp(float x){return expf(x); }
