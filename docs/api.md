@@ -1358,7 +1358,8 @@ already running). The rest are internal reasons, never a client code: `kv_pool`,
 `prefill_concurrent` (a family round planner waits for KV pool pages, for the memory floor, or passes a long prompt
 over while others prefill; DeepSeek-V4.1 names them), `prefix_cut` (it waits for a cut another prompt is filling),
 `state_read` (it waits for its disk state's read ahead), `ledger_bytes` (its caches' bytes do not fit the KV ledger
-now) and `pool_room` (the family's pool has no room for it now). A request behind one that waits for the pool, the
+now), `pool_room` (the family's pool has no room for it now) and `remote_fill` (it waits for another machine's fill
+of its prefix). A request behind one that waits for the pool, the
 ledger or the planner holds that request's reason. `memory_floor` is never counted under `memory_pressure`. The
 reasons are as of the engine's last admission attempt: a request queued behind one just admitted keeps its earlier
 reason until the engine next tries to admit it.
