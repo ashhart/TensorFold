@@ -275,6 +275,11 @@ pub const Metal = struct {
         const c = &self.model.config;
         const words = (c.vocab + 31) / 32;
         if (windows.len != out.len) return error.InvalidStep5Windows;
+        if (self.options.verify_shared) {
+            var total: usize = 0;
+            for (windows) |w| total += w.rows();
+            if (total > 0 and total <= st.window_rows) return self.verifyShared(windows, out, total);
+        }
         for (windows, out) |w, o| {
             const rows = w.rows();
             if (rows > st.window_rows or w.parents != null or o.sampled.len != rows or o.drafts.len != rows - 1) return error.UnsupportedStep5Window;
@@ -298,6 +303,44 @@ pub const Metal = struct {
             }
             // the last kept row's logits are the next first draw's (the lane core keeps every row here)
             @memcpy(cache.logits.slice(u16, c.vocab), all[(rows - 1) * c.vocab ..][0..c.vocab]);
+        }
+    }
+
+    fn verifyShared(self: *Metal, windows: []const be.Window, out: []be.Verified, total: usize) !void {
+        const c = &self.model.config;
+        const words = (c.vocab + 31) / 32;
+        var segments: [st.window_rows]fwd.Segment = undefined;
+        var ids: [st.window_rows]u32 = undefined;
+        var base: usize = 0;
+        for (windows, out, 0..) |w, o, seg| {
+            const rows = w.rows();
+            if (rows > st.window_rows or w.parents != null or o.sampled.len != rows or o.drafts.len != rows - 1) return error.UnsupportedStep5Window;
+            const cache = try self.cacheOf(w.stream);
+            if (w.held > cache.nheld) return error.Step5DraftsNotHeld;
+            for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidStep5Position;
+            segments[seg] = .{ .cache = cache, .rows = rows };
+            ids[base] = w.pending;
+            @memcpy(ids[base + 1 ..][0..w.held], cache.held[0..w.held]);
+            @memcpy(ids[base + 1 + w.held ..][0..w.tokens.len], w.tokens);
+            base += rows;
+        }
+        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total]);
+        base = 0;
+        const all = self.scratch.logits_all.slice(u16, total * c.vocab);
+        for (windows, out, 0..) |w, o, seg| {
+            const cache = segments[seg].cache;
+            const rows = segments[seg].rows;
+            cache.len += rows;
+            cache.nheld = 0;
+            @memcpy(o.drafts, ids[base + 1 .. base + rows]);
+            for (0..rows) |r| {
+                const l = all[(base + r) * c.vocab ..][0..c.vocab];
+                const mask = if (w.masks.len >= (r + 1) * words) w.masks[r * words ..][0..words] else &.{};
+                o.sampled[r] = try draw(self.gpa, l, w.stream.sampling, w.positions[r], mask);
+                if (o.rows.len == rows) o.rows[r] = row(l, o.sampled[r], w.stream.logprobs orelse 0);
+            }
+            @memcpy(cache.logits.slice(u16, c.vocab), all[(base + rows - 1) * c.vocab ..][0..c.vocab]);
+            base += rows;
         }
     }
 

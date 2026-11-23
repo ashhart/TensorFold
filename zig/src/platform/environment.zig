@@ -121,6 +121,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
+    .{ .name = "TF_STEP5_VERIFY_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 shares one Step-5 decode forward across windows totalling at most 16 rows, with a segment for each stream's cache; default 0)" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
     .{ .name = "TF_LFM3_METAL_WARM_TURNS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_METAL4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps Metal 3; 1 sends the work of a family that supports it through Metal 4 on macOS 26 and later, the default for DeepSeek-V4.1 there)" },

@@ -78,7 +78,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.resident = null;
-    h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    const verify_shared = @import("sys").environment.read(bool, "TF_STEP5_VERIFY_SHARED", false) catch {
+        problem.* = "TF_STEP5_VERIFY_SHARED is not 0 or 1: set exactly 0 or 1, or unset it for the existing per-window forwards";
+        model.deinit();
+        return null;
+    };
+    h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget, .verify_shared = verify_shared });
     errdefer h.metal.deinit();
     try h.metal.warm();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), s5.state.window_rows, s5.state.window_rows - 1);

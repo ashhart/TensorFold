@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 pub const valid = [_]Case{
+    .{ .name = "TF_STEP5_VERIFY_SHARED", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_IDLE_RELEASE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_IDLE_RELEASE", .raw = "40", .n = 40 },
     .{ .name = "TF_Q27_IDLE_RELEASE", .raw = "86400", .n = 86400 },
