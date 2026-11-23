@@ -504,8 +504,8 @@ pub const Target = struct {
 
     pub const Run = launch_.Run;
 
-    pub fn launchRuns(t: *Target, runs: []const Run) !void {
-        return launch_.run(t, runs, &.{}, null);
+    pub fn launchRuns(t: *Target, runs: []const Run, rec: ?*round_prof.Round) !void {
+        return launch_.run(t, runs, &.{}, rec);
     }
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.
