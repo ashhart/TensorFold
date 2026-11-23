@@ -47,8 +47,12 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void 
     var shape: [128]u8 = undefined;
     const parts = [_][]const u8{ kind, std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, width, r.capture_taps) };
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
-    if (k) |key| if (lanes.cost_cache.load([width]lanes.config.Cost, b.gpa, io, key)) |kept| {
-        @memcpy(b.costs[0..width], &kept);
+    var kept = if (k) |key| lanes.cost_cache.load([width]lanes.config.Cost, b.gpa, io, key) else null;
+    if (kept) |table| for (table, 0..) |c, i| {
+        if (c.width != i + 1 or !(c.ms > 0) or !std.math.isFinite(c.ms)) { kept = null; break; }
+    };
+    if (kept) |table| if (r.capacity <= width + 7) {
+        @memcpy(b.costs[0..width], &table);
         b.timed = width;
         return;
     };
@@ -58,17 +62,32 @@ fn sized(b: anytype, io: std.Io, comptime width: usize, kind: []const u8) !void 
     }
     var ids: [192]u32 = undefined;
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
-    const prompt = ids[0..@min(ids.len, r.capacity - width)]; // a small --context still holds a window past it
+    // A warm probe keeps at most seven rows; reserve them so a tight context does not repeat its prompt fill.
+    const prompt = ids[0..@min(ids.len, r.capacity - width - (if (kept != null) @as(usize, 7) else 0))];
     try b.refill(prompt);
     var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
     defer s.deinit(b.gpa);
     const timer: Timer(@TypeOf(b)) = .{ .b = b, .s = &s, .prompt = prompt };
+    if (kept) |table| {
+        var ms: [width]f64 = undefined;
+        var widths: [width]u32 = undefined;
+        for (table, &ms, &widths) |c, *m, *w| { m.* = c.ms; w.* = c.width; }
+        const current = k orelse unreachable;
+        const cursor_key = lanes.cost_cache.buildKey(&current, &.{"metal-heal-v1"});
+        var cursor = lanes.cost_cache.load(u64, b.gpa, io, cursor_key) orelse 0;
+        _ = try lanes.cost_rule.healWindows(timer, &ms, &widths, &cursor);
+        for (b.costs[0..width], ms, 0..) |*c, m, i| c.* = .{ .width = @intCast(i + 1), .ms = m };
+        b.timed = width;
+        lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, current, b.costs[0..width].*);
+        lanes.cost_cache.save(u64, b.gpa, io, cursor_key, cursor);
+        return;
+    }
     for (0..5) |_| _ = try timer.time(width - 1); // the widest window first, while the GPU's clocks ramp up
     var ms: [width]f64 = undefined;
-    for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
+    try lanes.cost_rule.measureWindows(timer, &ms, false);
     try lanes.cost_rule.smooth(timer, &ms);
     const ref = lanes.cost_cache.referenceKey(&parts);
-    if (lanes.cost_cache.load([width]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.again(timer, &ms);
+    if (lanes.cost_cache.load([width]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.measureWindows(timer, &ms, true);
     for (b.costs[0..width], ms, 0..) |*cost, m, i| cost.* = .{ .width = @intCast(i + 1), .ms = m };
     b.timed = width;
     if (k) |key| lanes.cost_cache.save([width]lanes.config.Cost, b.gpa, io, key, b.costs[0..width].*);
