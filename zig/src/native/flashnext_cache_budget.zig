@@ -2,7 +2,7 @@
 const math = @import("cache_budget.zig");
 const margin = @import("sys").memory_policy.margin;
 pub fn automatic(cap: u64, ready: u64, allocated: u64) !u64 {
-    _ = allocated;
     const room = cap -| ready -| margin;
-    return (try math.fitUnder(cap, ready, null, false, .{ .margin = margin, .ceiling = @min(room, @max(16 * math.GiB, room / 2)) })).budget;
+    const physical = (try math.fitUnder(cap, ready, null, false, .{ .margin = margin, .ceiling = @min(room, @max(16 * math.GiB, room / 2)) })).budget;
+    return @min(physical, cap -| allocated -| margin);
 }
