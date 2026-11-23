@@ -151,11 +151,21 @@ pub fn projectQkv(
     q_width: usize,
     kv_width: usize,
 ) !void {
+    const at = [9]u64{ u_q, u_k, u_v, wq, wk, wv, raw_q, raw_k, raw_v };
+    return qkvLaunch(k, s, at, rows, c, q_width, kv_width, rows <= 16 and c % 64 == 0);
+}
+
+/// tf_ink2_loop_project_qkv's 16x16 tiles at any row count (projectQkv's order): the decode kernels' baseline.
+pub fn projectQkvTiles(k: *const Kernels, s: cuda.Stream, at: [9]u64, rows: usize, c: usize, q_width: usize, kv_width: usize) !void {
+    return qkvLaunch(k, s, at, rows, c, q_width, kv_width, false);
+}
+
+fn qkvLaunch(k: *const Kernels, s: cuda.Stream, at: [9]u64, rows: usize, c: usize, q_width: usize, kv_width: usize, decode: bool) !void {
     if (rows == 0 or c == 0 or q_width == 0 or kv_width == 0) return error.Inkling2LoopQkvShape;
     var a: cuda.Args = .{};
-    for ([_]u64{ u_q, u_k, u_v, wq, wk, wv, raw_q, raw_k, raw_v }) |v| a.add(v);
+    for (at) |v| a.add(v);
     for ([_]i32{ int(rows), int(c), int(q_width), int(kv_width) }) |v| a.add(v);
-    if (rows <= 16 and c % 64 == 0) { // decode: a warp 32 outputs, the same sums in the same order
+    if (decode) { // a warp 32 outputs, the same sums in the same order
         const f = k.qkv_rows_fns[if (rows == 1) 0 else if (rows <= 4) 1 else 2];
         return go(f, s, .{ .x = @intCast((@max(q_width, kv_width) + 31) / 32), .y = 3 }, 32, &a);
     }
