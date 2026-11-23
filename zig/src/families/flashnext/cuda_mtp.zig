@@ -421,12 +421,12 @@ pub const Head = struct {
 /// The split best's scratch: each warp's best and id bits, its exponent sum, then a counter a row (round_rows rows).
 pub const split_bytes: usize = round_rows * 32 * 8 + round_rows * 32 * 4 + round_rows * 4;
 
-/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
-pub fn headBytes(fp8: bool) usize {
+/// Device bytes the head's weights take beyond the main model's: `fp8` routed experts, `shared` the shared width.
+pub fn headBytes(fp8: bool, shared: usize) usize {
     const weights = 3 * wt.moe_w * dims;
     const nvfp4 = weights / 2 * 5 / 4;
     const routed = if (fp8) weights + 3 * (wt.moe_w / 128) * (dims / 128) * 4 else nvfp4;
-    const experts = wt.experts_n * routed + nvfp4;
+    const experts = wt.experts_n * routed + 3 * shared * dims / 2 * 5 / 4;
     const attn = (wt.proj_n + dims) * dims / 2 * 5 / 4;
     const draft = 79_591 * dims / 2 * 5 / 4;
     return experts + attn + draft + 2 * dims * dims / 2 * 5 / 4 + @import("cuda_draw_batch.zig").bytes + @import("cuda_draft_draw.zig").scoreBytes(79_591) + split_bytes;
@@ -441,9 +441,19 @@ pub const check = @import("cuda_mtp_check.zig").check;
 test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
     const before = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4 + (wt.proj_n + dims) * dims / 2 * 5 / 4 + 79_591 * dims / 2 * 5 / 4 + 2 * dims * dims / 2 * 5 / 4;
     try std.testing.expectEqual(@as(usize, 24_832), split_bytes);
-    try std.testing.expectEqual(before + @import("cuda_draw_batch.zig").bytes + @import("cuda_draft_draw.zig").scoreBytes(79_591) + split_bytes, headBytes(false));
+    try std.testing.expectEqual(before + @import("cuda_draw_batch.zig").bytes + @import("cuda_draft_draw.zig").scoreBytes(79_591) + split_bytes, headBytes(false, wt.moe_w));
     // an expert's three projections: 640 x 2560 bytes and 5 x 20 scales each, against 5/8 of a byte a weight
-    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true) - headBytes(false));
+    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true, wt.moe_w) - headBytes(false, wt.moe_w));
+}
+
+test "a 1280-wide shared expert adds its three projections: the 3,072,000 bytes the 640 width undercounted" {
+    // gate, up and down at 5/8 of a byte a weight over the 640 rows a 1280-wide expert adds
+    const added = 3 * (1280 - wt.moe_w) * dims / 2 * 5 / 4;
+    try std.testing.expectEqual(@as(usize, 3_072_000), added);
+    try std.testing.expectEqual(added, headBytes(false, 1280) - headBytes(false, wt.moe_w));
+    try std.testing.expectEqual(added, headBytes(true, 1280) - headBytes(true, wt.moe_w));
+    // the routed experts' format moves the head by the same bytes at either shared width
+    try std.testing.expectEqual(headBytes(true, wt.moe_w) - headBytes(false, wt.moe_w), headBytes(true, 1280) - headBytes(false, 1280));
 }
 
 test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
