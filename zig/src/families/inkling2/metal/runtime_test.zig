@@ -178,6 +178,7 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
 }
 
 test "Model.scanNvfp4Weights merges all 20 NVFP4 layers and skips null globals" {
+    if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
     var w: model.Weights = undefined;
     for (0..24) |i| {
         w.layers[i].gu = .{ .weight = undefined, .scale = undefined, .amax = null, .denominator = null };
@@ -186,7 +187,6 @@ test "Model.scanNvfp4Weights merges all 20 NVFP4 layers and skips null globals" 
     const empty = model.Model.scanNvfp4Weights(&w);
     try std.testing.expectEqual(@as(usize, 0), empty.experts);
     try std.testing.expect(empty.finite_globals and empty.normal_range and empty.two_prod_exact and empty.finite_scales);
-    if (!builtin.os.tag.isDarwin()) return;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
@@ -216,7 +216,14 @@ test "Model.scanNvfp4Weights merges all 20 NVFP4 layers and skips null globals" 
     amax_buf.slice(f32, 2)[0] = 0x1.0p-118;
     sc_buf.slice(u8, 4)[0] = 0x7f;
     const bad = model.Model.scanNvfp4Weights(&w);
-    try std.testing.expect(!bad.normal_range and !bad.finite_scales);
+    try std.testing.expect(!bad.normal_range and !bad.finite_scales and bad.usesThreeProdFallback());
     try std.testing.expectEqual(@as(usize, 2), bad.unsafe_phi_experts);
     try std.testing.expectEqual(@as(usize, 2), bad.nan_scales);
+    amax_buf.slice(f32, 2)[0] = 1.0 + 1.0 / 64.0;
+    amax_buf.slice(f32, 2)[1] = 1.0 + 1.0 / 64.0;
+    den_buf.slice(f32, 1)[0] = 1.5;
+    sc_buf.slice(u8, 4)[0] = 0x38;
+    const tie = model.Model.scanNvfp4Weights(&w);
+    try std.testing.expect(tie.normal_range and !tie.two_prod_exact and tie.usesThreeProdFallback());
+    try std.testing.expectEqual(@as(usize, 4), tie.tie_fallback_experts);
 }

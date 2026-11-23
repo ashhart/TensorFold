@@ -132,6 +132,7 @@ pub const Nvfp4Scan = struct {
     finite_scales: bool = true,
     experts: usize = 0,
     unsafe_phi_experts: usize = 0,
+    tie_fallback_experts: usize = 0,
     exact_fallback_experts: usize = 0,
     nan_scales: usize = 0,
 
@@ -142,8 +143,13 @@ pub const Nvfp4Scan = struct {
         self.finite_scales = self.finite_scales and other.finite_scales;
         self.experts += other.experts;
         self.unsafe_phi_experts += other.unsafe_phi_experts;
+        self.tie_fallback_experts += other.tie_fallback_experts;
         self.exact_fallback_experts += other.exact_fallback_experts;
         self.nan_scales += other.nan_scales;
+    }
+
+    pub fn usesThreeProdFallback(self: Nvfp4Scan) bool {
+        return !self.two_prod_exact or self.exact_fallback_experts > 0;
     }
 };
 
@@ -165,38 +171,15 @@ fn countNanScales(bytes: []const u8) usize {
     return count;
 }
 
-fn normalizedScaleMantissa(code: u8) u3 {
-    const em = code & 0x7f;
-    if (em >= 8) return @truncate(em & 7);
-    return switch (@as(u3, @truncate(em))) {
-        0, 1, 2, 4 => 0,
-        3, 6 => 4,
-        5 => 2,
-        7 => 6,
-    };
-}
-
-fn badMantissaMask(p: f32) u8 {
-    var bad: u8 = 0;
-    const norm_bits: u32 = (@as(u32, @bitCast(p)) & 0x7f_ffff) | 0x3f80_0000;
-    const np: f32 = @bitCast(norm_bits);
-    const hp: f32 = 0.5 * np;
-    for (1..8) |m| {
-        const mf: f32 = @floatFromInt(m);
-        const a: u32 = @bitCast(roundBf16((1.5 + mf * 0.1875) * np));
-        const b: u32 = @bitCast(roundBf16(3.0 * ((1.0 + mf * 0.125) * hp)));
-        if (a != b) bad |= @as(u8, 1) << @intCast(m);
-    }
-    return bad;
-}
-
-/// Validates NVFP4 amax, denominator, and scales against the 2-product normal-range contract.
+/// Validates NVFP4 amax, denominator, and scales against the shader's per-expert ink2_nv_two_prod_safe(phi) dispatch.
 pub fn scanNvfp4Tensors(amax: []const f32, denominator: []const f32, scales: []const u8) Nvfp4Scan {
     var out = Nvfp4Scan{ .experts = amax.len };
     if (amax.len == 0 or denominator.len == 0 or scales.len % amax.len != 0) {
         out.finite_globals = false;
         out.normal_range = false;
         out.two_prod_exact = false;
+        out.unsafe_phi_experts = amax.len;
+        out.exact_fallback_experts = amax.len;
         return out;
     }
     const d = denominator[0];
@@ -226,20 +209,9 @@ pub fn scanNvfp4Tensors(amax: []const f32, denominator: []const f32, scales: []c
             out.unsafe_phi_experts += 1;
             out.exact_fallback_experts += 1;
         } else if (!nvfp4TwoProdSafe(p)) {
-            const bad_mask = badMantissaMask(p);
-            var hit = false;
-            for (row_scales) |sc| {
-                if ((sc & 0x7f) == 0x7f) continue;
-                const m = normalizedScaleMantissa(sc);
-                if ((bad_mask & (@as(u8, 1) << m)) != 0) {
-                    hit = true;
-                    break;
-                }
-            }
-            if (hit) {
-                out.two_prod_exact = false;
-                out.exact_fallback_experts += 1;
-            }
+            out.two_prod_exact = false;
+            out.tie_fallback_experts += 1;
+            out.exact_fallback_experts += 1;
         }
     }
     return out;

@@ -209,24 +209,37 @@ test "NVFP4 2-product guard filters failing BF16 quotient ties and scans checkpo
     const good_scales = [_]u8{ 0x38, 0x39, 0x38, 0x3a, 0x38, 0x3b };
     const ok = p.scanNvfp4Tensors(&good_amax, &good_den, &good_scales);
     try std.testing.expect(ok.finite_globals and ok.normal_range and ok.two_prod_exact and ok.finite_scales);
+    try std.testing.expect(!ok.usesThreeProdFallback());
     try std.testing.expectEqual(@as(usize, 0), ok.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), ok.tie_fallback_experts);
     try std.testing.expectEqual(@as(usize, 0), ok.exact_fallback_experts);
 
     const tie_amax = [_]f32{1.0 + 1.0 / 64.0};
     const tie_den = [_]f32{1.5};
-    const tie_clean = [_]u8{ 0x38, 0x40 };
-    const tie_hit = [_]u8{ 0x38, 0x07 };
-    const s_clean = p.scanNvfp4Tensors(&tie_amax, &tie_den, &tie_clean);
-    try std.testing.expect(s_clean.normal_range and s_clean.two_prod_exact);
-    const s_hit = p.scanNvfp4Tensors(&tie_amax, &tie_den, &tie_hit);
-    try std.testing.expect(s_hit.normal_range and !s_hit.two_prod_exact);
-    try std.testing.expectEqual(@as(usize, 1), s_hit.exact_fallback_experts);
+    for ([_][2]u8{ .{ 0x38, 0x40 }, .{ 0x38, 0x07 } }) |tie_scales| {
+        const s_tie = p.scanNvfp4Tensors(&tie_amax, &tie_den, &tie_scales);
+        try std.testing.expect(s_tie.finite_globals and s_tie.normal_range and s_tie.finite_scales and !s_tie.two_prod_exact);
+        try std.testing.expect(s_tie.usesThreeProdFallback());
+        try std.testing.expectEqual(@as(usize, 0), s_tie.unsafe_phi_experts);
+        try std.testing.expectEqual(@as(usize, 1), s_tie.tie_fallback_experts);
+        try std.testing.expectEqual(@as(usize, 1), s_tie.exact_fallback_experts);
+    }
+
+    const nan_scales = [_]u8{ 0x38, 0x7f, 0xff, 0x3a, 0x38, 0x3b };
+    const s_nan = p.scanNvfp4Tensors(&good_amax, &good_den, &nan_scales);
+    try std.testing.expect(s_nan.finite_globals and s_nan.normal_range and s_nan.two_prod_exact and !s_nan.finite_scales);
+    try std.testing.expect(!s_nan.usesThreeProdFallback());
+    try std.testing.expectEqual(@as(usize, 0), s_nan.exact_fallback_experts);
+    try std.testing.expectEqual(@as(usize, 2), s_nan.nan_scales);
 
     const edge_amax = [_]f32{ 0x1.0p-118, std.math.inf(f32) };
     const edge_den = [_]f32{1.0};
     const edge_scales = [_]u8{ 0x01, 0x7f, 0xff, 0x38 };
     const s_edge = p.scanNvfp4Tensors(&edge_amax, &edge_den, &edge_scales);
-    try std.testing.expect(!s_edge.finite_globals and !s_edge.normal_range and !s_edge.finite_scales);
+    try std.testing.expect(!s_edge.finite_globals and !s_edge.normal_range and !s_edge.two_prod_exact and !s_edge.finite_scales);
+    try std.testing.expect(s_edge.usesThreeProdFallback());
     try std.testing.expectEqual(@as(usize, 2), s_edge.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), s_edge.tie_fallback_experts);
+    try std.testing.expectEqual(@as(usize, 2), s_edge.exact_fallback_experts);
     try std.testing.expectEqual(@as(usize, 2), s_edge.nan_scales);
 }

@@ -254,10 +254,16 @@ pub const Model = struct {
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "model.llm.");
         m.weights = try loadWeights(&m.checkpoint, &m.config, &m.weight_plan);
         m.nvfp4_scan = scanNvfp4Weights(&m.weights);
-        if (!m.nvfp4_scan.finite_globals or !m.nvfp4_scan.normal_range or !m.nvfp4_scan.finite_scales) {
+        if (m.nvfp4_scan.usesThreeProdFallback()) {
             std.log.warn(
-                "inkling2: nvfp4 checkpoint outside 2-prod fast bounds (unsafe_phi={d}, nan_scales={d}); using 3-prod fallback",
-                .{ m.nvfp4_scan.unsafe_phi_experts, m.nvfp4_scan.nan_scales },
+                "inkling2: nvfp4 checkpoint triggers 3-prod fallback on {d}/{d} experts (unsafe_phi={d}, tie_fallback={d})",
+                .{ m.nvfp4_scan.exact_fallback_experts, m.nvfp4_scan.experts, m.nvfp4_scan.unsafe_phi_experts, m.nvfp4_scan.tie_fallback_experts },
+            );
+        }
+        if (!m.nvfp4_scan.finite_scales) {
+            std.log.warn(
+                "inkling2: nvfp4 checkpoint contains {d} nonfinite E4M3 scales (2-prod dispatch unchanged for safe phi)",
+                .{m.nvfp4_scan.nan_scales},
             );
         }
 
