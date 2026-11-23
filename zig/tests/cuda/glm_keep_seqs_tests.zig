@@ -76,15 +76,14 @@ const Run = struct {
 
 const Case = struct { name: []const u8, slot: u32, poison: bool, plant: bool };
 
-pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
-    if (rest.len < 2) return check.expect(false, "usage: glm-keep-seqs-check CKPT ID_PATH (TF_GLM_LAYERS=2 on glm-synth's checkpoint)", .{});
+pub fn keepSeqsCheck(gpu: check.Gpu, checkpoint: []const u8, id_path: []const u8, rank: c_int, world: c_int) !void {
     const glm = @import("glm_cuda");
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var lib = try cuda.nccl.Library.open();
     defer lib.close();
-    const comm = try openComm(gpu, &lib, 0, 1, rest[1]);
+    const comm = try openComm(gpu, &lib, rank, world, id_path);
     defer _ = lib.api.ncclCommDestroy(comm);
     var problem: []const u8 = "";
     var set = glm.ranks.Settings.read(&glm.ranks.environment, &problem) catch |err| {
@@ -94,7 +93,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     var failed = false;
     for ([_]bool{ false, true }) |kv8| {
         set.kv8 = kv8;
-        const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, rest[0], &lib, comm, 0, 1, .{ .capacity = 8192, .mtp = true, .settings = set });
+        const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, rank, world, .{ .capacity = 8192, .mtp = true, .settings = set });
         try check.expect(e.keepsSequence(1), "glm-keep-seqs-check needs TF_GLM_KEEP_SEQS=1", .{});
         defer e.deinit();
         var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, 8192);
