@@ -84,12 +84,15 @@ __device__ __forceinline__ void fetch(const Weight& w, long long e, int cb, int 
   const long long z = (e * w.N + row) * w.K + 32LL * g0;
   const int n = w.format ? steps : 2 * steps;  // the row's scale bytes in this tile; unpadded, the last ends the data
   const uint8_t* src = w.scales + z / w.G;
-  const bool words = (reinterpret_cast<uintptr_t>(src) & 3) == 0;
+  if (((reinterpret_cast<uintptr_t>(src) | n) & 3) == 0) {  // aligned, no partial word (Mini's shapes): whole words
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      if (4 * i < n) t.scales[i] = __ldg(reinterpret_cast<const uint32_t*>(src) + i);
+    return;
+  }
 #pragma unroll
   for (int i = 0; i < 4; ++i)
-    if (4 * i < n)
-      t.scales[i] = words && 4 * i + 4 <= n ? __ldg(reinterpret_cast<const uint32_t*>(src) + i)
-                                            : scale_word(src + 4 * i, n - 4 * i);
+    if (4 * i < n) t.scales[i] = scale_word(src + 4 * i, n - 4 * i);
 }
 
 template <int NT>
