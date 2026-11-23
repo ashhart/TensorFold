@@ -66,6 +66,9 @@ pub const Kernels = struct {
     rnn: cuda.Function,
     vocab: cuda.Function,
     pick: cuda.Function,
+    vocab_rows: cuda.Function,
+    pick_rows: cuda.Function,
+    many: Many,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -86,6 +89,16 @@ pub const Kernels = struct {
             .rnn = try mod.function("tf_ink2_dsp_rnn"),
             .vocab = try mod.function("tf_ink2_dsp_vocab"),
             .pick = try mod.function("tf_ink2_dsp_pick_merge"),
+            .vocab_rows = try mod.function("tf_ink2_dsp_vocab_rows"),
+            .pick_rows = try mod.function("tf_ink2_dsp_pick_rows"),
+            .many = .{
+                .qk = try mod.function("tf_ink2_dsp_qk_many"),
+                .attn = try mod.function("tf_ink2_dsp_attn_many"),
+                .merge = try mod.function("tf_ink2_dsp_merge_many"),
+                .ctx = try mod.function("tf_ink2_dsp_ctx_many"),
+                .rnn = try mod.function("tf_ink2_dsp_rnn_many"),
+                .pick = try mod.function("tf_ink2_dsp_pick_many"),
+            },
         };
     }
 
@@ -218,6 +231,114 @@ pub fn pick(k: *const Kernels, s: cuda.Stream, picks: u64, world: usize, walk: u
     try go(k.pick, s, .{ .x = 1 }, 32, &a);
 }
 
+pub fn vocabRows(k: *const Kernels, s: cuda.Stream, base: u64, base_ld: usize, latent: u64, fold: u64, fbias: u64, cap: f32, valid: usize, nv: usize, rows: usize, out: u64) !void {
+    var a: cuda.Args = .{};
+    a.add(base);
+    a.add(@as(i64, @intCast(base_ld)));
+    for ([_]u64{ latent, fold, fbias }) |v| a.add(v);
+    a.add(cap);
+    a.add(int(valid));
+    a.add(int(nv));
+    a.add(int(rows));
+    a.add(out);
+    try go(k.vocab_rows, s, .{ .x = @intCast((nv + 7) / 8) }, 256, &a);
+}
+
+/// Every stream's best pick across ranks (rank q's row r at (q * rows + r) * 16 bytes) into its walk, a block a stream.
+pub fn pickRows(k: *const Kernels, s: cuda.Stream, picks: u64, world: usize, rows: usize, walk: u64, t: usize, j: usize) !void {
+    var a: cuda.Args = .{};
+    a.add(picks);
+    for ([_]usize{ world, rows }) |v| a.add(int(v));
+    a.add(walk);
+    for ([_]usize{ t, j }) |v| a.add(int(v));
+    try go(k.pick_rows, s, .{ .x = @intCast(rows) }, 32, &a);
+}
+
+/// The batched pass's kernels (dspark_many.cuh): every stream of a pass in one launch.
+pub const Many = struct {
+    qk: cuda.Function,
+    attn: cuda.Function,
+    merge: cuda.Function,
+    ctx: cuda.Function,
+    rnn: cuda.Function,
+    pick: cuda.Function,
+};
+
+/// dspark_many.cuh's DspStream, field for field: a stream's caches by layer, f_rnn, anchor, keys, race.
+pub const Stream = extern struct {
+    kc: [8]u64 = @splat(0),
+    vc: [8]u64 = @splat(0),
+    frnn: u64 = 0,
+    seed: u64 = 0,
+    p: i32 = 0,
+    race: i32 = 0,
+    inv_t: f32 = 0,
+    lo: [8]i32 = @splat(0),
+    pad: i32 = 0,
+};
+
+/// q/k prep over several streams' rows: row r is stream at[2r] at position at[2r + 1] (QkArgs' kc, vc, pos0 unused).
+pub fn qkMany(k: *const Kernels, s: cuda.Stream, q: QkArgs, st: u64, at: u64, layer: usize, rows: usize) !void {
+    var a: cuda.Args = .{};
+    a.add(q);
+    a.add(st);
+    a.add(at);
+    a.add(int(layer));
+    try go(k.many.qk, s, .{ .x = @intCast(rows), .y = @intCast(q.hq + q.hk) }, 64, &a);
+}
+
+/// Every stream's block attention (streams `n`, at most `maxc` chunks each), then its merge into `out` [n][T][hq][128].
+pub fn attendMany(k: *const Kernels, s: cuda.Stream, at: AttnArgs, st: u64, layer: usize, n: usize, maxc: usize, out: u64) !void {
+    if (at.T * @divExact(at.hq, at.hk) > max_q) return error.Inkling2DraftShape;
+    var a: cuda.Args = .{};
+    a.add(at);
+    a.add(st);
+    a.add(int(layer));
+    a.add(int(maxc));
+    try go(k.many.attn, s, .{ .x = @intCast(maxc), .y = @intCast(at.hk), .z = @intCast(n) }, 256, &a);
+    var m: cuda.Args = .{};
+    for ([_]u64{ at.po, at.pml, st }) |v| m.add(v);
+    for ([_]i32{ int(layer), at.T, int(maxc), at.T * at.hq }) |v| m.add(v);
+    m.add(out);
+    try go(k.many.merge, s, .{ .x = @intCast(at.T * at.hq), .y = @intCast(n) }, 128, &m);
+}
+
+/// The Markov head's context rows of `n` streams (hidden rows `hstride` elements apart): fp32 [n][rows][3r].
+pub fn ctxMany(k: *const Kernels, s: cuda.Stream, hidden: u64, hstride: usize, st: u64, w: u64, bias: u64, out: u64, n: usize, rows: usize, c: usize, r: usize) !void {
+    if (rows > max_rows or r != rank) return error.Inkling2DraftShape;
+    var a: cuda.Args = .{};
+    a.add(hidden);
+    a.add(@as(i64, @intCast(hstride)));
+    for ([_]u64{ st, w, bias, out }) |v| a.add(v);
+    for ([_]i32{ int(rows), int(c), int(r) }) |v| a.add(v);
+    try go(k.many.ctx, s, .{ .x = @intCast((3 * r + 7) / 8), .y = @intCast(n) }, 256, &a);
+}
+
+/// One recurrence step of `n` streams' walks (ctx rows `cstride` floats apart, walks `t` apart).
+pub fn rnnMany(k: *const Kernels, s: cuda.Stream, cx: u64, cstride: usize, w: u64, w1: u64, walk: u64, t: usize, j: usize, state: u64, latent: u64, n: usize, r: usize, c: usize) !void {
+    if (r != rank) return error.Inkling2DraftShape;
+    var a: cuda.Args = .{};
+    a.add(cx);
+    a.add(@as(i64, @intCast(cstride)));
+    for ([_]u64{ w, w1, walk }) |v| a.add(v);
+    for ([_]usize{ t, j }) |v| a.add(int(v));
+    a.add(state);
+    a.add(latent);
+    for ([_]usize{ r, c }) |v| a.add(int(v));
+    try go(k.many.rnn, s, .{ .x = @intCast(n) }, @intCast(r), &a);
+}
+
+/// Each of `n` streams' step pick on this rank (greedy over nv, or raced over valid) into `picks`, 16 bytes apart.
+pub fn pickMany(k: *const Kernels, s: cuda.Stream, scores: u64, nv: usize, valid: usize, base: usize, st: u64, step: usize, picks: u64, n: usize) !void {
+    var a: cuda.Args = .{};
+    a.add(scores);
+    for ([_]usize{ nv, valid, base }) |v| a.add(int(v));
+    a.add(st);
+    a.add(int(step));
+    a.add(picks);
+    try go(k.many.pick, s, .{ .x = @intCast(n) }, 1024, &a);
+}
+
 test "dspark ops: argument structs keep dspark.cu's layouts; chunks by absolute position" {
     try std.testing.expectEqual(@as(usize, 6 * 8 + 8 + 4 * 4 + 2 * 4), @sizeOf(QkArgs));
     try std.testing.expectEqual(@as(usize, 5 * 8 + 8 * 4), @sizeOf(AttnArgs));
@@ -238,6 +359,8 @@ test "dspark ops: a head, a block or a ring the kernels would run wrong is refus
     try std.testing.expectError(no, rnn(&k, s, 0, 0, 0, 0, 0, 0, 0, 512, 4608));
     try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 8, 4608, 128));
     try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 9, 4608, 256));
+    try std.testing.expectError(no, ctxMany(&k, s, 0, 0, 0, 0, 0, 0, 2, 9, 4608, 256));
+    try std.testing.expectError(no, rnnMany(&k, s, 0, 0, 0, 0, 0, 8, 0, 0, 0, 2, 512, 4608));
     const q: QkArgs = .{ .x = 0, .qw = 0, .kw = 0, .q = 0, .kc = 0, .vc = 0, .ld = 32 * 64, .hq = 24, .hk = 4, .ring = 4096, .pos0 = 0, .eps = 1e-6, .theta = 1e6 };
     try std.testing.expectError(no, qk(&k, s, q, 8)); // 64-wide heads
     const at: AttnArgs = .{ .q = 0, .kc = 0, .vc = 0, .po = 0, .pml = 0, .T = 8, .hq = 24, .hk = 4, .ring = 4096, .lo = 0, .hi = 4096, .c0 = 0, .scale = 1 };

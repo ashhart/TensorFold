@@ -9,6 +9,8 @@ const norm = @import("contract_inkling2_dspark_norm.zig");
 const attn = @import("contract_inkling2_dspark_attn.zig");
 const head = @import("contract_inkling2_dspark_head.zig");
 const glue = @import("contract_inkling2_dspark_glue.zig");
+const pick = @import("contract_inkling2_ops_pick.zig");
+const opsref = @import("contract_inkling2_ops_ref.zig");
 
 /// The drafter's registrations, each control after the kernel it breaks (the caller's heap set holds them).
 pub const Set = struct {
@@ -21,8 +23,15 @@ pub const Set = struct {
     silus: [2]ref.Gated(glue.Silu) = undefined,
     ctxs: [2]ref.Gated(head.Ctx) = undefined,
     rnns: [2]ref.Gated(head.Rnn) = undefined,
-    vocabs: [2]head.Banded(head.Vocab) = undefined,
-    picks: [2]ref.Checked(glue.Pick) = undefined,
+    vocabs: [4]head.Banded(head.Vocab) = undefined,
+    picks: [4]ref.Checked(glue.Pick) = undefined,
+    // Mini's batched pass (dspark_many.cuh), each with the control of the kernel it copies
+    qkms: [3]ref.Gated(norm.Qk) = undefined,
+    attms: [2]attn.Attend = undefined,
+    ctxms: [2]ref.Gated(head.Ctx) = undefined,
+    rnnms: [2]ref.Gated(head.Rnn) = undefined,
+    top1ms: [2]opsref.Checked(pick.Top1) = undefined,
+    racems: [2]opsref.Checked(pick.Race) = undefined,
 
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.k = try dk.Kernels.load(gpu.d);
@@ -37,8 +46,14 @@ pub const Set = struct {
         for (&set.silus, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .swapped = i == 1 } };
         for (&set.ctxs, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .early = i == 1 } };
         for (&set.rnns, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .late = i == 1 } };
-        for (&set.vocabs, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .short = i == 1 } } };
-        for (&set.picks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .alone = i == 1 } };
+        for (&set.vocabs, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .short = i % 2 == 1, .rows = i >= 2 } } };
+        for (&set.picks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .alone = i % 2 == 1, .rows = i >= 2 } };
+        for (&set.qkms, [_]norm.Form{ .draft, .absorb, .draft }, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .late = i == 2, .many = true } };
+        for (&set.attms, 0..) |*x, i| x.* = .{ .rig = rig, .k = k, .late = i == 1, .many = true };
+        for (&set.ctxms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .early = i == 1, .many = true } };
+        for (&set.rnnms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .late = i == 1, .many = true } };
+        for (&set.top1ms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = undefined, .short = i == 1, .many = k } };
+        for (&set.racems, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = undefined, .late = i == 1, .many = k } };
         for (&set.mixes) |*x| try list.append(a, x.kernel());
         for (&set.adds) |*x| try list.append(a, x.kernel());
         for (&set.qks) |*x| try list.append(a, x.kernel());
@@ -49,6 +64,7 @@ pub const Set = struct {
         for (&set.rnns) |*x| try list.append(a, x.kernel());
         for (&set.vocabs) |*x| try list.append(a, x.kernel());
         for (&set.picks) |*x| try list.append(a, x.kernel());
+        inline for (.{ "qkms", "attms", "ctxms", "rnnms", "top1ms", "racems" }) |f| for (&@field(set, f)) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
@@ -62,6 +78,7 @@ pub const Set = struct {
         for (&set.rnns) |*x| x.deinit();
         for (&set.vocabs) |*x| x.deinit();
         for (&set.picks) |*x| x.deinit();
+        inline for (.{ "qkms", "attms", "ctxms", "rnnms", "top1ms", "racems" }) |f| for (&@field(set, f)) |*x| x.deinit();
         set.k.unload();
     }
 };
