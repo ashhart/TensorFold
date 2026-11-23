@@ -157,4 +157,10 @@ test "speech arriving during the prompt encoder, denoising or the decoder holds 
     try Arrival.join();
     try testing.expect(Arrival.untouched and last.paused >= least and !last.timing_valid);
     try testing.expectEqualSlices(f32, velocity, held_velocity);
+    // the probe after the final command buffer is waited: speech arriving then does not hold a finished step
+    b.model.give_way = Arrival.at(io, lock, 4 + b.model.blocks.len, hold_ms);
+    const done = try b.model.forward(case.noise, &.{}, 0, held_velocity, &.{});
+    try Arrival.join();
+    try testing.expect(done.paused == 0 and !done.timing_valid);
+    try testing.expectEqualSlices(f32, velocity, held_velocity);
 }
