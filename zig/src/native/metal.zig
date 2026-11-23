@@ -155,8 +155,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return @import("uocr.zig").open(a, gpa, io, o, problem);
-    if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl") and !std.mem.eql(u8, o.model_type, "minimax_m3_vl")) {
-        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4, Step-5, MiniMax-M3.1-Flash and Unlimited-OCR-2 only, not {s} checkpoints", .{o.model_type});
+    if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl") and !std.mem.eql(u8, o.model_type, "minimax_m3_vl") and !std.mem.eql(u8, o.model_type, "inkling2_loop")) {
+        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4, Step-5, MiniMax-M3.1-Flash, Inkling 2 Mini and Unlimited-OCR-2 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);

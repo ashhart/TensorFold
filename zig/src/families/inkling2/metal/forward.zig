@@ -14,11 +14,14 @@ const Model = model_file.Model;
 
 pub const Ref = state.Ref;
 pub const Segment = struct { cache: *state.Cache, rows: usize };
+/// The BF16 rows [off, off + rows * hidden * 2) of `buf` replace the normed embeddings of chunk rows [row, row + rows).
+pub const ImageRows = struct { row: u32, rows: u32, buf: mtl.Buffer, off: usize = 0 };
 pub const Options = struct {
     all: bool = false,
     ids: ?Ref = null,
     flight: ?*mtl.CommandBuffer = null,
     taps: ?state.Ref = null,
+    images: []const ImageRows = &.{},
 };
 
 pub const FinalPlan = struct { work_rows: usize, logits_rows: usize, logits_row: usize, capture_rows: usize };
@@ -295,6 +298,17 @@ pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const
     return runShared(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, options);
 }
 
+/// Image rows ride one segment's chunk, fit their buffer, and replace only placeholder tokens.
+fn checkImages(m: *const Model, ids: []const u32, segments: usize, options: Options) !void {
+    if (options.images.len == 0) return;
+    if (segments != 1 or options.ids != null) return error.Inkling2ImageRows;
+    for (options.images) |im| {
+        const end = @as(usize, im.row) + im.rows;
+        if (im.rows == 0 or end > ids.len or im.off + @as(usize, im.rows) * state.hidden * 2 > im.buf.length()) return error.Inkling2ImageRows;
+        for (ids[im.row..end]) |id| if (id != m.config.image_token) return error.Inkling2ImageRows;
+    }
+}
+
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
     if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
@@ -317,11 +331,13 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         for (ids) |id| if (id >= m.config.text.vocab) return error.Inkling2Token;
         @memcpy(s.ids.slice(u32, rows), ids);
     }
+    try checkImages(m, ids, segments.len, options);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
+    for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);
