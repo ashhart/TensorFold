@@ -437,6 +437,11 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
     if (l.pins) |*x| x.remove(st);
 }
 
+pub fn requestedLanes(count: u32, fixed: bool) error{Slots}!u32 {
+    _ = fixed;
+    return count;
+}
+
 fn requestedSlots(o: Options) error{Slots}!u32 {
     const slots = @import("automatic_lanes").bounded(o.lanes, o.lanes_fixed, 32);
     if (slots == 0 or slots > 32) return error.Slots;
