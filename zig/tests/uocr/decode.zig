@@ -206,7 +206,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const t1 = mtl.clock.seconds();
-    try dec.prefill(p, rows);
+    try dec.prefill(p, rows, null);
     const t_pre = mtl.clock.seconds() - t1;
     dec.trace = null;
     dec.trace_parts = null;
@@ -257,7 +257,7 @@ pub fn main(init: std.process.Init) !u8 {
     {
         var fed = try uo.decoder.Decoder.init(gpa, device, queue, &k, &w, n + max_new + 1, n);
         defer fed.deinit();
-        try fed.prefill(p, rows);
+        try fed.prefill(p, rows, null);
         var guard = uo.generate.Guard.init(p);
         var st = uo.prompt.Step.init(p);
         var flips: usize = 0;
@@ -285,7 +285,7 @@ pub fn main(init: std.process.Init) !u8 {
         dec.deinit();
         dec = try uo.decoder.Decoder.init(gpa, device, queue, &k, &w, n + max_new + 1, @min(c, n));
         const t3 = mtl.clock.seconds();
-        try dec.prefill(p, rows);
+        try dec.prefill(p, rows, null);
         const lg = try dec.logits();
         const t_chunked = mtl.clock.seconds() - t3;
         const same_logits = std.mem.eql(u16, lg, first_logits);
