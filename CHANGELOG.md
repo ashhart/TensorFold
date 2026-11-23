@@ -17,6 +17,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: prompt chunks' full-attention layers score and weight eight rows at a time on 8x8 simdgroup matrices instead of one row a threadgroup, so a chunk's cost no longer grows as fast with the position: the 512-row attention of one full-attention visit drops from 117 to 57 ms at 32K and from 218 to 108 ms at 61K of context, and a cold 32,768-token first token from 170 to 190 s to 151 to 156 s. Each row keeps its key blocks, running max and sum, and the four-stream merge order, and the outputs are byte-equal (token hashes unchanged); the kernel contract registers the kernels with launch records and planted controls (#4337).
 
+- Nemotron on CUDA: a new prompt is filled a chunk at a time between other streams' decode rounds, so a long prompt no longer stalls replies already streaming; tokens unchanged.
+
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
 - Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending.
 
