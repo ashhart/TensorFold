@@ -93,11 +93,11 @@ test "Every visit and convolution role has disjoint persistent and staged bytes"
     }
 }
 
-test "Compact snapshots charge global prefixes and sliding physical rings" {
+test "Compact snapshots charge global prefixes and a sliding layer's window less one" {
     const one_layer_pair: u64 = state.kv_width * 2 * 2;
-    for ([_]usize{ 0, 1, 1024, state.sliding_ring, state.sliding_ring + 1 }) |at| {
+    for ([_]usize{ 0, 1, 1023, 1024, state.sliding_ring, state.sliding_ring + 1 }) |at| {
         const n: u64 = @intCast(at);
-        const live = @as(u64, 8) * n + @as(u64, 40) * @as(u64, @intCast(@min(at, state.sliding_ring)));
+        const live = @as(u64, 8) * n + @as(u64, 40) * @as(u64, @intCast(@min(at, state.sliding_window - 1)));
         const kv = live * one_layer_pair;
         const expected = kv + state.conv_bytes;
         try std.testing.expectEqual(expected, snapshot.bytes(at));
@@ -223,4 +223,85 @@ test "A snapshot restores each head's live rows into a cache of another capacity
     try std.testing.expectEqual(@as(usize, rows), to.len);
     try moveLive(queue, &to, got, rows, false);
     try std.testing.expect(std.mem.eql(u8, want.slice(u8, size), got.slice(u8, size)));
+}
+
+/// One head's whole ring of a slot's keys or values, to or from `flat` at `at`.
+fn moveHead(e: mtl.BlitEncoder, cache: *const state.Cache, slot: usize, values: bool, head: usize, flat: mtl.Buffer, at: usize, rows: usize, into: bool) void {
+    const row = ap.head_dim * 2;
+    const off = (if (values) cache.value_at[slot] else cache.key_at[slot]) + head * cache.ring(slot) * row;
+    if (into) e.copy(flat, at, cache.kv, off, rows * row) else e.copy(cache.kv, off, flat, at, rows * row);
+}
+
+test "A snapshot keeps a wrapped sliding ring's window less one by position, and no row before it" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    const p = schedule();
+    // Past the sliding ring, so it has wrapped: the kept rows are positions at - 1023 to at - 1, in two runs of slots.
+    const at = state.sliding_ring + 452;
+    var from = try state.Cache.init(device, 3000, &p);
+    defer from.deinit();
+    var to = try state.Cache.init(device, 3500, &p);
+    defer to.deinit();
+    const row = ap.head_dim * 2;
+    const heads = state.kv_width / ap.head_dim;
+    // A sliding slot and a global one, the first and last head of each side.
+    var sliding: usize = 0;
+    var global: usize = 0;
+    for (0..state.visit_slots) |slot| {
+        if (from.globals[slot]) global = slot else sliding = slot;
+    }
+    try std.testing.expect(from.ring(global) != to.ring(global) and from.ring(sliding) == state.sliding_ring and from.ring(global) >= at);
+    const span = @max(state.sliding_ring, from.ring(global));
+    const picks = [_]struct { slot: usize, values: bool, head: usize }{
+        .{ .slot = sliding, .values = false, .head = 0 },        .{ .slot = sliding, .values = true, .head = heads - 1 },
+        .{ .slot = global, .values = false, .head = heads - 1 }, .{ .slot = global, .values = true, .head = 0 },
+    };
+    const want = try device.buffer(picks.len * span * row, mtl.ResourceOptions.shared);
+    defer want.deinit();
+    const got = try device.buffer(picks.len * span * row, mtl.ResourceOptions.shared);
+    defer got.deinit();
+    var prng = std.Random.DefaultPrng.init(11);
+    prng.random().bytes(want.slice(u8, picks.len * span * row));
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const e = cb.blit();
+        for (picks, 0..) |pick, i| moveHead(e, &from, pick.slot, pick.values, pick.head, want, i * span * row, from.ring(pick.slot), true);
+        e.end();
+        cb.commit();
+        cb.wait();
+    }
+    from.len = at;
+    var snap = try snapshot.save(device, queue, &from);
+    defer snap.deinit();
+    try snapshot.restore(&to, queue, &snap);
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const e = cb.blit();
+        for (picks, 0..) |pick, i| moveHead(e, &to, pick.slot, pick.values, pick.head, got, i * span * row, @min(to.ring(pick.slot), span), false);
+        e.end();
+        cb.commit();
+        cb.wait();
+    }
+    const w = want.slice(u8, picks.len * span * row);
+    const g = got.slice(u8, picks.len * span * row);
+    for (picks, 0..) |pick, i| {
+        const base = i * span * row;
+        const first = if (from.globals[pick.slot]) 0 else at - (state.sliding_window - 1);
+        // A kept position sits at its slot of the saver's ring in `want` and of the restorer's in `got`.
+        for (first..at) |pos| {
+            const a = base + (pos % from.ring(pick.slot)) * row;
+            const b = base + (pos % to.ring(pick.slot)) * row;
+            try std.testing.expect(std.mem.eql(u8, w[a..][0..row], g[b..][0..row]));
+        }
+        // The position before a sliding layer's kept rows was not carried over: its slot is still empty.
+        if (!from.globals[pick.slot]) {
+            const b = base + ((first - 1) % to.ring(pick.slot)) * row;
+            try std.testing.expect(std.mem.allEqual(u8, g[b..][0..row], 0));
+        }
+    }
 }

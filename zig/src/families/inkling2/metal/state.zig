@@ -27,7 +27,9 @@ pub const message_entries = 48;
 pub const block_slots = 4;
 pub const conv_states = 4;
 pub const visit_slots = 48;
-pub const sliding_ring = ap.ringFor(1024, max_rows);
+/// A sliding layer's span: a row reads itself and the `sliding_window - 1` rows before it.
+pub const sliding_window = 1024;
+pub const sliding_ring = ap.ringFor(sliding_window, max_rows);
 pub const conv_widths = [conv_states]usize{ 1024, 1024, 2304, 2304 };
 pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const conv_bytes = visit_slots * 3 * conv_row_values * 2;
