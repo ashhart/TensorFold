@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5/3.8 on CUDA: `TF_QWEN35_ATTN_ALL_ROWS=1` sends multi-row BF16 decode windows to the existing rows attention kernel at every context length (it already matches the one-row kernel's score and reduction order), removing the dead second launch below 8K; off by default (#N).
+
 - Tests: the lone-driver third-prompt test no longer hangs when its poller is descheduled (#4783).
 
 - Lanes: the opt-in shared price log also covers the shared-drafts grant path (#4686). Thanks @eXsoR65.
