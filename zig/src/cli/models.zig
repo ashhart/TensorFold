@@ -42,6 +42,53 @@ pub fn fitOf(e: *const Entry, mc: *const Machine) Fit {
     return if (n + room <= mc.gpu_limit) .fits else .tight;
 }
 
+/// The one checkpoint `start` selects, with pinned pull specs and the snapshot directories serve must use.
+pub const StartChoice = struct {
+    entry: *const Entry,
+    model: []const u8,
+    drafter: ?[]const u8,
+    model_dir: []const u8,
+    drafter_dir: ?[]const u8,
+    download_bytes: u64,
+    cached: bool,
+};
+
+fn pinned(repo: []const u8, revision: []const u8, a: Allocator) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}@{s}", .{ repo, revision });
+}
+
+/// The exact snapshot a fully pinned entry names, whether it is cached yet or a successful pull will create it.
+fn startSnapshot(a: Allocator, io: std.Io, root: []const u8, repo: []const u8, revision: []const u8) !struct { []const u8, bool } {
+    const dir = try std.fs.path.join(a, &.{ root, try hub.repoDirName(a, repo), "snapshots", revision });
+    return .{ dir, hub.isDir(io, dir) and @import("checkpoint_config").optional(a, io, dir) != null };
+}
+
+/// Largest comfortably fitting fully pinned `models` row that `tensorfold pull` can install; ties keep registry order.
+pub fn chooseForStart(a: Allocator, io: std.Io, env: ?*const std.process.Environ.Map, override: ?[]const u8, entries: []const Entry, mc: *const Machine) !?StartChoice {
+    var best: ?*const Entry = null;
+    for (entries) |*e| {
+        if (e.hf_dir != null) continue;
+        const revision = e.revision orelse continue;
+        if (!hub.hexSha(revision)) continue;
+        if (e.drafter != null and (e.drafter_revision == null or !hub.hexSha(e.drafter_revision.?))) continue;
+        if (fitOf(e, mc) != .fits) continue;
+        if (best == null or need(e) > need(best.?)) best = e;
+    }
+    const e = best orelse return null;
+    const root = try hub.cacheDir(a, env, override);
+    const main = try startSnapshot(a, io, root, e.repo, e.revision.?);
+    const draft = if (e.drafter) |d| try startSnapshot(a, io, root, d, e.drafter_revision.?) else .{ @as([]const u8, ""), true };
+    return .{
+        .entry = e,
+        .model = try pinned(e.repo, e.revision.?, a),
+        .drafter = if (e.drafter) |d| try pinned(d, e.drafter_revision.?, a) else null,
+        .model_dir = main[0],
+        .drafter_dir = if (e.drafter != null) draft[0] else null,
+        .download_bytes = e.download,
+        .cached = main[1] and draft[1],
+    };
+}
+
 /// A measurement on this chip, else the nearest on this backend (same chip generation first) scaled by bandwidth.
 pub fn estimate(e: *const Entry, mc: *const Machine) ?Estimate {
     if (mc.backend == .none) return null;
@@ -464,6 +511,33 @@ test "onDisk sizes the checkpoints models lists, and an absent cache has none" {
     try std.testing.expectEqualStrings("qwen4_exp", found[0].model_type);
     try std.testing.expect(found[0].bytes > 0); // its config.json
     try std.testing.expectEqual(@as(usize, 0), (try onDisk(a, io, null, try std.fs.path.join(a, &.{ root, "missing" }))).len);
+}
+
+test "start CLI: a fake registry picks the largest pullable fit and refuses a machine that fits nothing" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    const missing = try std.fmt.allocPrint(a, ".tf-start-none-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    const entries = [_]Entry{
+        .{ .title = "Small", .format = "4-bit", .repo = "Org/Small", .revision = "1111111111111111111111111111111111111111", .download = 2 * gib, .metal = true, .recipe = "small" },
+        .{ .title = "Large", .format = "4-bit", .repo = "Org/Large", .revision = "2222222222222222222222222222222222222222", .drafter = "Org/Draft", .drafter_revision = "3333333333333333333333333333333333333333", .download = 9 * gib, .metal = true, .recipe = "large" },
+        .{ .title = "Unpinned", .format = "4-bit", .repo = "Org/Unpinned", .download = 20 * gib, .metal = true, .recipe = "unpinned" },
+        .{ .title = "Tight", .format = "8-bit", .repo = "Org/Tight", .revision = "4444444444444444444444444444444444444444", .download = 61 * gib, .metal = true, .recipe = "tight" },
+        .{ .title = "External installer", .format = "4-bit", .repo = "Org/External", .download = 12 * gib, .metal = true, .hf_dir = "External", .recipe = "external" },
+        .{ .title = "Too big", .format = "8-bit", .repo = "Org/TooBig", .download = 100 * gib, .metal = true, .recipe = "too-big" },
+    };
+    var mc: Machine = .{ .backend = .metal, .memory = 96 * gib, .gpu_limit = 64 * gib };
+    const picked = (try chooseForStart(a, io, null, missing, &entries, &mc)).?;
+    try std.testing.expectEqualStrings("Org/Large", picked.entry.repo);
+    try std.testing.expectEqualStrings("Org/Large@2222222222222222222222222222222222222222", picked.model);
+    try std.testing.expectEqualStrings("Org/Draft@3333333333333333333333333333333333333333", picked.drafter.?);
+    try std.testing.expectEqual(@as(u64, 9 * gib), picked.download_bytes);
+    try std.testing.expect(!picked.cached);
+    mc.gpu_limit = gib;
+    try std.testing.expect((try chooseForStart(a, io, null, missing, &entries, &mc)) == null);
+    mc = .{};
+    try std.testing.expect((try chooseForStart(a, io, null, missing, &entries, &mc)) == null);
 }
 
 fn has(text: []const u8, needle: []const u8) bool {

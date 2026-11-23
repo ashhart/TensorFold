@@ -19,6 +19,19 @@ a container and the tests that need no GPU.
   The archive's binary is `tensorfold-native`; the quick start defines a `tensorfold` shell function that calls it.
 - **Windows with an NVIDIA GPU:** follow [the native Windows build guide](WINDOWS.md).
 
+## Select, download and prove a model
+
+After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
+fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
+`--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
+run accepts only `y` or `yes`. A cached model and its drafter need no prompt or download.
+
+The command starts a loopback server and sends one deterministic request. `--check` stops that server after a nonempty
+reply and exits 0; without `--check`, the checked server stays in the foreground and Ctrl-C stops it. A failed first reply
+is fatal and the started server is stopped. The request key is not printed. No existing `serve` default or flag changes.
+
+Windows refuses managed server startup: use `tensorfold serve` in one console and `tensorfold chat --url` in another.
+
 ## Send a request
 
 Leave the server running. In another terminal, on either platform:
