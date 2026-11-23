@@ -200,7 +200,8 @@ pub const Metal = struct {
 
     fn land(self: *Metal) !void {
         const f = self.flights.orderedRemove(0);
-        if (logits_.settleFlight(f.work.cbs[0..f.work.len], &self.landed, f.end)) |msg| {
+        var err_buf: [512]u8 = undefined;
+        if (logits_.settleFlight(f.work.cbs[0..f.work.len], &self.landed, f.end, &err_buf)) |msg| {
             std.log.err("inkling2_loop step: {s}", .{msg});
             return error.GpuFailed;
         }
