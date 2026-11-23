@@ -41,6 +41,8 @@ pub const Options = struct {
     key: ?[]const u8 = null,
     /// The complete caller credential list for the child environment when it differs from ``key``.
     environment_key: ?[]const u8 = null,
+    /// All configured credential forms to remove before a log line is cleaned or truncated.
+    secrets: []const []const u8 = &.{},
     words: Words = .{},
 };
 
@@ -142,6 +144,7 @@ pub const Managed = struct {
     served: []const u8 = served_name,
     stuck: []const u8 = (Words{}).stuck,
     key: ?[]const u8 = null,
+    secrets: []const []const u8 = &.{},
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
@@ -175,7 +178,7 @@ pub const Managed = struct {
         };
         stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
-        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key };
+        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key, .secrets = o.secrets };
         const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
             _ = m.stop();
             return e;
@@ -199,7 +202,7 @@ pub const Managed = struct {
             }
             if (m.exited()) {
                 problem.* = words.exited;
-                if (tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
+                if (tail) |t| t.* = try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
                 return false;
             }
             if (port == null) {
@@ -213,10 +216,17 @@ pub const Managed = struct {
         return false;
     }
 
-    /// The log's last ``buf.len`` bytes.
+    /// The log's last ``buf.len`` bytes, excluding a first line cut in the middle.
     fn logEnd(m: *Managed, buf: []u8) []const u8 {
         const size = if (m.log.stat(m.io)) |st| st.size else |_| 0;
-        return buf[0 .. m.log.readPositional(m.io, &.{buf}, size -| buf.len) catch 0];
+        var bytes = buf[0 .. m.log.readPositional(m.io, &.{buf}, size -| buf.len) catch 0];
+        if (size > buf.len) {
+            const cut = std.mem.indexOfAny(u8, bytes, "\r\n") orelse return bytes[bytes.len..];
+            var next = cut + 1;
+            if (bytes[cut] == '\r' and next < bytes.len and bytes[next] == '\n') next += 1;
+            bytes = bytes[next..];
+        }
+        return bytes;
     }
 
     /// ``http://127.0.0.1:PORT``.
@@ -228,7 +238,7 @@ pub const Managed = struct {
     pub fn exitedTail(m: *Managed, a: Allocator) !?[]const []const u8 {
         if (m.closed or !m.exited()) return null;
         var buf: [64 << 10]u8 = undefined;
-        return try lastLines(a, m.logEnd(&buf));
+        return try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
     }
 
     /// TERM, a grace period, KILL, another; always closes the log and the lock. Null when reaped.
@@ -290,12 +300,17 @@ pub fn ended(pid: posix.pid_t) bool {
 
 /// Up to three last ``tensorfold:`` or ``error:`` lines in order (an earlier variable hint first), else the last line.
 pub fn lastLines(a: Allocator, log: []const u8) ![]const []const u8 {
+    return lastLinesRedacted(a, log, &.{});
+}
+
+/// Select managed log lines only after credentials are removed and before their 300-byte terminal cut.
+pub fn lastLinesRedacted(a: Allocator, log: []const u8, secrets: []const []const u8) ![]const []const u8 {
     var picked: std.ArrayList([]const u8) = .empty; // newest first
     var fallback: []const u8 = "";
     var hint: ?[]const u8 = null;
     var lines = std.mem.splitBackwardsAny(u8, log, "\r\n");
     while (lines.next()) |line| {
-        const text = try sse.clean(a, line, sse.line_limit);
+        const text = try sse.clean(a, try sse.redact(a, line, secrets), sse.line_limit);
         if (text.len == 0 or leakNoise(text)) continue;
         if (fallback.len == 0) fallback = text;
         if ((std.mem.startsWith(u8, text, "tensorfold:") or std.mem.startsWith(u8, text, "error:")) and picked.items.len < 3) {

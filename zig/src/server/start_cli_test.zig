@@ -103,7 +103,7 @@ const Run = struct {
 
     fn standInAt(r: *Run, port: u16, name: []const u8) !void {
         const script = try r.path(name);
-        const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\nprintf '%s' \"$TENSORFOLD_API_KEY\" > {s}\nprintf '%s' \"$START_TEST_UNRELATED\" > {s}\nprintf '[tensorfold] serving Model at http://127.0.0.1:{d}/v1 (x)\\n'\nif [ \"$START_TEST_SHORT_LIVED\" = 1 ]; then exec sleep 1; else exec sleep 30; fi\n", .{ try r.path("pid"), try r.path("args"), try r.path("child-key"), try r.path("unrelated"), port });
+        const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\nprintf '%s' \"$TENSORFOLD_API_KEY\" > {s}\nprintf '%s' \"$START_TEST_UNRELATED\" > {s}\nprintf '[tensorfold] serving Model at http://127.0.0.1:{d}/v1 (x)\\n'\nif [ \"$START_TEST_LOG_KEY\" = 1 ]; then printf 'error: %0250d%s\\n' 0 \"$TENSORFOLD_API_KEY\" >&2; fi\nif [ \"$START_TEST_SHORT_LIVED\" = 1 ]; then exec sleep 1; else exec sleep 30; fi\n", .{ try r.path("pid"), try r.path("args"), try r.path("child-key"), try r.path("unrelated"), port });
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = script, .data = text, .flags = .{ .permissions = .fromMode(0o755) } });
         r.self_exe = script;
     }
@@ -299,6 +299,56 @@ test "start CLI: a cached model answers once, prints no key and --check reaps it
         for ([_][]const u8{ r.out.written(), r.err.written(), args }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
 
+test "start CLI: a malformed cached config requires repair while valid caches skip pulls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    try r.cache();
+    const config = try std.fs.path.join(a, &.{ r.root, "models--Org--Model", "snapshots", revision, "config.json" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = config, .data = "{" });
+    const f = try world(&r, try events(a, "Ready."));
+    defer f.stop();
+    try r.standIn(f.port);
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--yes", "--check" }));
+    try std.testing.expectEqual(@as(usize, 2), r.pulls.items.len);
+    try std.testing.expectEqualStrings("Org/Model@" ++ revision, r.pulls.items[0]);
+    try std.testing.expectEqualStrings("Org/Draft@" ++ draft_revision, r.pulls.items[1]);
+}
+
+test "start CLI: managed first-reply failures redact every configured credential" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const first = "fixture-managed-first";
+    const second = "fixture-managed-second";
+    try r.env.put("TENSORFOLD_API_KEY", try std.mem.concat(a, u8, &.{ first, ",", second }));
+    try r.cache();
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = first });
+    const reflected = try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"{s}\"}}}}", .{first});
+    const replies = try a.dupe([]const fake.Write, &.{
+        try fake.jsonReply(a, "401 Unauthorized", reflected),
+        try fake.jsonReply(a, "500 Internal Server Error", second),
+    });
+    const f = try worldKeyed(&r, replies, try r.path("credential"));
+    defer f.stop();
+    var errors: std.ArrayList(u8) = .empty;
+    for (0..2) |_| {
+        try r.standIn(f.port);
+        try std.testing.expectEqual(@as(u8, 1), try r.command(&.{}));
+        try errors.appendSlice(a, r.err.written());
+        try std.testing.expect(r.childGone());
+    }
+    for ([_][]const u8{ first, second }) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, errors.items, secret) == null);
+    try std.testing.expect(std.mem.indexOf(u8, errors.items, "[redacted]") != null);
+}
+
 test "start CLI: a failed first reply is fatal and still reaps its serve child" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -426,7 +476,7 @@ test "start CLI: persistent mode requires a valid environment credential before 
         try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
         try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
     }
-    for ([_][]const u8{ "\xc2\xa0", "good-key,bad key", "good-key,\xc2\xa0" }) |key| {
+    for ([_][]const u8{ "\xc2\xa0", "good-key,bad key", "good-key,\xc2\xa0", "fixture-\u{009b}", "good-key,fixture-\u{009b}" }) |key| {
         try r.env.put("TENSORFOLD_API_KEY", key);
         try std.testing.expectEqual(@as(u8, 2), try r.command(&.{}));
         try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null);
@@ -448,6 +498,7 @@ test "start CLI: persistent caller keys preserve the child list and send only th
     try r.env.put("TENSORFOLD_API_KEY", key_list);
     try r.env.put("START_TEST_UNRELATED", "caller-value-retained");
     try r.env.put("START_TEST_SHORT_LIVED", "1");
+    try r.env.put("START_TEST_LOG_KEY", "1");
     try r.cache();
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = caller_key });
     const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
@@ -473,11 +524,11 @@ test "start CLI: persistent caller keys preserve the child list and send only th
     try std.testing.expect(f.count() > 0 and std.mem.eql(u8, f.header(f.count() - 1, "authorization") orelse "", bearer));
     try std.testing.expectEqual(@as(usize, 1), f.refusals());
     const args = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("args"), a, .limited(4096));
-    for ([_][]const u8{ caller_key, second_key, key_list }) |secret|
+    for ([_][]const u8{ caller_key, second_key, second_key[0..8], key_list }) |secret|
         for ([_][]const u8{ args, r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
 }
 
-test "start CLI: a managed first reply authenticates a Latin-1 caller key" {
+test "start CLI: a managed first reply authenticates Latin-1 and removes terminal controls" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -491,13 +542,15 @@ test "start CLI: a managed first reply authenticates a Latin-1 caller key" {
     try r.env.put("START_TEST_SHORT_LIVED", "1");
     try r.cache();
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = caller_key });
-    const f = try worldKeyed(&r, try events(a, "Ready."), try r.path("credential"));
+    const f = try worldKeyed(&r, try events(a, "Ready.\\u001b[2J\\u009b2J"), try r.path("credential"));
     defer f.stop();
     try r.standIn(f.port);
 
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--startup-timeout", "2" }));
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Serving Model at") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Ready.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "\x1b") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "\u{009b}") == null);
     try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
     try std.testing.expect(r.childGone());
     const child_key = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("child-key"), a, .limited(256));

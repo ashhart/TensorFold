@@ -64,7 +64,11 @@ fn startSnapshot(a: Allocator, io: std.Io, root: []const u8, repo: []const u8, r
     var ref_buf: [128]u8 = undefined;
     const ref = std.Io.Dir.cwd().readFile(io, try std.fs.path.join(a, &.{ repo_dir, "refs", "main" }), &ref_buf) catch return .{ dir, false };
     if (!std.mem.eql(u8, std.mem.trim(u8, ref, " \r\n"), revision)) return .{ dir, false };
-    return .{ dir, hub.isDir(io, dir) and @import("checkpoint_config").optional(a, io, dir) != null };
+    if (!hub.isDir(io, dir)) return .{ dir, false };
+    const bytes = @import("checkpoint_config").optional(a, io, dir) orelse return .{ dir, false };
+    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ dir, false };
+    defer parsed.deinit();
+    return .{ dir, parsed.value == .object };
 }
 
 /// Largest comfortably fitting fully pinned `models` row that `tensorfold pull` can install; ties keep registry order.

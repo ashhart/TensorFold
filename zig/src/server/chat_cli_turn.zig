@@ -17,6 +17,31 @@ pub const Settings = struct { model: []const u8, temperature: ?f64 = null, max_t
 /// How a reply is shown: reasoning dimmed or hidden, and on a terminal its styles and only printable text.
 pub const Show = struct { thinking: bool = false, terminal: bool = false };
 
+/// Every configured secret in its decoded and raw-header forms, shared by all response boundaries.
+pub const Credentials = struct {
+    forms: []const []const u8 = &.{},
+
+    pub fn init(a: Allocator, secrets: []const []const u8) !Credentials {
+        var forms: std.ArrayList([]const u8) = .empty;
+        for (secrets) |secret| {
+            if (secret.len == 0) continue;
+            try forms.append(a, secret);
+            var buf: [300]u8 = undefined;
+            if (stream.rawHeader(&buf, secret)) |raw| try forms.append(a, try a.dupe(u8, raw[7..]));
+        }
+        return .{ .forms = forms.items };
+    }
+
+    pub fn redact(c: Credentials, a: Allocator, text: []const u8) ![]const u8 {
+        return sse.redact(a, text, c.forms);
+    }
+
+    /// Remove secrets before control cleaning and byte limiting can hide a suffix or split a match.
+    pub fn clean(c: Credentials, a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+        return sse.clean(a, try c.redact(a, text), limit);
+    }
+};
+
 /// A finished reply: its answer, whether it stopped at its token limit, and whether reasoning came.
 pub const Finished = struct { content: []const u8, cut: bool, reasoned: bool };
 
@@ -47,25 +72,29 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
 }
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
-pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
+pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     var printer: Printer = .{ .io = io, .out = out, .show = show };
-    var r: reply.Reply = .{ .a = a, .sink = printer.sink() };
+    var r: reply.Reply = .{ .a = a, .sink = printer.sink(), .secrets = credentials.forms };
     var auth_buf: [300]u8 = undefined;
     const bearer = if (key) |k| stream.rawHeader(&auth_buf, k) orelse return .{ .failed = .{
         .reason = "API key cannot be encoded as Latin-1 header text",
     } } else null;
-    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .body = request, .reply = &r };
+    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r };
     const ended = stream.bounded(io, null, Exchange.run, &x);
+    try r.end();
     printer.end();
     switch (ended) {
         .stopped, .deadline => return .{ .stopped = r.content.items },
         .unavailable => return .{ .failed = .{ .reason = "could not start the request" } },
         .finished => {},
     }
-    if (x.failure) |f| return .{ .failed = .{ .reason = try x.reason(f, url), .connect = f == .connect, .status = x.status } };
+    if (x.failure) |f| {
+        const reason = try x.reason(f, url);
+        return .{ .failed = .{ .reason = try credentials.redact(a, reason), .connect = f == .connect, .status = x.status } };
+    }
     if (r.failure) |why| return .{ .failed = .{ .reason = why } };
     if (!r.complete()) return .{ .failed = .{ .reason = "the server closed the stream before the reply finished" } };
     return .{ .finished = .{ .content = r.content.items, .cut = std.mem.eql(u8, r.finish orelse "", "length"), .reasoned = r.reasoned } };
@@ -83,6 +112,7 @@ const Exchange = struct {
     bearer: ?[]const u8,
     body: []u8,
     reply: *reply.Reply,
+    credentials: Credentials,
     status: u16 = 0,
     refused: []const u8 = "",
     content_type: []const u8 = "",
@@ -145,8 +175,8 @@ const Exchange = struct {
         return switch (f) {
             .connect => try std.fmt.allocPrint(x.a, "could not reach the server at {s}", .{url}),
             .lost => "the connection to the server broke during the reply",
-            .http => try sse.refusal(x.a, x.status, x.refused),
-            .not_events => try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{try sse.clean(x.a, x.content_type, sse.line_limit)}),
+            .http => try sse.refusalRedacted(x.a, x.status, x.refused, x.credentials.forms),
+            .not_events => try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{try x.credentials.clean(x.a, x.content_type, sse.line_limit)}),
             .stream => "the server sent a malformed event stream",
             .output => "could not write the reply",
         };

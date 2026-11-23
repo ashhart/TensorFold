@@ -55,6 +55,13 @@ pub const Auth = struct {
         return if (auth.owns(uri)) .{ .override = bearer } else .default;
     }
 
+    /// Whether server-controlled text contains this hub's bearer, directly or percent-encoded.
+    pub fn reflects(auth: Auth, text: []const u8) bool {
+        const bearer = auth.bearer orelse return false;
+        const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+        return containsCredential(text, secret);
+    }
+
     /// One bodiless request into `req`, redirects followed here so each hop decides the token anew; see `header`.
     pub fn send(auth: Auth, client: *http.Client, req: *http.Client.Request, method: http.Method, uri: std.Uri, options: http.Client.RequestOptions, buf: []u8) !http.Client.Response {
         var o = options;
@@ -76,6 +83,7 @@ pub const Auth = struct {
             const location = response.head.location orelse return error.HttpRedirectLocationMissing;
             if (location.len > rest.len) return error.HttpRedirectLocationOversize;
             @memcpy(rest[0..location.len], location); // the head's bytes go when the connection does
+            if (auth.reflects(location)) return error.HubCredentialRedirect;
             at = at.resolveInPlace(location.len, &rest) catch return error.HttpRedirectLocationInvalid;
             left.subtractOne();
             req.deinit();
@@ -105,6 +113,36 @@ fn origin(uri: std.Uri, buf: []u8) ?Origin {
     if (host.len == 0) return null;
     const port: u16 = uri.port orelse if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) 443 else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else return null;
     return .{ .scheme = uri.scheme, .host = host, .port = port };
+}
+
+/// Match a credential directly or through percent encoding, without decoding an untrusted whole URL.
+fn containsCredential(text: []const u8, secret: []const u8) bool {
+    if (secret.len == 0) return false;
+    for (0..text.len) |start| {
+        var at = start;
+        var matched: usize = 0;
+        while (matched < secret.len and at < text.len) {
+            var byte = text[at];
+            if (byte == '%' and at + 2 < text.len) {
+                const hi = hex(text[at + 1]) orelse break;
+                const lo = hex(text[at + 2]) orelse break;
+                byte = hi * 16 + lo;
+                at += 2;
+            }
+            if (byte != secret[matched]) break;
+            matched += 1;
+            at += 1;
+        }
+        if (matched == secret.len) return true;
+    }
+    return false;
+}
+
+fn hex(c: u8) ?u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    return null;
 }
 
 /// The first non-empty of HF_TOKEN and HUGGING_FACE_HUB_TOKEN, else the one token file the `hf` tools read.

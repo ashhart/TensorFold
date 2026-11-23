@@ -219,7 +219,13 @@ pub const line_limit = 300;
 
 /// A refused attempt's reason for the terminal, ``HTTP 400: message``; it never reaches a receipt.
 pub fn refusal(a: Allocator, status: u16, body: []const u8) ![]const u8 {
-    const text = try clean(a, try errorText(a, body), line_limit);
+    return refusalRedacted(a, status, body, &.{});
+}
+
+/// Redact decoded JSON text or a plain body independently, before terminal truncation.
+pub fn refusalRedacted(a: Allocator, status: u16, body: []const u8, secrets: []const []const u8) ![]const u8 {
+    const decoded = try errorText(a, body);
+    const text = try clean(a, try redact(a, decoded, secrets), line_limit);
     if (text.len == 0) return std.fmt.allocPrint(a, "HTTP {d}", .{status});
     return std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
 }
@@ -261,6 +267,67 @@ pub fn clean(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
         try out.appendSlice(a, text[i - len .. i]);
     }
     return std.mem.trim(u8, out.items, " ");
+}
+
+/// Terminal/error text with every supplied credential replaced, longest first at each byte.
+pub fn redact(a: Allocator, text: []const u8, secrets: []const []const u8) ![]const u8 {
+    var scan: usize = 0;
+    while (scan < text.len and secretAt(text, scan, secrets).len == 0) scan += 1;
+    if (scan == text.len) return text;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        const found = secretAt(text, i, secrets);
+        if (found.len > 0) {
+            try out.appendSlice(a, "[redacted]");
+            i += found.len;
+        } else {
+            try out.append(a, text[i]);
+            i += 1;
+        }
+    }
+    return out.items;
+}
+
+pub const RedactedPiece = struct { text: []const u8, rest: []const u8 };
+
+/// One streamed piece: emit complete safe text and retain only a suffix that may begin a credential.
+pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) !RedactedPiece {
+    var out: std.ArrayList(u8) = .empty;
+    var changed = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const found = secretAt(text, i, secrets);
+        const rest = text[i..];
+        var holds = false;
+        if (found.len == 0) for (secrets) |secret| {
+            if (secret.len > rest.len and std.mem.startsWith(u8, secret, rest)) {
+                holds = true;
+                break;
+            }
+        };
+        if (found.len > 0 or holds) {
+            if (!changed) {
+                try out.appendSlice(a, text[0..i]);
+                changed = true;
+            }
+            if (holds) return .{ .text = out.items, .rest = rest };
+            try out.appendSlice(a, "[redacted]");
+            i += found.len;
+        } else {
+            if (changed) try out.append(a, text[i]);
+            i += 1;
+        }
+    }
+    return .{ .text = if (changed) out.items else text, .rest = "" };
+}
+
+fn secretAt(text: []const u8, i: usize, secrets: []const []const u8) []const u8 {
+    var found: []const u8 = "";
+    for (secrets) |secret| {
+        if (secret.len > found.len and std.mem.startsWith(u8, text[i..], secret)) found = secret;
+    }
+    return found;
 }
 
 /// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.
