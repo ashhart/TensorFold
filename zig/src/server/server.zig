@@ -153,7 +153,7 @@ pub const Server = struct {
         srv.eos = try a.dupe(u32, text.eosIds());
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
-        if (minimax) srv.markers = reply_text.mm_markers;
+        if (minimax) srv.markers = reply_text.mm_markers else if (srv.info.reasoning_optional and std.mem.eql(u8, srv.markers.close, reply_text.think_markers.close)) srv.markers.optional = true;
         srv.close_id = text.tokenId(srv.markers.close);
         srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
@@ -302,6 +302,7 @@ pub const Server = struct {
 
     /// A request's grammar, compiled once here and handed to the engine (a 400 with xgrammar's reason if it cannot be).
     pub fn compiledStructure(srv: *Server, cx: *Cx, kind: grammar.Kind, text: []const u8, field: []const u8, thinking: bool) errors.Refused!api.Structure {
+        try grammar.checkNesting(cx, kind, text, field);
         const c = srv.grammarCompiler() orelse return cx.fail(.request, "{s}: {s}", .{ if (kind == .structural_tag) field else "structured output", srv.grammar_problem.? });
         var err: [512]u8 = undefined;
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
@@ -316,10 +317,7 @@ pub const Server = struct {
         if (!v.bool) return;
         const st = if (request.structure) |*s| s else return;
         const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
-        if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
-        const ready = g.budgetReadiness() catch .uncovered;
-        if (ready == .over_work) return cx.refuse("grammar_budget cannot be kept for this grammar: exploring its parser states passes the fixed work limit, a step count that is the same on every machine; send it without grammar_budget");
-        if (ready != .ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        try @import("grammar_budget.zig").require(cx, g);
         st.budget = true;
     }
 
@@ -506,18 +504,6 @@ fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
 }
 
-test "queue phase: server notes measured waits only when explicitly enabled" {
-    const defaults: Config = .{ .served_name = "test", .model_ids = &.{"test"} };
-    try std.testing.expect(!defaults.phase_metrics);
-    for ([_]bool{ false, true }) |enabled| {
-        var srv: Server = undefined;
-        srv.io = std.testing.io;
-        srv.metrics = .{ .gpa = std.testing.allocator, .phases = enabled };
-        defer srv.metrics.deinit();
-        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, 0.25, 0.3);
-        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
-        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, null, null);
-        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
-        try std.testing.expectEqual(@as(u64, 6), srv.metrics.generation);
-    }
+test {
+    _ = @import("server_queue_phase_test.zig");
 }

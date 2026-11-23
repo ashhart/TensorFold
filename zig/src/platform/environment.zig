@@ -54,6 +54,8 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit GiB count (capped at 16777216)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
+    .{ .name = "TENSORFOLD_PULL_CONNECT_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's connect timeout; default 30)" },
+    .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's no-progress timeout; default 60)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
@@ -82,6 +84,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_Q27_GEMM", .scope = .cuda, .kind = .word, .words = &.{"narrow"}, .forms = "narrow (default: 128x128 tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
@@ -92,6 +95,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
+    .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
+    .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
@@ -101,6 +106,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
+    .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
@@ -158,6 +164,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_MOE_DIRECT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7 on CUDA, 0.5 on Metal)" },
     // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
@@ -292,6 +299,7 @@ pub const rules = [_]Rule{
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
+    .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.

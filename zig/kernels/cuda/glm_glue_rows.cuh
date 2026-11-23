@@ -40,6 +40,16 @@ __device__ __forceinline__ void ranks8(const float* g, int64_t rs, int64_t i, in
     for (int j = 0; j < 8; ++j) a[j] = a[j] + b[j];
   }
 }
+// The same sum with `own` at k == me: every other rank keeps its gathered slot and FP32 addition order.
+__device__ __forceinline__ void ranks8own(const float* g, const float* own, int64_t rs, int64_t i, int world, int me,
+                                           float a[8]) {
+  ld8(me == 0 ? own + i : g + i, a);
+  for (int k = 1; k < world; ++k) {
+    float b[8];
+    ld8(k == me ? own + i : g + k * rs + i, b);
+    for (int j = 0; j < 8; ++j) a[j] = a[j] + b[j];
+  }
+}
 
 }  // namespace glm_glue
 
@@ -93,15 +103,10 @@ extern "C" __global__ void tf_glm_rank_sum(const float* own, const float* peers,
   glm_glue::st8(out + i, a);
 }
 
-// glue._hc_post: stream s = bf16(post[s] branch + sum_t comb[t][s] x[t]) in LLVM's fma order; x may be xout.
-extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g,
-                                          const float* post, const float* comb, int64_t rs, int64_t d, int world) {
-  glm_pdl::enter();
-  const int64_t c = glm_glue::col8();
-  if (c >= d) return;
+// The shared hc_post tail: identical post/comb FMA order for gathered and direct-own branches.
+__device__ __forceinline__ void hc_post_tail(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* post,
+                                             const float* comb, int64_t d, int64_t c, const float branch[8]) {
   const int64_t r = blockIdx.x;
-  float branch[8];
-  glm_glue::ranks8(g, rs, r * d + c, world, branch);
   float xv[4][8];
   for (int t = 0; t < 4; ++t) glm_glue::ld8(x + r * 4 * d + t * d + c, xv[t]);
   for (int s = 0; s < 4; ++s) {
@@ -119,6 +124,31 @@ extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16*
   }
 }
 
+// glue._hc_post: stream s = bf16(post[s] branch + sum_t comb[t][s] x[t]) in LLVM's fma order; x may be xout.
+extern "C" __global__ void tf_glm_hc_post(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g,
+                                          const float* post, const float* comb, int64_t rs, int64_t d, int world) {
+  glm_pdl::enter();
+  const int64_t c = glm_glue::col8();
+  if (c >= d) return;
+  const int64_t r = blockIdx.x;
+  float branch[8];
+  glm_glue::ranks8(g, rs, r * d + c, world, branch);
+  hc_post_tail(x, xout, post, comb, d, c, branch);
+}
+
+// Split prefill: rank me reads its FP32 partial in place; all peers and the HC tail keep their original order.
+extern "C" __global__ void tf_glm_hc_post_own(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g,
+                                              const float* post, const float* comb, int64_t rs, int64_t d, int world,
+                                              const float* own, int me) {
+  glm_pdl::enter();
+  const int64_t c = glm_glue::col8();
+  if (c >= d) return;
+  const int64_t r = blockIdx.x;
+  float branch[8];
+  glm_glue::ranks8own(g, own, rs, r * d + c, world, me, branch);
+  hc_post_tail(x, xout, post, comb, d, c, branch);
+}
+
 // glue._combine: fp32 sum over slots in order of y[r][k] wts[r][k] (fma from 0), y fp32 or bf16, 8 columns a thread.
 extern "C" __global__ void tf_glm_combine(
         const void* y, int y_f32, const float* wts, float* out, int64_t d, int slots) {
@@ -134,6 +164,28 @@ extern "C" __global__ void tf_glm_combine(
       glm_glue::ld8(static_cast<const float*>(y) + i, v);
     else
       glm_glue::ld8(static_cast<const __nv_bfloat16*>(y) + i, v);
+    const float w = wts[r * slots + k];
+    for (int j = 0; j < 8; ++j) a[j] = __fmaf_rn(v[j], w, a[j]);
+  }
+  float* o = out + r * d + c;
+  *reinterpret_cast<float4*>(o) = make_float4(a[0], a[1], a[2], a[3]);
+  *reinterpret_cast<float4*>(o + 4) = make_float4(a[4], a[5], a[6], a[7]);
+}
+
+// tf_glm_combine with the last slot apart (#3570): y [rows][slots - 1][d], tail [rows][d], fp32; its fmas in order.
+extern "C" __global__ void tf_glm_combine_tail(
+        const float* y, const float* tail, const float* wts, float* out, int64_t d, int slots) {
+  glm_pdl::enter();
+  const int64_t c = glm_glue::col8();
+  if (c >= d) return;
+  const int64_t r = blockIdx.x;
+  float a[8] = {};
+  for (int k = 0; k < slots; ++k) {
+    float v[8];
+    if (k + 1 < slots)
+      glm_glue::ld8(y + (r * (slots - 1) + k) * d + c, v);
+    else
+      glm_glue::ld8(tail + r * d + c, v);
     const float w = wts[r * slots + k];
     for (int j = 0; j < 8; ++j) a[j] = __fmaf_rn(v[j], w, a[j]);
   }

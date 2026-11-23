@@ -9,6 +9,7 @@ const c = contract.spec;
 const g = contract.gates;
 const Affine = contract.affine.Affine;
 const mm = tf.affine_mm;
+const identity = @import("affine_identity.zig");
 
 /// The experts a test spreads its rows over: some take none, so a tile walk must skip empty experts.
 const weights = [_]usize{ 5, 0, 3, 1, 7, 2, 0, 4 };
@@ -34,7 +35,7 @@ pub const Mutation = enum {
 };
 
 /// One registered gather: the weights' bits (groups of 64), whether each output goes back to its row's own place.
-pub const Variant = struct { bits: u8, scatter: bool, glm_m3_fast: bool = false, mutation: Mutation = .none };
+pub const Variant = struct { bits: u8, scatter: bool, glm_m3_fast: bool = false, identity: bool = false, control: bool = false, mutation: Mutation = .none };
 
 /// The widths qwen27 admits for its routed experts on tensor units, each plain and scattering, and controls.
 pub const registered = [_]Variant{
@@ -44,6 +45,8 @@ pub const registered = [_]Variant{
     .{ .bits = 8, .scatter = true },
     .{ .bits = 4, .scatter = false, .glm_m3_fast = true },
     .{ .bits = 8, .scatter = true, .glm_m3_fast = true },
+    .{ .bits = 4, .scatter = false, .glm_m3_fast = true, .identity = true },
+    .{ .bits = 4, .scatter = false, .glm_m3_fast = true, .identity = true, .control = true },
     .{ .bits = 4, .scatter = false, .mutation = .tail },
     .{ .bits = 4, .scatter = false, .glm_m3_fast = true, .mutation = .tail },
     .{ .bits = 8, .scatter = false, .mutation = .expert },
@@ -51,6 +54,7 @@ pub const registered = [_]Variant{
 };
 
 pub fn name(v: Variant) []const u8 {
+    if (v.identity) return if (v.control) "control: metal affine_mm glm m3 q4 g64 gather finite identity, one BF16 rounding" else "metal affine_mm glm m3 q4 g64 gather finite identity";
     return switch (v.mutation) {
         .none => switch (v.bits) {
             4 => if (v.glm_m3_fast) (if (v.scatter) "metal affine_mm glm m3 q4 g64 gather scatter" else "metal affine_mm glm m3 q4 g64 gather") else if (v.scatter) "metal affine_mm q4 g64 gather scatter" else "metal affine_mm q4 g64 gather",
@@ -71,15 +75,16 @@ fn groupDepth64(s: c.Shape) usize {
 const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)" };
 
 pub fn spec(v: Variant) c.Spec {
-    const known = if (v.bits == 4 and v.mutation == .none) offset_inf else null;
+    const known = if (v.bits == 4 and v.mutation == .none and !v.glm_m3_fast) offset_inf else null;
     // Ornith-1.5-122B: gate and up 1024 x 3072, down 3072 x 1024; 32 rows an expert (32-row tiles), past 64 (64-row)
     const served = &[_]c.Shape{ .{ .rows = 256, .n = 1024, .k = 3072 }, .{ .rows = 520, .n = 3072, .k = 1024 } };
-    return .{ .name = name(v), .accum = .f32, .depth = groupDepth64, .out = .bf16, .known = known, .tiles = .{ .{ .size = 32 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = served };
+    return .{ .name = name(v), .accum = .f32, .depth = groupDepth64, .out = .bf16, .known = known, .replaces = if (v.identity) "the frozen affine_mm before exact-nonfinite groups" else null, .tiles = .{ .{ .size = 32 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = served };
 }
 
 pub const Gather = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
+    base_pipes: ?mm.Pipes = null,
     v: Variant,
     pipes: mm.Pipes,
     parts: [experts]?Affine = @splat(null),
@@ -91,28 +96,40 @@ pub const Gather = struct {
     s: rig_.Ref = undefined,
     b: rig_.Ref = undefined,
     sums: rig_.Ref = undefined,
+    base_sums: rig_.Ref = undefined,
+    base: rig_.Ref = undefined,
     offsets: rig_.Ref = undefined,
     order: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant) !Gather {
-        const plain = try mm.source(device, a, .{ .bits = v.bits, .group = 64, .glm_m3_fast = v.glm_m3_fast });
-        defer a.free(plain);
-        const src = if (v.mutation == .none) try a.dupe(u8, plain) else blk: {
-            const e = v.mutation.edit();
-            if (std.mem.indexOf(u8, plain, e.from) == null) return error.ControlEditMissing;
-            break :blk try std.mem.replaceOwned(u8, a, plain, e.from, e.to);
-        };
-        defer a.free(src);
-        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
-        defer lib.deinit();
+        const format: mm.Format = .{ .bits = v.bits, .group = 64, .glm_m3_fast = v.glm_m3_fast, .exact_nonfinite = v.bits == 4 and v.glm_m3_fast };
         var pipes: mm.Pipes = undefined;
-        for (mm.names, 0..) |n, i| pipes[i] = try mtl.Pipeline.init(device, lib, n, false);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .pipes = pipes };
+        var base_pipes: ?mm.Pipes = null;
+        if (v.identity) {
+            const src = try identity.source(device, a, format, if (v.control) .rounding_control else .current);
+            defer a.free(src);
+            pipes = try identity.compile(device, src);
+            const old = try identity.source(device, a, format, .baseline);
+            defer a.free(old);
+            base_pipes = try identity.compile(device, old);
+        } else {
+            const plain = try mm.source(device, a, format);
+            defer a.free(plain);
+            const src = if (v.mutation == .none) try a.dupe(u8, plain) else blk: {
+                const edit = v.mutation.edit();
+                if (std.mem.indexOf(u8, plain, edit.from) == null) return error.ControlEditMissing;
+                break :blk try std.mem.replaceOwned(u8, a, plain, edit.from, edit.to);
+            };
+            defer a.free(src);
+            pipes = try identity.compile(device, src);
+        }
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .pipes = pipes, .base_pipes = base_pipes };
     }
 
     pub fn deinit(p: *Gather) void {
         p.drop();
+        if (p.base_pipes) |pipes| for (pipes) |x| x.deinit();
         for (p.pipes) |x| x.deinit();
         p.rig.deinit();
     }
@@ -128,11 +145,7 @@ pub const Gather = struct {
     }
 
     pub fn kernel(p: *Gather) g.Kernel {
-        const gate: ?g.Gate = switch (p.v.mutation) {
-            .none => null,
-            else => .shapes,
-        };
-        return .{ .spec = spec(p.v), .ctx = p, .vt = &vt, .control = gate };
+        return .{ .spec = spec(p.v), .ctx = p, .vt = &vt, .control = if (p.v.mutation != .none or p.v.control) .shapes else null };
     }
 
     const vt = g.hooks(Gather);
@@ -178,6 +191,7 @@ pub const Gather = struct {
             slot.* = f;
             // gate 1's NaN and infinities in the first expert with rows only, so the others' outputs stay finite
             try f.fill(if (fill == .nonfinite and (planted or n == 0)) .random else fill, seed +% e);
+            if (p.v.identity and fill == .random) identity.plant(f);
             if (n > 0) planted = true;
             offsets[e] = @intCast(at);
             @memcpy(x[at * shape.k ..][0 .. n * shape.k], f.x);
@@ -200,27 +214,33 @@ pub const Gather = struct {
             p.order = try p.rig.input(std.mem.sliceAsBytes(p.dst));
         }
         p.sums = try p.rig.scratch(shape.rows * kg * 4);
+        if (p.v.identity) {
+            p.base_sums = try p.rig.scratch(shape.rows * kg * 4);
+            p.base = try p.rig.scratch(shape.rows * shape.n * 2);
+        }
         p.out = try p.rig.output(shape.rows * shape.n * 2);
         return true;
     }
 
     pub fn run(p: *Gather) !void {
         const pass = p.rig.begin();
-        const e = pass.e;
+        p.encodeGather(pass.e, p.pipes, p.sums, p.out);
+        try p.rig.finish(pass);
+    }
+
+    fn encodeGather(p: *Gather, e: mtl.ComputeEncoder, pipes: mm.Pipes, sums: rig_.Ref, y: rig_.Ref) void {
         const shape = p.shape;
         const x = .{ .buf = p.x.buf, .off = p.x.off };
-        const xs = .{ .buf = p.sums.buf, .off = p.sums.off };
+        const xs = .{ .buf = sums.buf, .off = sums.off };
         const offs = .{ .buf = p.offsets.buf, .off = p.offsets.off };
-        const y = .{ .buf = p.out.buf, .off = p.out.off };
         const q = .{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .s = .{ .buf = p.s.buf, .off = p.s.off }, .b = .{ .buf = p.b.buf, .off = p.b.off }, .n = @as(u32, @intCast(shape.n)), .k = @as(u32, @intCast(shape.k)) };
-        mm.rowSums(e, p.pipes, 64, x, xs, @intCast(shape.rows), @intCast(shape.k));
+        mm.rowSums(e, pipes, 64, x, xs, @intCast(shape.rows), @intCast(shape.k));
         e.barrier();
         if (p.v.scatter) {
-            mm.gatherTo(e, p.pipes, x, xs, q, offs, y, .{ .buf = p.order.buf, .off = p.order.off }, @intCast(shape.rows), experts);
+            mm.gatherTo(e, pipes, x, xs, q, offs, .{ .buf = y.buf, .off = y.off }, .{ .buf = p.order.buf, .off = p.order.off }, @intCast(shape.rows), experts);
         } else {
-            mm.gather(e, p.pipes, x, xs, q, offs, y, @intCast(shape.rows), experts);
+            mm.gather(e, pipes, x, xs, q, offs, .{ .buf = y.buf, .off = y.off }, @intCast(shape.rows), experts);
         }
-        try p.rig.finish(pass);
     }
 
     pub fn count(p: *Gather) usize {
@@ -270,8 +290,14 @@ pub const Gather = struct {
         return p.gatherAll(out, null, simOne, Sim{ .acc = acc, .order = order });
     }
 
-    pub fn replaced(_: *Gather) ![]const u8 {
-        return error.NotAReplacement;
+    pub fn replaced(p: *Gather) ![]const u8 {
+        if (!p.v.identity) return error.NotAReplacement;
+        const len = p.shape.rows * p.shape.n * 2;
+        @memset(p.rig.bytes(p.base, len), 0xff);
+        const pass = p.rig.begin();
+        p.encodeGather(pass.e, p.base_pipes.?, p.base_sums, p.base);
+        try p.rig.finish(pass);
+        return p.rig.bytes(p.base, len);
     }
 };
 

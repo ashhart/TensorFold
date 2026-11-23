@@ -155,6 +155,8 @@ test {
     _ = @import("tool_id_key.zig");
     _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
+    _ = @import("tool_nonfinite_text_test.zig");
+    _ = @import("tool_schema_names_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_args_close.zig");
     _ = @import("tool_json_cut.zig");
@@ -343,6 +345,7 @@ test {
 test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
+    _ = @import("choices_test.zig");
     _ = @import("cors_test.zig");
     _ = @import("deepseek_fixture_test.zig");
     _ = @import("uocr_chat_test.zig");
@@ -354,6 +357,9 @@ test {
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
+    _ = @import("audio_out.zig");
+    _ = @import("flac.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_format_http_test.zig"); // over a Unix socket pair
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");

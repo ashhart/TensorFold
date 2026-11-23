@@ -22,10 +22,12 @@ struct Gate {
     bool released = false;
     std::atomic<int> entered{0};
     std::atomic<int> exited{0};
-    void Wait() {
+    void Wait(const Cache::Cancel* cancel = nullptr) {
         entered++;
         std::unique_lock<std::mutex> hold(mutex);
-        changed.wait(hold, [&] { return released; });
+        while (!released && !(cancel && cancel->load(std::memory_order_acquire))) {
+            changed.wait_for(hold, std::chrono::milliseconds(1));
+        }
         exited++;
     }
     void Release() {
@@ -57,6 +59,22 @@ template <class Work> void refuses(Work work, const char* part) {
     throw std::runtime_error("the compile should have been refused");
 }
 
+template <class Failure, class Work> void refuses_as(Work work, const char* part) {
+    try { work(); }
+    catch (const Failure& e) {
+        require(std::string(e.what()).find(part) != std::string::npos, e.what());
+        return;
+    }
+    throw std::runtime_error("the typed refusal was lost");
+}
+
+void limits() {
+    require(tfc::TimeBudget(30000) == 2000, "a client raised its deadline");
+    require(tfc::TimeBudget(30000, tfc::WaitLimit::fixed_grammar) == 30000, "fixed grammar ceiling lost");
+    require(tfc::TimeBudget(90000, tfc::WaitLimit::fixed_grammar) == 30000, "fixed grammar became unbounded");
+    require(tfc::TimeBudget(0) == 1 && tfc::TimeBudget(40, tfc::WaitLimit::fixed_grammar) == 40, "small deadlines changed");
+}
+
 std::string Bytes(const std::string& text) { return "grammar of " + text; }
 
 void cached() {
@@ -76,7 +94,7 @@ void deadline() {
     Release release{gate};
     auto calls = std::make_shared<std::atomic<int>>(0);
     auto slow = [gate, calls](const std::string&) { (*calls)++; gate->Wait(); return std::string("late"); };
-    refuses([&] { cache.Compile(1, "slow", slow, 40); }, "40 ms time limit");
+    refuses_as<tfc::CompileTimeout>([&] { cache.Compile(1, "slow", slow, 40); }, "40 ms time limit");
     // The gate is still shut, so the compile cannot have returned: the caller stopped at its own
     // deadline rather than wait for the abandoned work — however long the host took to say so.
     require(gate->exited.load() == 0, "the caller waited for abandoned work");
@@ -88,6 +106,23 @@ void deadline() {
     gate->Release();
     until([&] { return cache.Active() == 0; });
     require(cache.Compile(1, "slow", Bytes) == "grammar of slow", "a late result entered the cache");
+}
+
+void abandoned() {
+    Cache cache;
+    auto gate = std::make_shared<Gate>();
+    Release release{gate};
+    for (size_t i = 0; i < tfc::active_limit; i++) {
+        auto cancel = std::make_shared<Cache::Cancel>(false);
+        auto blocked = [gate, cancel](const std::string&) {
+            gate->Wait(cancel.get());
+            return std::string("cancelled");
+        };
+        refuses([&] { cache.Compile(1, std::to_string(i), blocked, 20, cancel); }, "time limit");
+    }
+    until([&] { return gate->exited.load() == tfc::active_limit && cache.Active() == 0; });
+    require(cache.Compile(1, "fifth", Bytes) == "grammar of fifth", "cancelled workers retained every slot");
+    until([&] { return cache.Active() == 0; });
 }
 
 void independent() {
@@ -152,7 +187,7 @@ void capacity() {
         refuses([&] { cache.Compile(1, std::to_string(i), slow, 20); }, "time limit");
     }
     const auto start = Clock::now();
-    refuses([&] { cache.Compile(1, "fifth", Bytes, 60); }, "60 ms time limit waiting for one of 4 compile slots");
+    refuses_as<tfc::CompileSlots>([&] { cache.Compile(1, "fifth", Bytes, 60); }, "60 ms time limit waiting for one of 4 compile slots");
     require(Clock::now() - start >= std::chrono::milliseconds(50), "a full runner refused without waiting");
     require(cache.Compile(0, "warm", Bytes) == "grammar of warm", "busy compiles blocked a cached grammar");
     std::thread opener([gate] {
@@ -238,6 +273,8 @@ extern "C" int tf_compile_host_test(int which) {
             case 5: ownership(); break;
             case 6: errors(); break;
             case 7: stack(); break;
+            case 8: abandoned(); break;
+            case 9: limits(); break;
             default: return 1;
         }
         return 0;

@@ -19,6 +19,7 @@ const reserve = @import("qwen27_reserve.zig");
 const StartupLine = startup.StartupLine;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
+const steer_served = @import("qwen27_steer_served.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 
@@ -37,6 +38,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    glp: ?api.glp.Glp = null, // the control vector the model steers with (null: none)
 };
 
 pub const Host = struct {
@@ -291,6 +293,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     const model = try q.model.Model.loadDeferred(gpa, io, dir, reserve.loaded_rows);
     errdefer model.deinit();
+    if (o.glp) |g| try steer_served.apply(gpa, model, dir, g, a, why);
     if (@import("qwen27_mtp_flags.zig").deviceRefusal(o.mtp_drafts, model.device.tensorUnits(), try q.decode_round.pagesOn())) |r| {
         why.* = r.why;
         return r.err;
@@ -411,7 +414,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .image_share = if (o.vision) |x| x.image_share else .request, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -440,7 +443,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (o.learn) |l| try disk.attach(h, io, a, l, if (o.glp) |*g| g else null);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
@@ -448,6 +451,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
+    if (o.glp) |g| {
+        if (model.steer != null) steer_served.report(g);
+    }
     return h;
 }
 
@@ -561,7 +567,14 @@ pub fn close(ptr: *anyopaque) void {
     h.gpa.destroy(h);
 }
 
+test "qwen27 startup: the adaptive block hooks are analyzed" {
+    _ = &lb.Metal.init;
+    _ = &lb.Metal.backend;
+    _ = &lb.Metal.lone;
+}
+
 test {
+    _ = @import("qwen27_draft_block.zig");
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_startup_line.zig");
 }

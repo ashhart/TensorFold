@@ -20,6 +20,23 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
+/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
+fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
+    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
+    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+}
+
+/// The 27B's source for a launch, by its label: the copy, the steering kernel, MoE, or the glue.
+fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
+    if (std.mem.indexOf(u8, name, " norm steer ") != null) {
+        return specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;");
+    }
+    if (std.mem.indexOf(u8, name, " moe rows ") != null) return tf.qwen27.moe_gpu.rows_source;
+    if (std.mem.indexOf(u8, name, " moe ") != null) return tf.qwen27.runtime_sources.moe;
+    return tf.qwen27.runtime_sources.glue;
+}
+
 /// A Bolt op's source: a norm by its key beside Lightning's, else the engine's prefill op file its label names.
 fn boltSource(name: []const u8) ![]const u8 {
     const in = std.mem.indexOf;
@@ -179,7 +196,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const here = if (device.tensorUnits()) try std.mem.replaceOwned(u8, a, body, "#include \"../nax.h\"", sources.nax) else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
-    if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
+    if (std.mem.startsWith(u8, d.name, "flashnext penalties ")) {
+        if (!assemble) return undefined;
+        text = tf.metal_penalties.source;
+    } else if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
         const fsr = try tf.flashnext_fsr_contract.source(a, fun);
         const pre = if (fsr.fragments) try preM5(a, "", fsr.text) else fsr.text;
@@ -244,6 +264,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     if (std.mem.startsWith(u8, d.name, "uocr ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_uocr.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "ricursive ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_ricursive_all.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
     if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {
@@ -352,7 +377,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = if (has(d.name, " mamba ")) sources.nemotron_tree else try boltSource(d.name);
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
+        text = try qwen27Source(a, d.name);
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;
@@ -383,12 +408,15 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const group: u16 = if (has(d.name, "g128")) 128 else if (has(d.name, "g32")) 32 else 64;
         const out_t: []const u8 = if (has(d.name, "fp32")) "float" else "bfloat";
         const m3_head: []const u8 = if (has(d.name, "glm m3")) "#define TF_GLM_M3_FAST 1\n" else "";
+        const nonfinite: []const u8 = if (bits == 4 and has(d.name, "glm m3")) "#define TF_AM_EXACT_NONFINITE 1\n" else "";
         head = try std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n", .{ bits, group, out_t });
-        const pre_head = if (m3_head.len == 0) head else try std.mem.concat(a, u8, &.{ head, m3_head });
-        const pre = try preM5(a, pre_head, sources.core_affine_mm);
+        const full_head = try std.mem.concat(a, u8, &.{ head, nonfinite });
+        const pre_head = if (m3_head.len == 0) full_head else try std.mem.concat(a, u8, &.{ full_head, m3_head });
+        const core = try std.mem.replaceOwned(u8, a, sources.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", sources.core_affine_nonfinite);
+        const pre = try preM5(a, pre_head, core);
         const here = if (device.tensorUnits()) blk: {
-            const body = try tf.frags.source(device, a, sources.core_affine_mm);
-            break :blk try std.mem.concat(a, u8, &.{ head, body });
+            const body = try tf.frags.source(device, a, core);
+            break :blk try std.mem.concat(a, u8, &.{ full_head, body });
         } else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     } else if (has(d.name, "lane projection")) {

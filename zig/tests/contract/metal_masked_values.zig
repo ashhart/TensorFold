@@ -19,6 +19,7 @@ pub const Suite = struct {
         try s.basic.?.controls(.qwen35, only);
         s.more = .{ .a = s.a, .device = s.device, .queue = s.queue, .kernels = s.kernels };
         try s.more.?.collect(only);
+        try s.more.?.identities(only);
     }
     pub fn deinit(s: *Suite) void {
         if (s.basic) |*x| x.deinit();

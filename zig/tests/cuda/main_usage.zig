@@ -101,6 +101,7 @@ pub const usage =
     \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
     \\  native-fp                 -Dnative-fp-decode: hardware e2m1/e4m3 pair decode equals software on every finite input
     \\  affine4-decode            affine-4 decode at the Qwen3.5 shapes: row counts and segmented launches byte for byte
+    \\  absorb-batch              DFlash2 absorb projections over 1/4/8/16 streams' rows in one pass vs each alone, byte for byte
     \\  w4a8                      int8-activation prompt matmuls on affine-4 tiles: float64 of their formula, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes

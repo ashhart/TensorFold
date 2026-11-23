@@ -125,20 +125,39 @@ pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
 }
 
 pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof) !void {
+    return prepareMode(set, stream, l, s, x, x_stride, rows, qi, profile, false);
+}
+
+/// Keys-only commits keep KV and index keys; compact KV uses the same tiled K reduction.
+fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof, keys_only: bool) !void {
     var stamp = prof.span(profile, stream, .replicated_qakva);
     const width = l.q_lora + l.row();
-    try projection.matmul(set, stream, l.proj, x, x_stride, s.dp, s.mm_part, rows, width, l.dims, false);
-    try glue.rmsnorm(set, stream, s.dp, width, l.q_norm, s.qr, l.q_lora, s.xs_qr, l.eps, rows, l.q_lora);
-    try glue.rmsnorm(set, stream, s.dp + l.q_lora * 2, width, l.kv_norm, s.lat, l.row(), s.xs_lat, l.eps, rows, l.lw);
+    const compact = keys_only and compactKv(set, l);
+    if (compact) {
+        try projection.matmul(set, stream, .{ .bf16 = l.proj.bf16 + l.q_lora * l.dims * 2 }, x, x_stride, s.dp, s.mm_part, rows, l.row(), l.dims, false);
+    } else {
+        try projection.matmul(set, stream, l.proj, x, x_stride, s.dp, s.mm_part, rows, width, l.dims, false);
+    }
+    if (!keys_only) try glue.rmsnorm(set, stream, s.dp, width, l.q_norm, s.qr, l.q_lora, s.xs_qr, l.eps, rows, l.q_lora);
+    const kv_offset: u64 = if (compact) 0 else l.q_lora * 2;
+    const kv_stride = if (compact) l.row() else width;
+    try glue.rmsnorm(set, stream, s.dp + kv_offset, kv_stride, l.kv_norm, s.lat, l.row(), s.xs_lat, l.eps, rows, l.lw);
     stamp.end();
     stamp = prof.span(profile, stream, .projections);
     defer stamp.end();
-    try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
+    if (!keys_only) try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
     const ix = l.index;
     try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
     try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
-    try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
-    if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+    if (!keys_only) {
+        try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
+        if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+    }
+}
+
+fn compactKv(set: glue.Set, l: Layer) bool {
+    if (!set.prompt or set.packs != null or l.rope != 0 or l.q_lora % 8 != 0 or l.proj != .bf16) return false;
+    return if (set.mm) |mk| !mk.prompt_fixed_k else false;
 }
 
 /// One sequence's rows r0..r0 + rows at pos: latent and index keys written, dense then sparse attention into s.ol.
@@ -160,12 +179,13 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     const t, const tk = try tables(l, c);
     const scale = l.scale();
     if (host_pos < l.dense_limit) {
+        const dense_rows = @min(rows, l.dense_limit - host_pos);
         const stamp = prof.span(k.prof, stream, .mla);
         var dc = c;
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: the visible ones, in order, into the slots
             dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
         };
-        try denseAttention(k, stream, l, dc, v, pos, rows, nch, part_rows, scale);
+        try denseAttention(k, stream, l, dc, v, pos, dense_rows, nch, part_rows, scale, latent.headBlockFor(rows, l.row()));
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
@@ -236,8 +256,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
 }
 
 /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
-fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
-    const hb = latent.headBlockFor(rows, l.row());
+fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32, hb: usize) !void {
     var r0: usize = 0;
     while (r0 < rows) : (r0 += part_rows) {
         const n = @min(part_rows, rows - r0);
@@ -292,8 +311,8 @@ fn ropeQueries(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, rows: u
     try latent.rope(set, stream, q, rows, l.heads, pos, l.rope_inv);
 }
 
-/// The existing row projections and cache writes, without attention or output projections.
+/// Latent/index cache writes only: query projections and attention are unread on this path.
 pub fn commit(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, stride: usize, rows: usize, pos: u64, host_pos: usize) !void {
-    try prepareProfile(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof);
+    try prepareMode(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof, true);
     try writeKeys(k, stream, l, c, s, rows, pos);
 }

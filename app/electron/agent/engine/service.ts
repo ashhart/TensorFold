@@ -103,7 +103,7 @@ export class EngineService {
     this.features = new EngineFeatures({ binary: () => this.binary(), requireBinary: () => this.requireBinary(), env: () => this.env })
     this.models = new ModelHub({
       endpoint: this.launch.endpoint, fetch: options.fetch, env: () => this.env, totalMemoryBytes: this.totalMemoryBytes,
-      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), installedRevision: (repo) => this.revisions.selected(repo), cacheDir: () => this.hub,
+      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), installedRevision: (repo) => this.revisions.revision(repo), cacheDir: () => this.hub,
       memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes, limitFor: (modelType) => this.supervisor.memoryPolicyFor(modelType) }),
     })
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)

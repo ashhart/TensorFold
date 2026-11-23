@@ -35,6 +35,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     schedule_step.dependOn(&schedule_run.step);
     all.dependOn(schedule_step);
     b.step("test-flashnext-buffer-plan-host", "Production prompt allocations counted without making any GPU buffer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next memory:"} })).step);
+    b.step("test-flashnext-penalties-host", "Flash Next presence and frequency entries, staged and dispatched on a recording device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next penalties:"} })).step);
     b.step("test-flashnext-vision-contracts-host", "Flash Next masked draws and vision contracts without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next contracts:"} })).step);
     b.step("test-flashnext-load-context-host", "Independent long and ordinary Flash Next load settings without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{ "Flash Next context:", "load sets no DeltaNet" } })).step);
     b.step("test-flashnext-rotary-bound-host", "Scalar rotary error propagation and contract hooks without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary bound:"} })).step);
@@ -55,6 +56,12 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const step = b.step("test-flashnext-batch-host", "Actual shared lane verification at checkpoint widths, without Metal execution");
     step.dependOn(&run.step);
     all.dependOn(step);
+    const gx_mb2 = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/gx_mb2.zig"), .target = b.graph.host, .imports = &.{.{ .name = "kernel_sources", .module = sources }} });
+    const gx_mb2_step = b.step("test-flashnext-gx-mb2-host", "The MB=2 gate/up slot pairing and its source, without a GPU");
+    gx_mb2_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gx_mb2 })).step);
+    const gx_env = b.createModule(.{ .root_source_file = b.path("zig/src/platform/environment.zig"), .target = b.graph.host, .link_libc = true });
+    gx_mb2_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gx_env })).step);
+    all.dependOn(gx_mb2_step);
     const plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_mtp_plan_test.zig"), .target = b.graph.host });
     const plan_step = b.step("test-flashnext-mtp-plan-host", "The batched MTP head's requests fit the admitted capacity, without a device");
     plan_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plan })).step);
