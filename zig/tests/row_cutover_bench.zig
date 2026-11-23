@@ -78,7 +78,8 @@ pub fn main() !void {
     const b = try device.buffer(max_rows * n * 2, opts);
     defer b.deinit();
     var line: [256]u8 = undefined;
-    std.debug.print("{s}\n", .{try row.keyLine(&line, row.chipOf(device.generation(), std.mem.span(device.name())))});
+    const name = std.mem.span(device.name()); // the name the key reads, printed beside it
+    std.debug.print("{s}\n", .{try row.keyLine(&line, name, row.chipOf(device.generation(), name))});
     for (row.bit_widths) |bits| {
         const m = try matrix(device, bits);
         defer for ([_]mtl.Buffer{ m.w.w, m.w.scales, m.w.biases, m.x }) |x| x.deinit();

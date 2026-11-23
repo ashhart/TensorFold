@@ -56,10 +56,10 @@ pub fn takes(wide_from: *const [bit_widths.len]usize, bits: u8, rows: usize) boo
     return rows >= wide_from[b];
 }
 
-/// tf-row-cutover's key line: the chip it keys on and the table's cutover at each width.
-pub fn keyLine(buf: []u8, chip: Chip) ![]const u8 {
+/// tf-row-cutover's key line: the device name it read, the chip it keys on and the table's cutover at each width.
+pub fn keyLine(buf: []u8, name: []const u8, chip: Chip) ![]const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    try w.print("generation {d}, tier {s}, table cutover", .{ chip.generation, if (chip.tier) |t| @tagName(t) else "unknown" });
+    try w.print("device \"{s}\", generation {d}, tier {s}, table cutover", .{ name, chip.generation, if (chip.tier) |t| @tagName(t) else "unknown" });
     for (bit_widths) |bits| {
         const from = wideFrom(chip, bits) orelse never;
         if (from == never) try w.print(" q{d}=never", .{bits}) else try w.print(" q{d}={d}", .{ bits, from });
@@ -98,9 +98,9 @@ test "the chip key reads the tier from the device name, and nothing it does not 
 
 test "tf-row-cutover prints the key it uses and the table's cutover at each width" {
     var buf: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("generation 17, tier max, table cutover q2=32 q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, chipOf(17, "Apple M5 Max")));
-    try std.testing.expectEqualStrings("generation 17, tier ultra, table cutover q2=8 q3=8 q4=8 q5=8 q6=8 q8=8", try keyLine(&buf, chipOf(17, "Apple M5 Ultra")));
-    try std.testing.expectEqualStrings("generation 16, tier unknown, table cutover q2=never q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, chipOf(16, "")));
+    try std.testing.expectEqualStrings("device \"Apple M5 Max\", generation 17, tier max, table cutover q2=32 q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, "Apple M5 Max", chipOf(17, "Apple M5 Max")));
+    try std.testing.expectEqualStrings("device \"Apple M5 Ultra\", generation 17, tier ultra, table cutover q2=8 q3=8 q4=8 q5=8 q6=8 q8=8", try keyLine(&buf, "Apple M5 Ultra", chipOf(17, "Apple M5 Ultra")));
+    try std.testing.expectEqualStrings("device \"Apple M5 Max (40-core)\", generation 16, tier unknown, table cutover q2=never q3=never q4=never q5=never q6=never q8=never", try keyLine(&buf, "Apple M5 Max (40-core)", chipOf(16, "Apple M5 Max (40-core)")));
 }
 
 test "a per-width table routes each code width by its own cutover, as an M5 Max's does (REV75 3)" {
