@@ -141,7 +141,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     const requested: u32 = @intCast(o.context orelse 8192);
     const drafted = o.drafts;
-    const model = fl.Model.load(gpa, io, o.dir, .{ .capacity = requested, .streams = o.lanes, .rows = target.max_rows, .drafts = drafted, .vision = o.vision != null }) catch |err| {
+    const model = fl.Model.load(gpa, io, o.dir, .{ .capacity = requested, .streams = o.lanes, .rows = target.max_rows, .drafts = drafted, .vision = o.vision != null, .metal4 = try @import("sys").environment.read(bool, "TF_METAL4", true) }) catch |err| {
         problem.* = switch (err) {
             error.InvalidOptions => try std.fmt.allocPrint(a, "--context {d} is outside this Inkling 2 Mini checkpoint's window", .{requested}),
             error.NoDraftHead => "this Inkling 2 Mini checkpoint has no DSpark head; serve with --no-drafts",

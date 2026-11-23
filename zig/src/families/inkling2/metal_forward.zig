@@ -97,6 +97,8 @@ pub fn forward(m: *Model, items: []const Item) !void {
 
 fn run(m: *Model, r: *layer.Run) !void {
     errdefer r.abort(); // an encoding error closes the half-built command buffer uncommitted; nothing half-encoded runs
+    const queue = m.queueFor(r.n);
+    queue.roundBegin("inkling2 pass"); // TF_METAL4_TIMELINE=n stamps n passes' stages on a Metal 4 queue
     r.begin();
     try r.embed();
     for (0..m.plan.n_visits) |k| {
@@ -109,6 +111,7 @@ fn run(m: *Model, r: *layer.Run) !void {
     }
     try r.head();
     try r.flush();
+    queue.roundEnd();
 }
 
 fn view(b: mtl.Buffer) View {
