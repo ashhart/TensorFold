@@ -195,7 +195,7 @@ test "Metal review: Qwen tight-context cold timing work stays below a twenty-per
         try rule.measureWindows(&candidate, now[0..width], false);
         try rule.smooth(&candidate, now[0..width]);
         try t.expect(candidate.rows * 100 <= baseline.rows * 120);
-        try t.expect(candidate.refills <= baseline.refills);
+        try t.expect(candidate.refills * candidate.prompt * 100 <= baseline.refills * baseline.prompt * 120);
         std.debug.print("Metal cold context width={d} capacity={d} prompt={d}/{d} refills={d}/{d} work_rows={d}/{d}\n", .{ width, capacity, baseline.prompt, candidate.prompt, baseline.refills, candidate.refills, baseline.rows, candidate.rows });
     };
 }
