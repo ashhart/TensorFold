@@ -19,6 +19,20 @@ fn pair() struct { first: [1100]u32, second: [1100]u32 } {
     return .{ .first = fixture.prompt(17), .second = sibling(18) };
 }
 
+/// Bounded staging streams on its caller; a save beside a held writer needs its own thread.
+const Stager = struct {
+    x: *Fixture,
+    tokens: []const u32,
+    at: u32,
+    err: ?anyerror = null,
+
+    fn run(s: *Stager) void {
+        s.x.keep(s.tokens, s.at) catch |err| {
+            s.err = err;
+        };
+    }
+};
+
 test "rows stage: a block still being written is charged and gathered once" {
     const x = try Fixture.open("stage-share", .finish, false, 18 << 20);
     defer x.close();
@@ -80,14 +94,18 @@ test "rows stage: a block its writer failed to write is written by the next save
     const third = sibling(19);
     try x.keep(&first, 900);
     try Hold.wait(&failing.entered);
-    try x.keep(&second, 900);
+    var stage = Stager{ .x = x, .tokens = &second, .at = 900 };
+    const thread = try std.Thread.spawn(.{}, Stager.run, .{&stage});
+    defer thread.join();
     x.r.worker.?.io = held.io(); // what the worker writes after the first job waits on `held`
     failing.release.store(true, .release);
     try Hold.wait(&held.entered);
     rows.write.reap(x.r);
     x.r.admission.retry_at = 0; // the back-off the first failure set has run out
     try t.expectEqual(@as(usize, 1), x.r.worker.?.pending());
-    try x.keep(&third, 900);
+    var stage3 = Stager{ .x = x, .tokens = &third, .at = 900 };
+    const thread3 = try std.Thread.spawn(.{}, Stager.run, .{&stage3});
+    defer thread3.join();
     try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
     held.release.store(true, .release);
     try x.settle();

@@ -84,9 +84,14 @@ pub fn counts(f: *prefetch.Prefetch) prefetch.Counts {
     return f.counts;
 }
 
-/// `name`'s read once it has finished or failed (null: it left the list).
+fn bound() i128 {
+    return rows.write.nowNs() + 60 * std.time.ns_per_s;
+}
+
+/// `name`'s read once it has finished or failed (null: it left the list, or the bound passed).
 pub fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
-    while (true) {
+    const end = bound();
+    while (rows.write.nowNs() < end) {
         f.mutex.lockUncancelable(f.io);
         const phase: ?prefetch.Phase = for (f.reads.items) |rd| {
             if (std.mem.eql(u8, &rd.name, &name)) break rd.phase;
@@ -95,11 +100,16 @@ pub fn settled(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
         if (phase == null or phase.? == .ready or phase.? == .failed) return phase;
         std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
     }
+    return null;
 }
 
 /// First availability releases admission; terminal readiness may await backpressured chunk recycling.
-pub fn available(f: *prefetch.Prefetch, name: Name) void {
-    while (f.pending(name)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+pub fn available(f: *prefetch.Prefetch, name: Name) !void {
+    const end = bound();
+    while (f.pending(name)) {
+        if (rows.write.nowNs() >= end) return error.PrefetchTimedOut;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
 }
 /// `name`'s read phase as it stands: `take` removes the detached winner, `forget` the refused states' reads.
 pub fn phased(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
@@ -109,8 +119,12 @@ pub fn phased(f: *prefetch.Prefetch, name: Name) ?prefetch.Phase {
     return null;
 }
 
-pub fn until(f: *prefetch.Prefetch, comptime field: []const u8, n: u64) void {
-    while (@field(counts(f), field) < n) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+pub fn until(f: *prefetch.Prefetch, comptime field: []const u8, n: u64) !void {
+    const end = bound();
+    while (@field(counts(f), field) < n) {
+        if (rows.write.nowNs() >= end) return error.PrefetchTimedOut;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
 }
 
 /// A slow reader the test opens (or fails), counting the reads that reached it.
@@ -226,7 +240,7 @@ test "prefetch: a state read ahead restores equal to a synchronous read and to a
     defer x.close();
     const f = try prefetch.make(x.r, t.io, .{});
     const name = x.start(f, again) orelse return error.NotReadAhead;
-    available(f, name);
+    try available(f, name);
     const got = try request(a, &x.s, &x.f, again, 1404);
     try t.expectEqual(@as(u32, 1400), got.from);
     try t.expect(x.f.restored_ok); // every byte of the restored image equals a fresh pass's
@@ -263,11 +277,11 @@ test "prefetch: cancellation before, during and after the read frees each read e
     f.limits.reads = 1;
     try t.expect(x.start(f, one) == null); // a cancelled read keeps its permit until its blocked syscall returns
     Gate.open.store(true, .release);
-    until(f, "freed", 2);
+    try until(f, "freed", 2);
     const n3 = x.start(f, one) orelse return error.NotReadAhead; // after: some payload is available, then its request went
-    available(f, n3);
+    try available(f, n3);
     f.sweep({}, none);
-    until(f, "freed", 3);
+    try until(f, "freed", 3);
     const c = counts(f);
     try t.expectEqual(@as(u64, 3), c.made);
     try t.expectEqual(@as(u64, 3), c.freed);
@@ -318,7 +332,7 @@ test "prefetch: a failed read, or a file that fails its check, falls back to tod
     _ = platform.c.close(fd);
     const f = try prefetch.make(x.r, t.io, .{});
     const name = x.start(f, again) orelse return error.NotReadAhead;
-    available(f, name); // a read longer than the fixed handoff cannot finish until its request drains it
+    try available(f, name); // a read longer than the fixed handoff cannot finish until its request drains it
     const got = try request(a, &x.s, &x.f, again, 1404); // the drained read finds the garbled block, as today
     try t.expectEqual(@as(u32, 0), got.from);
     try t.expectEqual(fresh(again), got.sum);
@@ -347,7 +361,7 @@ test "prefetch: two requests join one producer; its detached stream belongs to t
     try t.expectEqualSlices(u8, &n1, &n2);
     try t.expect(f.pending(n1));
     Gate.open.store(true, .release);
-    available(f, n1);
+    try available(f, n1);
     try t.expectEqual(@as(u32, 1), Gate.entered.load(.acquire));
     const got1 = try request(a, &x.s, &x.f, again, 1404);
     const got2 = try request(a, &x.s, &x.f, other, 1403);
@@ -387,7 +401,7 @@ test "prefetch: admission detaches an in-progress compatible read and waits for 
     try t.expectEqual(@as(u32, 1400), got.from);
     try t.expect(x.f.restored_ok);
     try t.expectEqual(fresh(again), got.sum);
-    until(f, "freed", 1);
+    try until(f, "freed", 1);
     const c = counts(f);
     try t.expectEqual(@as(u64, 1), c.used);
     try t.expectEqual(@as(u64, 1), c.made);

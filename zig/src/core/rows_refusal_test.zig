@@ -93,7 +93,7 @@ const cases = [_]Case{
 /// State `i`'s read registered; `wait` starts its producer, so `take` joins `.reading` or `.ready`, never `.queued`.
 fn started(p: *prefetch.Prefetch, r: *rows.Rows, i: usize, wait: bool) !void {
     const name = p.start(r, i) orelse return error.NotReadAhead;
-    if (wait) ahead.available(p, name);
+    if (wait) try ahead.available(p, name);
 }
 
 /// Conversation 1's next turn recalled with its copy failing as `c` says, both disk states read ahead first or not.
@@ -133,7 +133,7 @@ fn recalled(a: Allocator, tag: []const u8, c: Case, read_ahead: bool) !void {
     try t.expectEqual(c.mine or c.other, exists(x.r, shared.name, ".blk"));
     if (f) |p| {
         // the used read left with its request; a forgotten read is freed now (`drop` waits on a mid-stream fill)
-        ahead.until(p, "freed", @as(u64, 1) + @intFromBool(!c.other));
+        try ahead.until(p, "freed", @as(u64, 1) + @intFromBool(!c.other));
         const k = ahead.counts(p);
         try t.expectEqual(@as(u64, 2), k.made);
         try t.expectEqual(@as(u64, 1), k.used);

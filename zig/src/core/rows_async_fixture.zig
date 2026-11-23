@@ -117,10 +117,12 @@ pub const Gate = struct {
         return .{ .ctx = g, .write = write, .sync = sync };
     }
 
+    /// A bounded hold: staged saves backpressure their caller, so peer waits cannot hold it forever.
     fn write(ctx: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.entered.store(true, .release);
-        while (!g.release.load(.acquire)) rows.write.io.nap();
+        const end = rows.write.nowNs() + 250 * std.time.ns_per_ms;
+        while (!g.release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
         defer g.left.store(true, .release);
         g.calls += 1;
         if (g.mode == .full or (g.mode == .first_fails and g.calls == 1)) return error.NoSpaceLeft;
@@ -133,7 +135,8 @@ pub const Gate = struct {
     fn sync(ctx: ?*anyopaque, fd: c_int) !void {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.sync_entered.store(true, .release);
-        while (!g.sync_release.load(.acquire)) rows.write.io.nap();
+        const end = rows.write.nowNs() + 250 * std.time.ns_per_ms;
+        while (!g.sync_release.load(.acquire) and rows.write.nowNs() < end) rows.write.io.nap();
         if (g.mode == .sync_failure) return error.SyncFailed;
         if (platform.c.fsync(fd) != 0) return error.RowsWrite;
     }

@@ -74,14 +74,16 @@ const Box = struct {
             .finished => |f| b.done = f.reason,
         }
     }
-    fn wait(b: *@This()) Reason {
-        while (true) {
+    fn wait(b: *@This()) !Reason {
+        const end = waits.deadline();
+        while (pc.rows.write.nowNs() < end) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
             b.mutex.unlock(std.testing.io);
             if (d) |r| return r;
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
         }
+        return error.BoxTimedOut;
     }
 };
 
@@ -126,7 +128,7 @@ test "a host writes its kept states while idle and on its stop; the next host re
             defer b.tokens.deinit(std.testing.allocator);
             const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
             try h.engine().submit(1, &req, .{ .ctx = &b, .event = Box.event });
-            try std.testing.expectEqual(Reason.length, b.wait());
+            try std.testing.expectEqual(Reason.length, try b.wait());
             @memcpy(first[0..700], &p);
             @memcpy(first[700..], b.tokens.items);
             var waited: usize = 0;
@@ -144,7 +146,7 @@ test "a host writes its kept states while idle and on its stop; the next host re
             defer b2.tokens.deinit(std.testing.allocator);
             const req2: api.Request = .{ .prompt = &p2, .max_tokens = 2, .history_len = 650 };
             try h.engine().submit(2, &req2, .{ .ctx = &b2, .event = Box.event });
-            try std.testing.expectEqual(Reason.length, b2.wait());
+            try std.testing.expectEqual(Reason.length, try b2.wait());
         }
         fn two(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) anyerror!void {
             try std.testing.expectEqual(@as(usize, 2), r.states.items.len); // the stop wrote the second
@@ -161,7 +163,7 @@ test "a host writes its kept states while idle and on its stop; the next host re
             defer b.tokens.deinit(std.testing.allocator);
             const req: api.Request = .{ .prompt = &first, .max_tokens = 8, .history_len = 704 };
             try h.engine().submit(3, &req, .{ .ctx = &b, .event = Box.event });
-            try std.testing.expectEqual(Reason.length, b.wait());
+            try std.testing.expectEqual(Reason.length, try b.wait());
             try std.testing.expectEqual(@as(?u32, 600), b.cached);
             // the fake's tokens read the whole history: a wrong row changes them
             var history: std.ArrayList(u32) = .empty;
@@ -212,8 +214,8 @@ test "rows I/O: a host serves another turn while its disk writer is blocked" {
                 pc.rows.write.io.nap();
             }
             gate.release.store(true, .release);
-            _ = first.wait();
-            _ = second.wait();
+            _ = try first.wait();
+            _ = try second.wait();
             try std.testing.expectEqual(@as(?Reason, .length), result);
             try std.testing.expectEqual(@as(usize, 6), second.tokens.items.len);
         }
@@ -234,7 +236,7 @@ test "rows close: a spill-only host wakes with its RAM conversation on disk and 
             defer b.tokens.deinit(std.testing.allocator);
             const req: api.Request = .{ .prompt = &p, .max_tokens = 6, .history_len = 600 };
             try h.engine().submit(71, &req, .{ .ctx = &b, .event = Box.event });
-            try std.testing.expectEqual(Reason.length, b.wait());
+            try std.testing.expectEqual(Reason.length, try b.wait());
             @memcpy(history[0..700], &p);
             @memcpy(history[700..], b.tokens.items);
             var ask: api.ImprintAsk = .{ .op = .where, .prompt = &history };
@@ -255,7 +257,7 @@ test "rows close: a spill-only host wakes with its RAM conversation on disk and 
             defer b.tokens.deinit(std.testing.allocator);
             const req: api.Request = .{ .prompt = &history, .max_tokens = 8, .history_len = 704 };
             try h.engine().submit(72, &req, .{ .ctx = &b, .event = Box.event });
-            try std.testing.expectEqual(Reason.length, b.wait());
+            try std.testing.expectEqual(Reason.length, try b.wait());
             try std.testing.expectEqual(@as(?u32, if (wake) 600 else 0), b.cached);
             try std.testing.expectEqual(@as(u64, if (wake) 1 else 0), r.counts.reads);
             if (wake) @memcpy(&resumed, b.tokens.items) else try std.testing.expectEqualSlices(u32, &resumed, b.tokens.items);

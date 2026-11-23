@@ -14,7 +14,8 @@ const Gate = struct {
     fn write(ctx: ?*anyopaque, fd: c_int, bytes: []const u8) !usize {
         const g: *Gate = @ptrCast(@alignCast(ctx.?));
         g.entered.store(true, .release);
-        while (!g.release.load(.acquire)) nap();
+        const end = rows.write.nowNs() + 250 * std.time.ns_per_ms;
+        while (!g.release.load(.acquire) and rows.write.nowNs() < end) nap();
         const n = platform.c.write(fd, bytes.ptr, bytes.len);
         if (n < 0) return error.RowsWrite;
         return @intCast(n);

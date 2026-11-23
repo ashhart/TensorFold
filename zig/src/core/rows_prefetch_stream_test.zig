@@ -117,7 +117,8 @@ test "prefetch stream: multi-chunk identity, fixed buffers and readiness before 
         chunks += 1;
         s.f.recycle(s.rd.?, chunk);
         if (chunks == 1) {
-            while (s.phase() == .reading) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+            const end = rows.write.nowNs() + 60 * std.time.ns_per_s;
+            while (s.phase() == .reading and rows.write.nowNs() < end) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
             try t.expectEqual(prefetch.Phase.ready, s.phase());
         }
     }
