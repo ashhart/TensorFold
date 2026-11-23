@@ -50,6 +50,7 @@ pub fn interleaveWidths(windows: anytype, observer: anytype, ms: []f64, keep: bo
             if (i % reps == pass) try observer.afterWidth(i);
         }
     }
+    for (ms) |m| if (!(m > 0) or !std.math.isFinite(m)) return error.InvalidWindowCost;
 }
 
 pub const NoObserver = struct {
