@@ -55,6 +55,7 @@ pub fn refuse(a: std.mem.Allocator, model_type: []const u8, problem: *[]const u8
 /// Family and backend pairs that never copy (empty traces if admitted). Named, not inferred.
 pub fn neverCopies(backend: []const u8, model_type: []const u8) bool {
     if (std.mem.eql(u8, backend, "xpu") and std.mem.eql(u8, model_type, "nemotron_h")) return true;
+    if (std.mem.eql(u8, backend, "xpu") and std.mem.eql(u8, model_type, "qwen4_exp")) return true;
     if (std.mem.eql(u8, backend, "metal") and std.mem.eql(u8, model_type, "qwen4_exp")) return true;
     if (std.mem.eql(u8, backend, "metal") and std.mem.eql(u8, model_type, "qwen3_5_moe")) return true;
     return false;
@@ -365,6 +366,7 @@ test "tapped families are named; DeepSeek V4.1 and dense families are refused on
 
 test "named family/backend pairs that never copy are refused by name; others copy" {
     try std.testing.expect(neverCopies("xpu", "nemotron_h"));
+    try std.testing.expect(neverCopies("xpu", "qwen4_exp"));
     try std.testing.expect(neverCopies("metal", "qwen4_exp"));
     try std.testing.expect(neverCopies("metal", "qwen3_5_moe"));
     try std.testing.expect(!neverCopies("cuda", "nemotron_h"));
@@ -484,6 +486,10 @@ test "a failed open after admit frees the ring under the testing allocator" {
     }
 
     var problem: []const u8 = "";
+    try std.testing.expect(!admit(a, a, "qwen4_exp", 0, "xpu", &problem));
+    try std.testing.expect(!live());
+    a.free(problem);
+    problem = "";
     try std.testing.expect(admit(a, a, "nemotron_h", 0, "cuda", &problem));
     try std.testing.expect(live());
     {
