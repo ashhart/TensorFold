@@ -267,6 +267,24 @@ test "a reply of exactly the limit is read, and one byte more is too large" {
     try std.testing.expect(at.failed == .none and std.mem.eql(u8, at.body, "[1234]"));
     try std.testing.expect(stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/x"), .limit = 6, .timeout_s = 5 }).failed == .too_large);
 }
+test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing UTF-8" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "GET", .path = "/v1/models", .replies = &.{try fake.jsonReply(a, "200 OK", "{\"data\": []}")} }});
+    defer f.stop();
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
+    defer client.deinit();
+    const token = "fixture-caf\u{e9}";
+    const got = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = token });
+    try std.testing.expectEqual(.none, got.failed);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
+    const refused = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = "fixture-\u{20ac}" });
+    try std.testing.expectEqual(.network, refused.failed);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+}
 
 test "an https exchange is never sent through a proxy that refuses to tunnel" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
