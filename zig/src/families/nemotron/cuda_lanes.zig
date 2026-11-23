@@ -173,6 +173,7 @@ pub const Cuda = struct {
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = true, // copy-only models retain the landed shared target forward
             .batch_rows = @intCast(state.sharedRows(self.e.c)), // 32 with TF_NEMOTRON_WIDE_ROUNDS; 17-32 priced linearly
+            .learn_row_costs = self.e.c.wide_rounds, // 17-32 rows are unmeasured: learn their cost, not a fixed overhead
             .max_streams = @intCast(@import("cuda_wide.zig").streams(self.e.c)),
         };
     }
