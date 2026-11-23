@@ -32,6 +32,7 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     @import("qwen4_cuda_attention_host.zig").wire(b, m);
     const step = b.step("test-qwen4-host", "Qwen4 explicit config admission and synthetic graph contracts");
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    b.step("test-qwen4-state-host", "Qwen4 frame rollback, reset and KV-capacity preservation").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 frames:"} })).step);
     const widths_root = b.createModule(.{ .root_source_file = b.path("zig/qwen4_prefill_widths_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = m }} });
     const widths = b.step("test-qwen4-prefill-widths-host", "Existing adapter fixture counts Metal prompt passes and excludes CUDA and verify");
     for ([_]*std.Build.Module{ m, widths_root }) |root| widths.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen4 lanes:"} })).step);

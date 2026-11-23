@@ -58,7 +58,7 @@ pub fn buffers(gpa: std.mem.Allocator, driver: *cuda.Driver, n: usize, len: usiz
             return cuda.DeviceBuffer.alloc(a.driver, a.len);
         }
     };
-    return made(cuda.DeviceBuffer, gpa, n, Allocated{ .driver = driver, .len = len });
+    return makeBuffers(cuda.DeviceBuffer, gpa, n, Allocated{ .driver = driver, .len = len }, false);
 }
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
 pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
@@ -80,6 +80,10 @@ pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, 
 }
 /// `n` buffers from `src.make`, each through `src.fill`; on a failure every buffer made so far is freed, the last too.
 fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
+    return makeBuffers(B, gpa, n, src, true);
+}
+/// The shared allocation/rollback body; filling is explicit, never inferred from declaration visibility.
+fn makeBuffers(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype, comptime fill: bool) ![]B {
     const out = try gpa.alloc(B, n);
     var held: usize = 0;
     errdefer {
@@ -90,7 +94,7 @@ fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
     while (held < n) {
         out[held] = try src.make();
         held += 1; // counted before its fill, so a failed fill frees it with the rest
-        if (@hasDecl(@TypeOf(src), "fill")) try src.fill(&out[held - 1]);
+        if (fill) try src.fill(&out[held - 1]);
     }
     return out;
 }
