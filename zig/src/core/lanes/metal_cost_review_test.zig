@@ -199,3 +199,14 @@ test "Metal review: Qwen tight-context cold timing work stays below a twenty-per
         std.debug.print("Metal cold context width={d} capacity={d} prompt={d}/{d} refills={d}/{d} work_rows={d}/{d}\n", .{ width, capacity, baseline.prompt, candidate.prompt, baseline.refills, candidate.refills, baseline.rows, candidate.rows });
     };
 }
+
+
+test "Metal review: the rotating 150ms width cannot be starved by an earlier edge" {
+    var timer: Timer = .{ .value = 140 };
+    var ms = [_]f64{ 100, 150 };
+    var cursor: u64 = 1;
+    _ = try rule.healWindows(&timer, &ms, &.{ 1, 64 }, &cursor);
+    try t.expectEqual(@as(f64, 140), ms[1]);
+    try t.expectEqual(@as(usize, 1), timer.n);
+    try t.expectEqual(@as(usize, 1), timer.seen[0]);
+}

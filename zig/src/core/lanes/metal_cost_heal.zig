@@ -51,13 +51,13 @@ pub fn select(ms: []const f64, widths: []const u32, cursor: u64) Plan {
     }
     p.add(below);
     p.add(above);
-    std.mem.sort(usize, p.at[0..p.n], {}, std.sort.asc(usize));
     var fits: Plan = .{};
     var estimate: f64 = 0;
     for (p.at[0..p.n]) |i| if (estimate + ms[i] <= budget_ms) {
         fits.add(i);
         estimate += ms[i];
     };
+    std.mem.sort(usize, fits.at[0..fits.n], {}, std.sort.asc(usize));
     return fits;
 }
 
