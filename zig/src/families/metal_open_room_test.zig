@@ -5,6 +5,7 @@ const std = @import("std");
 const Case = struct { name: []const u8, src: []const u8, undo: []const u8, refit: []const u8 };
 const cases = [_]Case{
     .{ .name = "llama", .src = @embedFile("llama/backend.zig"), .undo = "self.ledger.give(need);", .refit = "r.fit(r.ctx, self.ledger.left(), null, &.{});" },
+    .{ .name = "ripple", .src = @embedFile("ricursive/backend.zig"), .undo = "self.ledger.give(need);", .refit = "r.fit(r.ctx, self.ledger.left(), null, &.{});" },
 };
 
 test "Metal open room: a pass failing after its room fit gives the room back with the bytes, in every family (D1073)" {
