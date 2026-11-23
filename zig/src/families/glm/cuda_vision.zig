@@ -176,12 +176,12 @@ pub const Tower = struct {
         };
         var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, try weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
         errdefer t.deinit();
+        t.bytes = t.mem.deviceBytes();
+        t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
         if (try attn.wanted()) {
             t.full = try cuda.vit.Attention.load(d);
             std.log.info("glm: the image tower's attention as vit's full attention (TF_GLM_VISION_FUSED)", .{});
         }
-        t.bytes = t.mem.deviceBytes();
-        t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
         var at: u64 = 0;
         var names = std.StringHashMap(u64).init(gpa);
         defer names.deinit();
