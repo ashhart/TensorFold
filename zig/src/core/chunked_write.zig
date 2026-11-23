@@ -9,7 +9,9 @@ comptime {
 }
 
 /// Write bytes to a sink in requests of at most `cap` bytes; the sink's errors pass through.
+/// A zero cap refuses: an enforcing sink could otherwise take a nonempty buffer without progress.
 pub fn writeChunked(sink: anytype, bytes: []const u8, cap: usize) !void {
+    if (cap == 0 and bytes.len > 0) return error.ZeroWriteCap;
     var at: usize = 0;
     while (at < bytes.len) {
         const n = @min(bytes.len - at, cap);
