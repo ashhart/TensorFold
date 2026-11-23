@@ -383,6 +383,11 @@ pub const Generation = struct {
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
         try @import("grammar_metrics.zig").put(a, runtime, m.stats.grammar);
         if (m.stats.gpu_seconds) |gpu| try runtime.put(a, "gpu_seconds", .{ .float = gpu }); // TF_Q27_PROFILE only
+        // Inkling 2's refused calls are dropped, never shown: say how many, as kept calls are counted
+        if (inkling) if (native) |n| if (n.rejected_calls > 0) {
+            log.line("warning: dropped {d} malformed, unoffered or unfinished Inkling 2 tool calls", .{n.rejected_calls});
+            try runtime.put(a, "rejected_tool_calls", try json.intValue(a, n.rejected_calls));
+        };
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);

@@ -59,28 +59,28 @@ fn appendDecoded(a: Allocator, out: *std.ArrayList(u8), text: model_text.Text, i
     try out.appendSlice(a, bytes);
 }
 
-fn finishTool(a: Allocator, payload: []const u8, tools: []const Value, calls: *std.ArrayList(Value), rejected: *bool) Allocator.Error!void {
+fn finishTool(a: Allocator, payload: []const u8, tools: []const Value, calls: *std.ArrayList(Value), rejected: *usize) Allocator.Error!void {
     const document = switch (try json.parse(a, payload)) {
         .ok => |value| value,
         .err => {
-            rejected.* = true;
+            rejected.* += 1;
             return;
         },
     };
     if (document != .object) {
-        rejected.* = true;
+        rejected.* += 1;
         return;
     }
     const name_value = document.get("name") orelse {
-        rejected.* = true;
+        rejected.* += 1;
         return;
     };
     const arguments = document.get("args") orelse {
-        rejected.* = true;
+        rejected.* += 1;
         return;
     };
     if (name_value != .string or arguments != .object) {
-        rejected.* = true;
+        rejected.* += 1;
         return;
     }
     const name = try a.dupe(u8, name_value.string); // Calls outlive the reusable payload.
@@ -92,7 +92,7 @@ fn finishTool(a: Allocator, payload: []const u8, tools: []const Value, calls: *s
         }
     }
     if (!offered) {
-        rejected.* = true;
+        rejected.* += 1;
         return;
     }
 
@@ -117,9 +117,8 @@ pub const Stream = struct {
     calls: std.ArrayList(Value) = .empty,
     state: State = .none,
     reasoning_tokens: usize = 0,
-    rejected: bool = false,
+    rejected: usize = 0, // tool calls refused: malformed, unoffered, or left open by a new header
     next: usize = 0,
-    ended: bool = false,
 
     pub fn init(a: Allocator, text: model_text.Text) Allocator.Error!Stream {
         return .{ .a = a, .text = text, .resolved = try resolve(a, text) };
@@ -131,18 +130,31 @@ pub const Stream = struct {
             .reasoning = s.reasoning.items,
             .calls = if (s.calls.items.len == 0) null else s.calls.items,
             .reasoning_tokens = s.reasoning_tokens,
-            .rejected = s.rejected or s.state == .tool_json,
+            .rejected = s.rejected > 0 or s.state == .tool_json,
+            .rejected_calls = s.rejected + @intFromBool(s.state == .tool_json),
             .open_think = s.state == .thinking,
         };
+    }
+
+    /// Neither a listed control nor any other special token of the tokenizer: text a block holds.
+    fn payload(s: *const Stream, id: u32) bool {
+        return controlKind(s.text, s.resolved, id) == null and !s.text.isSpecial(id);
     }
 
     /// Consume only the new suffix; ids is a monotonically growing full prefix, and EOS stripping must never shrink it.
     pub fn extend(s: *Stream, ids: []const u32, tools: []const Value) Allocator.Error!Result {
         std.debug.assert(ids.len >= s.next);
-        while (!s.ended and s.next < ids.len) {
+        while (s.next < ids.len) {
             const kind = controlKind(s.text, s.resolved, ids[s.next]);
             if (kind == .end_sampling) {
-                s.ended = true;
+                // closes nothing: an open channel stays reported, and with ignore_eos the reply goes on
+                s.next += 1;
+                continue;
+            }
+            if (kind == .message_model and s.state != .none) {
+                // a new message inside an open block: the block was never closed, and a call in it never finished
+                if (s.state == .tool_json) s.rejected += 1;
+                s.state = .none;
                 s.next += 1;
                 continue;
             }
@@ -165,23 +177,23 @@ pub const Stream = struct {
                 s.next += 1;
                 continue;
             }
-            if (kind != null) {
-                // A control inside a block is never payload; only end_message closes it.
+            if (!s.payload(ids[s.next])) {
+                // a control or any other special token inside a block is never payload
                 s.next += 1;
                 continue;
             }
 
             const start = s.next;
             s.next += 1;
-            while (s.next < ids.len and controlKind(s.text, s.resolved, ids[s.next]) == null) s.next += 1;
-            const payload = ids[start..s.next];
+            while (s.next < ids.len and s.payload(ids[s.next])) s.next += 1;
+            const run = ids[start..s.next];
             switch (s.state) {
                 .thinking => {
-                    try appendDecoded(s.a, &s.reasoning, s.text, payload);
-                    s.reasoning_tokens += payload.len;
+                    try appendDecoded(s.a, &s.reasoning, s.text, run);
+                    s.reasoning_tokens += run.len;
                 },
-                .content => try appendDecoded(s.a, &s.content, s.text, payload),
-                .tool_json => try appendDecoded(s.a, &s.tool_payload, s.text, payload),
+                .content => try appendDecoded(s.a, &s.content, s.text, run),
+                .tool_json => try appendDecoded(s.a, &s.tool_payload, s.text, run),
                 .none => unreachable,
             }
         }
