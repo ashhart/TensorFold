@@ -59,8 +59,13 @@ test "REV99 a refused tensor-unit pool retains rotary headroom when a smaller po
 
 const fsr = @import("src/core/fsr/arena.zig");
 const Source = struct {
-    pub fn fileSize(_: @This(), _: usize) !u64 { return 4096; }
-    pub fn readAt(_: @This(), _: usize, out: []u8, _: u64) !usize { @memset(out, 0); return out.len; }
+    pub fn fileSize(_: @This(), _: usize) !u64 {
+        return 4096;
+    }
+    pub fn readAt(_: @This(), _: usize, out: []u8, _: u64) !usize {
+        @memset(out, 0);
+        return out.len;
+    }
 };
 fn measured(slots: usize) !usize {
     var peak: @import("src/core/rows_peak_allocator.zig").Peak = .{ .child = t.allocator };
@@ -89,21 +94,36 @@ test "REV99 slot metadata covers actual demand and forecast job allocations" {
 
 const Buffer = struct {
     r: *Recording,
-    pub fn deinit(b: @This()) void { b.r.live -= 1; b.r.freed += 1; }
+    pub fn deinit(b: @This()) void {
+        b.r.live -= 1;
+        b.r.freed += 1;
+    }
 };
 const Recording = struct {
-    live: usize = 0, freed: usize = 0, calls: usize = 0, kept: usize = 0, fail_at: usize,
-    pub fn allocate(r: *@This(), _: usize) !Buffer { r.calls += 1; r.live += 1; return .{ .r = r }; }
+    live: usize = 0,
+    freed: usize = 0,
+    calls: usize = 0,
+    kept: usize = 0,
+    fail_at: usize,
+    pub fn allocate(r: *@This(), _: usize) !Buffer {
+        r.calls += 1;
+        r.live += 1;
+        return .{ .r = r };
+    }
     pub fn keep(r: *@This(), _: Buffer) !void {
         if (r.calls == r.fail_at) return error.OutOfMemory;
         r.kept += 1;
     }
-    fn close(r: *@This()) void { r.live -= r.kept; r.freed += r.kept; r.kept = 0; }
+    fn close(r: *@This()) void {
+        r.live -= r.kept;
+        r.freed += r.kept;
+        r.kept = 0;
+    }
 };
 
 test "REV99 every failed slab registration releases only its unowned buffer" {
     const own = @import("src/families/flashnext/fsr_buffer.zig");
-    for ([_]usize{ 3, 9 }) |count| for (1 .. count + 1) |fail_at| {
+    for ([_]usize{ 3, 9 }) |count| for (1..count + 1) |fail_at| {
         var r: Recording = .{ .fail_at = fail_at };
         for (0..count) |_| _ = own.allocate(&r, 4096) catch break;
         const unowned = r.live - r.kept;
