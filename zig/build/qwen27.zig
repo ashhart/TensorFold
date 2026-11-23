@@ -24,8 +24,11 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *st
     var index: []const u8 = "";
     for (parts) |part| {
         _ = files.addCopyFile(b.path(b.fmt("zig/kernels/metal/qwen27/{s}.metal", .{part})), b.fmt("{s}.metal", .{part}));
-        index = b.fmt("{s}pub const {s} = @embedFile(\"{s}.metal\");\n", .{ index, part, part });
+        // The prompt kernels' pick comes from core: its macro heads attention_prompt.
+        const head = if (std.mem.eql(u8, part, "attention_prompt")) "@embedFile(\"prompt_pick.metal\") ++ " else "";
+        index = b.fmt("{s}pub const {s} = {s}@embedFile(\"{s}.metal\");\n", .{ index, part, head, part });
     }
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/prompt_pick.metal"), "prompt_pick.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet.metal"), "gdn.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet_slots.metal"), "gdn_slots.metal");
     const bf16_topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_topk.zig"), .target = target, .optimize = .ReleaseSafe });
