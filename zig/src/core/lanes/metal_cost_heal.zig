@@ -90,6 +90,7 @@ fn broadcast(p: Plan, len: usize, agree: anytype, lead: bool) !Plan {
 /// Setup and each complete read count against elapsed wall time; one unexpected slow operation can overrun it.
 pub fn prepared(timer: anytype, ms: []f64, widths: []const u32, cursor: *u64, floor: f64, agree: anytype, lead: bool) !Stats {
     var stats: Stats = .{};
+    if (comptime @hasDecl(kind(@TypeOf(timer)), "start")) timer.start();
     const mine = if (lead) select(ms, widths, cursor.*) else Plan{};
     if (!try agree.decide(lead and mine.n > 0)) return stats;
     const selected = try broadcast(mine, ms.len, agree, lead);

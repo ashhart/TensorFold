@@ -97,43 +97,44 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
             }
         }
     }
-    const cursor_key = if (k) |key| lanes.cost_cache.buildKey(&key, &.{"metal-heal-v1"}) else null;
-    var cursor: [3]u64 = if (cursor_key) |key| lanes.cost_cache.load([3]u64, b.gpa, io, key) orelse .{ 0, 0, 0 } else .{ 0, 0, 0 };
-    const heal_shared = kept != null and kept.?.shareds > 0 and cursor[2] % 2 == 1;
-    var caches: [64]st.Cache = undefined;
-    const n = if (kept != null and !heal_shared) @min(most, 1) else most;
-    makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b }) catch |err| {
-        if (kept) |table| {
-            b.costs = table;
-            b.timing = .{};
-            return;
-        }
-        return err;
-    };
-    defer for (caches[0..n]) |*x| x.deinit(&b.pool);
+    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
     if (kept) |table| {
         var costs = table;
+        if (most == 0) { b.costs = costs; b.timing = .{}; return; }
+        const cursor_key = lanes.cost_cache.buildKey(&(k orelse unreachable), &.{"metal-heal-v2"});
+        var cursor = lanes.cost_cache.load([3]u64, b.gpa, io, cursor_key) orelse [3]u64{ 0, 0, 0 };
+        const shared = costs.shareds > 0 and cursor[2] % 2 == 1;
+        const count = if (shared) costs.shareds else costs.windows;
+        const entries = if (shared) costs.shared[0..count] else costs.window[0..count];
         var values: [32]f64 = undefined;
         var widths: [32]u32 = undefined;
-        const count = if (heal_shared) costs.shareds else costs.windows;
-        const entries = if (heal_shared) costs.shared[0..count] else costs.window[0..count];
-        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| {
-            m.* = c2.ms;
-            w.* = c2.width;
-        }
-        if (heal_shared) {
-            _ = try lanes.cost_rule.healWindows(SharedTimer{ .b = b, .caches = caches[0..n] }, values[0..count], widths[0..count], &cursor[1]);
-        } else {
-            _ = try lanes.cost_rule.healWindows(WindowTimer{ .b = b, .caches = caches[0..1] }, values[0..count], widths[0..count], &cursor[0]);
-        }
+        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| { m.* = c2.ms; w.* = c2.width; }
+        var caches: [64]st.Cache = undefined;
+        var n: usize = 0;
+        defer for (caches[0..n]) |*x| x.deinit(&b.pool);
+        defer b.timing = .{};
+        var timer: WarmTimer = .{ .b = b, .caches = &caches, .n = &n, .shared = shared };
+        const stats = lanes.cost_rule.warm_prices.prepared(&timer, values[0..count], widths[0..count], &cursor[@intFromBool(shared)], 0, lanes.cost_rule.warm_prices.Local{}, true) catch {
+            b.costs = table;
+            return;
+        };
         for (entries, values[0..count]) |*c2, m| c2.ms = m;
-        cursor[2] +%= 1;
         b.costs = costs;
-        b.timing = .{};
-        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
-        if (cursor_key) |key| lanes.cost_cache.save([3]u64, b.gpa, io, key, cursor);
+        if (stats.lowered > 0) {
+            lanes.cost_cache.save(Costs, b.gpa, io, k.?, costs);
+            lanes.cost_cache.save(Costs, b.gpa, io, last, costs);
+        }
+        if (stats.reads > 0) {
+            cursor[2] +%= 1;
+            lanes.cost_cache.save([3]u64, b.gpa, io, cursor_key, cursor);
+        }
         return;
     }
+    if (most == 0) return error.NoTimingStreams;
+    var caches: [64]st.Cache = undefined;
+    const n = most;
+    try makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b });
+    defer for (caches[0..n]) |*x| x.deinit(&b.pool);
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
     _ = try timeWindows(b, caches[0..1], backend.max_window, 12);
     const windows: WindowTimer = .{ .b = b, .caches = caches[0..1] };
@@ -143,7 +144,6 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var head = [1]f64{0};
     const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
     const ref = lanes.cost_cache.referenceKey(&parts);
-    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
     // the last build's table for this chip and shape stands while a probe of each kernel path stays within drift
     if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |last_costs| if (try holds(windows, heads, shared, last_costs, b.head != null, sharedCount(n))) {
         b.costs = last_costs;
@@ -152,7 +152,9 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
         return;
     };
     try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
-    try lanes.cost_rule.smooth(windows, &ms);
+    var window_widths: [wide.len + backend.max_window]u32 = undefined;
+    for (&window_widths, 0..) |*w, i| w.* = @intCast(widthOf(i));
+    try lanes.cost_rule.smoothWidths(windows, &ms, &window_widths);
     if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
         if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
             try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
@@ -163,7 +165,9 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     costs.shareds = sharedCount(n);
     var shared_ms: [8]f64 = undefined;
     try lanes.cost_rule.measureWindows(shared, shared_ms[0..costs.shareds], false);
-    try lanes.cost_rule.smooth(shared, shared_ms[0..costs.shareds]);
+    var shared_widths: [8]u32 = undefined;
+    for (shared_widths[0..costs.shareds], 0..) |*w, i| w.* = @intCast(2 * streamsOf(i));
+    try lanes.cost_rule.smoothWidths(shared, shared_ms[0..costs.shareds], shared_widths[0..costs.shareds]);
     for (costs.shared[0..costs.shareds], shared_ms[0..costs.shareds], 0..) |*s2, m, i| s2.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = m };
     b.costs = costs;
     b.timing = .{};
@@ -304,6 +308,25 @@ const WindowTimer = struct {
     caches: []st.Cache,
     pub fn time(t: WindowTimer, i: usize) !f64 {
         return timeWindows(t.b, t.caches, widthOf(i), 1);
+    }
+};
+
+const WarmTimer = struct {
+    b: *backend.Metal,
+    caches: *[64]st.Cache,
+    n: *usize,
+    shared: bool,
+    began: f64 = 0,
+    pub fn start(t: *WarmTimer) void { t.began = mtl.clock.seconds(); }
+    pub fn elapsedMs(t: *WarmTimer) f64 { return (mtl.clock.seconds() - t.began) * 1e3; }
+    pub fn prepare(t: *WarmTimer, plan: lanes.cost_rule.warm_prices.Plan, widths: []const u32) !void {
+        const needed = if (t.shared) plan.widest(widths) / 2 else 1;
+        try makeEach(st.Cache, t.caches[0..needed], CacheMaker{ .b = t.b });
+        t.n.* = needed;
+    }
+    pub fn time(t: *WarmTimer, i: usize) !f64 {
+        if (t.shared) return (SharedTimer{ .b = t.b, .caches = t.caches[0..t.n.*] }).time(i);
+        return (WindowTimer{ .b = t.b, .caches = t.caches[0..t.n.*] }).time(i);
     }
 };
 

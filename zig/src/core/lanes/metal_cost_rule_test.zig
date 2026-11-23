@@ -15,8 +15,8 @@ const Timer = struct {
 };
 fn truth(i: usize) f64 {
     const width = i + 1;
-    return 10 + 0.5 * @as(f64, @floatFromInt(width)) + @as(f64, if (width >= 16) 2 else 0) +
-        @as(f64, if (width >= 32) 3 else 0) + @as(f64, if (width >= 48) 4 else 0);
+    return 10 + 0.5 * @as(f64, @floatFromInt(width)) + @as(f64, if (width > 16) 2 else 0) +
+        @as(f64, if (width > 32) 3 else 0) + @as(f64, if (width > 48) 4 else 0);
 }
 
 test "Metal window prices: interleaved minima survive one whole-width slow stretch" {
@@ -38,7 +38,7 @@ test "Metal window prices: a high outlier below the dip threshold is retimed and
     ms[8] *= 1.04;
     try rule.smooth(&timer, &ms);
     for (ms, 0..) |m, i| try std.testing.expectApproxEqAbs(truth(i), m, 1e-9);
-    for ([_]usize{ 15, 31, 47 }) |i| try std.testing.expect(ms[i] > ms[i - 1] + 1);
+    for ([_]usize{ 16, 32, 48 }) |i| try std.testing.expect(ms[i] > ms[i - 1] + 1);
     try std.testing.expect(timer.calls <= ms.len);
 }
 
