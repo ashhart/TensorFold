@@ -15,6 +15,9 @@ pub const Device = struct {
     pub fn generation(d: Device) u32 {
         return d.gen;
     }
+    pub fn name(_: Device) [*:0]const u8 {
+        return ""; // no chip the cutover table lists: its generation's cutover
+    }
 };
 pub const objc = struct {
     pub const Pool = struct {
