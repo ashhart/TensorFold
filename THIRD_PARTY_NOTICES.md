@@ -666,3 +666,10 @@ against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` reb
 `Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
 The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
 own.
+
+## Inkling 2 EXL3 packs
+
+`zig/src/families/inkling2/exl3.zig` and `zig/src/families/inkling2/pack_weights.zig` read packs in the EXL3 format of
+[turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3) 1.x (MIT): the trellis layout, the `mul1` codebook
+and the per-tensor records. Packs carry the tensor names of an `inkling2` architecture added to exllamav3 for this
+model. The loader and its two-rank cuts are TensorFold's own.
