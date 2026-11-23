@@ -226,6 +226,38 @@ test "dsv41 metal dspark: R rows ingested in one launch equal the same rows one 
     try testing.expectEqual(@as(usize, 0), bad);
 }
 
+test "dsv41 metal dspark: a window ingested before its commit and cut by it leaves the rings and drafts of the kept rows" {
+    const a = testing.allocator;
+    const ds = try Ds.init(a, testing.io, limit, 68, 2);
+    defer ds.deinit();
+    var bad: usize = 0;
+    for ([_]u32{ 0, 1, 2, 3 }) |kept| {
+        const at: u64 = 400 + 9 * kept;
+        for ([_]u32{ 0, 1 }) |slot| {
+            ds.pass.reset(slot);
+            try ds.ingest(slot, at - 200, 200, 90);
+        }
+        // slot 0: the window's five rows land first; the commit keeps the first kept + 1 (its ingest again, or none)
+        try ds.ingest(0, at, 5, 91);
+        if (kept % 2 == 0) try ds.ingest(0, at, kept + 1, 91);
+        // slot 1: only the kept rows, ever
+        try ds.ingest(1, at, kept + 1, 91);
+        const p = at + kept + 1;
+        const o0 = try proposeOne(a, ds, Ds.ask(0, 11, p, null));
+        defer o0.deinit(a);
+        const o1 = try proposeOne(a, ds, Ds.ask(1, 11, p, null));
+        defer o1.deinit(a);
+        var differ = o0.diff(o1);
+        for (0..ds.w.stages.len) |s| for (ringBytes(ds, 0, s), ringBytes(ds, 1, s)) |x, y| {
+            differ += @intFromBool(x != y);
+        };
+        std.debug.print("{s} dsv41 metal dspark cut window: {d} of 5 rows kept ({s}): {d} values differ (rings, drafts)\n", .{ if (differ == 0) "PASS" else "FAIL", kept + 1, if (kept % 2 == 0) "ingested again" else "the pass alone", differ });
+        bad += differ;
+    }
+    try testing.expect(ds.pass.undo.restored > 0);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
 fn sampled(p: u64) host.dspark.Params {
     return .{ .seed = 0x5eed + p, .pos0 = p + 1, .top_k = 40, .sampled = true, .temperature = 0.9, .top_p = 0.95, .min_p = 0.01 };
 }
@@ -323,6 +355,46 @@ test "dsv41 metal dspark: a pass of more asks than a launch holds splits into la
     try testing.expectEqual(@as(usize, 0), differ);
 }
 
+/// One launch's encodeAll in an encoder of `kind`: its logits and hf bytes (block keys rewrite the same values).
+fn launchBytes(a: std.mem.Allocator, ds: *Ds, l: *const pkg.dspark.Launch, kind: @import("metal").DispatchType) ![]u8 {
+    const c = &ds.r.c;
+    const pool = @import("metal").objc.Pool.push();
+    defer pool.pop();
+    const cb = ds.r.queue.commandBuffer();
+    const e = cb.compute(kind);
+    try ds.pass.encodeAll(e, l);
+    e.end();
+    cb.commit();
+    cb.wait();
+    const nl = l.rows * c.vocab * 4;
+    const nh = l.rows * c.hidden * 2;
+    const out = try a.alloc(u8, nl + nh);
+    @memcpy(out[0..nl], ds.pass.b.bytes(ds.pass.b.logits, nl));
+    @memcpy(out[nl..], ds.pass.b.bytes(ds.pass.b.hf, nh));
+    return out;
+}
+
+test "dsv41 metal dspark: a launch in one concurrent encoder equals it in a serial one (1 and 3 slots, 10 runs each)" {
+    const a = testing.allocator;
+    const ds = try Ds.init(a, testing.io, limit, 67, 3);
+    defer ds.deinit();
+    _ = try history(a, ds, 9);
+    const asks = [_]pkg.dspark.Ask{ Ds.ask(0, 17, 200, null), Ds.ask(1, 90, 40, null), Ds.ask(2, 33, 520, null) };
+    var differ: usize = 0;
+    for ([_]usize{ 1, 3 }) |m| {
+        const l = try ds.pass.prepare(asks[0..m]);
+        const want = try launchBytes(a, ds, &l, .serial);
+        defer a.free(want);
+        for (0..10) |_| {
+            const got = try launchBytes(a, ds, &l, .concurrent);
+            defer a.free(got);
+            for (want, got) |x, y| differ += @intFromBool(x != y);
+        }
+    }
+    std.debug.print("{s} dsv41 metal dspark concurrent launch: {d} bytes differ from the serial encoder\n", .{ if (differ == 0) "PASS" else "FAIL", differ });
+    try testing.expectEqual(@as(usize, 0), differ);
+}
+
 test "dsv41 metal dspark: refusals (rows past the taps, a position past the tables, a draft block with no drafter)" {
     const a = testing.allocator;
     const ds = try Ds.init(a, testing.io, limit, 66, 2);
@@ -337,4 +409,42 @@ test "dsv41 metal dspark: refusals (rows past the taps, a position past the tabl
     try pkg.pipelines.check(&c);
     c.dspark_experts = 12;
     try testing.expectError(error.UnsupportedDspark, pkg.pipelines.check(&c));
+}
+
+test "dsv41 metal dspark: a block of 7 with a narrow 5: the narrow pass equals a block of 5's, a wide one makes 7 drafts" {
+    const a = testing.allocator;
+    var c7 = fixture.dsparkConfig();
+    c7.dspark_block = 7;
+    const d7 = try Ds.initWith(a, testing.io, c7, limit, 69, 1, .{ .narrow = 5 });
+    defer d7.deinit();
+    const d5 = try Ds.initWith(a, testing.io, fixture.dsparkConfig(), limit, 69, 1, .{});
+    defer d5.deinit();
+    var bad: usize = 0;
+    var wide_live: usize = 0;
+    for (0..3) |round| {
+        const at: u64 = 420 + 23 * round;
+        for ([_]*Ds{ d7, d5 }) |d| {
+            d.pass.reset(0);
+            try d.ingest(0, at - 180, 180, 70 + round);
+        }
+        const ask = Ds.ask(0, @intCast(9 + round), at, if (round == 2) sampled(at) else null);
+        // a narrow pass (the slot's last window verified fewer than 5 drafts)
+        d7.pass.note(0, 3);
+        const o7 = try Out.init(a, &c7);
+        defer o7.deinit(a);
+        var p7 = [1]pkg.dspark.Proposal{.{ .drafts = o7.drafts, .conf = o7.conf }};
+        try d7.pass.propose(&.{ask}, &p7);
+        const o5 = try proposeOne(a, d5, ask);
+        defer o5.deinit(a);
+        for (o7.drafts[0..5], o5.drafts) |x, y| bad += @intFromBool(x != y);
+        for (o7.conf[0..5], o5.conf) |x, y| bad += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+        for (o7.conf[5..]) |q| bad += @intFromBool(q != 0);
+        // a wide pass (the last window verified 5): seven drafts, each with a confidence
+        d7.pass.note(0, 6);
+        try d7.pass.propose(&.{ask}, &p7);
+        for (o7.conf) |q| wide_live += @intFromBool(q > 0);
+    }
+    std.debug.print("{s} dsv41 metal dspark narrow passes: {d} values differ from a block of 5's; {d} of 21 wide confidences set\n", .{ if (bad == 0 and wide_live == 21) "PASS" else "FAIL", bad, wide_live });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual(@as(usize, 21), wide_live);
 }

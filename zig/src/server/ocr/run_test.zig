@@ -62,7 +62,7 @@ test "ocr run: blocks scale from the frame, quads are validated, and the sink se
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "text 0 0 100 50\nall" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "title 10 5 90 10\n# T\n;;\ntext -5 40 120 60\nbody" }, .{ .text = "page\nall" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var seen: Seen = .{};
@@ -73,11 +73,11 @@ test "ocr run: blocks scale from the frame, quads are validated, and the sink se
     try t.expectEqual(@as(u32, 200), p.width);
     try t.expectEqual(@as(u32, 72), p.dpi);
     try t.expectEqual([2]usize{ 200, 100 }, seen.sizes.items[0]);
-    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 20, 10 }, .{ 180, 10 }, .{ 180, 20 }, .{ 20, 20 } }, p.blocks[0].quad.?);
     // a box past the page is clamped into it
-    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 0, 80 }, .{ 200, 80 }, .{ 200, 100 }, .{ 0, 100 } }, p.blocks[1].quad.?);
     try t.expectEqualStrings("body", p.blocks[1].content);
-    try t.expectEqual(api.ocr.Quad{ .{ 0, 0 }, .{ 30, 0 }, .{ 30, 20 }, .{ 0, 20 } }, seen.pages.items[1].blocks[0].quad);
+    try t.expectEqual(@as(?api.ocr.Quad, null), seen.pages.items[1].blocks[0].quad);
     // the encode limit grew by four times each page's pixels
     try t.expectEqual(@as(u64, 4 * (200 * 100 + 30 * 20)), seen.limit);
     try t.expectEqual(@as(i64, 0), h.srv.preparing.load(.acquire));
@@ -146,7 +146,7 @@ test "ocr run: the encode budget is the whole request's, so a first page may use
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{ .{ .text = "text 0 0 1 1\na" }, .{ .text = "text 0 0 1 1\nb" }, .{ .text = "text 0 0 1 1\nc" } } };
+    var h: Harness = .{ .replies = &.{ .{ .text = "page\na" }, .{ .text = "page\nb" }, .{ .text = "page\nc" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     var g: Greedy = .{};
@@ -193,7 +193,7 @@ test "ocr run: an image whose first header and its pixels disagree is refused be
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var h: Harness = .{ .replies = &.{.{ .text = "text 0 0 1 1\na" }} };
+    var h: Harness = .{ .replies = &.{.{ .text = "page\na" }} };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false });
     defer h.stop();
     const orders = [_][2][2]u32{ .{ .{ 80, 60 }, .{ 40, 30 } }, .{ .{ 40, 30 }, .{ 80, 60 } } };
@@ -431,9 +431,9 @@ test "ocr mistral: a page past the decoded-pixel limit answers 400 with the deco
     var h: Harness = undefined;
     try serve(&h, &.{.{ .text = "text 0 0 1 1\na" }});
     defer h.stop();
-    // 4097 x 4096 is 16 Mi pixels and 4096 more, under 8192 a side: only the pixel limit refuses it
-    const w = 4097;
-    const ht = 4096;
+    // 8192 x 4097 is 32 Mi pixels and 8192 more, under 8192 a side: only the pixel limit refuses it
+    const w = 8192;
+    const ht = 4097;
     try t.expect(@as(u64, w) * ht > run.max_page_pixels and @max(w, ht) <= picture.max_side);
     var status: u16 = 0;
     const r = try postPng(a, &h, try bigHeader(a, .{ w, ht }), "", &status);

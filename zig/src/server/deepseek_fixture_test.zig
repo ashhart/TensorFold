@@ -95,6 +95,15 @@ test "DeepSeek chat: licensed encoder fixture through the server render path" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // The render path honours serve-time environment; pin its inputs so an ambient export cannot move a golden.
+    const env = @import("sys").env;
+    const env_names = [_][:0]const u8{ "TF_DSV41_SCHEMA_PROMPT", "TENSORFOLD_TOOL_GRAMMAR", "TF_DSV41_TOOL_GRAMMAR" };
+    var saved: [env_names.len]?[:0]const u8 = undefined;
+    for (env_names, &saved) |n, *s| s.* = if (@import("sys").getenv(n)) |v| try a.dupeSentinel(u8, v, 0) else null;
+    defer for (env_names, saved) |n, s| {
+        if (s) |v| _ = env.setenv(n, v, 1) else _ = env.unsetenv(n);
+    };
+    for (env_names) |n| _ = env.unsetenv(n);
     var tmp = try @import("hf_eos_fixture.zig").Fixture.init(a, std.testing.io, null);
     defer tmp.deinit();
     const mini = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/src/families/deepseek_v41/fixtures/serve/mini_tokenizer.json", a, .limited(1 << 20));
@@ -239,11 +248,13 @@ fn checkPrompt(a: std.mem.Allocator, c: json.Value, got: []const u8) !bool {
     return true;
 }
 
-fn checkNamespacePin(a: std.mem.Allocator, row: json.Value, recorded: []const u8) !void {
+fn recordedHex(recorded: []const u8) [64]u8 {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(recorded, &hash, .{});
-    const pinned = row.get("recorded_prompt_sha256").?.string;
-    try std.testing.expectEqualStrings(pinned, &std.fmt.bytesToHex(hash, .lower));
+    return std.fmt.bytesToHex(hash, .lower);
+}
+
+fn undoneHex(a: std.mem.Allocator, row: json.Value) ![64]u8 {
     const names: [2][]const u8 = switch (row.get("id").?.int64().?) {
         6 => .{ "\"name\": \"git::commit\", \"description\": \"Git operations.\\nCommit staged changes\"", "\"name\": \"commit\", \"description\": \"Commit staged changes\"" },
         67, 97 => .{ "\"name\": \"fs::read_file\"", "\"name\": \"read_file\"" },
@@ -253,8 +264,13 @@ fn checkNamespacePin(a: std.mem.Allocator, row: json.Value, recorded: []const u8
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, qualified, names[0]));
     const undone = try std.mem.replaceOwned(u8, a, qualified, names[0], names[1]);
     defer a.free(undone);
-    std.crypto.hash.sha2.Sha256.hash(undone, &hash, .{});
-    try std.testing.expectEqualStrings(pinned, &std.fmt.bytesToHex(hash, .lower));
+    return recordedHex(undone);
+}
+
+fn checkNamespacePin(a: std.mem.Allocator, row: json.Value, recorded: []const u8) !void {
+    const pinned = row.get("recorded_prompt_sha256").?.string;
+    try std.testing.expectEqualStrings(pinned, &recordedHex(recorded));
+    try std.testing.expectEqualStrings(pinned, &try undoneHex(a, row));
 }
 
 test "DeepSeek chat: namespace pins reject unrelated prompt drift" {
@@ -281,7 +297,9 @@ test "DeepSeek chat: namespace pins reject unrelated prompt drift" {
         try checkNamespacePin(a, row, recorded.?);
         const expected = row.get("expected_qualified").?.string;
         try row.object.put(a, "expected_qualified", .{ .string = try std.fmt.allocPrint(a, "{s}unrelated drift", .{expected}) });
-        try std.testing.expectError(error.TestExpectedEqual, checkNamespacePin(a, row, recorded.?));
+        // Compare quietly: the rejection must never print a golden-style diff a log scan can misread.
+        const drifted: [64]u8 = try undoneHex(a, row);
+        try std.testing.expect(!std.mem.eql(u8, row.get("recorded_prompt_sha256").?.string, &drifted));
         checked += 1;
     }
     try std.testing.expectEqual(@as(usize, 3), checked);

@@ -5,6 +5,12 @@ const cuda = @import("cuda");
 /// What a load has to leave room for: the server's room before it, one stream's window, and the drafter's directory.
 pub const Fit = struct { room: u64, context: usize, drafter: ?[]const u8, prompt_int8: bool = false };
 
+pub fn fromRoom(room: anytype, context: usize, drafts: bool, drafter_dir: ?[]const u8) ?Fit {
+    const r = room orelse return null;
+    const available = r.read(r.ctx) orelse return null;
+    return .{ .room = available, .context = context, .drafter = if (drafts) drafter_dir else null };
+}
+
 /// The load's other bytes (kernels, kit, startup costs): ~112 MiB on a 3090 Ti; less refuses as main does, more maps.
 const others: u64 = 96 << 20;
 

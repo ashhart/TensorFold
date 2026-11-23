@@ -1,4 +1,4 @@
-//! A lone stream's copy windows priced as its head's drafts are: the depth rule on the stream's own timed rounds.
+//! A lone stream prices copy prefixes against its own timed rounds, with a model drafter or without.
 const Engine = @import("engine.zig").Engine;
 const Stream = @import("stream.zig").Stream;
 const win = @import("windows.zig");
@@ -8,11 +8,11 @@ const ev = @import("events.zig");
 const trail = @import("trail.zig");
 const f = ev.f;
 
-/// A lone stream whose copies compete with its plain rounds (copy_guard), timed, its head priced by the rule's chain.
+/// Only opted-in lone streams with copies enabled; shared rounds keep their existing path.
 pub fn enabled(e: *const Engine, s: *const Stream) bool {
     const c = e.cfg;
-    return e.alone and s.drafts and c.timed and c.copy_guard and e.trim == null and !c.root_copies and
-        !c.context_copies and !c.node_probabilities and c.lone_cost_tile == 0 and !c.family_costs.empty() and e.windowed(s);
+    return e.alone and s.drafts and c.timed and c.copy_guard and c.max_copy > 0 and e.trim == null and !c.root_copies and
+        !c.context_copies and !c.node_probabilities and c.lone_cost_tile == 0 and !c.family_costs.empty() and (c.family_mtp or !c.pipelined or s.logprobs != null or s.grammar != null);
 }
 
 /// The copy's rows to verify, a prefix (none: plain or the head's drafts take the round); `take`: the round's plan.

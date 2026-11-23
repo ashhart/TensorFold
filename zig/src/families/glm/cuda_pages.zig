@@ -87,7 +87,7 @@ pub const Pages = struct {
                 p.host_ptr = try p.host.?.device();
             }
             p.pk_arena = try cuda.DeviceBuffer.alloc(e.d, pages * state.pkPageBytes(&e.w));
-            try kv_host.prepare(e.d, page, e.capacity, e.w.config.kv_lora * 2); // made before the room was read
+            try kv_host.prepare(e.d, page, e.capacity, e.w.config.latentRow() * 2); // made before the room was read
             std.log.info("kv host: {d} pages ({d} MiB) in pinned host memory, pooled keys {d} MiB on the device", .{ pages, pages * page >> 20, pages * state.pkPageBytes(&e.w) >> 20 });
         }
         errdefer if (p.host) |*h| h.free();

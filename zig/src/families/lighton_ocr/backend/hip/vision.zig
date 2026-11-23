@@ -10,6 +10,7 @@ const cancels = @import("hip_serve").cancel;
 pub const Limits = struct {
     image_tokens: u32,
     max_images: u32,
+    image_share: @import("engine_api").ImageShare = .request,
 
     pub fn check(l: Limits, context: usize) !void {
         if (l.image_tokens == 0 or l.image_tokens > context or l.max_images == 0 or l.max_images > 64)

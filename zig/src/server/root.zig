@@ -81,6 +81,8 @@ test {
     _ = @import("grammar.zig");
     _ = @import("grammar_compile_test.zig");
     _ = @import("structural_tag.zig");
+    _ = @import("cache_salt.zig");
+    _ = @import("cache_salt_test.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
     _ = @import("load_metrics.zig");
@@ -145,6 +147,7 @@ test {
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
+    _ = @import("image_share_test.zig");
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
@@ -153,6 +156,8 @@ test {
     _ = @import("tool_id_key.zig");
     _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
+    _ = @import("tool_nonfinite_text_test.zig");
+    _ = @import("tool_schema_names_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_args_close.zig");
     _ = @import("tool_json_cut.zig");
@@ -190,6 +195,7 @@ test {
     _ = @import("cancel_route_test.zig");
     _ = @import("prompt_list_test.zig");
     _ = @import("hf_eos_http_test.zig");
+    _ = @import("eos_phase.zig");
     _ = @import("token_stream_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
     _ = @import("spark_wire.zig");
@@ -340,6 +346,7 @@ test {
 test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
+    _ = @import("choices_test.zig");
     _ = @import("cors_test.zig");
     _ = @import("deepseek_fixture_test.zig");
     _ = @import("uocr_chat_test.zig");
@@ -351,11 +358,15 @@ test {
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
+    _ = @import("audio_out.zig");
+    _ = @import("flac.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_format_http_test.zig"); // over a Unix socket pair
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");

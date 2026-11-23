@@ -494,13 +494,13 @@ pub const Ngram = struct {
     }
 
     /// One call's rows split into `parts` equal ranges, part i filling [i * per, (i + 1) * per).
-    const Split = struct {
+    pub const Split = struct {
         g: *const Ngram,
         ids: []const i64,
         out: []u16,
         per: usize,
 
-        fn part(ctx: *const anyopaque, i: usize) anyerror!void {
+        pub fn part(ctx: *const anyopaque, i: usize) anyerror!void {
             const s: *const Split = @ptrCast(@alignCast(ctx));
             const lo = @min(s.ids.len, i * s.per);
             try s.g.fill(s.ids, s.out, lo, @min(s.ids.len, lo + s.per));
@@ -572,6 +572,7 @@ test "a fresh window hashes token 7 into sixteen rows" {
 }
 
 test {
+    _ = @import("cuda_ple_gather_lanes.zig");
     _ = @import("cuda_ple_nvfp4_test.zig");
     _ = @import("cuda_ple_pool.zig");
     _ = @import("cuda_ple_pool_gather_test.zig");

@@ -282,6 +282,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-minimax-vision", .path = "zig/tests/minimax_m3/vision.zig", .about = "MiniMax-M3.1-Flash's image tower alone: an image's patches and text rows, for tools/vision_ref.py's check" },
         .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-flint-run", .path = "zig/tests/flint/run.zig", .about = "Flint greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-ricursive-run", .path = "zig/tests/ricursive/run.zig", .about = "Ripple on Metal: greedy tokens, every position's logits, a prompt's last logits or forced steps, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
     // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
@@ -304,7 +305,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     glm_checks.sampler(b, target, optimize, metal, lanes, sources);
 
-    @import("h3_host.zig").metalTools(b, target, optimize, metal, sources);
+    @import("h3_metal.zig").targets(b, target, optimize, metal, sources, test_step);
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     const row_check = b.addExecutable(.{ .name = "tf-row-check", .root_module = b.createModule(.{
@@ -316,7 +317,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     core_checks.rowWidths(b, target, optimize, metal, row_mod);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    const row_tests = b.addRunArtifact(b.addTest(.{ .root_module = row_mod }));
+    test_step.dependOn(&row_tests.step);
+    b.step("test-row-projection-host", "Row projection shapes and the kernel chosen at each window width").dependOn(&row_tests.step);
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     core_checks.kvPages(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);

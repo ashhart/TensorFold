@@ -61,9 +61,9 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
-| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
+| 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864]; paired C experiment (REV25 E1) | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
-| 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
+| 15. MTP | done [#1562]; yes C [#2485] (dense) | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
@@ -83,6 +83,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
 | 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
 | 34. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
+| 35. FP8 KV prefill waits | failed C[#3741] | ? | ? | ? | ? |
+| 36. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
+| 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -120,6 +124,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -157,6 +165,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -200,6 +212,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -237,6 +253,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 32. Filled-item prompt grid | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? |
 | 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
+| 35. FP8 KV prefill waits | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -288,6 +308,10 @@ below; these are estimates for planning a port, not results.
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
 | 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
 | 34. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
+| 35. FP8 KV prefill waits | none | none | none | CUDA qwen3_5: +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) |
+| 36. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
+| 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
+| 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
 
 ## The optimizations
 
@@ -392,6 +416,12 @@ below; these are estimates for planning a port, not results.
     Flash Next on Metal before tensor units groups a decode window's 4-bit experts from five rows up, each
     (row, expert) pair keeping the per-row kernels' sums ([#2784], plan in [#2764]); its shared rounds do not yet.
 
+    REV25 E1 adds an opt-in GLM CUDA experiment: two paired prompt chunks share one grouped route and 128-pair
+    block-16 NVFP4 items, with separate per-chunk activations and slot rows (`TF_GLM_PAIR_EXPERTS=1`). Each pair
+    keeps its own K loop and epilogue; shared prefixes and slot combines retain the original piece and slot order.
+    Default-off allocations and the existing 64-pair kernels are unchanged. Device timing and token hashes are not
+    yet run, so no speedup is claimed; EXL3 and block-32/CSF0 keep the original two-pass path.
+
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
     and Dory) keeps those eager. GLM's capture is [#2279] (open), for [#1490].
@@ -409,6 +439,23 @@ below; these are estimates for planning a port, not results.
     that same total between fixed and head components. Its row learning, granted-depth and shared-depth limits are
     off. The preserved shared step values are still checked on the host; the other proposed behavior retains its gates.
 
+    Dense Qwen CUDA MTP is tracked in [#2485]. The local candidate `ab19ad377` against main `a0e2665a4` was
+    measured with the Qwen3.8-27B NVFP4 checkpoint on an RTX 5090 Laptop (SM120). At one stream, 128-token decode
+    was 68.5–78.4 tok/s with MTP3 versus 34.2 tok/s without drafts; at two streams, aggregate decode was
+    122.6–151.9 versus 58.9–60.3 tok/s. Across greedy and seeded temperature-1 sampling, 120/120 cross-run token
+    hashes matched; resumed and fresh replies also matched in all four MTP-on/off and greedy/sampled cells, with
+    4,096 cached tokens observed on each resumed request. Cold first-token latency with cache off was slower with
+    MTP3: at 2,048 prompt tokens, 1.279 s versus a 1.213 s main A/B/A mean (+5.5%); at 8,000 tokens, 5.036 s
+    versus 4.864 s (+3.5%). The branch's target-only path matched main within noise. This misses the current
+    no-slower prompt gate for `--drafter`, so the change is not release-qualified until that regression is
+    addressed or the gate is explicitly revised. At parallel 2 and context 1,024, process GPU peak was 21,498
+    MiB with MTP versus 21,088 MiB target-only (+410 MiB); at context 8,192 it was 21,396 versus 21,168 MiB
+    (+228 MiB). Only this checkpoint and SM120 were measured; other dense families and devices remain unqualified.
+
+    Follow-up on 12 Nov 2026 after adding KV-only prompt absorption (same Qwen3.8-27B NVFP4 checkpoint and RTX 5090 Laptop, SM120): baseline worktree `3885dceb2bb60fe02e609066b75ec752baf51e38`, candidate `4f2436fc016adbc4ca79adab5fbcd0886a6149be`. Five fresh-server, cache-off greedy samples gave main/candidate-MTP median first-output latency of 1.2214/1.2498 s at 2,048 tokens (+2.33%) and 4.9839/5.0677 s at 8,192 (+1.68%); all token hashes matched. Candidate without drafts was +0.62% at 2K and −0.12% at 8K. MTP remains outside the strict no-slower prompt gate at both required lengths. The isolated K/V ring check was byte-identical for 1 and 128 rows; KV-only CUDA time was 0.081/0.770 ms versus 0.336/3.003 ms for full proposal. These checks do not qualify away the cold-prefill regression.
+
+    Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
+
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
     Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
@@ -417,6 +464,10 @@ below; these are estimates for planning a port, not results.
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
     target.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | deepseek_v41 (M), timed cost table | opt-in; M5 Ultra code +1..+6 %, 3 chat cells −2..−4 %; M3 Ultra 5 cells +1..+4 %, 3 −1..−2 % | [#2952] |
 
 18. **Copy drafts.** Where a reply repeats earlier text, the lane host drafts the continuation from the context
     (`copy_index.zig`) and the target verifies it. It needs no drafter weights; [#2022] brought verified root and
@@ -482,6 +533,13 @@ below; these are estimates for planning a port, not results.
     | qwen3_5 (27B), nemotron | −3.5 % (a cost) with exact tokens, closed | [#2014] |
     | glm | decode +3.0..+4.1 % at TP=3, +0.8..+1.9 % at TP=2 | [#2162] |
     | flashnext, gemma4 | null: +0.45 % and +0.15 % at one stream, inside the runs' spread, same replies; not proposed | measured on a GB10, no PR |
+
+    Qwen3.8-27B's decode attention on XPU takes its L2 reuse from launch order instead, with no prefetch: [#2595] is a
+    grid-only change. `attn_decode` runs on a (rows, heads, slices) grid, so a key slice's tree rows run back to back;
+    each work group's arithmetic and the bits are unchanged ([#2543] keeps wider slices for later, as an opt-in). On
+    an Arc Pro B70 at one stream, drafted, with a bf16 cache: +6 % at 8K prompt tokens, +23 % at 32K, +33 % at 131K;
+    `"draft": false` is unchanged. With `XPU_KV_INT8=1` it is 2–4 % slower below about 12K tokens and faster past it.
+    Not run: sampled decoding, resumed prompts, `QPARTS != 1` builds and any GPU but BMG-G31.
 
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
@@ -551,6 +609,38 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | nemotron (H), Lightning 4-bit | dense launches 3..16 % faster; one stream's decode +3.4..+5.9 %, two greedy streams −3.2 % and −2.3 % (2.98 against 3.08 tokens a chunk), same tokens; not proposed | measured on a Strix Halo, [#3305] |
     | flashnext (H), Flash Next oQ4e | picks nothing: its dense weights are 5, 6 and 8 bits | measured on a Strix Halo, no PR |
+
+35. **FP8 KV prefill waits.** Experiment: FP8 KV prefill waits; Nsight showed the FP8 path executed. On one GB10
+    (SM121) it fell under the 3 % bar, so the row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+36. **Qwen normalization and head.** Experiment: Qwen normalization and head; Nsight showed standalone group-sum
+    launches removed in the normalization trace. On one GB10 (SM121) it fell under the 3 % bar, so the row is `failed`
+    ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+37. **Text metadata uploads.** Experiment: Qwen text metadata and snapshots; Nsight showed a typical Qwen
+    text-metadata upload shrink from 183,328 to 70,192 bytes. On one GB10 (SM121) it fell under the 3 % bar, so the
+    row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+38. **Greedy readback.** Experiment: dots.mocr greedy readback; Nsight showed 48 four-byte device-to-host copies
+    eliminated in the dots trace. On one GB10 (SM121) the one-stream gain did not carry to four streams, so the change
+    is `failed` ([#3741]). `dots_mocr` is an OCR family named under "Not in the table" above and has no column of its
+    own, so this entry is the only place it is recorded.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | dots_mocr | +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) at one greedy stream, but −0.68 % paired at four greedy streams (absolute 52.61 → 52.26 tok/s a stream); tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
 
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
@@ -672,6 +762,8 @@ below; these are estimates for planning a port, not results.
 [#2127]: https://github.com/ashhart/TensorFold/pull/2127
 [#2146]: https://github.com/ashhart/TensorFold/pull/2146
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
+[#2543]: https://github.com/ashhart/TensorFold/issues/2543
+[#2595]: https://github.com/ashhart/TensorFold/pull/2595
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
 [#2432]: https://github.com/ashhart/TensorFold/pull/2432
 [#2499]: https://github.com/ashhart/TensorFold/issues/2499
@@ -697,12 +789,14 @@ below; these are estimates for planning a port, not results.
 [#2392]: https://github.com/ashhart/TensorFold/pull/2392
 [#2436]: https://github.com/ashhart/TensorFold/pull/2436
 [#2464]: https://github.com/ashhart/TensorFold/pull/2464
+[#2485]: https://github.com/ashhart/TensorFold/issues/2485
 [#2375]: https://github.com/ashhart/TensorFold/pull/2375
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2950]: https://github.com/ashhart/TensorFold/pull/2950
+[#2952]: https://github.com/ashhart/TensorFold/pull/2952
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
 [#1603]: https://github.com/ashhart/TensorFold/issues/1603
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
@@ -710,3 +804,4 @@ below; these are estimates for planning a port, not results.
 [#3305]: https://github.com/ashhart/TensorFold/issues/3305
 [#2941]: https://github.com/ashhart/TensorFold/issues/2941
 [#2971]: https://github.com/ashhart/TensorFold/pull/2971
+[#3741]: https://github.com/ashhart/TensorFold/issues/3741

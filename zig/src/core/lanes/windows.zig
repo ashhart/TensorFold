@@ -296,7 +296,8 @@ pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     if (e.cfg.root_copies) return false;
     const copied = copyProposal(e, s) catch return false;
     // a copy its price leaves off takes no round: the head drafts its own depth
-    return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
+    if (lone_copy.enabled(e, s)) return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
+    return copied.tokens.len > 0;
 }
 
 /// cfg.plain_streams: a shared round this wide drafts none, its copies included (each window its pending row).

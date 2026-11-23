@@ -139,3 +139,87 @@ test "snap hooks: a family's spare, trim and reuses reach the prompt cache, and 
     };
     try std.testing.expectEqual(@as(usize, 2), qwen); // the dense and MoE entry points
 }
+
+test "request starts: snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {
+    const snaps = @import("cuda_snaps.zig");
+    // Nemotron/LFM-style: chunk-invariant, no switch; the step is prompt_rows or a declared snap_grid.
+    const Nemotron = struct {
+        pub const snap_cut_invariant = true;
+        pub const prompt_rows: u32 = 2048;
+    };
+    const Lfm = struct {
+        pub const snap_cut_invariant = true;
+        pub const prompt_rows: u32 = 512;
+    };
+    const Planned = struct {
+        pub const snap_cut_invariant = true;
+        pub const snap_grid: u32 = 4096;
+    };
+    // Qwen/GLM-style: no invariant declaration, so the old opt-in contract holds.
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_SNAPS_TEST_QWEN_STARTS";
+    };
+    const Glm = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+        pub const request_min_chunk: u32 = 256;
+        pub const request_starts_switch = "TF_SNAPS_TEST_GLM_STARTS";
+    };
+    // Invariant families: starts on with no switch, every start, cache cuts at request starts.
+    try std.testing.expectEqual(@as(u32, 2048), snaps.requestStep(Nemotron));
+    try std.testing.expectEqual(@as(u32, 512), snaps.requestStep(Lfm));
+    try std.testing.expectEqual(@as(u32, 4096), snaps.requestStep(Planned));
+    try std.testing.expectEqual(@as(u32, 1), snaps.requestMinimum(Nemotron));
+    try std.testing.expect(snaps.passRules(Nemotron, 2048).chunk_starts and snaps.passRules(Planned, 4096).chunk_starts);
+    // Qwen/GLM: still off without their switch, 256 apart, cache ignores request starts.
+    try std.testing.expectEqual(@as(u32, 0), snaps.requestStep(Qwen));
+    try std.testing.expectEqual(@as(u32, 0), snaps.requestStep(Glm));
+    try std.testing.expectEqual(@as(u32, 256), snaps.requestMinimum(Qwen));
+    try std.testing.expect(!snaps.passRules(Qwen, 4096).chunk_starts and !snaps.passRules(Glm, 2048).chunk_starts);
+    // A store under invariant rules keeps its state at the message start the server now sends.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &Held.one, .vtable = &Held.vtable }, snaps.passRules(Planned, 4096), 1 << 30);
+    defer store.deinit();
+    const prompt = try a.alloc(u32, 12000);
+    for (prompt, 0..) |*t, j| t.* = @intCast(j + 1);
+    const marks = try store.marks(a, prompt, 0, 10000, &.{}, &.{6000}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{6000}, marks);
+}
+
+test "Qwen prompt rows: changing reported chunk cannot change planned cache marks, interior lookup or warm usability" {
+    const F = @import("qwen35").native;
+    const snaps = @import("cuda_snaps.zig");
+    const pc = api.prompt_cache;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try a.alloc(u32, 32768);
+    for (prompt, 0..) |*value, i| value.* = @intCast(i);
+    const old = snaps.passRules(F, 8192);
+    const corrected = snaps.passRules(F, 4096);
+    try std.testing.expect(old.planned and corrected.planned and old.grid == 4096 and old.min_prompt == 0);
+    var same = corrected;
+    same.chunk = old.chunk;
+    try std.testing.expectEqualDeep(old, same);
+    var before = pc.Store.init(a, .{ .ptr = &Held.one, .vtable = &Held.vtable }, old, 1 << 30);
+    defer before.deinit();
+    var after = pc.Store.init(a, .{ .ptr = &Held.one, .vtable = &Held.vtable }, corrected, 1 << 30);
+    defer after.deinit();
+    const named = [_]u32{ 4096, 12288, 16384, 28672 };
+    for ([_][]const u32{ &.{}, &named }) |starts| {
+        for ([_]u32{ 0, 4095, 4096, 15000, 32768 }) |history| {
+            try std.testing.expectEqualSlices(u32, try before.marks(a, prompt, 0, history, &.{}, starts, &.{}), try after.marks(a, prompt, 0, history, &.{}, starts, &.{}));
+            const left = try before.lookupUser(a, prompt, @intCast(prompt.len), history, 0, 30000, &.{}, starts, &.{});
+            const right = try after.lookupUser(a, prompt, @intCast(prompt.len), history, 0, 30000, &.{}, starts, &.{});
+            try std.testing.expect(left.entry == null and right.entry == null);
+            try std.testing.expectEqualDeep(left.miss, right.miss);
+            try std.testing.expectEqualSlices(u32, left.marks, right.marks);
+        }
+        for ([_]u32{ 1, 4095, 4096, 6000, 8192, 12288, 32768 }) |at|
+            try std.testing.expectEqual(before.usable(at, starts), after.usable(at, starts));
+    }
+}

@@ -125,7 +125,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.core.deinit();
     h.markers = .{ fl.vision.image_start, model.config.image_token, fl.vision.image_end };
     // the template writes the image token alone: the server adds start and end around each image's rows
-    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
+    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .image_share = v.image_share, .explain = tf.qwen_vl.geometry.problem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, servedInfo(h, o.lanes, @intCast(window), vis));
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
