@@ -86,11 +86,14 @@ publisher's W4A4 kernels.
 Every kernel is registered with the kernel contract (`zig/tests/contract/metal_ricursive*.zig`, the roll call in
 `contracts.zig`): the glue, decode and prompt attention for both layer kinds, the NVFP4 row kernels, dequantization and
 GEMM, and llama's row projections, merge, argmax and GEMM again at Ripple's shapes (every reduction it runs: k 5,120,
-10,240 for the attention output and 40,960). Fifteen planted controls each edit one kernel's source, and each must turn
-its gate red. `tf-kernel-contract --only ricursive` on the M5 Ultra:
+10,240 for the attention output and 40,960). The DFlash2 drafter adds its own kernels (the target's tap, the
+drafter's embedding, norms, conv, rotation, attention, SiLU, top-k and walk), llama's row projections and GEMM at the
+drafter's shapes, and the full-vocabulary sampler. Twenty-five planted controls (ten of them in the drafter's kernels)
+each edit one kernel's source, and each must turn its gate red. `tf-kernel-contract --only ricursive` on the M5 Ultra
+(23 Nov 2026):
 
 ```
-SUMMARY 46 kernels: 46 pass gates 1-4, 0 fail, 0 known findings; 15 controls: 15 red as planted, 0 missed; 0 limit problems; gates 645430 ms, limits 140 ms
+SUMMARY 75 kernels: 75 pass gates 1-4, 0 fail, 0 known findings; 25 controls: 25 red as planted, 0 missed; 0 limit problems; gates 874094 ms, limits 505 ms
 ```
 
 ## Correctness (M5 Ultra, 4 Nov 2026)
@@ -227,8 +230,9 @@ with first tokens of 3.24 to 7.98 s; they are left out of the table. Plain, two 
 
 No quality suite was run. Contexts past 258,039 tokens were not run, so `--context` stops at 262,144 and refuses
 the card's 1M by name. Ripple's think markers are spelled from several tokens, not one each, so a thinking budget
-(which forces a close) and logprobs (which cut the reply at its close token) are refused by name, and a reply's
-`reasoning_tokens` reads 0. No images:
+(which forces a close) is refused by name, and a reply's `reasoning_tokens` reads 0. Logprobs are served, with
+`--drafter` too: on the NVFP4 release with the drafter (23 Nov 2026), a greedy and a seeded sampled request with
+`top_logprobs: 3` gave the same tokens and rows with drafting on (3.58 and 3.56 tokens a round) and off. No images:
 Ripple has no vision tower. Only the M5's tensor units were checked; M1 to M4 Macs are refused at load, and smaller
 RAM is untested. Beside the bf16 release the drafter was checked for drafted == plain and one stream's speed only (two
 drafted streams run one at a time there, see above); its structured output, seeded sampling, soak and resumed turns were
