@@ -23,7 +23,7 @@ pub const takes_drafter = true; // --drafter: the DFlash2 pack (the server refus
 pub const prompt_cache_gib: f64 = 1; // the cache budget a rank when --prompt-cache-gib is not given
 
 /// The server's settings: `lanes` (--parallel) the streams' cache slots, `drafter` (--drafter) the DFlash2 pack.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 4, drafter: ?[]const u8 = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 4, lanes_fixed: bool = false, drafter: ?[]const u8 = null };
 
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -437,17 +437,23 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
     if (l.pins) |*x| x.remove(st);
 }
 
+fn requestedSlots(o: Options) error{Slots}!u32 {
+    const slots = @import("automatic_lanes").bounded(o.lanes, o.lanes_fixed, 32);
+    if (slots == 0 or slots > 32) return error.Slots;
+    return slots;
+}
+
 /// The native entry: a GB10 (sm_121) at TF_TP_WORLD=2 (rank 1 runs `tf-muse follow`); drafts need --drafter.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // no captured Triton set: Muse runs its own CUDA kernels
-    if (o.lanes == 0 or o.lanes > 32) return error.Slots;
+    const slots = try requestedSlots(o);
     // the two ranks meet over fabric/tp, whose sockets are POSIX: Windows refuses before any of it is compiled in
     if (comptime @import("builtin").os.tag == .windows) return error.MuseSparkTpPlatform;
     const c = (try tpRead()) orelse return error.MuseSparkRequiresTwoRanks;
     try config.admit(try ctx.capability(), c.world);
     if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-muse follow`
     const drafting = o.drafts and o.drafter != null;
-    const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = drafting };
+    const su: engine.Setup = .{ .context = o.context, .slots = slots, .drafts = drafting };
     const session = try gpa.create(tp.Session);
     errdefer gpa.destroy(session);
     try session.open(ctx.d, c, @import("tp_kernel").mailbox);
@@ -558,4 +564,10 @@ test "a bad TF_TP_* refuses the weight share; one rank is refused by name" {
 test "Windows refuses Muse Spark's two ranks by name, before any TP session opens" {
     const why = explain(null, error.MuseSparkTpPlatform).?;
     try std.testing.expect(std.mem.indexOf(u8, why, "runs on Linux only") != null);
+}
+
+test "Muse automatic lanes clamp to 32 slots without changing explicit requests" {
+    try std.testing.expectEqual(@as(u32, 32), try requestedSlots(.{ .context = 4096, .drafts = false, .lanes = 64 }));
+    try std.testing.expectEqual(@as(u32, 32), try requestedSlots(.{ .context = 4096, .drafts = false, .lanes = 32, .lanes_fixed = true }));
+    try std.testing.expectError(error.Slots, requestedSlots(.{ .context = 4096, .drafts = false, .lanes = 33, .lanes_fixed = true }));
 }
