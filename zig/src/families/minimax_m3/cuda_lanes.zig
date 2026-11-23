@@ -94,7 +94,6 @@ pub const Lanes = struct {
             .exact_width = max_rows,
             .gpu_tokens = false,
             .mtp = head,
-            .draft_kv = if (self.x.e.drafter) |d| .{ .bytes = @import("cuda_dspark.zig").Caches.bytes(d.w.c.layers, self.x.e.share.kv.len(), self.x.e.capacity), .dtype = .bf16 } else null,
             .speculate = head, // a block drafts from the rows a verify kept (their taps)
             .speculate_early = false,
             .drafts = if (head) max_held else 0,

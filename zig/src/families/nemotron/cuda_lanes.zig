@@ -160,7 +160,6 @@ pub const Cuda = struct {
             .copy_match = if (self.copy_drafts) 4 else 8,
             .gpu_tokens = false,
             .mtp = drafting,
-            .draft_kv = if (self.head) |h| .{ .bytes = 2 * h.kvBytes(), .dtype = .bf16 } else null,
             .allocate_shared_drafts = drafting,
             .limit_shared_drafts = drafting and self.mtp_confidence == null,
             .speculate = drafting,
