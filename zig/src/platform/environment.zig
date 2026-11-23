@@ -371,7 +371,6 @@ pub fn registered(comptime name: []const u8) void {
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
-
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
@@ -442,11 +441,9 @@ fn nameCount(r: Rule, text: []const u8) Error!u64 {
     while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
     return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
 }
-
 fn equal(r: Rule, a: []const u8, b: []const u8) bool {
     return if (r.fold or r.ignore_case) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
 }
-
 fn wordSet(r: Rule, text: []const u8) Error!u64 {
     if (r.set_switch) {
         if (std.mem.eql(u8, text, "0")) return 0;
@@ -469,7 +466,6 @@ fn wordSet(r: Rule, text: []const u8) Error!u64 {
     if (r.items != 0 and count != r.items) return error.InvalidEnvironment;
     return bits;
 }
-
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
 fn toggle(r: Rule, text: []const u8) ?u64 {
     if (!r.yes_word and std.ascii.eqlIgnoreCase(text, "yes")) return null;
@@ -478,7 +474,6 @@ fn toggle(r: Rule, text: []const u8) ?u64 {
         if (std.ascii.eqlIgnoreCase(text, v)) return i / 4;
     return null;
 }
-
 /// Finite only; `.real` is at least 0, `.positive_real` above 0, and a set `max` caps either.
 fn real(r: Rule, text: []const u8) Error!f64 {
     const x = std.fmt.parseFloat(f64, text) catch return error.InvalidEnvironment;
@@ -492,18 +487,15 @@ fn real(r: Rule, text: []const u8) Error!f64 {
     if (r.max != std.math.maxInt(u64) and x > @as(f64, @floatFromInt(r.max))) return error.InvalidEnvironment;
     return x;
 }
-
 /// A `.path` setting's text is never shown: a key pasted into it by mistake would reach the log.
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
     if (rule(name).kind == .path) return std.fmt.allocPrint(a, "{s}: expected {s}", .{ name, rule(name).forms });
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
 }
-
 /// A registered setting's raw text, for readers that parse it against runtime bounds the table cannot name.
 pub fn rawText(name: [:0]const u8) ?[]const u8 {
     return sys.getenv(name);
 }
-
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
@@ -511,21 +503,17 @@ fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
         return error.InvalidEnvironment;
     };
 }
-
 pub fn check(name: [:0]const u8, raw: ?[]const u8) Error!void {
     _ = try checked(name, raw);
 }
-
 /// One setting in its reader's type: a switch as bool, a real as a float, any other kind as its whole number.
 pub fn value(comptime T: type, name: [:0]const u8, raw: ?[]const u8, default: T) Error!T {
     std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range and rule(name).kind != .path and rule(name).kind != .pair);
     return decode(T, (try checked(name, raw)) orelse return default);
 }
-
 fn Plain(comptime T: type) type {
     return if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
 }
-
 fn decode(comptime T: type, n: u64) T {
     return switch (@typeInfo(T)) {
         .optional => |o| decode(o.child, n),
@@ -534,7 +522,6 @@ fn decode(comptime T: type, n: u64) T {
         else => @intCast(n),
     };
 }
-
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
     return value(T, name, sys.getenv(name), default);
 }
