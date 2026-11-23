@@ -6,7 +6,7 @@ pub const Memory = struct { free: u64, size: u64, allocated: u64 };
 /// Streams of `slot_bytes` that fit beside `margin` and `reserve`, at most `want` and `max`; 0 when the first does not.
 pub fn streamsThatFit(m: Memory, margin: u64, reserve: u64, slot_bytes: u64, want: u32, max: u32) u32 {
     const free = @min(m.free, m.size -| m.allocated);
-    if (free < margin + reserve) return 0;
+    if (free < margin or free - margin < reserve) return 0;
     const more: u32 = @intCast(@min((free - margin - reserve) / slot_bytes, max - 1));
     return @min(want, 1 + more);
 }

@@ -143,7 +143,7 @@ pub const Engine = struct {
         const rows: u64 = nw.max_rows;
         const mamba = 2 * (conv + ssm) + rows * (@as(u64, c.projDim()) + c.convDim()) * 2;
         const mamba_states: u64 = @intCast(e.own.cstate.len);
-        const kv_pairs: u64 = @intCast(2 * e.own.kc.len + @as(usize, if (e.head != null) 1 else 0));
+        const kv_pairs: u64 = @intCast(2 * (e.own.kc.len + @as(usize, if (e.head != null) 1 else 0)));
         const head_scratch: u64 = if (e.head != null) (rows + 1) * @as(u64, c.hidden_size) * 2 else 0;
         return mamba_states * mamba + kv_pairs * kv + head_scratch;
     }
