@@ -22,7 +22,7 @@ pub fn pagesOf(prompt: usize, max_new: usize) usize {
 /// Most marks a chunk taps, in any family.
 pub const tap_cap = 4;
 
-/// A chunk's end (the grid line, the prompt's end or a mark) and the marks inside it it taps, in order.
+/// A chunk's end (the grid line, the prompt's end or a cut point) and the cut points inside it it taps, in order.
 pub const Cut = struct {
     end: usize,
     at: [tap_cap]usize = undefined,
@@ -32,8 +32,8 @@ pub const Cut = struct {
     }
 };
 
-/// The chunk from `at` on a `rows` grid: the first `most` marks inside it are tapped, the next one ends it.
-pub fn cut(at: usize, len: usize, marks: []const u32, rows: usize, most: usize) Cut {
+/// The chunk from `at` on a `rows` grid: the first `most` marks or message starts inside it are tapped, the next ends it.
+pub fn cut(at: usize, len: usize, marks: []const u32, chunks: []const u32, rows: usize, most: usize) Cut {
     var c: Cut = .{ .end = @min(len, (at / rows + 1) * rows) };
     var from = at;
     while (true) {
@@ -41,19 +41,30 @@ pub fn cut(at: usize, len: usize, marks: []const u32, rows: usize, most: usize) 
         for (marks) |mk| if (mk > from and mk < c.end and (next == null or mk < next.?)) {
             next = mk;
         };
-        const mk = next orelse break;
+        for (chunks) |ck| if (ck > from and ck < c.end and (next == null or ck < next.?)) {
+            next = ck;
+        };
+        const point = next orelse break;
         if (c.n == most) {
-            c.end = mk;
+            c.end = point;
             break;
         }
-        c.at[c.n] = mk;
+        c.at[c.n] = point;
         c.n += 1;
-        from = mk;
+        from = point;
     }
     return c;
 }
 
-/// `F` names the family's `cfg`, `mdl`, `kern`, `fwd` (Chain, forward, commit), `snap` and `text_only` (images' error).
+/// Tap rows forward snapshots: only a registered hook can use them; a cache-off pass asks for none.
+pub fn tapRows(at: usize, c: *const Cut, hook: bool, rows: *[tap_cap]usize) []const usize {
+    if (!hook) return &.{};
+    for (c.taps(), 0..) |p, j| rows[j] = p - at - 1;
+    return rows[0..c.n];
+}
+
+/// `F` names the family's `cfg`, `mdl`, `kern`, `fwd` (Chain, forward, commit), `snap`, `text_only` (images' error),
+/// and `request_starts` (whether its cut-invariant prefill keeps message-start states).
 pub fn Backend(comptime F: type) type {
     return struct {
         const cfg = F.cfg;
@@ -327,17 +338,18 @@ pub fn Backend(comptime F: type) type {
                 return k.at;
             }
 
-            /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last logits are written.
+            /// One chunk from `l.fill` to the next grid line, mark or enabled message start; true at the last logits.
             fn chunk(x: *Liquid, s: *Stream, l: *Lane) !bool {
                 const p = s.prompt();
                 const at = l.fill.?;
                 if (s.isCancelled()) return error.Cancelled;
-                const c = cut(at, p.len, s.reuse.marks, prompt_rows, max_taps);
+                const points: []const u32 = if (comptime F.request_starts) lanes.cutPoints(s) else &.{};
+                const c = cut(at, p.len, s.reuse.marks, points, prompt_rows, max_taps);
                 const end = c.end;
                 const done = end == p.len;
                 var rows: [tap_cap]usize = undefined;
-                for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
-                const ch: fwd.Chain = if (comptime max_taps > 0) .{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .taps = rows[0..c.n] } else .{ .slot = l.slot, .p0 = at, .tokens = p[at..end] };
+                const taps = tapRows(at, &c, s.reuse.hook != null, &rows);
+                const ch: fwd.Chain = if (comptime max_taps > 0) .{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .taps = taps } else .{ .slot = l.slot, .p0 = at, .tokens = p[at..end] };
                 try fwd.forward(x.m, x.k, try x.fenced(), &.{ch}, true, end - at - 1, @intFromBool(done));
                 if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
                 s.fill_at.store(@intCast(end), .monotonic);
@@ -347,7 +359,9 @@ pub fn Backend(comptime F: type) type {
                     x.tapped = .{ .stream = s, .cut = c };
                     defer x.tapped = null;
                     for (c.taps()) |t| hk.at(hk.ptr, s, @intCast(t));
-                    if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+                    const end_at: u32 = @intCast(end);
+                    if (std.mem.indexOfScalar(u32, s.reuse.marks, end_at) != null or
+                        std.mem.indexOfScalar(u32, points, end_at) != null) hk.at(hk.ptr, s, end_at);
                 }
                 return done;
             }
@@ -507,8 +521,8 @@ test "a request holds its prompt, its reply and one verify window in whole pages
     try std.testing.expectEqual(@as(usize, 65), pagesOf(32768, 0));
 }
 
-test "a chunk taps the marks inside it, up to its family's most, and ends at the next one, the grid line or the end" {
-    const cases = [_]struct { at: usize, len: usize, marks: []const u32, most: usize = 4, end: usize, taps: []const usize }{
+test "a chunk taps marks and message starts, up to its family's most, and ends at the next one, the grid line or the end" {
+    const cases = [_]struct { at: usize, len: usize, marks: []const u32, chunks: []const u32 = &.{}, most: usize = 4, end: usize, taps: []const usize }{
         .{ .at = 0, .len = 3000, .marks = &.{}, .end = 1024, .taps = &.{} },
         .{ .at = 0, .len = 3000, .marks = &.{700}, .end = 1024, .taps = &.{700} },
         .{ .at = 0, .len = 3000, .marks = &.{700}, .most = 0, .end = 700, .taps = &.{} },
@@ -518,9 +532,12 @@ test "a chunk taps the marks inside it, up to its family's most, and ends at the
         .{ .at = 9216, .len = 10144, .marks = &.{ 10050, 10140 }, .end = 10144, .taps = &.{ 10050, 10140 } },
         .{ .at = 2048, .len = 2500, .marks = &.{ 2100, 2500 }, .end = 2500, .taps = &.{2100} },
         .{ .at = 700, .len = 3000, .marks = &.{700}, .end = 1024, .taps = &.{} },
+        .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{700}, .end = 1024, .taps = &.{700} },
+        .{ .at = 0, .len = 3000, .marks = &.{300}, .chunks = &.{900}, .end = 1024, .taps = &.{ 300, 900 } },
+        .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{ 300, 700, 900, 1000, 1023 }, .end = 1023, .taps = &.{ 300, 700, 900, 1000 } },
     };
     for (cases) |k| {
-        const c = cut(k.at, k.len, k.marks, 1024, k.most);
+        const c = cut(k.at, k.len, k.marks, k.chunks, 1024, k.most);
         try std.testing.expectEqual(k.end, c.end);
         try std.testing.expectEqualSlices(usize, k.taps, c.taps());
     }
