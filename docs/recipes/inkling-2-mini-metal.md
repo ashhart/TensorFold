@@ -66,7 +66,8 @@ M4 Max and the M5 Ultra rows above.
 
 Raw results, the generator of the prompt token arrays, hashes and the build's SHA-256 are in
 [`receipts/inkling2-mini-m4pro`](../receipts/inkling2-mini-m4pro/README.md), which says which file each number comes
-from. No number below was measured at the head, `e90ecce19a`.
+from. The decode, cold-prompt (table), concurrency and footprint numbers were not measured at the head; the contract,
+the hashes and the dense-tile cold first-token pairs below were measured at `61be67917f`.
 
 | | |
 | --- | --- |
@@ -108,6 +109,10 @@ Cold first token (seconds, tokens a second in brackets):
 | 32,768 | 81.74 (401) | 108.27 (303) |
 | 65,536 | 180.27 (364) | 249.21 (263) |
 
+The dense projection tile (`61be67917f`, a different build from the table) took the first token from 23.8 s to 22.7 s at
+8,192 tokens (4.7 %) and from 104.8 s to 102.0 s at 32,768 (2.7 %): one A-B-B-A session, the mean of each pair, plain
+server, same hashes. The table above predates it.
+
 Peak physical footprint (`footprint`, 1 GB resolution, sampled every 3 s through an 8,192-token prompt and a 128-token
 reply): native about 24 GB, with `--parallel 1 --context 65552` and with `--parallel 4 --context 8192` and DSpark alike;
 MLX about 23 GB.
@@ -143,11 +148,11 @@ on chat), so the check was not vacuous. The raw summaries are `sampled-*.out` in
 
 ## Verification
 
-Each line names the head it was taken on. The contract, host-test and sampled-decode lines were repeated at
-`e90ecce19a`.
+Each line names the head it was taken on. The contract line was taken at `61be67917f`; the host-test and sampled-decode
+lines at `e90ecce19a`.
 
-- Kernel contract, `tf-kernel-contract --only inkling2`: 86 kernels pass gates 1 to 4, 132 controls red as planted,
-  0 missed, 0 limit problems, on the M4 Pro (see [the kernel contract](../kernel-contract.md#coverage)).
+- Kernel contract, `tf-kernel-contract --only inkling2` at `61be67917f`: 86 kernels pass gates 1 to 4, 133 controls red
+  as planted, 0 missed, 0 limit problems, on the M4 Pro (see [the kernel contract](../kernel-contract.md#coverage)).
 - Original checkpoint, device integration (`test-inkling2-metal`, 7 of 7): shared rows, rollback and restore, drafted and
   plain token ids; a 129-row trace matched every FP32 logit across 128-row and 32-row chunking, SHA-256
   `fbbb16ea5bf855e5b106ce740c32232ddb9ce7cd4f200792e3376fd4598956e7` (PR description, measured before `3439d56ae0`).

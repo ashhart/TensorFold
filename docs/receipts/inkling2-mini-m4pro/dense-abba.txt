@@ -1,0 +1,42 @@
+SUMMARY 86 kernels: 86 pass gates 1-4, 0 fail, 0 known findings; 133 controls: 133 red as planted, 0 missed; 0 limit problems; gates 20069 ms, limits 298 ms
+{"label": "A1-8192", "n": 8192, "prompt_tokens": 8192, "first_token_plus_decode_s": 23.22, "text": " kernel"}
+{"label": "A1-32768", "n": 32768, "prompt_tokens": 32768, "first_token_plus_decode_s": 105.86, "text": " sliding"}
+A1 prompt=1 tokens=1 sha=4fc82b26aecb
+A1 prompt=8192 tokens=1 sha=16931d4dad49
+A1 prompt=1 tokens=1 sha=4fc82b26aecb
+A1 prompt=32768 tokens=1 sha=8a44904f45d6
+A1 prompt=28 tokens=8 sha=0b037128ee78
+A1 prompt=28 tokens=64 sha=b37d8a0e39c4
+A1 prompt=416 tokens=16 sha=77bf7c99cc66
+A1 prompt=1036 tokens=24 sha=538175732cc7
+{"label": "B1-8192", "n": 8192, "prompt_tokens": 8192, "first_token_plus_decode_s": 23.2, "text": " kernel"}
+{"label": "B1-32768", "n": 32768, "prompt_tokens": 32768, "first_token_plus_decode_s": 102.36, "text": " sliding"}
+B1 prompt=1 tokens=1 sha=4fc82b26aecb
+B1 prompt=8192 tokens=1 sha=16931d4dad49
+B1 prompt=1 tokens=1 sha=4fc82b26aecb
+B1 prompt=32768 tokens=1 sha=8a44904f45d6
+B1 prompt=28 tokens=8 sha=0b037128ee78
+B1 prompt=28 tokens=64 sha=b37d8a0e39c4
+B1 prompt=416 tokens=16 sha=77bf7c99cc66
+B1 prompt=1036 tokens=24 sha=538175732cc7
+{"label": "B2-8192", "n": 8192, "prompt_tokens": 8192, "first_token_plus_decode_s": 22.2, "text": " kernel"}
+{"label": "B2-32768", "n": 32768, "prompt_tokens": 32768, "first_token_plus_decode_s": 101.6, "text": " sliding"}
+B2 prompt=1 tokens=1 sha=4fc82b26aecb
+B2 prompt=8192 tokens=1 sha=16931d4dad49
+B2 prompt=1 tokens=1 sha=4fc82b26aecb
+B2 prompt=32768 tokens=1 sha=8a44904f45d6
+B2 prompt=28 tokens=8 sha=0b037128ee78
+B2 prompt=28 tokens=64 sha=b37d8a0e39c4
+B2 prompt=416 tokens=16 sha=77bf7c99cc66
+B2 prompt=1036 tokens=24 sha=538175732cc7
+{"label": "A2-8192", "n": 8192, "prompt_tokens": 8192, "first_token_plus_decode_s": 24.42, "text": " kernel"}
+{"label": "A2-32768", "n": 32768, "prompt_tokens": 32768, "first_token_plus_decode_s": 103.7, "text": " sliding"}
+A2 prompt=1 tokens=1 sha=4fc82b26aecb
+A2 prompt=8192 tokens=1 sha=16931d4dad49
+A2 prompt=1 tokens=1 sha=4fc82b26aecb
+A2 prompt=32768 tokens=1 sha=8a44904f45d6
+A2 prompt=28 tokens=8 sha=0b037128ee78
+A2 prompt=28 tokens=64 sha=b37d8a0e39c4
+A2 prompt=416 tokens=16 sha=77bf7c99cc66
+A2 prompt=1036 tokens=24 sha=538175732cc7
+finished
