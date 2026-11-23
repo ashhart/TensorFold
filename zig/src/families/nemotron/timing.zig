@@ -79,15 +79,48 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const keyed = if (tag == 0) base else shape[0 .. base.len + (try std.fmt.bufPrint(shape[base.len..], "/w{x:0>16}", .{tag})).len];
     const parts = [_][]const u8{ "nemotron-metal", std.mem.span(b.m.device.name()), keyed };
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
-    if (k) |key| if (lanes.cost_cache.load(Costs, b.gpa, io, key)) |kept| {
-        b.costs = kept;
-        b.timing = .{};
-        return;
-    };
+    const most = @min(b.o.batch_rows / 2, 64);
+    var kept = if (k) |key| lanes.cost_cache.load(Costs, b.gpa, io, key) else null;
+    if (kept) |table| {
+        if (table.windows != wide.len + backend.max_window or table.shareds != sharedCount(most)) kept = null else {
+            for (table.window[0..table.windows], 0..) |c2, i| {
+                if (c2.width != widthOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) { kept = null; break; }
+            }
+            for (table.shared[0..table.shareds], 0..) |c2, i| {
+                if (c2.width != 2 * streamsOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) { kept = null; break; }
+            }
+        }
+    }
+    const cursor_key = if (k) |key| lanes.cost_cache.buildKey(&key, &.{"metal-heal-v1"}) else null;
+    var cursor: [3]u64 = if (cursor_key) |key| lanes.cost_cache.load([3]u64, b.gpa, io, key) orelse .{ 0, 0, 0 } else .{ 0, 0, 0 };
+    const heal_shared = kept != null and kept.?.shareds > 0 and cursor[2] % 2 == 1;
     var caches: [64]st.Cache = undefined;
-    const n = @min(b.o.batch_rows / 2, caches.len);
-    try makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b });
+    const n = if (kept != null and !heal_shared) @min(most, 1) else most;
+    makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b }) catch |err| {
+        if (kept) |table| { b.costs = table; b.timing = .{}; return; }
+        return err;
+    };
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
+    if (kept) |table| {
+        var costs = table;
+        var values: [32]f64 = undefined;
+        var widths: [32]u32 = undefined;
+        const count = if (heal_shared) costs.shareds else costs.windows;
+        const entries = if (heal_shared) costs.shared[0..count] else costs.window[0..count];
+        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| { m.* = c2.ms; w.* = c2.width; }
+        if (heal_shared) {
+            _ = try lanes.cost_rule.healWindows(SharedTimer{ .b = b, .caches = caches[0..n] }, values[0..count], widths[0..count], &cursor[1]);
+        } else {
+            _ = try lanes.cost_rule.healWindows(WindowTimer{ .b = b, .caches = caches[0..1] }, values[0..count], widths[0..count], &cursor[0]);
+        }
+        for (entries, values[0..count]) |*c2, m| c2.ms = m;
+        cursor[2] +%= 1;
+        b.costs = costs;
+        b.timing = .{};
+        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
+        if (cursor_key) |key| lanes.cost_cache.save([3]u64, b.gpa, io, key, cursor);
+        return;
+    }
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
     _ = try timeWindows(b, caches[0..1], backend.max_window, 12);
     const windows: WindowTimer = .{ .b = b, .caches = caches[0..1] };
@@ -115,7 +148,10 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var costs = Costs{ .windows = ms.len, .head_ms = head[0] };
     for (ms, 0..) |m, i| costs.window[i] = .{ .width = @intCast(widthOf(i)), .ms = m };
     costs.shareds = sharedCount(n);
-    for (costs.shared[0..costs.shareds], 0..) |*s, i| s.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = try lanes.cost_rule.fastest(shared, i) };
+    var shared_ms: [8]f64 = undefined;
+    try lanes.cost_rule.measureWindows(shared, shared_ms[0..costs.shareds], false);
+    try lanes.cost_rule.smooth(shared, shared_ms[0..costs.shareds]);
+    for (costs.shared[0..costs.shareds], shared_ms[0..costs.shareds], 0..) |*s2, m, i| s2.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = m };
     b.costs = costs;
     b.timing = .{};
     if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);

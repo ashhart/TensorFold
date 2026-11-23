@@ -73,3 +73,43 @@ test "Metal window prices: a bad saved table heals across bounded warm loads wit
     for (healed, 0..) |m, i| try std.testing.expectApproxEqRel(truth(i), m, 0.01);
     try std.testing.expectEqual(@as(u64, 64), cache.loadAt(u64, a, io, cursor_key, dir).?);
 }
+
+test "Metal window prices: paired warm probes follow identical calls despite different clocks and saved state" {
+    const a = std.testing.allocator;
+    const Wire = struct {
+        bits: std.ArrayList(bool) = .empty,
+        at: usize = 0,
+        lead: bool = true,
+        pub fn decide(w: *@This(), mine: bool) !bool {
+            if (w.lead) { try w.bits.append(a, mine); return mine; }
+            const bit = w.bits.items[w.at];
+            w.at += 1;
+            return bit;
+        }
+    };
+    const Reads = struct {
+        calls: std.ArrayList(usize) = .empty,
+        scale: f64,
+        pub fn time(r: *@This(), i: usize) !f64 { try r.calls.append(a, i); return truth(i) * r.scale; }
+    };
+    var wire: Wire = .{};
+    defer wire.bits.deinit(a);
+    var lead: Reads = .{ .scale = 1 };
+    defer lead.calls.deinit(a);
+    var peer: Reads = .{ .scale = 2 };
+    defer peer.calls.deinit(a);
+    var ms: [64]f64 = undefined;
+    var unused: [64]f64 = @splat(0);
+    var widths: [64]u32 = undefined;
+    for (&ms, &widths, 0..) |*m, *w, i| { m.* = truth(i) * 1.08; w.* = @intCast(i + 1); }
+    var cursor: u64 = 31;
+    var peer_cursor: u64 = 0;
+    _ = try rule.warm_prices.synced(&lead, &ms, &widths, &cursor, &wire, true);
+    wire.lead = false;
+    _ = try rule.warm_prices.synced(&peer, &unused, &widths, &peer_cursor, &wire, false);
+    try std.testing.expectEqualSlices(usize, lead.calls.items, peer.calls.items);
+    try std.testing.expect(lead.calls.items.len > 1);
+    try std.testing.expectEqual(wire.bits.items.len, wire.at);
+    try std.testing.expectEqual(@as(u64, 32), cursor);
+    try std.testing.expectEqual(@as(u64, 0), peer_cursor);
+}
