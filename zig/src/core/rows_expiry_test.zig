@@ -99,6 +99,15 @@ test "expiry spill: an unreadable image reports one refusal before allocation-fr
         try std.testing.expect(s.keep(&tokens, 900, null, &.{}, &.{}));
         s.expired(s.entries.items[0].saved);
         s.collectExpired();
+        // The bounded gather fails after submit, so its refusal note arrives at a reap, not inside keep.
+        if (!sync) {
+            const end = waits.deadline();
+            while (rows.write.pending(r) and rows.write.nowNs() < end) {
+                rows.write.reap(r);
+                rows.write.io.nap();
+            }
+        }
+        rows.write.reap(r);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, heard.text(), "900 tokens"));
         try std.testing.expect(std.mem.indexOf(u8, heard.text(), "GatherFailed") != null);
         try std.testing.expectEqual(@as(usize, 0), r.states.items.len);
