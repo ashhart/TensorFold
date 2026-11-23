@@ -42,7 +42,7 @@ const mma_names = [_][:0]const u8{ "tf_ink2_mma_group", "tf_ink2_nvfp4_gu_mma", 
 /// The weight rows a simdgroup-matrix threadgroup takes.
 const mma_tile_rows = 64;
 /// The route pairs one expert may take: a chunk's rows, each of which names an expert once.
-const mma_cap: u32 = 256;
+pub const mma_cap: u32 = 256;
 /// A chunk of at least this many rows takes the simdgroup-matrix kernels.
 pub const mma_rows: u32 = 16;
 pub const max_grouped_rows: u32 = plan.max_grouped_rows;
@@ -56,6 +56,7 @@ pub const Pipelines = struct {
     /// Each expert's count, then its route pairs: launches in one encoder run in order, so they share it.
     groups: ?mtl.Buffer = null,
     mma: ?[mma_names.len]mtl.Pipeline = null,
+    group_wide: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         var out = try loadSource(device, src.experts);
@@ -77,11 +78,16 @@ pub const Pipelines = struct {
             const need: usize = if (i == 0) 128 else 256;
             if (pipes[i].maxThreads() < need) return error.ExpertThreads;
         }
+        const wide = try mtl.Pipeline.init(device, lib, "tf_ink2_group_wide", false);
+        errdefer wide.deinit();
+        if (wide.maxThreads() < 256) return error.ExpertThreads;
         const groups = try device.buffer((plan.expert_count + plan.expert_count * mma_cap) * @sizeOf(u32), mtl.ResourceOptions.shared);
         if (p.mma) |old| for (old) |pipe| pipe.deinit();
         if (p.groups) |old| old.deinit();
+        if (p.group_wide) |old| old.deinit();
         p.mma = pipes;
         p.groups = groups;
+        p.group_wide = wide;
     }
 
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
@@ -107,6 +113,7 @@ pub const Pipelines = struct {
     pub fn deinit(p: *Pipelines) void {
         if (p.mma) |pipes| for (pipes) |pipe| pipe.deinit();
         if (p.groups) |buf| buf.deinit();
+        if (p.group_wide) |pipe| pipe.deinit();
         for (p.entries) |pipe| pipe.deinit();
     }
 
@@ -204,6 +211,14 @@ pub fn gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Re
 
 /// Each expert's route pairs of `ids` [rows, topk], for the simdgroup-matrix products after it.
 pub fn group(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !void {
+    try plan.check(c);
+    if (c.rows > mma_cap or c.experts > plan.expert_count) return error.BadExpertShape;
+    if (plan.wideGroup(c)) return groupWide(p, e, ids, c);
+    return groupScalar(p, e, ids, c);
+}
+
+/// The current serial grouping launch, retained as the exact device reference.
+pub fn groupScalar(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !void {
     const pipes = p.mma orelse return error.NoSimdgroupMatrices;
     try plan.check(c);
     if (c.rows > mma_cap or c.experts > plan.expert_count) return error.BadExpertShape;
@@ -214,6 +229,20 @@ pub fn group(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !voi
     e.setBuffer(groups, plan.expert_count * @sizeOf(u32), 2);
     e.setValue(MmaGroupArgs{ .pairs = c.rows * c.topk, .experts = c.experts, .cap = mma_cap }, 3);
     e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(c.experts, 1, 1));
+}
+
+/// Wide grouping preserves the serial table's ascending pair order and untouched tail.
+pub fn groupWide(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !void {
+    const wide = p.group_wide orelse return error.NoSimdgroupMatrices;
+    try plan.check(c);
+    if (c.rows > mma_cap or c.experts > plan.expert_count) return error.BadExpertShape;
+    const groups = p.groups.?;
+    e.setPipeline(wide);
+    e.setBuffer(ids.buf, ids.off, 0);
+    e.setBuffer(groups, 0, 1);
+    e.setBuffer(groups, plan.expert_count * @sizeOf(u32), 2);
+    e.setValue(MmaGroupArgs{ .pairs = c.rows * c.topk, .experts = c.experts, .cap = mma_cap }, 3);
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 /// Gate-up, or down (`down`), after `group`: 64 weight rows by bands of 32 of an expert's pairs a threadgroup.

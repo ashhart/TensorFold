@@ -215,3 +215,68 @@ INK2_MMA_NVFP4(tf_ink2_nvfp4_gu_mma, true)
 INK2_MMA_NVFP4(tf_ink2_nvfp4_down_mma, false)
 INK2_MMA_MXFP8(tf_ink2_mxfp8_gu_mma, true)
 INK2_MMA_MXFP8(tf_ink2_mxfp8_down_mma, false)
+
+inline uint ink2_simd_match(uint raw, bool valid, uint nbits) {
+  const uint vmask = uint(ulong(simd_vote::vote_t(simd_ballot(valid))));
+  uint match = valid ? vmask : 0u;
+  for (uint b = 0u; b < nbits; ++b) {
+    const uint bm = uint(ulong(simd_vote::vote_t(simd_ballot(valid && (((raw >> b) & 1u) != 0u)))));
+    match &= ((raw >> b) & 1u) ? bm : ~bm;
+  }
+  return match;
+}
+
+// Parallel wide grouping for pairs > 256: 8 simdgroups slice pairs and prefix-sum into (counts, members).
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_group_wide(
+    device const int* ids [[buffer(0)]], device uint* counts [[buffer(1)]],
+    device uint* members [[buffer(2)]], constant Ink2MmaGroupArgs& a [[buffer(3)]],
+    uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup uint sg_cnt[2048];
+  const uint E = a.experts;
+  for (uint i = t; i < 8u * E; i += 256u) sg_cnt[i] = 0u;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint span = (a.pairs + 7u) / 8u;
+  const uint lo = min(sg * span, a.pairs);
+  const uint hi = min(lo + span, a.pairs);
+  const uint below = (1u << lane) - 1u;
+  const uint nbits = (E <= 128u) ? 7u : 8u;
+
+  for (uint i0 = lo; i0 < hi; i0 += 32u) {
+    const uint i = i0 + lane;
+    const uint raw = (i < hi) ? uint(ids[i]) : E;
+    const bool valid = (i < hi) && (raw < E);
+    const uint match = ink2_simd_match(raw, valid, nbits);
+    if (valid && (match & below) == 0u) sg_cnt[sg * E + raw] += popcount(match);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (t < E) {
+    uint offset = 0u;
+    for (uint s = 0u; s < 8u; ++s) {
+      const uint c = sg_cnt[s * E + t];
+      sg_cnt[s * E + t] = offset;
+      offset += c;
+    }
+    counts[t] = min(offset, a.cap);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (uint i0 = lo; i0 < hi; i0 += 32u) {
+    const uint i = i0 + lane;
+    const uint raw = (i < hi) ? uint(ids[i]) : E;
+    const bool valid = (i < hi) && (raw < E);
+    const uint match = ink2_simd_match(raw, valid, nbits);
+    const uint rank = popcount(match & below);
+    const uint dst_base = valid ? sg_cnt[sg * E + raw] : 0u;
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (valid && (match & below) == 0u) sg_cnt[sg * E + raw] = dst_base + popcount(match);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (valid) {
+      const uint pos = dst_base + rank;
+      if (pos < a.cap) members[raw * a.cap + pos] = i;
+    }
+  }
+}
+
