@@ -14,6 +14,16 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: grouped prompt experts, the dense prompt and loop-gate MMA tiles, 8-row prompt attention, deduplicated verify experts for drafted rounds of 2 to 63 rows and one DSpark head pass for all drafting streams of a round all keep the one-row kernels' bytes, and the kernel contract registers them with launch records and planted controls. On an M4 Pro a cold prompt reaches its first token at 0.87 (8,192 tokens) to 0.72 (65,536) of `mlx_lm`'s rate, `fibonacci-raw` decodes at 31.1 tokens a second plain and 35.8 with DSpark against MLX's 23.1, and four drafted streams are within noise of plain (code 3 % under, chat level); token hashes and drafted-equals-plain are unchanged. Raw results, their sources and the build are in [the receipt](docs/receipts/inkling2-mini-m4pro/README.md) (#4337).
 
+- Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#N).
+
+- Flash Next on Metal: `TF_FLASHNEXT_BATCH_GDN_WIDE=1` runs 8- and 16-row batch segments on the existing non-replay GDN kernel instead of the recorded pipe; off by default until the M3 and M5 checks (#N).
+
+
+
+- Host status: the lane host's status read copies a snapshot the engine thread publishes, so a monitoring client polling the status no longer holds the lock every decode round takes; a torn read retries and the round waits for no reader (#3200).
+
+- Qwen3.8-27B family on Metal: tied embedding heads are accepted, binding the output projection to the embedding weights; small tied Qwen shapes still wait for their own size qualification (#N).
+
 - Server: `tensorfold capabilities --json` now lists `TENSORFOLD_PARALLEL` and the other environment variables `serve` honours, so the desktop app's Engine variables page accepts them (#N, fixes #3684).
 
 - Tests: host tests record where capped prompt chunks cut while another stream is live, family by family (#N).

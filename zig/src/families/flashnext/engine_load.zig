@@ -153,6 +153,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         r.gdn_pipe = try fz.gdn_step.compile(r, false);
         if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
     }
+    if (r.tp == null and try platform.environment.read(bool, "TF_FLASHNEXT_BATCH_GDN_WIDE", false)) {
+        r.batch_gdn_wide = r.gdn_pipe orelse try fz.gdn_step.compile(r, false);
+    }
     const index_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
 
     if (index_file.size > index_format.max_bytes) return error.BadIndex;
