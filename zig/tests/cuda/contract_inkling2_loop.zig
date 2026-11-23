@@ -24,7 +24,6 @@ pub const Set = struct {
     /// Every registration appended to `list`.
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.k = try lp.Kernels.load(gpu.d);
-        set.loaded = true;
         const k = &set.k;
         const rig: @import("contract_rig.zig").Rig = .{ .gpu = gpu, .s = s };
         for (&set.msgs, [_]gate.View{ .msg, .pair, .msg }, 0..) |*x, v, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .view = v, .wrong = i == 2 } };
@@ -33,6 +32,8 @@ pub const Set = struct {
         for (&set.mixes, [_]ops.Form{ .attn, .mlp, .mlp }, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .short = i == 2 } };
         for (&set.norms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .one = i == 1 } };
         for (&set.banks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .wrong = i == 1 } };
+        set.loaded = true;
+        errdefer set.deinit();
         inline for (groups) |f| for (&@field(set, f)) |*x| try list.append(a, x.kernel());
     }
 
