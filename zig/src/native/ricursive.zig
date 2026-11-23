@@ -103,7 +103,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try h.metal.warm();
     if (draft) |d| {
         try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
-        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+        h.wrap = try fr.dflash2_config.wrap(gpa, h.metal.backend(), d.drafter());
         h.draft = d;
     }
     errdefer if (h.wrap) |*w| w.deinit();
