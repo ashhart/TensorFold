@@ -48,7 +48,7 @@ pub const Probe = struct {
         var self: Probe = .{ .a = a, .arena = .init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .kind = kind, .pipes = try host.Pipelines.loadSource(device, text) };
         self.served = switch (kind) {
             .embed_norm => .{ .{ .rows = 1, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden }, .{ .rows = 7, .n = p.hidden, .k = p.hidden } },
-            .ar => .{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
+            .ar, .ar_norm => .{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
             .conv_static => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
             .conv_dynamic => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
             .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
@@ -110,7 +110,7 @@ pub const Probe = struct {
         };
     }
     pub fn count(self: *Probe) usize {
-        return if (self.kind == .ar) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
+        return if (self.kind == .ar or self.kind == .ar_norm) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const out = try self.arena.allocator().alloc(f32, n);
@@ -175,6 +175,17 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], false);
                 self.refs[2] = try self.input(self.f[2], false);
             },
+            .ar_norm => {
+                self.f[0] = try self.floats((r - 1) * p.hidden, rng);
+                self.f[1] = try self.floats(p.hidden, rng);
+                self.f[2] = try self.floats(2 * p.hidden, rng);
+                self.f[3] = try self.floats(2 * p.hidden, rng);
+                if (nf) self.f[2][0] = std.math.inf(f32);
+                self.refs[0] = try self.input(self.f[0], true);
+                self.refs[1] = try self.input(self.f[1], false);
+                self.refs[2] = try self.input(self.f[2], false);
+                self.refs[3] = try self.input(self.f[3], true);
+            },
             .conv_static => {
                 self.f[0] = try self.floats((r + 3) * n, rng);
                 self.f[1] = try self.floats(4 * n, rng);
@@ -233,6 +244,7 @@ pub const Probe = struct {
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
         for (self.f, 0..) |values, j| if (values.len > 0 and switch (self.kind) {
             .ar => j == 0,
+            .ar_norm => j == 0 or j == 3,
             .router => j < 2,
             .expert_combine => j == 0,
             else => true,
@@ -255,6 +267,7 @@ pub const Probe = struct {
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
+            .ar_norm => host.arNormRows(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), .{ .buf = R[3].buf, .off = R[3].off + p.hidden * 2 }, at(R[3]), y, .{ .buf = y.buf, .off = y.off + p.hidden * 2 }, y, r, 2, 1),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .router => host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
@@ -276,6 +289,12 @@ pub const Probe = struct {
             .ar => {
                 var qout: [2 * p.hidden]f64 = undefined;
                 for (0..2) |q| p.blockResidual(self.f[0], self.f[1], self.f[2], r, q, qout[q * p.hidden ..][0..p.hidden]);
+                @memcpy(want, &qout);
+                break;
+            },
+            .ar_norm => {
+                var qout: [2 * p.hidden]f64 = undefined;
+                for (0..2) |q| p.blockResidualNorm(self.f[0], self.f[1], self.f[2], self.f[3][q * p.hidden ..][0..p.hidden], r, q, qout[q * p.hidden ..][0..p.hidden]);
                 @memcpy(want, &qout);
                 break;
             },

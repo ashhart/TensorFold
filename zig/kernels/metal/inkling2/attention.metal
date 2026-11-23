@@ -50,29 +50,26 @@ inline void ink_prep_qrel(uint row, uint unit, uint lane, uint heads, uint globa
     float tau, const device bfloat* q_raw, const device bfloat* rel_raw, const device bfloat* q_scale,
     const device bfloat* rel_scale, device bfloat* q_out, device bfloat* rel_out) {
   const size_t rh = size_t(row) * heads + unit;
-  float x[4];
-  for (uint i = 0; i < 4; ++i) x[i] = float(q_raw[rh * D + lane * 4 + i]) * float(q_scale[unit * D + lane * 4 + i]);
-  const float ss = ((x[0] * x[0] + x[1] * x[1]) + x[2] * x[2]) + x[3] * x[3];
+  const float4 qr = float4(*(const device bfloat4*)(q_raw + rh * D + lane * 4));
+  const float4 qs = float4(*(const device bfloat4*)(q_scale + unit * D + lane * 4));
+  float4 x = qr * qs;
+  const float ss = ((x.x * x.x + x.y * x.y) + x.z * x.z) + x.w * x.w;
   const float f = ink_clip_factor(ink_warp_sum(ss), qk_clip);
-  for (uint i = 0; i < 4; ++i) {
-    x[i] *= f;
-    const bfloat once = bfloat(x[i]);
-    q_out[rh * D + lane * 4 + i] = global ? bfloat(float(once) * tau) : once;
-  }
+  const bfloat4 once = bfloat4(x * f);
+  *(device bfloat4*)(q_out + rh * D + lane * 4) = global ? bfloat4(float4(once) * tau) : once;
   const float r = lane < REL ? float(rel_raw[rh * REL + lane]) * float(rel_scale[unit * REL + lane]) : 0.0f;
   const float rf = ink_clip_factor(ink_warp_sum(r * r), rel_clip);
   if (lane < REL) {
-    const bfloat once = bfloat(r * rf);
-    rel_out[rh * REL + lane] = global ? bfloat(float(once) * tau) : once;
+    const bfloat r_once = bfloat(r * rf);
+    rel_out[rh * REL + lane] = global ? bfloat(float(r_once) * tau) : r_once;
   }
 }
 inline void ink_prep_kv(const device bfloat* src, device bfloat* dst, bool key, float qk_clip, float eps, uint lane) {
-  float x[4];
-  for (uint i = 0; i < 4; ++i) x[i] = float(src[lane * 4 + i]);
-  const float ss = ((x[0] * x[0] + x[1] * x[1]) + x[2] * x[2]) + x[3] * x[3];
+  const float4 x = float4(*(const device bfloat4*)(src + lane * 4));
+  const float ss = ((x.x * x.x + x.y * x.y) + x.z * x.z) + x.w * x.w;
   const float scale = key ? ink_clip_factor(ink_warp_sum(ss), qk_clip)
                           : precise::rsqrt(ink_warp_sum(ss) / float(D) + eps);
-  for (uint i = 0; i < 4; ++i) dst[lane * 4 + i] = bfloat(x[i] * scale);
+  *(device bfloat4*)(dst + lane * 4) = bfloat4(x * scale);
 }
 
 // One 32-thread group handles a row and head; independent q/k/v and relative rows keep their first BF16 rounding.

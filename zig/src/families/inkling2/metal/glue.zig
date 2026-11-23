@@ -15,6 +15,7 @@ const unit = mtl.Size.of(32, 1, 1);
 pub const Pipelines = struct {
     embed_norm: mtl.Pipeline,
     ar: mtl.Pipeline,
+    ar_norm: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
@@ -32,12 +33,13 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [10]mtl.Pipeline = undefined;
+        var pipes: [11]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
             "tf_inkling2_embed_norm",
             "tf_inkling2_ar",
+            "tf_ink2_fused_ar_norm",
             "tf_inkling2_conv_static",
             "tf_inkling2_conv_dynamic",
             "tf_inkling2_router",
@@ -53,14 +55,15 @@ pub const Pipelines = struct {
         return .{
             .embed_norm = pipes[0],
             .ar = pipes[1],
-            .conv_static = pipes[2],
-            .conv_dynamic = pipes[3],
-            .router = pipes[4],
-            .swiglu = pipes[5],
-            .logits = pipes[6],
-            .expert_pick = pipes[7],
-            .expert_combine = pipes[8],
-            .route_scores = pipes[9],
+            .ar_norm = pipes[2],
+            .conv_static = pipes[3],
+            .conv_dynamic = pipes[4],
+            .router = pipes[5],
+            .swiglu = pipes[6],
+            .logits = pipes[7],
+            .expert_pick = pipes[8],
+            .expert_combine = pipes[9],
+            .route_scores = pipes[10],
             .route_dots = try device.buffer(@as(usize, max_rows) * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
@@ -91,6 +94,15 @@ pub fn arRows(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: 
     inline for (.{ blocks, partial, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = rows }, 4);
     e.dispatchGroups(mtl.Size.of(queries_, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Fused AR + RMSNorm for ungated visits: skips FP32 intermediate write and separate norm launch.
+pub fn arNormRows(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, queries: Ref, nw0: Ref, nw1: Ref, nw2: Ref, out0: Ref, out1: Ref, out2: Ref, sources_: u32, queries_: u32, rows: u32) void {
+    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3 and rows > 0);
+    e.setPipeline(p.ar_norm);
+    inline for (.{ blocks, partial, queries, nw0, nw1, nw2, out0, out1, out2 }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = rows }, 9);
+    e.dispatchGroups(mtl.Size.of(queries_, rows, 1), mtl.Size.of(192, 1, 1));
 }
 
 const ConvArgs = extern struct { rows: u32, channels: u32 };

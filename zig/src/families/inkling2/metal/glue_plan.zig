@@ -10,6 +10,7 @@ pub const ar_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const Kind = enum {
     embed_norm,
     ar,
+    ar_norm,
     conv_static,
     conv_dynamic,
     router,
@@ -22,6 +23,7 @@ pub const Kind = enum {
         return switch (k) {
             .embed_norm => "tf_inkling2_embed_norm",
             .ar => "tf_inkling2_ar",
+            .ar_norm => "tf_ink2_fused_ar_norm",
             .conv_static => "tf_inkling2_conv_static",
             .conv_dynamic => "tf_inkling2_conv_dynamic",
             .router => "tf_inkling2_router",
@@ -35,6 +37,7 @@ pub const Kind = enum {
         return switch (k) {
             .embed_norm => "metal inkling2 glue embed_norm tf_inkling2_embed_norm",
             .ar => "metal inkling2 glue ar tf_inkling2_ar",
+            .ar_norm => "metal inkling2 glue ar_norm tf_ink2_fused_ar_norm",
             .conv_static => "metal inkling2 glue conv_static tf_inkling2_conv_static",
             .conv_dynamic => "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
             .router => "metal inkling2 glue router tf_inkling2_router",
@@ -55,7 +58,7 @@ pub fn valid(kind: Kind, c: Call) bool {
         .embed_norm => c.k == hidden and c.n == hidden,
         .router => c.k == hidden and c.n == top_k,
         .logits => c.k == hidden and c.n > 0 and c.n <= 200058,
-        .ar => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
+        .ar, .ar_norm => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
         .conv_static, .conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
@@ -182,6 +185,16 @@ pub fn blockResidualIn(blocks: []const f32, partial: []const f32, queries: []con
 /// AR over BF16 blocks widened to f32 and an unrounded f32 partial. FP64 is only the oracle.
 pub fn blockResidual(blocks: []const f32, partial: []const f32, queries: []const f32, sources: usize, q: usize, out: []f64) void {
     blockResidualIn(blocks, partial, queries, sources, q, null, out);
+}
+
+/// Fused AR followed by RMSNorm and BF16 weight multiply in FP64.
+pub fn blockResidualNorm(blocks: []const f32, partial: []const f32, queries: []const f32, weight: []const f32, sources: usize, q: usize, out: []f64) void {
+    var ar_out: [hidden]f64 = undefined;
+    blockResidual(blocks, partial, queries, sources, q, &ar_out);
+    var ss: f64 = 0;
+    for (ar_out) |v| ss += v * v;
+    const inv = 1 / @sqrt(ss / hidden + 1e-6);
+    for (out, ar_out, weight) |*y, x, w| y.* = @as(f64, w) * (x * inv);
 }
 
 pub fn staticConv(taps: []const f32, weight: []const f32, channels: usize, r: usize, c: usize) f64 {

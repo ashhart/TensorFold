@@ -13,7 +13,7 @@ test "loop entries have unique symbols, launch records and disabled FP contracti
     for (std.enums.values(p.Kind), records) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
-        try t.expectEqual(@as(u32, 256), record.threads);
+        try t.expectEqual(p.geometry(kind, .{ .rows = 1, .n = 1, .k = 1 }).threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try t.expectEqual(p.geometry(kind, .{ .rows = 1, .n = 1, .k = 1 }).tg_memory, record.tg_memory);
     }

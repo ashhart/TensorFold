@@ -146,10 +146,24 @@ fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows:
     e.barrier();
 }
 
+fn arNorm1(m: *const Model, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, q: Ref, nw: Ref, out: Ref, sources: u32, rows: u32) void {
+    glue.arNormRows(&m.glue, e, blocks, partial, q, nw, nw, nw, out, out, out, sources, 1, rows);
+}
+
 /// Ends with a barrier: the norms are written.
 fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
+    const gated = v.hasMessages();
+    if (!gated and v.layer != 0) {
+        const q = m.weights.attn_queries[v.layer - 1];
+        if (lp.kind == .local)
+            arNorm1(m, e, at(s.blocks, 0), at(s.partial, 0), r(q), r(w.attn.q_norm), at(s.q_norm, 0), lp.attn_sources, @intCast(rows))
+        else
+            glue.arNormRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(q), r(w.attn.q_norm), r(w.attn.k_norm), r(w.attn.v_norm), at(s.q_norm, 0), at(s.k_norm, 0), at(s.v_norm, 0), lp.attn_sources, @intCast(lp.attn_queries), @intCast(rows));
+        e.barrier();
+        return;
+    }
     if (v.layer == 0) {
         widen(m, e, at(s.p, 0), at(s.ar, 0), rows * state.hidden);
     } else {
@@ -157,7 +171,6 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(q), at(s.ar, 0), lp.attn_sources, @intCast(lp.attn_queries), @intCast(rows));
     }
     e.barrier();
-    const gated = v.hasMessages();
     if (gated) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
@@ -474,15 +487,15 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     postConv(m, e, s, segments, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
     runtime(m, e, .attention_partial, &.{ at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.partial, 0) }, rows * state.hidden, if (lp.boundary) lp.blocks_in + 1 else 0);
     e.barrier();
-    residual(m, e, s, m.weights.mlp_queries[v.layer], lp.mlp_sources, rows);
-    e.barrier();
     if (gated) {
+        residual(m, e, s, m.weights.mlp_queries[v.layer], lp.mlp_sources, rows);
+        e.barrier();
         const c = w.controllers.?[3];
         const core = v.layer - 6;
         loop.gatesEachUnits(&m.loop, if (m.dense_units) |*du| du else null, e, &.{.{ .h = l(at(s.mlp_ar, 0)), .m = l(messageRow(s, core, 3, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(at(s.mlp_gated, 0)) }}, @intCast(rows), state.message_entries * state.hidden);
         e.barrier();
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
-    } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
+    } else arNorm1(m, e, at(s.blocks, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), r(w.mlp_norm), at(s.mlp_normed, 0), lp.mlp_sources, @intCast(rows));
     e.barrier();
     if (m.dense_units) |*du| {
         dense_units.encodeRouteScores(du, e, at(s.mlp_normed, 0), r(w.router_weight), at(m.glue.route_dots, 0), @intCast(rows));
@@ -557,14 +570,10 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     e.barrier();
     const final = finalPlan(rows, options.all, options.taps != null);
-    if (final.work_rows == rows) {
-        glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, @intCast(rows));
-    } else {
-        const i = rows - 1;
-        glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1);
-    }
-    e.barrier();
-    norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
+    if (final.work_rows == rows)
+        arNorm1(m, e, at(s.blocks, 0), at(s.partial, 0), r(m.weights.output_query), r(m.weights.norm), at(s.mlp_normed, 0), m.weight_plan.final_sources, @intCast(rows))
+    else
+        arNorm1(m, e, at(s.blocks, (rows - 1) * state.block_slots * state.hidden * 2), row(s.partial, rows - 1, state.hidden * 4), r(m.weights.output_query), r(m.weights.norm), at(s.mlp_normed, 0), m.weight_plan.final_sources, 1);
     e.barrier();
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);

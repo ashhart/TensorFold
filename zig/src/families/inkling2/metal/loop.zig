@@ -60,7 +60,7 @@ pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, ban
     e.setPipeline(p.messages);
     bind(e, &.{ bank0, bank1, q_mlp, kv, out });
     e.setValue(GateArgs{ .rows = rows, .stride = hidden }, 5);
-    e.dispatchGroups(mtl.Size.of(rows * message_entries, 1, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(rows * message_entries, 1, 1), mtl.Size.of(192, 1, 1));
 }
 
 const GateArgs = extern struct { rows: u32, stride: u32 };
@@ -87,7 +87,7 @@ pub fn gatesEach(p: *const Pipelines, e: mtl.ComputeEncoder, items: []const Gate
         e.setPipeline(p.gates);
         bind(e, &.{ g.h, g.m, normalizedOf(p, i) });
         e.setValue(args, 3);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(192, 1, 1));
     }
     e.barrier();
     for (items, 0..) |g, i| {
@@ -118,7 +118,7 @@ pub fn gatesEachUnits(p: *const Pipelines, du: ?*const dense_units.Pipelines, e:
         e.setPipeline(p.gates);
         bind(e, &.{ g.h, g.m, normalizedOf(p, i) });
         e.setValue(args, 3);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(192, 1, 1));
     }
     e.barrier();
     for (items, 0..) |g, i| {

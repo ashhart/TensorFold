@@ -17,6 +17,11 @@ inline float ink_value(const device bfloat* blocks, const device float* partial,
                        uint source, uint sources, uint d) {
   return source + 1 == sources ? partial[d] : float(blocks[size_t(source) * 2304 + d]);
 }
+inline float4 ink_value4(const device bfloat* blocks, const device float* partial,
+                         uint source, uint sources, uint d) {
+  return source + 1 == sources ? *(const device float4*)(partial + d)
+                               : float4(*(const device bfloat4*)(blocks + size_t(source) * 2304 + d));
+}
 
 struct InkEmbedArgs { uint rows; };
 [[max_total_threads_per_threadgroup(256)]]
@@ -102,6 +107,88 @@ kernel void tf_inkling2_ar(
     for (uint s = 0; s < a.sources; ++s)
       acc += weights[s] * (ink_value(blocks, partial, s, a.sources, d) * means[s]);
     out[d] = acc;
+  }
+}
+
+// Fused AR + RMSNorm for ungated visits: skips FP32 intermediate round-trip and separate norm launch.
+[[max_total_threads_per_threadgroup(192)]]
+kernel void tf_ink2_fused_ar_norm(
+    const device bfloat* all_blocks [[buffer(0)]], const device float* all_partial [[buffer(1)]],
+    const device float* queries [[buffer(2)]],
+    const device bfloat* nw0 [[buffer(3)]], const device bfloat* nw1 [[buffer(4)]], const device bfloat* nw2 [[buffer(5)]],
+    device bfloat* out0 [[buffer(6)]], device bfloat* out1 [[buffer(7)]], device bfloat* out2 [[buffer(8)]],
+    constant InkARArgs& a [[buffer(9)]], uint t [[thread_index_in_threadgroup]],
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint q = tg.x, row = tg.y;
+  if (q >= a.queries || row >= a.rows || a.sources == 0 || a.sources > 5) return;
+  const uint sg = t / 32u;
+  const device bfloat* blocks = all_blocks + size_t(row) * 4 * 2304;
+  const device float* partial = all_partial + size_t(row) * 2304;
+  const device float* qrow = queries + size_t(q) * 2304;
+  const device bfloat* nw = (q == 0u) ? nw0 : ((q == 1u) ? nw1 : nw2);
+  device bfloat* out = ((q == 0u) ? out0 : ((q == 1u) ? out1 : out2)) + size_t(row) * 2304;
+  threadgroup float red[2 * 5 * 6];
+  float4 vals[5][3];
+  for (uint s = 0; s < a.sources; ++s) {
+    float ss = 0.0f;
+    for (uint n = 0; n < 3; ++n) {
+      const float4 x = ink_value4(blocks, partial, s, a.sources, (n * 192u + t) * 4u);
+      vals[s][n] = x;
+      ss += (x.x * x.x + x.y * x.y) + (x.z * x.z + x.w * x.w);
+    }
+    const float reduced = simd_sum(ss);
+    if (lane == 0) red[s * 6u + sg] = reduced;
+  }
+  float4 qv[3];
+  for (uint n = 0; n < 3; ++n) qv[n] = *(const device float4*)(qrow + (n * 192u + t) * 4u);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float means[5];
+  for (uint s = 0; s < a.sources; ++s) {
+    float ss = 0.0f;
+    for (uint j = 0; j < 6; ++j) ss += red[s * 6u + j];
+    means[s] = precise::rsqrt(precise::divide(ss, 2304.0f) + INKLING_EPS);
+  }
+  threadgroup float* dots = red + 30;
+  for (uint s = 0; s < a.sources; ++s) {
+    float dsum = 0.0f;
+    for (uint n = 0; n < 3; ++n) {
+      const float4 z = vals[s][n] * means[s];
+      const float4 p = qv[n] * z;
+      dsum += (p.x + p.y) + (p.z + p.w);
+    }
+    const float reduced = simd_sum(dsum);
+    if (lane == 0) dots[s * 6u + sg] = reduced;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float weights[5];
+  float peak = -INFINITY;
+  for (uint s = 0; s < a.sources; ++s) {
+    float dot = 0.0f;
+    for (uint j = 0; j < 6; ++j) dot += dots[s * 6u + j];
+    weights[s] = INKLING_AR_SCALE * dot;
+    peak = max(peak, weights[s]);
+  }
+  float den = 0.0f;
+  for (uint s = 0; s < a.sources; ++s) { weights[s] = precise::exp(weights[s] - peak); den += weights[s]; }
+  for (uint s = 0; s < a.sources; ++s) weights[s] = precise::divide(weights[s], den);
+  float4 accs[3];
+  float nsum = 0.0f;
+  for (uint n = 0; n < 3; ++n) {
+    float4 acc = float4(0.0f);
+    for (uint s = 0; s < a.sources; ++s) acc += weights[s] * (vals[s][n] * means[s]);
+    accs[n] = acc;
+    nsum += (acc.x * acc.x + acc.y * acc.y) + (acc.z * acc.z + acc.w * acc.w);
+  }
+  const float sg_sum = simd_sum(nsum);
+  if (lane == 0) red[sg] = sg_sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float total = 0.0f;
+  for (uint j = 0; j < 6; ++j) total += red[j];
+  const float inv = precise::rsqrt(precise::divide(total, 2304.0f) + INKLING_EPS);
+  for (uint n = 0; n < 3; ++n) {
+    const uint d = (n * 192u + t) * 4u;
+    const float4 w = float4(*(const device bfloat4*)(nw + d));
+    *(device bfloat4*)(out + d) = bfloat4(w * (accs[n] * inv));
   }
 }
 

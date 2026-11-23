@@ -7,6 +7,7 @@ fn edit(kind: p.Kind) Edit {
     return switch (kind) {
         .embed_norm => .{ .from = "float(weight[d]) * (float(x[d]) * inverse)", .to = "float(weight[0]) * (float(x[d]) * inverse)" },
         .ar => .{ .from = "weights[s] = dot * INKLING_AR_SCALE;", .to = "weights[s] = dot;" },
+        .ar_norm => .{ .from = "weights[s] = INKLING_AR_SCALE * dot;", .to = "weights[s] = dot;" },
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
         .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
         .router => .{ .from = "keys[t] = scores[t] + bias[t];", .to = "keys[t] = scores[t];" },
@@ -27,6 +28,7 @@ pub fn name(kind: p.Kind) []const u8 {
     return switch (kind) {
         .embed_norm => "control: metal inkling2 glue embed_norm tf_inkling2_embed_norm",
         .ar => "control: metal inkling2 glue ar tf_inkling2_ar",
+        .ar_norm => "control: metal inkling2 glue ar_norm tf_ink2_fused_ar_norm",
         .conv_static => "control: metal inkling2 glue conv_static tf_inkling2_conv_static",
         .conv_dynamic => "control: metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
         .router => "control: metal inkling2 glue router tf_inkling2_router",

@@ -30,7 +30,7 @@ pub const Kind = enum {
 };
 
 pub const Call = struct { rows: usize, n: usize, k: usize };
-pub const Geometry = struct { groups: usize, threads: u32 = 256, tg_memory: u32 };
+pub const Geometry = struct { groups: usize, threads: u32 = 192, tg_memory: u32 };
 
 pub fn valid(kind: Kind, c: Call) bool {
     if (c.rows == 0 or c.rows > 512) return false;
@@ -52,8 +52,8 @@ pub fn geometry(kind: Kind, c: Call) Geometry {
             .gates => c.rows,
         },
         .tg_memory = switch (kind) {
-            .messages => 144,
-            .gates => 80,
+            .messages => 96,
+            .gates => 48,
         },
     };
 }
