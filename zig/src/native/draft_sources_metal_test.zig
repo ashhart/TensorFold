@@ -64,6 +64,7 @@ test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head fa
     var b: q.Metal = undefined;
     b.runner = &runner;
     b.draft = null;
+    b.external = false;
     b.timed = 0;
     b.window = 16;
     b.copies = false;
