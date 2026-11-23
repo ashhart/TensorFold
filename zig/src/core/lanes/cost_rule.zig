@@ -37,14 +37,15 @@ pub fn smoothSerial(ctx: anytype, ms: []f64) !void {
     }
 }
 
-/// One warm pass and seven interleaved measured passes; observers run once per width on the last pass.
+/// One warm pass and seven interleaved measured passes; observers run once per width spread across the passes.
 pub fn interleaveWidths(windows: anytype, observer: anytype, ms: []f64, keep: bool) !void {
     for (0..ms.len) |i| _ = try windows.time(i);
     if (!keep) @memset(ms, std.math.inf(f64));
     for (0..reps) |pass| {
         for (ms, 0..) |*m, i| {
-            m.* = @min(m.*, try windows.time(i));
-            if (pass + 1 == reps) try observer.afterWidth(i);
+            const measured = try windows.time(i);
+            if (measured > 0 and std.math.isFinite(measured)) m.* = @min(m.*, measured);
+            if (i % reps == pass) try observer.afterWidth(i);
         }
     }
 }
@@ -60,11 +61,23 @@ pub fn measureWindows(windows: anytype, ms: []f64, keep: bool) !void {
 
 /// Retime a high local outlier or both sides of a dip, never changing a real step to an interpolated value.
 pub fn repairAt(ms: []const f64, i: usize) bool {
+    return repairGrid(ms, null, i);
+}
+
+fn coordinate(widths: ?[]const u32, i: usize) f64 {
+    return @floatFromInt(if (widths) |w| w[i] else i + 1);
+}
+
+pub fn repairGrid(ms: []const f64, widths: ?[]const u32, i: usize) bool {
     const value = ms[i];
     if (!(value > 0) or !std.math.isFinite(value)) return true;
     if (i > 0 and value < ms[i - 1] * (1 - dip)) return true;
     if (i + 1 < ms.len and ms[i + 1] < value * (1 - dip)) return true;
-    const predicted = if (i > 0 and i + 1 < ms.len) (ms[i - 1] + ms[i + 1]) / 2 else if (i == 0 and ms.len > 2) 2 * ms[1] - ms[2] else if (i > 1) 2 * ms[i - 1] - ms[i - 2] else value;
+    if (ms.len < 3) return false;
+    const left = if (i == 0) 1 else if (i + 1 == ms.len) i - 2 else i - 1;
+    const right = if (i == 0) 2 else if (i + 1 == ms.len) i - 1 else i + 1;
+    const ratio = (coordinate(widths, i) - coordinate(widths, left)) / (coordinate(widths, right) - coordinate(widths, left));
+    const predicted = ms[left] + (ms[right] - ms[left]) * ratio;
     return predicted > 0 and value > predicted * (1 + dip);
 }
 
@@ -81,10 +94,22 @@ pub fn smooth(ctx: anytype, ms: []f64) !void {
 
 /// Both ranks retime the same entries; the leader alone selects them from its table.
 pub fn smoothSynced(ctx: anytype, ms: []f64, agree: anytype, lead: bool) !void {
-    for (ms, 0..) |*m, i| {
-        if (!try agree.decide(lead and repairAt(ms, i))) continue;
+    return smoothGrid(ctx, ms, null, agree, lead);
+}
+
+pub fn smoothWidths(ctx: anytype, ms: []f64, widths: []const u32) !void {
+    std.debug.assert(ms.len == widths.len);
+    return smoothGrid(ctx, ms, widths, Local{}, true);
+}
+
+fn smoothGrid(ctx: anytype, ms: []f64, widths: ?[]const u32, agree: anytype, lead: bool) !void {
+    var remaining = ms.len;
+    while (remaining > 0) {
+        remaining -= 1;
+        const i = remaining;
+        if (!try agree.decide(lead and repairGrid(ms, widths, i))) continue;
         const measured = try ctx.time(i);
-        if (measured > 0 and std.math.isFinite(measured)) m.* = if (m.* > 0 and std.math.isFinite(m.*)) @min(m.*, measured) else measured;
+        if (measured > 0 and std.math.isFinite(measured)) ms[i] = if (ms[i] > 0 and std.math.isFinite(ms[i])) @min(ms[i], measured) else measured;
     }
 }
 
