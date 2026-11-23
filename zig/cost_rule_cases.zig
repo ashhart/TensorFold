@@ -5,4 +5,3 @@ test {
     _ = @import("src/core/lanes/cost_rule.zig");
     _ = @import("src/core/lanes/cost_cache.zig");
 }
-

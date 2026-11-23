@@ -187,7 +187,10 @@ test "Metal review: Qwen tight-context cold timing work stays below a twenty-per
         if (capacity <= width) continue;
         var baseline: Sweep = .{ .capacity = capacity, .prompt = @min(192, capacity - width) };
         var candidate: Sweep = .{ .capacity = capacity, .prompt = rule.context.promptRows(capacity, width, width + 5) };
-        for (0..5) |_| { _ = try baseline.time(width - 1); _ = try candidate.time(width - 1); }
+        for (0..5) |_| {
+            _ = try baseline.time(width - 1);
+            _ = try candidate.time(width - 1);
+        }
         var old: [64]f64 = undefined;
         var now: [64]f64 = undefined;
         var observer: rule.NoObserver = .{};
@@ -199,7 +202,6 @@ test "Metal review: Qwen tight-context cold timing work stays below a twenty-per
         std.debug.print("Metal cold context width={d} capacity={d} prompt={d}/{d} refills={d}/{d} work_rows={d}/{d}\n", .{ width, capacity, baseline.prompt, candidate.prompt, baseline.refills, candidate.refills, baseline.rows, candidate.rows });
     };
 }
-
 
 test "Metal review: the rotating 150ms width cannot be starved by an earlier edge" {
     var timer: Timer = .{ .value = 140 };
