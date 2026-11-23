@@ -27,6 +27,9 @@ const stats_bytes = 8192;
 /// Keys a row's attention chunk covers (kernels/metal/inkling2/attention.metal's I2_CHUNK) and floats of its partial.
 pub const attn_chunk = 2048;
 pub const attn_partial_floats = 132;
+/// Rows of a tile of attention_rows.metal's kernel, which full-attention calls of `attn_rows_min` rows or more use.
+pub const attn_rows_tile = 8;
+pub const attn_rows_min = 8;
 /// The dense MMA tile (kernels/metal/inkling2/dense_mma.metal): outputs a side, and the K step a staging round covers.
 const dense_tile = 16;
 const dense_chunk = 256;
@@ -49,6 +52,8 @@ const Kernel = enum {
     scaled_l2_clip,
     kv_prep,
     attn_merge,
+    attn_rows_partial,
+    attn_rows_final,
     route_select,
     softcap,
     residual_attn,
@@ -529,10 +534,15 @@ pub const Ops = struct {
                 .scale = a.scale,
             };
             const scratch = View{ .buffer = o.scratch };
-            e.setPipeline(o.attnPipe(chunks == 1, group));
+            const tiled = a.window == 0 and a.ring == 0 and n >= attn_rows_min;
+            e.setPipeline(if (tiled) o.pipe(if (chunks == 1) .attn_rows_final else .attn_rows_partial) else o.attnPipe(chunks == 1, group));
             bind(e, &.{ q, rel, sink, gate, a.kcache, a.vcache, a.proj, out, scratch });
             e.setValue(args, 9);
-            e.dispatchGroups(mtl.Size.of(chunks, a.kv_heads, n), mtl.Size.of(128, 1, 1));
+            if (tiled) {
+                e.dispatchGroups(mtl.Size.of(chunks, a.heads, (n + attn_rows_tile - 1) / attn_rows_tile), mtl.Size.of(128, 1, 1));
+            } else {
+                e.dispatchGroups(mtl.Size.of(chunks, a.kv_heads, n), mtl.Size.of(128, 1, 1));
+            }
             if (chunks > 1) {
                 e.setPipeline(o.pipe(.attn_merge));
                 bind(e, &.{ gate, out, scratch });
