@@ -18,7 +18,7 @@ struct MeRows {
   device bfloat* yr = y + ulong(row) * p.out_stride;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]) * float(xr[i]);
-  const float inv = metal::precise::rsqrt(mi_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat(float(xr[i]) * inv * (1.0f + float(w[i])));
 }
 
@@ -85,7 +85,7 @@ struct MeAttn {
   float m = -INFINITY, l = 0.0f, acc = 0.0f;
   for (uint j = 0; j <= t; j++) {
     const ulong at = (ulong(kvh) * p.rows + j) * 256 + d;
-    const float s = mi_sum(q * float(K[at]), part, 256, lane, sg) * p.scale;
+    const float s = tf_vis_sum(q * float(K[at]), part, 256, lane, sg) * p.scale;
     const float top = max(m, s);
     const float old = metal::precise::exp(m - top), e = metal::precise::exp(s - top);
     l = l * old + e;
