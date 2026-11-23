@@ -11,6 +11,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: grouped prompt experts, the dense prompt and loop-gate MMA tiles, 8-row prompt attention, deduplicated verify experts for drafted rounds of 2 to 63 rows and one DSpark head pass for all drafting streams of a round all keep the one-row kernels' bytes, and the kernel contract registers them with launch records and planted controls. On an M4 Pro a cold prompt reaches its first token at 0.87 (8,192 tokens) to 0.72 (65,536) of `mlx_lm`'s rate, `fibonacci-raw` decodes at 31.1 tokens a second plain and 35.8 with DSpark against MLX's 23.1, and four drafted streams are within noise of plain (code 3 % under, chat level); token hashes and drafted-equals-plain are unchanged. Raw results, their sources and the build are in [the receipt](docs/receipts/inkling2-mini-m4pro/README.md) (#4337).
 
+- Docs: the credits say the native CUDA engine serves EXL3 packs (#4743). Thanks @Bizuayeu.
+
+- Metal: Nemotron's offline build uses the shared expert kernel sources, and two duplicate files are gone; the kernels are unchanged (#4738). Thanks @jschmied.
+
+
+
 - Docs: a plan for Inkling 2 Mini on CUDA and Metal in slices a contributor can claim (#4274). Thanks @akol1.
 
 - Docs: the Flash Next HIP recipe adds the measured four-rank serve path and fixes its receipt link (#4669). Thanks @timmyit.
