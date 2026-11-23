@@ -499,13 +499,13 @@ test "rows io: two fixed slots preserve every byte over multiple chunks" {
     var hash = std.hash.Wyhash.init(0);
     var off: u64 = 0;
     while (off < source.len) {
-        const c = &j.chunks[j.put % 2];
+        const c = try w.freeChunk(&j);
         const n: usize = @min(c.bytes.len, source.len - @as(usize, @intCast(off)));
         @memcpy(c.bytes[0..n], source[@intCast(off)..][0..n]);
         j.sendChunk(c, 0, off, n);
         off += n;
-        if (j.put != 3) continue;
-        const got = try w.takeChunk(&j, 0, 0);
+        if (j.put - j.get < 2) continue; // both slots are live: drain one before reusing it
+        const got = try w.takeChunk(&j, 0, j.get * chunk_bytes);
         hash.update(got.bytes[0..got.len]);
         got.state.store(0, .release);
         j.get += 1;
