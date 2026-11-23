@@ -40,6 +40,14 @@ fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Op
     return metal_admit.streams(a, "step5", stream_bytes, left, o, window, problem);
 }
 
+fn admittedWindow(a: std.mem.Allocator, c: *const s5.config.Config, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return admittedStreams(a, s5.state.cacheBytes(c, @intCast(window)), left, o, window, problem);
+}
+
+fn longestWindow(c: *const s5.config.Config, budget: u64, most: usize) usize {
+    return s5.budget.longest(c, budget, most);
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
@@ -69,14 +77,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "STEP5_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0 and at most this Mac's RAM, or unset it for 75% of RAM";
         return null;
     };
-    const fits = s5.budget.longest(&model.config, budget, model.config.context);
+    const fits = longestWindow(&model.config, budget, model.config.context);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Step-5 caches fit {d} tokens under its load limit (75% of RAM, or STEP5_LOAD_LIMIT_GB)", .{ window, fits });
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
-    const served = try admittedStreams(a, s5.state.cacheBytes(&model.config, @intCast(window)), budget, o, @intCast(window), problem) orelse {
+    const served = try admittedWindow(a, &model.config, budget, o, @intCast(window), problem) orelse {
         model.deinit();
         return null;
     };
@@ -219,9 +227,33 @@ test "Metal capabilities: Step5 admission fits automatic 64 and refuses explicit
     const exact: api.Open = .{ .dir = "", .model_type = "step5_vl", .lanes = 3, .lanes_fixed = true };
     const over: api.Open = .{ .dir = "", .model_type = "step5_vl", .lanes = 64, .lanes_fixed = true };
     var why: []const u8 = "";
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 11, over, 4096, &why));
     defer a.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+}
+
+test "Metal capabilities: Step5 default windows price the backend's extra position" {
+    var c: s5.config.Config = .{ .layers = 1 };
+    c.layer[0] = .{ .kind = .full, .span = 1, .theta = 1, .limit = 1, .shared_limit = 1, .moe = false };
+    const budget = s5.state.cacheBytes(&c, 64);
+    try std.testing.expectEqual(@as(usize, 63), longestWindow(&c, budget, 4096));
+    try std.testing.expect(s5.state.cacheBytes(&c, longestWindow(&c, budget, 4096) + 1) <= budget);
+}
+
+test "Metal capabilities: Step5 admission reduces automatic streams and refuses explicit streams at window + 1" {
+    const a = std.testing.allocator;
+    var c: s5.config.Config = .{ .layers = 1 };
+    c.layer[0] = .{ .kind = .full, .span = 1, .theta = 1, .limit = 1, .shared_limit = 1, .moe = false };
+    const left = 2 * s5.state.cacheBytes(&c, 64) + 1;
+    const auto: api.Open = .{ .dir = "", .model_type = "step5_vl", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "step5_vl", .lanes = 2, .lanes_fixed = true };
+    var why: []const u8 = "";
+    const automatic = try admittedWindow(a, &c, left, auto, 64, &why);
+    const explicit = try admittedWindow(a, &c, left, exact, 64, &why);
+    defer if (why.len > 0) a.free(why);
+    try std.testing.expectEqual(@as(?u32, 1), automatic);
+    try std.testing.expectEqual(@as(?u32, null), explicit);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 2") != null);
 }
