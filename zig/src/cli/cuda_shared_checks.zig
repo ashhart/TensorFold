@@ -10,7 +10,7 @@ const max_rows = nemotron.state.max_rows;
 
 /// Compare serial streams with shared windows of varying splits and kept-row lengths.
 pub fn widths(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, path: []const u8, streams: usize, count: usize, sampling: ?lanes.Sampling) !u8 {
-    if (streams < 2 or streams > max_streams) return error.BadStreams;
+    if (streams < 2 or streams > nemotron.wide.streams(e.c)) return error.BadStreams; // 8 with the switch off
     var prompts = try lanes_cli.readPrompts(gpa, io, path);
     defer prompts.deinit();
     const ids = prompts.value.map.values();
@@ -40,15 +40,13 @@ pub fn widths(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, path: []c
     while (true) : (round += 1) {
         var parts: [max_streams]nemotron.engine.Shared = undefined;
         var n: usize = 0;
-        var room: usize = nemotron.state.windowRows(e.c);
+        var room: usize = nemotron.state.sharedRows(e.c); // 17-32-row rounds with TF_NEMOTRON_WIDE_ROUNDS
         var waiting: usize = 0;
         for (0..streams) |k| waiting += @intFromBool(at[k] + 1 < refs[k].items.len);
         for (0..streams) |k| {
             if (at[k] + 1 >= refs[k].items.len) continue;
             waiting -= 1;
-            const cap = room - waiting; // at least a row for each stream after this one
-            const width = 1 + (round * 7 + k * 5 + round / 3) % cap; // uneven splits come round in turn
-            const rows = @min(width, refs[k].items.len - 1 - at[k]);
+            const rows = nemotron.wide.checkRows(round, k, room, waiting, nemotron.state.windowRows(e.c), refs[k].items.len - 1 - at[k]);
             @memcpy(bufs[k][0..rows], refs[k].items[at[k]..][0..rows]);
             keep[k] = rows;
             if ((round + k) % 3 == 2 and rows > 2) { // a wrong draft: the rows from it on read a token serial never fed
