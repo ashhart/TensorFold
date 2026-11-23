@@ -190,18 +190,25 @@ scene, a 1792 x 1344 invoice). Native read "TensorFold 4821 / Metal on Apple M4 
 9", red circle, blue square and green triangle, the scene's sun, mountains and sea, and (inside the 160-token thinking text,
 cut before the final answer) "INVOICE No. 20931" and "TOTAL DUE: 1034.00 EUR", from both PNG and JPEG. `mlx_lm.server` of
 the same checkpoint serves images too (no mlx_vlm needed) and read the same content; the texts differ in wording after a
-few dozen characters, as near-tie noise does. Time to first token, median of two requests after a warm-up, one image:
+few dozen characters, as near-tie noise does. Time to first token, median of two requests after a warm-up, one image (the
+first three rows from the session above; the last two at `a305edd706`, quiet machine, A-B-B-A against `5e75f97db2`, which
+took 15.7 to 16.2 s on the invoice and 3.0 to 3.4 s on the scene there, 17.3 to 18.1 s and 3.5 to 3.9 s in the first session):
 
 | Image (prompt tokens) | Native | MLX |
 | --- | --- | --- |
 | 320 x 120 text (56) | 0.37 s | 0.55 to 0.99 s |
 | 512 x 512 shapes (197) | 0.88 s | 0.71 s |
 | 640 x 420 chart (208) | 0.93 s | 0.73 s |
-| 1024 x 768 scene (546) | 3.5 to 3.9 s | 1.7 s |
-| 1792 x 1344 invoice (1,561) | 17.3 to 18.1 s | 4.8 to 5.1 s |
+| 1024 x 768 scene (546) | 1.9 to 2.3 s | 1.7 s |
+| 1792 x 1344 invoice (1,561) | 6.9 to 7.2 s | 4.7 to 4.8 s |
 
-Native's time to first token on larger images is 2.3 to 3.6 times MLX's on this M4 Pro (no tensor units); the split
-between the image tower and the text prefill was not profiled.
+The image tower was most of a larger image's first token: on the invoice it took 12.5 s of the 15.7 s, 89 % of that in
+the two fp32 attention dots (q k^T and p v) that ran one thread an output. They now run on 64 x 64 tiles with each output
+still one fma chain over k, so the tower's output is the same bits (its hash and all 16 replies per image are equal): the
+tower takes 3.2 s on the invoice and 0.64 s on the scene. What is left of the invoice's 6.9 s is that tower and the text
+prefill of its 1,561 rows (about 3.7 s), and MLX's tower is under half of native's (the stage table is in
+`fidelity/img-ttft.txt` of the receipt). The three small rows were not re-measured quietly: their attention is small
+and a 0.1 s change is inside this machine's noise.
 
 Sampled decode, `bench_concurrent --temperatures 0.7 --seed 1234 --alone --serial --levels 1,4 --tokens 256 --reps 3`
 (aggregate tokens a second), `--context 8192 --parallel 4 --prompt-cache-gib 0 --no-thinking`, on an idle machine, the

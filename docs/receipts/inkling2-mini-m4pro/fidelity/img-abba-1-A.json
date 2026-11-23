@@ -1,0 +1,122 @@
+[
+ {
+  "image": "scene.jpg",
+  "question": "Describe this image in two sentences.",
+  "runs": [
+   {
+    "ttft": 3.163673416012898,
+    "total": 7.477266250003595,
+    "text": "<|message_model|><|content_thinking|>The user wants a two-sentence description of the image. Let me analyze: It shows a stylized sunset/sunrise over water with two dark green triangular mountains, a yellow sun on the right, gradient sky from orange at top to light blue near horizon, and deep blue water with gradient. Need concise two sentences. Ensure no claim beyond image. Final only.<|end_message|><|message_model|><|content_text|>A stylized sunset scene shows two dark green triangular mountains rising from a deep blue gradient sea. A bright yellow sun sits low on the right against a sky that fades from orange at the top to pale blue near the horizon.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 546,
+     "completion_tokens": 131,
+     "total_tokens": 677,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 2.951567000010982,
+    "total": 7.270696291991044,
+    "text": "<|message_model|><|content_thinking|>The user wants a two-sentence description of the image. Let me analyze: It shows a stylized sunset/sunrise over water with two dark green triangular mountains, a yellow sun on the right, gradient sky from orange at top to light blue near horizon, and deep blue water with gradient. Need concise two sentences. Ensure no claim beyond image. Final only.<|end_message|><|message_model|><|content_text|>A stylized sunset scene shows two dark green triangular mountains rising from a deep blue gradient sea. A bright yellow sun sits low on the right against a sky that fades from orange at the top to pale blue near the horizon.<|end_message|>",
+    "usage": {
+     "prompt_tokens": 546,
+     "completion_tokens": 131,
+     "total_tokens": 677,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "invoice-large.jpg",
+  "question": "What is the total due and what is the invoice number?",
+  "runs": [
+   {
+    "ttft": 15.747479624988046,
+    "total": 21.197869541996624,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. I can read directly: INVOICE No. 20931, TOTAL DUE: 1034.00 EUR. But I should verify the total by calculation.\n\nItem 1: qty 2, price 10.50 \u2192 21.00\nItem 2: qty 3, price 20.50 \u2192 61.50\nItem 3: qty 4, price 30.50 \u2192 122.00\nItem 4: qty 5, price 40.50 \u2192 202.50\nItem 5: qty 6, price 50.50 \u2192 303.00\nItem 6: qty ",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 16.17939645802835,
+    "total": 21.60845749999862,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. I can read directly: INVOICE No. 20931, TOTAL DUE: 1034.00 EUR. But I should verify the total by calculation.\n\nItem 1: qty 2, price 10.50 \u2192 21.00\nItem 2: qty 3, price 20.50 \u2192 61.50\nItem 3: qty 4, price 30.50 \u2192 122.00\nItem 4: qty 5, price 40.50 \u2192 202.50\nItem 5: qty 6, price 50.50 \u2192 303.00\nItem 6: qty ",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ },
+ {
+  "image": "invoice-large.png",
+  "question": "What is the total due and what is the invoice number?",
+  "runs": [
+   {
+    "ttft": 16.167640374973416,
+    "total": 21.599387332971673,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. Let me read the image carefully.\n\nThe image shows:\n\"INVOICE No. 20931\"\n\nItem 1: widget type A qty 2 price 10.50\nItem 2: widget type B qty 3 price 20.50\nItem 3: widget type C qty 4 price 30.50\nItem 4: widget type D qty 5 price 40.50\nItem 5: widget type E qty 6 price 50.50\nItem 6: widget type F qty 7 price 60.50\nItem 7: widget type G qty 8 price 70.50",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   },
+   {
+    "ttft": 15.963747708010487,
+    "total": 21.38574175001122,
+    "text": "<|message_model|><|content_thinking|>The user is asking for the total due and invoice number from the image. Let me read the image carefully.\n\nThe image shows:\n\"INVOICE No. 20931\"\n\nItem 1: widget type A qty 2 price 10.50\nItem 2: widget type B qty 3 price 20.50\nItem 3: widget type C qty 4 price 30.50\nItem 4: widget type D qty 5 price 40.50\nItem 5: widget type E qty 6 price 50.50\nItem 6: widget type F qty 7 price 60.50\nItem 7: widget type G qty 8 price 70.50",
+    "usage": {
+     "prompt_tokens": 1561,
+     "completion_tokens": 160,
+     "total_tokens": 1721,
+     "prompt_tokens_details": {
+      "cached_tokens": 0
+     },
+     "completion_tokens_details": {
+      "reasoning_tokens": 0
+     }
+    },
+    "error": null
+   }
+  ]
+ }
+]
