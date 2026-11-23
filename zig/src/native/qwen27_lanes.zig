@@ -278,6 +278,8 @@ pub const Metal = struct {
     fn lowerRow(ctx: *const anyopaque, row: u32, logits: []u16) void {
         const pens: *const lanes.penalty_rows.Entries = @ptrCast(@alignCast(ctx));
         pens.applyRow(row, logits);
+    }
+
     fn encodeArgmaxRange(b: *const Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
