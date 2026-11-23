@@ -18,6 +18,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: prompt chunks' full-attention layers score and weight eight rows at a time on 8x8 simdgroup matrices instead of one row a threadgroup, so a chunk's cost no longer grows as fast with the position: the 512-row attention of one full-attention visit drops from 117 to 57 ms at 32K and from 218 to 108 ms at 61K of context, and a cold 32,768-token first token from 170 to 190 s to 151 to 156 s. Each row keeps its key blocks, running max and sum, and the four-stream merge order, and the outputs are byte-equal (token hashes unchanged); the kernel contract registers the kernels with launch records and planted controls (#4337).
 
+- Metal: the row projection picks its narrow or wide kernel per chip (generation plus Pro/Max/Ultra), so an M5 Max no longer runs 8-row and wider windows on the kernel that is slower there; M5 Ultra and unlisted chips are unchanged, tokens unchanged (refs #3396). Thanks to @Spectre056 for the M5 Max measurements.
+- Metal: a stream whose setup fails partway no longer leaves the prompt cache smaller by its bytes in Llama, Ripple, Spark2.5, Flint, Step-5 and MiniMax-M3.
+
+
+
 - CUDA: `TF_CUDA_POOL_AFTER_WARMUP=1` (opt-in) sizes dense Qwen3.5's still-empty KV page pool again after warm-up, from the free memory then measured under the same reserve and cap, so pages the first plan held back for warm-up become KV capacity; `/memory` reports the decision; tokens are unchanged, and other modes keep today's pool (#4591).
 
 - Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH=1` (opt-in) captures the greedy verify round's argmax in the target graph, skips the token download greedy rounds never read and uploads per-forward metadata from pinned memory; same kernel and inputs, so tokens are unchanged (#4616).
