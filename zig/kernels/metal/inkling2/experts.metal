@@ -42,11 +42,21 @@ inline uint ink2_word(device const uchar* p) {
   return as_type<uint>(uchar4(*(device const packed_uchar4*)p));
 }
 
-// E2M1 times two is 0, 1, 2, 3, 4, 6, 8 or 12: one nibble of this word a code.
-inline float ink2_e2m1_twice(uint code) {
-  const float v = float((0xC8643210u >> (4u * (code & 7u))) & 15u);
-  return (code & 8u) ? -v : v;
+constant float ink2_e2m1_twice_lut[16] = {0, 1, 2, 3, 4, 6, 8, 12, -0.f, -1, -2, -3, -4, -6, -8, -12};
+
+// Exact 2-product guard: safe normal exponent [2^-116, 2^118) and no 3-multiple BF16 tie rounding diff.
+inline bool ink2_nv_two_prod_safe(float phi) {
+  if (phi == 0.0f) return true;
+  const float ap = fabs(phi);
+  if (!(ap >= 0x1.0p-116f && ap < 0x1.0p118f)) return false;
+  const float np = as_type<float>((as_type<uint>(phi) & 0x7fffffu) | 0x3f800000u);
+  const float hp = 0.5f * np;
+  for (uint m = 1u; m < 8u; ++m)
+    if (bfloat(3.0f * ((1.0f + float(m) * 0.125f) * hp)) != bfloat((1.5f + float(m) * 0.1875f) * np)) return false;
+  return true;
 }
+
+inline float ink2_e2m1_twice(uint code) { return ink2_e2m1_twice_lut[code & 15u]; }
 
 // ink2_e4m3 with its finite values built from their bits.
 inline float ink2_e4m3_bits(uint code) {
@@ -56,21 +66,27 @@ inline float ink2_e4m3_bits(uint code) {
   return (exp == 15u && mant == 7u) ? NAN : s;
 }
 
-// One simdgroup a dot: lane l sums blocks l, l + 32, ... in column order, then the 32 lanes are summed.
-inline float ink2_dot_nv(device const uchar* w, device const uchar* scales,
-                         device const bfloat* x, float phi, uint k, uint lane) {
+template <bool TWO_PROD>
+inline float ink2_dot_nv_impl(device const uchar* w, device const uchar* scales,
+                              device const bfloat* x, float arg, uint k, uint lane) {
   float sum = 0.0f;
   for (uint b = lane; b < k / 16u; b += 32u) {
-    // ink2_nv_weight's inner product, exact in fp32 either way: (2 * e2m1) * (e4m3 / 2).
-    const float half_scale = 0.5f * ink2_e4m3(scales[b]);
+    const float bs = TWO_PROD ? (ink2_e4m3(scales[b]) * arg) : (0.5f * ink2_e4m3(scales[b]));
     const uint lo = ink2_word(w + 8u * b), hi = ink2_word(w + 8u * b + 4u);
     for (uint j = 0; j < 16u; ++j) {
       const uint code = ((j < 8u ? lo : hi) >> (4u * (j & 7u))) & 15u;
-      const float weight = float(bfloat(ink2_e2m1_twice(code) * half_scale * phi));
-      sum += weight * float(x[16u * b + j]);
+      const float prod = TWO_PROD ? (ink2_e2m1_twice_lut[code] * bs) : (ink2_e2m1_twice_lut[code] * bs * arg);
+      sum += float(bfloat(prod)) * float(x[16u * b + j]);
     }
   }
   return simd_sum(sum);
+}
+
+// One simdgroup a dot: lane l sums blocks l, l + 32, ... in column order, then the 32 lanes are summed.
+inline float ink2_dot_nv(device const uchar* w, device const uchar* scales,
+                         device const bfloat* x, float phi, uint k, uint lane) {
+  return ink2_nv_two_prod_safe(phi) ? ink2_dot_nv_impl<true>(w, scales, x, 0.5f * phi, k, lane)
+                                     : ink2_dot_nv_impl<false>(w, scales, x, phi, k, lane);
 }
 
 // As ink2_dot_nv over 32-column MXFP8 blocks.
@@ -194,13 +210,14 @@ kernel void tf_ink2_group(
   counts[e] = min(n, a.cap);
 }
 
-// Block b of a packed NVFP4 row as its 16 BF16 weights, each as ink2_dot_nv decodes it.
-inline void ink2_nv_block(device const uchar* w, device const uchar* scales, float phi, uint b, thread float* out) {
-  const float half_scale = 0.5f * ink2_e4m3(scales[b]);
+// Block b of a packed NVFP4 row as its 16 BF16 weights, matching ink2_dot_nv.
+template <bool TWO_PROD = false>
+inline void ink2_nv_block(device const uchar* w, device const uchar* scales, float arg, uint b, thread float* out) {
+  const float bs = TWO_PROD ? (ink2_e4m3(scales[b]) * arg) : (0.5f * ink2_e4m3(scales[b]));
   const uint lo = ink2_word(w + 8u * b), hi = ink2_word(w + 8u * b + 4u);
   for (uint j = 0; j < 16u; ++j) {
     const uint code = ((j < 8u ? lo : hi) >> (4u * (j & 7u))) & 15u;
-    out[j] = float(bfloat(ink2_e2m1_twice(code) * half_scale * phi));
+    out[j] = float(bfloat(TWO_PROD ? (ink2_e2m1_twice_lut[code] * bs) : (ink2_e2m1_twice_lut[code] * bs * arg)));
   }
 }
 
@@ -208,6 +225,65 @@ inline void ink2_nv_block(device const uchar* w, device const uchar* scales, flo
 inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uint b, thread float* out) {
   const int shift = int(scales[b]) - 127;
   for (uint j = 0; j < 32u; ++j) out[j] = float(bfloat(ldexp(ink2_e4m3_bits(w[32u * b + j]), shift)));
+}
+
+template <bool GU, bool TWO_PROD>
+inline void ink2_nv_grouped_pass(device const bfloat* X, device const uchar* row_w, device const uchar* row_s,
+                                 device const uint* members, device bfloat* Y, constant Ink2GroupedArgs& a,
+                                 uint n, uint expert, uint count, float arg, uint lane) {
+  for (uint first = 0u; first < count; first += INK2_PASS) {
+    uint pair[INK2_PASS];
+    device const bfloat* x[INK2_PASS];
+    float g[INK2_PASS], u[INK2_PASS];
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
+      x[j] = X + ulong(GU ? pair[j] / a.topk : pair[j]) * a.k;
+      g[j] = u[j] = 0.0f;
+    }
+    for (uint b = lane; b < a.k / 16u; b += 32u) {
+      float gate[16], up[16];
+      ink2_nv_block<TWO_PROD>(row_w, row_s, arg, b, gate);
+      if (GU) ink2_nv_block<TWO_PROD>(row_w + a.k / 2u, row_s + a.k / 16u, arg, b, up);
+      for (uint j = 0u; j < INK2_PASS; ++j)
+        for (uint i = 0u; i < 16u; ++i) {
+          const float v = float(x[j][16u * b + i]);
+          g[j] += gate[i] * v;
+          if (GU) u[j] += up[i] * v;
+        }
+    }
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      const float gs = simd_sum(g[j]), us = GU ? simd_sum(u[j]) : 0.0f;
+      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = GU ? ink2_act(gs, us) : bfloat(gs);
+    }
+  }
+}
+
+template <bool GU>
+__attribute__((noinline)) void ink2_nv_grouped_exact(
+    device const bfloat* X, device const uchar* row_w, device const uchar* row_s,
+    device const uint* members, device bfloat* Y, constant Ink2GroupedArgs& a,
+    uint n, uint expert, uint count, float phi, uint lane) {
+  ink2_nv_grouped_pass<GU, false>(X, row_w, row_s, members, Y, a, n, expert, count, phi, lane);
+}
+
+template <bool GU>
+inline void ink2_nv_grouped(device const bfloat* X, device const uchar* W, device const uchar* S,
+                            device const float* amax, device const float* denominator,
+                            device const uint* counts, device const uint* members,
+                            device bfloat* Y, constant Ink2GroupedArgs& a, uint2 tg, uint sg, uint lane) {
+  const uint n = tg.x * 8u + sg, expert = tg.y;
+  if (n >= a.n) return;
+  const uint count = counts[expert];
+  if (count == 0u) return;
+  const uint rows_w = GU ? 2u * a.n : a.n, r = GU ? 2u * n : n;
+  const float phi = precise::divide(float(bfloat(amax[expert])), float(bfloat(denominator[0])));
+  device const uchar* row_w = W + ulong(expert) * rows_w * (a.k / 2u) + ulong(r) * (a.k / 2u);
+  device const uchar* row_s = S + ulong(expert) * rows_w * (a.k / 16u) + ulong(r) * (a.k / 16u);
+  if (!ink2_nv_two_prod_safe(phi)) {
+    ink2_nv_grouped_exact<GU>(X, row_w, row_s, members, Y, a, n, expert, count, phi, lane);
+    return;
+  }
+  ink2_nv_grouped_pass<GU, true>(X, row_w, row_s, members, Y, a, n, expert, count, 0.5f * phi, lane);
 }
 
 // Threadgroup (x, e): outputs 8x to 8x + 7 of expert e for each of its route pairs, four pairs a pass.
@@ -219,43 +295,7 @@ inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uin
     constant Ink2GroupedArgs& a [[buffer(8)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  const uint n = tg.x * 8u + sg, expert = tg.y;
-  if (n >= a.n) return;
-  const uint count = counts[expert];
-  if (count == 0u) return;
-  const ulong expert_w = ulong(expert) * 2u * a.n * (a.k / 2u);
-  const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 16u);
-  const float phi = precise::divide(float(bfloat(amax[expert])), float(bfloat(denominator[0])));
-  device const uchar* gate_w = W + expert_w + ulong(2u * n) * (a.k / 2u);
-  device const uchar* gate_s = S + expert_s + ulong(2u * n) * (a.k / 16u);
-  device const uchar* up_w = gate_w + (a.k / 2u);
-  device const uchar* up_s = gate_s + (a.k / 16u);
-  for (uint first = 0u; first < count; first += INK2_PASS) {
-    uint pair[INK2_PASS];
-    device const bfloat* x[INK2_PASS];
-    float g[INK2_PASS], u[INK2_PASS];
-    for (uint j = 0u; j < INK2_PASS; ++j) {
-      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
-      x[j] = X + ulong(pair[j] / a.topk) * a.k;
-      g[j] = 0.0f;
-      u[j] = 0.0f;
-    }
-    for (uint b = lane; b < a.k / 16u; b += 32u) {
-      float gate[16], up[16];
-      ink2_nv_block(gate_w, gate_s, phi, b, gate);
-      ink2_nv_block(up_w, up_s, phi, b, up);
-      for (uint j = 0u; j < INK2_PASS; ++j)
-        for (uint i = 0u; i < 16u; ++i) {
-          const float v = float(x[j][16u * b + i]);
-          g[j] += gate[i] * v;
-          u[j] += up[i] * v;
-        }
-    }
-    for (uint j = 0u; j < INK2_PASS; ++j) {
-      const float gs = simd_sum(g[j]), us = simd_sum(u[j]);
-      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = ink2_act(gs, us);
-    }
-  }
+  ink2_nv_grouped<true>(X, W, S, amax, denominator, counts, members, Y, a, tg, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_mxfp8_gu_grouped(
@@ -311,33 +351,7 @@ inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uin
     constant Ink2GroupedArgs& a [[buffer(8)]],
     uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  const uint n = tg.x * 8u + sg, expert = tg.y;
-  if (n >= a.n) return;
-  const uint count = counts[expert];
-  if (count == 0u) return;
-  const float phi = precise::divide(float(bfloat(amax[expert])), float(bfloat(denominator[0])));
-  device const uchar* row_w = W + ulong(expert) * a.n * (a.k / 2u) + ulong(n) * (a.k / 2u);
-  device const uchar* row_s = S + ulong(expert) * a.n * (a.k / 16u) + ulong(n) * (a.k / 16u);
-  for (uint first = 0u; first < count; first += INK2_PASS) {
-    uint pair[INK2_PASS];
-    device const bfloat* x[INK2_PASS];
-    float d[INK2_PASS];
-    for (uint j = 0u; j < INK2_PASS; ++j) {
-      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
-      x[j] = X + ulong(pair[j]) * a.k;
-      d[j] = 0.0f;
-    }
-    for (uint b = lane; b < a.k / 16u; b += 32u) {
-      float weight[16];
-      ink2_nv_block(row_w, row_s, phi, b, weight);
-      for (uint j = 0u; j < INK2_PASS; ++j)
-        for (uint i = 0u; i < 16u; ++i) d[j] += weight[i] * float(x[j][16u * b + i]);
-    }
-    for (uint j = 0u; j < INK2_PASS; ++j) {
-      const float ds = simd_sum(d[j]);
-      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = bfloat(ds);
-    }
-  }
+  ink2_nv_grouped<false>(X, W, S, amax, denominator, counts, members, Y, a, tg, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_mxfp8_down_grouped(

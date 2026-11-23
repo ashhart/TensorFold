@@ -145,3 +145,88 @@ test "launch geometry is a simdgroup an output by route pair and validates block
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(p.MatrixArgs, "k"));
     try std.testing.expectEqual(@as(usize, 12), @offsetOf(p.MatrixArgs, "experts"));
 }
+
+test "NVFP4 2-product decode is bit-exact across normal BF16 phi and edge bounds" {
+    try std.testing.expect(p.nvfp4PhiInSafeRange(0.0));
+    try std.testing.expect(p.nvfp4PhiInSafeRange(-0.0));
+    try std.testing.expect(p.nvfp4PhiInSafeRange(0x1.0p-116));
+    try std.testing.expect(!p.nvfp4PhiInSafeRange(0x1.0p-117));
+    try std.testing.expect(p.nvfp4PhiInSafeRange(-0x1.0p117));
+    try std.testing.expect(!p.nvfp4PhiInSafeRange(0x1.0p118));
+    try std.testing.expect(!p.nvfp4PhiInSafeRange(std.math.nan(f32)));
+    try std.testing.expect(!p.nvfp4PhiInSafeRange(std.math.inf(f32)));
+
+    const exps = [_]i32{ -116, -115, -1, 0, 1, 117 };
+    for (exps) |e| {
+        for (0..128) |m| {
+            const np = 1.0 + @as(f32, @floatFromInt(m)) / 128.0;
+            for ([_]f32{ 1.0, -1.0 }) |sign| {
+                const factor = sign * std.math.ldexp(np, e);
+                try std.testing.expect(p.nvfp4TwoProdSafe(factor));
+                for (0..256) |sc| {
+                    for (0..16) |nibble| {
+                        const a = p.nvWeight(@intCast(nibble), 0, @intCast(sc), factor);
+                        const b = p.nvWeightTwoProd(@intCast(nibble), 0, @intCast(sc), factor);
+                        if (std.math.isNan(a)) {
+                            try std.testing.expect(std.math.isNan(b));
+                        } else {
+                            try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "NVFP4 2-product guard filters failing BF16 quotient ties and scans checkpoint tensors" {
+    var exact_pairs: usize = 0;
+    var guard_rejected: usize = 0;
+    for (0..128) |a_m| {
+        const fa = 1.0 + @as(f32, @floatFromInt(a_m)) / 128.0;
+        for (0..128) |d_m| {
+            const fd = 1.0 + @as(f32, @floatFromInt(d_m)) / 128.0;
+            const factor = p.phi(fa, fd);
+            if (!p.nvfp4TwoProdSafe(factor)) {
+                guard_rejected += 1;
+                continue;
+            }
+            exact_pairs += 1;
+            for (0..16) |sc| {
+                for (0..8) |nibble| {
+                    const a = p.nvWeight(@intCast(nibble), 0, @intCast(sc), factor);
+                    const b = p.nvWeightTwoProd(@intCast(nibble), 0, @intCast(sc), factor);
+                    try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
+                }
+            }
+        }
+    }
+    try std.testing.expect(exact_pairs > 16300);
+    try std.testing.expectEqual(@as(usize, 38), guard_rejected);
+
+    const good_amax = [_]f32{ 2688.125, 2688.5, 0.0 };
+    const good_den = [_]f32{2695.75 * 64.0};
+    const good_scales = [_]u8{ 0x38, 0x39, 0x38, 0x3a, 0x38, 0x3b };
+    const ok = p.scanNvfp4Tensors(&good_amax, &good_den, &good_scales);
+    try std.testing.expect(ok.finite_globals and ok.normal_range and ok.two_prod_exact and ok.finite_scales);
+    try std.testing.expectEqual(@as(usize, 0), ok.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 0), ok.exact_fallback_experts);
+
+    const tie_amax = [_]f32{1.0 + 1.0 / 64.0};
+    const tie_den = [_]f32{1.5};
+    const tie_clean = [_]u8{ 0x38, 0x40 };
+    const tie_hit = [_]u8{ 0x38, 0x07 };
+    const s_clean = p.scanNvfp4Tensors(&tie_amax, &tie_den, &tie_clean);
+    try std.testing.expect(s_clean.normal_range and s_clean.two_prod_exact);
+    const s_hit = p.scanNvfp4Tensors(&tie_amax, &tie_den, &tie_hit);
+    try std.testing.expect(s_hit.normal_range and !s_hit.two_prod_exact);
+    try std.testing.expectEqual(@as(usize, 1), s_hit.exact_fallback_experts);
+
+    const edge_amax = [_]f32{ 0x1.0p-118, std.math.inf(f32) };
+    const edge_den = [_]f32{1.0};
+    const edge_scales = [_]u8{ 0x01, 0x7f, 0xff, 0x38 };
+    const s_edge = p.scanNvfp4Tensors(&edge_amax, &edge_den, &edge_scales);
+    try std.testing.expect(!s_edge.finite_globals and !s_edge.normal_range and !s_edge.finite_scales);
+    try std.testing.expectEqual(@as(usize, 2), s_edge.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 2), s_edge.nan_scales);
+}

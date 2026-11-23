@@ -10,6 +10,7 @@ pub const Mutation = enum {
     mx_gu_scale,
     mx_down_scale,
     logits_cap,
+    nv_swap_ab,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -19,6 +20,7 @@ pub const Mutation = enum {
             .mx_gu_scale => "control: metal inkling2 units tf_ink2_mxfp8_gu_units scale",
             .mx_down_scale => "control: metal inkling2 units tf_ink2_mxfp8_down_units scale",
             .logits_cap => "control: metal inkling2 units tf_ink2_logits_units cap",
+            .nv_swap_ab => "control: metal inkling2 units tf_ink2_nvfp4_down_units swapped 2-prod guard",
         };
     }
 
@@ -35,6 +37,7 @@ pub const Mutation = enum {
             // Both MXFP8 entries decode through one helper; a control compiles only its selected entry.
             .mx_gu_scale, .mx_down_scale => .{ .from = "const int shift = int(scales[b / 2u]) - 127;", .to = "const int shift = int(scales[b / 2u]) - 126;" },
             .logits_cap => .{ .from = "precise::divide(float(bfloat(dot)), 30.0f)", .to = "precise::divide(float(bfloat(dot)), 15.0f)" },
+            .nv_swap_ab => .{ .from = "if (!FP8 && !ink2_nv_two_prod_safe(phi))", .to = "if (!FP8 && ink2_nv_two_prod_safe(phi))" },
         };
     }
 };

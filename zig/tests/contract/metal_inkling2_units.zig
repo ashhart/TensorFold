@@ -9,6 +9,7 @@ const bf = contract.bf16_round.bf16;
 const rig_ = @import("rig.zig");
 const host = @import("tensorfold").inkling2_metal_host.experts;
 const controls = @import("metal_inkling2_units_controls.zig");
+const nv_proof = @import("metal_inkling2_nvfp4_proof.zig");
 const src = @import("inkling2_metal");
 
 pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down };
@@ -90,14 +91,19 @@ pub const Probe = struct {
     denominator: []f32 = &.{},
     ids: []i32 = &.{},
     refs: [7]rig_.Ref = undefined,
+    quad_proof_done: bool = false,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, control: bool) !Probe {
-        const text = try controls.apply(a, if (control) mutation(kind) else .none);
+        return initControl(a, device, queue, kind, if (control) mutation(kind) else .none);
+    }
+
+    pub fn initControl(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, ctl: controls.Mutation) !Probe {
+        const text = try controls.apply(a, ctl);
         defer a.free(text);
         var pipes = try host.Pipelines.loadSource(device, src.experts);
         errdefer pipes.deinit();
         try pipes.loadUnits(device, text);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = pipes, .kind = kind, .ctl = if (control) mutation(kind) else .none };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = pipes, .kind = kind, .ctl = ctl };
     }
 
     fn clear(p: *Probe) void {
@@ -123,7 +129,9 @@ pub const Probe = struct {
     }
 
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = spec(p.kind, p.ctl != .none), .ctx = p, .vt = &vt, .control = p.ctl.gate() };
+        var s = spec(p.kind, p.ctl != .none);
+        if (p.ctl != .none) s.name = p.ctl.name();
+        return .{ .spec = s, .ctx = p, .vt = &vt, .control = p.ctl.gate() };
     }
     const vt = blk: {
         var table = g.hooks(Probe);
@@ -165,6 +173,7 @@ pub const Probe = struct {
             for (p.amax, 0..) |*v, i| v.* = 2688.125 + @as(f32, @floatFromInt(i % 4)) * 0.375;
             p.denominator = try p.a.alloc(f32, 1);
             p.denominator[0] = 2695.75 * 64;
+            if (p.ctl == .nv_swap_ab) nv_proof.fillSwapAb(p.x, p.w, p.scales, p.amax, p.denominator);
         }
         if (fill == .stress) {
             for (p.x, 0..) |*v, i| v.* = c.toBf16(@as(f32, @floatFromInt(128 * (1 + i % 13))) * (if (i >= p.x.len / 2) @as(f32, -1) else 1));
@@ -205,6 +214,10 @@ pub const Probe = struct {
         e.barrier();
         try host.units(&p.pipes, e, !isGu(p.kind), hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), if (nv) .{ .amax = hr(p.refs[3]), .denominator = hr(p.refs[4]) } else null, out, p.call());
         try p.rig.finish(pass);
+        if (p.kind == .nv_gu and p.ctl == .none and !p.quad_proof_done) {
+            p.quad_proof_done = true;
+            try nv_proof.assertQuadProof(p.a, p.rig.device, p.rig.queue);
+        }
     }
 
     pub fn count(p: *const Probe) usize {
@@ -289,7 +302,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [8]Probe = undefined,
+    probes: [9]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {
@@ -306,6 +319,12 @@ pub const Suite = struct {
             s.made += 1;
             try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
         };
+        const swap = controls.Mutation.nv_swap_ab;
+        if (only == null or std.mem.indexOf(u8, swap.name(), only.?) != null) {
+            s.probes[s.made] = try Probe.initControl(s.a, s.device, s.queue, .nv_down, swap);
+            s.made += 1;
+            try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
+        }
     }
 };
 

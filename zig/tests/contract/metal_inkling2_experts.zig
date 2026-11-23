@@ -9,6 +9,7 @@ const bf = contract.bf16_round.bf16;
 const rig_ = @import("rig.zig");
 const host = @import("tensorfold").inkling2_metal_host.experts;
 const controls = @import("metal_inkling2_experts_controls.zig");
+const nv_proof = @import("metal_inkling2_nvfp4_proof.zig");
 const src = @import("inkling2_metal");
 
 pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down, nv_decode, mx_decode, combine };
@@ -99,11 +100,16 @@ pub const Probe = struct {
     ids: []i32 = &.{},
     weights: []f32 = &.{},
     refs: [7]rig_.Ref = undefined,
+    block_proof_done: bool = false,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, control: bool) !Probe {
-        const text = try controls.apply(a, if (control) mutation(kind) else .none);
+        return initControl(a, device, queue, kind, if (control) mutation(kind) else .none);
+    }
+
+    pub fn initControl(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, ctl: controls.Mutation) !Probe {
+        const text = try controls.apply(a, ctl);
         defer a.free(text);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = try host.Pipelines.loadSource(device, text), .kind = kind, .ctl = if (control) mutation(kind) else .none };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = try host.Pipelines.loadSource(device, text), .kind = kind, .ctl = ctl };
     }
 
     fn clear(p: *Probe) void {
@@ -131,7 +137,9 @@ pub const Probe = struct {
     }
 
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = spec(p.kind, p.ctl != .none), .ctx = p, .vt = if (p.kind == .combine and p.ctl == .combine_slot_order) &vt_exact else &vt, .control = p.ctl.gate() };
+        var s = spec(p.kind, p.ctl != .none);
+        if (p.ctl != .none) s.name = p.ctl.name();
+        return .{ .spec = s, .ctx = p, .vt = if (p.kind == .combine and p.ctl == .combine_slot_order) &vt_exact else &vt, .control = p.ctl.gate() };
     }
     const vt = blk: {
         var table = g.hooks(Probe);
@@ -186,6 +194,7 @@ pub const Probe = struct {
             for (p.amax, 0..) |*v, i| v.* = 2688.125 + @as(f32, @floatFromInt(i)) * 0.375;
             p.denominator = try p.a.alloc(f32, 1);
             p.denominator[0] = 2695.75;
+            if (p.ctl == .nv_swap_ab) nv_proof.fillSwapAb(p.x, p.w, p.scales, p.amax, p.denominator);
         }
         if (k == .combine) p.weights = try p.a.alloc(f32, routes);
         if (fill == .stress and !isDecode(k)) {
@@ -266,6 +275,10 @@ pub const Probe = struct {
             if (nv) try host.nvfp4Down(&p.pipes, e, hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), hr(p.refs[3]), hr(p.refs[4]), hr(p.refs[5]), hr(p.refs[6]), p.call()) else try host.mxfp8Down(&p.pipes, e, hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), hr(p.refs[3]), hr(p.refs[4]), p.call());
         } else try host.combine(&p.pipes, e, hr(p.refs[0]), hr(p.refs[1]), hr(p.refs[2]), hr(p.refs[3]), p.call());
         try p.rig.finish(pass);
+        if (p.kind == .nv_decode and p.ctl == .none and p.shape.k == 32 and !p.block_proof_done) {
+            p.block_proof_done = true;
+            try nv_proof.assertBlockProof(p.a, p.rig.device, p.rig.queue);
+        }
     }
 
     pub fn count(p: *const Probe) usize {
@@ -382,21 +395,27 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [14]Probe = undefined,
+    probes: [15]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {
         for (s.probes[0..s.made]) |*probe| probe.deinit();
     }
 
+    fn append(s: *Suite, kind: Kind, ctl: controls.Mutation, only: ?[]const u8) !void {
+        const label = if (ctl != .none) ctl.name() else spec(kind, false).name;
+        if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) return;
+        s.probes[s.made] = try Probe.initControl(s.a, s.device, s.queue, kind, ctl);
+        s.made += 1;
+        try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
+    }
+
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        for (std.enums.values(Kind)) |kind| for ([_]bool{ false, true }) |control| {
-            const label = if (control) mutation(kind).name() else spec(kind, false).name;
-            if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
-            s.probes[s.made] = try Probe.init(s.a, s.device, s.queue, kind, control);
-            s.made += 1;
-            try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
-        };
+        for (std.enums.values(Kind)) |kind| {
+            try s.append(kind, .none, only);
+            try s.append(kind, mutation(kind), only);
+        }
+        try s.append(.nv_down, .nv_swap_ab, only);
     }
 };
 

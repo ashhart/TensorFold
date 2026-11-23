@@ -12,6 +12,7 @@ pub const Mutation = enum {
     nv_decode_nibble,
     mx_decode_scale,
     combine_slot_order,
+    nv_swap_ab,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -23,6 +24,7 @@ pub const Mutation = enum {
             .nv_decode_nibble => "control: metal inkling2 experts tf_ink2_nvfp4_quantize nibble",
             .mx_decode_scale => "control: metal inkling2 experts tf_ink2_mxfp8_quantize scale",
             .combine_slot_order => "control: metal inkling2 experts tf_ink2_combine route-slot order",
+            .nv_swap_ab => "control: metal inkling2 experts tf_ink2_nvfp4_down swapped 2-prod guard",
         };
     }
 
@@ -41,6 +43,7 @@ pub const Mutation = enum {
             .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k, lane);", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k, lane);" },
             .mx_decode_scale => .{ .from = "S[row * (a.k / 32u) + col / 32u]", .to = "S[row * (a.k / 32u) + col / 16u]" },
             .combine_slot_order => .{ .from = "const uint slot = order[r];", .to = "const uint slot = r;" },
+            .nv_swap_ab => .{ .from = "return ink2_nv_two_prod_safe(phi) ? ink2_dot_nv_impl<true>(w, scales, x, 0.5f * phi, k, lane)\n                                     : ink2_dot_nv_impl<false>(w, scales, x, phi, k, lane);", .to = "return ink2_nv_two_prod_safe(phi) ? ink2_dot_nv_impl<false>(w, scales, x, phi, k, lane)\n                                     : ink2_dot_nv_impl<true>(w, scales, x, 0.5f * phi, k, lane);" },
         };
     }
 };

@@ -7,6 +7,10 @@ const plan = @import("experts_plan.zig");
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Format = plan.Format;
 pub const Call = plan.Call;
+pub const Nvfp4Scan = plan.Nvfp4Scan;
+pub const nvfp4PhiInSafeRange = plan.nvfp4PhiInSafeRange;
+pub const nvfp4TwoProdSafe = plan.nvfp4TwoProdSafe;
+pub const scanNvfp4Tensors = plan.scanNvfp4Tensors;
 pub const Operation = enum { nvfp4_gu, nvfp4_down, mxfp8_gu, mxfp8_down, nvfp4_quantize, mxfp8_quantize, combine, group, nvfp4_gu_grouped, nvfp4_down_grouped, mxfp8_gu_grouped, mxfp8_down_grouped };
 
 pub const function_names = [_][:0]const u8{

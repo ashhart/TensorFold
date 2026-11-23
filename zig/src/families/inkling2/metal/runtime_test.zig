@@ -1,5 +1,7 @@
 //! Host-only schedule, cache-layout, accepted-history and compact-snapshot checks.
 const std = @import("std");
+const builtin = @import("builtin");
+const mtl = @import("metal");
 const cfg = @import("../config.zig");
 const layer_plan = @import("../plan.zig");
 const state = @import("state.zig");
@@ -173,4 +175,48 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
+}
+
+test "Model.scanNvfp4Weights merges all 20 NVFP4 layers and skips null globals" {
+    var w: model.Weights = undefined;
+    for (0..24) |i| {
+        w.layers[i].gu = .{ .weight = undefined, .scale = undefined, .amax = null, .denominator = null };
+        w.layers[i].down = .{ .weight = undefined, .scale = undefined, .amax = null, .denominator = null };
+    }
+    const empty = model.Model.scanNvfp4Weights(&w);
+    try std.testing.expectEqual(@as(usize, 0), empty.experts);
+    try std.testing.expect(empty.finite_globals and empty.normal_range and empty.two_prod_exact and empty.finite_scales);
+    if (!builtin.os.tag.isDarwin()) return;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const amax_buf = try device.buffer(16, mtl.ResourceOptions.shared);
+    defer amax_buf.deinit();
+    const den_buf = try device.buffer(8, mtl.ResourceOptions.shared);
+    defer den_buf.deinit();
+    const sc_buf = try device.buffer(16, mtl.ResourceOptions.shared);
+    defer sc_buf.deinit();
+    @memcpy(amax_buf.slice(f32, 2), &[_]f32{ 2688.125, 2688.5 });
+    den_buf.slice(f32, 1)[0] = 2695.75 * 64.0;
+    @memcpy(sc_buf.slice(u8, 4), &[_]u8{ 0x38, 0x39, 0x3a, 0x3b });
+    const mat = model.ExpertMatrix{
+        .weight = undefined,
+        .scale = .{ .buffer = sc_buf, .offset = 0, .bytes = 4, .dtype = .f8_e4m3 },
+        .amax = .{ .buffer = amax_buf, .offset = 0, .bytes = 8, .dtype = .f32 },
+        .denominator = .{ .buffer = den_buf, .offset = 0, .bytes = 4, .dtype = .f32 },
+    };
+    w.layers[0].gu = mat;
+    w.layers[19].down = mat;
+    // Layer 20 is MXFP8 and must be ignored by the 20-layer NVFP4 scan even if populated.
+    w.layers[20].gu = mat;
+    const ok = model.Model.scanNvfp4Weights(&w);
+    try std.testing.expectEqual(@as(usize, 4), ok.experts);
+    try std.testing.expect(ok.finite_globals and ok.normal_range and ok.two_prod_exact and ok.finite_scales);
+    amax_buf.slice(f32, 2)[0] = 0x1.0p-118;
+    sc_buf.slice(u8, 4)[0] = 0x7f;
+    const bad = model.Model.scanNvfp4Weights(&w);
+    try std.testing.expect(!bad.normal_range and !bad.finite_scales);
+    try std.testing.expectEqual(@as(usize, 2), bad.unsafe_phi_experts);
+    try std.testing.expectEqual(@as(usize, 2), bad.nan_scales);
 }

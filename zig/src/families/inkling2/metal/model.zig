@@ -9,6 +9,7 @@ const shards = @import("core").checkpoint_host;
 const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
+const experts_plan = @import("experts_plan.zig");
 const loop = @import("loop.zig");
 
 pub const Tensor = ck.Tensor;
@@ -205,6 +206,20 @@ pub const Model = struct {
     dense: [6]mtl.Pipeline,
     norm: mtl.Pipeline,
     runtime: [runtime_names.len]mtl.Pipeline,
+    nvfp4_scan: experts_plan.Nvfp4Scan = .{},
+
+    /// Scans all 20 NVFP4 expert layers at load time so nonfinite or edge globals flag exact 3-prod fallback.
+    pub fn scanNvfp4Weights(w: *const Weights) experts_plan.Nvfp4Scan {
+        var total = experts_plan.Nvfp4Scan{};
+        for (w.layers[0..20]) |l| {
+            for ([_]ExpertMatrix{ l.gu, l.down }) |mat| {
+                const amax = mat.amax orelse continue;
+                const den = mat.denominator orelse continue;
+                total.merge(experts_plan.scanNvfp4Tensors(amax.host(f32), den.host(f32), mat.scale.host(u8)));
+            }
+        }
+        return total;
+    }
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -238,6 +253,13 @@ pub const Model = struct {
         if (m.weight_plan.n_visits != 48) return error.UnsupportedInkling2Loop;
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "model.llm.");
         m.weights = try loadWeights(&m.checkpoint, &m.config, &m.weight_plan);
+        m.nvfp4_scan = scanNvfp4Weights(&m.weights);
+        if (!m.nvfp4_scan.finite_globals or !m.nvfp4_scan.normal_range or !m.nvfp4_scan.finite_scales) {
+            std.log.warn(
+                "inkling2: nvfp4 checkpoint outside 2-prod fast bounds (unsafe_phi={d}, nan_scales={d}); using 3-prod fallback",
+                .{ m.nvfp4_scan.unsafe_phi_experts, m.nvfp4_scan.nan_scales },
+            );
+        }
 
         m.attention = try attention.Kernels.init(gpa, m.device);
         errdefer m.attention.deinit();

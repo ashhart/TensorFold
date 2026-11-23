@@ -11,7 +11,15 @@ inline tfp::frag<bfloat> ink2_units_x(device const bfloat* x0, device const bflo
   return tfp::frag<bfloat>(live0 ? *(device const bfloat4*)(x0 + c) : z, live1 ? *(device const bfloat4*)(x1 + c) : z);
 }
 
-// Columns 16b + hx .. + 3 of a packed NVFP4 row as BF16 weights, each as ink2_nv_block decodes it.
+// Columns 16b + hx .. + 3 of a packed NVFP4 row as BF16 weights: exact 2-product fast path and 3-product fallback.
+inline bfloat4 ink2_nv_quad_2p(device const uchar* w, device const uchar* scales, float half_phi, uint b, uint hx) {
+  const float bs = ink2_e4m3(scales[b]) * half_phi;
+  const uint word = ((device const uint*)w)[2u * b + ((hx >> 3u) & 1u)] >> (4u * (hx & 4u));
+  float4 v;
+  for (uint j = 0u; j < 4u; ++j) v[j] = ink2_e2m1_twice_lut[(word >> (4u * j)) & 15u] * bs;
+  return bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
+}
+
 inline bfloat4 ink2_nv_quad(device const uchar* w, device const uchar* scales, float phi, uint b, uint hx) {
   const float half_scale = 0.5f * ink2_e4m3(scales[b]);
   const uint word = ink2_word(w + 8u * b + (hx & 8u) / 2u) >> (4u * (hx & 4u));
@@ -29,11 +37,11 @@ inline bfloat4 ink2_mx_quad(device const uchar* w, device const uchar* scales, u
   return bfloat4(bfloat(v[0]), bfloat(v[1]), bfloat(v[2]), bfloat(v[3]));
 }
 
-// Threadgroup (x, e): weight rows 32x .. 32x + 31 of expert e by its pairs, 16 a band; FP8 is MXFP8, else NVFP4.
-template <bool FP8, bool GU>
-inline void ink2_units(device const bfloat* X, device const uchar* W, device const uchar* S, float phi,
-                       device const uint* counts, device const uint* members, device bfloat* Y,
-                       constant Ink2GroupedArgs& a, uint2 tg, uint sg, uint lane, threadgroup float* part) {
+// BM=16, BN=32 tensor-unit expert tile body for exact 3-product fallback and 2-product fast path.
+template <bool FP8, bool GU, bool TWO_PROD>
+inline void ink2_units_body(device const bfloat* X, device const uchar* W, device const uchar* S, float scale_arg,
+                            device const uint* counts, device const uint* members, device bfloat* Y,
+                            constant Ink2GroupedArgs& a, uint2 tg, uint sg, uint lane, threadgroup float* part) {
   // GU: X is by row and the 2n interleaved gate and up rows give Y[pair][n]; else X is by pair. 32 divides the rows.
   const uint K = GU ? INK2_GU_K : INK2_DOWN_K, rows_w = GU ? 2u * a.n : a.n, steps = K / 128u;
   const uint expert = tg.y, w0 = 32u * tg.x;
@@ -58,9 +66,16 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
       if (FP8) {
         b0 = tfp::frag<bfloat>(ink2_mx_quad(w, s, b, hx), ink2_mx_quad(w + 8u * wb, s + 8u * sb, b, hx));
         b1 = tfp::frag<bfloat>(ink2_mx_quad(w + 16u * wb, s + 16u * sb, b, hx), ink2_mx_quad(w + 24u * wb, s + 24u * sb, b, hx));
+      } else if (TWO_PROD) {
+        b0 = tfp::frag<bfloat>(ink2_nv_quad_2p(w, s, scale_arg, b, hx),
+                               ink2_nv_quad_2p(w + 8u * wb, s + 8u * sb, scale_arg, b, hx));
+        b1 = tfp::frag<bfloat>(ink2_nv_quad_2p(w + 16u * wb, s + 16u * sb, scale_arg, b, hx),
+                               ink2_nv_quad_2p(w + 24u * wb, s + 24u * sb, scale_arg, b, hx));
       } else {
-        b0 = tfp::frag<bfloat>(ink2_nv_quad(w, s, phi, b, hx), ink2_nv_quad(w + 8u * wb, s + 8u * sb, phi, b, hx));
-        b1 = tfp::frag<bfloat>(ink2_nv_quad(w + 16u * wb, s + 16u * sb, phi, b, hx), ink2_nv_quad(w + 24u * wb, s + 24u * sb, phi, b, hx));
+        b0 = tfp::frag<bfloat>(ink2_nv_quad(w, s, scale_arg, b, hx),
+                               ink2_nv_quad(w + 8u * wb, s + 8u * sb, scale_arg, b, hx));
+        b1 = tfp::frag<bfloat>(ink2_nv_quad(w + 16u * wb, s + 16u * sb, scale_arg, b, hx),
+                               ink2_nv_quad(w + 24u * wb, s + 24u * sb, scale_arg, b, hx));
       }
       ink2_mma(lo, hi, fa, b0, b1);
     }
@@ -87,6 +102,27 @@ inline void ink2_units(device const bfloat* X, device const uchar* W, device con
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
+}
+
+template <bool FP8, bool GU>
+__attribute__((noinline)) void ink2_units_exact(
+    device const bfloat* X, device const uchar* W, device const uchar* S, float phi,
+    device const uint* counts, device const uint* members, device bfloat* Y,
+    constant Ink2GroupedArgs& a, uint2 tg, uint sg, uint lane, threadgroup float* part) {
+  ink2_units_body<FP8, GU, false>(X, W, S, phi, counts, members, Y, a, tg, sg, lane, part);
+}
+
+// Threadgroup (x, e): weight rows 32x .. 32x + 31 of expert e by its pairs, 16 a band; FP8 is MXFP8, else NVFP4.
+template <bool FP8, bool GU>
+inline void ink2_units(device const bfloat* X, device const uchar* W, device const uchar* S, float phi,
+                       device const uint* counts, device const uint* members, device bfloat* Y,
+                       constant Ink2GroupedArgs& a, uint2 tg, uint sg, uint lane, threadgroup float* part) {
+  if (counts[tg.y] == 0u) return;
+  if (!FP8 && !ink2_nv_two_prod_safe(phi)) {
+    ink2_units_exact<FP8, GU>(X, W, S, phi, counts, members, Y, a, tg, sg, lane, part);
+    return;
+  }
+  ink2_units_body<FP8, GU, !FP8>(X, W, S, FP8 ? 1.0f : (0.5f * phi), counts, members, Y, a, tg, sg, lane, part);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_nvfp4_gu_units(

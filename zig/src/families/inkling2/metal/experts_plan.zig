@@ -86,9 +86,163 @@ pub fn phi(amax: f32, denominator: f32) f32 {
     return roundBf16(amax) / roundBf16(denominator);
 }
 
+pub fn e2m1Twice(code: u8) f32 {
+    const values = [_]f32{ 0, 1, 2, 3, 4, 6, 8, 12 };
+    const v = values[code & 7];
+    return if (code & 8 != 0) -v else v;
+}
+
 pub fn nvWeight(codes: u8, column: u32, scale: u8, factor: f32) f32 {
     const code = if (column & 1 != 0) codes >> 4 else codes & 15;
     return roundBf16(e2m1(code) * e4m3(scale) * factor);
+}
+
+pub fn nvfp4PhiInSafeRange(p: f32) bool {
+    if (std.math.isNan(p)) return false;
+    if (p == 0) return true;
+    const ap = @abs(p);
+    return ap >= 0x1.0p-116 and ap < 0x1.0p118;
+}
+
+pub fn nvfp4TwoProdSafe(p: f32) bool {
+    if (!nvfp4PhiInSafeRange(p)) return false;
+    if (p == 0) return true;
+    const norm_bits: u32 = (@as(u32, @bitCast(p)) & 0x7f_ffff) | 0x3f80_0000;
+    const np: f32 = @bitCast(norm_bits);
+    const hp: f32 = 0.5 * np;
+    for (1..8) |m| {
+        const mf: f32 = @floatFromInt(m);
+        const a: u32 = @bitCast(roundBf16((1.5 + mf * 0.1875) * np));
+        const b: u32 = @bitCast(roundBf16(3.0 * ((1.0 + mf * 0.125) * hp)));
+        if (a != b) return false;
+    }
+    return true;
+}
+
+pub fn nvWeightTwoProd(codes: u8, column: u32, scale: u8, factor: f32) f32 {
+    const code: u8 = if (column & 1 != 0) codes >> 4 else codes & 15;
+    const bs = e4m3(scale) * (0.5 * factor);
+    return roundBf16(e2m1Twice(code) * bs);
+}
+
+pub const Nvfp4Scan = struct {
+    finite_globals: bool = true,
+    normal_range: bool = true,
+    two_prod_exact: bool = true,
+    finite_scales: bool = true,
+    experts: usize = 0,
+    unsafe_phi_experts: usize = 0,
+    exact_fallback_experts: usize = 0,
+    nan_scales: usize = 0,
+
+    pub fn merge(self: *Nvfp4Scan, other: Nvfp4Scan) void {
+        self.finite_globals = self.finite_globals and other.finite_globals;
+        self.normal_range = self.normal_range and other.normal_range;
+        self.two_prod_exact = self.two_prod_exact and other.two_prod_exact;
+        self.finite_scales = self.finite_scales and other.finite_scales;
+        self.experts += other.experts;
+        self.unsafe_phi_experts += other.unsafe_phi_experts;
+        self.exact_fallback_experts += other.exact_fallback_experts;
+        self.nan_scales += other.nan_scales;
+    }
+};
+
+fn countNanScales(bytes: []const u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    const mask: @Vector(16, u8) = @splat(0x7f);
+    while (i + 16 <= bytes.len) : (i += 16) {
+        const chunk: @Vector(16, u8) = bytes[i..][0..16].*;
+        if (@reduce(.Or, (chunk & mask) == mask)) {
+            for (bytes[i..][0..16]) |b| if ((b & 0x7f) == 0x7f) {
+                count += 1;
+            };
+        }
+    }
+    for (bytes[i..]) |b| if ((b & 0x7f) == 0x7f) {
+        count += 1;
+    };
+    return count;
+}
+
+fn normalizedScaleMantissa(code: u8) u3 {
+    const em = code & 0x7f;
+    if (em >= 8) return @truncate(em & 7);
+    return switch (@as(u3, @truncate(em))) {
+        0, 1, 2, 4 => 0,
+        3, 6 => 4,
+        5 => 2,
+        7 => 6,
+    };
+}
+
+fn badMantissaMask(p: f32) u8 {
+    var bad: u8 = 0;
+    const norm_bits: u32 = (@as(u32, @bitCast(p)) & 0x7f_ffff) | 0x3f80_0000;
+    const np: f32 = @bitCast(norm_bits);
+    const hp: f32 = 0.5 * np;
+    for (1..8) |m| {
+        const mf: f32 = @floatFromInt(m);
+        const a: u32 = @bitCast(roundBf16((1.5 + mf * 0.1875) * np));
+        const b: u32 = @bitCast(roundBf16(3.0 * ((1.0 + mf * 0.125) * hp)));
+        if (a != b) bad |= @as(u8, 1) << @intCast(m);
+    }
+    return bad;
+}
+
+/// Validates NVFP4 amax, denominator, and scales against the 2-product normal-range contract.
+pub fn scanNvfp4Tensors(amax: []const f32, denominator: []const f32, scales: []const u8) Nvfp4Scan {
+    var out = Nvfp4Scan{ .experts = amax.len };
+    if (amax.len == 0 or denominator.len == 0 or scales.len % amax.len != 0) {
+        out.finite_globals = false;
+        out.normal_range = false;
+        out.two_prod_exact = false;
+        return out;
+    }
+    const d = denominator[0];
+    const d_ok = std.math.isFinite(d) and roundBf16(d) != 0 and !std.math.isNan(roundBf16(d));
+    if (!d_ok) out.finite_globals = false;
+    const per = scales.len / amax.len;
+    for (amax, 0..) |a, ei| {
+        const row_scales = scales[ei * per ..][0..per];
+        const nans = countNanScales(row_scales);
+        if (nans > 0) {
+            out.finite_scales = false;
+            out.nan_scales += nans;
+        }
+        const a_ok = std.math.isFinite(a);
+        if (!a_ok or !d_ok) {
+            out.finite_globals = false;
+            out.normal_range = false;
+            out.two_prod_exact = false;
+            out.unsafe_phi_experts += 1;
+            out.exact_fallback_experts += 1;
+            continue;
+        }
+        const p = phi(a, d);
+        if (!nvfp4PhiInSafeRange(p)) {
+            out.normal_range = false;
+            out.two_prod_exact = false;
+            out.unsafe_phi_experts += 1;
+            out.exact_fallback_experts += 1;
+        } else if (!nvfp4TwoProdSafe(p)) {
+            const bad_mask = badMantissaMask(p);
+            var hit = false;
+            for (row_scales) |sc| {
+                if ((sc & 0x7f) == 0x7f) continue;
+                const m = normalizedScaleMantissa(sc);
+                if ((bad_mask & (@as(u8, 1) << m)) != 0) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) {
+                out.two_prod_exact = false;
+                out.exact_fallback_experts += 1;
+            }
+        }
+    }
+    return out;
 }
 
 pub fn mxWeight(value: u8, scale: u8) f32 {
