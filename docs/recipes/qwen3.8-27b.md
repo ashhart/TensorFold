@@ -240,12 +240,25 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
 `--no-drafts` disables all drafts on either backend. On CUDA, `--drafter` can name DFlash2 or a compatible
 checkpoint with MTP weights; use `--no-drafts` to disable all drafts.
-The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
-loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+On HIP, `serve --drafter DIR` runs the DFlash2 drafter over the dense checkpoints: the target taps the
+drafter's layers into a ring beside each stream's caches, budgeted before the streams are sized, and the
+drafter's chains reach the round loop through the lane core's drafter wrapper. It runs on one rank at 4 bits:
+`--drafter` with `--tp` above 1 and `--drafter-bits 0` are refused before any load, and the other HIP families
+(the sparse `qwen3_5_moe` among them) refuse `--drafter` by name, as BF16 checkpoints do: the engine times no
+BF16 windows to price the drafter's rounds. Prompts reach the drafter whole, as their prompt pass ends.
+A hold runs only its deepest stream's drafts and the pending row, not the whole block, so the round loop's price
+of a draft holds. On gfx1151 at T=0, plain to drafted decode: one stream 14.4 to 34.8 tok/s (code) and 14.8 to
+28.0 (chat); two streams 27.2 to 49.2 and 27.5 to 38.1; four streams 46.2 to 54.5 (code), while four chat streams
+decode at 44.7 drafted against 45.8 plain.
+Without `--drafter` the engine still drafts on its own: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
-head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
-both off and decodes plain.
+head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
+turns every draft off (the drafter is not loaded) and decodes plain.
 The target verifies every proposed token against its own serial sample.
+`tf-qwen35-test check <model dir> --drafter DIR` (`zig build tf-qwen35-test -Dhip=true`) runs the HIP model checks
+with the drafter in front of the target, opened as the server opens it, so the lane checks compare drafted
+replies with serial ones (greedy and seeded), solo with together and graph with eager under the drafter; without
+`--drafter` the 27B has no draft head and skips the drafted == serial checks.
 
 ## CUDA
 

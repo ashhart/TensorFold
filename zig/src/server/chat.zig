@@ -39,6 +39,9 @@ pub const Input = struct {
     temperature: f64 = 0,
     /// The sampling fields: the request's own (``k in body``), its thinking switches and ``tool_call_required``.
     fields: Value,
+    /// This reply's index among the request's ``n`` choices (``choices``); choice 0 keeps the request's seed.
+    choice: u32 = 0,
+    choices: u32 = 1,
     /// The reply's id as its client gets it, so the server's lines for the request carry the same id.
     id: []const u8 = "",
     /// POST /v1/requests/{id}/cancel's ask for the client's request (cancel_ids.zig); a server-made request has none.
@@ -168,7 +171,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (gone.check()) return error.Cancelled;
     const thinking = input.prompt == null and (fields_mod.flag(f, "enable_thinking") orelse srv.config.enable_thinking);
     const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
-    const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
+    const reasoning = (thinking or (srv.markers.optional and input.prompt == null)) and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
     const asked = if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null;
     const effort = srv.effortFor(asked);
     cx.named_effort = if (input.prompt == null) fields_mod.namedEffort(asked, srv.effort_levels) else null; // a raw prompt has no template
@@ -190,7 +193,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
         if (cut >= 512) try shared.append(a, @intCast(cut));
     };
-    const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids, instruct);
+    var sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids, instruct);
+    if (sampling) |*s| s.seed = @import("choices.zig").seedOf(s.seed, input.choice); // choice 0: the seed as is
     const draft_field = f.get("draft");
     const drafts = srv.config.use_drafts and !(draft_field != null and draft_field.? == .bool and !draft_field.?.bool);
     var request: api.Request = .{
@@ -218,6 +222,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
     if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
     request.salted = salt != 0;
+    request.cache_salt = salt;
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
     errdefer srv.release(false, request);
@@ -291,7 +296,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .report_seed = input.choices > 1, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     if (srv.recipients and input.prompt == null) gen.recipient = try recipient_reply.Reading.of(a, srv.text, request.prompt, input.tools, prepared.reasoning);

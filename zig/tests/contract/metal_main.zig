@@ -125,7 +125,6 @@ const Moe = struct {
             try kernels.append(a, x.kernel());
         }
     }
-
     fn deinit(m: *Moe, a: std.mem.Allocator) void {
         for (m.extra.items) |x| x.deinit();
         m.extra.deinit(a);
@@ -137,12 +136,10 @@ const Moe = struct {
         m.combine.deinit(a);
     }
 };
-
 fn wanted(o: Opts, name: []const u8) bool {
     const only = o.only orelse return true;
     return std.mem.indexOf(u8, name, only) != null;
 }
-
 pub fn main(init: std.process.Init) !u8 {
     const a = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -366,6 +363,9 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var penalties = @import("metal_penalties.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer penalties.deinit();
+    try penalties.collect(o.only);
     var q8_exact = @import("metal_lane_q8.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer q8_exact.deinit();
     if (tensor) try q8_exact.collect(o.only);
@@ -386,8 +386,6 @@ pub fn main(init: std.process.Init) !u8 {
         try gathers.append(a, p);
         try kernels.append(a, p.kernel());
     }
-    var h3_list: std.ArrayList(*h3_k.H3) = .empty;
-    defer for (h3_list.items) |x| x.deinit();
     var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
     defer qwen3_heads.deinit();
     try qwen3_heads.collect(a, device, queue, &kernels, o.only);
@@ -397,13 +395,12 @@ pub fn main(init: std.process.Init) !u8 {
     var masked_values = @import("metal_masked_values.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer masked_values.deinit();
     try masked_values.collect(o.only);
-    if (tensor) for (std.enums.values(h3_k.Which)) |w| {
-        if (!wanted(o, h3_k.spec(w).name)) continue;
-        const x = try a.create(h3_k.H3);
-        x.* = try h3_k.H3.init(a, device, queue, w);
-        try h3_list.append(a, x);
-        try kernels.append(a, x.kernel());
-    };
+    var ricursive_set = @import("metal_ricursive_all.zig").Set{};
+    defer ricursive_set.deinit(a);
+    try ricursive_set.collect(a, device, queue, tensor, &kernels, o.only);
+    var h3: h3_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer h3.deinit();
+    try h3.collect(o.only);
     var h3_top: ?h3_topk.TopK = null;
     defer if (h3_top) |*x| x.deinit();
     if (wanted(o, h3_topk.spec().name)) {
@@ -506,12 +503,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
     const flash_grouped = @import("metal_flashnext_grouped.zig");
-    var grouped_probes: [4]flash_grouped.Probe = undefined;
+    var grouped_probes: [8]flash_grouped.Probe = undefined;
     var grouped_made: usize = 0;
     defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
-    for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, flash_grouped.Probe.name(control, indexed))) continue;
-        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed };
+    for ([_]bool{ false, true }) |mb2| for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control, indexed, mb2))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed, .mb2 = mb2 };
         grouped_made += 1;
         try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
     };

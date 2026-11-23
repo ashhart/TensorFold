@@ -6,6 +6,7 @@ const glue = @import("cuda_glue.zig");
 const latent = @import("cuda_latent.zig");
 const dsa = @import("cuda_dsa_block.zig");
 const state = @import("cuda_state.zig");
+const mm = @import("cuda_mm.zig");
 const t = std.testing;
 
 /// One launch as the driver saw it: function, grid, block, dynamic shared bytes and the arguments' values.
@@ -20,6 +21,9 @@ fn sizes(id: usize) []const u8 {
         ids.absorb_q, ids.expand_v => "888888",
         mla_ids.absorb_q_192, mla_ids.absorb_q => "88888888",
         mla_ids.rope => "888888884",
+        ids.rmsnorm_512, ids.rmsnorm_1536 => "88888844",
+        ids.bmm_tile => "888888844",
+        mm_ids.prompt => "88888844444",
         ops_ids.dsa_tokens => "88488884",
         else => "",
     };
@@ -28,6 +32,7 @@ fn sizes(id: usize) []const u8 {
 const Launch = struct {
     var n: usize = 0;
     var seen: [128]Seen = undefined;
+    var simulate_merges = false;
 
     fn run(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, shared: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
         const id = @intFromPtr(f);
@@ -36,9 +41,24 @@ const Launch = struct {
             const at = args.?[i].?;
             s.args[i] = if (size == '8') @as(*const u64, @ptrCast(@alignCast(at))).* else @as(*const u32, @ptrCast(@alignCast(at))).*;
         }
+        if (simulate_merges and id == ids.merge) mergeWrites(s);
         seen[n] = s;
         n += 1;
         return 0;
+    }
+
+    fn mergeWrites(s: Seen) void {
+        const rows: usize = @intCast(s.args[5]);
+        const heads: usize = @intCast(s.args[6]);
+        const stride = heads * latent.latent_width * 2;
+        const out: [*]u8 = @ptrFromInt(s.args[3]);
+        const sparse = s.args[8] != 0;
+        var counts: [*]const u32 = undefined;
+        if (sparse) counts = @ptrFromInt(s.args[4]);
+        for (0..rows) |r| {
+            if (sparse and counts[r] == 0) continue;
+            @memset(out[r * stride ..][0..stride], if (sparse) 0x5a else 0xd3);
+        }
     }
 
     /// The launches of function `id`, in order.
@@ -60,6 +80,9 @@ const ids = struct {
     const chunks_16 = fieldId("chunks_16");
     const chunks_32 = fieldId("chunks_32");
     const merge = fieldId("merge");
+    const rmsnorm_512 = fieldId("rmsnorm_512");
+    const rmsnorm_1536 = fieldId("rmsnorm_1536");
+    const bmm_tile = fieldId("bmm_tile");
 };
 const mla_ids = struct {
     const chunks = 201;
@@ -69,6 +92,9 @@ const mla_ids = struct {
 };
 const ops_ids = struct {
     const dsa_tokens = 301;
+};
+const mm_ids = struct {
+    const prompt = 401;
 };
 const mla_fields = .{ "chunks_fn", "chunks_split_fn", "merge_part_fn", "absorb_q_fn", "absorb_q_192_fn", "expand_v_fn", "rope_fn", "gate_fn" };
 
@@ -242,6 +268,51 @@ test "GLM DSA block: a window's rows from r0 rope full GLM-5.3's keys and querie
     try t.expectError(error.NoRopeFreqs, dsa.attend(k, f.stream(), l, .{ .lc = 0, .ik = 0, .ig = 0, .pk = 0, .pk_rows = 0 }, s, 0, 3, 0x850_0000, 5, 1, 3));
 }
 
+test "prefill exact: E3 boundary dense prefix keeps the full chunk's head block" {
+    var f: Fakes = undefined;
+    f.init();
+    const k: dsa.Kernels = .{ .set = .{ .glue = &f.ks }, .ops = .{ .d = &f.d, .handle = null } };
+    var l = layer(false);
+    l.dense_limit = 2051;
+    l.heads = 1;
+    const rows = 2048;
+    const stride = l.heads * latent.latent_width * 2;
+    const c: dsa.Caches = .{ .lc = 0x800_0000, .ik = 0x810_0000, .ig = 0x820_0000, .pk = 0x830_0000, .pk_rows = 4098, .pt = 0x840_0000, .ps = flash_ps };
+    var s = scratch();
+    var counts: [rows]u32 = @splat(1);
+    @memset(counts[0..3], 0);
+    const got = try t.allocator.alloc(u8, rows * stride);
+    defer t.allocator.free(got);
+    const want = try t.allocator.alloc(u8, rows * stride);
+    defer t.allocator.free(want);
+    @memset(got, 0xa5);
+    @memset(want, 0xd3);
+    @memset(want[3 * stride ..], 0x5a);
+    s.counts = @intFromPtr(&counts);
+    s.ol = @intFromPtr(got.ptr);
+    Launch.simulate_merges = true;
+    defer Launch.simulate_merges = false;
+    try dsa.attend(k, f.stream(), l, c, s, 0, rows, 0x850_0000, 2048, 8, 512);
+
+    var cb: [8]Seen = undefined;
+    const chunks = Launch.of(ids.chunks_32, &cb);
+    try t.expectEqual(@as(usize, 2), chunks.len);
+    try t.expectEqual([3]u32{ 3, 1, 8 }, chunks[0].grid);
+    try t.expectEqualSlices(u64, &.{ s.qa, c.lc, 0x850_0000, 0, 0, s.partials.po, s.partials.pm, s.partials.pl, 3, 1, 0, @as(u32, @bitCast(@as(f32, 0.0625))), 0, c.pt, c.ps }, chunks[0].args[0..15]);
+    try t.expectEqual([3]u32{ 2048, 1, 5 }, chunks[1].grid);
+    try t.expectEqual(@as(u64, 2048), chunks[1].args[8]);
+    try t.expectEqual(s.counts, chunks[1].args[4]);
+    try t.expectEqual(@as(u64, 1), chunks[1].args[12]);
+    var mb: [8]Seen = undefined;
+    const merges = Launch.of(ids.merge, &mb);
+    try t.expectEqual(@as(usize, 2), merges.len);
+    try t.expectEqual([3]u32{ 3, 1, 1 }, merges[0].grid);
+    try t.expectEqualSlices(u64, &.{ s.partials.po, s.partials.pm, s.partials.pl, s.ol, s.dummy, 3, 1, 8, 0 }, merges[0].args[0..9]);
+    try t.expectEqual([3]u32{ 2048, 1, 1 }, merges[1].grid);
+    try t.expectEqualSlices(u64, &.{ s.partials.po, s.partials.pm, s.partials.pl, s.ol, s.counts, 2048, 1, 5, 1 }, merges[1].args[0..9]);
+    try t.expectEqualSlices(u8, want, got); // count-zero rows retain dense bytes; every other row is sparse-overwritten
+}
+
 test "GLM DSA block: token lists resolve pages to 576-wide rows on full GLM-5.3's padded page, Flash's 6,528 rows" {
     for ([_]bool{ false, true }) |full| {
         var f: Fakes = undefined;
@@ -261,4 +332,66 @@ test "GLM DSA block: token lists resolve pages to 576-wide rows on full GLM-5.3'
     const full = state.Shape.of(&@import("config.zig").Config{ .rope = 64, .kpool = 1 }, 79);
     try t.expectEqual(flash_ps, flash.pageBytes());
     try t.expectEqual(full_ps, full.pageBytes());
+}
+
+fn poisonQueries(s: *dsa.Scratch) void {
+    s.qr = 0xdead_1000;
+    s.q = 0xdead_2000;
+    s.qa = 0xdead_3000;
+    s.qi = 0xdead_4000;
+}
+
+fn expectNoQueryReads(s: dsa.Scratch) !void {
+    for (Launch.seen[0..Launch.n]) |seen| for (seen.args) |arg| {
+        try t.expect(arg != s.qr and arg != s.q and arg != s.qa and arg != s.qi);
+    };
+}
+
+test "prefill exact: E4 keys-only commit slices only safe KV and never reads poisoned queries" {
+    var f: Fakes = undefined;
+    var mk: mm.Kernels = undefined;
+    var l = layer(false);
+    l.dense_limit = 1;
+    l.proj = .{ .bf16 = 0x900_0000 };
+    l.q_b = .{ .bf16 = 0x910_0000 };
+    l.index.kw = .{ .bf16 = 0x920_0000 };
+    l.index.qb = .{ .bf16 = 0x930_0000 };
+    const c: dsa.Caches = .{ .lc = 0x800_0000, .ik = 0x810_0000, .ig = 0x820_0000, .pk = 0x830_0000, .pk_rows = 4098, .pt = 0x840_0000, .ps = flash_ps };
+    const x = 0xa00_0000;
+    const rows = 128;
+    var s = scratch();
+    poisonQueries(&s);
+
+    f.init();
+    mk.prompt = .{ .d = &f.d, .handle = @ptrFromInt(mm_ids.prompt) };
+    mk.prompt_fixed_k = false;
+    mk.pdl = false;
+    const kt: dsa.Kernels = .{ .set = .{ .glue = &f.ks, .mm = &mk, .prompt = true }, .ops = .{ .d = &f.d, .handle = null } };
+    try dsa.commit(kt, f.stream(), l, c, s, x, l.dims, rows, 0x850_0000, 4096);
+    try expectNoQueryReads(s);
+    var mb: [8]Seen = undefined;
+    const compact = Launch.of(mm_ids.prompt, &mb);
+    try t.expectEqual(@as(usize, 2), compact.len);
+    try t.expectEqual([3]u32{ 1, 8, 1 }, compact[0].grid);
+    try t.expectEqualSlices(u64, &.{ x, l.dims, l.proj.bf16 + l.q_lora * l.dims * 2, 0, s.dp, s.mm_part, 0, rows, l.row(), l.dims, 1 }, compact[0].args[0..11]);
+    try t.expectEqual(l.index.kw.bf16, compact[1].args[2]);
+    const kv_norm = Launch.of(ids.rmsnorm_512, &mb);
+    try t.expectEqual(@as(usize, 1), kv_norm.len);
+    try t.expectEqualSlices(u64, &.{ s.dp, l.row(), l.kv_norm, s.lat, l.row(), s.xs_lat }, kv_norm[0].args[0..6]);
+    try t.expectEqual(@as(usize, 0), Launch.of(ids.rmsnorm_1536, &mb).len);
+    try t.expectEqual(@as(usize, 0), Launch.of(ids.absorb_q, &mb).len);
+
+    f.init();
+    const ku: dsa.Kernels = .{ .set = .{ .glue = &f.ks }, .ops = .{ .d = &f.d, .handle = null } };
+    try dsa.commit(ku, f.stream(), l, c, s, x, l.dims, rows, 0x850_0000, 4096);
+    try expectNoQueryReads(s);
+    const full = Launch.of(ids.bmm_tile, &mb);
+    try t.expectEqual(@as(usize, 2), full.len);
+    try t.expectEqual(l.proj.bf16, full[0].args[1]);
+    try t.expectEqualSlices(u64, &.{ s.dp, rows, l.dims, l.q_lora + l.row(), l.dims }, full[0].args[2..7]);
+    const wide_norm = Launch.of(ids.rmsnorm_512, &mb);
+    try t.expectEqual(@as(usize, 1), wide_norm.len);
+    try t.expectEqualSlices(u64, &.{ s.dp + l.q_lora * 2, l.q_lora + l.row(), l.kv_norm, s.lat, l.row(), s.xs_lat }, wide_norm[0].args[0..6]);
+    try t.expectEqual(@as(usize, 0), Launch.of(ids.rmsnorm_1536, &mb).len);
+    try t.expectEqual(@as(usize, 0), Launch.of(ids.absorb_q, &mb).len);
 }

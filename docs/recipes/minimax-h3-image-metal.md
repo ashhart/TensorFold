@@ -8,6 +8,51 @@ sampling steps with no guidance, and each step has its own output head in place 
 ([minimax-h3-metal.md](minimax-h3-metal.md)). It is a denoiser beside the engine, not a token family. Nothing in the
 lane engine, the server or another family changes, and a clip's case runs exactly as before.
 
+## Text to image, end to end
+
+Three tools, each on Metal. The prompt and decoder run on any Apple GPU; the transformer needs an M5's tensor units:
+
+```sh
+zig build tf-h3-image-prompt tf-h3-image tf-h3-image-decoder -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/case.safetensors 2048x2048 42
+zig-out/bin/tf-h3-image MODEL_DIR out/case.safetensors out/case free
+zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.png 2048x2048
+```
+
+1. With a size and a seed, `tf-h3-image-prompt` writes a whole text-to-image case:
+   - the prompt's rows;
+   - the canvas, grown to 2048 x 2048 at the size's ratio when smaller, with sides snapped to 32;
+   - the requested size;
+   - the starting rows: the seed's first draw of torch's CPU `randn` over the latent [24, height / 16, width / 16],
+     made natively (`moss_image/noise.zig`) and patchified.
+2. `tf-h3-image ... free` runs the six steps from those rows. It writes the latent, and exits 0 with nothing to gate.
+3. `tf-h3-image-decoder` decodes the latent. Its rows and columns are the canvas over 16. It resizes the picture back
+   to the requested size when that differs from the canvas.
+
+### Resident: one process, every picture warm
+
+`tf-h3-image-server` loads the prompt encoder, the transformer's weights and the decoder once, then makes one picture
+per stdin line, writing the same files as the three tools above:
+
+```sh
+zig build tf-h3-image-server -Dcpu=apple_m1 -Doptimize=ReleaseFast
+printf '2048x2048 42 out/a prompt.txt\n2048x2048 7 out/b prompt.txt\n' |
+  zig-out/bin/tf-h3-image-server TEXT_ENCODER_DIR MODEL_DIR
+```
+
+A request line is `WIDTHxHEIGHT SEED OUT_PREFIX prompt.txt`. This server accepts text-to-image requests only, not
+reference images or editing cases. The transformer's kernels and buffers depend on the picture's layout (canvas,
+rows and text tags), so a request with the last one's layout keeps them and only replaces the prompt's text rows
+(`Model.retext`); another layout releases them and binds anew over the same mapped weights. `Binding.fits` compares
+the canvas, row count, reference count and tags; it assumes there are no reference rows, so those determine all
+rotary positions. Supporting edits would also require checking reference geometry and refreshing reference
+conditioning, not just comparing row counts.
+Each request prints one line of stage seconds: prompt, case, transformer (`reused` or `bound`), 6 steps, decoder, total.
+A bad request prints its error and the server reads the next line.
+If the weights cannot be held resident or the idle ticker cannot start, it exits instead of serving unwarmed.
+
+`zig build test-h3-image-server` runs the resident gates on a synthetic checkpoint.
+
 ## What runs here, and what the case brings
 
 Made natively, from the request and the model folder:
@@ -53,6 +98,73 @@ The picture case brings the rest, made by the reference pipeline for now:
 Rows are 96 wide: 24 latent channels times a 2 x 2 patch, channel-major, then the patch's row, then its column.
 Patches run in row-major order. The case must be written aligned (Python's `safetensors` writer does this).
 
+## Prompt
+
+`tf-h3-image-prompt` makes a picture case's `text` and `text_tags` from a prompt. It runs on any Apple GPU: no tensor
+units are needed.
+
+```sh
+zig build tf-h3-image-prompt -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/prompt.safetensors
+```
+
+`TEXT_ENCODER_DIR` is MiniMax-H3's `text_encoder/` (Qwen3-VL). `MODEL_DIR` is the MiniMax-H3-Image folder, for its
+`tokenizer/` and `transformer/`. The prompt is used verbatim, except for one trailing line ending: no chat template and
+no system prompt.
+
+1. **Ids.** The prompt is tokenised on its own, with no special tokens added, and cut to its first 4,096 tokens.
+   Every row is tagged 1 (text).
+2. **The text encoder.** Qwen3-VL's text model runs 50 of its 64 layers:
+   - hidden 5,120, with 64 query and 8 KV heads of 128;
+   - q and k RMSNorm, and a SwiGLU of 25,600;
+   - causal attention, with rotary at theta 5,000,000.
+
+   Text positions count up, equal on M-RoPE's three axes. The rows leaving layer index 49 are kept unnormalised. The
+   final norm and layers 50 to 63 are never mapped or run.
+3. **The front end.** `condition_proj` and its bias map each row to 5,376. The two token-refiner blocks then run over
+   every row as one document, with no rotary and no AdaLN, and `token_refiner.final_norm` ends it.
+
+It writes `text` BF16 [rows, 5,376], `text_tags` I32 [rows] and `ids` I32 [rows], aligned. `tf-h3-image` reads the
+first two as a case's own.
+
+**Precision.** Weights are bf16, read in place. Products run in simdgroup matrices with fp32 sums. Norms keep fp32
+statistics, and the softmax and its sums stay in fp32. Each step rounds to bf16 where the reference's bf16 arithmetic
+does:
+
+- the text model's norms round x r before the weight;
+- its rotary turns by bf16 cos and sin;
+- its SiLU rounds once;
+- the refiner rounds as H3's blocks do: x r w at once, then the sigmoid, then the product.
+
+**Edits.** The encoder places a reference's vision rows at its image pads and adds DeepStack's features after layers
+0, 1 and 2. The labels (`Picture i: `), vision blocks, tags (0 for a vision block's tokens) and M-RoPE positions are
+made here. Qwen3-VL's vision tower is not, so an edit's prompt rows still come from the case.
+
+**Gates, fixed before the first run except the whole-run gate below.** `tf-h3-image-prompt selftest [WORK_DIR]`
+writes a tiny synthetic checkpoint and loads it as a real run does. The checkpoint is a 256-wide text model with 4
+query and 2 KV heads, three layers written and two run, and a 384-wide refiner of 2 heads. The selftest checks 70 rows
+against a float64 host reference with the same bf16 rounding points:
+
+- **Each kernel alone:** at least 99.9% of values bit-equal, none further than 1/32 of its row's RMS. Kernels: the
+  product, both norms, heads with rotary, fused heads, causal and full attention, both SiLU gates, the residual add.
+- **Whole runs:** a text prompt; a reference's vision and DeepStack rows at M-RoPE positions; the refiner on the GPU's
+  encoder rows. Each must be within twice a float32-sum host run's distance from float64, in both 1 - cosine and
+  relative error, with cosine at least 0.999. This gate replaced a fixed cosine bound of 0.99999, which the refiner
+  missed at 0.9999884 on a second seed while every kernel alone was bit-exact.
+- **A second run:** byte for byte the same.
+
+On an M3 Ultra, every kernel alone is 99.97% to 100% bit-equal. The whole runs sit 0.7 to 1.03 times as far from
+float64 as the float32-sum run.
+
+`zig build test-h3-image-prompt` runs the prompt rules without a GPU:
+
+- ids per segment, the 4,096 cut, tags, pad rows and vision token counts;
+- M-RoPE positions and the interleaved rotary table;
+- the Qwen copy's size and LANCZOS pixels;
+- the encoder's and refiner's configs, and the text model's tensor prefix.
+
+`zig build compile-h3-image-prompt` compiles the tool without running a shader.
+
 ## Run a case
 
 ```sh
@@ -83,12 +195,66 @@ reference to gate against.
 
 Attention here is dense, so no routing floor applies. FastH3's 0.990 at step 1 came from its top-k tiles.
 
-## Checkpoint
+## Decoder
 
-`MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
-float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are the prompt's. The weights are under the
-MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
-the United States of America. Read it before use.
+`tf-h3-image-decoder` turns `tf-h3-image`'s latent into a picture on Metal. It runs the VAE's 2D ViT decoder (24 blocks
+of 1,024, 16 heads of 64, 4 register tokens) on any Apple GPU. Its kernels compile from source when it loads and use no
+tensor units.
+
+**What runs:**
+
+1. The latent file (normalised, [24, rows, columns] float32) is mapped back with `latents_mean` and `latents_std` in
+   float32.
+2. It is cut into tiles of 16 x 16 cells (256 pixels) overlapping by at least 64 pixels, as `picture_vae.zig` splits
+   it.
+3. Each tile runs `post_quant_conv`, then its cells become tokens through `x_embedder`, with the 4 registers and one
+   zero token appended.
+4. The 2D rotary table is built, and the 24 blocks run, then `norm_out` and `proj_out`.
+5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 16 tiles run in one command buffer.
+6. Tiles are blended in float32: the top band against the tile above, then the left band against the tile to the left,
+   both as decoded.
+7. The result is mapped to [0, 1] with ImageNet's statistics, clamped and truncated to bytes.
+8. If the request's size differs from the canvas, the picture is resized with Pillow's LANCZOS. Then it is written as
+   a PNG.
+
+**Precision:**
+
+- Every parameter is rounded from the file's F32 to bf16 when loaded, and the latent is rounded to bf16 at
+  `post_quant_conv`.
+- Products are bf16 with float32 sums, the bias added before the one rounding.
+- RMSNorm's statistics and weight are float32, rounded once; q and k are RMS-normed with no weight.
+- The rotary ids and 2π·id are in bf16 arithmetic, the angles in float32, cos and sin in bf16.
+- Rotation, LayerScale, the residuals and SiLU are bf16 elementwise.
+- Attention takes bf16 q, k and v, with float32 scores, softmax, probabilities and sums. The reference's fused
+  attention may round the probabilities to bf16 before the value product. A reference case will say which.
+- `norm_out` is float32; `proj_out` takes bf16 in and gives bf16 out, held in float32. The blend is float32.
+
+```sh
+zig build tf-h3-image-decoder -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 ROWS COLUMNS out/case.png [WIDTHxHEIGHT]
+zig-out/bin/tf-h3-image-decoder selftest
+```
+
+`ROWS` and `COLUMNS` are the latent's grid in cells: the canvas's height and width over 16, so a 2048 x 2048 canvas is
+`128 128`. `WIDTHxHEIGHT` is the requested size.
+
+**Selftest.** `selftest` runs the kernels on synthetic weights against a float64 host reference with the same
+rounding points, and exits 1 past a bound. On an M3 Ultra:
+
+| Check | Result |
+|---|---|
+| The embedding and `proj_out` | within 1 ULP |
+| Each block, on the GPU's own input | 93-96% identical, worst 4 ULPs |
+| The output after two chained blocks | relative error 3e-3 |
+| The output after 24 chained blocks | relative error 1.5e-2 |
+| Decodes in different batch sizes | bit-identical |
+| The picture's bytes | at most 1 apart |
+
+The host's own float32 sums spread as far from its float64 sums as the GPU's do.
+
+All 24 blocks take 13.4 ms a 16 x 16 tile, so about 1.6 s of GPU time for a 2048 x 2048 canvas (121 tiles).
+`zig build test-h3-geometry` covers the decoder's host rules. `zig build compile-h3-image-decoder-host` compiles the
+tool without the Metal compiler.
 
 ## Edit encoder
 
@@ -156,15 +322,21 @@ Its gates, measured on an M3 Ultra:
 
 A 1024 x 1024 reference at the released widths encodes in 0.6 s.
 
+## Checkpoint
+
+`MiniMaxAI/MiniMax-H3-Image`. `transformer/` is bf16, with the patch projection, time embedder and step heads in
+float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are the prompt's. The weights are under the
+MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
+the United States of America. Read it before use.
+
 ## Not done
 
-- The prompt's rows come from the case. The text encoder (Qwen3-VL, 50 of 64 layers), `condition_proj` and the token
-  refiner are not run here.
-- No image decoder: the latent is decoded by the reference pipeline. That decoder is a 2D ViT (24 layers of 1,024) in
-  256-pixel tiles.
-- No edit encoder: an edit's anchor rows come from the case. That encoder is MiniMax H3's CNN, on one frame.
-- No `/v1/images/generations` or edits route, and no CUDA path.
-- One machine class (M5). Chips without tensor units are refused.
+- **Checked against the release:** nothing yet. The reference cases and the gates above wait for the weights.
+- **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
+  Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
+- **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
+- **Kernel contract:** the new kernels are gated by each tool's `selftest`, not registered with `tf-kernel-contract`.
+- **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
 ## Host checks
 

@@ -256,7 +256,7 @@ pub const Model = struct {
         if (sliced) {
             try encode_mod.batch(ops, &m.backend, &m.graph, m.preparation, streams[0..n], frame, block, depths[0..n], lattices[0..n]);
         } else {
-            try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+            try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], null, streams[0..n], block, lattices[0..n]);
         }
         defer for (lattices[0..n]) |*l| l.deinit();
         // the frame completed, so an absorbing stream's context now covers its new taps

@@ -74,6 +74,13 @@ pub const Request = struct {
     unread: ?*const std.atomic.Value(u32) = null,
     /// ``cache_key`` is salted (cache_salt): the lane host neither drafts from nor adds to Recall's shared record.
     salted: bool = false,
+    /// The full salt id that produced `cache_key`, compared separately from its non-injective masked words.
+    cache_salt: u64 = 0,
+
+    /// The cache-tenant identity: null for an unsalted request, the exact numeric salt otherwise.
+    pub fn cacheSalt(r: *const Request) ?u64 {
+        return if (r.salted) r.cache_salt else null;
+    }
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {

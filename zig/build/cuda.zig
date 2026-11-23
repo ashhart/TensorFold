@@ -162,6 +162,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.getInstallStep().dependOn(&q35_install.step);
     b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);
     @import("moss_image_tools.zig").install(b, target, optimize, strip, cuda, mods.core);
+    @import("qwen3_asr_cuda.zig").tool(b, target, optimize, cuda, mods.core, mods.tokenizer, strip);
     const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, mods.core) } } });
     const d3_exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = d3_tool });
     b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
@@ -311,6 +312,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
+    const prompt_rows = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA startup:", "Qwen prompt rows:", "slide admission: cuda" } }));
+    prompt_rows.has_side_effects = true;
+    b.step("test-qwen35-prompt-rows-host", "Loaded Qwen prompt rows and unchanged planned cache behavior without devices").dependOn(&prompt_rows.step);
     b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);
@@ -406,6 +410,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-glm-grants-host", "GLM CUDA head-cost policy without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"shared head costs:"} })).step);
     skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"zero grant:"} })).step);
     @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
+    const prefill_exact = b.step("test-glm-prefill-exact-host", "GLM exact prefill dead-work and launch regressions without a GPU");
+    prefill_exact.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"prefill exact:"} })).step);
+    step.dependOn(prefill_exact);
     const q4_pdl = b.createModule(.{ .root_source_file = b.path("zig/glm_q4_pdl_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const q4_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = q4_pdl }));
     b.step("test-glm-q4-pdl-host", "GLM Q4 draft-head launch honors TF_GLM_PDL without a GPU").dependOn(&q4_pdl_run.step);

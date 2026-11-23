@@ -136,7 +136,18 @@ const cases = [_]Case{
     .{ .style = .xml, .ok = false, .what = "lookup n as text", .reply = qwen("lookup", qp("q", "hi") ++ qp("n", "two")) },
     .{ .style = .xml, .ok = false, .what = "lookup extra", .reply = qwen("lookup", qp("q", "hi") ++ qp("n", "2") ++ qp("x", "1")) },
     .{ .style = .xml, .ok = false, .what = "lookup no n", .reply = qwen("lookup", qp("q", "hi")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax valid", .reply = mm("lookup", mp("q", "hi") ++ mp("n", "2")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax after text", .reply = "Let me check.\n" ++ mm("lookup", mp("q", "hi") ++ mp("n", "2")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax free names", .reply = mm("now", mp("tz", "UTC") ++ mp("extra", "1")) },
+    .{ .style = .minimax, .ok = false, .what = "minimax missing n", .reply = mm("lookup", mp("q", "hi")) },
 };
+fn mm(comptime name: []const u8, comptime params: []const u8) []const u8 {
+    return "]<]minimax[>[<tool_call>\n" ++ "]<]minimax[>[<invoke name=\"" ++ name ++ "\">" ++ params ++ "]<]minimax[>[</invoke>\n" ++ "]<]minimax[>[</tool_call>";
+}
+
+fn mp(comptime key: []const u8, comptime v: []const u8) []const u8 {
+    return "]<]minimax[>[<" ++ key ++ ">" ++ v ++ "]<]minimax[>[</" ++ key ++ ">";
+}
 
 test "auto tools through xgrammar: non-strict now takes any object, strict lookup only its schema" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

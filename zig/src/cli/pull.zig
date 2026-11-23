@@ -10,6 +10,7 @@ const blobName = single.blobName;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
 const revisionOk = hub.revisionOk;
+const route = @import("pull_route.zig");
 
 pub const GiB: u64 = 1 << 30;
 const revision_json_bytes = 1 << 20;
@@ -35,6 +36,8 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         return 2;
     }
     const auth = try Auth.init(a, io, env, err_out) orelse return 1;
+    const endpoint = auth.endpoint;
+    if (!try routes(a, io, err_out, env)) return 2;
     const root = try hub.cacheDir(a, env, override);
     const w = std.Io.Dir.cwd();
     try w.createDirPath(io, root);
@@ -58,7 +61,9 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             return 1;
         },
         else => {
-            try err_out.print("{s}@{s}: the hub is unreachable ({t}); check the network or HF_ENDPOINT\n", .{ repo, revision, e });
+            try err_out.print("{s}@{s}: the hub at {s} is unreachable: ", .{ repo, revision, endpoint });
+            try route.explain(io, err_out, e);
+            try err_out.writeAll("; check the network, HF_ENDPOINT or the proxy settings\n");
             return 1;
         },
     };
@@ -71,7 +76,9 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             return 1;
         },
         else => {
-            try err_out.print("{s}@{s}: the hub's file tree is unreachable ({t})\n", .{ repo, revision, e });
+            try err_out.print("{s}@{s}: the hub's file tree is unreachable: ", .{ repo, revision });
+            try route.explain(io, err_out, e);
+            try err_out.writeAll("\n");
             return 1;
         },
     };
@@ -133,7 +140,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         }
         const got = downloadRetrying(a, io, &client, auth, out, url, blobs_dir, e) catch |err| {
             if (err == error.HubDenied) return auth.refuse(err_out, repo);
-            try err_out.print("  {s}: the download failed ({t})\n", .{ e.path, err });
+            try failed(io, err_out, e.path, err);
             return 1;
         };
         try linkIntoSnapshot(a, io, snapshot_dir, e.path, got);
@@ -159,7 +166,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
                 ranged.discard(a, io, b.file, piece); // the hub sent whole files: one stream each
                 const got = downloadRetrying(a, io, client, auth, out, b.file.url, blobs_dir, b.entry) catch |e| {
                     if (e == error.HubDenied) return e;
-                    try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, e });
+                    try failed(io, err_out, b.entry.path, e);
                     return false;
                 };
                 try linkIntoSnapshot(a, io, snapshot_dir, b.entry.path, got);
@@ -168,7 +175,9 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
         },
         error.HubDenied => return err,
         else => {
-            try err_out.print("  the download failed ({t}); pull again to fetch only the missing pieces\n", .{err});
+            try err_out.writeAll("  the download failed: ");
+            try route.explain(io, err_out, err);
+            try err_out.writeAll("; pull again to fetch only the missing pieces\n");
             return false;
         },
     };
@@ -177,7 +186,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
             ranged.discard(a, io, b.file, piece);
             ranged.fetch(a, io, &.{b.file}, piece, auth, out) catch |err| {
                 if (err == error.HubDenied) return err;
-                try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, err });
+                try failed(io, err_out, b.entry.path, err);
                 return false;
             };
             if (!try matches(a, io, b)) {
@@ -195,6 +204,36 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
 
 fn matches(a: Allocator, io: std.Io, b: Big) !bool {
     return std.mem.eql(u8, &(try ranged.digest(a, io, b.file.path, b.file.size)), &b.entry.sha256.?);
+}
+
+/// Reads the proxy and timeout settings; false (after saying why, naming only the variable) when one is unusable.
+pub fn routes(a: Allocator, io: std.Io, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map) !bool {
+    route.reset(io);
+    route.configure(a, env) catch |e| {
+        try err_out.writeAll("tensorfold pull: ");
+        try route.refusal(err_out, e);
+        try err_out.writeAll("\n");
+        return false;
+    };
+    if (route.settings.skipped.len > 0) try err_out.print("tensorfold pull: {s} names a socks or https:// proxy, which pull cannot use; connecting directly\n", .{route.settings.skipped});
+    return true;
+}
+
+/// One file's failure: a stall names its timeout, its resumes and the proxy in use; others what the connect met.
+pub fn failed(io: std.Io, err_out: *std.Io.Writer, path: []const u8, err: anyerror) !void {
+    if (err == error.Stalled) {
+        try err_out.print("  {s}: no bytes arrived for {d} s ({s}), and {d} range resumes stalled too; ", .{ path, route.settings.stall_s, route.stall_name, single.max_resumes });
+        try route.proxyInUse(err_out);
+        try err_out.writeAll("; pull again to resume\n");
+        return;
+    }
+    try err_out.print("  {s}: the download failed: ", .{path});
+    try route.explain(io, err_out, err);
+    try err_out.writeAll("\n");
+}
+
+pub fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+    return if (env) |m| m.get(key) else null;
 }
 
 /// The commit the hub serves for ``repo@revision``.

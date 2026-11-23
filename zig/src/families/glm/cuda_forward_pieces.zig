@@ -95,6 +95,7 @@ pub fn exchangePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site,
 pub fn gluePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize) !void {
     defer prof.context(f.prof, j, null, if (site == .mixer) .mixer else .ffn);
     const world = f.ranks[0].w.share.world;
+    const D = f.ranks[0].w.config.hidden;
     const last = site == .ffn and j + 1 == f.ranks[0].w.layers.len;
     var sent: usize = 0;
     for (cut, 0..) |piece, q| {
@@ -105,12 +106,12 @@ pub fn gluePieces(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut
         try f.stream.wait(p.gathered[q]);
         stamp.end();
         if (!f.splits(n)) {
-            for (f.ranks) |r| try f.glueRows(r, j, site, lo, piece[1], room(r, lo));
+            for (f.ranks) |r| try f.glueRows(r, j, site, lo, piece[1], room(r, lo), 0);
             continue;
         }
         for (f.ranks) |r| {
             const mine = share(n, world, r.w.share.rank);
-            try f.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo));
+            try f.glueRows(r, j, site, lo + mine[0], lo + mine[1], room(r, lo), r.b.part + (lo + mine[0]) * D * 4);
         }
         try p.glues[q].record(f.stream);
         stamp = prof.span(f.prof, p.side, .wait_glues);
@@ -187,16 +188,13 @@ pub fn partials(f: *const Forward, p: *const Pieces, lo: usize, n: usize, split:
         .local => for (f.ranks) |to| {
             const mine = share(n, world, to.w.share.rank);
             const own = mine[1] - mine[0];
-            for (f.ranks) |from| try f.copy(p.side, room(to, lo) + from.w.share.rank * own * D * 4, from.b.part + (lo + mine[0]) * D * 4, own * D * 4);
+            for (f.ranks) |from| if (from.w.share.rank != to.w.share.rank) try f.copy(p.side, room(to, lo) + from.w.share.rank * own * D * 4, from.b.part + (lo + mine[0]) * D * 4, own * D * 4);
         },
         .nccl => |x| {
             const r = f.ranks[0];
             const me = r.w.share.rank;
-            const mine = share(n, world, me);
-            const own = mine[1] - mine[0];
             const plan: relay.Relay = .{ .world = world, .rank = me, .n = n };
             if (f.ring) try relay.partials(x.lib, x.comm, p.side, plan, room(r, lo), r.b.part, lo, D) else try relay.splitPartials(x.lib, x.comm, p.side, plan, room(r, lo), r.b.part, lo, D);
-            try f.copy(p.side, room(r, lo) + me * own * D * 4, r.b.part + (lo + mine[0]) * D * 4, own * D * 4);
         },
     }
 }

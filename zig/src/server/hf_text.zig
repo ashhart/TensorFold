@@ -77,7 +77,7 @@ pub const HfText = struct {
         };
         errdefer t.tok.deinit();
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
-        t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
+        t.tok.memo = try tokenizer.Memo.create(std.heap.smp_allocator, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
         // a Clef checkpoint's tokenizer splits words with the regex this field publishes, not tokenizer.json's
         const clef = if (std.fs.path.join(a, &.{ dir, "joint_head_config.json" })) |head| if (std.Io.Dir.cwd().access(io, head, .{})) |_| true else |_| false else |_| false;

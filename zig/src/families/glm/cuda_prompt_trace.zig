@@ -173,7 +173,8 @@ pub const Trace = struct {
             std.log.warn("glm prompt invalid rank={d} slot={d} start={d} rows={d} reason={s}", .{ t.meta.rank, t.meta.slot, t.meta.start, t.meta.rows, @errorName(err) });
             return;
         };
-        std.log.info("glm prompt chunk rank={d} slot={d} start={d} rows={d} wall_ms={d:.4} spans={d}", .{ t.meta.rank, t.meta.slot, t.meta.start, t.meta.rows, wall, t.n });
+        const usage = cuda.memory.usage(false);
+        std.log.info("glm prompt chunk rank={d} slot={d} start={d} rows={d} wall_ms={d:.4} spans={d} device_bytes={d} pinned_bytes={d} peak_bytes={d} pinned_peak_bytes={d} live_device_allocs={d}", .{ t.meta.rank, t.meta.slot, t.meta.start, t.meta.rows, wall, t.n, usage.device, usage.host, usage.peak, usage.host_peak, usage.allocs });
         for (t.events[0..t.n]) |p| std.log.info("glm prompt stage rank={d} slot={d} start={d} rows={d} layer={?d} piece={?d} site={s} stage={s} stream={s} ms={d:.4}", .{ t.meta.rank, t.meta.slot, t.meta.start, t.meta.rows, p.layer, p.piece, @tagName(p.site), @tagName(p.stage), if (p.stream.handle == t.events[0].stream.handle) "main" else "side", p.ms });
     }
 };

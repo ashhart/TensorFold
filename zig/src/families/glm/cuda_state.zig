@@ -11,6 +11,7 @@ const sparse = @import("cuda_sparse.zig");
 const experts = @import("cuda_experts.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const moe = @import("cuda_moe.zig");
+const pair_layout = @import("cuda_pair_layout.zig");
 const glue = @import("cuda_glue.zig");
 const mlp = @import("cuda_mlp.zig");
 const kda_block = @import("cuda_kda_block.zig");
@@ -232,17 +233,22 @@ pub const Buffers = struct {
     part: u64, // fp32 [rows][dims]: this rank's partial rows a split exchange sends from
 
     pub fn init(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize) !Buffers {
-        return make(d, w, rows, prefill, capacity, rows, prefill, null);
+        return make(d, w, rows, prefill, capacity, rows, prefill, null, false);
+    }
+
+    /// A paired step's first chunk with room for both chunks' picks and grouped plan.
+    pub fn initPairExperts(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
+        return make(d, w, rows, true, capacity, rows, true, null, true);
     }
 
     /// A shared window's scratch: `rows` rows of several streams, each one's attention and KDA chain on `window_rows`.
     pub fn initShared(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
-        return make(d, w, rows, false, capacity, window_rows, true, null);
+        return make(d, w, rows, false, capacity, window_rows, true, null, false);
     }
 
-    /// A paired step's second chunk: its own rows across sites and streams, and `of`'s scratch for one site's work.
-    pub fn initTwin(d: *const cuda.Driver, w: *const weights.Weights, of: *const Buffers, capacity: usize) !Buffers {
-        return make(d, w, of.rows, of.prefill, capacity, of.rows, of.prefill, of);
+    /// A paired step's second chunk; `joint` also owns routed weights and expert temporaries.
+    pub fn initTwin(d: *const cuda.Driver, w: *const weights.Weights, of: *const Buffers, capacity: usize, joint: bool) !Buffers {
+        return make(d, w, of.rows, of.prefill, capacity, of.rows, of.prefill, of, joint);
     }
 
     /// The fields a twin holds apart, by their index in make's sizes (make reads the fields from these indexes too).
@@ -250,14 +256,8 @@ pub const Buffers = struct {
     /// make's size count when twin_at's indexes were last checked: adding or removing a size fails the build.
     const twin_checked = 76;
 
-    /// Whether make's size `i` is one a twin holds apart.
-    fn twinHolds(i: usize) bool {
-        inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| if (@field(twin_at, f) == i) return true;
-        return false;
-    }
-
     /// `seg`: a stream's most attention rows; `own_proj`: its KDA projection rows are here, not in the state.
-    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool, twin: ?*const Buffers) !Buffers {
+    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool, twin: ?*const Buffers, joint: bool) !Buffers {
         const c = &w.config;
         const s = &w.share;
         const D: usize = c.hidden;
@@ -271,6 +271,7 @@ pub const Buffers = struct {
         const sh = s.shared.len();
         const slots: usize = c.topk + 1;
         const pairs = rows * slots;
+        const plan_pairs = if (joint) 2 * pairs else pairs;
         const count: usize = c.experts;
         const lw: usize = c.kv_lora;
         const row: usize = c.latentRow(); // the latent, then its roped key columns
@@ -290,7 +291,7 @@ pub const Buffers = struct {
         if (w.mtp) |m| if (m.layer.ffn == .moe) if (m.layer.ffn.moe.exl3) |x| exl3.mostScratch(&x3, rows, D, ew, prefill, x);
         var split = false; // a KDA stack in two parts moves each part's rows through one more buffer
         for (w.layers) |l| split = split or (l.mixer == .kda and l.mixer.kda.proj == .split);
-        const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
+        const hist_len = if (plan_pairs > cuda.grouped.small) (plan_pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
         const sizes: [twin_checked]usize = .{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
             rows * S * 4, rows * S * S * 4, glue.hcPartBytes(rows), s.world * rows * D * 4,
@@ -317,10 +318,10 @@ pub const Buffers = struct {
             rows * 2 * mw * 2,
             rows * mw * 2,
             rows * (mw / 64) * 4,
-            rows * count * 4, pairs * 4, pairs * 4, pairs * 4, // mlog, pick, wts, members
-            experts.maxItems(pairs, count + 1, experts.tile) * 3 * 4, // items (the decode tile's count bounds the prompt's)
-            8,              @max(1, pairs) * 4, hist_len * 4, // counts, rank, hist
-            pairs * ew * 2, pairs * D * 4,      rows * 2 * sh * 2,
+            rows * count * 4, plan_pairs * 4, pairs * 4, plan_pairs * 4, // mlog, pick, wts, members
+            experts.maxItems(pairs, count + 1, experts.tile) * 3 * 4, // items (one chunk's decode bound covers the joint 128-pair plan)
+            8,              @max(1, plan_pairs) * 4, hist_len * 4, // counts, rank, hist
+            pairs * ew * 2, pairs * D * 4,           rows * 2 * sh * 2,
             rows * sh * 2,
             rows * (sh / 64) * 4, rows * D * 4, // sxs, sy
             rows * D * 2,         rows * D * 2,
@@ -332,7 +333,7 @@ pub const Buffers = struct {
         };
         var held = sizes;
         if (twin != null) for (&held, 0..) |*bytes, i| { // a twin allocates its own rows only
-            if (!twinHolds(i)) bytes.* = 0;
+            if (!pair_layout.twinHolds(twin_at, i, joint)) bytes.* = 0;
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &held, &p);
@@ -392,6 +393,11 @@ pub const Buffers = struct {
             var t = of.*;
             t.arena = out.arena;
             inline for (@typeInfo(@TypeOf(twin_at)).@"struct".field_names) |f| @field(t, f) = @field(out, f);
+            if (joint) {
+                t.moe.wts = out.moe.wts;
+                t.moe.eact = out.moe.eact;
+                t.moe.ey = out.moe.ey;
+            }
             return t;
         }
         return out;

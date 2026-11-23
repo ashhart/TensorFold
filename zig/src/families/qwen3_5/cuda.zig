@@ -46,6 +46,7 @@ test {
     _ = @import("cuda_draft_config.zig");
     _ = @import("cuda_drafter_open.zig");
     _ = draft;
+    _ = @import("cuda_draft_absorb.zig");
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
     _ = reuse;

@@ -45,6 +45,8 @@ pub const Lane = struct {
     resumed: bool = false,
     /// The stream's id on every rank.
     id: u32 = 0,
+    key: []const u32 = &.{},
+    cache_salt: ?u64 = null,
     /// Pages of the table the other ranks hold already.
     known: usize = 0,
 };
@@ -297,12 +299,14 @@ pub const Hip = struct {
         h.prefix.restored = serve.protocol.no_snapshot;
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(h.gpa);
-        const plan = try h.prefix.begin(prompt, s.history_len, s.shared_prefixes, l, &adopt);
+        l.key = if (s.key.len != 0) s.key else prompt;
+        l.cache_salt = s.cache_salt;
+        const plan = try h.prefix.begin(l.key, l.cache_salt, s.history_len, s.shared_prefixes, l, &adopt);
         defer h.gpa.free(plan.marks);
         if (adopt.items.len > 0) {
             // the tree held them once more for this stream already
             errdefer for (adopt.items) |id| e.pool.release(id);
-            try l.s.adopt(&e.pool, adopt.items, false);
+            try l.s.adoptRollback(&e.pool, &adopt);
         }
         if (plan.from > 0) {
             l.s.len = plan.from;
@@ -360,7 +364,8 @@ pub const Hip = struct {
     }
 
     pub fn keepCut(h: *Hip, l: *Lane, prompt: []const u32, at: usize) !void {
-        try h.prefix.keep(l, prompt, at);
+        _ = prompt;
+        try h.prefix.keep(l, l.key, l.cache_salt, at);
     }
 
     /// The lanes' windows (each the pending token, then its drafts) in one round with per-row snapshots: the logits.
