@@ -45,6 +45,24 @@ const Host = struct {
 fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
     return metal_admit.streams(a, "minimax_m3", stream_bytes, left, o, window, problem);
 }
+const DraftCost = struct {
+    fixed: u64 = 0,
+    lane: u64 = 0,
+    tap: u64 = 0,
+};
+
+const Admission = struct { lanes: u32, ledger: u64 };
+
+fn longestWindow(c: *const fl.config.Config, left: u64, most: usize, draft: DraftCost) usize {
+    _ = draft;
+    return fl.budget.longest(c, left, most);
+}
+
+fn fitAdmission(a: std.mem.Allocator, c: *const fl.config.Config, left: u64, o: api.Open, window: u64, draft: DraftCost, problem: *[]const u8) !?Admission {
+    _ = draft;
+    const lanes = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)), left, o, window, problem) orelse return null;
+    return .{ .lanes = lanes, .ledger = left };
+}
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
@@ -274,9 +292,56 @@ test "Metal capabilities: MiniMax admission fits automatic 64 and refuses explic
     const exact: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3, .lanes_fixed = true };
     const over: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 64, .lanes_fixed = true };
     var why: []const u8 = "";
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 11, over, 4096, &why));
     defer a.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+}
+
+test "MiniMax admission: window allocation includes the extra position and default stops one token earlier" {
+    const a = std.testing.allocator;
+    const c: fl.config.Config = .{};
+    const short = fl.state.cacheBytes(&c, 128);
+    var why: []const u8 = "";
+    const auto: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3 };
+    const exact: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3, .lanes_fixed = true };
+    const three = (try fitAdmission(a, &c, 3 * short, auto, 128, .{}, &why)).?;
+    try std.testing.expectEqual(@as(u32, 2), three.lanes);
+    try std.testing.expect((try fitAdmission(a, &c, 3 * short, exact, 128, .{}, &why)) == null);
+    defer a.free(why);
+    try std.testing.expectEqual(@as(usize, 127), longestWindow(&c, short, 128, .{}));
+}
+
+fn expectDraftedAdmission(comptime D: type) !void {
+    const a = std.testing.allocator;
+    const c: fl.config.Config = .{};
+    var drafter: D.Drafter = undefined;
+    drafter.config = .{};
+    const fixed = 257;
+    const tap = drafter.config.taps.len * c.hidden * 2;
+    const draft: DraftCost = .{ .fixed = fixed, .lane = drafter.laneBytes(), .tap = tap };
+    const target = fl.state.cacheBytes(&c, 129);
+    const reserved = draft.lane + draft.tap;
+    const left = fixed + 3 * target + 2 * reserved;
+    const auto: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3 };
+    const exact: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 3, .lanes_fixed = true };
+    const two: api.Open = .{ .dir = "", .model_type = "minimax_m3_vl", .lanes = 2, .lanes_fixed = true };
+    var why: []const u8 = "";
+    const fitted = (try fitAdmission(a, &c, left, auto, 128, draft, &why)).?;
+    try std.testing.expectEqual(@as(u32, 2), fitted.lanes);
+    try std.testing.expectEqual(2 * target, fitted.ledger);
+    try std.testing.expect((try fitAdmission(a, &c, left, exact, 128, draft, &why)) == null);
+    defer a.free(why);
+    const pair = (try fitAdmission(a, &c, left, two, 128, draft, &why)).?;
+    try std.testing.expectEqual(2 * target, pair.ledger);
+    try std.testing.expectEqual(@as(usize, 127), longestWindow(&c, fixed + fl.state.cacheBytes(&c, 128) + reserved, 128, draft));
+}
+
+test "MiniMax admission: DFlash2 fixed, lane and tap reservations share the target and snapshot ledger" {
+    try expectDraftedAdmission(fl.dflash2);
+}
+
+test "MiniMax admission: DSpark fixed, lane and tap reservations share the target and snapshot ledger" {
+    try expectDraftedAdmission(fl.dspark);
 }
