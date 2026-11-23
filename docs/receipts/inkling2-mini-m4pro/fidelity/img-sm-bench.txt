@@ -1,0 +1,80 @@
+ 19:26:53  up 4 days 19:48,  1 user,  load average: 17.51, 12.61, 9.77
+bench all.metal n lc reps (GPU ms medians; Apple M4 Pro; scores, probs and O compared bitwise on the same run)
+== n=6121 lc=256
+scores: 0 of 25071616 differ from bf(bf(fp32 dot) * scale)
+n=6121 lc=256 heads=16: fp32 score chunk 100.3 MB
+base  qk32 1.951 ms
+base  sm32 0.850 ms (floor r+w at 250GB/s 0.802)
+base  pv32 1.752 ms
+new   qk_bf 1.313 ms
+new   sm_bf 0.438 ms
+new   pv_bf 1.698 ms
+sm_bf probs vs fp32 probs: 0 of 25071616 differ; O hash 7213fa64d61b8f38 vs 7213fa64d61b8f38
+fused O hash 7213fa64d61b8f38
+== n=6121 lc=512
+scores: 0 of 50143232 differ from bf(bf(fp32 dot) * scale)
+n=6121 lc=512 heads=16: fp32 score chunk 200.6 MB
+base  qk32 2.618 ms
+base  sm32 1.676 ms (floor r+w at 250GB/s 1.605)
+base  pv32 2.795 ms
+new   qk_bf 2.578 ms
+new   sm_bf 0.856 ms
+new   pv_bf 2.728 ms
+sm_bf probs vs fp32 probs: 0 of 50143232 differ; O hash 07463bc8d5d760d9 vs 07463bc8d5d760d9
+fused O hash 07463bc8d5d760d9
+== n=4093 lc=513
+scores: 0 of 33595344 differ from bf(bf(fp32 dot) * scale)
+n=4093 lc=513 heads=16: fp32 score chunk 134.4 MB
+base  qk32 1.918 ms
+base  sm32 1.112 ms (floor r+w at 250GB/s 1.075)
+base  pv32 2.071 ms
+new   qk_bf 1.904 ms
+new   sm_bf 0.569 ms
+new   pv_bf 2.075 ms
+sm_bf probs vs fp32 probs: 0 of 33595344 differ; O hash 0ed86c2211625847 vs 0ed86c2211625847
+fused O hash 0ed86c2211625847
+== n=2081 lc=100
+scores: 0 of 3329600 differ from bf(bf(fp32 dot) * scale)
+n=2081 lc=100 heads=16: fp32 score chunk 13.3 MB
+base  qk32 0.379 ms
+base  sm32 0.086 ms (floor r+w at 250GB/s 0.107)
+base  pv32 0.510 ms
+new   qk_bf 0.375 ms
+new   sm_bf 0.082 ms
+new   pv_bf 0.502 ms
+sm_bf probs vs fp32 probs: 0 of 3329600 differ; O hash f1b3cc2dcc4236e0 vs f1b3cc2dcc4236e0
+fused O hash f1b3cc2dcc4236e0
+== n=1001 lc=77
+scores: 0 of 1233232 differ from bf(bf(fp32 dot) * scale)
+n=1001 lc=77 heads=16: fp32 score chunk 4.9 MB
+base  qk32 0.506 ms
+base  sm32 0.117 ms (floor r+w at 250GB/s 0.039)
+base  pv32 0.671 ms
+new   qk_bf 0.505 ms
+new   sm_bf 0.107 ms
+new   pv_bf 0.664 ms
+sm_bf probs vs fp32 probs: 0 of 1233232 differ; O hash e3a0459a41d620cc vs e3a0459a41d620cc
+fused O hash e3a0459a41d620cc
+== n=130 lc=129
+scores: 0 of 268320 differ from bf(bf(fp32 dot) * scale)
+n=130 lc=129 heads=16: fp32 score chunk 1.1 MB
+base  qk32 0.172 ms
+base  sm32 0.077 ms (floor r+w at 250GB/s 0.009)
+base  pv32 0.138 ms
+new   qk_bf 0.170 ms
+new   sm_bf 0.075 ms
+new   pv_bf 0.136 ms
+sm_bf probs vs fp32 probs: 0 of 268320 differ; O hash e215cfce330daf54 vs e215cfce330daf54
+fused O hash e215cfce330daf54
+== n=65 lc=64
+scores: 0 of 66560 differ from bf(bf(fp32 dot) * scale)
+n=65 lc=64 heads=16: fp32 score chunk 0.3 MB
+base  qk32 0.055 ms
+base  sm32 0.038 ms (floor r+w at 250GB/s 0.002)
+base  pv32 0.053 ms
+new   qk_bf 0.055 ms
+new   sm_bf 0.038 ms
+new   pv_bf 0.052 ms
+sm_bf probs vs fp32 probs: 0 of 66560 differ; O hash 2ab2386c5c7293c8 vs 2ab2386c5c7293c8
+fused O hash 2ab2386c5c7293c8
+ 19:26:56  up 4 days 19:48,  1 user,  load average: 17.51, 12.61, 9.77
