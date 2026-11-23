@@ -63,19 +63,20 @@ const Delimiter = struct {
     close: bool,
 };
 
-/// The first `--boundary` at a line start that `--`, or blanks and a CRLF or LF, follows; other such text is body.
+/// The first `--boundary` line start, `--` if it closes, then blanks and a CRLF, LF or (to close) the end; else body.
 fn delimiter(body: []const u8, from: usize, bound: []const u8) ?Delimiter {
     var pos = from + 2;
     while (std.mem.indexOfPos(u8, body, pos, bound)) |at| : (pos = at + 1) {
         const line = at - 2;
         if (!std.mem.eql(u8, body[line..at], "--")) continue;
         if (line != 0 and body[line - 1] != '\n') continue;
-        const end = at + bound.len;
-        if (std.mem.startsWith(u8, body[end..], "--")) return .{ .line = line, .next = end + 2, .close = true };
-        var i = end;
+        var i = at + bound.len;
+        const close = std.mem.startsWith(u8, body[i..], "--");
+        if (close) i += 2;
         while (i < body.len and (body[i] == ' ' or body[i] == '\t')) i += 1;
-        if (std.mem.startsWith(u8, body[i..], "\r\n")) return .{ .line = line, .next = i + 2, .close = false };
-        if (std.mem.startsWith(u8, body[i..], "\n")) return .{ .line = line, .next = i + 1, .close = false };
+        if (close and i == body.len) return .{ .line = line, .next = i, .close = true };
+        if (std.mem.startsWith(u8, body[i..], "\r\n")) return .{ .line = line, .next = i + 2, .close = close };
+        if (std.mem.startsWith(u8, body[i..], "\n")) return .{ .line = line, .next = i + 1, .close = close };
     }
     return null;
 }

@@ -86,6 +86,25 @@ test "ocr multipart: boundary-like text inside a body stays in the body" {
     try t.expectEqualStrings(inner, parts[0].body);
 }
 
+test "ocr multipart: the close delimiter takes only blanks and a line break or the end after it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const head = "--XyZ\r\nContent-Disposition: form-data; name=a\r\n\r\n";
+    const b = "--XyZ\r\nContent-Disposition: form-data; name=b\r\n\r\nB\r\n";
+    // a `--XyZ--` line with more text is body, so a later part is still read
+    const parts = try parse(&arena, head ++ "A\r\n--XyZ--junk\r\n" ++ b ++ "--XyZ--");
+    try t.expectEqual(@as(usize, 2), parts.len);
+    try t.expectEqualStrings("A\r\n--XyZ--junk", parts[0].body);
+    try t.expectEqualStrings("B", parts[1].body);
+    try t.expectError(error.Malformed, parse(&arena, head ++ "A\r\n--XyZ--junk"));
+    try t.expectError(error.Malformed, parse(&arena, head ++ "A\r\n--XyZ-- x\r\n"));
+    inline for ([_][]const u8{ "--XyZ--", "--XyZ-- \t", "--XyZ--\r\n", "--XyZ--\t\n", "--XyZ--\r\nepilogue" }) |close| {
+        const got = try parse(&arena, head ++ "A\r\n" ++ close);
+        try t.expectEqual(@as(usize, 1), got.len);
+        try t.expectEqualStrings("A", got[0].body);
+    }
+}
+
 test "ocr multipart: missing delimiters are malformed" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
