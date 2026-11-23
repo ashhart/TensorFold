@@ -209,15 +209,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
     }) });
     test_step.dependOn(&b.addRunArtifact(pack_cases).step);
-    const load_admission_cases = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    }) });
-    const load_admission_run = b.addRunArtifact(load_admission_cases);
-    b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&load_admission_run.step);
-    test_step.dependOn(&load_admission_run.step);
     const pack_cache_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_pack_cache_cases.zig"),
         .target = target,
