@@ -81,13 +81,13 @@ const Run = struct {
         const repo = try std.fs.path.join(r.a, &.{ r.root, "models--Org--Model" });
         try std.Io.Dir.cwd().createDirPath(std.testing.io, try std.fs.path.join(r.a, &.{ repo, "refs" }));
         try std.Io.Dir.cwd().createDirPath(std.testing.io, try std.fs.path.join(r.a, &.{ repo, "snapshots", revision }));
-        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ repo, "refs/main" }), .data = "cccccccccccccccccccccccccccccccccccccccc" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ repo, "refs/main" }), .data = revision });
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ repo, "snapshots", revision, "config.json" }), .data = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}}" });
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ repo, "snapshots", revision, "model.safetensors" }), .data = "fixture" });
         const draft = try std.fs.path.join(r.a, &.{ r.root, "models--Org--Draft" });
         try std.Io.Dir.cwd().createDirPath(std.testing.io, try std.fs.path.join(r.a, &.{ draft, "refs" }));
         try std.Io.Dir.cwd().createDirPath(std.testing.io, try std.fs.path.join(r.a, &.{ draft, "snapshots", draft_revision }));
-        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ draft, "refs/main" }), .data = "dddddddddddddddddddddddddddddddddddddddd" });
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ draft, "refs/main" }), .data = draft_revision });
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(r.a, &.{ draft, "snapshots", draft_revision, "config.json" }), .data = "{\"model_type\": \"qwen4_exp_draft\"}" });
     }
 
@@ -191,6 +191,24 @@ test "start CLI: explicit consent shows sizes and pulls both pinned specs before
     r.input = "yes\n";
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{}));
     try std.testing.expectEqual(@as(usize, 2), r.pulls.items.len);
+}
+
+test "start CLI: an unpublished snapshot is not complete and cannot skip its pull" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    try r.cache();
+    const repo = try std.fs.path.join(a, &.{ r.root, "models--Org--Model" });
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, try std.fs.path.join(a, &.{ repo, "refs/main" }));
+    const f = try world(&r, try events(a, "Ready."));
+    defer f.stop();
+    try r.standIn(f.port);
+    try std.testing.expectEqual(@as(u8, 2), try r.command(&.{"--check"}));
+    try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "nothing was downloaded") != null);
+    try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
 }
 
 test "start CLI: a cached model answers once, prints no key and --check reaps its serve child" {
