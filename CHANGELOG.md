@@ -9,6 +9,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: grouped prompt experts, the dense prompt and loop-gate MMA tiles, 8-row prompt attention, deduplicated verify experts for drafted rounds of 2 to 63 rows and one DSpark head pass for all drafting streams of a round all keep the one-row kernels' bytes, and the kernel contract registers them with launch records and planted controls. On an M4 Pro a cold prompt reaches its first token at 0.87 (8,192 tokens) to 0.72 (65,536) of `mlx_lm`'s rate, `fibonacci-raw` decodes at 31.1 tokens a second plain and 35.8 with DSpark against MLX's 23.1, and four drafted streams are within noise of plain (code 3 % under, chat level); token hashes and drafted-equals-plain are unchanged. Raw results, their sources and the build are in [the receipt](docs/receipts/inkling2-mini-m4pro/README.md) (#4337).
 
+- Qwen 3.5 and 3.8: one EOS rule for every family reader, and qwen27 now reads `generation_config.json`, so its stop tokens match the served set on the ten configs that declare `<|im_end|>` (#4678). Thanks @devopsfortunato.
+
 - Nemotron on CUDA: `TF_NEMOTRON_WIDE_ROUNDS=1` (opt-in) runs decode rounds of up to 16 streams; +2% to +6% at 16 streams on a GB10, tokens unchanged; off changes nothing.
 
 - macOS: the native server links `memcpy` from libSystem again (Hy4-flash config parsing no longer pulls in compiler-rt), and two macOS-only tests match current behaviour.
