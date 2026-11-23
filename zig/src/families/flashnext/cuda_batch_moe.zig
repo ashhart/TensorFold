@@ -28,5 +28,5 @@ pub fn sumSlots(self: anytype, r0: usize, rows: usize) !void {
     a.add(s.moe_f32 + r0 * dims * 4);
     a.add(batch.cint(dims));
     a.add(batch.cint(slots));
-    try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
+    try cuda.launch.launch(self.k.moe_sum, .{ .pdl = self.k.pdl, .grid = .{ .x = @intCast(rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }

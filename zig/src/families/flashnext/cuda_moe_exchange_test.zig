@@ -69,7 +69,7 @@ const Bufs = struct { y: u64 = 0x1000_0000, wts: u64 = 0x2000_0000, moe_f32: u64
 
 const Pass = struct {
     s: *const Bufs,
-    k: struct { moe_sum: cuda.Function },
+    k: struct { moe_sum: cuda.Function, pdl: bool = false },
     stream: cuda.Stream,
     pending_f32: bool = false,
 };

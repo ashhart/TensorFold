@@ -19,7 +19,7 @@ struct Rows {
 };
 
 template <int NK, int NV>
-__device__ __forceinline__ void load_rows(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, int r0,
+__device__ __forceinline__ void load_rows(const __nv_bfloat16* P, const __nv_bfloat16* cs, int r0,
                                           int n, const int (&ch)[3], int hv, int p, Rows& in) {
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
 #pragma unroll
@@ -78,9 +78,9 @@ __device__ __forceinline__ void front_rows(const Rows& in, const float (&w)[3][T
 
 // the chain's 256 threads after a batch's steps: fn_gdn_norm's arithmetic for its n rows from row r0 (ys[j][dv])
 template <int NK, int NV>
-__device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* __restrict__ P,
-                                          const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
-                                          float* __restrict__ xs, int r0, int n, int hv, float* rinv) {
+__device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bfloat16* P,
+                                          const __nv_bfloat16* norm_w, float eps, __nv_bfloat16* out,
+                                          float* xs, int r0, int n, int hv, float* rinv) {
     constexpr int C = G<NK, NV>::C, PW = G<NK, NV>::PW;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     cbar();  // every readout of the batch is in ys
@@ -120,11 +120,11 @@ __device__ __forceinline__ void norm_rows(const float (*ys)[DV], const __nv_bflo
 
 // CUTS: the chain also stores its state after two given rows (prompt cache marks inside the pass)
 template <int NK, int NV, bool CUTS>
-__device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
-                                    const __nv_bfloat16* __restrict__ cw, const float* __restrict__ a_log,
-                                    const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
-                                    const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out,
-                                    float* __restrict__ xs, float* __restrict__ ys_out, int cut0, float* cut0_state,
+__device__ __forceinline__ void run(const __nv_bfloat16* P, const __nv_bfloat16* cs,
+                                    const __nv_bfloat16* cw, const float* a_log,
+                                    const float* dt_bias, const float* state_in, float* state_out, int rows,
+                                    const __nv_bfloat16* norm_w, float eps, __nv_bfloat16* out,
+                                    float* xs, float* ys_out, int cut0, float* cut0_state,
                                     int cut1, float* cut1_state) {
     extern __shared__ __align__(16) unsigned char smem[];
     unsigned char* stage = smem;                                                 // [2][STEPS] rows
@@ -235,10 +235,10 @@ __device__ __forceinline__ void run(const __nv_bfloat16* __restrict__ P, const _
 }  // namespace gdn_fused
 
 extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
-        const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
-        float* __restrict__ ys_out, int cut0, float* cut0_state, int cut1, float* cut1_state) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, const float* state_in, float* state_out, int rows,
+        const __nv_bfloat16* norm_w, float eps, __nv_bfloat16* out, float* xs,
+        float* ys_out, int cut0, float* cut0_state, int cut1, float* cut1_state) { flashnext_pdl::enter();
     // a pass without a mark inside (nearly all) runs the chain without the per-row check
     if (cut0 == 0 && cut1 == 0)
         gdn_fused::run<16, 48, false>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, 0, nullptr, 0, nullptr);
@@ -248,10 +248,10 @@ extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused(
 
 // fn_gdn_fused on one rank's 8 key and 24 value heads (8,240-wide projection rows, a 5,120-channel conv window).
 extern "C" __global__ void __launch_bounds__(gdn_fused::THREADS) fn_gdn_fused_h8(
-        const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs, const __nv_bfloat16* __restrict__ cw,
-        const float* __restrict__ a_log, const float* __restrict__ dt_bias, const float* state_in, float* state_out, int rows,
-        const __nv_bfloat16* __restrict__ norm_w, float eps, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
-        float* __restrict__ ys_out) {
+        const __nv_bfloat16* P, const __nv_bfloat16* cs, const __nv_bfloat16* cw,
+        const float* a_log, const float* dt_bias, const float* state_in, float* state_out, int rows,
+        const __nv_bfloat16* norm_w, float eps, __nv_bfloat16* out, float* xs,
+        float* ys_out) { flashnext_pdl::enter();
     // the marks run with whole heads only: a rank's half set never cuts
     gdn_fused::run<8, 24, false>(P, cs, cw, a_log, dt_bias, state_in, state_out, rows, norm_w, eps, out, xs, ys_out, 0, nullptr, 0, nullptr);
 }

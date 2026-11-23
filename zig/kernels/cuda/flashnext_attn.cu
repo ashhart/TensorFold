@@ -3,6 +3,7 @@
 // glue.py and attention.py's arithmetic and bf16 rounding points; the attention dots on mma tiles, K ascending.
 
 #include <cuda_bf16.h>
+#include "flashnext_pdl.cuh"
 #include <math.h>
 #include <stdint.h>
 
@@ -23,7 +24,7 @@ using tf_common::block_sum_serial;
 __device__ __forceinline__ float inv_rms(float ss, int n, float eps) { return tf_common::rms_scale(ss, n, eps); }
 
 // Rotate-half RoPE over the first 2 * half features at `pos`: cos and sin of the fp32 angle (full range reduction).
-__device__ __forceinline__ float rope(float xn, float xpn, int d, int half, int pos, const float* __restrict__ inv) {
+__device__ __forceinline__ float rope(float xn, float xpn, int d, int half, int pos, const float* inv) {
     if (d >= 2 * half) return xn;
     const int i = d < half ? d : d - half;
     float s, c;
@@ -51,12 +52,12 @@ __device__ __forceinline__ int media_pos(int pos, int d, int half, const int* ro
 
 // glue._attn_prep (text positions, bf16 cache), program (row, head): heads normed, rounded, roped, rounded, stored.
 template <bool PAGED>
-__device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
-                                                               const float* __restrict__ QW, const float* __restrict__ KW,
-                                                               const float* __restrict__ IW, const float* __restrict__ INV,
-                                                               __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
-                                                               __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
-                                                               __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
+__device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* P, const int* POS0,
+                                                               const float* QW, const float* KW,
+                                                               const float* IW, const float* INV,
+                                                               __nv_bfloat16* Q, __nv_bfloat16* KC,
+                                                               __nv_bfloat16* VC, __nv_bfloat16* IQ,
+                                                               __nv_bfloat16* IKC, float eps, int PW, int NQ, int NKV,
                                                                int NI, int IHD, int HALF, const int* rope3, int n,
                                                                int delta, const Pg& pg) {
     __shared__ float scratch[32];
@@ -92,53 +93,53 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
-                                                               const float* __restrict__ QW, const float* __restrict__ KW,
-                                                               const float* __restrict__ IW, const float* __restrict__ INV,
-                                                               __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
-                                                               __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
-                                                               __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF) {
+extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat16* P, const int* POS0,
+                                                               const float* QW, const float* KW,
+                                                               const float* IW, const float* INV,
+                                                               __nv_bfloat16* Q, __nv_bfloat16* KC,
+                                                               __nv_bfloat16* VC, __nv_bfloat16* IQ,
+                                                               __nv_bfloat16* IKC, float eps, int PW, int NQ, int NKV,
+                                                               int NI, int IHD, int HALF) { flashnext_pdl::enter();
     fn_attn_prep_body<false>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0,
                              0, Pg{});
 }
 
-extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
-                                                               const float* __restrict__ QW, const float* __restrict__ KW,
-                                                               const float* __restrict__ IW, const float* __restrict__ INV,
-                                                               __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
-                                                               __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
-                                                               __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
+extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_bfloat16* P, const int* POS0,
+                                                               const float* QW, const float* KW,
+                                                               const float* IW, const float* INV,
+                                                               __nv_bfloat16* Q, __nv_bfloat16* KC,
+                                                               __nv_bfloat16* VC, __nv_bfloat16* IQ,
+                                                               __nv_bfloat16* IKC, float eps, int PW, int NQ, int NKV,
+                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) { flashnext_pdl::enter();
     fn_attn_prep_body<false>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n,
                              delta, Pg{});
 }
 
 // fn_attn_prep through a stream's page table: KC, VC and IKC are its arena's slot in page 0.
 extern "C" __global__ void __launch_bounds__(256)
-    fn_attn_prep_paged(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0, const float* __restrict__ QW,
-                       const float* __restrict__ KW, const float* __restrict__ IW, const float* __restrict__ INV,
-                       __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
-                       __nv_bfloat16* __restrict__ IQ, __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ,
-                       int NKV, int NI, int IHD, int HALF, Pg pg) {
+    fn_attn_prep_paged(const __nv_bfloat16* P, const int* POS0, const float* QW,
+                       const float* KW, const float* IW, const float* INV,
+                       __nv_bfloat16* Q, __nv_bfloat16* KC, __nv_bfloat16* VC,
+                       __nv_bfloat16* IQ, __nv_bfloat16* IKC, float eps, int PW, int NQ,
+                       int NKV, int NI, int IHD, int HALF, Pg pg) { flashnext_pdl::enter();
     fn_attn_prep_body<true>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0,
                             0, pg);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
-    fn_attn_prep_media_paged(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
-                             const float* __restrict__ QW, const float* __restrict__ KW, const float* __restrict__ IW,
-                             const float* __restrict__ INV, __nv_bfloat16* __restrict__ Q,
-                             __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
-                             __nv_bfloat16* __restrict__ IQ, __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ,
-                             int NKV, int NI, int IHD, int HALF, const int* rope3, int n, int delta, Pg pg) {
+    fn_attn_prep_media_paged(const __nv_bfloat16* P, const int* POS0,
+                             const float* QW, const float* KW, const float* IW,
+                             const float* INV, __nv_bfloat16* Q,
+                             __nv_bfloat16* KC, __nv_bfloat16* VC,
+                             __nv_bfloat16* IQ, __nv_bfloat16* IKC, float eps, int PW, int NQ,
+                             int NKV, int NI, int IHD, int HALF, const int* rope3, int n, int delta, Pg pg) { flashnext_pdl::enter();
     fn_attn_prep_body<true>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n,
                             delta, pg);
 }
 
 // glue._attn_gate, program (row, head) of HD threads: bf16(o / (1 + e^-gate)) and its 32-group sums.
-extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat16* __restrict__ O, const __nv_bfloat16* __restrict__ P,
-                                                               __nv_bfloat16* __restrict__ OUT, float* __restrict__ XS, int PW, int NQ) {
+extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat16* O, const __nv_bfloat16* P,
+                                                               __nv_bfloat16* OUT, float* XS, int PW, int NQ) { flashnext_pdl::enter();
     const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x;
     const float o = bf(O[(static_cast<long long>(r) * NQ + h) * HD + d]);
     const float g = bf(P[static_cast<long long>(r) * PW + h * 2 * HD + HD + d]);
@@ -150,9 +151,9 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat
 
 // attention._pool, a block a completed block of RATIO indexer keys: their mean, rounded, normed and roped at its start.
 template <bool PAGED>
-__device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
-                                                              const int* __restrict__ POS0, const float* __restrict__ W,
-                                                              const float* __restrict__ INV, float eps, int R, int DI, int HALF,
+__device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* IKC, __nv_bfloat16* POOLED,
+                                                              const int* POS0, const float* W,
+                                                              const float* INV, float eps, int R, int DI, int HALF,
                                                               int RATIO, const int* rope3, int n, int delta,
                                                               const Pg& pg) {
     __shared__ float scratch[32];
@@ -175,40 +176,40 @@ __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict
     POOLED[at + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
 }
 
-extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
-                                                              const int* __restrict__ POS0, const float* __restrict__ W,
-                                                              const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO) {
+extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* IKC, __nv_bfloat16* POOLED,
+                                                              const int* POS0, const float* W,
+                                                              const float* INV, float eps, int R, int DI, int HALF,
+                                                              int RATIO) { flashnext_pdl::enter();
     fn_qsa_pool_body<false>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0, Pg{});
 }
 
-extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool_media(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
-                                                              const int* __restrict__ POS0, const float* __restrict__ W,
-                                                              const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO, const int* rope3, int n, int delta) {
+extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool_media(const __nv_bfloat16* IKC, __nv_bfloat16* POOLED,
+                                                              const int* POS0, const float* W,
+                                                              const float* INV, float eps, int R, int DI, int HALF,
+                                                              int RATIO, const int* rope3, int n, int delta) { flashnext_pdl::enter();
     fn_qsa_pool_body<false>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta, Pg{});
 }
 
 // fn_qsa_pool through a stream's page table: IKC and POOLED are its arena's slot in page 0.
 extern "C" __global__ void __launch_bounds__(128)
-    fn_qsa_pool_paged(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
-                      const int* __restrict__ POS0, const float* __restrict__ W, const float* __restrict__ INV,
-                      float eps, int R, int DI, int HALF, int RATIO, Pg pg) {
+    fn_qsa_pool_paged(const __nv_bfloat16* IKC, __nv_bfloat16* POOLED,
+                      const int* POS0, const float* W, const float* INV,
+                      float eps, int R, int DI, int HALF, int RATIO, Pg pg) { flashnext_pdl::enter();
     fn_qsa_pool_body<true>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0, pg);
 }
 
 extern "C" __global__ void __launch_bounds__(128)
-    fn_qsa_pool_media_paged(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
-                            const int* __restrict__ POS0, const float* __restrict__ W, const float* __restrict__ INV,
+    fn_qsa_pool_media_paged(const __nv_bfloat16* IKC, __nv_bfloat16* POOLED,
+                            const int* POS0, const float* W, const float* INV,
                             float eps, int R, int DI, int HALF, int RATIO, const int* rope3, int n, int delta,
-                            Pg pg) {
+                            Pg pg) { flashnext_pdl::enter();
     fn_qsa_pool_body<true>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta, pg);
 }
 
 // attention._scores, program (row, 64 blocks): the heads' sum of relu(q . k) / sqrt(DI), rows past TOP (DI 128).
-extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloat16* __restrict__ IQ, const __nv_bfloat16* __restrict__ POOLED,
-                                                                const int* __restrict__ POS0, float* __restrict__ SC, int NB, int HI,
-                                                                int RATIO, int TOP) {
+extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloat16* IQ, const __nv_bfloat16* POOLED,
+                                                                const int* POS0, float* SC, int NB, int HI,
+                                                                int RATIO, int TOP) { flashnext_pdl::enter();
     constexpr int DI = 128;
     __shared__ float qs[8][DI];
     const int r = blockIdx.x, j = blockIdx.y;
@@ -242,10 +243,10 @@ extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloa
 
 // A row, KV head and chunk: stage its key addresses once a tile, then retain the online softmax and partials.
 template <int NB, bool ONE = false, bool FUSE = false, bool PAGED = false>
-__device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                                            const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                                            float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                            const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR,
+__device__ __forceinline__ void attn_chunks(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                                            const __nv_bfloat16* VC, const int* POS0,
+                                            float* PO, float* PM, float* PL,
+                                            const int* IDS, const int* NKR, const int* SPR,
                                             int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA,
                                             Pg pg = {}) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -465,79 +466,79 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
 }
 
 // attn_chunks one tile at a time (prompt chunks: two blocks a multiprocessor).
-extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                                                                 const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                                                                 float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                                                 const int* __restrict__ IDS, const int* __restrict__ NKR,
-                                                                 const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                 float SCALE, int IDW, int QSA) {
+extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                                                                 const __nv_bfloat16* VC, const int* POS0,
+                                                                 float* PO, float* PM, float* PL,
+                                                                 const int* IDS, const int* NKR,
+                                                                 const int* SPR, int H, int HK, int G, int CH, int NCH,
+                                                                 float SCALE, int IDW, int QSA) { flashnext_pdl::enter();
     attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
 // attn_chunks on one buffer, a row's chunks merged in place (prompt rows): OUT bf16 in PO's place, no partials.
-extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                                                                const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                                                                float* __restrict__ OUT, const int* __restrict__ IDS, const int* __restrict__ NKR,
-                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH,
-                                                                float SCALE, int IDW, int QSA) {
+extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                                                                const __nv_bfloat16* VC, const int* POS0,
+                                                                float* OUT, const int* IDS, const int* NKR,
+                                                                const int* SPR, int H, int HK, int G, int CH,
+                                                                float SCALE, int IDW, int QSA) { flashnext_pdl::enter();
     attn_chunks<1, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW, QSA);
 }
 
 // attn_chunks with one buffer, keys then values (17 to 256 rows: prompt chunks and wide decode rounds), the same sums.
-extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_one(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                                                                     const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                                                                     float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                                                     const int* __restrict__ IDS, const int* __restrict__ NKR,
-                                                                     const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                     float SCALE, int IDW, int QSA) {
+extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_one(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                                                                     const __nv_bfloat16* VC, const int* POS0,
+                                                                     float* PO, float* PM, float* PL,
+                                                                     const int* IDS, const int* NKR,
+                                                                     const int* SPR, int H, int HK, int G, int CH, int NCH,
+                                                                     float SCALE, int IDW, int QSA) { flashnext_pdl::enter();
     attn_chunks<1, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
 // attn_chunks with the next tile's loads in flight (a decode round's few rows): the same sums.
-extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_ahead(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                                                                       const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                                                                       float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                                                       const int* __restrict__ IDS, const int* __restrict__ NKR,
-                                                                       const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                       float SCALE, int IDW, int QSA) {
+extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_ahead(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                                                                       const __nv_bfloat16* VC, const int* POS0,
+                                                                       float* PO, float* PM, float* PL,
+                                                                       const int* IDS, const int* NKR,
+                                                                       const int* SPR, int H, int HK, int G, int CH, int NCH,
+                                                                       float SCALE, int IDW, int QSA) { flashnext_pdl::enter();
     attn_chunks<2>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
 // fn_attn_fused, fn_attn_chunks_one and fn_attn_chunks_ahead through a stream's page table: the same sums.
 extern "C" __global__ void __launch_bounds__(128)
-    fn_attn_fused_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0, float* __restrict__ OUT,
-                        const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR, int H,
-                        int HK, int G, int CH, float SCALE, int IDW, int QSA, Pg pg) {
+    fn_attn_fused_paged(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                        const __nv_bfloat16* VC, const int* POS0, float* OUT,
+                        const int* IDS, const int* NKR, const int* SPR, int H,
+                        int HK, int G, int CH, float SCALE, int IDW, int QSA, Pg pg) { flashnext_pdl::enter();
     attn_chunks<1, true, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW,
                                      QSA, pg);
 }
 
 extern "C" __global__ void __launch_bounds__(128)
-    fn_attn_chunks_one_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                             const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0, float* __restrict__ PO,
-                             float* __restrict__ PM, float* __restrict__ PL, const int* __restrict__ IDS,
-                             const int* __restrict__ NKR, const int* __restrict__ SPR, int H, int HK, int G, int CH,
-                             int NCH, float SCALE, int IDW, int QSA, Pg pg) {
+    fn_attn_chunks_one_paged(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                             const __nv_bfloat16* VC, const int* POS0, float* PO,
+                             float* PM, float* PL, const int* IDS,
+                             const int* NKR, const int* SPR, int H, int HK, int G, int CH,
+                             int NCH, float SCALE, int IDW, int QSA, Pg pg) { flashnext_pdl::enter();
     attn_chunks<1, true, false, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA,
                                       pg);
 }
 
 extern "C" __global__ void __launch_bounds__(128)
-    fn_attn_chunks_ahead_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
-                               const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
-                               float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                               const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR,
-                               int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA, Pg pg) {
+    fn_attn_chunks_ahead_paged(const __nv_bfloat16* Q, const __nv_bfloat16* KC,
+                               const __nv_bfloat16* VC, const int* POS0,
+                               float* PO, float* PM, float* PL,
+                               const int* IDS, const int* NKR, const int* SPR,
+                               int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA, Pg pg) { flashnext_pdl::enter();
     attn_chunks<2, false, false, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA,
                                        pg);
 }
 
 // attention._merge, program (row, head) of HD threads: the head's chunk partials merged in chunk order, o / l.
-__device__ __forceinline__ void fn_attn_merge_body(const float* __restrict__ PO, const float* __restrict__ PM,
-                                                   const float* __restrict__ PL, const int* __restrict__ POS0,
-                                                   __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
-                                                   const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH, int QSA) {
+__device__ __forceinline__ void fn_attn_merge_body(const float* PO, const float* PM,
+                                                   const float* PL, const int* POS0,
+                                                   __nv_bfloat16* OUT, const int* NKR,
+                                                   const int* SPR, int H, int HK, int G, int CH, int NCH, int QSA) {
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     int n = POS0[0] + r + 1;
     if (QSA && SPR[r] != 0) n = NKR[r];
@@ -559,25 +560,25 @@ __device__ __forceinline__ void fn_attn_merge_body(const float* __restrict__ PO,
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM,
-                                                                const float* __restrict__ PL, const int* __restrict__ POS0,
-                                                                __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
-                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                int QSA) {
+extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* PO, const float* PM,
+                                                                const float* PL, const int* POS0,
+                                                                __nv_bfloat16* OUT, const int* NKR,
+                                                                const int* SPR, int H, int HK, int G, int CH, int NCH,
+                                                                int QSA) { flashnext_pdl::enter();
     fn_attn_merge_body(PO, PM, PL, POS0, OUT, NKR, SPR, H, HK, G, CH, NCH, QSA);
 }
 
 #include "flashnext_qsa_tile.cuh"
 
 // The indexer scores 8 rows a block, every head, the sums in fn_qsa_scores' order (its bits).
-template __global__ void qsa_tile::scores<8, 4>(const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__,
-    const int* __restrict__, float* __restrict__, int, int, int, int);
+template __global__ void qsa_tile::scores<8, 4>(const __nv_bfloat16*, const __nv_bfloat16*,
+    const int*, float*, int, int, int, int);
 
 // qsa_tile::scores<8, 4> through a stream's page table: POOLED is its arena's slot in page 0, the same sums.
 extern "C" __global__ void __launch_bounds__(256)
-    fn_qsa_scores_paged(const __nv_bfloat16* __restrict__ IQ, const __nv_bfloat16* __restrict__ POOLED,
-                        const int* __restrict__ POS0, float* __restrict__ SC, int NB, int RATIO, int TOP, int rows,
-                        Pg pg) {
+    fn_qsa_scores_paged(const __nv_bfloat16* IQ, const __nv_bfloat16* POOLED,
+                        const int* POS0, float* SC, int NB, int RATIO, int TOP, int rows,
+                        Pg pg) { flashnext_pdl::enter();
     qsa_tile::scores_body<8, 4, true>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, pg);
 }
 

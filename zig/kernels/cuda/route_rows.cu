@@ -3,12 +3,15 @@
 // Router logits on mma tiles, K ascending from zero (a row's sums never depend on the row count), and top-k rows.
 
 #include <cuda_bf16.h>
+#include "flashnext_pdl.cuh"
 #include <math.h>
 #include <stdint.h>
 
 #include "common/glue_math.cuh"
 #include "common/qmm_frag.cuh"
+#define TF_ROUTER_PDL
 #include "common/router_mma.cuh"
+#undef TF_ROUTER_PDL
 
 using namespace tf_glue;
 
@@ -47,30 +50,30 @@ __device__ __forceinline__ void block_best(float& v, int& i, float (*sv)[NT / 32
 using namespace tf_route;
 
 // route_logits over 32 experts a block (prompt chunks: the input rows are read once per 32 experts).
-extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfloat16* __restrict__ X, int x_ld,
-                                                                  const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
-                                                                  int M, int D, int E) {
+extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfloat16* X, int x_ld,
+                                                                  const __nv_bfloat16* W, float* OUT,
+                                                                  int M, int D, int E) { flashnext_pdl::enter();
     tf_router_mma::logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
 }
 
 // route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows), the same sums; EFAST block order.
-extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
-                                                                       const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
-                                                                       int M, int D, int E) {
+extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* X, int x_ld,
+                                                                       const __nv_bfloat16* W, float* OUT,
+                                                                       int M, int D, int E) { flashnext_pdl::enter();
     tf_router_mma::logits<8, 2, 64, 8, true>(X, x_ld, W, OUT, M, D, E);
 }
 
 // route_logits with three stages of 256 in flight (up to 16 rows, where the router rows' reads set its time).
-extern "C" __global__ void __launch_bounds__(128) tf_route_logits_few(const __nv_bfloat16* __restrict__ X, int x_ld,
-                                                                     const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
-                                                                     int M, int D, int E) {
+extern "C" __global__ void __launch_bounds__(128) tf_route_logits_few(const __nv_bfloat16* X, int x_ld,
+                                                                     const __nv_bfloat16* W, float* OUT,
+                                                                     int M, int D, int E) { flashnext_pdl::enter();
     tf_router_mma::logits<4, 3, 256>(X, x_ld, W, OUT, M, D, E);
 }
 
 // A row's TOPK largest of NE logits (lower id on ties), bf16(e^(l_k - l_0) / sum); `shared`: slot TOPK gated by NE.
-extern "C" __global__ void __launch_bounds__(NT) tf_route_topk(const float* __restrict__ L, int NL, int NE, int TOPK,
-                                                               int* __restrict__ PICK, float* __restrict__ WTS, int SLOTS,
-                                                               int shared) {
+extern "C" __global__ void __launch_bounds__(NT) tf_route_topk(const float* L, int NL, int NE, int TOPK,
+                                                               int* PICK, float* WTS, int SLOTS,
+                                                               int shared) { flashnext_pdl::enter();
     __shared__ float sv[2][NT / 32];
     __shared__ int si[2][NT / 32];
     const int r = blockIdx.x;

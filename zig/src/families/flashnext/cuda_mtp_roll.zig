@@ -29,7 +29,7 @@ pub fn lateRoll(o: anytype, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
     a.add(t);
     a.add(cint(keep));
     const widest = @max(gdn.conv_dim, wt.wide);
-    try cuda.launch.launch(o.e.batch_k.late_roll, .{ .grid = .{ .x = @intCast((widest + 255) / 256), .y = @intCast(n) }, .block = .{ .x = 256 } }, o.e.stream.*, &a);
+    try cuda.launch.launch(o.e.batch_k.late_roll, .{ .pdl = o.e.batch_k.pdl, .grid = .{ .x = @intCast((widest + 255) / 256), .y = @intCast(n) }, .block = .{ .x = 256 } }, o.e.stream.*, &a);
 }
 
 /// The kept rows replayed on the window's start state (device work alone: a graph holds it).
@@ -57,12 +57,12 @@ const Replay = struct {
             try copyAsync(r.st, r.seq.conv[li].ptr, lk.hist, r.d.layout.conv);
             var f: cuda.Args = .{};
             for ([_]u64{ lk.proj, r.seq.conv[li].ptr, lw.cw.ptr, lw.a_log.ptr, lw.dt.ptr, rs.gq, rs.gk, rs.gv, rs.ggb }) |v| f.add(v);
-            try cuda.launch.launch(g.front, .{ .grid = .{ .x = @intCast(r.keep), .y = h.nk + h.nv }, .block = .{ .x = 256 } }, r.st, &f);
+            try cuda.launch.launch(g.front, .{ .pdl = k.pdl, .grid = .{ .x = @intCast(r.keep), .y = h.nk + h.nv }, .block = .{ .x = 256 } }, r.st, &f);
             var a: cuda.Args = .{};
             for ([_]u64{ rs.gq, rs.gk, rs.gv, rs.ggb, r.seq.state[li].ptr }) |v| a.add(v);
             a.add(cint(r.keep));
             a.add(rs.ys);
-            try cuda.launch.launch(g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, r.st, &a);
+            try cuda.launch.launch(g.chain, .{ .pdl = k.pdl, .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, r.st, &a);
             try shift(k, r.st, r.seq.conv[li].ptr, lk.proj, h.projWidth(), r.keep, gdn.taps - 1, h.convDim());
         }
     }
@@ -93,5 +93,5 @@ fn shift(k: *const parts.Kernels, st: cuda.Stream, win: u64, rows_ptr: u64, stri
     a.add(cint(n));
     a.add(cint(taps));
     a.add(cint(c));
-    try cuda.launch.launch(k.shift, .{ .grid = .{ .x = @intCast((c + 255) / 256) }, .block = .{ .x = 256 } }, st, &a);
+    try cuda.launch.launch(k.shift, .{ .pdl = k.pdl, .grid = .{ .x = @intCast((c + 255) / 256) }, .block = .{ .x = 256 } }, st, &a);
 }

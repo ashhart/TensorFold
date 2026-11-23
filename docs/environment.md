@@ -172,6 +172,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
 | --- | --- |
+| `TF_FLASHNEXT_PDL` | Exactly `0` or `1`; default off. Native CUDA sm90+ launches guarded HC, GDN, attention, router and qmmf entries dependently. Routed expert plans and kernels keep their existing launches. CUDA assembly and full-model exactness gates are required before enabling |
 | `TF_FLASHNEXT_PROMPT_BF16` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_WINDOW_GRAPH` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_LANE_PARTS` | Exactly `0` or `1`; default on |
