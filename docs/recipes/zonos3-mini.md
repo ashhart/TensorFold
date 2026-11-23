@@ -4,7 +4,7 @@
 publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
 came from, and how each part was checked, so the checks can be rerun.
 
-Status: one branch, proposed in #3615 and open as draft pull request #3720. All 40 kernels have their limits
+Status: one branch, proposed in #3615 and open as pull request #3720. All 40 kernels have their limits
 records, numeric contract tests and a planted control each; the quality suite has not been run on this build.
 
 ## Sources
@@ -56,7 +56,9 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   runs in the publisher's lanes: 20 s each, a later lane carrying 10 s of what came before.
 - **Served route** (`native/zonos_host.zig`, `server/zonos_speech.zig`): one request at a time; the release's 27
   default voices by their reference codes; a caller's own voice as `ref_audio` (a WAV file in base64, encoded by the
-  engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
+  engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames,
+  and the server's other reply options as for any speech model (24-bit and float WAV, FLAC, another `sample_rate`,
+  stereo), whole replies only.
   The clip encoder's weights load on the first request that brings a clip.
 
 Refused or absent: clips in formats other than WAV, text normalization (text is spoken as typed), speaker and control
@@ -90,8 +92,8 @@ the difference. The port has no bf16 path and none is planned as an option.
 ## How it was checked
 
 All figures below were measured on one RTX 5090 (driver 615.71, nvcc 13.3, Zig 0.17.0, `-Dsm=120`). The table of
-port-side checks was last run in full on the branch rebased onto main `6d0a128b0`, with the contract tests and the
-two kernel changes they brought in; the reference dumps are one set, regenerated before the first full run.
+port-side checks was run in full again on the branch rebased onto main `281d81b8b`, and every figure in it came out
+as before; the reference dumps are one set, regenerated before the first full run.
 
 ### The reference side
 
@@ -191,6 +193,14 @@ The standalone tool measured the parts: the decoder alone turns 11.4 s of codes 
 encodes in 0.75 s and a 47.3 s clip in 5.1 s (the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are
 no CUDA graphs and the sampler runs on the host; none of this is tuned.
 
+The table above was measured on main `6d0a128b0`. After the rebase onto main `281d81b8b`, the branch before and after
+it were served side by side on the 5090 and gave the same bytes, status and headers for twelve requests (a default
+voice, a named one, greedy reference codes, sampled, a cloned 48 kHz stereo clip, whole and streamed PCM, and four
+refusals) and the same 503s to requests that arrived while one spoke; the rebased build admitted the same
+3,828,406,528 bytes at load and spoke a 17.1 s reply in 0.59 s whole (first streamed byte at 0.04 s). Its 24-bit,
+float and FLAC replies decode to the 16-bit reply's samples within one 16-bit step, its stereo replies carry the same
+samples in both channels, its 24 and 48 kHz replies have the resampled length, and a stream at 24 kHz is refused.
+
 ### A test page
 
 `tools/zig/zonos3_test_page.py` serves a small browser page (`zonos3_test_page.html`) and passes its three routes
@@ -211,32 +221,30 @@ browser by an automated test.
 
 ### Repo checks
 
-On the branch rebased onto main `6d0a128b0`, the no-GPU workflow's steps were run on one Linux machine as the
+On the branch rebased onto main `281d81b8b`, the no-GPU workflow's steps were run on one Linux machine as the
 workflow runs them (`-Dfixed-cpu`, its test timeouts) and passed:
 
-- `zig fmt --check build.zig zig`; `tools/zig/lean_check.py` against the base with `lean_new.py` (221 problems on
+- `zig fmt --check build.zig zig`; `tools/zig/lean_check.py` against the base with `lean_new.py` (165 problems on
   both, 0 new); `tools/zig/cuda_common_check.py` (0 violations), `cuda_fragment_check.py` (0 misses) and their unit
-  tests; `host_tests_test.py`.
+  tests; `test_pdl_early_loads.py`, `host_tests_test.py`, `build_options_test.py` and `flashnext_batch_serve_test.py`.
 - `zig build test-host-a`, `test-host-b`, `test-kernel-contract`, `test-golden`,
-  `test-gradient-serving test-qwen-serving-host`, `test-server-security test-pull-security`, `fuzz-cortheon`, `test`
-  and `check-release-paths`.
-- The family's host tests alone (`zig build test-zonos-host`), with Drama's and the CUDA host suite
-  (`test-drama-host test-cuda-host`).
+  `test-gradient-serving test-qwen-serving-host test-glm-pdl-scan`, `test-server-security test-pull-security`,
+  `fuzz-cortheon`, `test` and `check-release-paths`.
+- The family's host tests alone (`zig build test-zonos-host`) and the CUDA host suite (`test-cuda-host`).
 
 They ran under umask 022: with 0002 one unrelated test (`serve --config`, which refuses a group-writable file)
-fails. In the first run of `test-host-a` one real-clock test of the rank bring-up (`two ranks settle on the real
-clock and agree on one plan and view`) failed while other jobs shared the CPU; the step passed when run again alone.
+fails.
 
-On macOS (an M5 Ultra) the default build, `zig build native` and `zig build test` pass. The family has no Metal
-path; the Metal contract jobs were not run, and neither was any quality suite.
+On macOS (an M5 Ultra) `zig build native` builds the rebased branch (for the Drama 3 run below); `zig build test`
+there was last run before the rebase onto `281d81b8b`. The family has no Metal path; the Metal contract jobs were
+not run, and neither was any quality suite.
 
-The branch changes the speech route Drama 3 is served through and moves Drama's `torch.save` reader and WAV code to
-core, so Drama 3 (`fishaudio/drama-3`) was run on that M5 Ultra from main `6d0a128b0` and from the branch: six
-`drama3-generate` runs (greedy, seeded, a reference clip encoded, a cloned voice, streamed PCM, frames) three times
-each, and four `/v1/audio/speech` requests (seeded whole, seeded streamed PCM, default, sampled) twice from each of
-two server starts. Every output is byte-identical between the two, and the speeds agree (the cloned run 73.21 to 73.55
-frames a second on main, 73.31 to 73.49 on the branch). Drama on CUDA was not run: the checkpoint does not fit the
-5090.
+The branch changes the speech route Drama 3 is served through, so Drama 3 (`fishaudio/drama-3`) was served on that
+M5 Ultra from main `281d81b8b` and from the rebased branch, two server starts each: `GET /v1/voices` and twelve
+`/v1/audio/speech` requests, each sent twice (seeded whole WAV, seeded streamed PCM, a plain one, sampled, `top_k` 64,
+a 24 kHz stereo FLAC and a 24-bit WAV reply, and the refusals of `top_k` 0 and 65, a `ref_audio`, reference codes and
+an unknown voice). Every reply is byte-identical between the two builds and between starts, with no leak or panic
+line. Speeds were not measured in this run. Drama on CUDA was not run: the checkpoint does not fit the 5090.
 
 The family registers four kernel images, so `zig/tests/fixtures/gradient-serving.tsv` re-pins
 `zig/src/cuda/kernels.zig`, as earlier image registrations did.
@@ -350,11 +358,9 @@ bf16-encoded references, clones as well from fp32 codes.
 
 ## Shared code this touches
 
-- `drama3/codec_pth.zig` moved to `core/torch_pth.zig` (its zip half to `core/torch_zip.zig`) and gained nested
-  checkpoints and a raw reader; Drama 3's codec loads through the same code and its host tests pass.
-- `drama3/wav.zig` moved to `core/wav.zig`: both families read WAV files and resample with it.
 - `core/speech_api.zig`: `SpeechRequest.speaker`, an optional speaker vector, and `reference_audio`, an optional clip.
-- `server/`: voices load through `speech_voices.zig`; the speech route, the sampling parser, the voices listing,
-  model detection and the tokenizer loader each gained a branch for a release folder, which has no `config.json`
-  and is recognised by `lm/zonos3_mini/params.json`.
-- `native/`: `zonos3` in the CUDA open dispatch, the capabilities list and the rank refusals.
+- `server/`: `speech_voices.zig` (Drama 3's voices holder, #4609) also starts and lists a release's voices; the speech
+  route takes `ref_audio` and `speaker_reference_codes` only with a release and calls `parseFrom` with the family's
+  defaults and its top-k ceiling of 4,096; model detection and the tokenizer loader each gained a branch for a
+  release folder, which has no `config.json` and is recognised by `lm/zonos3_mini/params.json`.
+- `native/`: `zonos3` in the CUDA open dispatch (`cuda_open.zig`), the capabilities list and the rank refusals.
