@@ -185,3 +185,83 @@ test "status: idle decode marks expire individually at read time" {
     host.engine().status(&value, &.{});
     try std.testing.expectEqual(@as(f64, 0), value.decode_tokens_per_second);
 }
+
+test "status: a registered slot reader holds off its next writer" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    defer host.stop();
+    const status = @import("lane_host_status.zig");
+
+    try host.st.live_tokens.append(gpa, 42);
+    status.publish(&host);
+    const registered = host.st.snap.slot;
+    _ = host.st.readers[registered].fetchAdd(1, .acq_rel);
+    var first_done = std.atomic.Value(bool).init(false);
+    var finished = std.atomic.Value(bool).init(false);
+    const Writer = struct {
+        fn run(h: *LaneHost, first: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+            @import("lane_host_status.zig").publish(h);
+            first.store(true, .release);
+            @import("lane_host_status.zig").publish(h); // this targets the registered slot and must wait
+            done.store(true, .release);
+        }
+    };
+    var writer = try std.Thread.spawn(.{}, Writer.run, .{ &host, &first_done, &finished });
+    var waited: usize = 0;
+    while (!first_done.load(.acquire) and waited < 2000) : (waited += 1)
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch {};
+    const completed_first = first_done.load(.acquire);
+    const finished_before_release = finished.load(.acquire);
+    _ = host.st.readers[registered].fetchSub(1, .acq_rel);
+    writer.join();
+    try std.testing.expect(completed_first);
+    try std.testing.expect(!finished_before_release);
+    try std.testing.expect(finished.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), host.st.readers[registered].load(.acquire));
+}
+
+test "status: terminal close publishes no queued or live work" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    defer host.stop();
+    const status = @import("lane_host_status.zig");
+
+    var tally: Tally = .{};
+    const request: Request = .{ .prompt = &.{ 3, 1, 4 }, .max_tokens = 1 };
+    _ = try host.engine().submit(1, &request, .{ .ctx = &tally, .event = Tally.event });
+    try host.st.live_tokens.append(gpa, 17);
+    host.st.live_generated = 3;
+    status.publish(&host);
+    var value: api.Status = .{};
+    var buf: [1]u32 = undefined;
+    host.engine().status(&value, &buf);
+    try std.testing.expectEqual(@as(u32, 1), value.waiting);
+    try std.testing.expectEqual(@as(usize, 1), value.streams);
+
+    @import("lane_host_end.zig").closeAll(&host);
+    host.engine().status(&value, &buf);
+    try std.testing.expectEqual(@as(u32, 0), value.running);
+    try std.testing.expectEqual(@as(u32, 0), value.waiting);
+    try std.testing.expectEqual(@as(usize, 0), value.streams);
+    try std.testing.expectEqual(@as(u64, 0), value.generation_tokens);
+    try std.testing.expectEqual(@as(?u32, null), value.fill_prompt_tokens);
+    try std.testing.expectEqual(@as(?u32, null), value.fill_tokens_left);
+    try std.testing.expect(!value.fill_unknown);
+    try std.testing.expectEqual(@as(u64, 0), value.fill_run);
+    try std.testing.expect(tally.done.load(.acquire));
+}
