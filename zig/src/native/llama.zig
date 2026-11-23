@@ -7,7 +7,6 @@ const fl = tf.llama;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
 const mem_ctrl = @import("memory_controller.zig");
-
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -100,9 +99,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "LLAMA_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const streams: u32 = @max(o.lanes, 1);
-    const drafted: ?fl.budget.Drafted = if (drafter_model) |dm| .{ .c = &dm.config, .streams = streams } else null;
-    const fits = fl.budget.longestWith(&model.config, drafted, budget, most);
+    const fits = if (drafter_model) |dm| longestWindow(&model.config, &dm.config, budget, most, o) else fl.budget.longest(&model.config, budget, most);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Llama caches fit {d} tokens under its load limit (75% of RAM, or LLAMA_LOAD_LIMIT_GB){s}", .{ window, fits, if (drafter_model != null) ", the drafter's caches and trained window counted" else "" });
@@ -110,6 +107,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
+    var per_stream: u64 = @intCast(fl.state.cacheBytes(&model.config, @intCast(window + 1)));
+    if (drafter_model) |dm| per_stream += @intCast(fl.state.cacheBytes(&dm.config, @intCast(window + fl.state.window_rows)));
+    const streams = try admitStreams(a, per_stream, budget, o, @intCast(window), problem) orelse {
+        if (drafter_model) |dm| dm.deinit();
+        model.deinit();
+        return null;
+    };
     std.log.info("llama: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -135,7 +139,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = streams, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -183,16 +187,12 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
 }
 
 fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
-    _ = a;
-    _ = per_stream;
-    _ = left;
-    _ = window;
-    _ = problem;
-    return @max(o.lanes, 1);
+    return metal_admit.streams(a, "llama", per_stream, left, o, window, problem);
 }
 
 fn longestWindow(c: *const fl.config.Config, dc: *const fl.config.Config, budget: u64, most: usize, o: api.Open) usize {
-    const drafted: fl.budget.Drafted = .{ .c = dc, .streams = @max(o.lanes, 1) };
+    _ = o; // Pricing 64 drafters here could reject every window before automatic lane fitting below.
+    const drafted: fl.budget.Drafted = .{ .c = dc, .streams = 1 };
     return fl.budget.longestWith(c, drafted, budget, most);
 }
 

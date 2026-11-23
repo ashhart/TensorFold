@@ -6,7 +6,7 @@ const tf = @import("tensorfold");
 const fr = tf.ricursive;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
-
+const metal_admit = @import("metal_admit.zig");
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -138,12 +138,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 }
 
 fn admitStreams(a: std.mem.Allocator, per_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
-    _ = a;
-    _ = per_stream;
-    _ = left;
-    _ = window;
-    _ = problem;
-    return @max(o.lanes, 1);
+    return metal_admit.streams(a, "ricursive", per_stream, left, o, window, problem);
 }
 
 /// Weights, tables and scratches in one residency set for the keepalive, under the 70% limit.
