@@ -163,3 +163,39 @@ test "Metal review: each width's head observation spans the interleaved passes" 
     try rule.interleaveWidths(&timer, &observer, &ms, false);
     try t.expectEqual(@as(usize, 1), observer.before_end);
 }
+
+test "Metal review: Qwen tight-context cold timing work stays below a twenty-percent increase" {
+    const Sweep = struct {
+        capacity: usize,
+        prompt: usize,
+        offset: usize = 0,
+        refills: usize = 0,
+        rows: usize = 0,
+        pub fn time(s: *@This(), i: usize) !f64 {
+            const width = i + 1;
+            if (s.offset == 0 or s.offset + width > s.capacity) {
+                s.offset = s.prompt;
+                s.rows += s.prompt;
+                s.refills += 1;
+            }
+            s.rows += width;
+            s.offset += 1;
+            return 10 + @as(f64, @floatFromInt(width));
+        }
+    };
+    for ([_]usize{ 16, 32, 64 }) |width| for ([_]usize{ width + 1, 128, 256, 16384 }) |capacity| {
+        if (capacity <= width) continue;
+        var baseline: Sweep = .{ .capacity = capacity, .prompt = @min(192, capacity - width) };
+        var candidate: Sweep = .{ .capacity = capacity, .prompt = rule.context.promptRows(capacity, width, width + 5) };
+        for (0..5) |_| { _ = try baseline.time(width - 1); _ = try candidate.time(width - 1); }
+        var old: [64]f64 = undefined;
+        var now: [64]f64 = undefined;
+        var observer: rule.NoObserver = .{};
+        try rule.measureWidths(&baseline, &observer, old[0..width], false);
+        try rule.measureWindows(&candidate, now[0..width], false);
+        try rule.smooth(&candidate, now[0..width]);
+        try t.expect(candidate.rows * 100 <= baseline.rows * 120);
+        try t.expect(candidate.refills <= baseline.refills);
+        std.debug.print("Metal cold context width={d} capacity={d} prompt={d}/{d} refills={d}/{d} work_rows={d}/{d}\n", .{ width, capacity, baseline.prompt, candidate.prompt, baseline.refills, candidate.refills, baseline.rows, candidate.rows });
+    };
+}
