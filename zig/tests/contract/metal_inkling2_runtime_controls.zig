@@ -17,6 +17,7 @@ fn edit(kind: p.Kind) Edit {
         .attention_partial => .{ .from = "blocks[row * 4 * 2304 + (a.boundary - 1) * 2304 + d] = p[i];", .to = "blocks[row * 2304 + (a.boundary - 1) * 2304 + d] = p[i];" },
         .mlp_partial => .{ .from = "p[i] = bfloat(t[i] + float(x[i]));", .to = "p[i] = bfloat(t[i] - float(x[i]));" },
         .capture_tap => .{ .from = "y[row * 4 * 2304 + a.boundary * 2304 + d] = x[i];", .to = "y[row * 4 * 2304 + ((a.boundary + 1) % 4) * 2304 + d] = x[i];" },
+        .bank_and_reset => .{ .from = "const size_t blk = (size_t(row) * 4u + a.boundary) * 576u + q;", .to = "const size_t blk = (size_t(row) * 4u + ((a.boundary + 1u) & 3u)) * 576u + q;" },
     };
 }
 
@@ -34,6 +35,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .attention_partial => "control: metal inkling2 runtime attention_partial tf_ink2_attention_partial",
         .mlp_partial => "control: metal inkling2 runtime mlp_partial tf_ink2_mlp_partial",
         .capture_tap => "control: metal inkling2 runtime capture_tap tf_ink2_capture_tap",
+        .bank_and_reset => "control: metal inkling2 runtime bank_and_reset tf_ink2_bank_and_reset",
     };
 }
 

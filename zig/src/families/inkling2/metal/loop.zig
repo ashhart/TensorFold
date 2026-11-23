@@ -14,10 +14,12 @@ pub const RowsArgs = plan.RowsArgs;
 const gate_row_bytes: usize = (2 * hidden + rank) * 2;
 
 pub const Pipelines = struct {
+    messages_rms: mtl.Pipeline,
     messages: mtl.Pipeline,
     gates: mtl.Pipeline,
     zeta: mtl.Pipeline,
     blend: mtl.Pipeline,
+    rms_inv: mtl.Buffer,
     /// The gates' intermediates for up to 256 rows of each of `max_gates` tuples.
     scratch: mtl.Buffer,
 
@@ -27,6 +29,8 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
+        var messages_rms = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_rms", false);
+        errdefer messages_rms.deinit();
         var messages = try mtl.Pipeline.init(device, lib, plan.Kind.messages.symbol(), false);
         errdefer messages.deinit();
         const gate_pipeline = try mtl.Pipeline.init(device, lib, plan.Kind.gates.symbol(), false);
@@ -35,15 +39,19 @@ pub const Pipelines = struct {
         errdefer zeta.deinit();
         const blend = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_blend", false);
         errdefer blend.deinit();
+        const rms_inv = try device.buffer(256 * 2 * @sizeOf(f32), mtl.ResourceOptions.shared);
+        errdefer rms_inv.deinit();
         const scratch = try device.buffer(max_gates * 256 * gate_row_bytes, mtl.ResourceOptions.shared);
-        return .{ .messages = messages, .gates = gate_pipeline, .zeta = zeta, .blend = blend, .scratch = scratch };
+        return .{ .messages_rms = messages_rms, .messages = messages, .gates = gate_pipeline, .zeta = zeta, .blend = blend, .rms_inv = rms_inv, .scratch = scratch };
     }
     pub fn deinit(p: *Pipelines) void {
         p.scratch.deinit();
+        p.rms_inv.deinit();
         p.blend.deinit();
         p.zeta.deinit();
         p.gates.deinit();
         p.messages.deinit();
+        p.messages_rms.deinit();
         p.* = undefined;
     }
 };
@@ -55,9 +63,16 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 /// Output layout is [token][12 core layers][q,k,v,mlp][H], all binary32.
 pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, bank0: Ref, bank1: Ref, q_mlp: Ref, kv: Ref, out: Ref, rows: u32) void {
     std.debug.assert(rows > 0 and rows <= 256);
+    const args = GateArgs{ .rows = rows, .stride = hidden };
+    const inv_ref: Ref = .{ .buf = p.rms_inv };
+    e.setPipeline(p.messages_rms);
+    bind(e, &.{ bank0, bank1, inv_ref });
+    e.setValue(args, 3);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    e.barrier();
     e.setPipeline(p.messages);
-    bind(e, &.{ bank0, bank1, q_mlp, kv, out });
-    e.setValue(GateArgs{ .rows = rows, .stride = hidden }, 5);
+    bind(e, &.{ bank0, bank1, q_mlp, kv, inv_ref, out });
+    e.setValue(args, 6);
     e.dispatchGroups(mtl.Size.of(rows * message_entries, 1, 1), mtl.Size.of(256, 1, 1));
 }
 

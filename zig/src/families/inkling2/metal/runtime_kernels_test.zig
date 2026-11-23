@@ -32,6 +32,7 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expectEqual(@as(usize, 0), @offsetOf(p.RuntimeArgs, "count"));
     try t.expectEqual(@as(usize, 4), @offsetOf(p.RuntimeArgs, "boundary"));
     for (std.enums.values(p.Kind)) |kind| {
+        if (kind == .bank_and_reset) continue;
         const call = p.Call{ .rows = 7, .n = p.hidden, .k = if (kind == .attention_partial) 4 else 1 };
         try t.expect(p.valid(kind, call));
         const a = p.args(kind, call);
@@ -55,6 +56,14 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expect(!p.valid(.widen, .{ .rows = 1, .n = p.hidden, .k = 0 }));
     try t.expect(p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 3 }));
     try t.expect(!p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 4 }));
+    try t.expect(p.valid(.bank_and_reset, .{ .rows = p.max_rows, .n = p.hidden, .k = 2 }));
+    try t.expect(!p.valid(.bank_and_reset, .{ .rows = p.max_rows + 1, .n = p.hidden, .k = 2 }));
+    try t.expect(!p.valid(.bank_and_reset, .{ .rows = 1, .n = p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.bank_and_reset, .{ .rows = 1, .n = 1024, .k = 2 }));
+    const br = p.args(.bank_and_reset, .{ .rows = 7, .n = p.hidden, .k = 2 });
+    try t.expectEqual(@as(u32, 7), br.count);
+    try t.expectEqual(@as(u32, 2), br.boundary);
+    try t.expectEqual(@as(usize, 3 * 7 * p.hidden), p.outputCount(.bank_and_reset, .{ .rows = 7, .n = p.hidden, .k = 2 }));
 }
 
 test "DSpark capture channels are packed [row][tap][H] in visit order" {

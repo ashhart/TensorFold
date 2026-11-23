@@ -173,6 +173,10 @@ pub const Probe = struct {
                 self.f[0] = try self.floats(r * p.hidden, rng);
                 self.f[1] = try self.floats(p.expert_count * p.hidden, rng);
                 self.f[2] = try self.floats(p.expert_count, rng);
+                if (!nf and r == 5) {
+                    @memset(self.f[0][4 * p.hidden .. 5 * p.hidden], 0);
+                    @memset(self.f[2][0..16], 10.0);
+                }
                 if (nf) self.f[0][0] = std.math.nan(f32);
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], true);

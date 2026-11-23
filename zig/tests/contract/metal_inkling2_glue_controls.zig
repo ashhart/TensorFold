@@ -9,7 +9,7 @@ fn edit(kind: p.Kind) Edit {
         .ar => .{ .from = "weights[s] = dot * INKLING_AR_SCALE;", .to = "weights[s] = dot;" },
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
         .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
-        .router => .{ .from = "keys[t] = scores[t] + bias[t];", .to = "keys[t] = scores[t];" },
+        .router => .{ .from = "key[k] = sc[k] + bias[e];", .to = "key[k] = sc[k];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
         .expert_pick => .{ .from = "ids[r * 8 + j]", .to = "ids[r * 8 + 7 - j]" },

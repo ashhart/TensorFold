@@ -15,6 +15,7 @@ pub const Kind = enum {
     attention_partial,
     mlp_partial,
     capture_tap,
+    bank_and_reset,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
@@ -24,6 +25,7 @@ pub const Kind = enum {
             .attention_partial => "tf_ink2_attention_partial",
             .mlp_partial => "tf_ink2_mlp_partial",
             .capture_tap => "tf_ink2_capture_tap",
+            .bank_and_reset => "tf_ink2_bank_and_reset",
         };
     }
     pub fn label(k: Kind) []const u8 {
@@ -34,6 +36,7 @@ pub const Kind = enum {
             .attention_partial => "metal inkling2 runtime attention_partial tf_ink2_attention_partial",
             .mlp_partial => "metal inkling2 runtime mlp_partial tf_ink2_mlp_partial",
             .capture_tap => "metal inkling2 runtime capture_tap tf_ink2_capture_tap",
+            .bank_and_reset => "metal inkling2 runtime bank_and_reset tf_ink2_bank_and_reset",
         };
     }
 };
@@ -47,6 +50,7 @@ pub fn valid(kind: Kind, c: Call) bool {
     return switch (kind) {
         .copy_bf16, .copy_f32 => c.k == 1,
         .capture_tap => c.n == hidden and c.k < tap_channels,
+        .bank_and_reset => c.n == hidden and c.k < block_slots,
         .widen, .attention_partial, .mlp_partial => c.n == hidden and switch (kind) {
             .attention_partial => c.k <= block_slots,
             else => c.k == 1,
@@ -60,13 +64,20 @@ pub fn geometry(c: Call) Geometry {
 
 /// Values in the full destination for one capture launch; its dispatch still reads rows*n.
 pub fn outputCount(kind: Kind, c: Call) usize {
-    const channels: usize = if (kind == .capture_tap) tap_channels else 1;
-    return c.rows * c.n * channels;
+    const copies: usize = switch (kind) {
+        .capture_tap => tap_channels,
+        .bank_and_reset => 3,
+        else => 1,
+    };
+    return c.rows * c.n * copies;
 }
 
 pub fn args(kind: Kind, c: Call) RuntimeArgs {
     std.debug.assert(valid(kind, c));
-    return .{ .count = @intCast(c.rows * c.n), .boundary = if (kind == .attention_partial or kind == .capture_tap) @intCast(c.k) else 0 };
+    return .{
+        .count = @intCast(if (kind == .bank_and_reset) c.rows else c.rows * c.n),
+        .boundary = if (kind == .attention_partial or kind == .capture_tap or kind == .bank_and_reset) @intCast(c.k) else 0,
+    };
 }
 
 /// Completed blocks are [row][four BF16 blocks][H]; the separate partial is not stored here.

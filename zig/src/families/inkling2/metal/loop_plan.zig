@@ -52,7 +52,7 @@ pub fn geometry(kind: Kind, c: Call) Geometry {
             .gates => c.rows,
         },
         .tg_memory = switch (kind) {
-            .messages => 144,
+            .messages => 80,
             .gates => 80,
         },
     };

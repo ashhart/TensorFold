@@ -174,3 +174,12 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
 }
+
+test "prompt scratch caps logits_all at batch_rows" {
+    const below = state.scratchBytes(state.batch_rows) - state.scratchBytes(state.batch_rows - 1);
+    const above = state.scratchBytes(state.batch_rows + 1) - state.scratchBytes(state.batch_rows);
+    try std.testing.expectEqual(@as(usize, state.vocabulary * 4), below - above);
+    const saved = (state.prompt_rows - state.batch_rows) * state.vocabulary * 4;
+    try std.testing.expectEqual(state.scratchBytes(state.batch_rows) + (state.prompt_rows - state.batch_rows) * above, state.scratchBytes(state.prompt_rows));
+    try std.testing.expect(saved > 170 * 1024 * 1024);
+}

@@ -12,73 +12,92 @@ constant uint INKLING_LOOP_MESSAGES = 48;
 // stride: floats from one row's m to the next (the messages interleave 48 entries a row).
 struct InkLoopArgs { uint rows, stride; };
 
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_loop_rms(
+    const device bfloat* bank0 [[buffer(0)]], const device bfloat* bank1 [[buffer(1)]],
+    device float* inv [[buffer(2)]], constant InkLoopArgs& a [[buffer(3)]],
+    uint t [[thread_position_in_threadgroup]], uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  if (row >= a.rows) return;
+  const device bfloat* b0 = bank0 + size_t(row) * INKLING_LOOP_H;
+  const device bfloat* b1 = bank1 + size_t(row) * INKLING_LOOP_H;
+  threadgroup float sums[16];
+  float ss0 = 0.0f, ss1 = 0.0f;
+  for (uint d = t; d < INKLING_LOOP_H; d += 256u) {
+    const float x0 = float(b0[d]), x1 = float(b1[d]);
+    ss0 += x0 * x0;
+    ss1 += x1 * x1;
+  }
+  const uint sg = t / 32u;
+  const float r0 = simd_sum(ss0), r1 = simd_sum(ss1);
+  if (lane == 0u) {
+    sums[sg] = r0;
+    sums[8u + sg] = r1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t < 2u) {
+    float ss = 0.0f;
+    for (uint j = 0u; j < 8u; ++j) ss += sums[t * 8u + j];
+    inv[row * 2u + t] = precise::rsqrt(precise::divide(ss, 2304.0f) + INKLING_LOOP_EPS);
+  }
+}
+
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_loop_messages(
     const device bfloat* bank0 [[buffer(0)]], const device bfloat* bank1 [[buffer(1)]],
     const device float* q_mlp [[buffer(2)]], const device float* kv [[buffer(3)]],
-    device float* out [[buffer(4)]], constant InkLoopArgs& a [[buffer(5)]],
+    const device float* inv [[buffer(4)]], device float* out [[buffer(5)]],
+    constant InkLoopArgs& a [[buffer(6)]],
     uint t [[thread_position_in_threadgroup]], uint work [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]]) {
   const uint row = work / INKLING_LOOP_MESSAGES;
   const uint entry = work - row * INKLING_LOOP_MESSAGES;
   if (row >= a.rows) return;
-  const uint layer = entry / 4;
-  const uint role = entry - 4 * layer;
-  const device float* queries = (role == 0 || role == 3) ? q_mlp : kv;
-  // q/mlp and k/v occupy even/odd rows respectively.
-  const device float* query = queries + size_t(2 * layer + (role >= 2 ? 1 : 0)) * INKLING_LOOP_H;
-  const device bfloat* banks[2] = { bank0 + size_t(row) * INKLING_LOOP_H,
-                                    bank1 + size_t(row) * INKLING_LOOP_H };
-  threadgroup float sums[2 * 8], inverse[2], dots[2 * 8], weights[2];
-  for (uint s = 0; s < 2; ++s) {
-    float ss = 0.0f;
-    for (uint d = t; d < INKLING_LOOP_H; d += 256) {
-      const float x = float(banks[s][d]);
-      ss += x * x;
-    }
-    const float reduced = simd_sum(ss);
-    if (lane == 0) sums[s * 8 + t / 32] = reduced;
+  const uint layer = entry / 4u;
+  const uint role = entry - 4u * layer;
+  const device float* queries = (role == 0u || role == 3u) ? q_mlp : kv;
+  const device float* query = queries + size_t(2u * layer + (role >= 2u ? 1u : 0u)) * INKLING_LOOP_H;
+  const device bfloat* b0p = bank0 + size_t(row) * INKLING_LOOP_H;
+  const device bfloat* b1p = bank1 + size_t(row) * INKLING_LOOP_H;
+  const float inv0 = inv[row * 2u], inv1 = inv[row * 2u + 1u];
+  threadgroup float dots[16], weights[4];
+  float b0[9], b1[9], dot0 = 0.0f, dot1 = 0.0f;
+  for (uint k = 0u; k < 9u; ++k) {
+    const uint d = t + k * 256u;
+    b0[k] = float(b0p[d]) * inv0;
+    b1[k] = float(b1p[d]) * inv1;
+    const float qv = query[d];
+    dot0 += qv * b0[k];
+    dot1 += qv * b1[k];
+  }
+  const uint sg = t / 32u;
+  const float r0 = simd_sum(dot0), r1 = simd_sum(dot1);
+  if (lane == 0u) {
+    dots[sg] = r0;
+    dots[8u + sg] = r1;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t == 0) for (uint s = 0; s < 2; ++s) {
-    float ss = 0.0f;
-    for (uint j = 0; j < 8; ++j) ss += sums[s * 8 + j];
-    inverse[s] = precise::rsqrt(precise::divide(ss, 2304.0f) + INKLING_LOOP_EPS);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint s = 0; s < 2; ++s) {
-    float dot = 0.0f;
-    for (uint d = t; d < INKLING_LOOP_H; d += 256) {
-      const float beta = float(banks[s][d]) * inverse[s];
-      dot += query[d] * beta;
-    }
-    const float reduced = simd_sum(dot);
-    if (lane == 0) dots[s * 8 + t / 32] = reduced;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t == 0) {
+  if (t == 0u) {
     float logits[2];
     float peak = -INFINITY;
-    for (uint s = 0; s < 2; ++s) {
+    for (uint s = 0u; s < 2u; ++s) {
       float dot = 0.0f;
-      for (uint j = 0; j < 8; ++j) dot += dots[s * 8 + j];
+      for (uint j = 0u; j < 8u; ++j) dot += dots[s * 8u + j];
       weights[s] = dot * INKLING_LOOP_SCALE;
       logits[s] = weights[s];
       peak = max(peak, logits[s]);
     }
     float den = 0.0f;
-    for (uint s = 0; s < 2; ++s) {
+    for (uint s = 0u; s < 2u; ++s) {
       weights[s] = precise::exp(logits[s] - peak);
       den += weights[s];
     }
-    for (uint s = 0; s < 2; ++s) weights[s] = precise::divide(weights[s], den);
+    for (uint s = 0u; s < 2u; ++s) weights[s] = precise::divide(weights[s], den);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint d = t; d < INKLING_LOOP_H; d += 256) {
-    const float beta0 = float(banks[0][d]) * inverse[0];
-    const float beta1 = float(banks[1][d]) * inverse[1];
-    out[(size_t(row) * INKLING_LOOP_MESSAGES + entry) * INKLING_LOOP_H + d] =
-        weights[0] * beta0 + weights[1] * beta1;
-  }
+  const float w0 = weights[0], w1 = weights[1];
+  device float* dst = out + (size_t(row) * INKLING_LOOP_MESSAGES + entry) * INKLING_LOOP_H;
+  for (uint k = 0u; k < 9u; ++k) dst[t + k * 256u] = w0 * b0[k] + w1 * b1[k];
 }
 
 // The gates' first launch: h and m each to unit RMS and BF16, as normalized[row][h | m].

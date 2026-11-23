@@ -280,13 +280,14 @@ fn sizes(rows: usize) [fields.len]usize {
     const kv = kv_width;
     const bf = 2;
     const fp = 4;
+    const batch_cap: usize = @min(r, batch_rows);
     return .{
         r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg), r * h * bf,     r * h * bf,     r * block_slots * h * bf,
         r * h * bf,                r * h * bf,                                       r * message_entries * h * fp,              r * h * fp,                     3 * r * h * fp, 3 * r * h * fp, r * h * fp,
         r * h * fp,                r * h * bf,                                       r * h * bf,                                r * h * bf,                     r * q * bf,     r * kv * bf,    r * kv * bf,
         r * rel_width * bf,        r * 24 * bf,                                      r * q * bf,                                r * kv * bf,                    r * kv * bf,    r * q * bf,     r * rel_width * bf,
         r * 24 * ap.extent * bf,   r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,     r * h * bf,     r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,     r * h * bf,     r * vocabulary * fp,
+        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,     r * h * bf,     batch_cap * vocabulary * fp,
     };
 }
 

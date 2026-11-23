@@ -117,15 +117,17 @@ fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: 
 
 /// Ends with a barrier: the cross-pass messages and the restored p are written.
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
-    for (0..rows) |i| {
-        // The second completed block of the previous pass is B12; its final p is P18.
-        copyBf16(m, e, at(s.blocks, (i * state.block_slots + 2) * state.hidden * 2), row(s.bank0, i, state.hidden * 2), state.hidden);
-    }
-    copyBf16(m, e, at(s.p, 0), at(s.bank1, 0), rows * state.hidden);
+    e.setPipeline(m.runtime[@backingInt(model_file.RuntimeOp.bank_and_reset)]);
+    e.setBuffer(s.blocks, 0, 0);
+    e.setBuffer(s.p, 0, 1);
+    e.setBuffer(s.prelude, 0, 2);
+    e.setBuffer(s.bank0, 0, 3);
+    e.setBuffer(s.bank1, 0, 4);
+    e.setValue(RArgs{ .count = @intCast(rows), .boundary = 2 }, 5);
+    e.dispatchThreads(mtl.Size.of(state.hidden / 4, rows, 1), mtl.Size.of(256, 1, 1));
     e.barrier();
     loop.crossPassMessageAttention(&m.loop, e, l(at(s.bank0, 0)), l(at(s.bank1, 0)), l(r(m.weights.cross_queries)), l(r(m.weights.cross_kv_queries)), l(at(s.messages, 0)), @intCast(rows));
-    // The prelude p is restored, but every visit's KV and convolution state remains live.
-    copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
+    // The prelude p is restored before messages finish; one trailing barrier exposes both.
     e.barrier();
 }
 
@@ -395,7 +397,7 @@ pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const
 
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
-    if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
+    if (rows == 0 or rows > s.rows or (options.all and rows > state.batch_rows) or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
     var total: usize = 0;
     var base: usize = 0;
     for (segments, 0..) |seg, si| {

@@ -31,6 +31,11 @@ pub const Probe = struct {
     refs: [2]rig_.Ref = undefined,
     blocks: rig_.Ref = undefined,
     blocks_before: []u16 = &.{},
+    bank_blocks: []u16 = &.{},
+    bank_p_before: []u16 = &.{},
+    bank_prelude: []u16 = &.{},
+    bank0_out: rig_.Ref = undefined,
+    bank1_out: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
@@ -68,6 +73,13 @@ pub const Probe = struct {
                 .{ .rows = 16, .n = p.hidden, .k = 3 },
                 .{ .rows = 32, .n = p.hidden, .k = 3 },
             },
+            .bank_and_reset => .{
+                .{ .rows = 1, .n = p.hidden, .k = 2 },
+                .{ .rows = 5, .n = p.hidden, .k = 0 },
+                .{ .rows = 7, .n = p.hidden, .k = 1 },
+                .{ .rows = 16, .n = p.hidden, .k = 2 },
+                .{ .rows = 32, .n = p.hidden, .k = 3 },
+            },
             else => .{
                 .{ .rows = 1, .n = p.hidden, .k = 1 },
                 .{ .rows = 5, .n = p.hidden, .k = 1 },
@@ -97,9 +109,10 @@ pub const Probe = struct {
             .depth = depth,
             .ops = if (self.kind == .attention_partial or self.kind == .mlp_partial) 1 else 0,
             .out = switch (self.kind) {
-                .copy_bf16, .mlp_partial, .capture_tap => .bf16,
+                .copy_bf16, .mlp_partial, .capture_tap, .bank_and_reset => .bf16,
                 .copy_f32, .widen, .attention_partial => .f32,
             },
+            .in_place = self.kind == .bank_and_reset,
             .served = &self.served,
             .sums = .{ .f16 = 0, .bf16 = 0, .why = "pointwise moves and single additions have no reduction accumulator to discriminate" },
         } };
@@ -111,6 +124,11 @@ pub const Probe = struct {
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const values = try self.arena.allocator().alloc(f32, n);
         for (values) |*v| v.* = value(rng);
+        return values;
+    }
+    fn u16s(self: *Probe, n: usize, rng: std.Random) ![]u16 {
+        const values = try self.arena.allocator().alloc(u16, n);
+        for (values) |*v| v.* = c.toBf16(value(rng));
         return values;
     }
     fn input(self: *Probe, values: []const f32, bf: bool) !rig_.Ref {
@@ -127,8 +145,27 @@ pub const Probe = struct {
         self.shape = shape;
         self.f = @splat(&.{});
         self.blocks_before = &.{};
+        self.bank_blocks = &.{};
+        self.bank_p_before = &.{};
+        self.bank_prelude = &.{};
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
+        if (self.kind == .bank_and_reset) {
+            self.bank_blocks = try self.u16s(shape.rows * p.block_slots * p.hidden, rng);
+            self.bank_p_before = try self.u16s(shape.rows * p.hidden, rng);
+            self.bank_prelude = try self.u16s(shape.rows * p.hidden, rng);
+            if (fill == .nonfinite) {
+                self.bank_blocks[shape.k * p.hidden] = c.toBf16(std.math.nan(f32));
+                self.bank_p_before[0] = c.toBf16(std.math.nan(f32));
+                self.bank_prelude[1] = c.toBf16(std.math.nan(f32));
+            }
+            self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(self.bank_blocks));
+            self.refs[1] = try self.rig.input(std.mem.sliceAsBytes(self.bank_prelude));
+            self.bank0_out = try self.rig.output(shape.rows * p.hidden * 2);
+            self.bank1_out = try self.rig.output(shape.rows * p.hidden * 2);
+            self.out = try self.rig.output(shape.rows * p.hidden * 2);
+            return true;
+        }
         const n = shape.rows * shape.n;
         self.f[0] = try self.floats(n, rng);
         switch (self.kind) {
@@ -150,12 +187,14 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], true);
             },
             .copy_f32 => {},
+            .bank_and_reset => unreachable,
         }
         if (fill == .nonfinite) self.f[0][0] = std.math.nan(f32);
         self.refs[0] = try self.input(self.f[0], self.kind == .copy_bf16 or self.kind == .widen or self.kind == .attention_partial or self.kind == .capture_tap);
         const elem: c.Elem = switch (self.kind) {
             .copy_bf16, .mlp_partial, .capture_tap => .bf16,
             .copy_f32, .widen, .attention_partial => .f32,
+            .bank_and_reset => unreachable,
         };
         self.out = try self.rig.output(self.count() * c.size(elem));
         if (self.kind == .capture_tap) {
@@ -166,32 +205,54 @@ pub const Probe = struct {
     }
 
     pub fn run(self: *Probe) !void {
+        const call = p.Call{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k };
+        if (self.kind == .bank_and_reset) @memcpy(self.rig.bytes(self.out, self.shape.rows * p.hidden * 2), std.mem.sliceAsBytes(self.bank_p_before));
         const pass = self.rig.begin();
         const e = pass.e;
         e.setPipeline(self.pipe);
         e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
         switch (self.kind) {
+            .bank_and_reset => {
+                e.setBuffer(self.out.buf, self.out.off, 1);
+                e.setBuffer(self.refs[1].buf, self.refs[1].off, 2);
+                e.setBuffer(self.bank0_out.buf, self.bank0_out.off, 3);
+                e.setBuffer(self.bank1_out.buf, self.bank1_out.off, 4);
+                e.setValue(p.args(.bank_and_reset, call), 5);
+            },
             .copy_bf16, .copy_f32, .widen, .capture_tap => {
                 e.setBuffer(self.out.buf, self.out.off, 1);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 2);
+                e.setValue(p.args(self.kind, call), 2);
             },
             .attention_partial => {
                 e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
                 e.setBuffer(self.blocks.buf, self.blocks.off, 2);
                 e.setBuffer(self.out.buf, self.out.off, 3);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 4);
+                e.setValue(p.args(self.kind, call), 4);
             },
             .mlp_partial => {
                 e.setBuffer(self.refs[1].buf, self.refs[1].off, 1);
                 e.setBuffer(self.out.buf, self.out.off, 2);
-                e.setValue(p.args(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }), 3);
+                e.setValue(p.args(self.kind, call), 3);
             },
         }
-        e.dispatchThreads(mtl.Size.of(p.geometry(.{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }).count, 1, 1), mtl.Size.of(p.threads, 1, 1));
+        const grid = if (self.kind == .bank_and_reset) mtl.Size.of(p.hidden / 4, self.shape.rows, 1) else mtl.Size.of(p.geometry(call).count, 1, 1);
+        e.dispatchThreads(grid, mtl.Size.of(p.threads, 1, 1));
         try self.rig.finish(pass);
     }
 
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
+        if (self.kind == .bank_and_reset) {
+            const n = self.shape.rows * p.hidden;
+            for (0..self.shape.rows) |row| for (0..p.hidden) |d| {
+                const dst = row * p.hidden + d;
+                const src = (row * p.block_slots + self.shape.k) * p.hidden + d;
+                want[dst] = c.fromBf16(self.bank_blocks[src]);
+                want[n + dst] = c.fromBf16(self.bank_p_before[dst]);
+                want[2 * n + dst] = c.fromBf16(self.bank_prelude[dst]);
+            };
+            for (want, mag) |w, *m| m.* = @abs(w);
+            return;
+        }
         if (self.kind == .capture_tap) {
             for (want, mag, 0..) |*w, *m, i| {
                 const row = i / (p.tap_channels * p.hidden);
@@ -209,6 +270,7 @@ pub const Probe = struct {
                 .copy_bf16, .copy_f32, .widen, .capture_tap => x,
                 .attention_partial => p.attentionPartial(x, y, self.shape.k),
                 .mlp_partial => p.mlpPartial(x, y),
+                .bank_and_reset => unreachable,
             };
             m.* = @abs(@as(f64, x)) + @abs(@as(f64, y));
         }
