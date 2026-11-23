@@ -84,10 +84,16 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     if (kept) |table| {
         if (table.windows != wide.len + backend.max_window or table.shareds != sharedCount(most)) kept = null else {
             for (table.window[0..table.windows], 0..) |c2, i| {
-                if (c2.width != widthOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) { kept = null; break; }
+                if (c2.width != widthOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) {
+                    kept = null;
+                    break;
+                }
             }
             for (table.shared[0..table.shareds], 0..) |c2, i| {
-                if (c2.width != 2 * streamsOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) { kept = null; break; }
+                if (c2.width != 2 * streamsOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) {
+                    kept = null;
+                    break;
+                }
             }
         }
     }
@@ -97,7 +103,11 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var caches: [64]st.Cache = undefined;
     const n = if (kept != null and !heal_shared) @min(most, 1) else most;
     makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b }) catch |err| {
-        if (kept) |table| { b.costs = table; b.timing = .{}; return; }
+        if (kept) |table| {
+            b.costs = table;
+            b.timing = .{};
+            return;
+        }
         return err;
     };
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
@@ -107,7 +117,10 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
         var widths: [32]u32 = undefined;
         const count = if (heal_shared) costs.shareds else costs.windows;
         const entries = if (heal_shared) costs.shared[0..count] else costs.window[0..count];
-        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| { m.* = c2.ms; w.* = c2.width; }
+        for (entries, values[0..count], widths[0..count]) |c2, *m, *w| {
+            m.* = c2.ms;
+            w.* = c2.width;
+        }
         if (heal_shared) {
             _ = try lanes.cost_rule.healWindows(SharedTimer{ .b = b, .caches = caches[0..n] }, values[0..count], widths[0..count], &cursor[1]);
         } else {
@@ -132,10 +145,10 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const ref = lanes.cost_cache.referenceKey(&parts);
     const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
     // the last build's table for this chip and shape stands while a probe of each kernel path stays within drift
-    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |kept| if (try holds(windows, heads, shared, kept, b.head != null, sharedCount(n))) {
-        b.costs = kept;
+    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |last_costs| if (try holds(windows, heads, shared, last_costs, b.head != null, sharedCount(n))) {
+        b.costs = last_costs;
         b.timing = .{};
-        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, kept);
+        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, last_costs);
         return;
     };
     try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);

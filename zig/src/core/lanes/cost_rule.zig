@@ -64,14 +64,14 @@ pub fn repairAt(ms: []const f64, i: usize) bool {
     if (!(value > 0) or !std.math.isFinite(value)) return true;
     if (i > 0 and value < ms[i - 1] * (1 - dip)) return true;
     if (i + 1 < ms.len and ms[i + 1] < value * (1 - dip)) return true;
-    const predicted = if (i > 0 and i + 1 < ms.len) (ms[i - 1] + ms[i + 1]) / 2 else
-        if (i == 0 and ms.len > 2) 2 * ms[1] - ms[2] else
-        if (i > 1) 2 * ms[i - 1] - ms[i - 2] else value;
+    const predicted = if (i > 0 and i + 1 < ms.len) (ms[i - 1] + ms[i + 1]) / 2 else if (i == 0 and ms.len > 2) 2 * ms[1] - ms[2] else if (i > 1) 2 * ms[i - 1] - ms[i - 2] else value;
     return predicted > 0 and value > predicted * (1 + dip);
 }
 
 const Local = struct {
-    pub fn decide(_: @This(), mine: bool) !bool { return mine; }
+    pub fn decide(_: @This(), mine: bool) !bool {
+        return mine;
+    }
 };
 
 /// At most one extra warm read per width: at most one eighth of the initial window timing calls.
