@@ -120,6 +120,11 @@ def run_kl(a: argparse.Namespace) -> int:
     eng, fed = open_logits(a.engine, a.vocab)
     if ref.shape[0] > len(ids):
         ref = ref[: len(ids)]  # a causal model: the first rows of a longer run are the shorter run's
+    if ref_fed is not None:  # a kl-format reference says which token it fed after each row: the chat's, as the engine's
+        ref_fed = ref_fed[: len(ids)]
+        wrong = np.flatnonzero(np.asarray(ref_fed[:-1]) != np.asarray(ids[1 : len(ref_fed)], dtype=np.uint32))
+        if wrong.size:
+            raise SystemExit(f"the reference's file fed other tokens than the ids at {wrong.size} rows, first row {wrong[0]}")
     if fed is None and eng.shape[0] > len(ids):
         eng = eng[: len(ids)]  # the same for a raw file, so two reference passes compare over the chat's rows
     if ref.shape != eng.shape or ref.shape[0] != len(ids):
