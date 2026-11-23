@@ -1,5 +1,6 @@
 //! Inkling 2 Mini behind the lane engine: independent visit state and exact copy-window rollback.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -325,6 +326,7 @@ pub const Metal = struct {
     }
 
     fn now() f64 {
+        if (comptime !builtin.os.tag.isDarwin()) return 0;
         var ts: std.c.timespec = undefined;
         _ = std.c.clock_gettime(.MONOTONIC, &ts);
         return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) * 1e-6;
