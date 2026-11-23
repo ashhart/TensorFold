@@ -159,7 +159,9 @@ fn run(ctx: *const Context, args: Args) !u8 {
             }
         }
         if (try pull(ctx, choice.model) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{choice.model});
+        if (stop.requested()) |sig| return stop.exitCode(sig);
         if (choice.drafter) |d| if (try pull(ctx, d) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{d});
+        if (stop.requested()) |sig| return stop.exitCode(sig);
     }
     return serve(ctx, args, choice, caller_key);
 }
