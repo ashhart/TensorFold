@@ -217,50 +217,50 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 
-| Optimization | gdsa | kimi | qwen3 |
-| --- | --- | --- | --- |
-| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) |
-| 2. Paged KV | yes | yes | no (prompt) |
-| 3. Prompt store | yes | yes | no (prompt) |
-| 4. iGPU states | no (unified) | no (unified) | no (prompt) |
-| 5. State walk | yes | yes | no (prompt) |
-| 6. KV ledger | yes | yes | no (prompt) |
-| 7. Host KV tier | yes | yes | no (prompt) |
-| 8. Disk cache | yes | yes | no (prompt) |
-| 9. FP8 KV | yes | yes | no (prompt) |
-| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) |
-| 11. Fused proj. | yes | yes | yes |
-| 12. Add + norm | done¹ | done M¹ | yes |
-| 13. MoE grouped | done¹ | done¹ | no (dense) |
-| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
-| 15. MTP | done¹ | no (DSpark) | no (prompt) |
-| 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | yes | no (prompt) |
-| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) |
-| 19. Shared drafts | yes | yes | no (prompt) |
-| 20. Solo chunks | yes | yes | no (prompt) |
-| 21. Read-ahead | no (Metal) | no (Metal) | yes |
-| 22. Direct load | yes | yes | yes |
-| 23. Page drop | done M[#1888] | yes | yes |
-| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) |
-| 25. TP ranks | yes | yes | no (small) |
-| 26. Pipeline | yes | yes | no (small) |
-| 27. Profiles | yes | yes | yes |
-| 28. Scale index | ? | ? | ? |
-| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
-| 30. Small-kernel fusion | ? | ? | ? |
-| 31. Stream-tile prefetch | ? | ? | ? |
-| 32. Filled-item prompt grid | ? | ? | ? |
-| 33. Dependent launches | ? | ? | ? |
-| 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
-| 35. FP8 KV prefill waits | ? | ? | ? |
-| 36. Qwen normalization and head | ? | ? | ? |
-| 37. Text metadata uploads | ? | ? | ? |
-| 38. Greedy readback | ? | ? | ? |
+| Optimization | gdsa | kimi | qwen3 | ink2 |
+| --- | --- | --- | --- | --- |
+| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) | ? |
+| 2. Paged KV | yes | yes | no (prompt) | yes (whole buffers a visit) |
+| 3. Prompt store | yes | yes | no (prompt) | no (own kept states, `--no-drafts` only) |
+| 4. iGPU states | no (unified) | no (unified) | no (prompt) | no (unified) |
+| 5. State walk | yes | yes | no (prompt) | ? |
+| 6. KV ledger | yes | yes | no (prompt) | open M[#4337] (its own admission by state bytes) |
+| 7. Host KV tier | yes | yes | no (prompt) | ? |
+| 8. Disk cache | yes | yes | no (prompt) | ? |
+| 9. FP8 KV | yes | yes | no (prompt) | ? |
+| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) | no (Metal) |
+| 11. Fused proj. | yes | yes | yes | open M[#4337] (dense prompt MMA tile) |
+| 12. Add + norm | done¹ | done M¹ | yes | ? |
+| 13. MoE grouped | done¹ | done¹ | no (dense) | open M[#4337] |
+| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 15. MTP | done¹ | no (DSpark) | no (prompt) | no (DSpark) |
+| 16. DFlash(2) | yes | yes | no (prompt) | no (DSpark) |
+| 17. DSpark | yes | yes | no (prompt) | open M[#4337] |
+| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) | ? |
+| 19. Shared drafts | yes | yes | no (prompt) | open M[#4337] |
+| 20. Solo chunks | yes | yes | no (prompt) | ? |
+| 21. Read-ahead | no (Metal) | no (Metal) | yes | no (Metal) |
+| 22. Direct load | yes | yes | yes | ? |
+| 23. Page drop | done M[#1888] | yes | yes | ? |
+| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 25. TP ranks | yes | yes | no (small) | ? |
+| 26. Pipeline | yes | yes | no (small) | ? |
+| 27. Profiles | yes | yes | yes | ? |
+| 28. Scale index | ? | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) | ? |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
-qwen3 `qwen3` (H: embeddings and rerankers, prompt only).
+qwen3 `qwen3` (H: embeddings and rerankers, prompt only), ink2 `inkling2_loop` (M: Inkling 2 Mini, experimental on [#4337]).
 
 Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_image`, `qwen_image`, `radio`, and
 the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers on the lane host, so few rows
@@ -422,6 +422,11 @@ below; these are estimates for planning a port, not results.
     Default-off allocations and the existing 64-pair kernels are unchanged. Device timing and token hashes are not
     yet run, so no speedup is claimed; EXL3 and block-32/CSF0 keep the original two-pass path.
 
+    Inkling 2 Mini on Metal groups a prompt chunk's route pairs by expert from 64 rows up, decoding each expert's weights
+    once a tile and summing on simdgroup matrix multiplies, and plans a drafted verify round's pairs (2 to 63 rows) by
+    expert in tiles of four; every pair keeps the one-row kernels' sums ([#4337]). Cold prompts reach 0.72 to 0.87 of MLX's
+    rate on an M4 Pro ([recipe](recipes/inkling-2-mini-metal.md#receipt-apple-m4-pro-48-gib)).
+
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
     and Dory) keeps those eager. GLM's capture is [#2279] (open), for [#1490].
@@ -468,6 +473,7 @@ below; these are estimates for planning a port, not results.
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
     | deepseek_v41 (M), timed cost table | opt-in; M5 Ultra code +1..+6 %, 3 chat cells −2..−4 %; M3 Ultra 5 cells +1..+4 %, 3 −1..−2 % | [#2952] |
+    | inkling2 (M), bundled head | one stream +15..+22 % over plain on an M4 Pro; four streams level (code −3 %, chat +0.1 %) | [#4337] |
 
 18. **Copy drafts.** Where a reply repeats earlier text, the lane host drafts the continuation from the context
     (`copy_index.zig`) and the target verifies it. It needs no drafter weights; [#2022] brought verified root and
@@ -484,6 +490,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | qwen3_5 (Qwen3.6 MTP) | +18 % (2 streams), +32 % (4), +38 % (8) aggregate | [#1562] |
     | nemotron | −3.6..−7.5 % time at 2–8 streams | [#768] |
+    | inkling2 (M), head in one pass | four drafted streams against plain: code −3 %, chat +0.1 % (A-B-B-A, M4 Pro) | [#4337] |
 
 20. **Prompt chunk size and interleaving.** A prompt pass takes a wider chunk while no other stream decodes, and the
     normal chunk once one does, so a cold prompt is faster without longer decode waits ([#1554] option C).
@@ -805,3 +812,4 @@ below; these are estimates for planning a port, not results.
 [#2941]: https://github.com/ashhart/TensorFold/issues/2941
 [#2971]: https://github.com/ashhart/TensorFold/pull/2971
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
+[#4337]: https://github.com/ashhart/TensorFold/pull/4337
