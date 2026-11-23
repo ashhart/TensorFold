@@ -28,6 +28,7 @@ pub const Model = struct {
     weights: wts.Weights,
     kernels: quant.Kernels,
     glue: glue.Kernels,
+    tap_ring: ?mtl.Pipeline = null,
     /// The routed block's kernels, with experts.
     moe: ?moe_gpu.Kernels = null,
     /// Two-stream mHC pipelines for looped checkpoints.
@@ -172,8 +173,10 @@ pub const Model = struct {
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
         errdefer m.kernels.deinit();
         if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
-        m.glue = try glue.Kernels.init(m.device);
+        m.tap_ring = null;
+        m.glue = try glue.Kernels.init(m.device, &m.tap_ring);
         errdefer m.glue.deinit();
+        errdefer if (m.tap_ring) |p| p.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
         m.mhc = if (shard.local.looped and shard.local.mhc_iterations != 0) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
@@ -254,6 +257,7 @@ pub const Model = struct {
         if (m.mhc) |*p| p.deinit();
         if (m.moe) |*k| k.deinit();
         m.glue.deinit();
+        if (m.tap_ring) |p| p.deinit();
         m.kernels.deinit();
         if (m.idle_release) |owner| owner.deinit();
         m.weights.deinit();

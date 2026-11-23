@@ -119,7 +119,9 @@ fn gather(device: mtl.Device, queue: mtl.Queue, k: q27.glue_gpu.Kernels, p: q27.
 
 /// Each width: gathered bits against float64 rounded once, one-row calls against one call, scales 1% off as control.
 pub fn check(device: mtl.Device, queue: mtl.Queue) !usize {
-    const k = try q27.glue_gpu.Kernels.init(device);
+    var tap_ring: ?mtl.Pipeline = null;
+    const k = try q27.glue_gpu.Kernels.init(device, &tap_ring);
+    defer if (tap_ring) |p| p.deinit();
     defer k.deinit();
     var failed: usize = 0;
     const deq = try a.alloc(f64, hidden);

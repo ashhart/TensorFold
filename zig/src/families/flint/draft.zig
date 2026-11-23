@@ -24,7 +24,10 @@ pub const Drafter = struct {
         if (bits != 0 and bits != 4) return error.UnsupportedDraftBits;
         const d = try a.create(Drafter);
         errdefer a.destroy(d);
-        d.* = .{ .a = a, .model = undefined, .glue = try @import("../qwen27/glue_gpu.zig").Kernels.init(target.device), .kernels = .{ .allocator = a, .device = target.device, .raw_tiles = false }, .dims = undefined };
+        var unused_tap_ring: ?mtl.Pipeline = null;
+        const glue = try @import("../qwen27/glue_gpu.zig").Kernels.init(target.device, &unused_tap_ring);
+        if (unused_tap_ring) |p| p.deinit();
+        d.* = .{ .a = a, .model = undefined, .glue = glue, .kernels = .{ .allocator = a, .device = target.device, .raw_tiles = false }, .dims = undefined };
         errdefer d.glue.deinit();
         errdefer d.kernels.deinit();
         d.dims = try target.device.buffer(4096, mtl.ResourceOptions.shared);

@@ -98,7 +98,9 @@ pub fn createLayers(a: std.mem.Allocator, layers: usize) !*q.model.Model {
     const shard = q.config.Shard{ .rank = 0, .ranks = 1, .global = c, .local = c };
     var weights = try q.gpu_weights.load(a, device, &cp, &shard, &widths);
     errdefer weights.deinit();
-    const glue = try q.glue_gpu.Kernels.init(device);
+    var tap_ring: ?mtl.Pipeline = null;
+    const glue = try q.glue_gpu.Kernels.init(device, &tap_ring);
+    errdefer if (tap_ring) |p| p.deinit();
     errdefer glue.deinit();
     const frame = try q.gpu_frame.Frame.init(device, c, 128);
     errdefer {
@@ -106,6 +108,6 @@ pub fn createLayers(a: std.mem.Allocator, layers: usize) !*q.model.Model {
         f.deinit();
     }
     const m = try a.create(q.model.Model);
-    m.* = .{ .allocator = a, .device = device, .queue = queue, .shard = shard, .config = c, .checkpoint = cp, .weights = weights, .kernels = .{ .allocator = a, .device = device }, .glue = glue, .frame = frame };
+    m.* = .{ .allocator = a, .device = device, .queue = queue, .shard = shard, .config = c, .checkpoint = cp, .weights = weights, .kernels = .{ .allocator = a, .device = device }, .glue = glue, .tap_ring = tap_ring, .frame = frame };
     return m;
 }

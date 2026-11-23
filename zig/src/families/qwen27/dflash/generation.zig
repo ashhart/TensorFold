@@ -55,10 +55,10 @@ pub const Generation = struct {
     }
     /// A prompt pass's rows into the drafter, 128 a call (its frame's); the target's pass may be longer.
     fn absorbChunk(g: *Generation, rows: usize) !void {
-        if (@import("../tap_prompt.zig").on() and g.runner.model.glue.tap_ring != null) {
+        if (g.runner.model.tap_ring != null) {
             if (g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null) return error.BadCommittedTaps;
             errdefer g.runner.failed = true;
-            try @import("../tap_prompt_gpu.zig").absorb(g.runner.model.glue, g.runner.model.queue, g.runner.taps, g.draft.ring(), @intCast(rows));
+            try @import("../tap_prompt_gpu.zig").absorb(g.runner.model.tap_ring.?, g.runner.model.queue, g.runner.taps, g.draft.ring(), @intCast(rows));
             if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
             return;
         }
@@ -112,7 +112,7 @@ pub const Generation = struct {
             generation: *Generation,
             ids: []const u32,
             pub fn enabled(ctx: @This()) bool {
-                return @import("../tap_prompt.zig").on() and ctx.generation.runner.model.glue.tap_ring != null;
+                return ctx.generation.runner.model.tap_ring != null;
             }
             pub fn chunk(ctx: @This(), requested: usize) usize {
                 return ctx.generation.runner.promptRows(@intCast(requested));
@@ -127,9 +127,9 @@ pub const Generation = struct {
                 const one = ctx.generation;
                 if (!omit) return one.promptChunk(ctx.ids[first..][0..count], last);
                 const end = try std.math.add(u64, one.draft.committed_end, count);
-                const previous = one.runner.taps.discard;
-                one.runner.taps.discard = true;
-                defer one.runner.taps.discard = previous;
+                const previous = one.runner.capture_taps;
+                one.runner.capture_taps = false;
+                defer one.runner.capture_taps = previous;
                 try (TargetSession.Session{ .runner = one.runner }).promptChunk(ctx.ids[first..][0..count], false);
                 one.draft.committed_end = end;
                 if (end != one.runner.offsets[0]) return error.BadDraftPosition;

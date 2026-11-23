@@ -4,14 +4,13 @@ const mtl = @import("metal");
 const policy = @import("tap_prompt.zig");
 const Ring = @import("tap_ring.zig").Ring;
 const Taps = @import("taps.zig").Taps;
-const Glue = @import("glue_gpu.zig").Kernels;
 const Context = struct {
     taps: Taps,
     ring: Ring,
-    glue: Glue,
+    pipeline: mtl.Pipeline,
     queue: mtl.Queue,
     pub fn write(c: @This(), args: policy.Args) !void {
-        const pipe = c.glue.tap_ring orelse return error.UnsupportedTapRing;
+        const pipe = c.pipeline;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = c.queue.commandBuffer();
@@ -30,6 +29,6 @@ const Context = struct {
         }
     }
 };
-pub fn absorb(glue: Glue, queue: mtl.Queue, taps: Taps, ring: Ring, rows: u32) !void {
-    try policy.absorb(Context{ .taps = taps, .ring = ring, .glue = glue, .queue = queue }, rows);
+pub fn absorb(pipeline: mtl.Pipeline, queue: mtl.Queue, taps: Taps, ring: Ring, rows: u32) !void {
+    try policy.absorb(Context{ .taps = taps, .ring = ring, .pipeline = pipeline, .queue = queue }, rows);
 }

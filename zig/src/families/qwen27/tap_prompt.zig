@@ -37,11 +37,12 @@ pub fn absorb(ctx: anytype, rows: u32) !void {
 pub fn prefill(ctx: anytype, total: usize, requested: usize) !void {
     var skipped = false;
     errdefer if (skipped) ctx.invalidate();
+    const enabled = ctx.enabled();
     var first: usize = 0;
     while (first < total) {
         const count = @min(total - first, ctx.chunk(requested));
         if (count == 0) return error.BadDraftContext;
-        const omit = ctx.enabled() and dead(first + count, total, ctx.window());
+        const omit = enabled and dead(first + count, total, ctx.window());
         skipped = skipped or omit;
         try ctx.feed(first, count, omit, first + count == total);
         first += count;

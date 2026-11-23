@@ -78,7 +78,9 @@ const Direct = struct {
     invalid: bool = false,
     fail_after: ?usize = null,
     flag: bool = true,
+    enabled_calls: usize = 0,
     pub fn enabled(d: *@This()) bool {
+        d.enabled_calls += 1;
         return d.flag;
     }
     pub fn chunk(_: *@This(), requested: usize) usize {
@@ -116,6 +118,7 @@ test "tap lean: actual direct prefill loop poisons skipped planes and matches th
         try t.expectEqualSlices(u8, &old.got, &d.got);
         try t.expectEqual(old.target_calls, d.target_calls);
         try t.expectEqual(@as(usize, 0), old.skipped);
+        try t.expectEqual(@as(usize, 1), old.enabled_calls);
     }
     try t.expect(!policy.dead(512, 2048, 2048));
     try t.expect(policy.dead(512, 2560, 2048));
