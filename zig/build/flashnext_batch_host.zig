@@ -7,6 +7,8 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const review = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_review_test.zig"), .target = b.graph.host, .link_libc = true }) }));
     b.step("test-flashnext-ssd-review-host", "SSD startup, cache and ownership regressions without a device").dependOn(&review.step);
     all.dependOn(&review.step);
+    const metadata = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_review_test.zig"), .target = b.graph.host, .link_libc = true }), .filters = &.{"REV99 slot metadata"} }));
+    b.step("test-flashnext-ssd-metadata-host", "Forecast accounting preserves legacy pool receipt bytes").dependOn(&metadata.step);
     const rope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/rope_refusal_test.zig"), .target = b.graph.host }) }));
     b.step("test-flashnext-rope-host", "The Metal/HIP config reader refuses scaled RoPE and keeps plain configs' rotary").dependOn(&rope.step);
     all.dependOn(&rope.step);
