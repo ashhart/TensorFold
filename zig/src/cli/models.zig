@@ -57,9 +57,13 @@ fn pinned(repo: []const u8, revision: []const u8, a: Allocator) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}@{s}", .{ repo, revision });
 }
 
-/// The exact snapshot a fully pinned entry names, whether it is cached yet or a successful pull will create it.
+/// A pinned entry is cached only after pull publishes its exact revision through refs/main.
 fn startSnapshot(a: Allocator, io: std.Io, root: []const u8, repo: []const u8, revision: []const u8) !struct { []const u8, bool } {
-    const dir = try std.fs.path.join(a, &.{ root, try hub.repoDirName(a, repo), "snapshots", revision });
+    const repo_dir = try std.fs.path.join(a, &.{ root, try hub.repoDirName(a, repo) });
+    const dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", revision });
+    var ref_buf: [128]u8 = undefined;
+    const ref = std.Io.Dir.cwd().readFile(io, try std.fs.path.join(a, &.{ repo_dir, "refs", "main" }), &ref_buf) catch return .{ dir, false };
+    if (!std.mem.eql(u8, std.mem.trim(u8, ref, " \r\n"), revision)) return .{ dir, false };
     return .{ dir, hub.isDir(io, dir) and @import("checkpoint_config").optional(a, io, dir) != null };
 }
 
