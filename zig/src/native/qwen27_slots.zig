@@ -450,7 +450,7 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     if (slot == 0 and b.draft_block.enabled) {
         std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
         b.draft_block.drop();
-        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+        if (b.draft) |d| if (d.generation.draft.dflash()) |m| m.tree_block = @import("qwen27_draft_block.zig").wide;
     }
     if (slot == 0) leave(b, s);
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
@@ -574,7 +574,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
-        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
+        if (b.draft_block.enabled) if (g.draft.dflash()) |m| try m.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
         const result = if (g.draft.dflash() != null and b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
