@@ -70,14 +70,6 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} },
     .{ .model_type = "ricursive", .formats = &.{ "bf16", "modelopt-nvfp4-mlp" } },
 };
-/// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
-fn isGemma4(model_type: []const u8) bool {
-    return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
-}
-/// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
-fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
-    return cache_fit.hostMemory(0, reset_peak);
-}
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
@@ -300,8 +292,8 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.prompt_int8) return prompt_int8_refusal;
     if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
-    if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint") and !std.mem.eql(u8, t, "glm5_next")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), GLM-5.3-Flash (glm5_next), Gemma 4 dense, Flint (DFlash2 on M5) and Llama (a smaller Llama on the same tokenizer)";
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    if (o.drafter != null and !dense and !models.isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint") and !std.mem.eql(u8, t, "glm5_next")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), GLM-5.3-Flash (glm5_next), Gemma 4 dense, Flint (DFlash2 on M5) and Llama (a smaller Llama on the same tokenizer)";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (models.isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
@@ -309,7 +301,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
-    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (models.isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "{s} keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{ spill.flag(o), name });
     const or_talks: []const u8 = if (dense and std.mem.eql(u8, t, "qwen3_5")) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
