@@ -1,11 +1,27 @@
 //! Step-5 host checks share the actual family and native callback, using no GPU work or shader compiler.
 const std = @import("std");
+pub fn recordingTests(b: *std.Build) *std.Build.Step {
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
+    const empty = b.addWriteFiles().add("step5-test-empty.zig", "pub const bytes = \"\";\n");
+    sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = empty });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    const recording = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = b.graph.host });
+    const family = b.createModule(.{ .root_source_file = b.path("zig/step5_family_tests.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = recording }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes } } });
+    const filter = b.option([]const u8, "step5-filter", "One Step-5 host regression");
+    const tests = b.addTest(.{ .root_module = family, .filters = &.{ "step5 host: imports", filter orelse "step5 host: verify" } });
+    family.addCSourceFile(.{ .file = b.path("zig/residency_objc_stub.c"), .flags = &.{} });
+    const run = b.addRunArtifact(tests);
+    const check = b.step("test-step5-host", "Step-5 geometry and shared verify with recording Metal, no GPU work");
+    check.dependOn(&run.step);
+    return check;
+}
+
 pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/step5.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const filter = b.option([]const u8, "step5-filter", "One Step-5 host regression");
     const check = b.step("test-step5-host", "Step-5 geometry and owned prompt-cache callback fixtures without GPU work");
-    const family = b.createModule(.{ .root_source_file = b.path("zig/step5_family_tests.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = engine.import_table.get("kernel_sources").? } } });
+    const family = b.createModule(.{ .root_source_file = b.path("zig/step5_family_tests.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = engine.import_table.get("kernel_sources").? }, .{ .name = "lanes", .module = lanes } } });
     for ([_]*std.Build.Module{ family, host }) |module| {
         const tests = b.addTest(.{ .root_module = module, .filters = &.{ "step5 host: imports", filter orelse "step5 host:" } });
         const run = b.addRunArtifact(tests);

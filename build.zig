@@ -123,6 +123,8 @@ pub fn build(b: *std.Build) void {
         step5_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
         @import("zig/build/step5_host.zig").steps(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
         @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
+    } else {
+        _ = @import("zig/build/step5_host.zig").recordingTests(b);
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/h3_image_prompt.zig").tests(b, target, test_step);

@@ -19,6 +19,9 @@ pub const Pipeline = struct {
     pub fn simdWidth(_: @This()) usize {
         return 32;
     }
+    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !Pipeline {
+        return .{ .id = @ptrFromInt(1) };
+    }
     pub fn maxThreads(_: @This()) usize {
         return 1024;
     }
@@ -99,6 +102,10 @@ pub const Record = struct {
     queue_releases: usize = 0,
     uses: usize = 0,
     copies: usize = 0,
+    passes: [256]Pass = undefined,
+    pass_count: usize = 0,
+    current: Pass = .{},
+    logits: usize = 0,
     bad: usize = 0,
     set_commits: usize = 0,
     initial_missing: usize = 0,
@@ -151,6 +158,18 @@ pub const Buffer = struct {
     }
 };
 
+pub const Bound = struct { id: usize = 0, off: usize = 0 };
+pub const Pass = struct {
+    pipe: usize = 0,
+    buffers: [16]Bound = @splat(.{}),
+    values: [16][64]u8 = @splat(@splat(0)),
+    lengths: [16]usize = @splat(0),
+    output: ?Buffer = null,
+    grid: Size = .{ .width = 0 },
+    threads: Size = .{ .width = 0 },
+    direct: bool = false,
+};
+
 pub const Device = struct {
     record: *Record,
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
@@ -163,6 +182,9 @@ pub const Device = struct {
         p.* = .{ .record = d.record, .data = data, .bytes = bytes };
         try d.record.allocations.append(d.record.gpa, p);
         return .{ .id = p };
+    }
+    pub fn tensorUnits(_: Device) bool {
+        return true;
     }
     pub fn maxWorkingSet(_: Device) usize {
         return 256 * ResidencySet.GiB;
@@ -247,8 +269,8 @@ pub const CommandBuffer = struct {
     pub fn blit(c: CommandBuffer) BlitEncoder {
         return .{ .record = c.record };
     }
-    pub fn compute(_: CommandBuffer, _: DispatchType) ComputeEncoder {
-        return .{};
+    pub fn compute(c: CommandBuffer, _: DispatchType) ComputeEncoder {
+        return .{ .record = c.record };
     }
     pub fn commit(c: CommandBuffer) void {
         c.record.commits += 1;
@@ -293,13 +315,55 @@ pub const BlitEncoder = struct {
 };
 
 pub const ComputeEncoder = struct {
-    id: objc.Id = @ptrFromInt(1),
-    pub fn setPipeline(_: @This(), _: Pipeline) void {}
-    pub fn setBuffer(_: @This(), _: Buffer, _: usize, _: usize) void {}
-    pub fn setValue(_: @This(), _: anytype, _: usize) void {}
-    pub fn setBytes(_: @This(), _: []const u8, _: usize) void {}
-    pub fn dispatchThreads(_: @This(), _: Size, _: Size) void {}
-    pub fn dispatchGroups(_: @This(), _: Size, _: Size) void {}
+    record: *Record,
+    pub fn setPipeline(e: @This(), p: Pipeline) void {
+        e.record.current = .{ .pipe = @intFromPtr(p.id) };
+    }
+    pub fn setBuffer(e: @This(), b: Buffer, off: usize, at: usize) void {
+        e.record.current.buffers[at] = .{ .id = @intFromPtr(b.id), .off = off };
+        if (at == 5) e.record.current.output = b;
+    }
+    pub fn setValue(e: @This(), v: anytype, at: usize) void {
+        const bytes = std.mem.asBytes(&v);
+        std.debug.assert(bytes.len <= e.record.current.values[at].len);
+        e.record.current.lengths[at] = bytes.len;
+        @memcpy(e.record.current.values[at][0..bytes.len], bytes);
+    }
+    pub fn setBytes(e: @This(), bytes: []const u8, at: usize) void {
+        std.debug.assert(bytes.len <= e.record.current.values[at].len);
+        e.record.current.lengths[at] = bytes.len;
+        @memcpy(e.record.current.values[at][0..bytes.len], bytes);
+    }
+    fn dispatch(e: @This(), grid: Size, threads: Size, direct: bool) void {
+        const r = e.record;
+        r.current.grid = grid;
+        r.current.threads = threads;
+        r.current.direct = direct;
+        if (r.logits != 0 and r.current.buffers[5].id == r.logits and r.current.lengths[4] == 24) {
+            const dims = std.mem.bytesToValue([6]i32, r.current.values[4][0..24]);
+            const vocab: usize = @intCast(dims[1]);
+            const rows: usize = @intCast(dims[3]);
+            const out = r.current.output.?;
+            const all = @as([*]u16, @ptrCast(@alignCast(out.contents() + r.current.buffers[5].off)))[0 .. rows * vocab];
+            for (0..rows) |row| {
+                const l = all[row * vocab ..][0..vocab];
+                @memset(l, 0);
+                if (row + 1 < vocab) l[row + 1] = 0x3f80; // each row's greedy token is its one-based global row
+            }
+        }
+        if (r.pass_count == r.passes.len) {
+            r.bad += 1;
+            return;
+        }
+        r.passes[r.pass_count] = r.current;
+        r.pass_count += 1;
+    }
+    pub fn dispatchThreads(e: @This(), grid: Size, threads: Size) void {
+        e.dispatch(grid, threads, true);
+    }
+    pub fn dispatchGroups(e: @This(), grid: Size, threads: Size) void {
+        e.dispatch(grid, threads, false);
+    }
     pub fn dispatchIndirect(_: @This(), _: Buffer, _: usize, _: Size) void {}
     pub fn barrier(_: @This()) void {}
     pub fn end(_: @This()) void {}

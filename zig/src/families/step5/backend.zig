@@ -11,7 +11,7 @@ const row = lanes.logprob.bf16Row;
 const be = lanes.backend;
 
 /// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
-pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
+pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, verify_shared: bool = false };
 
 /// Drafts a window holds at most: one a MTP layer.
 pub const max_drafts = 3;
