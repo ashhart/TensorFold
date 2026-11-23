@@ -294,12 +294,10 @@ pub const Engine = struct {
         errdefer recurrent.shutdown(e);
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
-
     /// Reserve prompt INT8 workspace before serving; prompt forwards are not graph-captured.
     pub fn warmPromptInt8(e: *Engine) !void {
         try e.int8.ensureRows(e, e.scratch_rows);
     }
-
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
         // Commit the configured prompt and verify ceiling before admission; warmup then reuses it.
