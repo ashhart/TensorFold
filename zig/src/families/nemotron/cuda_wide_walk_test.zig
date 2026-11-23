@@ -59,3 +59,25 @@ test "wide round walk: with the switch off every limit stays at today's 16 rows 
     try std.testing.expect(!wide.windowFits(c, 17)); // as the forward refused before
     try std.testing.expectEqual(@as(usize, 8), wide.streams(c));
 }
+
+test "wide round walk: a stream past its own window's rows is refused, however wide the round (REV60 3)" {
+    const c = try lightning(true);
+    const rows = state.windowRows(c);
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.c = c;
+    var seq: state.Seq = undefined;
+    const ids = [_]u32{1};
+    try std.testing.expectError(error.BadWindow, e.verifyShared(&.{.{ .seq = &seq, .ids = &ids, .rows = rows + 1 }}));
+    var h: @import("cuda_mtp.zig").Head = undefined;
+    h.e = &e;
+    var parts = [_]@import("cuda_mtp.zig").Part{.{ .k_cache = 0, .v_cache = 0, .probs = 0, .ids = 0, .hidden = 0, .sampled = 0, .rule = null, .pos = 0, .keep = rows + 1, .depth = 1 }};
+    try std.testing.expectError(error.BadDraftRequest, h.chains(&parts));
+    const glue = @import("cuda_glue.zig");
+    const g: glue.Glue = .{ .set = null, .f = undefined, .s = undefined, .emb = undefined, .norms = undefined, .moe = undefined };
+    const shape: glue.Shape = .{ .proj = 1, .xd = 1, .cd = 1, .heads = 1, .dh = 32, .groups = 1, .state = 128, .rmax = rows };
+    const seg: glue.MambaSeg = .{ .proj = 0, .base = 0, .raw = 0, .xc = 0, .dt = 0, .state = 0, .meta = 0, .y = 0, .rows = 1 };
+    var past = seg;
+    past.rows = rows + 1;
+    try std.testing.expectError(error.ScanShape, g.mambaSegs(&.{ seg, past }, 0, 0, 0, 0, 0, 0, 0, shape)); // the batched conv
+    try std.testing.expectError(error.ScanShape, g.mambaSegs(&.{past}, 0, 0, 0, 0, 0, 0, 0, shape)); // a stream alone
+}

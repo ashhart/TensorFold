@@ -468,7 +468,8 @@ pub const Engine = struct {
         if (parts.len < 1 or parts.len > @import("cuda_wide.zig").streams(e.c)) return error.BadWindow;
         var total: usize = 0;
         for (parts) |p| {
-            if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
+            // a stream's rows stride at windowRows in its own buffers (ids, hidden, Mamba rows), however wide the round
+            if (p.rows < 1 or p.rows > state.windowRows(e.c) or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
             total += p.rows;
         }
         if (total > state.sharedRows(e.c)) return error.WindowTooWide;

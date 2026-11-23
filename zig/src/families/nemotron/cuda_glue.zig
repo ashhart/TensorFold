@@ -223,6 +223,7 @@ pub const Glue = struct {
 
     /// Every stream's conv, then every stream's scan, of a shared window: one launch each, or a stream at a time.
     pub fn mambaSegs(g: Glue, segs: []const MambaSeg, cw: u64, cb: u64, a_: u64, dsk: u64, dtb: u64, lo: f32, hi: f32, m: Shape) !void {
+        for (segs) |s| if (s.rows > m.rmax) return error.ScanShape; // each stream's conv and scan rows stride at rmax
         if (g.set != null or segs.len < 2 or segs.len > max_segs) {
             for (segs) |s| {
                 try g.conv(s.proj, s.base, s.raw, s.xc, cw, cb, s.meta, s.rows, m);

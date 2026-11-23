@@ -420,7 +420,7 @@ pub const Head = struct {
         if (parts.len < 1 or parts.len > streams) return error.BadDraftRequest;
         var total: usize = 0;
         for (parts) |p| {
-            if (p.keep < 1 or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
+            if (p.keep < 1 or p.keep > state.windowRows(e.c) or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
             total += p.keep;
         }
         if (total > state.sharedRows(e.c)) return error.BadDraftRequest;
