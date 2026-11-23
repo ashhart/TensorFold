@@ -9,6 +9,7 @@ const Model = engine.Model;
 const Kernels = engine.Kernels;
 const prompt_rows = engine.prompt_rows;
 const window_rows = engine.window_rows;
+const round_rows = engine.round_rows;
 const token_ring = 1024;
 
 const Lane = struct {
@@ -52,7 +53,7 @@ pub const Backend = struct {
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *Model, k: *const Kernels, s: cuda.Stream) !Backend {
         const v = m.w.c.text.unpadded_vocab;
-        var tokens = try cuda.DeviceBuffer.alloc(d, (token_ring + window_rows) * 4);
+        var tokens = try cuda.DeviceBuffer.alloc(d, (token_ring + round_rows) * 4);
         errdefer tokens.free();
         var logits16 = try cuda.DeviceBuffer.alloc(d, window_rows * v * 2);
         errdefer logits16.free();
@@ -96,7 +97,7 @@ pub const Backend = struct {
     }
 
     pub fn facts(_: *const Backend) lanes.Model {
-        return .{ .exact_width = window_rows, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = prompt_rows, .max_streams = 1, .streams_exact = true };
+        return .{ .exact_width = window_rows, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .plain_share = true, .batch_rows = round_rows, .max_streams = engine.max_slots, .streams_exact = true };
     }
 
     pub fn admits(b: *const Backend, prompt: usize, max_new: usize) bool {
@@ -278,40 +279,60 @@ pub const Backend = struct {
         return h;
     }
 
+    /// Every window in one forward (loop_round.zig): each stream's rows on its own slot, its bits its solo window's.
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const b = self(ptr);
-        if (windows.len != 1 or out.len != 1) return error.OneStreamOnly;
-        const w = windows[0];
-        if (w.held != 0) return error.NoHeldDrafts;
-        if (w.parents != null) return error.ChainsOnly;
-        if (w.masks.len != 0) return error.StructuresUnsupported;
-        const l = try b.laneOf(w.stream);
-        const n = w.rows();
-        if (n == 0 or n > window_rows) return error.WindowTooWide;
-        l.base = l.len;
-        l.rows.clearRetainingCapacity();
-        try l.rows.append(b.gpa, w.pending);
-        try l.rows.appendSlice(b.gpa, w.tokens);
-        for (w.positions, 0..) |position, i| if (position != l.base + i + 1) return error.PositionMismatch;
-        try b.m.forward(b.k, b.s, l.rows.items, l.base, 0, n, true);
-        try b.drawRows(l, b.m.s.logits, n, w.positions[0], token_ring);
-        var got: [window_rows]u32 = undefined;
+        if (windows.len == 0 or windows.len != out.len or windows.len > engine.max_slots) return error.BadWindows;
+        var chains: [engine.max_slots]engine.Model.Chain = undefined;
+        var total: usize = 0;
+        for (windows, 0..) |w, i| {
+            if (w.held != 0) return error.NoHeldDrafts;
+            if (w.parents != null) return error.ChainsOnly;
+            if (w.masks.len != 0) return error.StructuresUnsupported;
+            const l = try b.laneOf(w.stream);
+            const n = w.rows();
+            if (n == 0 or n > window_rows) return error.WindowTooWide;
+            l.base = l.len;
+            l.rows.clearRetainingCapacity();
+            try l.rows.append(b.gpa, w.pending);
+            try l.rows.appendSlice(b.gpa, w.tokens);
+            for (w.positions, 0..) |position, r| if (position != l.base + r + 1) return error.PositionMismatch;
+            chains[i] = .{ .slot = b.m.slot, .p0 = l.base, .tokens = l.rows.items };
+            total += n;
+        }
+        if (total > round_rows) return error.RoundTooWide;
+        try b.m.forwardChains(b.k, b.s, chains[0..windows.len], 0, total, true);
+        const v = b.m.w.c.text.unpadded_vocab;
+        var at: usize = 0;
+        for (windows) |w| {
+            const l = try b.laneOf(w.stream);
+            try b.drawRows(l, b.m.s.logits + at * v * 4, l.rows.items.len, w.positions[0], token_ring + at);
+            at += l.rows.items.len;
+        }
+        var got: [round_rows]u32 = undefined;
         try b.s.synchronize();
-        try b.tokens.download(token_ring * 4, std.mem.sliceAsBytes(got[0..n]));
-        @memcpy(out[0].sampled[0..n], got[0..n]);
-        @memcpy(out[0].drafts[0 .. n - 1], l.rows.items[1..n]);
-        l.len = l.base + n;
+        try b.tokens.download(token_ring * 4, std.mem.sliceAsBytes(got[0..total]));
+        at = 0;
+        for (windows, out) |w, *o| {
+            const l = try b.laneOf(w.stream);
+            const n = l.rows.items.len;
+            @memcpy(o.sampled[0..n], got[at..][0..n]);
+            @memcpy(o.drafts[0 .. n - 1], l.rows.items[1..n]);
+            l.len = l.base + n;
+            at += n;
+        }
     }
 
     fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const b = self(ptr);
-        if (windows.len != 1 or paths.len != 1) return error.OneStreamOnly;
-        const l = try b.laneOf(windows[0].stream);
-        const path = paths[0];
-        if (path.len == 0 or path.len > l.rows.items.len) return error.EmptyPath;
-        for (path, 0..) |row, i| if (row != i) return error.ChainsOnly;
-        try b.m.rewind(b.k, b.s, path.len);
-        l.len = l.base + path.len;
+        if (windows.len != paths.len) return error.BadWindows;
+        for (windows, paths) |w, path| {
+            const l = try b.laneOf(w.stream);
+            if (path.len == 0 or path.len > l.rows.items.len) return error.EmptyPath;
+            for (path, 0..) |row, i| if (row != i) return error.ChainsOnly;
+            try b.m.rewind(b.k, b.s, path.len);
+            l.len = l.base + path.len;
+        }
     }
 
     fn draft(_: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
