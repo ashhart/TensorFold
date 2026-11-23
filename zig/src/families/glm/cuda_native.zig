@@ -122,7 +122,6 @@ pub fn priceWindows(p: *anyopaque, io: std.Io, ctx: *const cuda.Context, dir: []
     repriced.draft_kv = facts.draft_kv;
     return repriced;
 }
-
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *Owned = @ptrCast(@alignCast(p));
