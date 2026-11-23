@@ -82,10 +82,15 @@ pub fn refusal(o: api.Open) ?[]const u8 {
     if (o.speed_up != null or o.policy.len != 0) return "Kimi: --speed-up and --policy are unsupported";
     if (o.decode_share != null) return "Kimi: --decode-share is not qualified for this bring-up adapter";
     if (o.segments) |n| if (n != 1) return "Kimi: --segments must be 1; independent streams already share exact rounds";
-    if (o.lanes == 0 or o.lanes > 8) return "Kimi: --parallel must be 1 through 8";
+    const count = requestedLanes(o);
+    if (count == 0 or count > 8) return "Kimi: --parallel must be 1 through 8";
     if (o.keep) |n| if (n < 0) return "Kimi: --checkpoint-slots must be nonnegative";
     if (o.prompt_cache_gib) |n| if (!std.math.isFinite(n) or n < 0 or n > 1024) return "Kimi: --prompt-cache-gib must be a finite budget from 0 through 1024";
     return null;
+}
+
+fn requestedLanes(o: api.Open) u32 {
+    return @import("automatic_lanes.zig").bounded(o.lanes, o.lanes_fixed, 8);
 }
 
 pub fn open(a: A, gpa: A, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -113,7 +118,7 @@ fn inner(a: A, gpa: A, io: std.Io, o: api.Open, problem: *[]const u8) !api.Opene
         problem.* = if (c.dsa != null) family.config.dsa_config.limit_message else "Kimi: --context must be 1 through 65536";
         return error.KimiContextLimit;
     }
-    const streams = o.lanes;
+    const streams = requestedLanes(o);
     const cache: u64 = if (o.prompt_cache_gib) |g| @intFromFloat(g * GiB) else GiB;
     const weight = try family.graph.weightBytes(gpa, c);
     const ram = mtl.ResidencySet.totalRam() orelse return error.KimiUnknownMemoryBudget;
@@ -229,4 +234,16 @@ test "Kimi native capabilities remain limited after the shared lane host constru
 test "Kimi scratch budget refusal names working memory rather than an internal error" {
     const want = "Kimi: stream state and working buffers exceed this adapter's reserved memory budget; the checkpoint cannot be opened safely";
     try std.testing.expectEqualStrings(want, words(null, error.KimiScratchBound) orelse @errorName(error.KimiScratchBound));
+}
+
+test "Metal capabilities: Kimi clamps only automatic lanes to its eight-stream adapter limit" {
+    const automatic: api.Open = .{ .dir = "", .model_type = "kimi_k3", .lanes = 64 };
+    try std.testing.expectEqual(@as(u32, 8), requestedLanes(automatic));
+    try std.testing.expect(refusal(automatic) == null);
+    const eight: api.Open = .{ .dir = "", .model_type = "kimi_k3", .lanes = 8, .lanes_fixed = true };
+    try std.testing.expectEqual(@as(u32, 8), requestedLanes(eight));
+    try std.testing.expect(refusal(eight) == null);
+    const nine: api.Open = .{ .dir = "", .model_type = "kimi_k3", .lanes = 9, .lanes_fixed = true };
+    try std.testing.expectEqual(@as(u32, 9), requestedLanes(nine));
+    try std.testing.expectEqualStrings("Kimi: --parallel must be 1 through 8", refusal(nine).?);
 }

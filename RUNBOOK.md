@@ -108,7 +108,7 @@ bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
 ```
 
 This example's `--parallel 1` caps serving at one active request; extra requests wait for a free slot.
-Omit `--parallel` to use `auto`, which asks for up to eight streams as memory and the engine allow.
+Omit `--parallel` to use `auto`, which asks for up to 64 streams as memory and the engine allow.
 Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
 Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
 For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
