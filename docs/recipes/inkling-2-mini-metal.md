@@ -149,8 +149,8 @@ code, 447 on chat), so the check was not vacuous. The raw summaries are `sampled
 
 ## Verification
 
-Each line names the head it was taken on. The contract line was taken at `61be67917f`; the host-test and sampled-decode
-lines at `e90ecce19a`.
+Each line names the head it was taken on. The contract line and the sampled-decode table were taken at `61be67917f`; the
+host-test line at `e90ecce19a`.
 
 - Kernel contract, `tf-kernel-contract --only inkling2` at `61be67917f`: 86 kernels pass gates 1 to 4, 133 controls red
   as planted, 0 missed, 0 limit problems, on the M4 Pro (see [the kernel contract](../kernel-contract.md#coverage)).
