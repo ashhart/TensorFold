@@ -281,3 +281,71 @@ test "the table holds every width and a head level's ms from the two chains" {
     try std.testing.expect(cost_rule.repairAt(&.{ 10, 13, 12.5, 16 }, 2));
     try std.testing.expect(!cost_rule.repairAt(&.{ 10, 13, 12.7, 16 }, 2));
 }
+
+test "paired warm timing: setup overrun, cooldown, then next rotating read" {
+    const Timer = struct {
+        script: Script,
+        setup_ms: f64,
+        elapsed: f64 = 0,
+        plans: usize = 0,
+        first: ?usize = null,
+
+        pub fn prepare(t: *@This(), plan: cost_rule.warm_prices.Plan, _: []const u32) !void {
+            t.plans += 1;
+            t.first = plan.at[0];
+            t.elapsed = t.setup_ms;
+        }
+
+        pub fn elapsedMs(t: *@This()) f64 {
+            return t.elapsed;
+        }
+
+        pub fn time(t: *@This(), i: usize) !f64 {
+            const ms = try t.script.time(i);
+            t.elapsed += ms;
+            return ms;
+        }
+    };
+    const gpa = std.testing.allocator;
+    var runs: [2]std.ArrayList(usize) = .{ .empty, .empty };
+    defer for (&runs) |*r| r.deinit(gpa);
+    var cursors: [2]u64 = @splat(0);
+    var values = [2][3]f64{ .{ 10, 11, 12 }, .{ 0, 0, 0 } };
+    var decisions: Decisions = .{};
+    defer decisions.bits.deinit(gpa);
+    const widths = [_]u32{ 1, 16, 17 };
+    for (0..3) |turn| {
+        decisions.bits.clearRetainingCapacity();
+        decisions.at = 0;
+        for ([_]bool{ true, false }, 0..) |lead, rank| {
+            decisions.lead = lead;
+            runs[rank].clearRetainingCapacity();
+            var timer: Timer = .{
+                .script = .{ .calls = &runs[rank] },
+                .setup_ms = if (lead and turn == 0) 195 else 1,
+            };
+            const stats = try cost_rule.warm_prices.prepared(
+                &timer,
+                &values[rank],
+                &widths,
+                &cursors[rank],
+                0,
+                &decisions,
+                lead,
+            );
+            try std.testing.expectEqual(@as(usize, if (turn == 1) 0 else 1), timer.plans);
+            const first: ?usize = switch (turn) {
+                0 => 0,
+                1 => null,
+                else => 1,
+            };
+            try std.testing.expectEqual(first, timer.first);
+            try std.testing.expectEqual(@as(u32, if (turn == 2) 2 else 0), stats.reads);
+            if (lead and turn == 0) try std.testing.expectEqual(@as(f64, 195), stats.ms);
+        }
+        try std.testing.expectEqual(decisions.bits.items.len, decisions.at);
+        try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
+        if (turn == 2) try std.testing.expectEqualSlices(usize, &.{ 1, 2 }, runs[0].items);
+    }
+    try std.testing.expectEqual([2]u64{ 2, 0 }, cursors);
+}
