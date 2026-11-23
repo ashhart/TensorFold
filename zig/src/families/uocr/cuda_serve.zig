@@ -119,7 +119,7 @@ pub const Model = struct {
     pub const Prepared = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 
     /// Every image of the stream through the tower, laid out as its image tokens in prompt order.
-    fn encodeImages(m: *Model, a: std.mem.Allocator, images: []const lanes.stream.Image) ![]u16 {
+    fn encodeImages(m: *Model, a: std.mem.Allocator, images: []const lanes.stream.Image, stream: ?*const lanes.Stream) ![]u16 {
         var total: usize = 0;
         for (images) |img| total += img.tokens;
         const rows = try a.alloc(u16, total * H);
@@ -129,6 +129,7 @@ pub const Model = struct {
         const tile_px = 3 * cfg.tile_size * cfg.tile_size;
         var at: usize = 0;
         for (images) |img| {
+            if (stream) |st| if (st.isCancelled()) return error.Cancelled;
             const across: usize = img.gw;
             const down: usize = img.gh;
             const tiles: usize = if (across * down > 1) across * down else 0;
@@ -174,10 +175,12 @@ pub const Model = struct {
         if (ids.len == 0 or ids.len + @max(stream.max_new, 1) - 1 > m.decoder.cap) return error.UocrPromptTooLong;
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
-        const rows = try m.encodeImages(arena.allocator(), stream.images);
+        if (stream.isCancelled()) return error.Cancelled;
+        const rows = try m.encodeImages(arena.allocator(), stream.images, stream);
+        if (stream.isCancelled()) return error.Cancelled;
         var p = try prompt_mod.positions(m.gpa, try m.gpa.dupe(u32, ids));
         errdefer p.deinit(m.gpa);
-        try m.decoder.prefill(p, rows);
+        try m.decoder.prefillFor(p, rows, stream);
         m.guard = guard_mod.Guard.init(p);
         m.step = prompt_mod.Step.init(p);
         m.prompt = p;
@@ -237,3 +240,83 @@ pub const Model = struct {
         m.stream = null;
     }
 };
+
+/// Whether a stream's request is cancelled; the tests count the checks a pass makes.
+const Probe = struct {
+    at: usize = 0,
+    cancel_after: usize = 0,
+    fn cancelled(ptr: *anyopaque) bool {
+        const p: *Probe = @ptrCast(@alignCast(ptr));
+        p.at += 1;
+        return p.at > p.cancel_after;
+    }
+};
+
+fn fakeStream(a: std.mem.Allocator, probe: *Probe, ids: []const u32) !lanes.Stream {
+    return lanes.Stream.init(a, .{ .id = "cancel-test", .prompt = ids, .max_new = 4, .cancel_check = .{ .ptr = probe, .check = Probe.cancelled } });
+}
+
+/// A model no device backs: the checks under test return before the encoder or the decoder touch CUDA.
+fn fakeModel(a: std.mem.Allocator) Model {
+    var m: Model = undefined;
+    m.gpa = a;
+    m.stream = null;
+    m.prompt = null;
+    m.decoder.cap = cfg.max_context;
+    return m;
+}
+
+test "uocr cuda: a request cancelled before image encoding stops before the tower" {
+    const a = std.testing.allocator;
+    var probe: Probe = .{ .cancel_after = 0 };
+    var ids = [_]u32{ cfg.image_token, 10, 11 };
+    var s = try fakeStream(a, &probe, &ids);
+    defer s.deinit(a);
+    var m = fakeModel(a);
+    var pixels: [4]f32 = .{ 0, 0, 0, 0 };
+    const img: lanes.stream.Image = .{ .pixels = &pixels, .gh = 1, .gw = 1, .at = 0, .tokens = 2 };
+    s.images = &.{img};
+    try std.testing.expectError(error.Cancelled, Model.prefillFn(&m, &s));
+    try std.testing.expectEqual(@as(usize, 1), probe.at); // the first check alone: no encode ran
+    try std.testing.expect(m.stream == null and m.prompt == null);
+}
+
+test "uocr cuda: a request cancelled between encoding and the prefill keeps the model unclaimed" {
+    const a = std.testing.allocator;
+    var probe: Probe = .{ .cancel_after = 1 };
+    var ids = [_]u32{ cfg.image_token, 10, 11 };
+    var s = try fakeStream(a, &probe, &ids);
+    defer s.deinit(a);
+    var m = fakeModel(a);
+    try std.testing.expectError(error.Cancelled, Model.prefillFn(&m, &s));
+    try std.testing.expectEqual(@as(usize, 2), probe.at); // checks before and after the (empty) encode
+    try std.testing.expect(m.stream == null and m.prompt == null);
+}
+
+test "uocr cuda: a request cancelled before the first prefill chunk uploads nothing and commits no row" {
+    const a = std.testing.allocator;
+    var probe: Probe = .{ .cancel_after = 0 };
+    var ids = [_]u32{ cfg.image_token, 10, 11 };
+    var s = try fakeStream(a, &probe, &ids);
+    defer s.deinit(a);
+    var p = try prompt_mod.positions(a, try a.dupe(u32, &ids));
+    defer p.deinit(a);
+    var rows: [H]u16 = undefined;
+    var d: decoder_mod.Decoder = undefined;
+    d.cap = 8;
+    d.rows = 2;
+    d.len = 0;
+    try std.testing.expectError(error.Cancelled, d.prefillFor(p, &rows, &s));
+    try std.testing.expectEqual(@as(usize, 0), d.len);
+}
+
+test "uocr cuda: a request that is never cancelled reaches the decoder's shape gate" {
+    const a = std.testing.allocator;
+    var probe: Probe = .{ .cancel_after = 100 };
+    var ids = [_]u32{ cfg.image_token, 10, 11 };
+    var s = try fakeStream(a, &probe, &ids);
+    defer s.deinit(a);
+    var m = fakeModel(a);
+    try std.testing.expectError(error.UocrImageRows, Model.prefillFn(&m, &s)); // past both checks
+    try std.testing.expect(m.stream == null and m.prompt == null);
+}

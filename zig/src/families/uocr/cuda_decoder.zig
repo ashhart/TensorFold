@@ -1,6 +1,7 @@
 //! Unlimited-OCR-2's decoder on CUDA: prompt passes then a token a step, caches in bf16 as the Metal decoder's.
 const std = @import("std");
 const cuda = @import("cuda");
+const lanes = @import("lanes");
 const cfg = @import("config.zig");
 const wts = @import("cuda_weights.zig");
 const ks = @import("cuda_kernels.zig");
@@ -185,17 +186,24 @@ pub const Decoder = struct {
 
     /// Prefill a prompt: `image_rows` (bf16 [image tokens, 1280]) at its image tokens, the token embeddings elsewhere.
     pub fn prefill(dec: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16) !void {
+        return dec.prefillFor(p, image_rows, null);
+    }
+
+    /// prefill for a served stream: error.Cancelled before the upload or a chunk once its request is cancelled.
+    pub fn prefillFor(dec: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16, stream: ?*const lanes.Stream) !void {
         const n = p.len();
         if (n == 0 or n > dec.cap) return error.UocrPromptTooLong;
         var images: usize = 0;
         for (p.ids) |id| images += @intFromBool(id == cfg.image_token);
         if (image_rows.len != images * H) return error.UocrImageRows;
         for (p.ids) |id| if (id >= cfg.vocab) return error.UocrBadToken;
+        if (stream) |st| if (st.isCancelled()) return error.Cancelled;
         try dec.upload(p);
         dec.len = 0;
         var img: usize = 0;
         var s0: usize = 0;
         while (s0 < n) {
+            if (stream) |st| if (st.isCancelled()) return error.Cancelled; // dec.len stays at the last whole chunk
             const r = @min(dec.rows, n - s0);
             var m: usize = 0;
             for (0..r) |i| {

@@ -21,4 +21,5 @@ test {
     _ = gemm;
     _ = guard;
     _ = gate;
+    _ = serve; // its cancellation tests
 }
