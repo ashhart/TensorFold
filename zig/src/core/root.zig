@@ -38,6 +38,7 @@ pub const affine4_host = @import("affine4_host.zig");
 pub const affine4_fold = @import("affine4_fold.zig");
 pub const shard_edit = @import("shard_edit.zig");
 pub const lora_merge = @import("lora_merge_dir.zig");
+pub const runtime_lora = @import("runtime_lora.zig"); // exact PEFT overlays, never merged; MOSS-Image serves them
 pub const quant = @import("quant/quant.zig");
 pub const nvfp4_rows = @import("nvfp4_rows.zig");
 pub const route_ref = @import("route_ref.zig");
@@ -107,7 +108,7 @@ test {
     _ = shard_edit;
     _ = lora_merge;
     _ = quant;
-    _ = @import("runtime_lora.zig");
+    _ = runtime_lora;
     _ = quant.gptq;
     _ = nvfp4_rows;
     _ = route_ref;

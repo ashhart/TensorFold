@@ -36,5 +36,7 @@ pub fn steps(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.Step) 
         },
     });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm_test })).step);
+    const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = moss, .filters = &.{"env defaults:"} })).step);
     all.dependOn(step);
 }

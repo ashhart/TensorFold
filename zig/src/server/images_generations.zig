@@ -33,7 +33,9 @@ const default_guidance: f32 = 3;
 const default_seed: u64 = 42;
 
 /// The body fields this route answers; `quality` and every other key are refused by name.
-const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance", "stream", "preview_interval" };
+const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance", "stream", "preview_interval", "loras" };
+/// The most runtime LoRAs one request stacks.
+const max_loras = 8;
 
 /// One checked request: exactly what the engine's image host needs.
 const Plan = struct {
@@ -47,7 +49,39 @@ const Plan = struct {
     count: u8,
     stream: bool,
     preview_interval: u32,
+    loras: []const api.LoraPick = &.{},
 };
+
+/// `loras`: a list of adapter names, or of {"name": ..., "scale": ...} (scale 1 when left out).
+fn lorasOf(cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused![]const api.LoraPick {
+    const v = raw.field("loras") orelse return &.{};
+    if (!cap.loras) return cx.refuse("loras is not supported by this image engine");
+    const message = "loras must be a list of adapter names or of {\"name\": ..., \"scale\": ...} objects";
+    if (v != .array) return cx.refuse(message);
+    if (v.array.len > max_loras) return cx.fail(.request, "loras takes at most {d} adapters", .{max_loras});
+    const out = try cx.a.alloc(api.LoraPick, v.array.len);
+    for (v.array, out) |item, *pick| {
+        switch (item) {
+            .string => |s| pick.* = .{ .name = s },
+            .object => {
+                const name = item.strField("name") orelse return cx.refuse(message);
+                var scale: f32 = 1;
+                if (item.field("scale")) |s| {
+                    const given = s.float64() orelse return cx.refuse("a lora's scale must be a number");
+                    if (!std.math.isFinite(given) or @abs(given) > 16) return cx.refuse("a lora's scale must be a finite number from -16 to 16");
+                    scale = @floatCast(given);
+                }
+                pick.* = .{ .name = name, .scale = scale };
+            },
+            else => return cx.refuse(message),
+        }
+        // the server does not import the families: these are moss_image's lora.validName rules, which it checks again
+        if (pick.name.len == 0 or pick.name.len > 128 or pick.name[0] == '.') return cx.refuse("a lora's name must be a file name in the server's LoRA folder");
+        for (pick.name) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '_' or ch == '-'))
+            return cx.refuse("a lora's name must be a file name in the server's LoRA folder (letters, digits, '.', '_' and '-')");
+    }
+    return out;
+}
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const cap = srv.info.image orelse {
@@ -214,7 +248,8 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     for (seeds[0..@intCast(count)], 0..) |*value, index| {
         value.* = (seed orelse default_seed) + @as(u64, @intCast(index));
     }
-    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count), .stream = stream, .preview_interval = interval };
+    const loras = try lorasOf(cx, cap, raw);
+    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count), .stream = stream, .preview_interval = interval, .loras = loras };
 }
 
 fn imageRequest(srv: *Server, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) api.ImageRequest {
@@ -229,6 +264,7 @@ fn imageRequest(srv: *Server, plan: Plan, seed: u64, result: *api.ImageResult, p
         .result = result,
         .png = png,
         .alloc = srv.gpa,
+        .loras = plan.loras,
     };
 }
 

@@ -8,6 +8,7 @@ pub const png = @import("png.zig");
 pub const Model = @import("cuda_model.zig").Model;
 pub const Prompt = @import("cuda_model.zig").Prompt;
 pub const seconds = @import("cuda_model.zig").seconds;
+pub const lora = @import("lora.zig");
 pub const Decoder = @import("cuda_decoder.zig").Decoder;
 pub const DecoderPlan = @import("cuda_decoder.zig").Plan;
 pub const encoder_config = @import("encoder_config.zig");
@@ -20,6 +21,7 @@ pub const rotary = @import("cuda_encoder.zig").rotary;
 test {
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_model.zig");
+    _ = @import("lora.zig");
     _ = @import("generate.zig");
     _ = @import("cuda_decoder_kernels.zig");
     _ = @import("cuda_decoder.zig");
