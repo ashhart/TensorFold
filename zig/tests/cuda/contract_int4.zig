@@ -1,10 +1,11 @@
-//! fn_int4.cu under the contract at the checkpoint's shapes, with two planted controls and a skipped expert's rows.
+//! fn_int4.cu under the contract at the checkpoint's shapes: five controls, the epilogue's model, a skipped slot.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const ir = @import("int4_ref.zig");
+const scalar = @import("int4_controls.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -18,7 +19,8 @@ pub const Kind = enum { gu, down_f32, down_bf16, head, prompt_down, prompt_gu };
 /// A planted fault: gate 4's control kernel, or a head packed with its nibbles unshuffled (gate 3 must catch it).
 pub const Fault = enum { none, bf16_group_sums, unshuffled_nibbles };
 
-pub const Entry = struct { name: []const u8, kind: Kind, tile: usize = int4.plan_tile, fault: Fault = .none };
+/// A registration: its form, a planted `fault`, or the controls image's scalar gate/up at `gu` (`epilogue`: its model).
+pub const Entry = struct { name: []const u8, kind: Kind, tile: usize = int4.plan_tile, fault: Fault = .none, gu: ?scalar.Fault = null };
 
 /// The checkpoint's shapes: hidden 2,560, experts of width 640, a head of 248,320 rows (its config.json).
 const dims = 2560;
@@ -97,8 +99,12 @@ pub const entries = [_]Entry{
     .{ .name = "cuda int4 lm head to bf16 (int4_kernel, dense items)", .kind = .head },
     .{ .name = "cuda int4 routed down to fp32 (int4_prompt_kernel, 64-pair items)", .kind = .prompt_down },
     .{ .name = "cuda int4 routed gate/up SwiGLU (int4_prompt_kernel, 64-pair items)", .kind = .prompt_gu },
+    .{ .name = "cuda int4 routed gate/up SwiGLU (the epilogue's scalar model, int4_controls)", .kind = .gu, .gu = .epilogue },
     .{ .name = "control: int4 routed down with each group's sum rounded to bf16", .kind = .down_f32, .fault = .bf16_group_sums },
     .{ .name = "control: int4 lm head with each word's nibbles unshuffled", .kind = .head, .fault = .unshuffled_nibbles },
+    .{ .name = "control: int4 routed gate/up with silu of the up sum times the gate sum (gate and up swapped)", .kind = .gu, .gu = .swapped },
+    .{ .name = "control: int4 routed gate/up with gate, up and silu cut toward zero to bf16", .kind = .gu, .gu = .cut },
+    .{ .name = "control: int4 routed gate/up with each group's sums rounded to bf16", .kind = .gu, .gu = .bf16_sums },
 };
 
 /// swiglu as float64 keeps it: silu of the gate sum times the up sum.
@@ -113,6 +119,7 @@ pub const Fixture = struct {
     kx: *const int4.Kernels,
     router: grouped.Router,
     ctl: ?cuda.Function = null,
+    gu_ctl: ?cuda.Function = null,
     shape: c.Shape = undefined,
     pairs: usize = 0,
     mats: usize = 1,
@@ -159,7 +166,7 @@ pub const Fixture = struct {
     }
 
     pub fn kernel(self: *Fixture) g.Kernel {
-        const control: ?g.Gate = switch (self.entry.fault) {
+        const control: ?g.Gate = if (scalar.gate(self.entry.gu)) |at| at else switch (self.entry.fault) {
             .none => null,
             .unshuffled_nibbles => .shapes,
             .bf16_group_sums => .sums,
@@ -326,7 +333,7 @@ pub const Fixture = struct {
     pub fn run(self: *Fixture) !void {
         switch (self.entry.fault) {
             .bf16_group_sums => try self.controlSums(),
-            .none, .unshuffled_nibbles => try self.launch(),
+            .none, .unshuffled_nibbles => if (self.entry.gu) |f| try scalar.launch(self.rig.s, self.gu_ctl.?, self.xd, self.shape, slots, self.ex, self.plan, self.out, self.pairs, f) else try self.launch(),
         }
         try self.rig.s.synchronize();
     }
@@ -518,7 +525,8 @@ pub const Set = struct {
         set.* = .{ .gpa = gpu.gpa, .kx = kx, .mod = mod, .ctl = ctl };
         const router = try grouped.Router.resolve(set.mod);
         const sums = try set.ctl.function("tf_ctl_int4_bf16_sums");
-        for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .kx = &set.kx, .router = router, .ctl = if (e.fault == .bf16_group_sums) sums else null };
+        const gu_kernel = try set.ctl.function("tf_ctl_int4_swiglu");
+        for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .kx = &set.kx, .router = router, .ctl = if (e.fault == .bf16_group_sums) sums else null, .gu_ctl = if (e.gu != null) gu_kernel else null };
         for (&set.items) |*x| try list.append(a, x.kernel());
         return set;
     }
@@ -585,5 +593,5 @@ pub fn run(gpu: check.Gpu) !void {
 }
 
 test "every control is named one, and only the controls plant a fault" {
-    for (entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
+    for (entries) |e| try std.testing.expectEqual(e.fault != .none or (e.gu != null and e.gu.? != .epilogue), std.mem.startsWith(u8, e.name, "control: "));
 }
