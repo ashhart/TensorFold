@@ -148,6 +148,7 @@ pub fn closeAll(h: *LaneHost) void {
     h.admitted = .empty;
     h.filling.clearRetainingCapacity();
     h.unlock();
+    @import("lane_host_status.zig").noteLive(h); // empty before any terminal job or stream is deinitialized
     defer queued.deinit(h.gpa);
     defer admitted.deinit(h.gpa);
     for (admitted.items) |job| {
