@@ -16,6 +16,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal: decode attention loads each block's value rows four at a time and its keys 16 bytes at a time, so the inter-token latency grows less with context (about 39.5 ms at 2,000 tokens before, 35.6 to 37.9 ms after); every query keeps its key order and the outputs are byte-equal (#4337).
 - Inkling 2 Mini on Metal: prompt chunks' full-attention layers score and weight eight rows at a time on 8x8 simdgroup matrices instead of one row a threadgroup, so a chunk's cost no longer grows as fast with the position: the 512-row attention of one full-attention visit drops from 117 to 57 ms at 32K and from 218 to 108 ms at 61K of context, and a cold 32,768-token first token from 170 to 190 s to 151 to 156 s. Each row keeps its key blocks, running max and sum, and the four-stream merge order, and the outputs are byte-equal (token hashes unchanged); the kernel contract registers the kernels with launch records and planted controls (#4337).
 
+- Flash Next on Metal: `TF_FN_GX_GATEUP_MB2=1` (opt-in) decodes each expert's gate/up weights once for two rows; about 2% faster at 4 code streams on an M5 Ultra, tokens unchanged (refs #1486).
+
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
 
 - Qwen3.8-27B on Metal: `TF_Q27_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs drafter rows for 2 to 8 streams in one pass; about 1% faster at 2 and 4 streams on M3 Ultra, tokens unchanged.
