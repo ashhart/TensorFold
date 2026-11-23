@@ -7,9 +7,10 @@ pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this releas
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
 /// The first Thor product serves Qwen3.8-27B text with DFlash2 on one GPU.
-pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
-    if (!std.mem.eql(u8, o.model_type, qwen35.native.model_type)) {
-        problem.* = try std.fmt.allocPrint(a, "sm_110 product: {s} is not qualified; serve Qwen3.8-27B", .{o.model_type});
+pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, moss_image: bool, problem: *[]const u8) !bool {
+    const model = if (moss_image) "MOSS-Image" else o.model_type;
+    if (!std.mem.eql(u8, model, qwen35.native.model_type)) {
+        problem.* = try std.fmt.allocPrint(a, "sm_110 product: {s} is not qualified; serve Qwen3.8-27B", .{model});
         return true;
     }
     problem.* = if (o.tp != 1 or o.rank != 0)
