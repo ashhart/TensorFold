@@ -335,11 +335,13 @@ pub fn Namespace(comptime Tri: type) type {
                 const cut = snaps.cut(self, s, l, ids, at, @min(ids.len, at + rows), &marks);
                 const last = cut.stop == ids.len;
                 self.engine.ngram.warmAhead(ids, cut.stop, @min(ids.len, cut.stop + rows));
+                // the rows the next pass likely takes: this pass gathers their n-gram rows ahead (cuda_ple_next.zig)
+                const next = ids[cut.stop..@min(ids.len, cut.stop + rows)];
                 if (l.draft) |*d| {
-                    try self.ops().prefillChunk(&l.seq, d, ids, at, cut.stop, marks);
+                    try self.ops().prefillChunk(&l.seq, d, ids, at, cut.stop, marks, next);
                 } else if (self.ranks) |r| {
                     try r.forward(Tri, self.tri(), &l.seq, ids[at..cut.stop], .{ .logits = if (last) .last else .none, .prompt = true });
-                } else try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..cut.stop], .{ .logits = if (last) .last else .none, .prompt = true, .marks = marks });
+                } else try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..cut.stop], .{ .logits = if (last) .last else .none, .prompt = true, .marks = marks, .next = next });
                 l.filled = if (last) null else cut.stop;
                 if (cut.kept > 0) try snaps.handOver(self, s, l, marks[0..cut.kept]);
                 if (!last and std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(cut.stop)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(cut.stop));

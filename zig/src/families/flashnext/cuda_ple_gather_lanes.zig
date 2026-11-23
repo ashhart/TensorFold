@@ -108,7 +108,7 @@ const config =
     \\ "split_ngram_parts":2,"ple_embed_dim":2560,"eos_token_id":99}}
 ;
 
-const Kind = enum { nvfp4, mlx };
+pub const Kind = enum { nvfp4, mlx };
 
 const Fill = union(enum) { nibbles: usize, byte: u8, words: usize, bf16: u16 };
 
@@ -188,7 +188,8 @@ fn put(data: *std.ArrayList(u8), comptime T: type, v: T) !void {
     try data.appendSlice(a, &b);
 }
 
-fn load(tmp: *std.testing.TmpDir, kind: Kind) !ple.Ngram {
+/// The fixture's table opened as the engine opens one (cuda_ple_next.zig's tests read it too).
+pub fn load(tmp: *std.testing.TmpDir, kind: Kind) !ple.Ngram {
     try fixture(tmp.dir, kind);
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(path);
