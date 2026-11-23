@@ -1,4 +1,4 @@
-//! Block-FP8 MTP experts on the host: scale widening and packing, world 2 refused, the weight store's load, headFp8.
+//! Block-FP8 MTP experts on the host: scale packing, world 2 refused, the weight store's load and the head's probes.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -6,6 +6,7 @@ const fp8 = @import("cuda_fp8_experts_load.zig");
 const experts = @import("cuda_modelopt_experts.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const lanes_bytes = @import("cuda_lanes_bytes.zig");
+const mtp = @import("cuda_mtp.zig");
 const Fake = @import("cuda_modelopt_threads_fixture.zig").Fake;
 const env = @import("sys").env;
 const fx = cuda.experts.Fp8Experts;
@@ -263,6 +264,43 @@ test "Flash Next expert loader: FP8 MTP experts: headFp8 reads the head's first 
     const path = try tmp.dir.realPathFileAlloc(io, ".", ta);
     defer ta.free(path);
     try std.testing.expect(try lanes_bytes.headFp8(ta, io, path));
+}
+
+test "Flash Next expert loader: FP8 MTP experts: headSharedWidth reads the head's gate_proj rows and the estimate prices them" {
+    const zeros: [1280]u8 = @splat(0);
+    const cases = [_]struct { entries: []const Entry, shared: usize }{
+        // no head at all: the estimate prices the width the 640 constants hold
+        .{ .entries = &.{.{ .name = "model.language_model.embed_tokens.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] }}, .shared = wt.moe_w },
+        // whole routed experts beside a 1280-wide shared expert: the modelopt load holds every row
+        .{ .entries = &.{
+            .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 1280, 1 }, .data = zeros[0..1280] },
+        }, .shared = 1280 },
+        // a taught folder's 768 rows with no whole experts beside them: the legacy path keeps its first 640
+        .{ .entries = &.{.{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 768, 1 }, .data = zeros[0..768] }}, .shared = wt.moe_w },
+        // whole NVFP4 experts beside a 640-wide shared expert
+        .{ .entries = &.{
+            .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 640, 1 }, .data = zeros[0..640] },
+        }, .shared = 640 },
+    };
+    for (cases) |c| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try fixture(tmp.dir, c.entries);
+        const path = try tmp.dir.realPathFileAlloc(io, ".", ta);
+        defer ta.free(path);
+        const shared = try lanes_bytes.headSharedWidth(ta, io, path);
+        try std.testing.expectEqual(c.shared, shared);
+        // the estimate at the width the reader returns: a 1280-wide head is the 640 one plus 3,072,000 bytes
+        const priced = mtp.headBytes(false, shared);
+        const deflt = mtp.headBytes(false, wt.moe_w);
+        if (shared == 1280) {
+            try std.testing.expectEqual(deflt + 3_072_000, priced);
+        } else {
+            try std.testing.expectEqual(deflt, priced);
+        }
+    }
 }
 
 /// A wait that fails while `fail` is set; the context's own wait succeeds and is counted, each free sees the count.
