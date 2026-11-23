@@ -27,7 +27,7 @@ fn laneWeight(p: Proj) ?cuda.qmmf.Weight {
     };
 }
 
-/// `ls` over x into `outs` as one grouped launch, or false: the caller runs its separate launches.
+/// `ls` over x into `outs` as compatible grouped launches, or false: the caller runs separate launches.
 pub fn run(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !bool {
     if (@import("cuda_launch_trace.zig").active != null) return false; // the trace keeps counting separate launches
     const k = if (e.mo) |*m| m else return false;
@@ -36,7 +36,18 @@ pub fn run(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize,
     if (ls.len > group.most) return false;
     var ws: [group.most]cuda.qmmf.Weight = undefined;
     for (ls, ws[0..ls.len]) |l, *w| w.* = laneWeight(l) orelse return false;
-    const sh = group.plan(k.lane, ws[0..ls.len], outs, rows) orelse return false;
-    try g.launch(e.stream, x, rows, ws[0].k, sh, k.lane.pdl);
+    for (ws[0..ls.len]) |w| if (w.k != ws[0].k) return false;
+    for (outs, 0..) |out, i| for (outs[i + 1 ..]) |other| if (out == other) return false;
+    var shapes: [2]group.Shape = undefined;
+    var count: usize = 0;
+    var at: usize = 0;
+    while (at < ls.len) {
+        var end = at + 1;
+        while (end < ls.len and ws[end].mode == ws[at].mode) : (end += 1) {}
+        shapes[count] = group.plan(k.lane, ws[at..end], outs[at..end], rows) orelse return false;
+        count += 1;
+        at = end;
+    }
+    for (shapes[0..count]) |sh| try g.launch(e.stream, x, rows, ws[0].k, sh, k.lane.pdl);
     return true;
 }
