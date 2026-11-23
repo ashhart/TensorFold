@@ -63,6 +63,7 @@ pub const Generation = struct {
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     kimi: ?@import("kimi_reply.zig").Stream = null,
+    inkling2: ?@import("inkling2_reply.zig").Stream = null,
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},
@@ -150,6 +151,7 @@ pub const Generation = struct {
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.tokens);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
+        if (@import("chat_inkling2.zig").enabled(g.srv)) return @import("chat_inkling2.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
@@ -308,7 +310,8 @@ pub const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
+        const inkling = @import("chat_inkling2.zig").enabled(g.srv);
+        const native: ?@import("native_reply.zig").Result = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else if (inkling) try @import("chat_inkling2.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
         const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
         const close_at: ?reply_text.Close = if (native == null and g.thinking)
@@ -323,7 +326,7 @@ pub const Generation = struct {
         var reasoning: ?[]const u8 = null;
         const read = g.thinking or g.recipient != null; // the reply's split text is its content
         if (native) |n| {
-            const r = reply_text.pyStrip(n.reasoning);
+            const r = if (inkling) n.reasoning else reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (read) {
             const split = if (g.recipient) |*r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
