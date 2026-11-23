@@ -1,5 +1,7 @@
 //! `tensorfold start` against fake devices, registries, checkpoints and HTTP servers.
 const std = @import("std");
+const builtin = @import("builtin");
+const platform = @import("sys");
 const start = @import("start_cli.zig");
 const registry = @import("checkpoint_cli").start;
 const machine_mod = @import("sys").machine;
@@ -70,12 +72,7 @@ const Run = struct {
 
     fn fakePull(ctx: *anyopaque, spec: []const u8) !u8 {
         const r: *Run = @ptrCast(@alignCast(ctx));
-        if (r.cancel_in_pull) {
-            var action: std.posix.Sigaction = undefined;
-            std.posix.sigaction(.INT, null, &action);
-            if (action.handler.handler == std.posix.SIG.DFL) return error.DownloadSignalNotInstalled;
-            stop.request(.INT);
-        }
+        if (r.cancel_in_pull) _ = platform.c.raise(.INT);
         try r.pulls.append(r.a, spec);
         try r.out.writer.print("stored {s} at {s}/private-snapshot\n", .{ spec, r.root });
         const model = std.mem.eql(u8, spec, "Org/Model@" ++ revision);
@@ -201,7 +198,31 @@ test "start CLI: explicit consent shows sizes and pulls both pinned specs before
     try std.testing.expectEqual(@as(usize, 2), r.pulls.items.len);
 }
 
-test "start CLI: Ctrl-C during a deferred download stops before a drafter or server" {
+const DownloadInterrupt = struct {
+    var run: *Run = undefined;
+
+    fn body() u8 {
+        return run.command(&.{ "--yes", "--check" }) catch 99;
+    }
+};
+
+fn forkedDownload() !?u32 {
+    const pid = platform.c.fork();
+    if (pid < 0) return error.SkipZigTest;
+    if (pid == 0) platform.c._exit(DownloadInterrupt.body());
+    var status: c_int = 0;
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 10) {
+        if (platform.c.waitpid(pid, &status, platform.c.W.NOHANG) == pid) return @bitCast(status);
+        fake.nap(10);
+    }
+    _ = platform.c.kill(pid, .KILL);
+    _ = platform.c.waitpid(pid, &status, 0);
+    return null;
+}
+
+test "start CLI: Ctrl-C during a deferred download has its normal process effect" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -209,11 +230,10 @@ test "start CLI: Ctrl-C during a deferred download stops before a drafter or ser
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
     r.cancel_in_pull = true;
-    stop.reset();
-    defer stop.reset();
-    try std.testing.expectEqual(@as(u8, 130), try r.command(&.{ "--yes", "--check" }));
-    try std.testing.expectEqual(@as(usize, 1), r.pulls.items.len);
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, try r.path("pid"), .{}));
+    DownloadInterrupt.run = &r;
+    const status = (try forkedDownload()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(platform.c.W.IFSIGNALED(status));
+    try std.testing.expect(platform.c.W.TERMSIG(status) == std.posix.SIG.INT);
 }
 
 test "start CLI: an unpublished snapshot is not complete and cannot skip its pull" {

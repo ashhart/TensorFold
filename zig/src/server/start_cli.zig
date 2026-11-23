@@ -136,8 +136,6 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const caller_key = if (args.check) null else chat.envKey(ctx.environ) catch return fail(ctx, 2, chat.bad_key, .{});
     if (!args.check and caller_key == null)
         return fail(ctx, 2, "persistent start requires a nonempty TENSORFOLD_API_KEY entry in the environment, or use --check for a private temporary key", .{});
-    if (comptime !windows) if (ctx.signals) stop.install();
-    defer if (comptime !windows) if (ctx.signals) stop.restore();
     const mc = ctx.given orelse machine.detect(ctx.a, ctx.io);
     const choice = (try registry.choose(ctx.a, ctx.io, ctx.environ, ctx.override, ctx.registry orelse &registry.entries, &mc)) orelse
         return fail(ctx, 1, "no catalog model that this machine can start automatically; tensorfold models --all shows the reasons and manual recipes", .{});
@@ -159,10 +157,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
             }
         }
         if (try pull(ctx, choice.model) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{choice.model});
-        if (stop.requested()) |sig| return stop.exitCode(sig);
         if (choice.drafter) |d| if (try pull(ctx, d) != 0) return fail(ctx, 1, "pull {s} failed; fix the reported error and run start again", .{d});
-        if (stop.requested()) |sig| return stop.exitCode(sig);
     }
+    if (comptime !windows) if (ctx.signals) stop.install();
+    defer if (comptime !windows) if (ctx.signals) stop.restore();
     return serve(ctx, args, choice, caller_key);
 }
 
