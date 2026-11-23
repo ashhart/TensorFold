@@ -522,9 +522,10 @@ test "a tool follow-up that removes reply reasoning resumes at the changed row a
     var warm_reply: Capture = .{};
     var fresh_reply: Capture = .{};
     for ([_]bool{ true, false }, [_]*Capture{ &warm_reply, &fresh_reply }) |cached, reply| {
-        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1, .warm_turns = cached });
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
         host.decoded_rows = true;
-        if (cached) host.cache = &store;
+        host.cache = if (cached) &store else null;
+        host.advertiseCache(host.cache);
         try host.start();
         defer host.stop();
         if (cached) {
