@@ -3,8 +3,8 @@ const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 
 const reduce = std.mem.alignForward(u32, 4 * 33, 16);
-const gemm_kinds = [_][]const u8{ "bf16_nt", "bf16_nn", "bf16f_nt", "f32_nt", "f32_nn" };
-/// The fp32 dots stage two 16 x 68 float chunks (gemm.metal's IK2_DOT_KC and IK2_DOT_LD).
+const gemm_kinds = [_][]const u8{ "bf16_nt", "bf16_nn", "bf16f_nt", "score_nt", "prob_nn" };
+/// The fp32 dots (scores and p v) stage two 16 x 68 float chunks (gemm.metal's IK2_DOT_KC and IK2_DOT_LD).
 const dot_tg_memory = 2 * 16 * 68 * 4;
 
 const kernels = [_]M{
@@ -42,7 +42,7 @@ pub const records = blk: {
         out[at] = .{
             .name = std.fmt.comptimePrint("inkling2 media ik2_gemm_{s}_{d}{d}", .{ kind, m, n }),
             .threads = 256,
-            .tg_memory = if (std.mem.startsWith(u8, kind, "f32")) dot_tg_memory else 0,
+            .tg_memory = if (std.mem.eql(u8, kind, "score_nt") or std.mem.eql(u8, kind, "prob_nn")) dot_tg_memory else 0,
             .reserved = 256,
             .offline = false,
         };

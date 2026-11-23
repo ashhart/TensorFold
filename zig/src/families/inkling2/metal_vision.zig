@@ -98,7 +98,7 @@ pub const Tower = struct {
         defer gpa.free(src);
         t.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer t.lib.deinit();
-        t.gemm = try gm.Gemm.init(device, t.lib, &.{ .bf16_nt, .bf16f_nt, .f32_nt, .f32_nn });
+        t.gemm = try gm.Gemm.init(device, t.lib, &.{ .bf16_nt, .bf16f_nt, .score_nt, .prob_nn });
         errdefer t.gemm.deinit();
         var made: usize = 0;
         errdefer for (t.glue[0..made]) |p| p.deinit();
