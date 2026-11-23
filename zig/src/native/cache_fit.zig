@@ -95,6 +95,11 @@ pub fn budgetUnder(limit: ?u64, gib: ?f64, over: bool, spare: u64, a: std.mem.Al
     return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, null);
 }
 
+/// A family's allocated buffers can further bound the automatic grant before its receipt is printed.
+pub fn budgetUnderMaximum(limit: ?u64, gib: ?f64, over: bool, spare: u64, maximum: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
+    return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, maximum);
+}
+
 /// A host that sizes sessions after the cache retains its fixed automatic ceiling.
 pub fn budgetUnderFixed(limit: ?u64, gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
     return budgetUnderBeside(limit, gib, over, spare, 0, a, why, rank, DEFAULT_MINIMUM);
@@ -124,7 +129,7 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
         } else why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded{s}, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one{s}, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), if (later > 0) ", serve a smaller --parallel" else "", gibs(@min(left, fixed orelse defaultBudget(left))), gib.? });
         return e;
     };
-    const default_note = if (gib != null) "" else if (fixed != null) "; default: at most 16 GiB before session sizing; --prompt-cache-gib overrides it" else "; default: half the room, at least 16 GiB when available; --prompt-cache-gib overrides it";
+    const default_note = if (gib != null) "" else if (fixed != null) "; default: bounded by the remaining allowance; --prompt-cache-gib overrides it" else "; default: half the room, at least 16 GiB when available; --prompt-cache-gib overrides it";
     std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the {s} ({d:.1} GiB in use once loaded{s}, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}{s}", .{ gibs(f.budget), gibs(f.room), if (limit != null) "load limit" else "70% cap", gibs(loaded), streams, gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank, default_note });
     return .{
         .source = .physical_footprint,
