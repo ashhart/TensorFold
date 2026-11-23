@@ -126,8 +126,13 @@ pub fn build(b: *std.Build, name: []const u8) void {
 
 /// The development `native` server for one SM, with every image built for it (nvcc) or checked (prebuilt).
 fn cudaServer(b: *std.Build, o: Options, build_options: *std.Build.Step.Options, sm: []const u8) *std.Build.Step.Compile {
+    return cudaProduct(b, o.target, o.optimize, o.nvcc, o.prebuilt, build_options, sm);
+}
+
+/// The CUDA server; with neither nvcc nor prebuilt images, every image is an empty file, for a compile-only check.
+fn cudaProduct(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, prebuilt: ?[]const u8, build_options: *std.Build.Step.Options, sm: []const u8) *std.Build.Step.Compile {
     const cuda_build = @import("cuda.zig");
-    const version: ?std.Build.LazyPath = if (o.nvcc) |tool| blk: {
+    const version: ?std.Build.LazyPath = if (nvcc) |tool| blk: {
         const run = b.addSystemCommand(&.{ tool, "--version" });
         run.has_side_effects = true;
         break :blk run.captureStdOut(.{});
@@ -135,11 +140,14 @@ fn cudaServer(b: *std.Build, o: Options, build_options: *std.Build.Step.Options,
     const target_sm = catalog.Target.parse(sm);
     var images: [catalog.kernels.len]?std.Build.LazyPath = @splat(null);
     const check = b.addRunArtifact(b.addExecutable(.{ .name = "check-product-fatbins", .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_product_fatbins.zig"), .target = b.graph.host }) }));
+    const empty = b.addWriteFiles();
     for (catalog.kernels, &images) |k, *image| {
-        if (o.nvcc) |tool| {
+        if (nvcc) |tool| {
             image.* = @import("cuda_fatbin.zig").fatbin(b, tool, version.?, k, sm);
+        } else if (prebuilt == null) {
+            image.* = empty.add(b.fmt("{s}.fatbin", .{k.name}), "");
         } else {
-            const path = b.graph.cwdRelativePath(b.pathJoin(&.{ o.prebuilt.?, b.fmt("{s}.fatbin", .{k.name}) }));
+            const path = b.graph.cwdRelativePath(b.pathJoin(&.{ prebuilt.?, b.fmt("{s}.fatbin", .{k.name}) }));
             image.* = path;
             // an image below its kernel's min_sm is an inert empty file, as the nvcc path makes it
             if (catalog.profile(k, target_sm)) |p| {
@@ -148,14 +156,27 @@ fn cudaServer(b: *std.Build, o: Options, build_options: *std.Build.Step.Options,
             }
         }
     }
-    const rt = @import("cuda_runtime.zig").runtimeFor(b, o.target, o.optimize, &images, std.fmt.parseInt(u32, sm, 10) catch unreachable);
+    const rt = @import("cuda_runtime.zig").runtimeFor(b, target, optimize, &images, std.fmt.parseInt(u32, sm, 10) catch unreachable);
     const ids_files = b.addWriteFiles();
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
-    const mods = cuda_build.family(b, o.target, o.optimize, rt, draft_ids);
-    const exe = cuda_build.nativeServer(b, o.target, o.optimize, rt, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
-    if (o.prebuilt != null) exe.step.dependOn(&check.step);
+    const mods = cuda_build.family(b, target, optimize, rt, draft_ids);
+    const exe = cuda_build.nativeServer(b, target, optimize, rt, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
+    if (prebuilt != null) exe.step.dependOn(&check.step);
     return exe;
+}
+
+/// `compile-native-cuda-windows`: the Windows CUDA product checked by the compiler from any host, emitting nothing.
+pub fn windowsCompile(b: *std.Build) *std.Build.Step {
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu, .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v4 } });
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("../../build.zig.zon").version);
+    options.addOption(bool, "is_release", false);
+    options.addOption(bool, "slide_test_hooks", false);
+    const exe = cudaProduct(b, target, .ReleaseSafe, null, null, options, "120");
+    const step = b.step("compile-native-cuda-windows", "Type-check the sm_120 Windows CUDA product (x86_64-windows-gnu), with empty kernel images");
+    step.dependOn(&exe.step); // nothing asks for the binary, so the compiler checks without emitting or linking
+    return step;
 }
 
 /// The development `native-hip` server for one arch.

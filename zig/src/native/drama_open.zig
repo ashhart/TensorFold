@@ -81,15 +81,17 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         return null;
     }
     const window = o.context orelse 8192;
-    if (window < 1025 or window > 8192 or o.tp != 1 or o.rank != 0 or
-        (o.lanes_fixed and (o.lanes == 0 or o.lanes > 8)) or
-        o.vision != null or o.precision != null or o.record != null or o.recall or o.learn != null or
-        o.learn_conversations or o.speed_up != null or o.slide or o.drafter != null or
+    if (@import("drama_budget.zig").metalShapeProblem(window, o.tp, o.rank, if (o.lanes_fixed) o.lanes else 2, o.speed_up != null)) |why| {
+        problem.* = why;
+        return null;
+    }
+    if (o.vision != null or o.precision != null or o.record != null or o.recall or o.learn != null or
+        o.learn_conversations or o.slide or o.drafter != null or
         o.mtp_drafts != null or o.mtp_confidence != null or o.policy.len != 0 or
         (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or (o.keep != null and o.keep.? != 0) or
         (o.device != null and o.device.? != 0) or (o.segments != null and o.segments.? != 1))
     {
-        problem.* = "Drama 3 needs context 1025..8192, 1..8 frame lanes and no text, vision, TP or cache modifiers";
+        problem.* = "Drama 3 Metal takes no text, vision, learning, drafting, policy or cache modifiers, and device 0 in one segment";
         return null;
     }
     if (frameProblem(@intCast(window), o.max_frames)) |why| {
@@ -115,7 +117,7 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 fn frameProblem(context: u32, frames: ?u32) ?[]const u8 {
     _ = @import("drama_budget.zig").budget(context, frames) catch |err| return switch (err) {
         error.BadDramaMaxFrames => "Drama 3 supports --max-frames 1 through 8190",
-        error.NoDramaPromptRoom => "Drama 3 --max-frames must leave prompt room: use --max-frames < --context - 1",
+        error.NoDramaPromptRoom => "Drama 3 --max-frames must be <= --context - 3, leaving two assembled prompt rows and one reserved row",
         error.BadDramaContext => "Drama 3 supports --context 1025 through 8192",
     };
     return null;

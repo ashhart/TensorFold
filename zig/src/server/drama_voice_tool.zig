@@ -62,7 +62,7 @@ pub fn run(a: Allocator, io: std.Io, err: *Writer, argv: []const []const u8) !u8
     if (kind == null or note == null) return refuse(err, unattested);
     const refs = try a.alloc(prompt.Reference, texts.items.len);
     for (refs, texts.items) |*ref, text| ref.* = .{ .transcript = text, .codes = &placeholder };
-    _ = document(a, kind.?, note.?, refs) catch |e| return refuse(err, switch (e) {
+    _ = document(a, kind.?, note.?, "", refs) catch |e| return refuse(err, switch (e) {
         error.MissingAttestation => unattested,
         error.BadVoice => "drama3-voice: refused, give 1 to 4 references, each a transcript a speech request accepts\n",
         else => return e,
@@ -156,7 +156,7 @@ fn encode(
         if (bytes.len % @sizeOf([10]i32) != 0) return error.BadCodes;
         ref.codes = std.mem.bytesAsSlice([10]i32, bytes);
     }
-    try private.writeFile(io, .{ .sub_path = base, .data = try document(a, kind, note, refs), .flags = .{ .exclusive = true } });
+    try private.writeFile(io, .{ .sub_path = base, .data = try document(a, kind, note, "", refs), .flags = .{ .exclusive = true } });
     try private.rename(base, parent, base, io);
     return 0;
 }
@@ -166,15 +166,19 @@ fn refuse(err: *Writer, message: []const u8) !u8 {
     return 2;
 }
 
-/// The voice file's JSON, accepted by the catalog's own parser.
-fn document(a: Allocator, kind: []const u8, note: []const u8, refs: []const prompt.Reference) ![]const u8 {
+/// The voice file's JSON, with its listing `description` when not empty, accepted by the catalog's own parser.
+pub fn document(a: Allocator, kind: []const u8, note: []const u8, description: []const u8, refs: []const prompt.Reference) ![]const u8 {
     var out: Writer.Allocating = .init(a);
     const w = &out.writer;
     try w.writeAll("{\"format\": \"drama3-http-voice/1\", \"source\": {\"kind\": ");
     try json.writeString(w, kind, .{ .ascii = false });
     try w.writeAll(", \"note\": ");
     try json.writeString(w, note, .{ .ascii = false });
-    try w.writeAll("},\n\"references\": [");
+    if (description.len > 0) {
+        try w.writeAll("}, \"description\": ");
+        try json.writeString(w, description, .{ .ascii = false });
+    } else try w.writeByte('}');
+    try w.writeAll(",\n\"references\": [");
     for (refs, 0..) |ref, r| {
         try w.writeAll(if (r == 0) "\n{\"text\": " else ",\n{\"text\": ");
         try json.writeString(w, ref.transcript, .{ .ascii = false });
@@ -188,6 +192,10 @@ fn document(a: Allocator, kind: []const u8, note: []const u8, refs: []const prom
     }
     try w.writeAll("\n]}\n");
     _ = try voice.parse(a, out.written());
+    if (description.len > 0) _ = try voice.describeDoc(switch (try json.parse(a, out.written())) {
+        .ok => |doc| doc,
+        else => return error.BadVoice,
+    });
     return out.written();
 }
 

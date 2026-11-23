@@ -67,12 +67,16 @@ def _stream(client: httpx.Client, url: str, headers: dict, body: dict, cancel: t
                 rep.end_at = time.perf_counter()
                 return
             buf = ""
+            trailing_cr = False
             for chunk in r.iter_text():
                 if cancel.is_set():
                     rep.error = "cancelled"
                     break
-                # normalised on what has gathered, not chunk by chunk: a CRLF can arrive split between two chunks
-                buf = (buf + chunk).replace("\r\n", "\n")
+                # A CR already ended its line, so skip the LF if its CRLF arrived in two chunks.
+                if trailing_cr:
+                    chunk = chunk.removeprefix("\n")
+                trailing_cr = chunk.endswith("\r")
+                buf += chunk.replace("\r\n", "\n").replace("\r", "\n")
                 while "\n\n" in buf:
                     event, buf = buf.split("\n\n", 1)
                     data = "\n".join(line[5:].strip() for line in event.split("\n") if line.startswith("data:"))

@@ -40,7 +40,7 @@ pub fn declared(loaded: anytype) ?PerRequest {
 /// Whether this load serves from the ledger: the family allocates per request and nothing it loaded escapes the cost.
 pub fn wanted(comptime F: type, loaded: anytype, served_stream_bytes: u64) bool {
     if (declared(loaded) == null) return false;
-    // no path yet routes a warm pass's or a lone driver's LaneMemory back to the queue
+    // a family that declares warm turns serves off the ledger: its warm pass's LaneMemory ends the job, no requeue
     if (comptime @hasDecl(F, "warm_quiet")) return false;
     const L = @TypeOf(loaded);
     if (comptime @hasField(L, "lone")) if (loaded.lone != null) return false;

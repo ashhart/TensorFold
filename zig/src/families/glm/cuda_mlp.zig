@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
@@ -71,7 +72,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
         a.add(@as(c_longlong, @intCast(2 * w * 2)));
         a.add(@as(c_int, @intCast(rows)));
         a.add(@as(c_int, @intCast(w * 2)));
-        try cuda.launch.launch(k.copy_rows, .{ .grid = .{ .x = @intCast((rows * w * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+        try cuda_pdl.launch(k.copy_rows, .{ .grid = .{ .x = @intCast((rows * w * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
     }
     try glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
 }

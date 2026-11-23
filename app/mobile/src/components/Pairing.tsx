@@ -7,7 +7,7 @@ import { parsePairingInput } from '../lib/client'
 import { Body, Brand, Button, Field, Heading, Notice, layout, useColors } from './ui'
 
 export function Pairing() {
-  const c = useColors(); const session = useSession()
+  const c = useColors(); const session = useSession(); const offer = session.offer
   const [host, setHost] = useState(''); const [credential, setCredential] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
   useEffect(() => { if (session.pairingLink) setCredential(session.pairingLink) }, [session.pairingLink])
   useEffect(() => {
@@ -31,6 +31,15 @@ export function Pairing() {
   return <SafeAreaView style={[layout.page, { backgroundColor: c.bg }]}><KeyboardAvoidingView style={layout.page} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[layout.content, { paddingTop: 24, paddingBottom: 36 }]}>
     <Brand />
     <View style={{ gap: 10, marginTop: 28 }}><Heading>Connect to your Mac</Heading><Body muted>Follow workers and send instructions from your phone; your models keep running in TensorFold on the Mac.</Body></View>
+    {offer && <View testID="pair-offer" style={[layout.card, { backgroundColor: c.card, borderColor: c.line, gap: 14 }]}>
+      {'link' in offer ? <>
+        <Heading small>Use this pairing link?</Heading><Body muted>A link opened outside TensorFold asks this phone to connect to:</Body>
+        <Body style={{ fontWeight: '600' }}>{offer.baseUrl}</Body>
+        <Body muted>Use it only if you created this link in TensorFold on your Mac; the host you pair with receives the instructions you send from this phone.</Body>
+        <Button testID="pair-offer-accept" onPress={session.acceptOffer} disabled={busy}>Use this link</Button>
+      </> : <Notice error>{offer.problem}</Notice>}
+      <Button testID="pair-offer-decline" secondary onPress={session.declineOffer} disabled={busy}>{'link' in offer ? 'Ignore this link' : 'Dismiss'}</Button>
+    </View>}
     <View style={[layout.card, { backgroundColor: c.card, borderColor: c.line, gap: 18 }]}>
       <Heading small>Pair this device</Heading><Body muted>On your Mac, open Settings, Remote control, then Connect your phone; enable the private connection and scan its QR code.</Body>
       <Field testID="pair-host" label="Private host URL" value={host} onChangeText={setHost} autoCapitalize="none" autoCorrect={false} autoComplete="off" textContentType="none" importantForAutofill="no" keyboardType="url" placeholder="https://your-private-host" editable={!busy} />

@@ -312,6 +312,16 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows8(Geo geo, con
     tf_q35_tc::attn_rows<4, tf_q35_tc::Fp8Tiles<256>>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
 }
 
+// tf_q35_attn_rows8 for a forward whose streams share pages (cuda_cache.anyShares): rows on one page run join.
+extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows8_join(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
+                                                                           const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
+                                                                           const int* __restrict__ P, float scale, int total,
+                                                                           float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+    __shared__ __align__(16) uint4 kt[tf_q35_tc::TK * tf_q35_tc::CH], vt[tf_q35_tc::TK * tf_q35_tc::CH];
+    __shared__ float ksc[tf_q35_tc::TK], vsc[tf_q35_tc::TK];
+    tf_q35_tc::attn_rows<4, tf_q35_tc::Fp8Tiles<256>, true>({kt, vt, ksc, vsc}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
+}
+
 extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial8_whole(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                          const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                          const int* __restrict__ P, float scale,

@@ -5,10 +5,12 @@ const sources = @import("kernel_sources");
 const Config = @import("dsv41").config.Config;
 pub const fp8 = @import("fp8_rows.zig");
 pub const fp8_mma = @import("fp8_mma.zig");
+pub const fp8_tile = @import("fp8_tile.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const index = @import("index.zig");
 pub const experts = @import("experts.zig");
 pub const glue = @import("glue.zig");
+pub const mv_mma = @import("mv_mma.zig");
 pub const compress = @import("compress.zig");
 pub const engram = @import("engram.zig");
 pub const cand = @import("cand.zig");
@@ -39,18 +41,25 @@ pub fn check(c: *const Config) !void {
 
 pub const Pipelines = struct {
     fp8: fp8.Pipelines,
+    /// the decode rows' FP8 projections at 2-16 rows
+    tile: fp8_tile.Pipelines,
     mma: fp8_mma.Pipelines,
     attn: attn.Pipelines,
     index: index.Pipelines,
     experts: experts.Pipelines,
     glue: glue.Pipelines,
+    /// prompt bf16 matvecs on simdgroup MMA (bit-equal to glue.mv)
+    mv_mma: mv_mma.Pipelines,
     compress: compress.Pipelines,
     engram: engram.Pipelines,
     route: mtl.Pipeline,
     /// the DSpark blocks' route at their own expert count and top-k (null without blocks)
     route_dspark: ?mtl.Pipeline,
+    /// the backbone's gate matvec, route and experts' plan in one launch (moe.zig's decode MoE)
+    gate_plan: mtl.Pipeline,
     topk512: mtl.Pipeline,
     cand: mtl.Pipeline,
+    cand_segs: mtl.Pipeline,
     xmma: xmma.Pipelines,
     fused: fused.Pipelines,
     hc: hc.Pipelines,
@@ -62,6 +71,8 @@ pub const Pipelines = struct {
         var p: Pipelines = undefined;
         p.fp8 = try fp8.Pipelines.load(device);
         errdefer p.fp8.deinit();
+        p.tile = try fp8_tile.Pipelines.load(device);
+        errdefer p.tile.deinit();
         p.mma = try fp8_mma.Pipelines.load(device);
         errdefer p.mma.deinit();
         p.attn = try attn.Pipelines.load(device);
@@ -72,18 +83,24 @@ pub const Pipelines = struct {
         errdefer p.experts.deinit();
         p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);
         errdefer p.glue.deinit();
+        p.mv_mma = try mv_mma.Pipelines.load(device);
+        errdefer p.mv_mma.deinit();
         p.compress = try compress.Pipelines.load(device);
         errdefer p.compress.deinit();
         p.engram = try engram.Pipelines.load(device);
         errdefer p.engram.deinit();
-        p.route = try routeAt(a, device, c.experts, c.topk);
+        p.route = try routeAt(a, device, c.experts, c.topk, "tf_dsv41_route_select");
         errdefer p.route.deinit();
-        p.route_dspark = if (c.mtp_layers > 0 and c.dspark_experts > 0) try routeAt(a, device, c.dspark_experts, c.dspark_topk) else null;
+        p.route_dspark = if (c.mtp_layers > 0 and c.dspark_experts > 0) try routeAt(a, device, c.dspark_experts, c.dspark_topk, "tf_dsv41_route_select") else null;
         errdefer if (p.route_dspark) |r| r.deinit();
+        p.gate_plan = try routeAt(a, device, c.experts, c.topk, "tf_dsv41_route_gate_plan");
+        errdefer p.gate_plan.deinit();
         p.topk512 = try one(device, sources.dsv41.topk512, "tf_topk512");
         errdefer p.topk512.deinit();
         p.cand = try cand.load(device);
         errdefer p.cand.deinit();
+        p.cand_segs = try cand.loadSegs(device);
+        errdefer p.cand_segs.deinit();
         p.xmma = try xmma.Pipelines.load(a, device);
         errdefer p.xmma.deinit();
         p.fused = try fused.Pipelines.load(device);
@@ -98,17 +115,21 @@ pub const Pipelines = struct {
 
     pub fn deinit(p: *Pipelines) void {
         p.fp8.deinit();
+        p.tile.deinit();
         p.mma.deinit();
         p.attn.deinit();
         p.index.deinit();
         p.experts.deinit();
         p.glue.deinit();
+        p.mv_mma.deinit();
         p.compress.deinit();
         p.engram.deinit();
         p.route.deinit();
         if (p.route_dspark) |r| r.deinit();
+        p.gate_plan.deinit();
         p.topk512.deinit();
         p.cand.deinit();
+        p.cand_segs.deinit();
         p.xmma.deinit();
         p.fused.deinit();
         p.hc.deinit();
@@ -117,11 +138,11 @@ pub const Pipelines = struct {
     }
 };
 
-/// The route kernel compiled for `e` experts and `topk` picks.
-fn routeAt(a: std.mem.Allocator, device: mtl.Device, e: u32, topk: u32) !mtl.Pipeline {
+/// A route kernel (`name`) compiled for `e` experts and `topk` picks.
+fn routeAt(a: std.mem.Allocator, device: mtl.Device, e: u32, topk: u32, name: []const u8) !mtl.Pipeline {
     const text = try routeSource(a, e, topk);
     defer a.free(text);
-    return one(device, text, "tf_dsv41_route_select");
+    return one(device, text, name);
 }
 
 fn one(device: mtl.Device, text: []const u8, name: []const u8) !mtl.Pipeline {

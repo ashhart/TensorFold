@@ -126,7 +126,7 @@ pub const Forward = struct {
     /// the keyed sampler (sampling_gpu.zig): a follower runs rank 0's sampled choices too (their gathers pair up)
     sampler: ?Sampler = null,
     progress: ?*@import("round_progress.zig").Progress = null,
-    grammar: ?Grammar = null, // TF_DSV41_GRAMMAR=1: grammar masks applied to "w.logits" before a pick
+    grammar: ?Grammar = null, // structured output (grammar_gpu.zig): grammar masks applied to "w.logits" before a pick
     calib_marks: std.ArrayList(u64) = .empty, // TF_DSV41_CALIB=measure: a follower's clock at each op_calib_mark
 
     pub fn init(gpa: std.mem.Allocator, cfg: *const Config, widths: *const block.Widths, opts: block.Options, runner: *run.Runner, comm: tp.collective.Collective) Forward {
@@ -267,7 +267,6 @@ pub const Forward = struct {
         // no embed of a window fills image rows (graphed: never; eager: no keep or bias), so image ids fail here
         if (hooks.set.vision) |v| try v.checkWindow(ids);
         // the pool's pages for the window's positions, their table entries up before the launches (every rank alike)
-        if (f.kv) |kx| try kx.reserve(f.slot.pos + ids.len);
         if (f.leads()) {
             var msg: [2 + 128]i64 = undefined;
             if (ids.len > 128) return error.BadWindow;
@@ -276,6 +275,7 @@ pub const Forward = struct {
             for (ids, 0..) |t, i| msg[2 + i] = t;
             try f.link.?.send(msg[0 .. 2 + ids.len]);
         }
+        try @import("forward_prefill.zig").reserve(f, f.slot.pos + ids.len);
         const tf = ph.start(f.phases, .forward);
         defer tf.stop();
         f.runner.rows = @intCast(ids.len); // l2pf: wider windows skip the prefetch sites

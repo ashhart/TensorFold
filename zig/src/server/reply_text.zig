@@ -4,7 +4,7 @@ const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-pub const Markers = struct { open: []const u8, close: []const u8 };
+pub const Markers = struct { open: []const u8, close: []const u8, optional: bool = false };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
 /// MiniMax-M3's adaptive thinking: the reply writes `<mm:think>...</mm:think>` itself, or `</mm:think>` alone.
@@ -155,6 +155,10 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
         text = trimmed;
     } else if (!finished and std.mem.startsWith(u8, openerOf(m), text)) {
         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
+    } else if (m.optional) {
+        var held: usize = 0; // a reply without the opener answers: only a partial call opener is held while it streams
+        for (o.calls) |c| held = @max(held, if (finished) 0 else partialTag(text, c[0]));
+        return .{ .reasoning = "", .answer = text[0 .. text.len - held] };
     }
     if (at) |v| at = if (v >= shift) v - shift else null;
     const end: ?usize = switch (close) {
@@ -201,14 +205,16 @@ pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.E
 pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool, defer_closed: bool, o: Openers) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
-    var next_buf: [mm_calls.len]?usize = undefined; // each opener at or after `pos`, searched again only once `pos` passes it
+    var search: usize = 0;
+    var code: @import("reply_code.zig").Scanner = .{};
+    var next_buf: [mm_calls.len]?usize = undefined; // each opener at or after `search`, re-searched when passed
     const next = next_buf[0..o.calls.len];
     for (o.calls, next) |c, *n| n.* = findTag(text, 0, c[0]);
     while (true) {
         var start: ?usize = null;
         var which: usize = 0;
         for (o.calls, next, 0..) |c, *n, i| {
-            if (n.* != null and n.*.? < pos) n.* = findTag(text, pos, c[0]);
+            if (n.* != null and n.*.? < search) n.* = findTag(text, search, c[0]);
             if (n.*) |at| if (start == null or at < start.?) {
                 start = at;
                 which = i;
@@ -217,24 +223,33 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
         if (start == null) {
             const tail = text[pos..];
             var held: usize = 0;
-            if (!finished) for (o.calls) |c| {
-                held = @max(held, partialTag(tail, c[0]));
-            };
+            if (!finished) {
+                const scan = text[@min(text.len, @max(pos, search))..];
+                for (o.calls) |c| held = @max(held, partialTag(scan, c[0]));
+            }
             if (pos == 0) return text[0 .. text.len - held];
             try out.appendSlice(a, tail[0 .. tail.len - held]);
             return out.items;
         }
-        try out.appendSlice(a, text[pos..start.?]);
+        const st = code.check(text, start.?, finished);
+        if (st == .skip) {
+            search = st.skip;
+            continue;
+        }
         const after = start.? + o.calls[which][0].len;
-        switch (payloadOf(text[after..], o, which, finished)) {
+        switch (if (st == .pending) .wait else payloadOf(text[after..], o, which, finished)) {
             .call => {},
-            .wait => return out.items,
+            .wait => {
+                if (pos == 0) return text[0..start.?];
+                try out.appendSlice(a, text[pos..start.?]);
+                return out.items;
+            },
             .prose => {
-                try out.appendSlice(a, text[start.?..after]);
-                pos = after;
+                search = after;
                 continue;
             },
         }
+        try out.appendSlice(a, text[pos..start.?]);
         const end = findTag(text, after, o.calls[which][1]) orelse {
             // a finished reply's envelope that never closed is text, as tool_parse.parse keeps it in the content
             if (finished) try out.appendSlice(a, text[start.?..]);
@@ -243,6 +258,8 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
         // Final parsing may retain this envelope, so later prose must not overtake it.
         if (defer_closed) return out.items;
         pos = end + o.calls[which][1].len;
+        search = pos;
+        code.jumpTo(pos);
     }
 }
 

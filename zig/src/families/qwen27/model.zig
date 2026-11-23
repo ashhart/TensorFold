@@ -79,7 +79,7 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
-        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+        if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
             if (n < 16 or n > 2048 or n % 16 != 0) {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
@@ -92,7 +92,11 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
-        const c = try cfg.parse(a, text, null);
+        var problem: cfg.Problem = .{};
+        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+            if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
+            return e;
+        };
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
@@ -139,13 +143,25 @@ pub const Model = struct {
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
+        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation(), geometry)));
         errdefer m.frame.deinit();
         allocation.end();
         m.ane = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
         return m;
+    }
+
+    /// The MTP draft head from `dir`'s `mtp-4bit.safetensors`, while a deferred model's files are still open.
+    pub fn loadMtp(m: *Model, io: std.Io, dir: []const u8) !void {
+        if (!m.share_pending) return error.MtpAfterFilesClosed;
+        if (m.weights.mtp != null) return;
+        const path = try std.fs.path.joinZ(m.allocator, &.{ dir, wts.mtp_file });
+        defer m.allocator.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch return error.MissingMtpFile;
+        try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", wts.repacked);
+        try wts.loadMtp(&m.weights, m.device, &m.checkpoint, &m.shard);
     }
 
     /// A deferred share takes at most `room` bytes; zero refuses it, and decided models stay as they are.
@@ -158,7 +174,7 @@ pub const Model = struct {
         m.share_pending = false;
         defer m.checkpoint.closeFiles();
         const c = m.config;
-        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
         const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
@@ -208,10 +224,10 @@ pub const Model = struct {
     }
 };
 
-/// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(c: cfg.Config, generation: u32) u32 {
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
+/// Default frame rows follow attention geometry; a validated environment override keeps its width.
+pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {
+    const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
+    return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
 /// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).

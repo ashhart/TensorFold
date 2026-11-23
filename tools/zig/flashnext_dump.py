@@ -1,5 +1,4 @@
-"""Write what the Zig Flash Next family runs from the Python engine: kernels, launch sites, a prepared-weight pack,
-reference tokens from one-row steps, and per-call fixtures of one step. Run with TF_FLASH_PLE_KERNELS=1."""
+# Dump Zig Flash Next kernels, launch sites, weight pack, tokens and step fixtures from Python. TF_FLASH_PLE_KERNELS=1.
 
 from __future__ import annotations
 

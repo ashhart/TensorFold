@@ -127,7 +127,6 @@
         "fast"
       ],
       "backends": [
-        "mlx",
         "cuda"
       ],
       "drafter": null,

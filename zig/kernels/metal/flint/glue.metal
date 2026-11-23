@@ -374,3 +374,9 @@ inline bool fl_better(float a, uint ia, float b, uint ib) {
   }
   if (lane == 0) ids[0] = at;
 }
+
+// One post-block residual tap, packed by row in the drafter's trained layer order.
+kernel void fl_tap(device const float* x [[buffer(0)]], device bfloat* y [[buffer(1)]],
+                   constant uint4& a [[buffer(2)]], uint2 i [[thread_position_in_grid]]) {
+  if (i.x < a.x && i.y < a.y) y[i.y * a.z + a.w + i.x] = bfloat(x[i.y * a.x + i.x]);
+}

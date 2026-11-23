@@ -61,7 +61,7 @@ fn load(io: std.Io, a: Allocator) error{ NoJpegLibrary, JpegLibraryVersion }!Fns
 }
 
 fn find(io: std.Io, a: Allocator) Loaded {
-    if (platform.c.getenv(env)) |named| return open(io, a, std.mem.span(named)) orelse .missing;
+    if ((platform.environment.Process{}).get(env)) |named| return open(io, a, named) orelse .missing;
     var seen_wrong = false;
     if (std.process.executableDirPathAlloc(io, a)) |exe| {
         defer a.free(exe);

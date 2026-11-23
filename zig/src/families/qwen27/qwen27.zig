@@ -8,10 +8,13 @@ pub const checkpoint = @import("checkpoint.zig");
 pub const weights = @import("weights.zig");
 pub const attention = @import("attention.zig");
 pub const attention_plan = @import("attention_plan.zig");
+pub const attention_join = @import("attention_join.zig");
 /// The tail attention's rewrite and check before M5, as the runner builds it (tf-qwen27-attention-precision reads it).
 pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
+/// The MTP draft head's forward (mtp-4bit.safetensors beside the checkpoint).
+pub const mtp = @import("mtp.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
 pub const gdn_hook = @import("gdn_hook.zig");
@@ -31,6 +34,7 @@ pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
@@ -69,7 +73,10 @@ test {
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");
+    _ = @import("mtp_load_test.zig");
+    _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
+    _ = @import("slot_pages_test.zig");
 }
 
 pub const residency = @import("residency.zig");

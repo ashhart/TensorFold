@@ -1,6 +1,8 @@
 // glue._hc_partial and glue._hc_finish by hand (hyper-connections' pre side, 4 streams of 4096).
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_triton.cuh"
 
 using namespace glm_triton;
@@ -9,6 +11,7 @@ using namespace glm_triton;
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_hc_partial(
             const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb, int64_t rows) {
+  glm_pdl::enter();
   constexpr int R = 4;
   __shared__ float smem[R][4];
   const int64_t r0 = (int64_t)blockIdx.x * R, b = blockIdx.y, kb = wide / nb;
@@ -58,6 +61,7 @@ extern "C" __global__ void __launch_bounds__(128)
 // The same for decode windows (16 blocks a row): 8 steps of 128 at once, a 128-thread group each; same ops, same order.
 extern "C" __global__ void __launch_bounds__(1024)
     tf_glm_hc_partial8(const __nv_bfloat16* x, const __nv_bfloat16* fn, float* part, int64_t wide, int nb) {
+  glm_pdl::enter();
   __shared__ float dots[8][24];
   __shared__ float smem[4];
   const int64_t r = blockIdx.x, b = blockIdx.y, kb = wide / nb;
@@ -228,6 +232,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_hc_finish(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
                      const __nv_bfloat16* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
                      float hc_eps, int nb, int iters) {
+  glm_pdl::enter();
   glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 }
 
@@ -236,5 +241,6 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_hc_finish_f32w(const __nv_bfloat16* x, const float* part, const float* base, const float* scale,
                           const float* nw, __nv_bfloat16* out, float* xs, float* post, float* comb, float eps,
                           float hc_eps, int nb, int iters) {
+  glm_pdl::enter();
   glm_hc::finish(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 }

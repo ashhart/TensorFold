@@ -95,7 +95,7 @@ __device__ __forceinline__ float row_sum16(float x) {
 template <typename P>
 __device__ __forceinline__ P row_lane(P x, unsigned sel) {
     const int w = __builtin_bit_cast(int, x);
-    return __builtin_bit_cast(P, __builtin_amdgcn_permlane16(w, w, sel, sel, false, false));
+    return __builtin_bit_cast(P, __builtin_amdgcn_permlane16(w, w, sel, sel, true, false));
 }
 
 // Either 16-bit half of `w` has every exponent bit of `top` set: an infinity or NaN.

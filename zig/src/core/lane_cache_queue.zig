@@ -8,9 +8,10 @@ const reserve = @import("prompt_cache_reserve.zig");
 const Snapshot = struct {
     entries: std.ArrayList(*const pc.Entry) = .empty,
     promised: reserve.Room = .{},
+    replacement: ?u32 = null,
 
-    fn init(h: *LaneHost, current: *Job) !Snapshot {
-        var out: Snapshot = .{};
+    fn init(h: *LaneHost, current: *Job, replacement: ?u32) !Snapshot {
+        var out: Snapshot = .{ .replacement = replacement };
         errdefer out.entries.deinit(h.gpa);
         h.lock();
         defer h.unlock();
@@ -29,6 +30,7 @@ const Snapshot = struct {
         for (h.cache.?.by_position.items) |e| if (!e.expired and
             h.cache.?.usable(e.at, job.request.chunks) and extends(current, job, e))
         {
+            if (out.replacement) |at| if (at > e.at and takesPrefix(h, current, job, at)) continue;
             if (std.mem.indexOfScalar(*const pc.Entry, out.entries.items, e) == null) try out.entries.append(h.gpa, e);
             break;
         };
@@ -46,7 +48,7 @@ const Snapshot = struct {
 
 pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
     const store = h.cache.?;
-    var snapshot = try Snapshot.init(h, job);
+    var snapshot = try Snapshot.init(h, job, null);
     defer snapshot.entries.deinit(h.gpa);
     const before = store.reservation_guard;
     store.reservation_guard = snapshot.guard();
@@ -54,13 +56,51 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
     defer store.reservation_guard = before;
     errdefer job.cache_promise = .{};
     const r = job.request;
+    const previous_salt = store.salt;
+    store.salt = r.cacheSalt();
+    defer store.salt = previous_salt;
     return store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame);
 }
 
 /// Complete a promised keep without spending room another admitted pass has already claimed.
 pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
+    keepAt(h, job, stream, at, false, false);
+}
+
+/// A cancelled pass releases its unused promise; a warm pass can also hand its prefix to a queued follow-up.
+pub fn interrupted(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
+    var handoff = false;
+    if (h.info_.warm_turns and job.request.background and job.request.max_tokens == 0) {
+        h.lock();
+        for (h.queued.items) |next| if (takesPrefix(h, job, next, at)) {
+            handoff = true;
+            break;
+        };
+        h.unlock();
+    }
+    job.cache_promise = .{};
+    keepAt(h, job, stream, at, true, handoff);
+}
+
+fn takesPrefix(h: *const LaneHost, current: *const Job, next: *const Job, at: u32) bool {
+    const store = h.cache orelse return false;
+    const r = next.request;
+    if (current.request.cacheSalt() != r.cacheSalt()) return false;
+    const previous_salt = store.salt;
+    store.salt = r.cacheSalt();
+    defer store.salt = previous_salt;
+    if (next.started or r.background or r.promptOnly() or r.prompt_logprobs != null or r.untaught or
+        r.images.len != 0 or current.request.images.len != 0 or !store.usable(at, r.chunks)) return false;
+    if (store.find(next.cacheKey(), r.chunks, h.spans(r))) |e| if (e.at >= at) return false;
+    return store.wouldServe(next.cacheKey(), r.chunks, h.spans(r), current.cacheKey(), h.spans(current.request), at);
+}
+
+fn keepAt(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32, cancelled: bool, handoff: bool) void {
     const store = h.cache orelse return;
-    var snapshot = Snapshot.init(h, job) catch {
+    const previous_salt = store.salt;
+    store.salt = job.request.cacheSalt();
+    defer store.salt = previous_salt;
+    var snapshot = Snapshot.init(h, job, if (handoff) at else null) catch {
         job.cache_promise = .{};
         store.counts.failed += 1;
         pc.note("keeping {d} tokens failed (OutOfMemory); queue protection could not be copied", .{at});
@@ -70,12 +110,23 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
     const before = store.reservation_guard;
     store.reservation_guard = snapshot.guard();
     defer store.reservation_guard = before;
-    const planned = std.mem.indexOfScalar(u32, job.marks, at) != null;
+    const keep_others = store.keep_others;
+    store.keep_others = keep_others or handoff;
+    defer store.keep_others = keep_others;
+    const planned = cancelled or handoff or std.mem.indexOfScalar(u32, job.marks, at) != null;
+    if (cancelled) {
+        const bytes = store.family.vtable.bytes(store.family.ptr, at);
+        const can = reserve.evictable(store, null, job.cacheKey());
+        const held = store.held +| if (store.family.vtable.trim == null) store.spare() else 0;
+        if (bytes > store.budget -| snapshot.promised.bytes or
+            held -| can.bytes +| bytes > store.budget -| snapshot.promised.bytes or
+            store.entries.items.len -| can.slots >= store.most -| snapshot.promised.slots) return;
+    }
     if (!planned) {
         const bytes = store.family.vtable.bytes(store.family.ptr, at);
         const promised = snapshot.promised;
         // A fallback checkpoint may use free room only; it neither evicts states nor spends this job's promise.
-        if (store.held +| store.spare() +| bytes +| job.cache_promise.bytes > store.budget -| promised.bytes or
+        if (store.held +| (if (store.family.vtable.trim == null) store.spare() else 0) +| bytes +| job.cache_promise.bytes > store.budget -| promised.bytes or
             store.entries.items.len +| job.cache_promise.slots >= store.most -| promised.slots) return;
     }
     const held = store.held;
@@ -89,6 +140,7 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
 
 fn extends(current: *const Job, job: *const Job, e: *const pc.Entry) bool {
     const r = job.request;
+    if (e.salt != r.cacheSalt()) return false;
     if (job == current or r.promptOnly() or r.prompt_logprobs != null or r.untaught) return false;
     if (job.started and job.entry == null) return false;
     const key = job.cacheKey();

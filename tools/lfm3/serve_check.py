@@ -98,7 +98,7 @@ class Server:
                                          headers={'Content-Type': 'application/json'})
         if gate:
             gate.wait(timeout=30)
-        evidence, usage, runtime, text = Evidence(), {}, {}, []
+        evidence, usage, runtime, speculative, text = Evidence(), {}, {}, {}, []
         complete = False
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
@@ -114,11 +114,14 @@ class Server:
                         raise RuntimeError(str(event['error']))
                     usage = event.get('usage') or usage
                     runtime = event.get('tensorfold') or runtime
+                    speculative = event.get('speculative') or speculative
                     for choice in event.get('choices', []):
                         evidence.add(choice)
                         text.append(choice.get('text') or (choice.get('delta') or {}).get('content') or '')
             result = evidence.finish(usage, runtime, complete)
             result['text'] = ''.join(text)
+            result['sampling'] = runtime.get('sampling')
+            result['accepted'], result['drafted'] = speculative.get('accepted'), speculative.get('drafted')
             if not complete:
                 result['error'] = 'incomplete_stream'
             return result
@@ -245,6 +248,8 @@ def main():
                 result = server.request(item)
                 baselines[name] = result
                 check(name + '/fresh_plain', result.get('complete') and bool(result.get('token_sha256')), result)
+                if item.get('temperature'):  # the reply names its sampler: "exact" when sampled, "greedy" otherwise
+                    check(name + '/sampler_ran', result.get('sampling') == 'exact', result)
             if 'long_prefix' in baselines:
                 check('long_prefix/length_over_256', (baselines['long_prefix'].get('prompt_tokens') or 0) > 256,
                       baselines['long_prefix'].get('prompt_tokens'))
@@ -252,9 +257,14 @@ def main():
             receipt['logs'].append(server.log.name)
             receipt['commands'].append(server.command)
             if not args.cancel_only:
+                drafts = {'accepted': 0, 'plain_drafted': 0}
                 for name, item in items.items():
                     for draft in (False, True):
                         result = server.request(item, draft=draft)
+                        if draft:
+                            drafts['accepted'] += result.get('accepted') or 0
+                        else:
+                            drafts['plain_drafted'] += result.get('drafted') or 0
                         if name == 'edited_prefix' and not draft:
                             check('edited_prefix/no_stale_prefix_reuse', result.get('cached_tokens') == 0, result)
                         check(name + ('/drafted_equals_fresh' if draft else '/plain_equals_fresh'),
@@ -266,6 +276,8 @@ def main():
                     if name == 'edited_prefix':
                         result = server.request(item)
                         check('edited_prefix/matches_cache_off', token_equal(result, baselines[name]), result)
+                # drafted == fresh tests drafting only if a draft landed, and plain == fresh only if plain drafted none
+                check('drafts/exercised', drafts['accepted'] > 0 and drafts['plain_drafted'] == 0, drafts)
                 for level in (1, 2, 4):
                     names = ['code', 'chat'] if not args.sampled else ['code', 'chat', 'sampled_code', 'sampled_chat']
                     for name in names:

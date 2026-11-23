@@ -1,5 +1,8 @@
 # Community benchmarks
 
+`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev; [Publishing](#publishing) says which receipts it accepts today.
+
 Run repeatable code and chat workloads on a model you have already downloaded:
 
 ```sh
@@ -9,7 +12,7 @@ tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 
 The examples call the command `tensorfold`. A source build's binary is `zig-out/native/bin/tensorfold-native`, and it takes the same arguments.
 
-The command starts its own single-request `serve` on a loopback port, disables prompt reuse, warms each workload, and measures five repeats at sampled and greedy settings. It stops only the server it started, and a Ctrl-C or a closed terminal stops that server too; a second Ctrl-C exits at once and kills it. The default output limit is 256 tokens. The checkpoint must already be in the cache: `tensorfold benchmark` never downloads, so run `tensorfold pull` first. `--drafter DIR_OR_REPO` passes a drafter to engines that take one. Drafts stay on by default, and only `--serial` disables them. The default `--drafter auto` passes the target's own drafter when it is already cached (`z-lab/Qwen3.8-27B-DFlash2` for Qwen3.8-27B) and names it in the run output and the receipt; when it is not cached, the run passes none and says why. `--drafter none` passes none. When `--serial` overrides a given `--drafter`, the run prints a line saying so. The HIP engine runs no DFlash2 drafter yet, so a ROCm run passes none: a named `--drafter` is refused before the run starts, and `--drafter auto` on a checkpoint with its own drafter, such as Qwen3.8-27B, says the run passes no drafter, so the receipt's `drafter_repo_id` is null. `serve --drafter` on the HIP engine is refused before it loads. Without a drafter the HIP engine still drafts on its own, with the model's MTP head where the checkpoint has one and with copies from the stream's own context, so a ROCm run without a drafter is not a plain run; `--serial` gives one.
+The command starts its own single-request `serve` on a loopback port, disables prompt reuse, warms each workload, and measures five repeats at sampled and greedy settings. It stops only the server it started, and a Ctrl-C or a closed terminal stops that server too; a second Ctrl-C exits at once and kills it. The default output limit is 256 tokens. The checkpoint must already be in the cache: `tensorfold benchmark` never downloads, so run `tensorfold pull` first. `--drafter DIR_OR_REPO` passes a drafter to engines that take one. Drafts stay on by default, and only `--serial` disables them. The default `--drafter auto` passes the target's own drafter when it is already cached (`z-lab/Qwen3.8-27B-DFlash2` for Qwen3.8-27B) and names it in the run output and the receipt; when it is not cached, the run passes none and says why. `--drafter none` passes none. When `--serial` overrides a given `--drafter`, the run prints a line saying so. On ROCm the HIP engine runs DFlash2 over the dense `qwen3_5` checkpoints, so a named `--drafter` passes it to them; for any other family a ROCm run refuses a named `--drafter` before the run starts. `--drafter auto` passes none on ROCm: a ROCm run drafts with a drafter only when one is named, and on a checkpoint with its own drafter, such as Qwen3.8-27B, `auto` says the run passes no drafter, so the receipt's `drafter_repo_id` is null. Without a drafter the HIP engine still drafts on its own, with the model's MTP head where the checkpoint has one and with copies from the stream's own context, so a ROCm run without a drafter is not a plain run; `--serial` gives one.
 
 A managed run sizes its served context as `serve` does, unless `--context N` (1 through 10,000,000) names the
 prompt plus reply capacity, and serves a bf16 attention cache unless `--kv-cache fp8` says otherwise. An attached
@@ -20,6 +23,14 @@ An engine that decodes greedily only refuses the sampled cells, so it cannot com
 Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed native runs record `python_version` as `"none"`. An attached manifest may attest the same value; an unattested attached run records `"unknown"`. Beside each receipt, `RUN_ID.drafts.json` (for `--output FILE.json`, `FILE.drafts.json`) keeps what the server reported for each attempt: its verify rounds, the tokens a drafter proposed and the tokens the target accepted, with their totals (null, and the run says so, when a sum would pass 64 bits) and whether the run passed a drafter. The board's receipt has no field for these counts, so they are never uploaded; they are how a local run shows that its drafter ran, since equal timings do not. When a drafter was passed and the server drafted no tokens, the run says so.
 
 [The Grill](https://github.com/plotarmordev/thegrill) is a separate third-party tool that reports whether a serving change measured faster, slower or inconclusive.
+
+Managed receipts can also include `hardware.form_factor`: `Mac mini`, `Mac Studio`, `MacBook Pro`,
+`MacBook Air`, `iMac` or `Mac Pro`. On macOS a fixed lookup of documented Apple silicon products derives
+this coarse family on the device; the product identifier itself is never recorded. An unlisted product,
+a failed probe, Linux or Windows leaves the value unknown. Unknown values omit the optional field,
+preserving existing receipt bytes; readers also accept explicit null. Both community-v1 and community-v2
+receipts without the field remain valid. Attached runs use only an optional family attested in the server's
+manifest, never the client's product family. The benchmark board's display is a separate change.
 
 ## Commands
 

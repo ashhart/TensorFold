@@ -67,9 +67,20 @@ inline uint2 tf_topk512_pick(threadgroup atomic_uint* bins, uint k, threadgroup 
       const uint up = pass == 1u ? 21u : 10u;
       for (uint i = tid; i < TF_BINS; i += TF_TG) atomic_store_explicit(bins + i, 0u, memory_order_relaxed);
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      for (uint i = tid; i < m; i += TF_TG) {
-        const uint key = tf_topk512_key(s[i]);
-        if (pass == 0u || (key >> up) == prefix) atomic_fetch_add_explicit(bins + ((key >> shift) & mask), 1u, memory_order_relaxed);
+      if (pass == 0u) {
+        uint b3 = 0u;
+        for (uint i = tid; i < m; i += TF_TG) {
+          const uint bin = tf_topk512_key(s[i]) >> 21u;
+          if (bin == 3u) ++b3;
+          else atomic_fetch_add_explicit(bins + bin, 1u, memory_order_relaxed);
+        }
+        const uint sb3 = simd_sum(b3);
+        if (lane == 0u && sb3 != 0u) atomic_fetch_add_explicit(bins + 3u, sb3, memory_order_relaxed);
+      } else {
+        for (uint i = tid; i < m; i += TF_TG) {
+          const uint key = tf_topk512_key(s[i]);
+          if ((key >> up) == prefix) atomic_fetch_add_explicit(bins + ((key >> shift) & mask), 1u, memory_order_relaxed);
+        }
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
       const uint2 r = tf_topk512_pick(bins, k, sc, tid, lane, simd);

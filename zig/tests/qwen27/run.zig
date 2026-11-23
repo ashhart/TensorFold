@@ -34,13 +34,13 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
     try write(a, io, dir, "gdn.metal", gdn_source.text);
-    for ([_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" }) |name| {
-        const template = if (std.mem.eql(u8, name, "norm_input")) sources.norm_input else if (std.mem.eql(u8, name, "norm_xs")) sources.norm_xs else if (std.mem.eql(u8, name, "mlp_xs")) sources.mlp_xs else sources.xsum;
-        const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-        const defines = if (std.mem.eql(u8, name, "mlp_xs")) "constexpr int N=17408;" else "constexpr int K=5120, GS=64;";
-        const text = try std.mem.concat(a, u8, &.{ template[0..mark], defines, template[mark + "Q27_SPECIALIZE".len ..] });
-        try write(a, io, dir, try std.fmt.allocPrint(a, "{s}.metal", .{name}), text);
-    }
+    const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .mlp, .xsum };
+    const names = [_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" };
+    for (helpers, names) |kind, name| for ([_]bool{ true, false }) |xs| {
+        const text = try q.quant_gpu.specializedSource(a, .{ .kind = kind, .k = 5120, .n = 17408, .xs = xs });
+        const filename = try std.fmt.allocPrint(a, "{s}{s}.metal", .{ name, if (xs) "" else "-no-xs" });
+        try write(a, io, dir, filename, text);
+    };
     const shapes = [_][3]usize{ .{ 10240, 5120, 4 }, .{ 6240, 5120, 8 }, .{ 5120, 6144, 8 }, .{ 12288, 5120, 4 }, .{ 2048, 5120, 8 }, .{ 34816, 5120, 2 }, .{ 5120, 17408, 8 }, .{ 248320, 5120, 1 } };
     for (shapes, 0..) |shape, i| {
         const text = try core_lane.source(a, .{ .n = shape[0], .k = shape[1], .sk = shape[2], .format = .{ .bits = 4, .group = 64 }, .precompute_sums = true, .cooperative = true });

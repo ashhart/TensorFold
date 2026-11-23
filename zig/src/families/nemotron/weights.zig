@@ -5,6 +5,7 @@ const ckpt = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
 const host4 = @import("../../core/affine4_host.zig");
 const cfg = @import("config.zig");
+const bolt_dense = @import("weights_bolt.zig");
 
 const Tensor = ckpt.Tensor;
 const Width = cfg.Width;
@@ -20,10 +21,19 @@ pub const Linear = struct {
     rows: ?row.Weights = null, // the checkpoint's row layout: chips without tensor units, and every width but 4/64
     stack: [3]Member = undefined, // a fused stack not all 4/64: each member's rows into its own output columns
     stacked: usize = 0, // members in `stack` (0: one matrix)
+
+    /// A 4/64 projection the lane kernels take: its tiles, or its 4/64 rows where none are built (`Builder.tiled`).
+    pub fn lane(l: Linear) bool {
+        if (l.tiles != null) return true; // with tensor units every 4/64 projection has tiles, as on main
+        const r = l.rows orelse return false;
+        return l.stacked == 0 and r.bits == 4 and r.group == 64;
+    }
 };
 
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
 pub const Tiles = struct { w: mtl.Buffer, sbt: mtl.Buffer };
+
+pub const Dense = @import("weights_bolt.zig").Dense;
 
 /// One matrix of a fused stack, written from column `first` of the stack's output rows.
 pub const Member = struct { first: usize, rows: row.Weights };
@@ -68,6 +78,8 @@ pub const Moe = struct {
     adapter: ?Adapter = null, // after shared_down
     slide: ?mtl.Buffer = null, // bf16 [D, W]: shared_down's weight read from the shards minus its codes, added after it
     pocket: ?Pocket = null, // learned neurons, after shared_down
+    into: ?Dense = null, // fc1_latent_proj [latent, hidden] bf16: hidden -> latent before the routed experts (puzzle)
+    out: ?Dense = null, // fc2_latent_proj [hidden, latent] bf16: latent -> hidden after the routed experts (puzzle)
 };
 
 pub const Attention = struct {
@@ -105,6 +117,7 @@ pub const Weights = struct {
     layers: [cfg.max_layers]Layer = undefined,
     norm_f: Tensor,
     head: Linear,
+    head_dense: ?Dense = null, // a full-precision bf16 lm_head (no .scales; Bolt), read in place by the ops gemv
     mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     linears: std.StringHashMapUnmanaged(Linear) = .empty, // by the Python module path ("fused.qkv.5" for q/k/v)
@@ -119,6 +132,8 @@ pub const Weights = struct {
     }
 };
 
+pub const denseHead = @import("weights_bolt.zig").denseHead;
+
 /// Every tensor the kernels read, checked and laid out for them.
 pub const Builder = struct {
     allocator: std.mem.Allocator,
@@ -129,11 +144,17 @@ pub const Builder = struct {
     jobs: std.ArrayList(Tile) = .empty,
     why: cfg.Why = .{},
     rows: bool = false, // also keep each 4/64 projection's row layout (chips without tensor units)
+    pin: bool = false, // build this projection's tiles even with rows (the MTP eh, which coopParts reads directly)
 
     fn buffer(self: *Builder, bytes: usize) !mtl.Buffer {
         const b = try self.device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         try self.w.owned.append(self.allocator, b);
         return b;
+    }
+
+    /// Whether a 4/64 projection gets lane tiles: with tensor units; without, the row kernels read its rows instead.
+    fn tiled(self: *const Builder) bool {
+        return !self.rows or self.pin;
     }
 
     fn get(self: *Builder, comptime fmt: []const u8, args: anytype) !Tensor {
@@ -142,7 +163,7 @@ pub const Builder = struct {
     }
 
     /// A tensor the kernels read as stored (norms, the router), refused unless it has this dtype and shape.
-    fn typed(self: *Builder, comptime fmt: []const u8, args: anytype, dtype: ckpt.DType, shape: []const usize) !Tensor {
+    pub fn typed(self: *Builder, comptime fmt: []const u8, args: anytype, dtype: ckpt.DType, shape: []const usize) !Tensor {
         var name: [160]u8 = undefined;
         const full = try std.fmt.bufPrint(&name, fmt, args);
         const t = try self.ck.get(full);
@@ -172,11 +193,12 @@ pub const Builder = struct {
         for (parts) |p| n += p.t[0].shape[0];
         const words = parts[0].t[0].shape[1];
         const k = words * 8;
-        var lin = Linear{ .tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4) }, .n = n, .k = k };
+        var lin = Linear{ .n = n, .k = k };
+        if (self.tiled()) lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4) };
         var row0: usize = 0;
         for (parts) |p| {
             if (p.t[0].dtype != .u32 or p.t[0].shape[1] != words or p.t[1].shape[1] != k / 64) return error.BadLinear;
-            try self.jobs.append(self.allocator, .{ .src = p.t, .dst = lin, .row0 = row0 });
+            if (lin.tiles != null) try self.jobs.append(self.allocator, .{ .src = p.t, .dst = lin, .row0 = row0 });
             row0 += p.t[0].shape[0];
         }
         if (n % 64 != 0) return error.BadLinear;
@@ -222,8 +244,11 @@ pub const Builder = struct {
         for (pick) |r| if (r >= src.t[0].shape[0]) return error.BadDraftIds;
         if (!src.w.four()) return .{ .n = n, .k = k, .rows = try self.packRows(&.{src}, pick, n, k) };
         const words = k / 8;
-        var lin = Linear{ .tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4) }, .n = n, .k = k };
-        try self.jobs.append(self.allocator, .{ .src = src.t, .dst = lin, .row0 = 0, .pick = pick });
+        var lin = Linear{ .n = n, .k = k };
+        if (self.tiled()) {
+            lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4) };
+            try self.jobs.append(self.allocator, .{ .src = src.t, .dst = lin, .row0 = 0, .pick = pick });
+        }
         if (self.rows) lin.rows = try self.packRows(&.{src}, pick, n, k);
         return lin;
     }
@@ -257,13 +282,14 @@ pub const Builder = struct {
         return out;
     }
 
-    /// An MoE block at `ws` (fc1, fc2, shared up, shared down; members(.moe) order).
-    fn moe(self: *Builder, comptime prefix: []const u8, args: anytype, ws: [4]Width) !Moe {
+    /// An MoE block at `ws`, this layer's experts and width; latent > 0 runs them there, between its latent projections
+    fn moe(self: *Builder, comptime prefix: []const u8, args: anytype, ws: [4]Width, n_experts: usize, ewidth: usize, latent: usize) !Moe {
         const c = self.c;
-        const gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden });
-        const gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts});
-        const fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ c.experts, c.expert_width, c.hidden }, ws[0]);
-        const fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ c.experts, c.hidden, c.expert_width }, ws[1]);
+        const inner = if (latent > 0) latent else c.hidden; // the width the routed experts read and write
+        const gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ n_experts, c.hidden });
+        const gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{n_experts});
+        const fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ n_experts, ewidth, inner }, ws[0]);
+        const fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ n_experts, inner, ewidth }, ws[1]);
         const full = c.shared_width + c.pocket;
         const up = try self.quantized(prefix ++ ".shared_experts.up_proj", args, &.{ full, c.hidden }, ws[2]);
         const down = try self.quantized(prefix ++ ".shared_experts.down_proj", args, &.{ c.hidden, full }, ws[3]);
@@ -275,8 +301,8 @@ pub const Builder = struct {
         }
         const own_up = Matrix{ .t = firstRows(up.t, c.shared_width), .w = up.w };
         const own_down = Matrix{ .t = if (c.pocket > 0) try self.firstColumns(down.t, c.shared_width) else down.t, .w = down.w };
-        // the lane up writes the input sums the lane down reads: both on lane tiles, or both in rows
-        const routed = fc1.w.four() and fc2.w.four();
+        // both on lane tiles, else both in rows; the Puzzle (latent > 0) takes the runtime-dim row kernels, K = latent
+        const routed = fc1.w.four() and fc2.w.four() and latent == 0;
         return .{
             .gate = gate,
             .gate_bias = gate_bias,
@@ -287,6 +313,8 @@ pub const Builder = struct {
             .shared_down = if (four) try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}) else try self.rowLinear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}),
             .shared_raw = .{ own_up.t, own_down.t },
             .pocket = if (c.pocket > 0) try self.pocketOf(up.t, down.t) else null,
+            .into = if (latent > 0) try bolt_dense.dense(self, prefix ++ ".fc1_latent_proj.weight", args, latent, c.hidden) else null,
+            .out = if (latent > 0) try bolt_dense.dense(self, prefix ++ ".fc2_latent_proj.weight", args, c.hidden, latent) else null,
         };
     }
 
@@ -363,11 +391,15 @@ pub const Builder = struct {
         return .{
             .enorm = try self.typed("mtp.layers.0.enorm.weight", .{}, .bf16, d),
             .hnorm = try self.typed("mtp.layers.0.hnorm.weight", .{}, .bf16, d),
-            .eh = try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})}),
+            .eh = eh: { // in main's place, so a chip with tensor units builds the head in the same order
+                self.pin = true; // mtp.zig's coopParts reads eh's tiles without the row kernels first
+                defer self.pin = false;
+                break :eh try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})});
+            },
             .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}, four),
             .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
-            .moe = try self.moe("mtp.layers.1.mixer", .{}, four),
+            .moe = try self.moe("mtp.layers.1.mixer", .{}, four, self.c.experts, self.c.expert_width, self.c.latent),
             .final = try self.typed("mtp.layers.1.final_layernorm.weight", .{}, .bf16, d),
             .draft = try self.picked(try self.quantized("lm_head", .{}, &.{ self.c.vocab, self.c.hidden }, self.c.head_width), draft_ids),
             .ids = ids,
@@ -431,11 +463,16 @@ pub const Builder = struct {
                     .dt_bias = try b.f32vec(try b.get("backbone.layers.{d}.mixer.dt_bias", .{i})),
                     .norm = try b.typed("backbone.layers.{d}.mixer.norm.weight", .{i}, .bf16, &.{c.inner()}),
                 } },
-                .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}, ws) },
+                .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}, ws, if (c.bolt) c.moe[i].experts else c.experts, if (c.bolt) c.moe[i].width else c.expert_width, c.latent) },
                 .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}, ws) },
             };
         }
-        w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
+        if (denseHead(c.*, b.ck)) {
+            w.head_dense = try bolt_dense.dense(b, "lm_head.weight", .{}, c.vocab, c.hidden);
+            w.head = .{ .n = c.vocab, .k = c.hidden };
+        } else {
+            w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
+        }
         if (draft_ids) |ids| {
             if (b.ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);
         }
@@ -486,15 +523,17 @@ const Tile = struct {
     }
 };
 
-/// A projection's codes ([n, k/8], row layout) rewritten into its tiles and any row copy; scales and biases kept.
+/// A projection's codes ([n, k/8], row layout) rewritten into any tiles and any row copy; scales and biases kept.
 pub fn retile(lin: Linear, words: []const u32) void {
     const per = lin.k / 8;
     const groups = lin.k / 64;
-    const tiled = lin.tiles.?.w.slice(u32, lin.n * per);
-    for (0..lin.n) |n| for (0..groups) |g| {
-        const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
-        @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
-    };
+    if (lin.tiles) |t| { // without tensor units a 4/64 projection has rows only (`Builder.tiled`)
+        const tiled = t.w.slice(u32, lin.n * per);
+        for (0..lin.n) |n| for (0..groups) |g| {
+            const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
+            @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
+        };
+    }
     if (lin.rows) |r| {
         const own: [*]u32 = @ptrCast(@alignCast(r.w.contents() + r.w_off));
         if (own != words.ptr) @memcpy(own[0 .. lin.n * per], words[0 .. lin.n * per]);

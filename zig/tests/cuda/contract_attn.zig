@@ -24,6 +24,8 @@ pub const Ref = struct {
     want: []f64,
     tol: []f64,
     msg: [240]u8 = undefined,
+    /// The outputs' type as the kernel writes them (Idol's attention writes fp16).
+    out: c.Elem = .bf16,
 
     pub fn init(a: std.mem.Allocator, d: usize, most: usize) !Ref {
         const keys = try a.alloc(usize, most);
@@ -54,7 +56,7 @@ pub const Ref = struct {
             try t.load(i, &r.head);
             ref.head(r.head.q, r.head.k, r.head.v, r.keys[0..r.head.n], r.d, scale, r.want, r.tol);
             for (r.want, r.tol, 0..) |w, tl, e| {
-                const got = c.read(.bf16, out, i * r.d + e);
+                const got = c.read(r.out, out, i * r.d + e);
                 if (c.classOf(w) != .finite) planted += 1;
                 if (c.classOf(got) != c.classOf(w)) return try std.fmt.bufPrint(&r.msg, "head {d} element {d}: {t} where float64 gives {t}", .{ i, e, c.classOf(got), c.classOf(w) });
                 if (at != .nonfinite and std.math.isFinite(w) and !(@abs(got - w) <= tl)) return try std.fmt.bufPrint(&r.msg, "head {d} element {d} is {e:.6} where float64 gives {e:.6}: {d:.2} of attention_ref's bound", .{ i, e, got, w, @abs(got - w) / tl });

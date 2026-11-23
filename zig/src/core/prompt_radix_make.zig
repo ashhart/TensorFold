@@ -127,8 +127,8 @@ pub const Decl = struct {
         for (d.specs, ps, 0..) |spec, part, g| if (spec.make == .copied) try h.vtable.restore(h.ptr, owner, @intCast(g), part);
     }
 
-    /// The retained parts a resume at `at` maps: whole pages held once for the stream, partial ones as copies to make.
-    pub fn handOut(d: Decl, t: *Tree, a: Allocator, at: u32, ps: []const Part) !struct { parts: []Retained, copies: []Copy } {
+    /// The retained parts a resume at `at` maps: whole pages held for the stream, partial ones and `extra` as copies.
+    pub fn handOut(d: Decl, t: *Tree, a: Allocator, at: u32, ps: []const Part, extra: usize) !struct { parts: []Retained, copies: []Copy } {
         var nr: usize = 0;
         var nc: usize = 0;
         for (d.specs) |spec| if (spec.make == .retained) {
@@ -141,7 +141,7 @@ pub const Decl = struct {
             for (out[0..owned]) |r| a.free(r.ids);
             a.free(out);
         }
-        const copies = try a.alloc(Copy, nc);
+        const copies = try a.alloc(Copy, nc + extra);
         errdefer a.free(copies);
         nr = 0;
         for (d.specs, ps) |spec, part| if (spec.make == .retained) {

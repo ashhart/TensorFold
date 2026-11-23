@@ -134,6 +134,7 @@ const tiny: Geometry = .{ .hidden = 256, .layers = 2, .heads = 4, .kv_heads = 2,
 pub fn lane() cuda.qmmf.Lane {
     var l: cuda.qmmf.Lane = undefined;
     l.clusters = false; // partBytes reads the tile plan alone
+    l.pdl = false;
     return l;
 }
 

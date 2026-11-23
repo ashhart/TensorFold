@@ -51,6 +51,7 @@ const Held = struct { drafted: lanes.drafted.Drafted, ctx: *anyopaque, close: *c
 /// `loaded`'s backend, wrapped with the drafter `o.drafter` names when it does; null with `problem` set on refusal.
 pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: anytype, o: api.Open, problem: *[]const u8) !?Served {
     var s: Served = .{ .backend = loaded.backend, .facts = loaded.facts, .stream_bytes = loaded.stream_bytes };
+    defer if (@hasDecl(F, "finishDrafterOpen")) F.finishDrafterOpen(loaded.ctx);
     if (@hasField(@TypeOf(loaded), "draft_kind")) if (loaded.draft_kind) |kind| {
         s.source = .{ .kind = kind, .name = o.drafter_name orelse o.drafter orelse "" };
     };
@@ -64,22 +65,38 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
         return null;
     }
     const opened = F.openDrafter(gpa, io, loaded.ctx, dir, o.drafter_bits) catch |e| {
+        if (e == error.MtpDepthZero) return s;
+        if (@hasDecl(F, "explain")) if (F.explain(loaded.ctx, e)) |why| {
+            problem.* = why;
+            return null;
+        };
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load the drafter {s} ({s})", .{ dir, @errorName(e) });
         return null;
     };
+    var held: ?*Held = null;
+    var drafted_initialized = false;
+    var transferred = false;
+    defer if (!transferred) {
+        if (held) |h| {
+            if (drafted_initialized) h.drafted.deinit();
+            gpa.destroy(h);
+        }
+        opened.close(opened.ctx);
+    };
     const h = try gpa.create(Held);
-    errdefer gpa.destroy(h);
+    held = h;
     h.* = .{ .drafted = undefined, .ctx = opened.ctx, .close = opened.close, .reserve = opened.reserve };
     h.drafted = lanes.drafted.Drafted.init(gpa, loaded.backend, opened.drafter) catch |e| {
-        opened.close(opened.ctx);
         problem.* = try std.fmt.allocPrint(a, "the drafter {s} cannot attach to this model ({s})", .{ dir, @errorName(e) });
         return null;
     };
+    drafted_initialized = true;
     s.source = .{ .kind = opened.drafter.kind, .name = o.drafter_name orelse dir };
     s.backend = h.drafted.backend();
     s.facts = h.drafted.facts(loaded.facts);
-    s.stream_bytes = h.drafted.streamBytes(loaded.stream_bytes);
+    s.stream_bytes = try h.drafted.streamBytes(loaded.stream_bytes);
     s.held = h;
+    transferred = true;
     if (@hasField(@TypeOf(opened), "prepare")) {
         // a family's prepare, or an optional one when only some drafters time windows after the pool (not Qwen's MTP)
         const P = @TypeOf(opened.prepare);
@@ -110,4 +127,30 @@ test "--drafter: a family that loads its own drafter (GLM's DFlash2) serves as i
     };
     try std.testing.expect((try wrap(Plain, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) == null);
     try std.testing.expectEqualStrings("--drafter: plain checkpoints load no draft model on CUDA", problem);
+}
+
+test "--mtp-drafts 0 reaches drafter selection so an MTP refusal does not suppress other drafter kinds" {
+    var called = false;
+    const Opened = struct {
+        drafter: lanes.drafter.Drafter,
+        ctx: *anyopaque,
+        close: *const fn (*anyopaque) void,
+        reserve: *const fn (*anyopaque, u32) anyerror!void,
+    };
+    const F = struct {
+        pub const model_type = "test";
+        pub fn openDrafter(_: Allocator, _: std.Io, p: *anyopaque, _: []const u8, _: u8) error{MtpDepthZero}!Opened {
+            @as(*bool, @ptrCast(@alignCast(p))).* = true;
+            return error.MtpDepthZero;
+        }
+    };
+    const Loaded = struct { backend: lanes.backend.Backend, facts: lanes.Model, stream_bytes: usize, ctx: *anyopaque };
+    const loaded: Loaded = .{ .backend = undefined, .facts = undefined, .stream_bytes = 0, .ctx = &called };
+    const o: api.Open = .{ .dir = "target", .model_type = F.model_type, .drafter = "target", .mtp_drafts = 0 };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(called);
+    try std.testing.expect(served.held == null);
 }

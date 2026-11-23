@@ -114,6 +114,7 @@ test "draft sources: Metal GLM and GLM DSA follow actual MTP weights" {
     var weights: @typeInfo(@TypeOf(e.w)).pointer.child = undefined;
     e.w = &weights;
     e.ep = null;
+    e.dflash = null;
     e.device = .{ .id = no_arch };
     var slots: tf.glm.slots.Slots = undefined;
     var b: tf.glm.backend.Backend = .{ .gpa = std.testing.allocator, .sl = &slots };
@@ -125,6 +126,9 @@ test "draft sources: Metal GLM and GLM DSA follow actual MTP weights" {
     try check(facts, null, true, false);
     e.w.mtp = @as(@TypeOf(e.w.mtp.?), undefined);
     try check(b.facts(), null, true, true);
+    e.dflash = present(@TypeOf(e.dflash.?)); // the DFlash2 drafter's own facts branch
+    try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
+    e.dflash = null;
     var d: tf.glm_dsa.engine.Engine = undefined;
     var db: tf.glm_dsa.backend.Backend = undefined;
     db.e = &d;

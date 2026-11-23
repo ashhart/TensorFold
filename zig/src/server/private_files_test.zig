@@ -5,6 +5,7 @@ const json = @import("json");
 const compact_mem = @import("compact_mem.zig");
 const server = @import("server.zig");
 const Graph = @import("slide_graph.zig").Graph;
+const fakes = @import("compact_test.zig");
 const testing = std.testing;
 const io = testing.io;
 
@@ -43,7 +44,7 @@ test "security: a conversation note is owner-only and is not written through a p
         const link = try std.fmt.allocPrint(a, "notes/{s}{s}", .{ key, ext });
         try tmp.dir.symLink(io, victim, link, .{});
     }
-    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary");
+    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary", 0);
 
     try testing.expectEqualStrings("untouched", try tmp.dir.readFileAlloc(io, "victim.txt", a, .limited(64)));
     for ([_][]const u8{ ".md", ".json" }) |ext| {
@@ -52,7 +53,12 @@ test "security: a conversation note is owner-only and is not written through a p
     }
     const note = try std.fmt.allocPrint(a, "notes/{s}.md", .{key});
     try testing.expectEqualStrings("a private summary", try tmp.dir.readFileAlloc(io, note, a, .limited(64)));
-    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs).?.note);
+    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs, 0).?.note);
+    try testing.expect(compact_mem.loadMem(&srv, a, msgs, 0x5a17) == null); // a salted request reads no shared note
+    const other = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"salted\"}]")).ok.items().?;
+    compact_mem.storeMem(&srv, a, other, 1, "a salted summary", 0x5a17); // nor writes one another salt would read
+    const salted = try std.fmt.allocPrint(a, "notes/{s}.md", .{try compact_mem.conversationKey(a, other)});
+    try testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(io, salted, a, .limited(64)));
 }
 
 test "security: a folder the note writer makes is the owner's alone" {
@@ -67,7 +73,7 @@ test "security: a folder the note writer makes is the owner's alone" {
     srv.config = .{ .served_name = "test", .model_ids = &.{"test"}, .compact_memory = dir };
     srv.io = io;
     const msgs = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"hello\"}]")).ok.items().?;
-    compact_mem.storeMem(&srv, a, msgs, 1, "note");
+    compact_mem.storeMem(&srv, a, msgs, 1, "note", 0);
     const st = try std.Io.Dir.cwd().statFile(io, dir, .{});
     try testing.expectEqual(@as(u32, 0), @as(u32, @intCast(st.permissions.toMode() & 0o077)));
 }
@@ -94,4 +100,45 @@ test "security: the fact graph is owner-only and is not written through a plante
     var again = Graph.init(testing.allocator, io, path);
     defer again.deinit();
     try testing.expectEqual(@as(usize, 1), again.facts.items.len);
+}
+
+test "a server open clears a crash's stale temporaries but keeps a live writer's and every other file" {
+    // the pid check is POSIX's; Windows' day-old fallback would need Dir.setTimestamps, which Zig 0.17 lacks there
+    if (platform.windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "notes");
+    try tmp.dir.createDirPath(io, "graphs");
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const live = try std.fmt.allocPrint(a, ".tmp.{d}.0", .{platform.c.getpid()});
+    // no process has pid 999999999 (Linux's pid_max is at most 2^22, macOS's 99999)
+    const stale = [_][]const u8{ "notes/k.md.tmp.999999999.0", "notes/k.json.tmp.999999999.12", "graphs/graph.json.tmp.999999999.3" };
+    const kept = [_][]const u8{
+        "notes/k.md",                  "notes/k.md.tmp.not-a-pid.0",
+        "notes/k.md.tmp.+999999999.0", "notes/k.md.tmp.999999999.0.extra",
+        "notes/k.md.tmp.0999999999.0", "notes/k.md.tmp.999_999_999.0",
+        "notes/k.md.tmp.0.0",          "notes/k.md.tmp.4294967295.0",
+        "notes/.tmp.999999999.0",
+        "graphs/other.json.tmp.999999999.0", // another file's, in a folder the graph may share
+        try std.fmt.allocPrint(a, "notes/k.md{s}", .{live}),
+        try std.fmt.allocPrint(a, "graphs/graph.json{s}", .{live}),
+    };
+    for (stale ++ kept) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+
+    var eng: fakes.Eng = .{ .window = 256 };
+    defer fakes.freePrompts(&eng);
+    var text: fakes.Text = .{};
+    const srv = try server.Server.init(testing.allocator, io, eng.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .compact_memory = try std.fmt.allocPrint(a, "{s}/notes", .{root}),
+        .slide_graph = try std.fmt.allocPrint(a, "{s}/graphs/graph.json", .{root}),
+    }, null);
+    defer srv.deinit();
+
+    for (stale) |name| try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, name, .{}));
+    for (kept) |name| _ = try tmp.dir.statFile(io, name, .{});
 }

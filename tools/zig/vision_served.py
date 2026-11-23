@@ -1,4 +1,5 @@
 """Image input served end to end on a running ``tensorfold-native --vision`` (#565's served checks)."""
+# drafted == plain: equal token_sha256, a draft accepted when drafted and none drafted when plain, else it fails.
 
 from __future__ import annotations
 
@@ -10,6 +11,9 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from conformance import drafted_gate, reply_row  # noqa: E402
 
 
 def post(url: str, body: dict) -> tuple[int, dict]:
@@ -78,7 +82,8 @@ def main() -> int:
     plain_text = ask([user(text("Describe this image in one sentence."))])[1]
     check("an image request answers", code == 200 and code2 == 200, f"HTTP {code}/{code2}")
     if code == 200 and code2 == 200:
-        check("drafted equals \"draft\": false with an image", reply(r) == reply(r2), repr(reply(r)[:60]))
+        gate = drafted_gate({"greedy": [(reply_row(code2, r2), reply_row(code, r))]})
+        check("drafted equals \"draft\": false with an image", gate["passed"], gate["line"] + " " + repr(reply(r)[:60]))
         check("the image's tokens are in the prompt", r["usage"]["prompt_tokens"] > plain_text["usage"]["prompt_tokens"] + 8,
               f"{r['usage']['prompt_tokens']} prompt tokens with the image, {plain_text['usage']['prompt_tokens']} without")
 

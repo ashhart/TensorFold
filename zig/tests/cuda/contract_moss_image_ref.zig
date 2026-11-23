@@ -67,6 +67,24 @@ pub fn tanh(x: f64) f64 {
     return std.math.tanh(x);
 }
 
+pub fn exp(x: f64) f64 {
+    return @exp(x);
+}
+
+/// z / (1 + exp(-z)) in float64: it falls to `knee + 1` at `knee`, then rises to 0 and above.
+pub fn silu(z: f64) f64 {
+    return z / (1 + @exp(-z));
+}
+
+/// silu's turning point, where its derivative's 1 + z (1 - sigmoid z) is zero: e^z = -z - 1.
+pub const knee: f64 = -1.2784645427610738;
+
+/// The silu of every value in `a`: its least value sits between the ends when the range spans `knee`.
+pub fn siluRange(a: Range) Range {
+    const lo = @min(silu(a.lo), silu(a.hi));
+    return .{ .lo = if (a.lo <= knee and knee <= a.hi) knee + 1 else lo, .hi = @max(silu(a.lo), silu(a.hi)) };
+}
+
 fn sqrt(x: f64) f64 {
     return @sqrt(x);
 }
@@ -120,8 +138,11 @@ pub const nan16 = 0x7fc0;
 pub const inf16 = 0x7f80;
 pub const ninf16 = 0xff80;
 
+/// A sum of squares in float64 and its range.
+pub const Squares = struct { ss: f64, r: Range };
+
 /// A row's sum of squares in float64 and its range from fp32 sums `depth` deep (exact for gate 4's integers).
-pub fn squares(x: []const u16, depth: usize, exact: bool) struct { ss: f64, r: Range } {
+pub fn squares(x: []const u16, depth: usize, exact: bool) Squares {
     var ss: f64 = 0;
     for (x) |v| {
         const f: f64 = c.fromBf16(v);

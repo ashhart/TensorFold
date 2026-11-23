@@ -70,7 +70,7 @@ fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]cons
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .int = "0" });
     var scratch: errors.Cx = .{ .a = a };
-    const reply = chat.run(srv, &scratch, .{ .messages = .{ .array = msgs }, .fields = .{ .object = fields }, .max_tokens = 160, .id = t.id }, null, gone) catch |e| switch (e) {
+    const reply = chat.run(srv, &scratch, .{ .messages = .{ .array = msgs }, .fields = .{ .object = fields }, .max_tokens = 160, .id = t.id, .cache_salt = t.salt }, null, gone) catch |e| switch (e) {
         error.Cancelled => return error.Cancelled,
         error.OutOfMemory => return error.OutOfMemory,
         else => return fallback(a, t.goal),
