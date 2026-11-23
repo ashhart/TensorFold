@@ -9,6 +9,7 @@ struct TfMarkovArgs {
   uint parts;  // threadgroups an ask's search is cut into
   uint dim;    // the hidden size (the confidence head's first part)
 };
+static_assert(sizeof(TfMarkovArgs) == 20, "TfMarkovArgs must mirror metal/markov.zig's Args");
 
 // An ask's draws: greedy, or keyed (seed, the first draft's position, T) as the host races a row.
 struct TfMarkovAsk {
@@ -17,6 +18,7 @@ struct TfMarkovAsk {
   float t;
   uint sampled;
 };
+static_assert(sizeof(TfMarkovAsk) == 24, "TfMarkovAsk must mirror metal/markov.zig's Ask");
 
 inline float tf_mk_bf16(uint b) {
   return as_type<float>(b << 16);

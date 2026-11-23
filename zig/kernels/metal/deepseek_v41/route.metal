@@ -101,6 +101,7 @@ struct Dsv41PlanArgs {
     float scale;
     float eps;
 };
+static_assert(sizeof(Dsv41PlanArgs) == 16, "Dsv41PlanArgs must mirror metal/glue.zig's gatePlan rows/topk/scale/eps");
 
 #define TF_DSV41_NOWHERE 0xFFFFFFFFu
 // Simdgroups a row's scores take (two experts a lane), and rows routed at once in a group of 1024.
@@ -253,6 +254,7 @@ inline void tf_dsv41_route_plan_body(const device float* LOGITS, const device fl
 struct Dsv41GateArgs {
     uint k, rows_group; // a group's rows: groups of 32 columns repeat for each rows_group-row slice
 };
+static_assert(sizeof(Dsv41GateArgs) == 8, "Dsv41GateArgs must mirror metal/glue.zig's gatePlan k/rows_group");
 
 // The gate matvec's faults (the route's are TF_CTL): 1 non-finite x as 0, 2 steps lost, 3 fp16 sums, 4 a write past.
 #ifndef TF_GCTL

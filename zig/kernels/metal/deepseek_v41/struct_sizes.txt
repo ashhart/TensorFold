@@ -15,6 +15,9 @@ csa2_attn.metal TfKey 32
 csa2_attn.metal TfQ 64
 csa2_nax.metal DenseKv 20
 csa2_rows.metal Dsv41AttentionRows 60
+early.metal TfEarlyAcceptArgs 20
+early.metal TfEarlyKeyedArgs 8
+early.metal TfEarlyPickArgs 4
 engram.metal TfEngramArgs 20
 engram_exl3.metal EngramGateArgs 48
 engram_exl3.metal EngramGatherArgs 40
@@ -71,6 +74,8 @@ kv.metal Dsv41Pack 36
 kv.metal Dsv41Pool 32
 kv.metal Dsv41RingMove 32
 kv_glue.metal Dsv41KvGlue 36
+markov.metal TfMarkovArgs 20
+markov.metal TfMarkovAsk 24
 mhc.metal ColDense 20
 mhc.metal Collapse 20
 mhc.metal Expand 20
@@ -93,6 +98,10 @@ ops.metal Rms 24
 ops.metal StreamMean 28
 rope.metal Dsv41Rope 36
 rope.metal Dsv41RopeRows 24
+route.metal Dsv41Cand 12
+route.metal Dsv41GateArgs 8
+route.metal Dsv41PlanArgs 16
+route.metal Dsv41PlanTg 15448
 route.metal Dsv41RouteArgs 16
 route_exl3.metal Shape 40
 topk512.metal TfTopk512Args 4

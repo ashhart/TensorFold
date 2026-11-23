@@ -8,6 +8,7 @@ using namespace metal;
 struct TfEarlyPickArgs {
   uint vocab; // logits a row (the row stride)
 };
+static_assert(sizeof(TfEarlyPickArgs) == 4, "TfEarlyPickArgs must mirror metal/early_picks.zig's vocab row stride");
 
 // The better of two (value, id) pairs: the larger value, ties to the lower id (no NaN reaches here).
 inline void tf_early_better(thread float& v, thread uint& i, float ov, uint oi) {
@@ -52,6 +53,7 @@ struct TfEarlyKeyedArgs {
   uint vocab;  // logits a row (the row stride)
   float t;     // the temperature (at least 1e-6, as the host floors it)
 };
+static_assert(sizeof(TfEarlyKeyedArgs) == 8, "TfEarlyKeyedArgs must mirror metal/early_picks.zig's vocab and temperature");
 
 // A raced row's keyed pick: the largest x / t + gumbel(key); a value not finite picks none (the host sorts such rows).
 [[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_dsv41_early_keyed(
@@ -110,6 +112,7 @@ struct TfEarlyAcceptArgs {
   uint skew;  // tests: 1 swaps an accepted count of 0 and 1, so the chain parts from the host's commit
   uint pos_lo, pos_hi;  // the next ask's first draft's position less the accepted count
 };
+static_assert(sizeof(TfEarlyAcceptArgs) == 20, "TfEarlyAcceptArgs must mirror metal/early.zig's accept plan");
 
 // The drafts the picks accept (the host's rule), each count's plan copied in, the bonus into the block and the result.
 [[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_dsv41_early_accept(
