@@ -7,7 +7,7 @@
     "round_three": {
       "commit_named_by_the_pr": "a0935b5279",
       "sha256": "fea64c017bd4ac02d4c4d66ac3ebe3f578c12003df56003f3e99cec375eb6c4f",
-      "used_for": ["decode", "cold prompts", "footprint", "hash-r3b.log"]
+      "used_for": ["decode", "cold prompts", "footprint", "hash-r3b.txt"]
     },
     "concurrency_plain": {
       "commit": "e6cb02e09e",

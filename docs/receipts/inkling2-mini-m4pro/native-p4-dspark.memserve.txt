@@ -1,0 +1,16 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 4 streams, 8192-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.92 GiB; DSpark on, images off, prompt cache 0.00 GiB; demand 21.86 GiB (19.64 GiB fixed, 4 x 0.55 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8099/v1 (sampling: temperature 1.0; drafts: DSpark (DSpark); context: 8192; loaded in 11.7s)
+[tensorfold] done cmpl-7015aa7bb21779f180bfe89300769b4a prompt=1 cached=0 thinking=False effort=none tokens=1 sha=4fc82b26aecb finish=length rounds=0 accepted=0/0 ttft=0.051 decode=0.000 elapsed=0.051 queued=0.000 tok/s=0.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] refused cmpl-8b80a97df521dbd9f5fff163762d7810: This server's maximum context length is 8192 tokens, but the rendered prompt has 8192 tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 400 -
+[tensorfold] done chatcmpl-a3d4a1e03194100585ec912e9cf67c12 prompt=21 cached=0 thinking=False effort=none tokens=128 sha=a522c89a621e finish=length rounds=61 accepted=66/97 ttft=0.176 decode=3.622 elapsed=3.799 queued=0.000 tok/s=35.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

@@ -1,0 +1,18 @@
+info: Inkling 2: 0.0 GiB kept wired between requests, inside 70% of 48 GiB of RAM
+info: inkling2 mini: 8 streams, 8192-token context, 48 logical layers over 24 physical; weights 18.19 GiB resident, dense+scratch 18.92 GiB; DSpark on, images off, prompt cache 0.00 GiB; demand 24.08 GiB (19.64 GiB fixed, 8 x 0.55 GiB a stream)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] prompt chunks of up to 512 tokens, cut at replies 256+ tokens apart
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving ed40e7da625f594fc9c4990f5f66be24873c22d7 at http://127.0.0.1:8110/v1 (sampling: temperature 1.0; drafts: DSpark (DSpark); context: 8192; loaded in 14.2s)
+[tensorfold] done chatcmpl-93880518ea487cce5e268539a5c2ebc0 prompt=28 cached=0 thinking=False effort=none tokens=8 sha=0b037128ee78 finish=length rounds=4 accepted=4/6 ttft=0.212 decode=0.213 elapsed=0.425 queued=0.000 tok/s=32.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-11750a03b2410152baa2578647c7a3df prompt=28 cached=0 thinking=False effort=none tokens=64 sha=b37d8a0e39c4 finish=length rounds=35 accepted=29/56 ttft=0.197 decode=1.919 elapsed=2.116 queued=0.000 tok/s=32.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-e7024c21643ff3199b51b5f4c671a626 prompt=416 cached=0 thinking=False effort=none tokens=16 sha=77bf7c99cc66 finish=length rounds=6 accepted=9/14 ttft=1.147 decode=0.375 elapsed=1.522 queued=0.000 tok/s=40.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-f0c60354619aef20a128d051d510ac42 prompt=1036 cached=0 thinking=False effort=none tokens=24 sha=538175732cc7 finish=length rounds=13 accepted=11/22 ttft=2.867 decode=0.768 elapsed=3.636 queued=0.000 tok/s=29.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped
