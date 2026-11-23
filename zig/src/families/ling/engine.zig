@@ -420,7 +420,7 @@ pub const Engine = struct {
 
     pub fn dropState(e: *Engine, id: u64) void {
         var kv = e.snaps.fetchRemove(id) orelse return;
-        if (e.lead) e.dropped.append(e.gpa, id) catch {}; // rank 1 drops it before rank 0's next step
+        if (e.lead) e.dropped.appendAssumeCapacity(id); // kept.keep reserved it: rank 1 drops it before the next step
         e.freeSnap(&kv.value);
     }
 

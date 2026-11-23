@@ -40,16 +40,19 @@ fn rowsCopy(e: *const Engine, st: *const fw.State, kept: u64, at: usize, out: bo
 pub fn keep(e: *Engine) !u64 {
     const q = e.cur;
     if (q.st.pending != 0) return error.NotCommitted;
-    try e.sendOn(e.slot, .{ .kind = @backingInt(@import("tp.zig").Kind.keep_state), .a = e.next_snap }, &.{});
+    // every allocation before rank 1 hears of the keep, so a failed one leaves neither rank holding the state
+    try e.snaps.ensureUnusedCapacity(e.gpa, 1);
+    if (e.lead) try e.dropped.ensureTotalCapacity(e.gpa, e.dropped.items.len + e.snaps.count() + 1); // dropState's room
+    const cur = try e.gpa.dupe(u1, q.st.cur);
+    errdefer e.gpa.free(cur);
     var buf = try cuda.DeviceBuffer.alloc(e.d, bytes(&q.st, q.st.pos));
     errdefer if (weights.drains(e.stream)) buf.free(); // else leaked: the copy into it may be queued
+    try e.sendOn(e.slot, .{ .kind = @backingInt(@import("tp.zig").Kind.keep_state), .a = e.next_snap }, &.{});
     try headCopy(e, &q.st, buf.ptr, q.st.cur, true);
     try rowsCopy(e, &q.st, buf.ptr, q.st.pos, true);
     try e.stream.synchronize();
-    const cur = try e.gpa.dupe(u1, q.st.cur);
-    errdefer e.gpa.free(cur);
     const id = e.next_snap;
-    try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = q.st.pos, .cur = cur });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .buf = buf, .pos = q.st.pos, .cur = cur });
     e.next_snap += 1;
     return id;
 }
