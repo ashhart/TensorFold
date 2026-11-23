@@ -43,6 +43,20 @@ fn admittedStreams(a: std.mem.Allocator, stream_bytes: u64, left: u64, o: api.Op
     return metal_admit.streams(a, "flint", stream_bytes, left, o, window, problem);
 }
 
+fn admittedWindow(a: std.mem.Allocator, c: *const fl.config.Config, draft_stream: u64, left: u64, o: api.Open, window: u64, problem: *[]const u8) !?u32 {
+    return admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)) + draft_stream, left, o, window, problem);
+}
+
+fn longestWindow(c: *const fl.config.Config, budget: u64, most: usize) usize {
+    return fl.budget.longest(c, budget, most);
+}
+
+fn targetBudget(budget: u64, served: u32, draft_stream: u64) u64 {
+    _ = served;
+    _ = draft_stream;
+    return budget;
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (o.drafts and o.drafter != null and (o.lanes > 4 or (o.drafter_bits != 0 and o.drafter_bits != 4))) {
         problem.* = "--drafter: Flint DFlash2 is qualified for --parallel 1 to 4 and --drafter-bits 0 or 4 on Metal M5";
@@ -75,7 +89,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "FLINT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0 and at most this Mac's RAM, or unset it for 75% of RAM";
         return null;
     };
-    const fits = fl.budget.longest(&model.config, budget -| draft_stream, model.config.context);
+    const fits = longestWindow(&model.config, budget -| draft_stream, model.config.context);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Flint caches fit {d} tokens under its load limit (75% of RAM, or FLINT_LOAD_LIMIT_GB)", .{ window, fits });
@@ -83,11 +97,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
-    const served = try admittedStreams(a, fl.state.cacheBytes(c, @intCast(window)) + draft_stream, budget, o, @intCast(window), problem) orelse {
+    const served = try admittedWindow(a, c, draft_stream, budget, o, @intCast(window), problem) orelse {
         if (draft) |d| d.deinit();
         model.deinit();
         return null;
     };
+    const target_budget = targetBudget(budget, served, draft_stream);
     std.log.info("flint: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -97,7 +112,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.resident = null;
     h.drafter = draft;
     h.drafted = null;
-    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = budget });
+    h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = served, .budget = target_budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
     if (draft != null) try h.metal.calibrate();
@@ -120,7 +135,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         const M = fl.backend.Metal;
         // prompt chunks change arithmetic with their rows
         const rules: api.prompt_cache.Rules = .{ .lookahead = 0, .planned = true, .grid = fl.state.prompt_rows, .min_prompt = 0 };
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, budget));
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, target_budget));
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
@@ -233,9 +248,54 @@ test "Metal capabilities: Flint admission fits automatic 64 and refuses explicit
     const exact: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 3, .lanes_fixed = true };
     const over: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 64, .lanes_fixed = true };
     var why: []const u8 = "";
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, auto, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 10, exact, 4096, &why));
-    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 10, over, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, auto, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, 3), try admittedStreams(a, 3, 11, exact, 4096, &why));
+    try std.testing.expectEqual(@as(?u32, null), try admittedStreams(a, 3, 11, over, 4096, &why));
     defer a.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+}
+
+test "Metal capabilities: Flint default windows price the backend's extra position" {
+    var c: fl.config.Config = .{ .layers = 1 };
+    c.layer[0] = .{ .kind = .full, .rope = false, .moe = false };
+    const budget = fl.state.cacheBytes(&c, 64);
+    try std.testing.expectEqual(@as(usize, 63), longestWindow(&c, budget, 4096));
+    try std.testing.expect(fl.state.cacheBytes(&c, longestWindow(&c, budget, 4096) + 1) <= budget);
+}
+
+test "Metal capabilities: Flint admission reduces automatic streams and refuses explicit streams at window + 1" {
+    const a = std.testing.allocator;
+    var c: fl.config.Config = .{ .layers = 1 };
+    c.layer[0] = .{ .kind = .full, .rope = false, .moe = false };
+    const old_stream = fl.state.cacheBytes(&c, 64) + 7;
+    const left = 2 * old_stream + 1;
+    const auto: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 64 };
+    const exact: api.Open = .{ .dir = "", .model_type = "flint", .lanes = 2, .lanes_fixed = true };
+    var why: []const u8 = "";
+    const automatic = try admittedWindow(a, &c, 7, left, auto, 64, &why);
+    const explicit = try admittedWindow(a, &c, 7, left, exact, 64, &why);
+    defer if (why.len > 0) a.free(why);
+    try std.testing.expectEqual(@as(?u32, 1), automatic);
+    try std.testing.expectEqual(@as(?u32, null), explicit);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 2") != null);
+}
+
+test "Metal capabilities: Flint snapshots cannot consume admitted draft lane and tap reservations" {
+    var f: CacheFixture = .{};
+    var h: Host = undefined;
+    const budget = 1000;
+    const target_budget = targetBudget(budget, 2, 100);
+    h.cache_cap = budget;
+    h.cache = api.prompt_cache.Store.init(std.testing.allocator, f.snapshots(), .{ .min_prompt = 0 }, budget);
+    defer h.cache.?.deinit();
+    const store = &h.cache.?;
+    for (0..9) |i| {
+        const prompt = [5]u32{ @intCast(i + 1), 1, 1, 1, 9 };
+        try std.testing.expect(store.keep(&prompt, 4, null, &.{}, &.{}));
+    }
+    try std.testing.expectEqual(@as(u64, 936), store.held);
+    fitCache(&h, target_budget, null, &.{});
+    try std.testing.expectEqual(@as(u64, 800), target_budget);
+    try std.testing.expectEqual(target_budget, store.budget);
+    try std.testing.expect(store.held <= target_budget);
 }
