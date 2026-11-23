@@ -7,5 +7,6 @@ pub const Result = struct {
     calls: ?[]json.Value,
     reasoning_tokens: usize,
     rejected: bool = false,
+    rejected_calls: usize = 0, // calls a parser refused and dropped; only Inkling 2 reports them
     open_think: bool = false,
 };

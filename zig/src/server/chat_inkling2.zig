@@ -24,7 +24,8 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Erro
         };
     result.content = g.stops.visible(result.content, !finished);
     result.reasoning = g.stops.visible(result.reasoning, !finished);
-    if (g.stops.strings.len > 0) {
+    // calls are read only from the finished reply: a streamed frame decodes no whole reply for them
+    if (finished and g.stops.strings.len > 0) {
         const raw = try g.srv.text.decode(g.a, ids);
         if (g.stops.matched(raw) != null) result.calls = null;
     }

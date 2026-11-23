@@ -98,7 +98,14 @@ const Seen = struct {
     ids: []const u8,
     names: []const u8,
     arguments: []const u8,
+    rejected: i64 = 0, // the tensorfold block's rejected_tool_calls
 };
+
+fn rejectedOf(v: json.Value) i64 {
+    const tf = v.get("tensorfold") orelse return 0;
+    const n = tf.get("rejected_tool_calls") orelse return 0;
+    return if (n == .int) std.fmt.parseInt(i64, n.int, 10) catch 0 else 0;
+}
 
 fn appendCall(a: std.mem.Allocator, call: json.Value, ids: *std.ArrayList(u8), names: *std.ArrayList(u8), arguments: *std.ArrayList(u8)) !void {
     if (call.get("id")) |v| if (v == .string) try ids.appendSlice(a, v.string);
@@ -126,9 +133,11 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
     var ids: std.ArrayList(u8) = .empty;
     var names: std.ArrayList(u8) = .empty;
     var arguments: std.ArrayList(u8) = .empty;
+    var rejected: i64 = 0;
     if (!stream) {
         try t.expectEqual(@as(u16, 200), got.status);
         const v = (try json.parseText(a, got.body)).ok;
+        rejected = rejectedOf(v);
         const first = v.get("choices").?.array[0];
         const m = if (first.get("message")) |message| message else first;
         if (m.get("reasoning_content")) |r| if (r == .string) try reasoning.appendSlice(a, r.string);
@@ -137,6 +146,7 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
         if (m.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     } else for (got.events.items) |e| {
         const v = (try json.parseText(a, e)).ok;
+        rejected += rejectedOf(v);
         const choices = v.get("choices") orelse continue;
         if (choices != .array or choices.array.len == 0) continue;
         const first = choices.array[0];
@@ -146,7 +156,7 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected };
 }
 
 fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
@@ -236,4 +246,28 @@ test "Inkling 2 reply: raw completions keep control spellings literal whole and 
         try t.expectEqualStrings(sample, streamed.content);
         try t.expectEqualStrings("", streamed.reasoning);
     }
+}
+
+test "Inkling 2 reply: the tokenizer's other special tokens inside blocks never reach the client" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const raw = "<|message_model|><|content_thinking|>a<|message_system|>b<|end_message|>" ++
+        "<|message_model|><|content_text|>A<|message_user|>B<|endoftext|>C<|content_xml|>D<|end_message|>";
+    const got = try probe(arena.allocator(), raw, "");
+    try t.expectEqualStrings("ab", got.reasoning);
+    try t.expectEqualStrings("ABCD", got.content);
+}
+
+test "Inkling 2 reply: a refused call is counted for the client, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "<|message_model|>other<|content_invoke_tool_json|>{\"name\":\"other\",\"args\":{}}<|end_message|>";
+    const tools = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
+    const reply = try encodeReply(a, raw);
+    const whole = try ask(a, "inkling2", reply, tools, false, 1);
+    try t.expectEqual(@as(i64, 1), whole.rejected);
+    try t.expectEqualStrings("", whole.content);
+    const streamed = try ask(a, "inkling2", reply, tools, true, 2);
+    try t.expectEqual(@as(i64, 1), streamed.rejected);
 }
