@@ -111,8 +111,7 @@
     "No standard performance pass; existing same-machine standard comparisons remain failures.",
     "No6/8 checkpoint/model qualification resumed.",
     "No universal FP64 identity claim; original four-bit disjoint contexts have separate prescribed-rounding explanation receipts.",
-    "Full backend unsupported on M4; M5 completion remains pending availability.",
-    "Private Qgate scheduling candidate retired OFF after exact correctness but no stable speed gain."
+    "Full backend unsupported on M4; M5 completion remains pending availability."
   ],
   "performance_pass": false,
   "ready_for_full_maintainer_acceptance": false
