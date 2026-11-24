@@ -1,0 +1,16 @@
+synthetic text model 256 wide (2 layers run of 3), refiner 384 wide, 70 rows
+text encoder rows, a text prompt: cosine 0.9999962, relative error 2.76e-3, 0.6706 bit-equal, worst value 1.94e-2 of its row's RMS (pass)
+  the float32-sum host run: cosine 0.9999962, relative error 2.76e-3, 0.6722 bit-equal
+condition_proj, refiner and final norm on the GPU's encoder rows: cosine 0.9999892, relative error 4.64e-3, 0.4663 bit-equal, worst value 4.66e-2 of its row's RMS (pass)
+  the float32-sum host run: cosine 0.9999934, relative error 3.63e-3, 0.5841 bit-equal
+encoded in 0.007 s; again, byte for byte the same: true
+a no-op vision (embedding rows spliced back, DeepStack zero) byte for byte the text-only run: true
+text encoder rows, a reference's vision and DeepStack rows at equal-axis positions: cosine 0.9999980, relative error 2.02e-3, 0.7948 bit-equal, worst value 1.52e-2 of its row's RMS (pass)
+  the float32-sum host run: cosine 0.9999980, relative error 2.02e-3, 0.7948 bit-equal
+text encoder rows after layer 0 only, vision and DeepStack: cosine 1.0000000, relative error 0.00e0, 1.0000 bit-equal, worst value 0.00e0 of its row's RMS (pass)
+  the float32-sum host run: cosine 1.0000000, relative error 0.00e0, 1.0000 bit-equal
+text encoder rows, vision spliced and DeepStack zero: cosine 0.9999980, relative error 1.99e-3, 0.7944 bit-equal, worst value 1.52e-2 of its row's RMS (pass)
+  the float32-sum host run: cosine 0.9999980, relative error 1.99e-3, 0.7944 bit-equal
+text encoder rows, DeepStack on embedding-row pads: cosine 0.9999979, relative error 2.05e-3, 0.7948 bit-equal, worst value 2.30e-2 of its row's RMS (pass)
+  the float32-sum host run: cosine 0.9999979, relative error 2.05e-3, 0.7948 bit-equal
+PASS every gate

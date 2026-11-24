@@ -4,6 +4,7 @@
 #include "drama3_attn.cuh"
 #include "drama3_moe.cuh"
 #include "drama3_sample.cuh"
+#include "drama3_cfg.h"
 
 // Greedy picks (argmax, ties to the lower index): the main token over the candidates, or a code.
 extern "C" __global__ void d3_argmax_main(const float* __restrict__ logits, int count, const int* __restrict__ cand_ids,
@@ -77,4 +78,10 @@ extern "C" __global__ void d3_next_input(const int* __restrict__ frame, int* __r
 // Copy n ints (small device-side moves inside a graph).
 extern "C" __global__ void d3_copy_i32(const int* __restrict__ src, int* __restrict__ dst, int n) {
   for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = src[i];
+}
+
+// Semantic CFG over the candidate logits (semantic tokens and EOS); codec logits stay conditional.
+extern "C" __global__ void d3_cfg_mix(float* __restrict__ conditional, const float* __restrict__ unconditional, int n,
+                                      float gamma) {
+  d3_cfg_mix_at(conditional, unconditional, n, gamma, blockIdx.x * blockDim.x + threadIdx.x);
 }

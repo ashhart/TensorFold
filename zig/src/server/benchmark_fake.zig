@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const posix = std.posix;
+const auth = @import("auth.zig");
 const Allocator = std.mem.Allocator;
 
 /// Write bytes, then wait on ``after`` (caller releases before cleanup) and pause.
@@ -89,18 +90,33 @@ pub const Fake = struct {
         return f.refused;
     }
 
-    /// True unless the fake is keyed and the request, not GET /health, lacks the file's key.
+    /// Match the request with the server's Latin-1 header digest conversion.
     fn authorized(f: *Fake, method: []const u8, path: []const u8, head: []const u8) bool {
         const file = f.key_file orelse return true;
         if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) return true;
         var buf: [512]u8 = undefined;
-        const key = std.mem.trim(u8, std.Io.Dir.cwd().readFile(std.testing.io, file, &buf) catch "", " \r\n");
-        const sent = headerIn(head, "authorization") orelse "";
-        if (key.len > 0 and std.mem.startsWith(u8, sent, "Bearer ") and std.mem.eql(u8, sent["Bearer ".len..], key)) return true;
-        f.mutex.lockUncancelable(std.testing.io);
-        defer f.mutex.unlock(std.testing.io);
-        f.refused += 1;
-        return false;
+        var allow = false;
+        if (std.Io.Dir.cwd().readFile(std.testing.io, file, &buf)) |raw| {
+            const key = std.mem.trim(u8, raw, " \r\n");
+            var arena: std.heap.ArenaAllocator = .init(f.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var problem: []const u8 = "";
+            var store = auth.Store.init(a, &.{key}, "", null, false, &problem) catch {
+                f.mutex.lockUncancelable(std.testing.io);
+                defer f.mutex.unlock(std.testing.io);
+                f.refused += 1;
+                return false;
+            };
+            defer store.deinit();
+            allow = store.match(a, headerIn(head, "authorization"), null) != null;
+        } else |_| {}
+        if (!allow) {
+            f.mutex.lockUncancelable(std.testing.io);
+            defer f.mutex.unlock(std.testing.io);
+            f.refused += 1;
+        }
+        return allow;
     }
 
     fn accept(f: *Fake) void {

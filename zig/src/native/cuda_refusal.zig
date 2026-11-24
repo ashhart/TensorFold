@@ -6,6 +6,32 @@ const qwen35 = @import("qwen35");
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
+/// The first Thor product serves Qwen3.8-27B text with DFlash2 on one GPU.
+pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, moss_image: bool, problem: *[]const u8) !bool {
+    const model = if (moss_image) "MOSS-Image" else o.model_type;
+    if (!std.mem.eql(u8, model, qwen35.native.model_type)) {
+        problem.* = try std.fmt.allocPrint(a, "sm_110 product: {s} is not qualified; serve Qwen3.8-27B", .{model});
+        return true;
+    }
+    problem.* = if (o.tp != 1 or o.rank != 0)
+        "sm_110 product: --tp and --rank must select one GPU"
+    else if (o.vision != null)
+        "sm_110 product: --vision is not qualified; serve text without --vision"
+    else if (o.precision == .full)
+        "sm_110 product: --precision full is not qualified; use checkpoint precision"
+    else if (o.mtp_drafts != null)
+        "sm_110 product: --mtp-drafts is not qualified; use the DFlash2 drafter"
+    else if (!o.drafts or o.drafter == null)
+        "sm_110 product: use --drafter with a DFlash2 checkpoint and omit --no-drafts"
+    else if (o.drafter_bits != 4)
+        "sm_110 product: --drafter-bits must be 4 for the qualified DFlash2 path"
+    else if (!(try qwen35.geometry.Geometry.read(a, io, o.dir)).sm110Product())
+        "sm_110 product: use the Qwen3.8-27B MLX affine 4-bit/group-64 or NVIDIA ModelOpt NVFP4 checkpoint"
+    else
+        return false;
+    return true;
+}
+
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
@@ -42,9 +68,9 @@ pub fn backend(o: api.Open) ?[]const u8 {
     return null;
 }
 
-/// LFM2 reads a checkpoint's pictures through its own tower without --vision: the flag is refused, not ignored.
+/// LFM2 opens outside `family()`: its ranks are refused here, and --vision goes on to core's gate in its open.
 pub fn lfm2(o: api.Open) ?[]const u8 {
-    return if (o.vision != null) lfm2_vision else unranked(o);
+    return unranked(o);
 }
 
 pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp and --rank";
@@ -53,9 +79,6 @@ pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve witho
 pub fn unranked(o: api.Open) ?[]const u8 {
     return if (o.tp != 1 or (o.given.rank and o.rank != 0)) no_ranks else null;
 }
-
-const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
-    "serve it without --vision";
 
 /// A given --rank below the world, as main's CLI refused it, and a world in the family's `worlds` when it lists them.
 pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
@@ -225,12 +248,15 @@ test "flags with nothing to do on CUDA are refused, not ignored" {
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .prompt_cache_gib = 4 }) == null);
 }
 
-test "--vision is each family's to take: Super VL reads images, LFM2 refuses the flag, the rest refuse at their open" {
+test "--vision is each family's to take: LFM2 passes it on to core's gate at its open, its ranks are still refused" {
     for ([_][]const u8{ "nemotron_h", "nemotron_h_omni", "glm5_next", "lfm2_vl" }) |t| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .vision = .{} }) == null);
     }
-    try std.testing.expectEqualStrings(lfm2_vision, lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{} }) orelse "");
+    try std.testing.expect(lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{} }) == null);
     try std.testing.expect(lfm2(.{ .dir = "d", .model_type = "lfm2_vl" }) == null);
+    try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{}, .tp = 2 }).?);
+    const one: api.Open = .{ .dir = "d", .model_type = "lfm2_vl", .vision = .{}, .rank = 1, .given = .{ .rank = true } };
+    try std.testing.expectEqualStrings(no_ranks, lfm2(one).?);
 }
 
 test "--drafter opens only a family that takes one" {

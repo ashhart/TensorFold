@@ -42,6 +42,7 @@ test {
     _ = kernels;
     _ = load_limit;
     _ = guidance;
+    _ = @import("guidance.zig");
     _ = @import("metal/quant_format_test.zig");
 }
 

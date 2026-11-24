@@ -72,6 +72,17 @@ pub const Gx = struct {
     }
 };
 
+/// One replay window's existing grouped-kernel gate; the shared-round opt-in does not change it.
+pub fn windowGroups(r: *const Run, w: ?variants.Experts, rows: usize) bool {
+    const g = r.gx orelse return false;
+    return rows >= g.min_rows and r.tp == null and w != null and applies(w.?);
+}
+
+/// A shared round groups only under TF_FN_GX_SHARED's explicit opt-in and the same window gates.
+pub fn sharedGroups(r: *const Run, w: ?variants.Experts, rows: usize, enabled: bool) bool {
+    return enabled and windowGroups(r, w, rows);
+}
+
 /// The grouped kernels read 4-bit group 32 routed and shared experts, gate/up and down.
 pub fn applies(w: variants.Experts) bool {
     const four = [4]usize{ 4, 32, 4, 32 };
@@ -103,4 +114,24 @@ pub fn init(r: *Run, min_rows: usize, two: bool) !*Gx {
 test "the grouped kernels take 4-bit group 32 experts only" {
     try std.testing.expect(applies(.{ .gu = .{ 4, 32, 4, 32 }, .down = .{ 4, 32, 4, 32 } }));
     try std.testing.expect(!applies(.{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 4, 32, 4, 32 } }));
+}
+
+test "shared rounds opt into grouped experts without changing the single-window gate" {
+    const w: variants.Experts = .{ .gu = .{ 4, 32, 4, 32 }, .down = .{ 4, 32, 4, 32 } };
+    var g: Gx = undefined;
+    g.min_rows = 5;
+    var r: Run = undefined;
+    r.gx = &g;
+    r.tp = null;
+    try std.testing.expect(windowGroups(&r, w, 6));
+    try std.testing.expect(!sharedGroups(&r, w, 6, false));
+    try std.testing.expect(sharedGroups(&r, w, 6, true));
+    try std.testing.expect(!windowGroups(&r, w, 4));
+    try std.testing.expect(!sharedGroups(&r, w, 4, true));
+    try std.testing.expect(!sharedGroups(&r, .{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 4, 32, 4, 32 } }, 6, true));
+    r.tp = @ptrFromInt(128);
+    try std.testing.expect(!sharedGroups(&r, w, 6, true));
+    r.tp = null;
+    r.gx = null;
+    try std.testing.expect(!sharedGroups(&r, w, 6, true));
 }

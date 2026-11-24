@@ -293,3 +293,22 @@ test "relay custody: a fresh flag over stale payload is rejected by the every-wo
     try t.expect(h.ready(0, 1));
     try t.expectError(error.StaleWord, h.check(0, 1));
 }
+
+test "relay eager: half 1 forwards immediately when half 0 has not landed yet" {
+    var h: Harness = undefined;
+    try h.init(4096);
+    defer h.deinit();
+    h.fabric.deferred = false;
+    try h.stage(0, 1, 16);
+    // Advance rank 0 past staging sequence 1 so both initial neighbour halves are sent.
+    try t.expect(try h.states[0].progress(&h.fabric.wires[0], 1, 0, 16, h.ticks));
+    // Deliver only half 1 from rank 1 (neighbour 0 -> direction 1) while half 0 from rank 3 is still missing.
+    const f1 = h.fabric.layout.flagAt(1, 1, 1);
+    h.states[0].word(f1 + 4).store(16, .release);
+    h.states[0].word(f1).store(1, .release);
+    const before = h.fabric.wires[0].posted;
+    try t.expect(try h.states[0].progress(&h.fabric.wires[0], 1, 0, 16, h.ticks));
+    try t.expectEqual(before + 1, h.fabric.wires[0].posted);
+    try t.expect(h.states[0].sent[1]);
+    try t.expect(!h.states[0].sent[0]);
+}

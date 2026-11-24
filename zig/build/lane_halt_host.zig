@@ -4,6 +4,9 @@ const std = @import("std");
 pub fn steps(b: *std.Build) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     b.step("test-lone-copy-host", "Lone-copy pricing and all existing lane depth/verification regressions without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
+    b.step("test-metal-cost-host", "Metal window timing and retained-price healing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"Metal window prices:"} })).step);
+    b.step("test-metal-cost-review-host", "Warm-budget and tile-edge regression controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"Metal review:"} })).step);
+    @import("metal_cost_host.zig").steps(b, lanes);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const interrupted = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_interrupted_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     b.step("test-lane-interrupted-host", "Interrupted prompt retention and clean retries without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = interrupted, .filters = &.{"interrupted prefill:"} })).step);

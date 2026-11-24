@@ -310,7 +310,7 @@ tensor units.
 3. Each tile runs `post_quant_conv`, then its cells become tokens through `x_embedder`, with the 4 registers and one
    zero token appended.
 4. The 2D rotary table is built, and the 24 blocks run, then `norm_out` and `proj_out`.
-5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 16 tiles run in one command buffer.
+5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 64 tiles run in one command buffer.
 6. Tiles are blended in float32: the top band against the tile above, then the left band against the tile to the left,
    both as decoded.
 7. The result is mapped to [0, 1] with ImageNet's statistics, clamped and truncated to bytes.
@@ -435,7 +435,6 @@ the United States of America. Read it before use.
 - **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
   Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
 - **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
-- **Kernel contract:** the new kernels are gated by each tool's `selftest`, not registered with `tf-kernel-contract`.
 - **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
 ## Host checks
@@ -449,3 +448,31 @@ the United States of America. Read it before use.
 - the case reader's picture admission.
 
 `zig build compile-h3-host` compiles both H3 tools without the Metal compiler.
+
+## Kernel contract
+
+Metal compiles each kernel at load with the options its tool uses. Its contract coverage is:
+
+- The edit encoder (`h3_image_encoder.metal`, fp32 with precise functions): its convolution at every layer geometry of
+  the released encoder (3x3, 3x3 adding its residual in place, 3x3 downsampling, 1x1), GroupNorm's partial sums (plain
+  and centred) and their finish, and the norm's SiLU, each within float64's range through its fp32 steps (nine
+  controls).
+- The prompt path (`h3_prompt.metal`): the bf16 product at every projection of Qwen3-VL to layer 50 and of the token
+  refiner, with and without a bias; both norms and both head layouts in the Qwen and H3 rounding orders; causal and full
+  attention within `attention_range`'s bound, with entries that plant an infinite value at a padded row's last key;
+  both gates, the residual add and the vision rows' scatter (fifteen controls).
+- The image decoder (`image_decoder.metal`, bf16): post_quant, the embedding with its registers, both norms, the
+  product plain and with LayerScale in place, the heads with their half-width rotary, attention over a 261-token tile
+  and a batch of 16 tiles, and SwiGLU, each at its bf16 points (ten controls).
+
+Every launch reserves its group size in its source.
+
+The edit encoder's, prompt path's and image decoder's kernels are registered with the kernel contract
+([kernel-contract.md](../kernel-contract.md)): 31 registrations with 34 planted controls, and every launch's limits.
+They are checked against float64 at their rounding points, beside each tool's own `selftest`. `zig build
+h3-image-contract` runs them on any Mac, with no Metal compiler; `tf-kernel-contract` runs them with every other kernel.
+On an M3 Ultra all 31 pass gates 1 to 4 and every control goes red as planted.
+
+The contract found one fault, now fixed: the prompt path's attention filled a row's last block of 4 keys with its last
+key at weight 0, so an infinite value there gave 0 x Inf = NaN where float64 keeps the infinity. A padded key now adds
+nothing; finite outputs keep their bytes.

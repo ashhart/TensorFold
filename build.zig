@@ -122,6 +122,9 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/h3_image_prompt.zig").tests(b, target, test_step);
     @import("zig/build/h3_image_decoder.zig").compileHost(b, target);
+    @import("zig/build/h3_image_contract.zig").steps(b, target, optimize);
+    @import("zig/build/h3_image_decoder.zig").hostSteps(b, target, optimize, test_step);
+    @import("zig/build/h3_image_prompt_host.zig").steps(b, target, optimize, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
     @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
     @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
@@ -156,6 +159,7 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "noise", "schedule" }) |name| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
     }
+    @import("zig/build/metal_cost_host.zig").compile(b, draft_ids);
     const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/cost_rule_cases.zig"),
         .target = target,
@@ -184,6 +188,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     // the backend options are declared for every target, so one build script may pass the same flags on every OS
     const cuda_options = @import("zig/build/options.zig").cuda(b);
+    // their selftests read checkpoints through mmap, which Windows lacks
+    if (target.result.os.tag != .windows) {
+        @import("zig/build/h3_image_decoder_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
+        @import("zig/build/h3_image_prompt_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
+    }
     const tp_options = @import("zig/build/options.zig").tp(b);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
@@ -283,6 +292,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/save_guard.zig").wire(b);
     @import("zig/build/cpu_contract.zig").steps(b, test_step);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
+    @import("zig/build/chunked_write.zig").wire(b, test_step);
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);

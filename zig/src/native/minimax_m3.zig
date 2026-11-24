@@ -113,6 +113,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
         h.draft = try fl.dspark.Drafter.init(gpa, model, dc);
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft.?.drafter());
+    } else if (h.metal.facts().copy_drafts) {
+        try h.metal.measure(); // the lanes' own copy drafts are priced against the same rounds, with no drafter too
     }
     errdefer if (h.wrap) |*w| w.deinit();
     errdefer if (h.draft) |d| d.deinit();

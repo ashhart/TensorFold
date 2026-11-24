@@ -19,13 +19,32 @@ a container and the tests that need no GPU.
   The archive's binary is `tensorfold-native`; the quick start defines a `tensorfold` shell function that calls it.
 - **Windows with an NVIDIA GPU:** follow [the native Windows build guide](WINDOWS.md).
 
-## Send a request
+## Select, download and prove a model
 
-Leave the server running. In another terminal, on either platform:
+After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
+fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
+`--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
+run accepts only `y` or `yes`. A cached model needs no prompt or download. Rows whose Gemma 4 drafts need M5 tensor units are
+served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
+
+The command starts a loopback server and sends one deterministic request. `--check` stops that server after a nonempty
+reply and exits 0; this ephemeral check replaces any caller API key with a private temporary key. Without `--check`, set
+`TENSORFOLD_API_KEY` in the environment first: persistent `start` requires at least one nonempty, valid entry, passes a
+comma-separated list to the child unchanged, and uses its first nonempty trimmed entry for the managed checks. Every entry
+must be UTF-8, at most 256 bytes, and contain no whitespace or control characters. The server accepts each registered entry.
+Send external requests with `Authorization: Bearer KEY`, replacing `KEY` with one accepted entry. Keys are never printed or
+placed in the child arguments. A failed first reply is fatal and the started server is stopped.
+No existing `serve` default or flag changes.
+
+## Send a request
+Leave the server running. In another terminal, on either platform, send the persistent credential below. For a
+comma-separated `TENSORFOLD_API_KEY`, substitute one accepted entry for the whole value in the Authorization header.
+An unauthenticated manual `serve` does not need a key:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${TENSORFOLD_API_KEY}" \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 
@@ -131,10 +150,10 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--drafter-bits 0\|4\|8` | Drafter weight precision where the model offers a choice: 4 bits (the default), or 0 to keep bf16. Qwen3.8-27B on CUDA takes 4 only. On M5 or newer, LFM2.5-24B-A2B's DSpark drafter runs bf16 as released (0, the default when not given) or 8-bit codes quantized at load (8); it has no 4-bit mode. |
 | `--record DIR` | Write each stream's committed tokens, positions and tapped rows under DIR, for drafter training. CUDA Nemotron only; a single stream runs through the lane rounds, and recording stops below 25 GiB free disk. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
-| `--cfg-gamma GAMMA` | Metal Drama speech: semantic guidance strength, finite 1–5; 0/default disables it. Only reference-conditioned requests are guided. Enabled replies report `X-Cfg-Gamma`; codec heads stay conditional. |
-| `--cfg-allow-request-gamma` | Metal Drama speech: allow a finite 1–5 `X-Cfg-Gamma` request header; invalid values return 400 before engine submission. Without this opt-in, the server's gamma is fixed. |
-| `--cfg-force-guided` | With an enabled Metal Drama guidance policy, exercise the unconditional state even at gamma 1. The semantic mix at 1 remains exact conditional-logit identity. |
-| `--cfg-batched` | With enabled Metal Drama guidance, submit both independent backbone states in one command buffer rather than separate submissions. Weights are shared; extra state is included in admission. Not vectorized batching. |
+| `--cfg-gamma GAMMA` | Drama speech on Metal and CUDA: semantic guidance strength, finite 1–5; 0/default disables it. Only reference-conditioned requests are guided. Enabled replies report `X-Cfg-Gamma`; codec heads stay conditional. |
+| `--cfg-allow-request-gamma` | Drama speech on Metal and CUDA: allow a finite 1–5 `X-Cfg-Gamma` request header; invalid values return 400 before engine submission. Without this opt-in, the server's gamma is fixed. |
+| `--cfg-force-guided` | With an enabled Drama guidance policy, exercise the unconditional state even at gamma 1. The semantic mix at 1 remains exact conditional-logit identity. |
+| `--cfg-batched` | With enabled Drama guidance, run both independent backbone states without a host wait between them: one command buffer on Metal, two streams joined by events on CUDA, rather than separate submissions. Weights are shared; extra state is included in admission. Not vectorized batching. |
 | `--silence-floor-dbfs DBFS` | Drama speech only: explicit frame-power floor for the silence guard, with no default floor. Calibrate below quiet intended speech using public or built-in speech. |
 | `--silence-seconds SECONDS` | Drama speech only: stop after this continuous duration below the explicit floor, retaining audio and reporting `silence`. Unset by default: off; calibrate above intentional pauses. |
 | `--silence-onset-s SECONDS` | Drama speech only: with the silence guard on, stop once this many seconds run below its floor while the synthesis has voiced less than `--silence-onset-voiced-s`, retaining audio and reporting `silence`. Off unless given; must be below `--silence-seconds`. |

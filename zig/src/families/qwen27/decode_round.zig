@@ -109,7 +109,7 @@ pub const Runner = struct {
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool, kv_step: ?u32) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
-        const geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
+        var geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
         // with the MTP head loaded, its block is one more attention layer past the last (forward.layerAt)
@@ -136,13 +136,10 @@ pub const Runner = struct {
         errdefer pool.deinit();
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
-        // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
-        if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        // both builds take the kernels' KV group as the defines attention_mpp.metal reads
+        if (!units) try @import("simd_attention.zig").check(m.device, m.queue); // before M5 the tail reads simdgroup-matrix results
         const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads, paged);
         defer a.free(text);
-        // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
-        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
+        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: { // before M5 prompt kernels are optional; a chip that cannot build them keeps decode prompts
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
             const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads, paged);
@@ -151,6 +148,7 @@ pub const Runner = struct {
         };
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
+        geometry.solo_prompt = !units and attention.prompt != null;
         errdefer attention.deinit();
         attention.join = try @import("attention_join.zig").build(a, m.device, units, geometry.group(), geometry.kv_heads, paged);
         pipelines.end();
@@ -194,14 +192,12 @@ pub const Runner = struct {
     pub const release = slot_pages.release;
     pub const reset = slot_pages.reset;
 
-    /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
-    fn trimSlot(r: *Runner, slot: u32) void {
+    fn trimSlot(r: *Runner, slot: u32) void { // pages past committed rows go back to the promise; no GPU work reads them
         const k = r.kv orelse return;
         k.pages.trim(slot, r.offsets[slot]);
     }
 
-    /// Slot `slot`'s first `at` rows of each attention layer's keys then values, head by head, page by page.
-    pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void {
+    pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void { // first `at` rows of K then V, head by head, page by page
         return kv_pages.spans(r, a, slot, at, list);
     }
 
@@ -526,12 +522,16 @@ pub const Runner = struct {
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
         return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
-
+    pub fn decodeRows(r: *const Runner) u32 {
+        return if (r.geometry.shared_prefix) r.model.frame.capacity else attn.planning.max_rows;
+    }
     pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, round.slots, 0..) |window, slot, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = if (r.kv_step != null) r.heldRows(slot) else r.capacity };
-        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
+        var geometry = r.geometry;
+        geometry.solo_prompt = geometry.solo_prompt and r.model.kernels.prompt;
+        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], geometry);
         if (r.attention.join != null) plan.pair(&.{}); // a stream's rows in pairs over the keys below its window
         return plan;
     }

@@ -3,14 +3,30 @@ const std = @import("std");
 const g = @import("core").contract.gates;
 const check = @import("check.zig");
 
-/// Keeps the kernels whose name holds one of `only`'s words; empty keeps every one.
+/// Whether `only` names kernels to keep: without plain words (none, or only `-word`s) the run is a full one.
+pub fn filtered(only: []const []const u8) bool {
+    for (only) |w| if (!std.mem.startsWith(u8, w, "-")) return true;
+    return false;
+}
+
+/// Whether `name` holds no `-word` and, when plain words are given, one of them.
+pub fn wanted(name: []const u8, only: []const []const u8) bool {
+    var named = !filtered(only);
+    for (only) |w| {
+        const minus = std.mem.startsWith(u8, w, "-");
+        const hit = std.mem.indexOf(u8, name, if (minus) w[1..] else w) != null;
+        if (minus and hit) return false;
+        named = named or hit;
+    }
+    return named;
+}
+
+/// Keeps the kernels `wanted` keeps; empty keeps every one.
 pub fn keep(kernels: *std.ArrayList(g.Kernel), only: []const []const u8) void {
-    if (only.len == 0) return;
     var kept: usize = 0;
-    for (kernels.items) |k| for (only) |w| if (std.mem.indexOf(u8, k.spec.name, w) != null) {
+    for (kernels.items) |k| if (wanted(k.spec.name, only)) {
         kernels.items[kept] = k;
         kept += 1;
-        break;
     };
     kernels.shrinkRetainingCapacity(kept);
 }

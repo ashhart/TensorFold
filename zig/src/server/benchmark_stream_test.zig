@@ -4,6 +4,8 @@ const suite = @import("benchmark_suite.zig");
 const stream = @import("benchmark_stream.zig");
 const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
+const history = @import("chat_cli_history.zig");
+const turn = @import("chat_cli_turn.zig");
 const Write = fake.Write;
 
 const golden_chat = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 1.0, \"seed\": 1234, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"presence_penalty\": 0.0, \"frequency_penalty\": 0.0, \"top_k\": 20, \"top_p\": 0.95, \"draft\": false, \"messages\": [{\"role\": \"user\", \"content\": \"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.\"}], \"chat_template_kwargs\": {\"enable_thinking\": false}}";
@@ -266,6 +268,119 @@ test "a reply of exactly the limit is read, and one byte more is too large" {
     const at = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/x"), .limit = 6, .timeout_s = 5 });
     try std.testing.expect(at.failed == .none and std.mem.eql(u8, at.body, "[1234]"));
     try std.testing.expect(stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/x"), .limit = 6, .timeout_s = 5 }).failed == .too_large);
+}
+test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing UTF-8" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "GET", .path = "/v1/models", .replies = &.{ try fake.jsonReply(a, "200 OK", "{\"data\": []}"), try fake.jsonReply(a, "200 OK", "{\"data\": []}") } }});
+    defer f.stop();
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
+    defer client.deinit();
+    const token = "fixture-caf\u{e9}";
+    const got = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = token });
+    try std.testing.expectEqual(.none, got.failed);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
+    const legacy = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = "fixture-\u{20ac}" });
+    try std.testing.expectEqual(.none, legacy.failed);
+    try std.testing.expectEqual(@as(u16, 200), legacy.status);
+    try std.testing.expectEqualStrings("Bearer fixture-\u{20ac}", f.header(1, "authorization").?);
+    try std.testing.expectEqual(@as(usize, 2), f.count());
+}
+
+test "chat CLI: managed validation rejects C1 while legacy raw headers retain main's bytes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [300]u8 = undefined;
+    var encoded: [4]u8 = undefined;
+    const del_len = try std.unicode.utf8Encode(0x7f, &encoded);
+    try std.testing.expect(stream.rawHeader(&buf, encoded[0..del_len]) == null);
+    for (0x80..0xa0) |cp| {
+        const len = try std.unicode.utf8Encode(@intCast(cp), &encoded);
+        const token = try std.mem.concat(a, u8, &.{ "fixture-", encoded[0..len] });
+        try std.testing.expect(!@import("auth.zig").validKey(token));
+        const raw = stream.rawHeader(&buf, token).?;
+        try std.testing.expectEqualStrings("Bearer ", raw[0..7]);
+        try std.testing.expectEqualStrings(token, raw[7..]);
+    }
+    const latin1 = "fixture-caf\u{e9}";
+    try std.testing.expect(@import("auth.zig").validKey(latin1));
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", stream.rawHeader(&buf, latin1).?);
+}
+
+test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserves unsupported legacy keys" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const token = "fixture-caf\u{e9}";
+    const key_file = try std.fs.path.join(a, &.{ try fake.tmpPath(a, &tmp), "caller-key" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = key_file, .data = token });
+    const replies = [_]Write{
+        .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream") },
+        .{ .bytes = try fake.event(a, "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Ready.\"},\"finish_reason\":\"stop\"}]}") },
+        .{ .bytes = try fake.event(a, "[DONE]") },
+    };
+    const responses = [_][]const Write{&replies};
+    const f = try fake.Fake.startKeyed(a, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &responses }}, key_file);
+    defer f.stop();
+    var h: history.History = .{ .a = a };
+    var out: std.Io.Writer.Allocating = .init(a);
+    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{}, false);
+    switch (ended) {
+        .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
+    const unicode_secret = "\u{e9}abc";
+    const unicode_credentials = try turn.Credentials.init(a, &.{unicode_secret});
+    const unicode_body = try turn.body(a, .{ .model = "m" }, &h, unicode_secret);
+    const escape_at = std.mem.indexOf(u8, unicode_body, "\\u00e9abc").?;
+    unicode_body[escape_at + 4] = 'E';
+    const unicode_refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), null, unicode_credentials, unicode_body, &out.writer, .{}, false);
+    switch (unicode_refused) {
+        .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    const malformed = "{\"model\":\"\\u00E9abc";
+    var deep: std.ArrayList(u8) = .empty;
+    for (0..901) |_| try deep.appendSlice(a, "[");
+    try deep.appendSlice(a, "{\"model\":\"\\u00E9abc\"}");
+    for (0..901) |_| try deep.append(a, ']');
+    const hostile_first = "{\"model\":\"\\u00E9abc\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
+    const hostile_last = "{\"model\":\"safe\",\"model\":\"\\u00E9abc\",\"messages\":[],\"stream\":true}";
+    for ([_][]const u8{ malformed, deep.items, hostile_first, hostile_last }) |request| {
+        const attack = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, request), &out.writer, .{}, false);
+        switch (attack) {
+            .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    const safe_duplicate = "{\"model\":\"first\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
+    const safe = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, safe_duplicate), &out.writer, .{}, false);
+    switch (safe) {
+        .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), f.count());
+    try std.testing.expectEqualStrings(safe_duplicate, f.request(1).body);
+    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{}, false);
+    switch (refused) {
+        .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), f.count());
+    try std.testing.expectEqual(@as(usize, 1), f.refusals());
+    try std.testing.expect(std.mem.indexOf(u8, f.request(0).path, token) == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), token) == null);
 }
 
 test "an https exchange is never sent through a proxy that refuses to tunnel" {
