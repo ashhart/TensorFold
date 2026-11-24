@@ -134,7 +134,7 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
 }
 
 fn run(ctx: *const Context, args: Args) !u8 {
-    const caller_key = if (args.check) null else chat.envKey(ctx.environ) catch return fail(ctx, 2, chat.bad_key, .{});
+    const caller_key = if (args.check) null else chat.managedKey(ctx.environ) catch return fail(ctx, 2, chat.managed_bad_key, .{});
     if (!args.check and caller_key == null)
         return fail(ctx, 2, "persistent start requires a nonempty TENSORFOLD_API_KEY entry in the environment, or use --check for a private temporary key", .{});
     const mc = ctx.given orelse machine.detect(ctx.a, ctx.io);

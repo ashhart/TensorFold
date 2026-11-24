@@ -98,10 +98,25 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
     if (comptime windows) return fail(ctx, windows_child) else return served(ctx, args, message);
 }
 
-pub const bad_key = "TENSORFOLD_API_KEY: expected Latin-1 keys without spaces or control characters, at most 256 bytes each";
+pub const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
+pub const managed_bad_key = "TENSORFOLD_API_KEY: expected Latin-1 keys without spaces or control characters, at most 256 bytes each";
 
-/// The first nonempty valid entry for ``--url``; null when all are empty. Every entry is checked first.
+/// The existing --url behavior: its first nonempty entry, with main's byte and length checks.
 pub fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
+    const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
+    var keys = std.mem.splitScalar(u8, text, ',');
+    while (keys.next()) |raw| {
+        const key = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
+        if (key.len == 0) continue;
+        if (key.len > 256) return error.Refused;
+        for (key) |ch| if (ch < 0x21 or ch == 0x7f) return error.Refused;
+        return key;
+    }
+    return null;
+}
+
+/// Managed start validates every entry against the bounded matcher's Latin-1 header representation.
+pub fn managedKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
     const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
     var keys = std.mem.splitScalar(u8, text, ',');
     var selected: ?[]const u8 = null;

@@ -273,7 +273,7 @@ test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "GET", .path = "/v1/models", .replies = &.{try fake.jsonReply(a, "200 OK", "{\"data\": []}")} }});
+    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "GET", .path = "/v1/models", .replies = &.{ try fake.jsonReply(a, "200 OK", "{\"data\": []}"), try fake.jsonReply(a, "200 OK", "{\"data\": []}") } }});
     defer f.stop();
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
     defer client.deinit();
@@ -283,29 +283,35 @@ test "chat CLI: a Latin-1 bearer uses the server's header bytes without exposing
     try std.testing.expectEqual(@as(u16, 200), got.status);
     try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
-    const refused = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = "fixture-\u{20ac}" });
-    try std.testing.expectEqual(.network, refused.failed);
-    try std.testing.expectEqual(@as(usize, 1), f.count());
+    const legacy = stream.fetch(a, std.testing.io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 64, .timeout_s = 5, .token = "fixture-\u{20ac}" });
+    try std.testing.expectEqual(.none, legacy.failed);
+    try std.testing.expectEqual(@as(u16, 200), legacy.status);
+    try std.testing.expectEqualStrings("Bearer fixture-\u{20ac}", f.header(1, "authorization").?);
+    try std.testing.expectEqual(@as(usize, 2), f.count());
 }
 
-test "chat CLI: the complete C1 range is refused by key validation and raw headers" {
+test "chat CLI: managed validation rejects C1 while legacy raw headers retain main's bytes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var buf: [300]u8 = undefined;
-    for (0x7f..0xa0) |cp| {
-        var encoded: [4]u8 = undefined;
+    var encoded: [4]u8 = undefined;
+    const del_len = try std.unicode.utf8Encode(0x7f, &encoded);
+    try std.testing.expect(stream.rawHeader(&buf, encoded[0..del_len]) == null);
+    for (0x80..0xa0) |cp| {
         const len = try std.unicode.utf8Encode(@intCast(cp), &encoded);
         const token = try std.mem.concat(a, u8, &.{ "fixture-", encoded[0..len] });
         try std.testing.expect(!@import("auth.zig").validKey(token));
-        try std.testing.expect(stream.rawHeader(&buf, token) == null);
+        const raw = stream.rawHeader(&buf, token).?;
+        try std.testing.expectEqualStrings("Bearer ", raw[0..7]);
+        try std.testing.expectEqualStrings(token, raw[7..]);
     }
     const latin1 = "fixture-caf\u{e9}";
     try std.testing.expect(@import("auth.zig").validKey(latin1));
     try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", stream.rawHeader(&buf, latin1).?);
 }
 
-test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and refuses unsupported keys" {
+test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserves unsupported legacy keys" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -372,7 +378,7 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and refuses 
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 2), f.count());
-    try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    try std.testing.expectEqual(@as(usize, 1), f.refusals());
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).path, token) == null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), token) == null);
 }

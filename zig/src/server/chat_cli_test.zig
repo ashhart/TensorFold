@@ -195,7 +195,7 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     for (0..f.count()) |i| try std.testing.expectEqualStrings("Bearer example-key-1", f.header(i, "authorization").?);
     try r.env.put("TENSORFOLD_API_KEY", "two words");
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url }));
-    try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected Latin-1 keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
+    try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
 }
 
@@ -249,7 +249,7 @@ test "chat CLI: attached responses redact credentials before every output bounda
     try std.testing.expect(std.mem.indexOf(u8, shown.items, "[redacted]") != null);
 }
 
-test "chat CLI: C1 controls in any key entry are refused before any request" {
+test "chat CLI: legacy C1 and later comma entries keep main's request behavior" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -260,16 +260,15 @@ test "chat CLI: C1 controls in any key entry are refused before any request" {
     const f = try world(a, models_doc, replies);
     defer f.stop();
     r.input = "hi";
-    var ok = true;
-    for ([_][]const u8{ "fixture-\u{009b}", "good-key,fixture-\u{009b}" }) |key| {
+    for ([_][]const u8{ "fixture-\u{009b}", "good-key,fixture-\u{009b}" }, 0..) |key, i| {
         try r.env.put("TENSORFOLD_API_KEY", key);
-        const code = try r.command(&.{ "--url", try f.url(a, "") });
-        ok = ok and code == 1;
-        ok = ok and f.count() == 0;
-        ok = ok and std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null;
-        ok = ok and std.mem.indexOf(u8, r.err.written(), key) == null;
+        const before = f.count();
+        try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+        try std.testing.expectEqual(before + 2, f.count());
+        const expected = if (i == 0) "Bearer fixture-\u{009b}" else "Bearer good-key";
+        try std.testing.expectEqualStrings(expected, f.header(before, "authorization").?);
+        try std.testing.expectEqualStrings("", r.err.written());
     }
-    try std.testing.expect(ok);
 }
 
 test "chat CLI: --no-thinking sends the documented switch, and is refused before any turn when the model has none" {
