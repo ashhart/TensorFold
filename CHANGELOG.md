@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lanes: the shared host sampler behind Flint, Llama, Kimi K3 and MiniMax-M3's draws (`gpu_rule`, `gpu_full`) keeps a draw's best 1,024 candidates in one bounded heap pass instead of sorting every logit of the row, so a draw over a 201,058-token vocabulary takes 0.11 ms where the sort alone took 15 ms; the kept candidates, the row maximum and every drawn token are the full sort's bit for bit (a test compares them with a full-sort reference on tied, NaN, infinite and zero rows), and 160 seeded requests give the same token ids. On an M4 Pro a sampled stream of a model with that vocabulary decodes at 29.2 tokens a second where it did 21.2, and four streams at 56.1 where 33.5; greedy is unchanged, and the four families' own timings were not measured (#4744).
+
 - Inkling 2 Mini on Metal: DSpark drafting uses the 1/sqrt(128) attention scale and reads the recurrent step's kappa as FP32, so one-stream draft acceptance on an M3 Ultra rises from 3% to 55% and drafted decode is about 56% faster; replies are unchanged (#4447). Thanks @sethforprivacy.
 
 
@@ -18,8 +20,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - MiniMax-H3-Image on CUDA: `tf-h3-image-prompt-cuda` runs the prompt path (Qwen3-VL to layer 50 and the token refiner) and `tf-h3-image-decoder-cuda` the image decoder, each writing the file its Metal sibling writes and carrying a self-test against the host's float64 reference (#3733). Thanks to @plotarmordev.
 
-
-
 - Flash Next on CUDA: the fused read-out is now the default, making prompt processing about 3-5% faster on GB10 with identical tokens; `TF_FLASHNEXT_READOUT_FUSED=0` keeps the old path (#4799). Thanks @BadAd84.
 
 - Ripple-65B-Preview on Metal: `--drafter` takes the publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) beside either release, with drafted replies equal to plain ones; with the drafter the server opens two streams unless `--parallel` is named, and refuses a named `--parallel` above 2 (#2260, fixes #2259). Thanks to @BobClawblaw.
@@ -28,13 +28,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on CUDA: the loop gate runs as a down half and an up half, so one-stream decode is about 28% faster on GB10 with identical tokens (#4697). Thanks @jschmied.
 
-
-
 - Tools: `tools/bench_prose.py` measures decode on distinct natural prose, cache-format loss and long-context recall against any server, and counts a result only with matching token evidence (#4797). Thanks @GrgaPalcic.
 
 - GLM Metal: one-Mac GLM-5.3-Flash prefills short remaining work first by default, cutting a short reply beside a long prompt from 6.11 s to 3.56 s (41.7%) with long-prompt TTFT within 1.2% (#3903, refs #3152). Thanks to @gilby.
-
-
 
 - GLM on Metal: `GLM_ROUND_PROF` reports per-round host and GPU time sums (#3894). Thanks @gilby.
 
@@ -54,13 +50,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: on M1-M4, a prompt that runs alone takes the prompt frame's rows per pass (512 by default, or `TF_PROMPT_ROWS`) instead of 128 when the prompt attention kernels build; a prompt beside a decoding request stays at 128 rows a pass before M5, and decoded spans, verifies and trees keep their 128-row limit (#2916, fixes #2907).
 
-
-
 - CUDA: an `sm_110` product target serves Qwen3.8-27B text on one Thor GPU (MLX 4-bit and NVFP4, with DFlash2) and refuses any other geometry (#4796). Thanks @IF-YFXJ.
 
 - OCR: `POST /ocr` now answers LiteParse's OCR server contract, with one text item per line and its box in page pixels (#2573). Thanks @laudney.
-
-
 
 - H3 on Metal: transformer products run on the `h3_gemm_32x64` kernel in 64-row bands and the decoder decodes 64 tiles a pass, with sums unchanged (#4641).
 
@@ -209,8 +201,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server web fetches: hostname lookup now uses the shared bounded resolver, so a request's deadline holds even when the system lookup is slow, and long answer lists are read while they arrive (#4551).
 
 - Qwen 3.5 and 3.8: one EOS rule for every family reader, and qwen27 now reads `generation_config.json`, so its stop tokens match the served set on the ten configs that declare `<|im_end|>` (#4678). Thanks @devopsfortunato.
-
-- Lanes: the shared host sampler behind Flint, Llama, Kimi K3 and MiniMax-M3's draws (`gpu_rule`, `gpu_full`) keeps a draw's best 1,024 candidates in one bounded heap pass instead of sorting every logit of the row, so a draw over a 201,058-token vocabulary takes 0.11 ms where the sort alone took 15 ms; the kept candidates, the row maximum and every drawn token are the full sort's bit for bit (a test compares them with a full-sort reference on tied, NaN, infinite and zero rows), and 160 seeded requests give the same token ids. On an M4 Pro a sampled stream of a model with that vocabulary decodes at 29.2 tokens a second where it did 21.2, and four streams at 56.1 where 33.5; greedy is unchanged, and the four families' own timings were not measured (#4744).
 
 - Nemotron on CUDA: `TF_NEMOTRON_WIDE_ROUNDS=1` (opt-in) runs decode rounds of up to 16 streams; +2% to +6% at 16 streams on a GB10, tokens unchanged; off changes nothing.
 
