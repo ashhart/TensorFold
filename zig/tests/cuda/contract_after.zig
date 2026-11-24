@@ -31,7 +31,7 @@ pub fn keep(kernels: *std.ArrayList(g.Kernel), only: []const []const u8) void {
     kernels.shrinkRetainingCapacity(kept);
 }
 
-/// The served, paged, pending, learning, lane, SwiGLU pair and int4 suites of a full run.
+/// The served, paged, pending, learning, lane and SwiGLU pair suites of a full run, and int4's skipped slot.
 pub fn suites(gpu: check.Gpu) !void {
     try @import("tfq3_tests.zig").run(gpu);
     try @import("contract_qwen_served.zig").run(gpu);
@@ -41,5 +41,6 @@ pub fn suites(gpu: check.Gpu) !void {
     try @import("contract_qwen_learning.zig").numerical(gpu);
     try @import("contract_fn_lanes.zig").run(gpu);
     try @import("contract_prompt_swiglu.zig").run(gpu);
-    try @import("contract_int4.zig").run(gpu);
+    // int4's gates are registrations (the filter selects them); its plan's skipped slot is not one
+    try @import("contract_int4_run.zig").skippedAlone(gpu);
 }
