@@ -147,6 +147,7 @@ test "completions echo: refused by name before anything is submitted, while chat
         .{ .body = "{\"prompt\":\"abc\",\"echo\":\"yes\"}", .message = "echo must be a boolean or null" },
         .{ .body = "{\"prompt\":\"abc\",\"echo\":1}", .message = "echo must be a boolean or null" },
         .{ .body = "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"echo\":true}", .message = "echo is supported with a prompt, not messages" },
+        .{ .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"messages\":[],\"echo\":true}", .message = "echo is supported with a prompt, not messages" },
         .{ .body = "{\"prompt\":\"abc\",\"echo\":true}", .message = "echo is not supported by this model or backend", .rows = false },
         .{ .body = "{\"prompt\":\"abc\",\"echo\":true,\"max_tokens\":0,\"logprobs\":1}", .message = "echo is not supported by this model or backend", .rows = false },
     };
