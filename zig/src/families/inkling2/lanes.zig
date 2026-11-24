@@ -20,9 +20,20 @@ const Lane = struct {
     pictures: bool = false, // an image prompt: never resumed from or kept in the prompt cache
 };
 
+const Map = std.AutoHashMapUnmanaged(*const lanes.Stream, Lane);
+
+/// The stream's lane, a new one published only once `chooser.pick` gave its slot: a failed choice leaves no entry.
+fn claim(map: *Map, gpa: std.mem.Allocator, s: *const lanes.Stream, chooser: anytype) !*Lane {
+    if (map.getPtr(s)) |l| return l;
+    const slot = try chooser.pick(s);
+    const gop = try map.getOrPut(gpa, s);
+    gop.value_ptr.* = .{ .slot = slot };
+    return gop.value_ptr;
+}
+
 pub const Lanes = struct {
     x: follow.Leader,
-    lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+    lanes: Map = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     shared: u64 = 0, // forwards that held several streams' windows
@@ -118,9 +129,7 @@ pub const Lanes = struct {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
         if (s.images.len > 0 and self.x.e.vision == null) return error.NoVision;
-        const gop = try self.lanes.getOrPut(self.x.e.gpa, s);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .slot = try self.pick(s) };
-        const l = gop.value_ptr;
+        const l = try claim(&self.lanes, self.x.e.gpa, s, self);
         l.fill = null;
         l.first = null;
         l.pictures = s.images.len > 0;
@@ -265,3 +274,30 @@ pub const Lanes = struct {
         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
     }
 };
+
+test "lanes: a new stream's slot is chosen before its entry exists, and a failed choice leaves no entry" {
+    const gpa = std.testing.allocator;
+    var map: Map = .empty;
+    defer map.deinit(gpa);
+    var streams: [3]lanes.Stream = undefined;
+    const Chooser = struct {
+        map: *const Map,
+        next: u32 = 0,
+        full: bool = false,
+        fn pick(c: *@This(), _: *const lanes.Stream) !u32 {
+            if (c.full) return error.NoFreeSlot;
+            var it = c.map.valueIterator(); // every entry the scan meets holds a slot already chosen
+            while (it.next()) |l| try std.testing.expect(l.slot < c.next);
+            c.next += 1;
+            return c.next - 1;
+        }
+    };
+    var ch: Chooser = .{ .map = &map };
+    try std.testing.expectEqual(@as(u32, 0), (try claim(&map, gpa, &streams[0], &ch)).slot);
+    try std.testing.expectEqual(@as(u32, 1), (try claim(&map, gpa, &streams[1], &ch)).slot);
+    try std.testing.expectEqual(@as(u32, 0), (try claim(&map, gpa, &streams[0], &ch)).slot);
+    ch.full = true;
+    try std.testing.expectError(error.NoFreeSlot, claim(&map, gpa, &streams[2], &ch));
+    try std.testing.expectEqual(@as(u32, 2), map.count());
+    try std.testing.expect(map.get(&streams[2]) == null);
+}
