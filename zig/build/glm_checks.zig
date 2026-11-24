@@ -133,6 +133,16 @@ fn drafter(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const host_run = b.addRunArtifact(host);
     b.step("test-glm-metal-dflash-host", "GLM DFlash2 drafter on Metal: config, schedule, taps and facts on the CPU").dependOn(&host_run.step);
     test_step.dependOn(&host_run.step);
+    const tfq3_t = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_tfq3_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const tfq3_run = b.addRunArtifact(tfq3_t);
+    b.step("test-glm-tfq3", "GLM TFQ3 format loader, run merging, and Metal decode/prefill parity").dependOn(&tfq3_run.step);
+    test_step.dependOn(&tfq3_run.step);
     const synthetic = b.addExecutable(.{ .name = "tf-glm-metal-dflash-synthetic", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/glm_metal_dflash_synthetic.zig"),
         .target = target,
