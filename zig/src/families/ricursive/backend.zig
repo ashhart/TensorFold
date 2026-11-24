@@ -97,6 +97,11 @@ pub const Metal = struct {
         return cache;
     }
 
+    /// The ledger's bytes for a stream of `capacity` (budget.charge), held from admission to release.
+    pub fn charge(self: *const Metal, stream: *const lanes.Stream, capacity: usize) u64 {
+        return budget.charge(&self.model.config, capacity, stream.drafts, self.options.drafter_bytes);
+    }
+
     pub fn facts(self: *const Metal) lanes.Model {
         // rows are independent in every decode kernel, so any width, alone or beside other streams, gives one-row bits
         return .{ .exact_width = st.window_rows, .gpu_tokens = !self.options.drafts, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed] };
@@ -274,14 +279,14 @@ pub const Metal = struct {
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidRicursivePrompt;
         if (stream.images.len > 0) return error.RicursiveHasNoImageTower;
         const capacity = ids.len + stream.max_new + 1;
-        const need = st.cacheBytes(&self.model.config, capacity);
-        // the stream's caches fit before anything is made; kept states trim first
+        const need = self.charge(stream, capacity);
+        // the stream's caches (and its drafter ring) fit before anything is made; kept states trim first
         const Admit = struct {
             m: *Metal,
             stream: *lanes.Stream,
             ids: []const u32,
-            pub fn growth(a: *const @This()) u64 {
-                return a.m.options.drafter_bytes; // a drafter's context for the stream, beside its caches
+            pub fn growth(_: *const @This()) u64 {
+                return 0; // the drafter ring is in the stream's charge, held until release
             }
             pub fn shed(_: *const @This(), _: u64) void {}
             pub fn restoreBytes(a: *const @This()) u64 {
@@ -301,7 +306,7 @@ pub const Metal = struct {
         };
         const admit: Admit = .{ .m = self, .stream = stream, .ids = ids };
         budget.admitStream(&self.ledger, need, &admit) catch |err| {
-            if (err == error.LaneMemory) std.log.warn("ricursive: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + admit.growth()), gib(self.ledger.held), gib(self.ledger.limit) });
+            if (err == error.LaneMemory) std.log.warn("ricursive: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need), gib(self.ledger.held), gib(self.ledger.limit) });
             return err; // LaneMemory: the lane host queues the stream until another finishes, or fails it alone
         };
         errdefer { // as releaseFn: the bytes back and the prompt cache's room fitted to them (admission trimmed it)
@@ -311,9 +316,10 @@ pub const Metal = struct {
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
+        cache.charge = need;
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);
-        // the kept states may use what the stream's growth copy and the slot's old cache gave back
+        // the kept states fitted to what the stream's charge (its caches and any drafter ring) leaves
         if (self.room) |r| r.fit(r.ctx, self.ledger.left(), stream.reuse.saved, ids);
         stream.cached = 0;
         if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
@@ -468,7 +474,7 @@ pub const Metal = struct {
         const self = cast(ptr);
         self.drain() catch |err| std.log.err("ricursive: a step in flight failed at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
-            self.ledger.give(st.cacheBytes(&self.model.config, entry.value.capacity));
+            self.ledger.give(entry.value.charge);
             entry.value.deinit();
             self.gpa.destroy(entry.value);
             if (self.room) |r| r.fit(r.ctx, self.ledger.left(), null, &.{});
