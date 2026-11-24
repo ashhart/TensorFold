@@ -4,14 +4,18 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const c = @import("config.zig");
 const lanes = @import("lanes");
+const pass = @import("image_pass.zig");
 
+/// One pass's projector: `begin` at the pass's first row, `end` when it is over or has failed.
 pub const Provider = struct {
     ctx: *anyopaque,
-    /// The image rows a prompt chunk [from, to) reads, null when none overlap it.
-    prepare: *const fn (*anyopaque, *const lanes.Stream, usize, usize) anyerror!?Images,
+    /// Each image the stream's pass from `from` still reads, projected once; null when none.
+    begin: *const fn (*anyopaque, *const lanes.Stream, usize) anyerror!?Images,
+    /// The pass ended (done, cancelled or failed): its rows and spans go.
+    end: *const fn (*anyopaque, *const lanes.Stream) void,
 };
 
-pub const Span = struct { at: u32, rows: u32, source: u32 };
+pub const Span = pass.Span;
 pub const Images = struct {
     buffer: mtl.Buffer,
     pipeline: mtl.Pipeline,

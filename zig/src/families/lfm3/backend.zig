@@ -128,7 +128,7 @@ pub const Metal = struct {
         errdefer self.drop(stream);
         const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
         while (!try steps.step(r, stream, &p.at, self.options.chunk, true)) {}
-        _ = self.fills.remove(stream);
+        self.closing(stream);
         try prefill_control.finished(stream);
     }
 
@@ -172,14 +172,21 @@ pub const Metal = struct {
             stream.reuse_failed = at == 0;
         }
         prefill_control.completed(stream, at);
-        const images = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at) else null;
+        const images = if (self.images) |provider| try provider.begin(provider.ctx, stream, at) else null;
+        errdefer if (images != null) self.images.?.end(self.images.?.ctx, stream);
         try self.fills.put(self.gpa, stream, .{ .at = at, .images = images });
         return self.fills.getPtr(stream).?;
     }
 
+    /// The pass is over: its fill and its images' projected rows go.
+    fn closing(self: *Metal, stream: *lanes.Stream) void {
+        const pass = self.fills.fetchRemove(stream) orelse return;
+        if (pass.value.images != null) self.images.?.end(self.images.?.ctx, stream);
+    }
+
     /// A pass that failed: its fill and its cache go, as the whole pass's error left them.
     fn drop(self: *Metal, stream: *lanes.Stream) void {
-        _ = self.fills.remove(stream);
+        self.closing(stream);
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
@@ -193,7 +200,7 @@ pub const Metal = struct {
         errdefer self.drop(stream);
         const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
         const done = try steps.step(r, stream, &p.at, self.options.chunk, false);
-        if (done) _ = self.fills.remove(stream);
+        if (done) self.closing(stream);
         return done;
     }
 
