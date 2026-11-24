@@ -334,12 +334,10 @@ pub const rules = [_]Rule{
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
         const at = std.SemanticVersion.parse(r.retire orelse return null) catch return null;
-        const now = std.SemanticVersion.parse(version) catch return null;
-        return if (now.order(at) != .lt) r else null;
+        return if ((std.SemanticVersion.parse(version) catch return null).order(at) != .lt) r else null;
     };
     return null;
 }
-
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
