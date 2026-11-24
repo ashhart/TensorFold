@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal Qwen3.8-27B with MTP drafts: `TF_Q27_MTP_GPU_PICK=1` runs each MTP absorb in one command buffer and picks draft tokens on the GPU, removing two blocking waits per absorb and the CPU pass over the vocabulary; off by default (#N).
+
 - Idol: octree and decode-trace allocation failures now unwind cleanly and free what they hold, with successful output unchanged (#4304).
 
 
