@@ -103,28 +103,39 @@ class BenchProseTests(unittest.TestCase):
 
     def test_drafted_and_plain_pairs_share_prompt_seed_and_require_token_evidence(self):
         seen = []
+        ids = [10, 20, 30, 40]
+        sha = bench_prose.sha256_token_ids(ids)
+        barrier = threading.Barrier(2)
 
-        def handler(_path, body):
-            seen.append(body)
-            ids = [10, 20, 30, 40]
-            events = [
-                {"choices": [{"index": 0, "delta": {"content": "part1 "}}]},
-                {"choices": [{"index": 0, "delta": {"content": "part2"}, "finish_reason": "stop"}]},
-                {
-                    "choices": [],
-                    "usage": {"prompt_tokens": 40, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
-                    "tensorfold": {"token_ids": ids, "token_sha256": bench_prose.sha256_token_ids(ids)},
-                },
-            ]
-            return 200, "text/event-stream", sse_bytes(events, done=True)
+        class OverlapHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
 
-        srv, th, url = start_server(handler)
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                seen.append(json.loads(raw.decode("utf-8")))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(sse_bytes([{"choices": [{"index": 0, "delta": {"content": "part1 "}}]}], done=False))
+                self.wfile.flush()
+                barrier.wait(timeout=5)
+                self.wfile.write(sse_bytes([
+                    {"choices": [{"index": 0, "delta": {"content": "part2"}, "finish_reason": "stop"}]},
+                    {"choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
+                     "tensorfold": {"token_ids": ids, "token_sha256": sha}},
+                ], done=True))
+                self.wfile.flush()
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OverlapHandler)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
         try:
             with tempfile.TemporaryDirectory() as td:
                 write_books(td, ["war_and_peace", "monte_cristo"], body=None)
                 with contextlib.redirect_stdout(io.StringIO()):
                     report = bench_prose.run_prose_decode(
-                        url, td, levels=(2,), gen_tokens=4, seed=777,
+                        f"http://127.0.0.1:{srv.server_port}", td, levels=(2,), gen_tokens=4, seed=777,
                         excerpt_specs=(("short", 120),), sources=bench_prose.DISTINCT_PROSE_8[:2],
                     )
         finally:
@@ -261,6 +272,10 @@ class BenchProseTests(unittest.TestCase):
                     "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
                     "token_sha256": "a" * 64, "steps": steps2,
                 },
+                "both_missing_evidence": {
+                    "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
+                    "steps": steps2,
+                },
                 "disjoint_case": {
                     "prompt_tokens": 100, "completion_tokens": 1, "finish_reason": "stop", "text": "a",
                     "token_ids": [1], "steps": [{"token": "a", "logprob": -0.2, "top": {"a": -0.2}}],
@@ -282,6 +297,10 @@ class BenchProseTests(unittest.TestCase):
                     "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
                     "token_sha256": "d" * 64, "steps": steps2,
                 },
+                "both_missing_evidence": {
+                    "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
+                    "steps": steps2,
+                },
                 "disjoint_case": {
                     "prompt_tokens": 100, "completion_tokens": 1, "finish_reason": "stop", "text": "a",
                     "token_ids": [1], "steps": [{"token": "a", "logprob": -0.2, "top": {"z": -0.2}}],
@@ -301,10 +320,67 @@ class BenchProseTests(unittest.TestCase):
             self.assertEqual(rep["cases"]["length_missing_step"]["status"], "incomplete_steps")
             self.assertFalse(rep["cases"]["sha_diff_case"]["identical"])
             self.assertEqual(rep["cases"]["sha_diff_case"]["status"], "token_sha256_mismatch")
+            self.assertFalse(rep["cases"]["both_missing_evidence"]["identical"])
+            self.assertIn("unverified", rep["cases"]["both_missing_evidence"]["status"])
             self.assertIsNone(rep["cases"]["disjoint_case"]["step0_cond_kl"])
             self.assertIn("step0_cond_KL=unavailable", out)
             self.assertIn("conditional intersection-only diagnostics", out)
             self.assertNotIn("PPL mult", out)
+
+    def test_serialized_streams_measure_shared_interval_and_do_not_qualify_as_concurrent(self):
+        serial_lock = threading.Lock()
+        ids = [10, 20, 30, 40]
+        sha = bench_prose.sha256_token_ids(ids)
+
+        class SerialHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                with serial_lock:
+                    c1 = sse_bytes([{"choices": [{"index": 0, "delta": {"content": "tok1 "}}]}], done=False)
+                    self.wfile.write(c1)
+                    self.wfile.flush()
+                    time.sleep(0.05)
+                    c2 = sse_bytes([
+                        {"choices": [{"index": 0, "delta": {"content": "tok2"}, "finish_reason": "stop"}]},
+                        {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
+                         "tensorfold": {"token_ids": ids, "token_sha256": sha}},
+                    ], done=True)
+                    self.wfile.write(c2)
+                    self.wfile.flush()
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SerialHandler)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                write_books(td, ["war_and_peace", "monte_cristo", "les_miserables", "don_quixote"], body=None)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rep = bench_prose.run_prose_decode(
+                        f"http://127.0.0.1:{srv.server_port}", td, levels=(4,), gen_tokens=4,
+                        excerpt_specs=(("short", 100),), sources=bench_prose.DISTINCT_PROSE_8[:4],
+                    )
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+
+        pair = rep["pairs"][0]
+        draft_arm = pair["draft"]
+        self.assertFalse(draft_arm["overlapped"])
+        self.assertTrue(draft_arm["serialized"])
+        self.assertFalse(draft_arm["concurrent_verified"])
+        self.assertFalse(pair["qualified"])
+        self.assertFalse(rep["qualified"])
+        self.assertIn("[SERIALIZED/QUEUED]", buf.getvalue())
+        per_sum = sum(r["decode_tps"] for r in draft_arm["rows"])
+        self.assertLess(draft_arm["timing"]["decode_tps"], per_sum * 0.4)
 
     def test_teacher_forced_checks_prefix_and_per_step_gt_identity(self):
         requests_seen = []

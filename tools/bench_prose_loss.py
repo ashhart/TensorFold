@@ -269,15 +269,22 @@ def _compare_sequences(r16: dict, r8: dict) -> dict:
     if r16.get("finish_reason") != r8.get("finish_reason") and (r16.get("finish_reason") is not None or r8.get("finish_reason") is not None):
         return {"identical": False, "first_diff_step": None, "status": "finish_reason_mismatch",
                 "len_ref": len(s16), "len_cand": len(s8)}
-    if (ids16 is not None or ids8 is not None) and ids16 != ids8:
+    sha16, sha8 = r16.get("token_sha256"), r8.get("token_sha256")
+    has_ids = isinstance(ids16, list) and len(ids16) > 0 and isinstance(ids8, list) and len(ids8) > 0
+    v16, v8 = _valid_sha256(sha16), _valid_sha256(sha8)
+    has_sha = v16 is not None and v8 is not None
+    if (ids16 is not None or ids8 is not None) and (not has_ids or ids16 != ids8):
         return {"identical": False, "first_diff_step": None, "status": "token_ids_mismatch",
                 "len_ref": len(s16), "len_cand": len(s8)}
-    sha16, sha8 = r16.get("token_sha256"), r8.get("token_sha256")
-    if sha16 is not None or sha8 is not None:
-        v16, v8 = _valid_sha256(sha16), _valid_sha256(sha8)
-        if v16 is None or v8 is None or v16 != v8:
-            return {"identical": False, "first_diff_step": None, "status": "token_sha256_mismatch",
-                    "len_ref": len(s16), "len_cand": len(s8)}
+    if (sha16 is not None or sha8 is not None) and (not has_sha or v16 != v8):
+        return {"identical": False, "first_diff_step": None, "status": "token_sha256_mismatch",
+                "len_ref": len(s16), "len_cand": len(s8)}
+    if has_ids and has_sha and (sha256_token_ids(ids16) != v16 or sha256_token_ids(ids8) != v8):
+        return {"identical": False, "first_diff_step": None, "status": "token_hash_id_inconsistent",
+                "len_ref": len(s16), "len_cand": len(s8)}
+    if not has_ids and not has_sha:
+        return {"identical": False, "first_diff_step": None, "status": "unverified (missing token_ids and token_sha256)",
+                "len_ref": len(s16), "len_cand": len(s8)}
     if r16.get("text") != r8.get("text") or r16.get("reasoning", "") != r8.get("reasoning", ""):
         return {"identical": False, "first_diff_step": None, "status": "text_mismatch",
                 "len_ref": len(s16), "len_cand": len(s8)}
