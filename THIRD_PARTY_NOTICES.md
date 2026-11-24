@@ -564,6 +564,9 @@ stated on its model card (see [the license text](LICENSES/Apache-2.0.txt)). The 
 headers, no tensor data or weights. `tools/zig/inkling2_fixtures.py` rebuilds all three from the Mini release, or from its
 extracted headers, with the same revision annotation. No revision was derived from fixture digests.
 
+`release_chat_template.jinja` and `release_tokenizer_config.json` in the same folder are byte-identical copies of that
+revision's `chat_template.jinja` and `tokenizer_config.json`, under the same license.
+
 The Mini loop host/reference implementations in `zig/src/families/inkling2/loop.zig`, `loop_model.zig`, `loop_engine.zig`,
 `loop_math_cuda.zig`, the CUDA and Metal loop kernels and the stored-expert implementations in `modelopt.zig` and
 `zig/kernels/cuda/inkling2/modelopt.cu` are independent TensorFold implementations of the supplied math-only Mini
