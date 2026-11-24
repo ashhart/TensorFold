@@ -1,5 +1,4 @@
 //! Qwen3.5 / Qwen3.6 for the native server on HIP: the engine sized to GPU memory and the lane backend over it.
-
 const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
