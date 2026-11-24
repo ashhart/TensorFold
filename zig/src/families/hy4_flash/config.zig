@@ -1,5 +1,5 @@
 const std = @import("std");
-const number = @import("config_number");
+const number = @import("../deepseek_v41/config_number.zig");
 const rope = @import("rope.zig");
 
 pub const Attention = enum { sliding_attention, deepseek_sparse_attention };

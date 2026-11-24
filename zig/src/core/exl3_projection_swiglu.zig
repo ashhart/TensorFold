@@ -60,6 +60,9 @@ pub fn canMergeDenseRows(p: *const Pipelines, m: Matrix, rows: usize, joined_row
     return multi4 or multi2 or fmaDenseOn();
 }
 
+/// The register-only bodies' row bound: a window's fused gate+up call names 14 descriptors a token, 112 at eight.
+const register_rows: usize = 128;
+
 pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     var a = args;
     // T-tile exact half-FMA bodies (routed, one-row dense): the widest T up to the knob that keeps the group count.
@@ -96,11 +99,12 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const moe_splits: usize = if (decode_nax and a.rows <= moe_split_rows and p.reduce != null) moeSplitCount() else 1;
     // The register-only knob, off, restores the tensor-unit body for a same-binary A/B.
     const fma_off = knobs.fma_off;
-    const fma = p.decode_fma != null and decode_nax and a.rows <= moe_split_rows and !fma_off;
+    const register = a.rows <= register_rows;
+    const fma = p.decode_fma != null and decode_nax and register and !fma_off;
     // The static state selection in the register-only body.
-    const fma_static = p.decode_fma_static != null and decode_nax and a.rows <= moe_split_rows and !fma_off and fmaStaticOn();
+    const fma_static = p.decode_fma_static != null and decode_nax and register and !fma_off and fmaStaticOn();
     // The same body with the codebook read from the 1024-entry threadgroup LUT.
-    const fma_static_lut = p.decode_fma_static_lut != null and decode_nax and a.rows <= moe_split_rows and !fma_off and
+    const fma_static_lut = p.decode_fma_static_lut != null and decode_nax and register and !fma_off and
         fmaStaticOn() and fmaLutOn();
     // A very wide one-row matrix already has thousands of column tiles.
     const wide = a.n >= 16384;
@@ -119,7 +123,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const fma_dense_multi2 = fma_dense_ok and a.routed == 0 and p.decode_fma_dense_multi2 != null and multi_rows >= 2 and
         a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and (multi_rows == 2 or !fma_dense_multi4);
     const fma_dense = fma_dense_ok and fmaDenseOn() and !fma_dense_multi4 and !fma_dense_multi2;
-    const fma_t = if (tile_pick) |ti| p.decode_fma_t[ti] != null and decode_nax and a.rows <= moe_split_rows and !fma_off else false;
+    const fma_t = if (tile_pick) |ti| p.decode_fma_t[ti] != null and decode_nax and register and !fma_off else false;
     const fma_t_dense = if (tile_pick) |ti| p.decode_fma_t_dense[ti] != null and fma_dense and a.codebook == 2 else false;
     const scalar_window = (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8))) or
         (!decode_nax and (a.indexed != 0 or a.routed != 0) and a.rows < 64);
@@ -443,6 +447,15 @@ test "invalid and overflowing extents fail before storage arithmetic can wrap" {
     try std.testing.expectError(error.Overflow, m.storageBytes());
     try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, std.math.maxInt(u32)));
     try std.testing.expectError(error.Overflow, scratchBytes(0xffffff80, 0xffffff80, 0xffffff80));
+}
+
+test "the register-only decode body serves every speculative window's fused gate+up call" {
+    const picks = 6; // 6 picks, two blocks, plus the merged shared expert's two: fourteen descriptors a token
+    const per_token = 2 * picks + 2;
+    try std.testing.expect(per_token * 8 <= register_rows); // the eight-token window
+    try std.testing.expect(per_token * 5 > moe_split_rows); // five tokens end the split reduction's bound
+    try std.testing.expect(per_token * 5 <= register_rows);
+    try std.testing.expect(picks * 8 <= register_rows); // the non-fused pair of calls, six a token
 }
 
 test {
