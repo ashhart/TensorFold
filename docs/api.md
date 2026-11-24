@@ -1742,15 +1742,17 @@ a proxied server keys.
 ## Flush the prompt cache
 
 `POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
-those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
-for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
-queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
-"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
-cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
-long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
-given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
-keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
-may still resume from one. The body, if any, is ignored.
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). The JSON
+body may contain `"retain": N`, a nonnegative 32-bit integer, to retain the N most recently used complete RAM states by
+the cache's existing clock and their matching disk states instead. Other states and their disk bytes are dropped; `retain`
+is zero by default, so an absent, empty or unrecognized body is still a full flush. It waits for the requests already
+running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the queue and start after it.
+Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ..., "disk_bytes": ..., "disk":
+..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the cache's budget, the bytes deleted
+from the server's own state folder, whether this server keeps states on disk, and how long the flush waited. After a full
+flush the next turn prefills its whole prompt and gives the tokens it would have given resumed. Two flushes asked together
+run one after the other. States `--learn` keeps for shared prompt prefixes stay on disk, as they do after
+`DELETE /v1/imprint`, so with `--learn` a later prompt may still resume from one.
 
 An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
 answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,
