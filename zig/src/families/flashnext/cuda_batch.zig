@@ -550,6 +550,7 @@ pub fn Pass(comptime Tri: type) type {
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
                 const sl = zs.slices(self.zero_slices, s.cap, n, self.out_slices);
                 self.zero_slices = false;
+                if (layer + 1 == self.m.layers.len and self.unreadTail()) break; // head(.none) reads none of these rows
                 if (hc.fuses(self, lw.mlp_hc, n, keep.mlp_hc)) {
                     try self.tri.hcWritebackNorm(s.h, s.h, s.pss, s.part, s.inj, s.dummy, s.dummy, lw.mlp_hc.scale.ptr, s.norm, eps, sl.stride, n, dims, streams, 4, 1, 1, sl.count);
                     try hc.readoutNative(self, lw.mlp_hc, 0, n);
@@ -562,6 +563,12 @@ pub fn Pass(comptime Tri: type) type {
                 self.pending = layer;
             }
             try self.head(logits_host);
+        }
+
+        /// A non-final prompt chunk on one rank that nothing taps: its last layer's MLP stream and experts go unread.
+        fn unreadTail(self: *const Self) bool {
+            const h = self.hooks;
+            return self.m.collective == null and h.logits == .none and h.streams == 0 and h.keep == null and h.moe_add == null;
         }
 
         pub fn complete(self: *Self) !void {
