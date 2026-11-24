@@ -107,10 +107,18 @@ test "direct-normalized MTP keeps the target's original stepped chunk boundary" 
     try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, 6143, false, false));
 }
 
-/// Shared page-edge marks join a 0-based compute grid, so fresh and resumed passes cut identically.
+/// Shared page-edge marks join each fresh request chunk's compute grid, so resumed passes cut identically.
 fn keptCut(len: usize, chunks: []const u32, f: *const Fill, at: usize) usize {
     var end = nextCut(len, chunks, at, 0);
-    if (f.kept != null) end = @min(end, at + E.grid_rows - at % E.grid_rows);
+    if (f.kept != null) {
+        var anchor: usize = 0;
+        for (chunks) |boundary| {
+            if (boundary > at) break;
+            anchor = boundary;
+        }
+        const since = at - anchor;
+        end = @min(end, anchor + since + E.grid_rows - since % E.grid_rows);
+    }
     const marks = if (f.kept) |k| k.marks else &.{};
     for (marks) |mark| if (mark > at) {
         end = @min(end, mark);
