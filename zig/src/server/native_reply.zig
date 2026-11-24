@@ -8,5 +8,7 @@ pub const Result = struct {
     reasoning_tokens: usize,
     rejected: bool = false,
     rejected_calls: usize = 0, // calls a parser refused and dropped; only Inkling 2 reports them
+    kept: ?@import("tool_parse.zig").Parsed = null, // a bare Inkling 2 reply's envelopes kept as content
+    cut_calls: bool = false, // the calls were cut by the token cap: the reply keeps finish_reason length
     open_think: bool = false,
 };

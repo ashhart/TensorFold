@@ -11,6 +11,13 @@ pub fn enabled(srv: anytype) bool {
     return srv.text.native_inkling2;
 }
 
+/// Tokens a stop check decodes: the longest stop's bytes plus 8, as a byte token can carry one byte of a character.
+pub fn stopWindow(strings: []const []const u8) usize {
+    var longest: usize = 0;
+    for (strings) |stop| longest = @max(longest, stop.len);
+    return longest + 8;
+}
+
 /// Where the first stop string starts in the raw text: the generation stops there and reports it.
 fn firstStop(strings: []const []const u8, raw: []const u8) ?usize {
     var first: ?usize = null;
@@ -20,17 +27,17 @@ fn firstStop(strings: []const []const u8, raw: []const u8) ?usize {
     return first;
 }
 
-/// `text` less a tail that could begin a stop string, held while the reply grows.
-fn held(strings: []const []const u8, text: []const u8) []const u8 {
-    var keep = text.len;
+/// Where a tail of `raw` that could begin a stop string starts, held while the reply grows; null: none could.
+fn held(strings: []const []const u8, raw: []const u8) ?usize {
+    var start: ?usize = null;
     for (strings) |stop| {
-        var size = @min(stop.len -| 1, text.len);
-        while (size > 0) : (size -= 1) if (std.mem.endsWith(u8, text, stop[0..size])) {
-            keep = @min(keep, text.len - size);
+        var size = @min(stop.len -| 1, raw.len);
+        while (size > 0) : (size -= 1) if (std.mem.endsWith(u8, raw, stop[0..size])) {
+            if (start == null or raw.len - size < start.?) start = raw.len - size;
             break;
         };
     }
-    return text[0..keep];
+    return start;
 }
 
 /// The reply as its raw text shows it before byte `at`, where a stop starts: whole tokens, then part of one.
@@ -50,39 +57,74 @@ fn cut(g: anytype, ids: []const u32, at: usize) Allocator.Error!?parser.Stream {
     return s;
 }
 
+/// The reply ended on its token cap: a call it was writing is returned cut, as the shared route returns one.
+fn atLength(g: anytype) bool {
+    if (comptime !@hasField(@TypeOf(g.*), "box")) {
+        return false; // a test's stand-in generation has no engine box
+    } else {
+        if (g.deadline_hit) return false;
+        if (g.reason) |r| return std.mem.eql(u8, r, "length");
+        return g.box.reason == .length;
+    }
+}
+
+/// A bare reply's generic-envelope calls, their cut recovery and kept envelopes, as the shared route reads them.
+fn bareCalls(g: anytype, result: *native_reply.Result) Allocator.Error!void {
+    const parsed = try @import("tool_parse.zig").parse(g.a, result.content, g.tools, null);
+    if (parsed.rejected_envelopes > 0) result.kept = parsed;
+    var calls = parsed.calls;
+    if (calls != null) {
+        result.content = parsed.content;
+    } else if (atLength(g)) if (try @import("tool_stream.zig").cutCalls(g.a, result.content, g.tools)) |cut_calls| {
+        calls = cut_calls;
+        result.content = try reply_text.cutProse(g.a, result.content);
+        result.cut_calls = true;
+    };
+    const found = calls orelse return;
+    // numbered as the native calls are, so the whole reply and its stream give the same ids
+    for (found, 0..) |call, i| if (call == .object) try call.object.put(g.a, "id", .{ .string = try std.fmt.allocPrint(g.a, "call_{d}", .{i}) });
+    result.calls = found;
+}
+
 pub fn read(g: anytype, ids: []const u32, finished: bool) Allocator.Error!native_reply.Result {
     const stopping = g.stops.strings.len > 0;
-    // the raw text: the generation's own incremental decode while it streams, decoded once when it is done
-    const raw: []const u8 = if (!g.chat or stopping) (if (finished) try g.srv.text.decode(g.a, ids) else g.visible.text.items) else "";
-    if (!g.chat) return .{ .content = g.stops.visible(raw, !finished), .reasoning = "", .calls = null, .reasoning_tokens = 0 };
-    const at = if (stopping) firstStop(g.stops.strings, raw) else null;
-    // a raw stop cuts the reply where the generation stopped; calls finished before it stay
-    var cut_stream = if (at) |offset| try cut(g, ids, offset) else null;
+    if (!g.chat) {
+        // the raw text: the generation's own incremental decode while it streams, decoded once when it is done
+        const raw = if (finished) try g.srv.text.decode(g.a, ids) else g.visible.text.items;
+        return .{ .content = g.stops.visible(raw, !finished), .reasoning = "", .calls = null, .reasoning_tokens = 0 };
+    }
     var whole: parser.Stream = undefined;
-    const s: *parser.Stream = if (cut_stream) |*c| c else if (g.inkling2) |*p| p else blk: {
+    const s: *parser.Stream = if (g.inkling2) |*p| p else blk: {
         whole = try parser.Stream.init(g.a, g.srv.text);
         break :blk &whole;
     };
-    var result = if (cut_stream != null) try s.result(finished) else try s.extend(ids, g.tools);
-    if (finished and cut_stream == null) result = try s.done();
-    if (at != null and cut_stream == null) {
-        // no token bytes to place the stop: cut the parsed channels instead
-        result.content = g.stops.visible(result.content, false);
-        result.reasoning = g.stops.visible(result.reasoning, false);
-    } else if (at == null and !finished) {
-        result.content = held(g.stops.strings, result.content);
-        result.reasoning = held(g.stops.strings, result.reasoning);
-    }
-    // a bare reply has no native calls; a tool grammar writes the generic envelope, which the shared parser reads
-    if (finished and s.bare() and g.tools.len > 0) {
-        const parsed = try @import("tool_parse.zig").parse(g.a, result.content, g.tools, null);
-        if (parsed.calls) |calls| {
-            // numbered as the native calls are, so the whole reply and its stream give the same ids
-            for (calls, 0..) |call, i| if (call == .object) try call.object.put(g.a, "id", .{ .string = try std.fmt.allocPrint(g.a, "call_{d}", .{i}) });
-            result.calls = calls;
-            result.content = parsed.content;
+    if (stopping and s.next == 0) s.track_raw = true;
+    var result = try s.extend(ids, g.tools);
+    if (finished) result = try s.done();
+    if (stopping and s.raw_ok) {
+        // a stop is found in the reply's exact bytes, where the generation stopped, and so is what may begin one
+        const raw = s.raw.items;
+        const stop = firstStop(g.stops.strings, raw);
+        if (stop orelse (if (finished) null else held(g.stops.strings, raw))) |at| if (at < raw.len) {
+            var part = (try cut(g, ids, at)).?;
+            // usage counts every generated id: a stop cuts what is shown, never what was made
+            const tokens = result.reasoning_tokens;
+            result = try part.result(finished);
+            result.reasoning_tokens = tokens;
+        };
+    } else if (stopping) {
+        // no token-local bytes: the raw decode places the stop, and the parsed channels are cut by it
+        const raw = if (finished) try g.srv.text.decode(g.a, ids) else g.visible.text.items;
+        if (firstStop(g.stops.strings, raw) != null) {
+            result.content = g.stops.visible(result.content, false);
+            result.reasoning = g.stops.visible(result.reasoning, false);
+        } else if (!finished) {
+            result.content = g.stops.visible(result.content, true);
+            result.reasoning = g.stops.visible(result.reasoning, true);
         }
     }
+    // a bare reply has no native calls; a tool grammar writes the generic envelope, which the shared parser reads
+    if (finished and s.bare() and g.tools.len > 0) try bareCalls(g, &result);
     return result;
 }
 
