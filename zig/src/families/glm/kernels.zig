@@ -18,6 +18,7 @@ pub const igate_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 128, .top
 pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000, .topk = route_shape.topk };
 
 pub const max_rows = 16;
+pub const Kv8Args = extern struct { stride: u32, heads: u32, rows: u32, k: u32, n: u32, per_head: u32, row_off: u32 };
 
 pub const Kernels = struct {
     source_hash: u64, // every compiled source, hashed: part of a learned prompt state's identity
@@ -115,6 +116,10 @@ pub const Kernels = struct {
     sparse_split: mtl.Pipeline, // decode rows' sparse MLA over key blocks on the tensor units
     sparse_combine: mtl.Pipeline, // and the blocks combined in order
     absorb_nax: mtl.Pipeline, // and its absorb (glm_absorb_nax.metal)
+    absorb_nax_8b: mtl.Pipeline, // prompt 8/64 kv_b absorb on tensor units
+    absorb_nax_8b_tp: mtl.Pipeline, // TP2: 32 heads
+    absorb_8b: mtl.Pipeline, // intact 8/64 kv_b decode/verify absorb and unabsorb
+    unabsorb_8b: mtl.Pipeline,
     sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
     absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
@@ -265,6 +270,38 @@ fn pickSources(gpa: std.mem.Allocator, route_core: []const u8, gu: []const u8, d
 
 const m16_names = affine_mm.names ++ mm_groups.names;
 
+/// Assemble `k` from `device` with intact 4-bit or 8-bit `kv_b` absorb/unabsorb dispatchers.
+pub fn absorb8(k: *const Kernels, e: mtl.ComputeEncoder, q: anytype, in: anytype, out: anytype, stride: u32, heads: u32, rows: u32, nope: u32, latent: u32, per_head: u32) void {
+    e.setPipeline(k.absorb_8b);
+    inline for (.{ q.w, q.s, q.b, in, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(Kv8Args{ .stride = stride, .heads = heads, .rows = rows, .k = nope, .n = latent, .per_head = per_head, .row_off = 0 }, 5);
+    e.dispatchGroups(mtl.Size.of(1, (latent + 31) / 32, heads), mtl.Size.of(32 * rows, 1, 1));
+}
+
+pub fn unabsorb8(k: *const Kernels, e: mtl.ComputeEncoder, q: anytype, in: anytype, out: anytype, heads: u32, rows: u32, latent: u32, v_dim: u32, per_head: u32, row_off: u32) void {
+    e.setPipeline(k.unabsorb_8b);
+    inline for (.{ q.w, q.s, q.b, in, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(Kv8Args{ .stride = heads * latent, .heads = heads, .rows = rows, .k = latent, .n = v_dim, .per_head = per_head, .row_off = row_off }, 5);
+    e.dispatchGroups(mtl.Size.of(1, (v_dim + 3) / 4, heads), mtl.Size.of(32 * rows, 1, 1));
+}
+
+pub fn absorbKv(k: *const Kernels, e: mtl.ComputeEncoder, q: anytype, in: anytype, out: anytype, stride: u32, heads: u32, rows: u32, nope: u32, latent: u32, per_head: u32) void {
+    if (q.bits == 8) return absorb8(k, e, q, in, out, stride, heads, rows, nope, latent, per_head);
+    e.setPipeline(k.absorb);
+    inline for (.{ q.w, q.s, q.b, in, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(stride, 5);
+    e.setValue(heads, 6);
+    e.dispatchGroups(mtl.Size.of(1, latent / 64, rows * heads), mtl.Size.of(64, 1, 1));
+}
+
+pub fn unabsorbKv(k: *const Kernels, e: mtl.ComputeEncoder, q: anytype, in: anytype, out: anytype, heads: u32, rows: u32, latent: u32, v_dim: u32, per_head: u32, row_off: u32) void {
+    if (q.bits == 8) return unabsorb8(k, e, q, in, out, heads, rows, latent, v_dim, per_head, row_off);
+    e.setPipeline(k.unabsorb);
+    inline for (.{ q.w, q.s, q.b, in, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(heads, 5);
+    e.dispatchGroups(mtl.Size.of(1, v_dim / 4, rows * heads), mtl.Size.of(32, 1, 1));
+}
+
 /// Compile every library on worker threads.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
@@ -283,7 +320,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.wide = null;
     const m3_fast = !device.tensorUnits();
     k.m3_fast = m3_fast;
-    var jobs: [generated.len + 28]Job = undefined;
+    var jobs: [generated.len + 31]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -394,11 +431,23 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 23] = .{ .device = device, .source = sources.glm_select, .names = &.{ "glm_select_mark", "glm_select_merge" }, .out = &select_out };
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
+    const absorb8_raw = try std.mem.concat(gpa, u8, &.{ "#define GLM_KV_BITS 8\n", sources.glm_absorb_nax });
+    defer gpa.free(absorb8_raw);
+    const absorb8_src = try frags.source(device, gpa, absorb8_raw);
+    defer gpa.free(absorb8_src);
+    jobs[generated.len + 27] = .{ .device = device, .source = absorb8_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_8b) };
+    const absorb8_tp_raw = try std.mem.concat(gpa, u8, &.{ "#define GLM_HEADS 32\n#define GLM_KV_BITS 8\n", sources.glm_absorb_nax });
+    defer gpa.free(absorb8_tp_raw);
+    const absorb8_tp_src = try frags.source(device, gpa, absorb8_tp_raw);
+    defer gpa.free(absorb8_tp_src);
+    jobs[generated.len + 29] = .{ .device = device, .source = absorb8_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_8b_tp) };
+    var kvb8_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 28] = .{ .device = device, .source = sources.glm_kvb_q8, .names = &.{ "glm_absorb_8b", "glm_unabsorb_8b" }, .out = &kvb8_out };
 
     const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true, .exact_nonfinite = true }) else try gpa.dupe(u8, "");
     defer gpa.free(m3_src);
     var m3_out: affine_mm.Pipes = undefined;
-    if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
+    if (m3_fast) jobs[generated.len + 30] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
     const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
         for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
@@ -453,6 +502,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.index_decode = index_out[1];
     k.select_mark = select_out[0];
     k.select_merge = select_out[1];
+    k.absorb_8b = kvb8_out[0];
+    k.unabsorb_8b = kvb8_out[1];
 }
 
 test "glm_tap_mean_ring unique source anchor in glm_glue.metal" {

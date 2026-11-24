@@ -426,12 +426,13 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
         p.sums,
     );
     var q = w.kv_b;
-    q.w = q.w.at(@as(usize, c.nope) * K / 2);
+    q.w = q.w.at(@as(usize, c.nope) * K * q.bits / 8);
     q.s = q.s.at(@as(usize, c.nope) * (K / 64) * 2);
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (p.mm.m3_fast) 32 else 64);
+    const mm = if (q.bits == 8) p.mm.wide.?.mm8 else p.mm.mm_bf16;
+    affine_mm.rowSums(e, mm, 64, p.att, p.sums, M * H, K);
+    affine_mm.denseBatchBm(e, mm, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (q.bits == 4 and p.mm.m3_fast) 32 else 64);
 }
 
 /// The index scores' tile rows: 128 (a row's queries read once for 64 blocks), 64 where that leaves the GPU half idle.
@@ -477,7 +478,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             p.sums,
         ); // mlx-lm's embed_q
     } else if (fwd.on(x, "mla_absorb")) {
-        e.setPipeline(if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax); // the row kernel's qvm, weights in three bf16 parts
+        e.setPipeline(if (w.kv_b.bits == 8) (if (c.tp > 1) x.k.absorb_nax_8b_tp else x.k.absorb_nax_8b) else if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax);
         bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, p.qp, p.ql });
         e.setValue([2]i32{ @intCast(M), @intCast(c.qrProj()) }, 5);
         e.dispatchGroups(size(c.kv_lora / 64, (M + 63) / 64, c.mla_heads), size(128, 1, 1));
@@ -590,8 +591,7 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     fwd.inject(x, e, p.m_emb, M, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, p.m_emb, m.enorm, p.m_eh, M, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
-    // eh_proj on the tile kernel (glm_rows_bf16_nax, receipt eh_check); scalar where the load built none (wide.zig)
-    if (m.eh_bf16) |eh| {
+    if (m.eh_bf16) |eh| { // eh_proj on the tile kernel; scalar where the load built none
         wide.bf16Nax(&p.mm.wide.?, e, eh, D, 2 * D, .{ .in = p.m_eh, .ldx = 2 * D, .out = p.m_x, .ldo = D, .rows = M });
     } else qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);
     fwd.rms(x, e, p.m_x, L.in_norm, p.m_xn, M, D, D, D, c.eps);

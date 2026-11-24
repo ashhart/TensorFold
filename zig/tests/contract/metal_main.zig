@@ -204,9 +204,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (embeddings[0..embed_made]) |*p| try kernels.append(a, p.kernel());
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
-    if (wanted(o, mixed.kernel().spec.name)) {
-        if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
-    }
+    if (wanted(o, mixed.kernel().spec.name) and @import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
@@ -448,6 +446,8 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_dflash_follow: @import("metal_glm_dflash_follow.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_dflash_follow.deinit();
     try glm_dflash_follow.collect(o.only);
+    var glm_kvb8 = try @import("metal_glm_kvb_q8.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer glm_kvb8.destroy();
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);

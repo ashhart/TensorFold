@@ -484,3 +484,18 @@ test "mlx-lm's one conv1d tensor and fp32 mixes and router plan as the three con
     try expectPlan(w, &c, 1_561_010_208, "4-bit/64 x40");
     try expectPlan(v, &c, 1_561_010_208, "4-bit/64 x40");
 }
+
+test "8/64 intact kv_b_proj alongside 4/64 routed experts plans without QSplit" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const c = small();
+    const cfg_hq = "{\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\", \"model.layers.3.self_attn.kv_b_proj\": {\"group_size\": 64, \"bits\": 8}}}";
+    const stored = [_]Pack{.{ "model.language_model.layers.3.self_attn.kv_b_proj", .{ .bits = 8, .group = 64 } }};
+    const w = try dry(arena.allocator(), cfg_hq, &stored);
+    defer free(w);
+    try testing.expectEqual(Width{ .bits = 8, .group = 64 }, w.layers[3].attn.mla.kv_b.width());
+    try testing.expectEqual(@as(u8, 0), w.layers[3].attn.mla.kv_b.more);
+    try testing.expectEqual(quant.uniform, w.layers[3].mlp.moe.gate.width());
+    try testing.expect(w.layers[3].attn.mla.absorbed == null);
+    try testing.expect(!wts.native(w, &c));
+}

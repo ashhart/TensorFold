@@ -7,6 +7,9 @@ using namespace tfp;
 #ifndef GLM_HEADS // TP2 builds one Mac's 32 heads
 #define GLM_HEADS 64
 #endif
+#ifndef GLM_KV_BITS
+#define GLM_KV_BITS 4
+#endif
 constant constexpr int HEADS = GLM_HEADS, NOPE = 256, LATENT = 512, PER_HEAD = 512; // kv_b rows a head: key half, value half
 constant constexpr int PAD = 64 + 8;
 
@@ -35,9 +38,23 @@ constant constexpr int PAD = 64 + 8;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     {
       const long wrow = long(h) * PER_HEAD + k0 + wk;
-      const device uchar* wb = (const device uchar*)W + wrow * (LATENT / 2) + (col + wn) / 2;
       const float s = float(S[wrow * (LATENT / 64) + (col + wn) / 64]);
       const float b = float(B[wrow * (LATENT / 64) + (col + wn) / 64]);
+#if GLM_KV_BITS == 8
+      const device uchar* wb = (const device uchar*)W + wrow * LATENT + col + wn;
+      TF_UNROLL
+      for (short i = 0; i < 16; i++) {
+        const float v = s * float(wb[i]) + b;
+        const bfloat p1 = bfloat(v);
+        const float r1 = v - float(p1);
+        const bfloat p2 = bfloat(r1);
+        const int at = wk * PAD + wn + i;
+        parts[0][at] = p1;
+        parts[1][at] = p2;
+        parts[2][at] = bfloat(r1 - float(p2));
+      }
+#else
+      const device uchar* wb = (const device uchar*)W + wrow * (LATENT / 2) + (col + wn) / 2;
       TF_UNROLL
       for (short i = 0; i < 8; i++) {
         const uchar q = wb[i];
@@ -53,6 +70,7 @@ constant constexpr int PAD = 64 + 8;
           parts[2][at] = bfloat(r1 - float(p2));
         }
       }
+#endif
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (live > 0) {

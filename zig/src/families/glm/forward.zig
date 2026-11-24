@@ -377,21 +377,14 @@ pub fn mlaNorms(k: *const Kernels, c: *const cfg.Config, e: mtl.ComputeEncoder, 
 pub fn absorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, qp: Ref, ql: Ref, rows: u32) void {
     const c = x.c;
     if (w.absorbed) |pair| return wide.perHead(&x.k.wide.?, e, pair[0], c.mla_heads, .{ .in = qp, .ldx = c.qrProj(), .out = ql, .ldo = c.mla_heads * c.kv_lora, .rows = rows }, c.nope, c.kv_lora);
-    e.setPipeline(x.k.absorb);
-    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, qp, ql });
-    e.setValue(c.qrProj(), 5);
-    e.setValue(c.mla_heads, 6);
-    e.dispatchGroups(size(1, c.kv_lora / 64, rows * c.mla_heads), size(64, 1, 1));
+    @import("kernels.zig").absorbKv(x.k, e, w.kv_b, qp, ql, c.qrProj(), c.mla_heads, rows, c.nope, c.kv_lora, c.nope + c.v_dim);
 }
 
 /// Every row's 64 heads' latent outputs to values [rows, heads * v]: qmv_fast on kv_b's value half, or unembed_out's.
 pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Ref, vals: Ref, rows: u32) void {
     const c = x.c;
     if (w.absorbed) |pair| return wide.perHead(&x.k.wide.?, e, pair[1], c.mla_heads, .{ .in = att, .ldx = c.mla_heads * c.kv_lora, .out = vals, .ldo = c.mla_heads * c.v_dim, .rows = rows }, c.kv_lora, c.v_dim);
-    e.setPipeline(x.k.unabsorb);
-    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, att, vals });
-    e.setValue(c.mla_heads, 5);
-    e.dispatchGroups(size(1, c.v_dim / 4, rows * c.mla_heads), size(32, 1, 1));
+    @import("kernels.zig").unabsorbKv(x.k, e, w.kv_b, att, vals, c.mla_heads, rows, c.kv_lora, c.v_dim, c.nope + c.v_dim, c.nope);
 }
 
 /// Dense latent attention (dense_attn.zig): one row's launches, and a window's rows in three launches.

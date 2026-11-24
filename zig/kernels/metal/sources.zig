@@ -156,6 +156,8 @@ pub const flashnext_gx_mb2 = @embedFile("decode/fn_gx_mb2.metal");
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
 pub const glm_glue = @embedFile("glm_glue.metal");
+/// Intact 8-bit/64 kv_b decode/verify absorb and unabsorb kernels (glm/forward.zig).
+pub const glm_kvb_q8 = @embedFile("glm_kvb_q8.metal");
 /// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
 pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_gather = @embedFile("glm_gather.metal");
