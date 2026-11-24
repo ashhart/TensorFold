@@ -19,6 +19,8 @@ pub const records = [_]M{
     .{ .name = "dsv41 dspark markov chain 2 tf_dsv41_markov_chain_topk_2", .threads = 256, .tg_memory = 3712, .reserved = 256 },
     .{ .name = "dsv41 dspark markov chain 4 tf_dsv41_markov_chain_topk_4", .threads = 256, .tg_memory = 3968, .reserved = 256 },
     .{ .name = "dsv41 dspark markov chain 8 tf_dsv41_markov_chain_topk_8", .threads = 256, .tg_memory = 4352, .reserved = 256 },
+    .{ .name = "dsv41 dspark early filtered tf_dsv41_early_filtered", .threads = 1024, .tg_memory = 5120, .reserved = 1024 },
+    .{ .name = "dsv41 dspark early accept tf_dsv41_early_accept_multi", .threads = 64, .tg_memory = 0, .reserved = 64 },
 };
 
 test "the DeepSeek V4.1 DSpark launches fit every Apple family" {
