@@ -2,9 +2,9 @@
 
 kernel void tf_inkling2_route_scores(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]], device float* scores [[buffer(2)]],
-    constant InkRouteArgs& a [[buffer(3)]], uint t [[thread_position_in_threadgroup]],
+    constant InkRouteArgs& a [[buffer(3)]], uint2 tid [[thread_position_in_threadgroup]],
     uint2 group [[threadgroup_position_in_grid]]) {
-  const uint row = group.y, e = group.x * 32 + t;
+  const uint row = group.y, e = group.x * 32 + tid.x;
   if (row >= a.rows || e >= 128) return;
   const device bfloat* w = weight + size_t(e) * 2304;
   const device bfloat* v = x + size_t(row) * 2304;
