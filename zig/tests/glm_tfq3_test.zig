@@ -240,6 +240,20 @@ fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.B
     try testing.expect(cb.failure() == null);
 }
 
+/// Each run against the 16-row prefill, every differing pair named with its first differing output, then one failure.
+fn sameRuns(units: bool, sh: Shape, ys: [4]mtl.Buffer, len: usize) !void {
+    const names = [_][]const u8{ "16-row prefill", "repeated 16-row prefill", "4-row decode", "1-row decode" };
+    const want = ys[0].slice(u16, len);
+    var differ = false;
+    for (ys[1..], names[1..]) |y, name| {
+        const got = y.slice(u16, len);
+        const at = std.mem.indexOfDiff(u16, want, got) orelse continue;
+        differ = true;
+        std.debug.print("TFQ3 {s} mode, {d}-bit {d}x{d}: {s} differs from the {s} at output {d} (0x{x:0>4} vs 0x{x:0>4})\n", .{ if (units) "tensor-unit" else "simdgroup", sh.bits, sh.n, sh.k, name, names[0], at, got[at], want[at] });
+    }
+    if (differ) return error.TestExpectedEqual;
+}
+
 test "tfq3: decode at 1 and 4 rows, prefill and a repeat give the same output bytes, both widths, split and not" {
     if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
@@ -250,9 +264,9 @@ test "tfq3: decode at 1 and 4 rows, prefill and a repeat give the same output by
     defer queue.deinit();
     const gpa = testing.allocator;
     const rows: u32 = 16;
-    // the device's own mode, then (on an M5) the pre-M5 simdgroup source executed too; no cross-mode claim
-    const modes = [_]bool{ device.tensorUnits(), false };
-    for (modes[0 .. 1 + @intFromBool(device.tensorUnits())]) |units| {
+    // the device's own mode, then on an M5 the simdgroup mode too; a mode count from a u1 (1 + 1) overflowed on M5
+    const modes: []const bool = if (device.tensorUnits()) &.{ true, false } else &.{false};
+    for (modes) |units| {
         var pipes = try tfq3.Pipes.initUnits(gpa, device, units, wide.glue_math);
         defer pipes.deinit();
         for ([_]Shape{ .{ .n = 128, .k = 128, .bits = 4 }, .{ .n = 128, .k = 128, .bits = 5 }, .{ .n = 128, .k = 1024, .bits = 4 }, .{ .n = 128, .k = 1024, .bits = 5 } }) |sh| {
@@ -271,8 +285,7 @@ test "tfq3: decode at 1 and 4 rows, prefill and a repeat give the same output by
             for (&ys) |*y| y.* = try device.buffer(rows * sh.n * 2, mtl.ResourceOptions.shared);
             defer for (ys) |y| y.deinit();
             for (ys, [_]u32{ rows, rows, 4, 1 }) |y, batch| try runDense(&pipes, queue, b, y, sh, rows, batch);
-            const want = ys[0].slice(u16, rows * sh.n);
-            for (ys[1..]) |y| try testing.expectEqualSlices(u16, want, y.slice(u16, rows * sh.n));
+            try sameRuns(units, sh, ys, rows * sh.n);
         }
     }
 }
