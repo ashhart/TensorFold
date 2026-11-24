@@ -666,20 +666,29 @@ pub const Bank = struct {
 
             const n_lex = lex_wts.items.len;
             const n_sem = sem_wts.items.len;
-            ug = .{
-                .dim = arch.hidden,
-                .lex_protos = try lex_vecs.toOwnedSlice(self.gpa),
-                .lex_weights = try lex_wts.toOwnedSlice(self.gpa),
-                .n_lex = n_lex,
-                .n_body_lex = n_body_lex,
-                .sem_protos = try sem_vecs.toOwnedSlice(self.gpa),
-                .sem_weights = try sem_wts.toOwnedSlice(self.gpa),
-                .n_sem = n_sem,
-                .neg_lex_max = 0.0,
-                .neg_sem_max = 0.0,
-                .is_small_fact = inp.is_small_fact,
-                .is_standing = false,
-                .is_digest = inp.is_digest,
+            // each slice freed by this block until the gate holds all four, then by the gate's cleanup alone
+            ug = gate: {
+                const lex_p = try lex_vecs.toOwnedSlice(self.gpa);
+                errdefer self.gpa.free(lex_p);
+                const lex_w = try lex_wts.toOwnedSlice(self.gpa);
+                errdefer self.gpa.free(lex_w);
+                const sem_p = try sem_vecs.toOwnedSlice(self.gpa);
+                errdefer self.gpa.free(sem_p);
+                break :gate .{
+                    .dim = arch.hidden,
+                    .lex_protos = lex_p,
+                    .lex_weights = lex_w,
+                    .n_lex = n_lex,
+                    .n_body_lex = n_body_lex,
+                    .sem_protos = sem_p,
+                    .sem_weights = try sem_wts.toOwnedSlice(self.gpa),
+                    .n_sem = n_sem,
+                    .neg_lex_max = 0.0,
+                    .neg_sem_max = 0.0,
+                    .is_small_fact = inp.is_small_fact,
+                    .is_standing = false,
+                    .is_digest = inp.is_digest,
+                };
             };
             errdefer ug.deinit(self.gpa);
 
@@ -722,7 +731,12 @@ pub const Bank = struct {
             .kv = kv,
             .rec = rec,
         });
-        try self.rebuildBridges();
+        // the unit's parts stay this function's until the index takes it: a failed rebuild gives it back, freed once
+        self.rebuildBridges() catch |e| {
+            _ = self.units.pop();
+            self.rebuildBridges() catch {}; // the index of the units before this one, as it was
+            return e;
+        };
         return uid;
     }
 
@@ -1416,12 +1430,44 @@ pub const Bank = struct {
         return nbytes;
     }
 
+    /// The prefix state a load reads or recompiles; freed here on failure, the caller's once returned.
+    fn loadPrefix(self: *Bank, lf: *const store.LoadedFile, prefix_len: usize) !RawState {
+        const arch = self.backend.arch;
+        var pref = try RawState.init(self.gpa, arch, @intCast(prefix_len));
+        errdefer pref.deinit(self.gpa);
+        var name_buf: [96]u8 = undefined;
+        if (lf.getTensor("p.kv.0.k") != null) {
+            const p_kv_elems = arch.kvLayerElems(prefix_len);
+            for (0..arch.num_attn) |l| {
+                const tk = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.kv.{d}.k", .{l})) orelse return error.MissingTensor;
+                if (tk.bytes.len != p_kv_elems * 2) return error.BadTensorShape;
+                @memcpy(std.mem.sliceAsBytes(pref.kv_k[l]), tk.bytes);
+                const tv = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.kv.{d}.v", .{l})) orelse return error.MissingTensor;
+                if (tv.bytes.len != p_kv_elems * 2) return error.BadTensorShape;
+                @memcpy(std.mem.sliceAsBytes(pref.kv_v[l]), tv.bytes);
+            }
+            const st_elems = arch.recStateElems();
+            for (0..arch.num_rec) |r| {
+                const ts = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.rec.{d}.st", .{r})) orelse return error.MissingTensor;
+                if (ts.bytes.len != st_elems * 4) return error.BadTensorShape;
+                @memcpy(std.mem.sliceAsBytes(pref.rec_state[r]), ts.bytes);
+                const tc = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.rec.{d}.cv", .{r})) orelse return error.MissingTensor;
+                if (tc.bytes.len != arch.conv_elems * 2) return error.BadTensorShape;
+                @memcpy(std.mem.sliceAsBytes(pref.rec_conv[r]), tc.bytes);
+            }
+        } else {
+            if (self.prefix_ids.len != prefix_len) return error.BadLivingWeights;
+            try self.backend.compileState(self.backend.ctx, null, self.prefix_ids, &pref);
+        }
+        return pref;
+    }
+
     /// Loads `<dir>/living-weights.safetensors` (`v6`, `v4`, or legacy `v3`) AND seamlessly replays
     /// any uncompacted frames from `<dir>/living-weights.delta`, recompiling prefix state & rebuilding indexes.
     pub fn loadIfPresent(self: *Bank) !bool {
         const path = try self.filePath(self.gpa);
         defer self.gpa.free(path);
-        if (!store.isFoldedMemoryFile(self.gpa, self.io, path)) return false;
+        if (!try store.probeFoldedMemoryFile(self.gpa, self.io, path)) return false; // unreadable errs, not empty
 
         var lf = try store.readFile(self.gpa, self.io, path);
         defer lf.deinit();
@@ -1456,57 +1502,13 @@ pub const Bank = struct {
         self.prefix_ids = try lf.copyU32(self.gpa, "frame.prefix_ids");
         self.suffix_ids = try lf.copyU32(self.gpa, "frame.suffix_ids");
 
-        const lex_cal_f32 = try loadMatrixMaybeQ8(&lf, self.gpa, "w.lex.cal", lex_cal, arch.hidden);
-        errdefer self.gpa.free(lex_cal_f32);
-        self.w_lex = .{
-            .dim = arch.hidden,
-            .k_pcs = lex_k,
-            .n_cal = lex_cal,
-            .mean = try lf.copyF32(self.gpa, "w.lex.mean", arch.hidden),
-            .basis = try lf.copyF32(self.gpa, "w.lex.basis", lex_k * arch.hidden),
-            .cal_tokens = lex_cal_f32,
-            .norm_floor = lex_floor,
-        };
-        const sem_cal_f32 = try loadMatrixMaybeQ8(&lf, self.gpa, "w.sem.cal", sem_cal, arch.hidden);
-        errdefer self.gpa.free(sem_cal_f32);
-        self.w_sem = .{
-            .dim = arch.hidden,
-            .k_pcs = sem_k,
-            .n_cal = sem_cal,
-            .mean = try lf.copyF32(self.gpa, "w.sem.mean", arch.hidden),
-            .basis = try lf.copyF32(self.gpa, "w.sem.basis", sem_k * arch.hidden),
-            .cal_tokens = sem_cal_f32,
-            .norm_floor = sem_floor,
-        };
+        // each read whole before the bank owns it: from then on only clearMemory frees it
+        self.w_lex = try loadWhitener(&lf, self.gpa, "w.lex", lex_k, lex_cal, lex_floor, arch.hidden);
+        self.w_sem = try loadWhitener(&lf, self.gpa, "w.sem", sem_k, sem_cal, sem_floor, arch.hidden);
 
         // Recompile static prefix_state on load for v4/v6 (0 bytes on disk!); read from disk for legacy v3
-        var pref = try RawState.init(self.gpa, arch, @intCast(prefix_len));
-        errdefer pref.deinit(self.gpa);
+        self.prefix_state = try self.loadPrefix(&lf, prefix_len);
         var name_buf: [96]u8 = undefined;
-        if (lf.getTensor("p.kv.0.k") != null) {
-            const p_kv_elems = arch.kvLayerElems(prefix_len);
-            for (0..arch.num_attn) |l| {
-                const tk = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.kv.{d}.k", .{l})) orelse return error.MissingTensor;
-                if (tk.bytes.len != p_kv_elems * 2) return error.BadTensorShape;
-                @memcpy(std.mem.sliceAsBytes(pref.kv_k[l]), tk.bytes);
-                const tv = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.kv.{d}.v", .{l})) orelse return error.MissingTensor;
-                if (tv.bytes.len != p_kv_elems * 2) return error.BadTensorShape;
-                @memcpy(std.mem.sliceAsBytes(pref.kv_v[l]), tv.bytes);
-            }
-            const st_elems = arch.recStateElems();
-            for (0..arch.num_rec) |r| {
-                const ts = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.rec.{d}.st", .{r})) orelse return error.MissingTensor;
-                if (ts.bytes.len != st_elems * 4) return error.BadTensorShape;
-                @memcpy(std.mem.sliceAsBytes(pref.rec_state[r]), ts.bytes);
-                const tc = lf.getTensor(try std.fmt.bufPrint(&name_buf, "p.rec.{d}.cv", .{r})) orelse return error.MissingTensor;
-                if (tc.bytes.len != arch.conv_elems * 2) return error.BadTensorShape;
-                @memcpy(std.mem.sliceAsBytes(pref.rec_conv[r]), tc.bytes);
-            }
-        } else {
-            if (self.prefix_ids.len != prefix_len) return error.BadLivingWeights;
-            try self.backend.compileState(self.backend.ctx, null, self.prefix_ids, &pref);
-        }
-        self.prefix_state = pref;
 
         // Optional sleep-time consolidated spectral skill steering
         const skill_rk: u16 = if (lf.getMeta("skill_rk")) |s| (std.fmt.parseInt(u16, s, 10) catch 0) else 0;
@@ -1574,10 +1576,13 @@ pub const Bank = struct {
                     var ua = std.heap.ArenaAllocator.init(self.gpa);
                     defer ua.deinit();
                     const up = std.json.parseFromSliceLeaky(std.json.Value, ua.allocator(), uj, .{}) catch continue;
-                    const u = loadUnitFromObject(self.gpa, &dlf, arch, up, 0) catch continue;
+                    var u = loadUnitFromObject(self.gpa, &dlf, arch, up, 0) catch continue;
                     if (u.unit_id >= self.next_unit_id) self.next_unit_id = u.unit_id + 1;
                     if (u.gate.epoch >= self.next_epoch) self.next_epoch = u.gate.epoch + 1;
-                    try self.units.append(self.gpa, u);
+                    self.units.append(self.gpa, u) catch |e| {
+                        u.deinit(self.gpa); // not the bank's yet: freed here, once
+                        return e;
+                    };
                 },
                 .forget_parent => {
                     if (fr.payload.len >= 4) {
@@ -1803,8 +1808,12 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
         .superseded_by = sup,
         .reinforcements = rf,
     };
-    errdefer ug.deinit(gpa);
-    try ug.computeSummaries(gpa);
+    // its four arrays stay this function's cleanups' to free: a failure frees only the summaries the gate made
+    ug.computeSummaries(gpa) catch |e| {
+        if (ug.lex_summary.len > 0) gpa.free(ug.lex_summary);
+        if (ug.sem_summary.len > 0) gpa.free(ug.sem_summary);
+        return e;
+    };
 
     return .{
         .unit_id = uid,
@@ -1814,6 +1823,16 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
         .kv = kv,
         .rec = rec,
     };
+}
+
+/// A saved whitener read whole; on failure nothing it read is kept, on success the caller owns every array.
+fn loadWhitener(lf: *const store.LoadedFile, gpa: Allocator, comptime name: []const u8, k: usize, n_cal: usize, floor: f32, hidden: usize) !whitener.LayerWhitener {
+    const cal = try loadMatrixMaybeQ8(lf, gpa, name ++ ".cal", n_cal, hidden);
+    errdefer gpa.free(cal);
+    const mean = try lf.copyF32(gpa, name ++ ".mean", hidden);
+    errdefer gpa.free(mean);
+    const basis = try lf.copyF32(gpa, name ++ ".basis", k * hidden);
+    return .{ .dim = hidden, .k_pcs = k, .n_cal = n_cal, .mean = mean, .basis = basis, .cal_tokens = cal, .norm_floor = floor };
 }
 
 fn loadMatrixMaybeQ8(lf: *const store.LoadedFile, gpa: Allocator, base: []const u8, rows: usize, cols: usize) ![]f32 {
