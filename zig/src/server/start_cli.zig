@@ -189,8 +189,8 @@ fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?
     try say(ctx.err, "Loading {s}; Ctrl-C cancels", .{choice.entry.repo});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, 1, "{s}", .{try credentials.redact(ctx.a, problem)});
-        try lastLines(ctx, tail, credentials);
+        const code = try fail(ctx, 1, "{s}", .{(try credentials.safe(ctx.a, problem)) orelse ""});
+        try lastLines(ctx, tail);
         return code;
     };
     errdefer _ = own.managed.stop();
@@ -205,7 +205,7 @@ fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?
         return 0;
     }
     try say(ctx.out, "Serving {s} at {s}/v1; Ctrl-C stops the server", .{ own.served, own.managed.base() });
-    return wait(ctx, &own, credentials);
+    return wait(ctx, &own);
 }
 
 /// One deterministic short request proves answer content, not only a listening socket.
@@ -226,7 +226,7 @@ fn firstReply(ctx: *const Context, own: *Child, credentials: turn.Credentials) !
 }
 
 /// Keep the checked server in the foreground until a signal or its own exit.
-fn wait(ctx: *const Context, own: *Child, credentials: turn.Credentials) !u8 {
+fn wait(ctx: *const Context, own: *Child) !u8 {
     while (true) {
         if (stop.requested()) |sig| {
             if (own.managed.stop()) |why| try say(ctx.err, "tensorfold start: {s}", .{why});
@@ -234,17 +234,17 @@ fn wait(ctx: *const Context, own: *Child, credentials: turn.Credentials) !u8 {
         }
         if (try own.managed.exitedTail(ctx.a)) |tail| {
             const code = try fail(ctx, 1, "the model server exited after its successful first reply", .{});
-            try lastLines(ctx, tail, credentials);
+            try lastLines(ctx, tail);
             return code;
         }
         ctx.io.sleep(.fromMilliseconds(200), .awake) catch {};
     }
 }
 
-fn lastLines(ctx: *const Context, tail: []const []const u8, credentials: turn.Credentials) !void {
-    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{try credentials.redact(ctx.a, tail[0])});
+fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
+    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{tail[0]});
     if (tail.len > 1) try ctx.err.writeAll("Last server log lines:\n");
-    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{try credentials.redact(ctx.a, line)});
+    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{line});
     try ctx.err.flush();
 }
 

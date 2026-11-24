@@ -32,13 +32,19 @@ pub const Credentials = struct {
         return .{ .forms = forms.items };
     }
 
-    pub fn redact(c: Credentials, a: Allocator, text: []const u8) ![]const u8 {
-        return sse.redact(a, text, c.forms);
+    /// Sanitize and redact without truncating; null means consume and suppress.
+    pub fn safe(c: Credentials, a: Allocator, text: []const u8) !?[]const u8 {
+        return sse.redactContained(a, text, c.forms);
     }
 
-    /// Remove secrets before control cleaning and byte limiting can hide a suffix or split a match.
-    pub fn clean(c: Credentials, a: Allocator, text: []const u8, limit: usize) ![]const u8 {
-        return sse.clean(a, try c.redact(a, text), limit);
+    /// Sanitize before matching, redact before limiting, and contain the final candidate.
+    pub fn clean(c: Credentials, a: Allocator, text: []const u8, limit: usize) !?[]const u8 {
+        return sse.cleanContained(a, text, c.forms, limit);
+    }
+
+    /// Containment-only validation for a composed or already-safe candidate.
+    pub fn check(c: Credentials, a: Allocator, text: []const u8) ![]const u8 {
+        return sse.suppress(a, text, c.forms);
     }
 };
 
@@ -93,7 +99,7 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credenti
     }
     if (x.failure) |f| {
         const reason = try x.reason(f, url);
-        return .{ .failed = .{ .reason = try credentials.redact(a, reason), .connect = f == .connect, .status = x.status } };
+        return .{ .failed = .{ .reason = try credentials.check(a, reason), .connect = f == .connect, .status = x.status } };
     }
     if (r.failure) |why| return .{ .failed = .{ .reason = why } };
     if (!r.complete()) return .{ .failed = .{ .reason = "the server closed the stream before the reply finished" } };
@@ -176,7 +182,13 @@ const Exchange = struct {
             .connect => try std.fmt.allocPrint(x.a, "could not reach the server at {s}", .{url}),
             .lost => "the connection to the server broke during the reply",
             .http => try sse.refusalRedacted(x.a, x.status, x.refused, x.credentials.forms),
-            .not_events => try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{try x.credentials.clean(x.a, x.content_type, sse.line_limit)}),
+            .not_events => blk: {
+                const text = (try x.credentials.clean(x.a, x.content_type, sse.line_limit)) orelse "";
+                break :blk if (text.len == 0)
+                    "the server did not answer with an event stream"
+                else
+                    try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{text});
+            },
             .stream => "the server sent a malformed event stream",
             .output => "could not write the reply",
         };
