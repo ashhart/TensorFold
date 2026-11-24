@@ -293,7 +293,8 @@ test "remote prefix: a request a closed host refuses starts no remote fill" {
     defer peer.kept.deinit(t.allocator);
     host.remote = .{ .ptr = &peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     try host.start();
-    host.stop();
+    defer host.stop();
+    host.halt("the test closed it"); // the production close: closing is set and the host's lists stay live for the refusal
     var seen: Seen = .{};
     try t.expectError(error.Closed, host.engine().submit(1, &.{ .prompt = &six, .max_tokens = 2 }, .{ .ctx = &seen, .event = Seen.event }));
     try t.expectEqual(@as(u32, 0), peer.fills);
