@@ -31,6 +31,8 @@ pub const Pipelines = struct {
     logits_r32: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
+    dense4: [6]mtl.Pipeline,
+    dense6: [6]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.glue);
@@ -38,10 +40,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [19]mtl.Pipeline = undefined;
-        var made: usize = 0;
-        errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for ([_][]const u8{
+        const pipes = try loadSet(19, device, lib, .{
             "tf_inkling2_embed_norm",
             "tf_inkling2_ar",
             "tf_inkling2_cached_ar",
@@ -61,11 +60,11 @@ pub const Pipelines = struct {
             "tf_inkling2_coalesced_logits_r8",
             "tf_inkling2_coalesced_logits_r16",
             "tf_inkling2_coalesced_logits_r32",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
-            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
-            made += 1;
-            if (pipe.maxThreads() < req_threads) return error.GlueThreads;
-        }
+        }, .{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 });
+        errdefer for (pipes) |pipe| pipe.deinit();
+        const d4 = try loadSet(6, device, lib, denseNames(4), @splat(256));
+        errdefer for (d4) |pipe| pipe.deinit();
+        const d6 = try loadSet(6, device, lib, denseNames(6), @splat(256));
         return .{
             .embed_norm = pipes[0],
             .ar = pipes[1],
@@ -86,10 +85,32 @@ pub const Pipelines = struct {
             .logits_r8 = pipes[16],
             .logits_r16 = pipes[17],
             .logits_r32 = pipes[18],
+            .dense4 = d4,
+            .dense6 = d6,
         };
     }
+    fn loadSet(comptime N: usize, device: mtl.Device, lib: mtl.Library, names: [N][:0]const u8, req_threads: [N]usize) ![N]mtl.Pipeline {
+        var pipes: [N]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |pipe| pipe.deinit();
+        for (names, req_threads, &pipes) |name, req, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+            made += 1;
+            if (pipe.maxThreads() < req) return error.GlueThreads;
+        }
+        return pipes;
+    }
+    fn denseNames(comptime segs: u8) [6][:0]const u8 {
+        const tag = if (segs == 4) "tf_ink2_dense4_" else "tf_ink2_dense6_";
+        return .{ tag ++ "1", tag ++ "2", tag ++ "4", tag ++ "8", tag ++ "16", tag ++ "32" };
+    }
     pub fn deinit(p: *Pipelines) void {
-        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
+        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| {
+            const f = @field(p, name);
+            if (@typeInfo(@TypeOf(f)) == .array) {
+                for (&@field(p, name)) |*pipe| pipe.deinit();
+            } else @field(p, name).deinit();
+        }
     }
 };
 
@@ -254,4 +275,47 @@ pub fn expertCombine(p: *const Pipelines, e: mtl.ComputeEncoder, picked: Ref, we
     inline for (.{ picked, weights, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ExpertArgs{ .rows = rows, .channels = channels }, 3);
     e.dispatchThreads(mtl.Size.of(channels, rows, 1), unit);
+}
+
+const DenseArgs = extern struct { rows: u32, k: u32, end: [6]u32 };
+
+fn denseVariant(rows: usize) usize {
+    if (rows <= 1) return 0;
+    if (rows <= 2) return 1;
+    if (rows <= 4) return 2;
+    if (rows <= 8) return 3;
+    if (rows <= 16) return 4;
+    return 5;
+}
+
+fn denseDispatch(pipes: *const [6]mtl.Pipeline, e: mtl.ComputeEncoder, comptime nx: usize, comptime ns: usize, x: [nx]Ref, w: [ns]Ref, n: [ns]u32, out: [ns]Ref, rows: u32, k: u32) void {
+    std.debug.assert(rows > 0 and k > 0 and k % 8 == 0);
+    var end: [6]u32 = .{ 0, 0, 0, 0, 0, 0 };
+    var total: u32 = 0;
+    inline for (0..ns) |i| {
+        std.debug.assert(n[i] > 0);
+        total += n[i];
+        end[i] = total;
+    }
+    var base: usize = 0;
+    while (base < rows) {
+        const take: usize = @min(@as(usize, rows) - base, 32);
+        e.setPipeline(pipes[denseVariant(take)]);
+        inline for (x, 0..) |xi, idx| e.setBuffer(xi.buf, xi.off + base * @as(usize, k) * 2, idx);
+        inline for (w, 0..) |wi, idx| e.setBuffer(wi.buf, wi.off, nx + idx);
+        inline for (0..ns) |idx| e.setBuffer(out[idx].buf, out[idx].off + base * @as(usize, n[idx]) * 2, nx + ns + idx);
+        e.setValue(DenseArgs{ .rows = @intCast(take), .k = k, .end = end }, nx + ns * 2);
+        e.dispatchGroups(mtl.Size.of((@as(usize, total) + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+        base += take;
+    }
+}
+
+/// Fuses 4 shared-input BF16 projections (`wq | wr | sink | gate`) in one sp_matvec-order dispatch.
+pub fn dense4(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: [4]Ref, n: [4]u32, out: [4]Ref, rows: u32, k: u32) void {
+    denseDispatch(&p.dense4, e, 1, 4, .{x}, w, n, out, rows, k);
+}
+
+/// Fuses 6 projections (`0..3` from `xq`, `4` from `xk`, `5` from `xv`) in one sp_matvec-order dispatch.
+pub fn dense6(p: *const Pipelines, e: mtl.ComputeEncoder, xq: Ref, xk: Ref, xv: Ref, w: [6]Ref, n: [6]u32, out: [6]Ref, rows: u32, k: u32) void {
+    denseDispatch(&p.dense6, e, 3, 6, .{ xq, xk, xv }, w, n, out, rows, k);
 }

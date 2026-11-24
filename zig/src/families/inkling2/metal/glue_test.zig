@@ -42,8 +42,28 @@ test "the split router's two launches follow the kinds' records, one symbol and 
     }
 }
 
+test "the twelve multi-segment dense launches follow split, one symbol and 256-thread record each" {
+    const dense_records = records[std.enums.values(p.Kind).len + 2 ..][0..12];
+    const symbols = [_][]const u8{
+        "tf_ink2_dense4_1", "tf_ink2_dense4_2",  "tf_ink2_dense4_4",
+        "tf_ink2_dense4_8", "tf_ink2_dense4_16", "tf_ink2_dense4_32",
+        "tf_ink2_dense6_1", "tf_ink2_dense6_2",  "tf_ink2_dense6_4",
+        "tf_ink2_dense6_8", "tf_ink2_dense6_16", "tf_ink2_dense6_32",
+    };
+    try t.expectEqual(symbols.len, dense_records.len);
+    for (dense_records, symbols) |record, symbol| {
+        try t.expect(std.mem.endsWith(u8, record.name, symbol));
+        var buf: [40]u8 = undefined;
+        const quoted = try std.fmt.bufPrint(&buf, "\"{s}\"", .{symbol});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, quoted));
+        try t.expectEqual(@as(u32, 256), record.threads);
+        try t.expectEqual(@as(u32, 0), record.tg_memory);
+        try t.expectEqual(record.threads, record.reserved);
+    }
+}
+
 test "coalesced multi-row logits kernels have unique records, valid tg memory and matching thread caps" {
-    const coalesced = records[std.enums.values(p.Kind).len + 2 ..];
+    const coalesced = records[std.enums.values(p.Kind).len + 14 ..];
     try t.expectEqual(@as(usize, 4), coalesced.len);
     const Expect = struct { symbol: []const u8, threads: u32, tg_memory: u32 };
     const want = [_]Expect{
