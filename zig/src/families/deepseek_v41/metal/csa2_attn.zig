@@ -21,6 +21,10 @@ pub const Meta = extern struct { pos: i32, wofs: i32, wbase: i32, cofs: i32, nco
 
 pub const Call = struct { rows: u32, heads: u32, out: Out = .bf16 };
 
+/// One DSpark ask's bidirectional block-attention record (matches dspark_attn.metal TfDsparkAttnAsk).
+pub const DsparkAsk = extern struct { base: u32, first_mod: u32, ctx_count: u32, start_pos: u32 };
+const DsparkArgs = extern struct { asks: u32, n: u32, heads: u32, window: u32, scale: f32, pad: u32 = 0 };
+
 const Args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 = 0 };
 const dec_names = [_][:0]const u8{ "tf_dsv41_attn_dec_f32", "tf_dsv41_attn_dec_bf16" };
 const pf_names = [_][:0]const u8{ "tf_dsv41_attn_dec_pf_f32", "tf_dsv41_attn_dec_pf_bf16" };
@@ -35,9 +39,26 @@ pub const Pipelines = struct {
     pre: [2]mtl.Pipeline,
     /// bf16 decode rows of several slots (segs.zig's table): without and with the key prefetch
     segs: [2]mtl.Pipeline,
+    /// dedicated DSpark bidirectional block attention (null when loaded without DSpark)
+    dspark: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.csa2_attn);
+    }
+
+    /// Load CSA2 attention pipelines plus the DSpark bidirectional block-attention kernel.
+    pub fn loadWithDspark(device: mtl.Device) !Pipelines {
+        var p = try load(device);
+        errdefer p.deinit();
+        p.dspark = try loadDsparkSource(device, sources.dsv41.dspark_attn);
+        return p;
+    }
+
+    /// Compile the DSpark bidirectional block-attention pipeline from `text` (used by contract controls).
+    pub fn loadDsparkSource(device: mtl.Device, text: []const u8) !mtl.Pipeline {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        return mtl.Pipeline.init(device, lib, "tf_dsv41_attn_dspark_bf16", false);
     }
 
     /// The same kernels from other text: the contract's planted controls prefix a TF_CTL define.
@@ -49,6 +70,7 @@ pub const Pipelines = struct {
         for (pf_names, 0..) |name, i| p.pf[i] = try mtl.Pipeline.init(device, lib, name, false);
         for (pre_names, 0..) |name, i| p.pre[i] = try mtl.Pipeline.init(device, lib, name, false);
         for (seg_names, 0..) |name, i| p.segs[i] = try mtl.Pipeline.init(device, lib, name, false);
+        p.dspark = null;
         return p;
     }
 
@@ -57,6 +79,7 @@ pub const Pipelines = struct {
         for (p.pf) |x| x.deinit();
         for (p.pre) |x| x.deinit();
         for (p.segs) |x| x.deinit();
+        if (p.dspark) |d| d.deinit();
     }
 };
 
@@ -109,4 +132,19 @@ pub fn encodePrompt(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call
     bind(e, b, c);
     const per = prompt_heads_per_sg * prompt_head_groups;
     e.dispatchGroups(mtl.Size.of((c.rows + prompt_rows - 1) / prompt_rows, (c.heads + per - 1) / per, 1), mtl.Size.of(32 * prompt_rows * prompt_head_groups, 1, 1));
+}
+
+/// DSpark bidirectional block attention: `asks` blocks of `n` rows sharing each block's ring+block KV rows.
+pub fn encodeDspark(p: *const Pipelines, e: mtl.ComputeEncoder, q: Ref, ring: Ref, asks_ref: Ref, sk: Ref, cs: Ref, o: Ref, asks: u32, n: u32, heads: u32, win: u32) !void {
+    const dp = p.dspark orelse return error.BadAttnShape;
+    try encodeDsparkPipe(dp, e, q, ring, asks_ref, sk, cs, o, asks, n, heads, win);
+}
+
+/// Encode `tf_dsv41_attn_dspark_bf16` on an explicit pipeline handle (shared by runtime and contract tests).
+pub fn encodeDsparkPipe(dp: mtl.Pipeline, e: mtl.ComputeEncoder, q: Ref, ring: Ref, asks_ref: Ref, sk: Ref, cs: Ref, o: Ref, asks: u32, n: u32, heads: u32, win: u32) !void {
+    if (asks == 0 or n == 0 or n > 16 or heads == 0 or win == 0) return error.BadAttnShape;
+    e.setPipeline(dp);
+    for ([_]Ref{ q, ring, asks_ref, sk, cs, o }, 0..) |r, idx| e.setBuffer(r.buf, r.off, idx);
+    e.setValue(DsparkArgs{ .asks = asks, .n = n, .heads = heads, .window = win, .scale = scale() }, 6);
+    e.dispatchGroups(mtl.Size.of(heads, asks, 1), mtl.Size.of(32 * n, 1, 1));
 }

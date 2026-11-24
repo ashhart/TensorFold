@@ -55,13 +55,14 @@ pub const Run = struct {
 pub const Plan = struct {
     buf: mtl.Buffer,
 
-    const pos = 0;
-    const bdest = max_rows;
+    pub const pos = 0;
+    pub const bdest = max_rows;
     pub const ipos = 2 * max_rows;
     pub const idest = 3 * max_rows;
     const meta = 4 * max_rows;
     const sel = meta + 8 * max_rows;
-    pub const ints = sel + max_rows * attn.max_selected;
+    pub const asks = sel + max_rows * attn.max_selected;
+    pub const ints = asks + 4 * max_rows;
 
     pub fn init(device: mtl.Device) !Plan {
         const buf = try device.buffer(4 * ints, mtl.ResourceOptions.shared);
@@ -81,9 +82,9 @@ pub const Plan = struct {
         return p.buf.slice(i32, ints);
     }
 
-    /// Row positions (RoPE), the pool rows the rows' keys land in, attention rows, and the selected keys of each row.
-    pub fn refs(p: *const Plan) struct { pos: Ref, dest: Ref, meta: Ref, sel: Ref } {
-        return .{ .pos = p.at(pos), .dest = p.at(bdest), .meta = p.at(meta), .sel = p.at(sel) };
+    /// Row positions (RoPE), pool rows for keys, attention rows, selected keys, and compact DSpark ask records.
+    pub fn refs(p: *const Plan) struct { pos: Ref, dest: Ref, meta: Ref, sel: Ref, asks: Ref } {
+        return .{ .pos = p.at(pos), .dest = p.at(bdest), .meta = p.at(meta), .sel = p.at(sel), .asks = p.at(asks) };
     }
 
     /// Ingest rows: positions and ring rows (`slot`'s), `n` rows from `start`.
@@ -118,6 +119,13 @@ pub const Plan = struct {
         if (cx.count + n - 1 > attn.max_selected) return error.ContextWidth;
         for (1..n) |i| list[cx.count + i - 1] = @intCast(c.window + i);
         const base: i32 = @intCast(slot * poolRows(c));
+        const drec: attn.DsparkAsk = .{
+            .base = slot * poolRows(c),
+            .first_mod = @intCast(cx.first % c.window),
+            .ctx_count = cx.count,
+            .start_pos = @intCast(start),
+        };
+        @memcpy(m[asks + 4 * j ..][0..4], @as(*const [4]i32, @ptrCast(&drec)));
         for (0..n) |i| {
             const r = row0 + i;
             m[pos + r] = @intCast(start + i);
