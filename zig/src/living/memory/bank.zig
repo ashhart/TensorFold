@@ -286,6 +286,7 @@ pub const Bank = struct {
     base_saved: bool = false,
     pending_deltas: u32 = 0,
     unflushed_from: usize = 0,
+    journal_gen: u64 = 0, // the base file's generation: only a journal of the same one is replayed onto it
     last_bytes: u64 = 0,
     route_cfg: gate.RouteConfig = .{},
 
@@ -1252,10 +1253,11 @@ pub const Bank = struct {
             const dpath = try self.deltaPath(self.gpa);
             defer self.gpa.free(dpath);
             var delta_total: u64 = 0;
-            for (self.units.items[self.unflushed_from..]) |*u| {
-                const blob = try self.serializeSingleUnit(self.gpa, u);
+            // each unit counts as flushed once its frame is durable: a retry after a failure appends no unit twice
+            while (self.unflushed_from < self.units.items.len) : (self.unflushed_from += 1) {
+                const blob = try self.serializeSingleUnit(self.gpa, &self.units.items[self.unflushed_from]);
                 defer self.gpa.free(blob);
-                delta_total = try store.appendDeltaFrame(self.io, dpath, .add_unit, blob);
+                delta_total = try store.appendDeltaFrame(self.gpa, self.io, dpath, self.journal_gen, .add_unit, blob);
                 self.pending_deltas += 1;
             }
             self.unflushed_from = self.units.items.len;
@@ -1283,7 +1285,7 @@ pub const Bank = struct {
             std.mem.writeInt(u32, buf[0..4], pid_a, .little);
             std.mem.writeInt(u32, buf[4..8], pid_b, .little);
             const payload = if (op == .supersede_parent) buf[0..8] else buf[0..4];
-            const delta_total = try store.appendDeltaFrame(self.io, dpath, op, payload);
+            const delta_total = try store.appendDeltaFrame(self.gpa, self.io, dpath, self.journal_gen, op, payload);
             self.pending_deltas += 1;
             const path = try self.filePath(self.gpa);
             defer self.gpa.free(path);
@@ -1375,6 +1377,7 @@ pub const Bank = struct {
             .{ .key = "sem_floor", .value = try std.fmt.allocPrint(a, "{d:.8}", .{ws.norm_floor}) },
             .{ .key = "next_uid", .value = try std.fmt.allocPrint(a, "{d}", .{self.next_unit_id}) },
             .{ .key = "next_epoch", .value = try std.fmt.allocPrint(a, "{d}", .{self.next_epoch}) },
+            .{ .key = "journal_gen", .value = try std.fmt.allocPrint(a, "{d}", .{self.journal_gen + 1}) },
             .{ .key = "skill_rk", .value = try std.fmt.allocPrint(a, "{d}", .{skill_rk}) },
             .{ .key = "skill_pols", .value = try std.fmt.allocPrint(a, "{d}", .{self.skill_policy_count}) },
             .{ .key = "units", .value = unit_meta.items },
@@ -1422,6 +1425,7 @@ pub const Bank = struct {
         }
 
         const nbytes = try store.writeFileAtomic(self.gpa, self.io, path, &meta, tensors.items);
+        self.journal_gen += 1; // the old journal's frames are in this base: if its delete fails, it is never replayed
         Io.Dir.cwd().deleteFile(self.io, dpath) catch {};
         self.base_saved = true;
         self.pending_deltas = 0;
@@ -1498,6 +1502,7 @@ pub const Bank = struct {
         const sem_floor = try parseF32Meta(&lf, "sem_floor");
         self.next_unit_id = @intCast(try parseUsizeMeta(&lf, "next_uid"));
         self.next_epoch = if (lf.getMeta("next_epoch")) |s| (std.fmt.parseInt(u64, s, 10) catch 1) else 1;
+        self.journal_gen = if (lf.getMeta("journal_gen")) |s| std.fmt.parseInt(u64, s, 10) catch return error.BadLivingWeights else 0;
 
         self.prefix_ids = try lf.copyU32(self.gpa, "frame.prefix_ids");
         self.suffix_ids = try lf.copyU32(self.gpa, "frame.suffix_ids");
@@ -1558,7 +1563,7 @@ pub const Bank = struct {
         // Replay any uncompacted crash-safe delta journal frames (`living-weights.delta`)!
         const dpath = try self.deltaPath(self.gpa);
         defer self.gpa.free(dpath);
-        const frames = try store.readDeltaFrames(self.gpa, self.io, dpath);
+        const frames = try store.readDeltaFrames(self.gpa, self.io, dpath, self.journal_gen);
         defer {
             for (frames) |*fr| fr.deinit(self.gpa);
             self.gpa.free(frames);
@@ -1607,6 +1612,7 @@ pub const Bank = struct {
                         _ = self.reinforceParent(pid);
                     }
                 },
+                .generation => {}, // only a journal's first frame, which the read checks and does not return
             }
             self.pending_deltas += 1;
             self.last_bytes += fr.payload.len + 24;
