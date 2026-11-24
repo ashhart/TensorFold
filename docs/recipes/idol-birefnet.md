@@ -50,10 +50,10 @@ The port therefore computes everything in fp32:
 The host's steps are exact:
 
 - PNG and WebP decoding as Pillow 13.0.0 decodes them;
-- LANCZOS with Pillow's double-precision coefficients and 22-bit fixed point;
+- LANCZOS through `core/picture/resample.zig`'s shared Lanczos-3, which gives Pillow 13's bytes;
 - the RGBa premultiply and its inverse;
 - `MinFilter`;
-- the paste's `MULDIV255`;
+- the paste's `v * a / 255`, rounded;
 - Python's `round` and `int`;
 - torch's CPU bilinear as it computes it, `fma(t0, w0, t1 * w1)` along each axis;
 - the alpha's fp32 sigmoid, bilinear and truncation as torch computes them on MPS.
