@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
+
 - CUDA: an `sm_110` product target serves Qwen3.8-27B text on one Thor GPU (MLX 4-bit and NVFP4, with DFlash2) and refuses any other geometry (#4796). Thanks @IF-YFXJ.
 
 - OCR: `POST /ocr` now answers LiteParse's OCR server contract, with one text item per line and its box in page pixels (#2573). Thanks @laudney.
