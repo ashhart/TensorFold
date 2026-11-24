@@ -64,6 +64,7 @@ function rows(node: any) { return all(node, (item) => item.type === placeholders
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise<void>((resolve) => setImmediate(resolve)) }
 let node = render(); await settle(); node = render()
 assert.equal(button(node, 'My models').props['aria-selected'], true)
+assert.equal(button(node, 'My models').props['aria-label'], undefined, 'visible My models tab text and count supply its name')
 button(node, 'Compute and clusters').props.onClick(); node = render(); assert.ok(component(node, 'ClusterWorkspace')); component(node, 'ClusterWorkspace').props.onCloseBlockedChange(true); node = render(); assert.equal(component(node, 'ModelsDrawer').props.closeDisabled, true); component(node, 'ClusterWorkspace').props.onCloseBlockedChange(false); node = render(); component(node, 'ModelsDrawer').props.onClose(); node = render(); assert.equal(component(node, 'ClusterWorkspace'), undefined)
 assert.equal(component(node, 'EngineRuntimePanel').props.compact, true)
 assert.equal(component(node, 'EngineApiPanel'), undefined, 'API credentials view is not mounted while the library is open')
@@ -72,8 +73,9 @@ const libraryPanel = all(node, (entry) => entry.props?.id === 'local-panel-Model
 assert.equal(component(libraryPanel, 'ModelRecommendationPanel'), undefined, 'recommendations do not displace a populated library')
 rows(node)[0].props.onFavorite(); assert.equal(calls.at(-1)[0], 'star'); assert.equal(calls.some((call) => call[0] === 'use'), false)
 rows(node)[0].props.onSettings(); node = render(); assert.equal(component(node, 'ModelDetailsDrawer').props.model.repo, 'fixture/Nemotron'); component(node, 'ModelDetailsDrawer').props.onClose(); node = render()
-button(node, 'Show favourite models only').props.onClick(); node = render(); assert.equal(rows(node).length, 1)
-button(node, 'Show favourite models only').props.onClick(); node = render()
+assert.equal(button(node, 'Favourites').props['aria-label'], undefined, 'visible Favourites text supplies its name')
+button(node, 'Favourites').props.onClick(); node = render(); assert.equal(rows(node).length, 1)
+button(node, 'Favourites').props.onClick(); node = render()
 const search = all(node, (entry) => entry.type === Input && entry.props['aria-label'] === 'Search your models')[0]
 search.props.onChange({ target: { value: 'qwen' } }); node = render(); assert.deepEqual(rows(node).map((entry) => entry.props.model.repo), ['fixture/Qwen'])
 search.props.onChange({ target: { value: '' } }); node = render()
