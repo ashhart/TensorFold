@@ -149,7 +149,8 @@ pub const Probe = struct {
         const n = p.shape.n;
         var base: usize = 0;
         while (base < rows) {
-            const take: usize = @min(rows - base, 32);
+            const left = rows - base;
+            const take: usize = if (left >= 32) 32 else if (left >= 16) 16 else if (left >= 8) 8 else if (left >= 4) 4 else if (left >= 2) 2 else 1;
             const variant: usize = if (take > 16) 5 else if (take > 8) 4 else if (take > 4) 3 else if (take > 2) 2 else if (take > 1) 1 else 0;
             e.setPipeline(p.matvec[variant]);
             e.setBuffer(p.refs[0].buf, p.refs[0].off + base * k * 2, 0);

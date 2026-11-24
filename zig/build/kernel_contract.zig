@@ -149,7 +149,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
-pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module) void {
+pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module, test_step: *std.Build.Step) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
     @import("ling_forward.zig").steps(b, target, optimize, metal_mod, sources, kimi_metallib);
     const inkling2_metal = engine.import_table.get("inkling2_metal").?;
@@ -224,6 +224,26 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     }) });
     b.step("test-ling-mla-gpu", "Ling MLA mixer on this GPU around k3_mla, against mla.zig").dependOn(&b.addRunArtifact(ling_mla_gpu).step);
+    // Inkling 2 Mini's dense-MMA tail: a partial row tile reads no row past its input, and its bits equal the matvec's.
+    const dense_guard = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_inkling2_dense_guard.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "kernel_sources", .module = sources },
+        },
+    }) });
+    const dense_guard_run = b.addRunArtifact(dense_guard);
+    dense_guard_run.has_side_effects = true; // a device run: never cached
+    // The GPU faults on an out-of-bounds read only with Metal's shader validation; it aborts on the fault.
+    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION", "1");
+    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1");
+    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION_ABORT_ON_FAULT", "1");
+    b.step("test-inkling2-dense-guard", "Inkling 2 Mini's dense-MMA tail: no read past a partial tile's input, bits equal the matvec's").dependOn(&dense_guard_run.step);
+    test_step.dependOn(&dense_guard_run.step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
