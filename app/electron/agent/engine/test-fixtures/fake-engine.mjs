@@ -26,12 +26,29 @@ function repoDir(repo) {
   return path.join(hub(), `models--${owner}--${name}`)
 }
 
+// The engine's own snapshot rule, as zig/src/cli/hub.zig cachedSnapshot: refs/main's revision when that
+// snapshot is on disk, else the newest snapshot directory holding a config.json.
 function snapshot(repo) {
+  const root = repoDir(repo)
   try {
-    const ref = readFileSync(path.join(repoDir(repo), 'refs', 'main'), 'utf8').trim()
-    const dir = path.join(repoDir(repo), 'snapshots', ref)
-    return existsSync(path.join(dir, 'config.json')) ? dir : null
-  } catch { return null }
+    const ref = readFileSync(path.join(root, 'refs', 'main'), 'utf8').trim()
+    if (/^[0-9a-fA-F]{40}$/.test(ref)) {
+      const dir = path.join(root, 'snapshots', ref)
+      if (existsSync(path.join(dir, 'config.json'))) return dir
+    }
+  } catch { /* no usable ref */ }
+  const snapshots = path.join(root, 'snapshots')
+  let newest = null
+  let newestMtime = -1
+  try {
+    for (const name of readdirSync(snapshots)) {
+      const dir = path.join(snapshots, name)
+      if (!existsSync(path.join(dir, 'config.json'))) continue
+      const mtime = statSync(dir).mtimeMs
+      if (mtime > newestMtime) { newestMtime = mtime; newest = dir }
+    }
+  } catch { /* no snapshots folder */ }
+  return newest
 }
 
 function record(entry) {
@@ -73,7 +90,12 @@ function infoCommand(repo) {
   console.log(config.quantization ? `format: ${config.quantization.bits}-bit, group ${config.quantization.group_size}` : 'format: full precision')
   if (config.max_position_embeddings) console.log(`context: ${config.max_position_embeddings}`)
   console.log(`weights: ${(weights / gib).toFixed(2)} GiB (${weights} bytes)`)
-  console.log(`memory floor: ${((weights + 2 * gib) / gib).toFixed(2)} GiB (weights plus a 2.00 GiB runtime margin)`)
+  // FAKE_INFO_BUDGET prints engine 1.3.0's startup budget instead of the memory floor.
+  if (env.FAKE_INFO_BUDGET) {
+    console.log(`startup budget: ${((weights + 2 * gib) / gib).toFixed(2)} GiB at --context ${config.max_position_embeddings ?? 32768}: weights, 2 streams of KV and state, 512-row prompt scratch (no drafter or images)`)
+  } else {
+    console.log(`memory floor: ${((weights + 2 * gib) / gib).toFixed(2)} GiB (weights plus a 2.00 GiB runtime margin)`)
+  }
   return 0
 }
 

@@ -44,6 +44,46 @@ async function main() {
   ].join('\n')), /family: Qwen3\.8 Flash Next/)
   assert.throws(() => parseInfoOutput('Org/X is not in the Hugging Face cache; run: tensorfold pull Org/X\n'), /not in the Hugging Face cache/)
 
+  // Engine 1.3.0 prints a startup budget instead of the memory floor for priced families. The budget
+  // already covers weights, KV/state and the runtime reserve, so the printed GiB figure is the floor.
+  const qwen27 = parseInfoOutput([
+    'family: Qwen3.8-27B (qwen3_5)',
+    'format: 4-bit, group 64',
+    'context: 262144',
+    'weights: 14.95 GiB (16054541349 bytes)',
+    'startup budget: 16.20 GiB at --context 262144: weights, 2 streams of KV and state, 512-row prompt scratch (no drafter or images)',
+    'this Mac: fits beside its 8.0 GiB Metal working set and an 2 GiB margin',
+  ].join('\n'))
+  assert.deepEqual(qwen27, { family: 'Qwen3.8-27B', modelType: 'qwen3_5', format: '4-bit, group 64', contextTokens: 262144, weightsBytes: 16054541349, memoryFloorBytes: Math.round(16.2 * 1024 ** 3) })
+  // Metal Flash Next prints the conservative plan plus a cold pack line the parser must ignore.
+  const flashNext = parseInfoOutput([
+    'family: Qwen3.8 Flash Next (qwen4_exp)',
+    'format: 4-bit, group 32',
+    'context: 262144',
+    'weights: 12.00 GiB (12884901888 bytes)',
+    'startup budget: 12.34 GiB (conservative raw/packed text weights, both prompt planes/selectors, KV/state, keepalive and 2 GiB runtime reserve; trained window)',
+    'cold pack budget: 14.56 GiB (source pages, one output phase and conversion scratch; skipped with a validated pack; vision and requested storage are additional at load)',
+  ].join('\n'))
+  assert.deepEqual(flashNext, { family: 'Qwen3.8 Flash Next', modelType: 'qwen4_exp', format: '4-bit, group 32', contextTokens: 262144, weightsBytes: 12884901888, memoryFloorBytes: Math.round(12.34 * 1024 ** 3) })
+  // An unpriced budget is still a parse failure, reported as the first printed line.
+  assert.throws(() => parseInfoOutput([
+    'family: Qwen3.8-27B (qwen3_5)',
+    'format: 4-bit, group 64',
+    'context: 262144',
+    'weights: 14.95 GiB (16054541349 bytes)',
+    'startup budget: not priced (--context is past this checkpoint\'s max_position_embeddings)',
+  ].join('\n')), /^Error: family: Qwen3\.8-27B \(qwen3_5\)$/)
+  // An unpriced budget with the floor still printed after it is the engine's exit-0 fallback: the floor wins.
+  const unpriced = parseInfoOutput([
+    'family: Qwen3.8-27B (qwen3_5)',
+    'format: 4-bit, group 64',
+    'context: 262144',
+    'weights: 14.95 GiB (16054541349 bytes)',
+    'startup budget: not priced (UnqualifiedQwenShape)',
+    'memory floor: 16.95 GiB (weights plus a 2.00 GiB runtime margin)',
+  ].join('\n'))
+  assert.equal(unpriced.memoryFloorBytes, 16054541349 + 2 * 1024 ** 3, 'the memory floor sizes an unpriced checkpoint')
+
   const caps = parseCapabilities('{"schema": 1, "engine": "zig", "version": "1.0.7", "chip": null, "backends": ["auto", "mlx"], "families": {"nemotron_h": ["mlx-q4g64"], "qwen3_5": ["mlx-q4g64"]}, "serve": {"flags": {"--host": {}, "--drafter": {}}}, "env": ["TENSORFOLD_API_KEY"]}\n')
   assert.deepEqual(caps.families, { nemotron_h: ['mlx-q4g64'], qwen3_5: ['mlx-q4g64'] })
   assert.deepEqual(caps.flags, ['--host', '--drafter'])

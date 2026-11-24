@@ -52,7 +52,8 @@ export async function seedModel(hub: string, repo: string, opts: { modelType?: s
     const prefix = Buffer.alloc(8); prefix.writeBigUInt64LE(BigInt(header.length))
     const fd = await fs.open(path.join(dir, 'blobs', 'weights'), 'w')
     try { await fd.write(Buffer.concat([prefix, header])); await fd.truncate(opts.bytes ?? 8192) } finally { await fd.close() }
-    const config = { model_type: opts.modelType ?? 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768 }
+    const config: Record<string, unknown> = { model_type: opts.modelType ?? (opts.dflash ? 'qwen3' : 'qwen3_5'), quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768 }
+    if (opts.dflash) config.dflash_config = {} // A drafter-only checkpoint, as the scanner must see it.
     await fs.writeFile(path.join(dir, 'blobs', 'config.json'), JSON.stringify(config))
     await fs.writeFile(path.join(dir, 'blobs', 'tokenizer.json'), JSON.stringify({ model: { type: 'BPE', vocab: {} } }))
     for (const file of ['config.json', 'tokenizer.json']) await fs.symlink(path.join(dir, 'blobs', file), path.join(snapshot, file))
