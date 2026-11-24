@@ -99,10 +99,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         return routes.sendValue(conn, a, 503, failure(a, message, "server_error", "model_unloaded") catch return);
     };
     const retain = retainFromBody(a, raw) catch |err| switch (err) {
-        // a body that cannot name retain (raw or escaped) is main's full flush even when its JSON cannot be read
-        error.OutOfMemory => if (std.mem.indexOf(u8, raw, "retain") == null and std.mem.indexOfScalar(u8, raw, '\\') == null) 0 else {
-            return conn.sendError(a, 500, "out of memory", null) catch {};
-        },
+        error.OutOfMemory => 0, // no retention count was read: main dropped the body and flushed all
         error.InvalidRetain => return routes.sendValue(conn, a, 400, failure(a, "retain must be a nonnegative 32-bit integer", "invalid_request_error", "invalid_request_error") catch return),
     };
     const got = answerRetaining(srv.gpa, srv.io, a, srv.engine, wait_ms, retain) catch return conn.sendError(a, 500, "out of memory", null) catch {};
