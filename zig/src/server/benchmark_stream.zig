@@ -343,16 +343,24 @@ pub const Fetched = struct {
     failed: enum { none, network, too_large, stopped, deadline } = .none,
 };
 
-/// Python's raw Authorization header: Unicode scalar values encoded as Latin-1, never raw UTF-8.
+/// Latin-1 uses Python's header bytes; other legacy UTF-8 keeps main's bytes, with C0 and DEL excluded.
 pub fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
     const prefix = "Bearer ";
     if (prefix.len + token.len > buf.len) return null;
     @memcpy(buf[0..prefix.len], prefix);
-    var view = std.unicode.Utf8View.init(token) catch return null;
+    var view = std.unicode.Utf8View.init(token) catch {
+        for (token) |ch| if (ch < 0x20 or ch == 0x7f) return null;
+        @memcpy(buf[prefix.len..][0..token.len], token);
+        return buf[0 .. prefix.len + token.len];
+    };
     var it = view.iterator();
     var n = prefix.len;
     while (it.nextCodepoint()) |cp| {
-        if (cp > 0xff or cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return null;
+        if (cp < 0x20 or cp == 0x7f) return null;
+        if (cp > 0xff or (cp >= 0x7f and cp <= 0x9f)) {
+            @memcpy(buf[prefix.len..][0..token.len], token);
+            return buf[0 .. prefix.len + token.len];
+        }
         buf[n] = @intCast(cp);
         n += 1;
     }

@@ -251,7 +251,7 @@ fn emptyDigest() [32]u8 {
     return out;
 }
 
-/// An API key is 1-256 bytes of UTF-8 whose scalars fit Latin-1 and exclude whitespace or controls.
+/// A managed-start key is 1-256 UTF-8 bytes whose scalars fit Latin-1 and exclude whitespace or controls.
 pub fn validKey(key: []const u8) bool {
     if (key.len == 0 or key.len > 256) return false;
     var view = std.unicode.Utf8View.init(key) catch return false;
@@ -260,9 +260,12 @@ pub fn validKey(key: []const u8) bool {
     return true;
 }
 
-/// SHA-256 of a key, or null when ``validKey`` rejects it.
+/// SHA-256 of a server key, preserving main's acceptance of any-length UTF-8 without C0 controls or Unicode whitespace.
 fn digest(key: []const u8) ?[32]u8 {
-    if (!validKey(key)) return null;
+    if (key.len == 0) return null;
+    var view = std.unicode.Utf8View.init(key) catch return null;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| if (cp < 32 or isSpace(cp)) return null;
     var out: [32]u8 = undefined;
     Sha256.hash(key, &out, .{});
     return out;

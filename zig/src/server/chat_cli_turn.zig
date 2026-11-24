@@ -28,7 +28,7 @@ pub const Credentials = struct {
             if (secret.len == 0) continue;
             try forms.append(a, secret);
             var buf: [300]u8 = undefined;
-            if (stream.rawHeader(&buf, secret)) |raw| try forms.append(a, try a.dupe(u8, raw[7..]));
+            if (stream.rawHeader(&buf, secret)) |raw| if (!std.mem.eql(u8, raw[7..], secret)) try forms.append(a, try a.dupe(u8, raw[7..]));
         }
         return .{ .forms = forms.items };
     }
