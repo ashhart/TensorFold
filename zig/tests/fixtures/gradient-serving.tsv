@@ -169,7 +169,7 @@ zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b16
 zig/src/families/flashnext/cuda_snap.zig	bbc66ed7e1aed820b4b60c148b1bbe47b2a5c7e7240c7da7f0bd8504080a6b56	raw	main 4f6017ced (prompt cache marks kept inside the pass), #1953: the prompt cache ladder's values
 zig/src/families/qwen27/attention.zig	ef533e2d07f0b38bd035cc79f282a621ae2b8604ef0f2d0436935b85e45fb55b	raw	#2916 (solo prompt frames; decode and shared limits retained)
 zig/src/families/qwen27/attention_memory.zig	49b9a2643b1499d26cd3d41066ab77351eb6a0258fae87eb880503ccd5c5ecec	raw	#2916 (solo prompt frames; decode and shared limits retained)
-zig/src/families/qwen27/attention_plan.zig	c5293b8ee88faa995ee3bdb46f5c7d0b8a020f8614ded8559dcab0cc028e9e66	raw	#2916 (solo prompt frames; decode and shared limits retained)
-zig/src/families/qwen27/decode_round.zig	933b1971399c1ba0cc2299e398eb7d8bfaf3a4b6a5eff1a9d0b6570de2a07ccc	raw	main 1eed88bb09 (public attentionPlan and lane-core Drafter/tail state retained), #2916 (solo prompt frames; decode and shared limits retained)
+zig/src/families/qwen27/attention_plan.zig	898964a99410620766416c5d5a350ab96061e9d2883354875f7da9e431a9ddc4	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/families/qwen27/decode_round.zig	67ef8d3358e5239943ae80fc67bc431bf40d119206df1cc6ab9fe0505e064cde	raw	main 1eed88bb09 (public attentionPlan and lane-core Drafter/tail state retained), #2916 (solo prompt frames; decode and shared limits retained)
 zig/src/native/qwen27_prompt_rows.zig	5e137f7966c0b725994bc613266be2d83a47800b211dcb7b742455066ed33887	raw	#2916 (solo prompt frames; decode and shared limits retained)
-zig/src/native/qwen27_slots.zig	ac6b8f6f3b570187da624960d887368ed8a2d678e8f3f98e96b4d40ed0628343	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/native/qwen27_slots.zig	c98070c752614213466f8e5a5c431b25ba1db7f2b4dfb686569206005342c247	raw	#2916 (solo prompt frames; decode and shared limits retained)
