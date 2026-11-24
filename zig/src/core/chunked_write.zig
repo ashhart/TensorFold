@@ -8,8 +8,7 @@ comptime {
     std.debug.assert(max_write_bytes < std.math.maxInt(c_int));
 }
 
-/// Write bytes to a sink in requests of at most `cap` bytes; the sink's errors pass through.
-/// A zero cap refuses: an enforcing sink could otherwise take a nonempty buffer without progress.
+/// Write bounded chunks; sink errors pass through, and a nonempty write with a zero cap refuses.
 pub fn writeChunked(sink: anytype, bytes: []const u8, cap: usize) !void {
     if (cap == 0 and bytes.len > 0) return error.ZeroWriteCap;
     var at: usize = 0;
