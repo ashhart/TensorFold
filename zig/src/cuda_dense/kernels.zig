@@ -139,8 +139,7 @@ pub const Kernels = struct {
     }
 };
 
-/// The dense loader's BF16 prompt enablement: on unless `TF_DENSE_PROMPT_BF16=0`.
-/// `test-cuda-dense-host` exercises both branches through `loadPrompt` on a stub driver.
+/// The loader's BF16 prompt enablement: on unless `TF_DENSE_PROMPT_BF16=0`; the host test drives both branches on a stub driver.
 pub fn loadPromptEnabled(lane: *cuda.qmmf.Lane, d: *const cuda.Driver) !void {
     if (try @import("sys").environment.read(bool, "TF_DENSE_PROMPT_BF16", true)) try lane.loadPrompt(d);
 }
