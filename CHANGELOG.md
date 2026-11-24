@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on CUDA: decode experts run a warp over 8 columns with gate and up in one launch, about 3% faster one-stream decode on GB10 on top of #4728, with identical tokens (#4729). Thanks @jschmied.
 
+
+
 - Inkling 2: required and named tool calls use the model's own message format, so a request that needs several calls ends after them instead of repeating until max_tokens; a required single call keeps its parsed tool_calls but its token ids change (#4898).
 
 - OCR: `POST /ocr` takes PaddleX's request contract (step 6 of #2440): page results with reading-order blocks, lines and optional word boxes, the whole document's page count kept when processing stops early, and a repeated query refused (#2575).
