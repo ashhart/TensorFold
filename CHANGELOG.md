@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: expert weights are staged a warp at a time in 128-byte rows with each expert's NVFP4 factor read once, so one-stream decode is about 70% faster on GB10, four streams about 60% faster and long prompts reach the first token about 25% sooner, with identical tokens (#4728). Thanks @jschmied.
+
 - MiniMax-H3-Image on CUDA: `tf-h3-image-prompt-cuda` runs the prompt path (Qwen3-VL to layer 50 and the token refiner) and `tf-h3-image-decoder-cuda` the image decoder, each writing the file its Metal sibling writes and carrying a self-test against the host's float64 reference (#3733). Thanks to @plotarmordev.
 
 
