@@ -32,7 +32,13 @@ pub fn parent(init: std.process.Init, driver: *const cuda.Driver, args: []const 
         return 2;
     };
     defer opt.deinit(init.gpa);
-    if (opt.parent) |pid| children.followParent(pid) catch |err| {
+    // the child processes compile on POSIX targets only; elsewhere their options are refused, never ignored
+    if (comptime !shard.posix_processes) {
+        if (opt.processOption()) |name| {
+            std.debug.print("FAIL kernel-contract: {s}: child processes need a POSIX host, so run without it (NoProcesses)\n", .{name});
+            return 2;
+        }
+    } else if (opt.parent) |pid| children.followParent(pid) catch |err| {
         std.debug.print("FAIL kernel-contract: --parent {d}: {t}, so this shard stops rather than run on\n", .{ pid, err });
         return 2;
     };
@@ -41,6 +47,12 @@ pub fn parent(init: std.process.Init, driver: *const cuda.Driver, args: []const 
         std.debug.print("FAIL kernel-contract: --device {d}: only {d} GPUs (NoSuchDevice)\n", .{ opt.device, gpus });
         return 2;
     }
+    // without POSIX processes a --jobs was refused above, so this process runs alone
+    return if (comptime shard.posix_processes) parallel(init, driver, opt, gpus) else null;
+}
+
+/// `--jobs`: the shards' child processes and their merged SUMMARY; null without `--jobs`.
+fn parallel(init: std.process.Init, driver: *const cuda.Driver, opt: shard.Options, gpus: u32) !?u8 {
     const jobs = opt.jobs orelse return null;
     if (dump.active()) {
         std.debug.print("FAIL kernel-contract: --jobs {d}: TF_CUDA_DUMP=1 would write every record {d} times (DumpWithJobs)\n", .{ jobs, jobs });
