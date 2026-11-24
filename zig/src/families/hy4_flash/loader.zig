@@ -82,9 +82,21 @@ const Validation = struct {
     }
 };
 
+const CudaOwnership = struct {
+    checkpoint: *core.Checkpoint,
+
+    pub fn expect(self: *CudaOwnership, name: []const u8, format: weights.DType, shape: []const usize) !void {
+        _ = format;
+        _ = shape;
+        _ = try self.checkpoint.stored(name); // Exact-name ownership when present; no new admission requirement.
+    }
+};
+
 /// Finish the CUDA target's checkpoint after its layers have been read.
 pub fn finishCuda(ck: *core.Checkpoint, model: config.Model) !void {
-    _ = model;
+    var ownership: CudaOwnership = .{ .checkpoint = ck };
+    // Only the names matter here; four bits keeps the shared enumerator's logical dimensions valid.
+    try weights.checkCudaAuxiliary(&ownership, model, 4);
     try refuseLeftovers(ck, error.UnusedHy4Tensors);
 }
 
