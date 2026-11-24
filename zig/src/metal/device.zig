@@ -25,6 +25,16 @@ pub const Buffer = struct {
         return objc.msg(usize, self.id, "length", .{});
     }
 
+    /// Let the OS discard this shared buffer's physical contents until the owner restores them.
+    pub fn makeVolatile(self: Buffer) void {
+        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@as(usize, 2)});
+    }
+
+    /// Keep restored contents resident before any GPU command reads this buffer again.
+    pub fn makeNonVolatile(self: Buffer) void {
+        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@as(usize, 1)});
+    }
+
     /// The buffer viewed as `len` values of T from its start.
     pub fn slice(self: Buffer, comptime T: type, len: usize) []T {
         return @as([*]T, @ptrCast(@alignCast(self.contents())))[0..len];

@@ -333,8 +333,7 @@ fn loop(comptime memory: bool, h: *LaneHost, rd: Rounds) void {
             continue;
         }
         if (!work) {
-            activity.end();
-            if (rows_host.idle(h)) continue;
+            if (@import("lane_activity.zig").idleRows(h, &activity)) continue;
             if (h.cancels.items.len == 0 and (!memory or h.mem_ops.asks.items.len == 0)) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
