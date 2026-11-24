@@ -1,5 +1,4 @@
-//! BF16/F32 conversion, partial RoPE rotation and shift,
-//! and deterministic randomized SVD for low-rank recurrent state deltas.
+//! BF16/F32 conversion, partial RoPE rotation and shift, and deterministic randomized SVD for low-rank deltas.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -45,9 +44,7 @@ pub fn dotF32(a: []const f32, b: []const f32) f32 {
     return sum;
 }
 
-/// Half-split partial RoPE matching TensorFold's qwen35_rotate and q27_rope bit-for-bit.
-/// `data` has layout `[kv_heads, seq_len, head_dim]` in BF16; rotates dims `[0..rotary_dim)` in place.
-/// When `rotary_dim == 0` (e.g. Nemotron NoPE), this is an exact no-op.
+/// Half-split partial RoPE on BF16 `[kv_heads, seq_len, head_dim]`, rotating dims `[0..rotary_dim)` in place.
 pub fn ropeRotateKvBf16(
     data: []u16,
     kv_heads: usize,
@@ -139,8 +136,7 @@ const SplitMix = struct {
     }
 };
 
-/// Modified Gram-Schmidt column orthonormalization in-place for column-major-ish `[rows, cols]` row-major matrix
-/// stored as `[cols, rows]` (each row of `q_t` is one orthonormal vector of length `rows`).
+/// Modified Gram-Schmidt orthonormalization in place of `q_t` stored as `[cols, rows]` (each row one vector).
 fn orthonormalizeRows(q_t: []f32, k: usize, n: usize) usize {
     var kept: usize = 0;
     for (0..k) |i| {
@@ -174,8 +170,7 @@ fn orthonormalizeRows(q_t: []f32, k: usize, n: usize) usize {
     return kept;
 }
 
-/// Cyclic Jacobi eigendecomposition of an `n x n` symmetric matrix `A` (destroyed in place).
-/// Writes eigenvalues into `evals[0..n]` and eigenvectors as rows of `evecs[n, n]` (`evecs[k]` is eigenvector `k`).
+/// Cyclic Jacobi eigensolver for symmetric `n x n` `a` (destroyed): `evals[0..n]`, eigenvectors as `evecs` rows.
 pub fn symmetricJacobi(a: []f64, evecs: []f64, evals: []f64, n: usize) void {
     std.debug.assert(a.len == n * n and evecs.len == n * n and evals.len == n);
     // Start with evecs = I (row-major, then we transpose at the end so rows are eigenvectors)
@@ -235,10 +230,7 @@ pub fn symmetricJacobi(a: []f64, evecs: []f64, evals: []f64, n: usize) void {
     }
 }
 
-/// Randomized low-rank SVD of `A [m, n]` (row-major f32) to target rank `r <= min(max_rank, m, n)`.
-/// Writes `u_out [m, r]` (= U_r * sqrt(S_r)) and `vt_out [r, n]` (= sqrt(S_r) * V_r^T) so
-/// `u_out @ vt_out ≈ A`, with balanced singular values.
-/// Returns actual rank `<= r` (0 if A is identically zero).
+/// Randomized rank-`r` SVD of `A [m, n]`: `u_out @ vt_out ~= A`, sqrt(S) split to both; returns rank (0 if A = 0).
 pub fn randomizedSvdBalanced(
     scratch_alloc: Allocator,
     a: []const f32,
@@ -264,8 +256,7 @@ pub fn randomizedSvdBalanced(
     if (frob2 < 1e-24) return 0;
 
     const l = @min(@min(m, n), r + 8);
-    // Work buffers
-    // omega_t: [l, n] (each row is one random probe vector in R^n)
+    // Work buffers; omega_t: [l, n] (each row is one random probe vector in R^n)
     const omega_t = try scratch_alloc.alloc(f32, l * n);
     defer scratch_alloc.free(omega_t);
     var rng = SplitMix{ .state = 0x51a7_9f13_2b4c_8e01 ^ (@as(u64, m) << 32) ^ @as(u64, n) };
@@ -405,8 +396,7 @@ pub fn randomizedSvdBalanced(
     return actual_r;
 }
 
-/// Top-K right singular vectors `vt_out [k, cols]` of row-major `X [rows, cols]` via randomized SVD.
-/// Used by LayerWhitener to strip the top-K background principal components in milliseconds.
+/// Top-K right singular vectors `vt_out [k, cols]` of row-major `X [rows, cols]` via randomized SVD (LayerWhitener).
 pub fn topRightSingularVectors(
     scratch_alloc: Allocator,
     x: []const f32,

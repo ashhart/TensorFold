@@ -1,6 +1,4 @@
-//! Folded Memory Weights v6 Metal adapter for Pure-Attention Llama models (`num_rec == 0`).
-//! Stores the KV caches exactly as computed (BF16) + dual-layer whitened gate prototypes — zero recurrent
-//! state deltas, zero SVD overhead, instant RoPE-shifted composition, and bit-exact atomic unlearning!
+//! Memory Metal adapter for pure-attention Llama (`num_rec == 0`): exact BF16 KV plus two-layer gate prototypes.
 const std = @import("std");
 const mtl = @import("metal");
 const living = @import("living");
@@ -224,7 +222,7 @@ fn uploadRawToCache(metal: *Metal, cache: *st.Cache, src: *const mem.RawState) !
     }
 }
 
-/// Downloads positions `start .. start + count` from Llama's private KV buffer into `RawState` (`[kv_heads, count, head_dim]`).
+/// Copies KV positions `start .. start + count` from the private buffer into `RawState`.
 fn downloadCacheSliceToRaw(metal: *Metal, cache: *const st.Cache, start: usize, count: usize, out: *mem.RawState) !void {
     const c = &metal.model.config;
     if (count == 0) return;
