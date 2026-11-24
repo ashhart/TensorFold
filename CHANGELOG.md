@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Qwen 3.8-27B on Metal M5: 5-bit and 6-bit group-64 checkpoints split K for decode and prompt rows as v1.3.4 did again, so their sums run in v1.3.4's order; #4419 had moved them onto the 4-bit M5 split tables, and its register-direct kernels stay, at the restored splits. Gemma 4 and 4-bit are unchanged.
+- Qwen 3.8-27B on Metal M5: 5-bit and 6-bit group-64 checkpoints split K for decode and prompt rows as v1.3.4 did again, so their sums run in v1.3.4's order; #4419 had moved them onto the 4-bit M5 split tables, and its register-direct kernels stay, at the restored splits. Gemma 4 and 4-bit are unchanged (#4962).
 
 - Nemotron 3.5 Transcribe on CUDA: chat requests take speech as 16 kHz mono WAV in OpenAI `input_audio` and vLLM `audio_url` parts, up to an hour of audio a request in the model's trained 65,536-token window, with each clip's rows keyed in the prompt cache and MTP drafts running over them; `/v1/models` lists `audio` among its input types (#1632, closes #1549). Thanks to @BobClawblaw.
 
@@ -17,8 +17,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Kolibri-1 on CUDA: decode rounds of two or more rows replay a CUDA graph captured once a shape, making the eager round's launches, so tokens are unchanged; `TENSORFOLD_KOLIBRI_GRAPHS=0` keeps them eager (#4884).
 
 - Inkling 2 Mini on CUDA: decode experts run a warp over 8 columns with gate and up in one launch, about 3% faster one-stream decode on GB10 on top of #4728, with identical tokens (#4729). Thanks @jschmied.
-
-
 
 - Inkling 2: required and named tool calls use the model's own message format, so a request that needs several calls ends after them instead of repeating until max_tokens; a required single call keeps its parsed tool_calls but its token ids change (#4898).
 
