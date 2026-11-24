@@ -461,6 +461,7 @@ const runAttention = createRunAttention({
     return !thread || thread.incognito === true || thread.phoneLocalOnly === true || thread.googleLocalOnly === true
   },
   enabled: () => store.settings?.notifyRuns !== false,
+  completionSoundEnabled: () => store.settings?.completionSound === true,
   focused: () => { try { return !!store.win && !store.win.isDestroyed() && store.win.isFocused() } catch { return false } },
   // Headless hosts have no window to bring forward, so they never notify.
   supported: () => !!store.win && Notification.isSupported(),

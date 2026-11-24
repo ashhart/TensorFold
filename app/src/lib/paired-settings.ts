@@ -36,6 +36,6 @@ export function pairedSettingsDefaults(): Settings {
     remoteClient: { enabled: false, serverUrl: '', authToken: '', lastConnectedAt: null, lastError: null },
     remoteOrchestrators: [], defaultExecutionTarget: 'local', defaultOrchestratorId: null,
     preset: 'tensorfold', light: { ...PRESETS.tensorfold.light }, dark: { ...PRESETS.tensorfold.dark },
-    pointerCursors: true, doomTodos: true, notifyRuns: true, sshHosts: [], trustedSshHostKeys: [],
+  pointerCursors: true, doomTodos: true, notifyRuns: true, completionSound: false, sshHosts: [], trustedSshHostKeys: [],
   }
 }

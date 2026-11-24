@@ -68,7 +68,7 @@ function sanitize(value: BackupJson, omitted: { fields: number; values: number }
   return value
 }
 const pick = (value: BackupRecord, allowed: string[]): BackupRecord => Object.fromEntries(Object.entries(value).filter(([key]) => allowed.includes(key)))
-const SETTING_FIELDS = ['uiPreferences', 'modelHelperDefaults', 'theme', 'themeMode', 'themePreset', 'desktopMode', 'desktopOnboardingComplete', 'activeModel', 'activeProviderId', 'engineModelProfiles', 'notifyRuns', 'showGitInitPrompt', 'confidentialTerms']
+const SETTING_FIELDS = ['uiPreferences', 'modelHelperDefaults', 'theme', 'themeMode', 'themePreset', 'desktopMode', 'desktopOnboardingComplete', 'activeModel', 'activeProviderId', 'engineModelProfiles', 'notifyRuns', 'completionSound', 'showGitInitPrompt', 'confidentialTerms']
 const THREAD_FIELDS = ['id', 'title', 'kind', 'projectId', 'providerId', 'model', 'createdAt', 'updatedAt', 'apiMessages', 'timeline', 'messageEditRevisions', 'conversationRevision', 'documentSourceIds', 'memoryPolicy', 'phoneLocalOnly', 'googleLocalOnly', 'archivedAt', 'notepad', 'annotations', 'parentId', 'forkedAt', 'bot', 'runRecovery']
 const PROJECT_FIELDS = ['id', 'name', 'memory', 'team', 'mode', 'localOnly', 'tags', 'archivedAt', 'createdAt', 'updatedAt']
 const BOT_FIELDS = ['id', 'name', 'role', 'lane', 'providerId', 'model', 'instructions', 'approvalScope', 'toolScope', 'toolScopeProblem', 'executionTarget', 'createdAt', 'updatedAt', 'archivedAt']

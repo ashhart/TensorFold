@@ -36,13 +36,14 @@ const legacy: BackupRecord = {
   bot: { presetId: 'legacy_bot', name: 'Legacy bot', role: 'Describe supplied text', instructions: 'Be concise.', providerId: 'local', providerAccountId: null, model: 'synthetic', approvalScope: 'readonly', executionTarget: 'vm', toolScope: { mode: 'selected', names: ['read_file'] }, capturedAt: 1 },
   runRecovery: recovery as unknown as BackupRecord, runRecoveryReviewedId: recovery.runId,
 }
-const base: WorkspaceBackupData = { settings: { theme: 'dark', confidentialTerms: ['Archive private term'], approvalRules: [{ decision: 'allow_always' }], automations: [{ enabled: true }] }, conversations: [legacy], projects: [], bots: [{ id: 'legacy_bot', name: 'Legacy bot', executionTarget: 'vm' }], drafts: [], attachments: [] }
+const base: WorkspaceBackupData = { settings: { theme: 'dark', completionSound: false, confidentialTerms: ['Archive private term'], approvalRules: [{ decision: 'allow_always' }], automations: [{ enabled: true }] }, conversations: [legacy], projects: [], bots: [{ id: 'legacy_bot', name: 'Legacy bot', executionTarget: 'vm' }], drafts: [], attachments: [] }
 const selection = { settings: true, conversationIds: ['legacy'], botIds: ['legacy_bot'] }
 const archive = buildBackupArchive({ revision: 'synthetic', data: base, blobs: new Map() }, selection, 4)
 const restored = parseArchive(encodeArchive(archive)).archive.data
 const saved = restored.conversations[0] as unknown as Thread
 assert.equal(saved.apiMessages[2].content, null)
 assert.deepEqual(restored.settings.confidentialTerms, ['Archive private term'])
+assert.equal(restored.settings.completionSound, false, 'the completion-sound opt-in survives backup and restore')
 assert.equal(restored.settings.approvalRules, undefined); assert.equal(restored.settings.automations, undefined)
 assert.ok(archive.warnings.some(warning => warning.includes('permission rules') && warning.includes('runtime configuration')))
 assert.throws(() => mergedBackupPrivacyTerms(Array.from({ length: 200 }, (_, index) => `Synthetic guard ${index}`), ['New synthetic guard']), /redaction limit/, 'term merging must not push existing guards beyond the original redactor cap')
@@ -87,6 +88,7 @@ const malformed = [
   (data: WorkspaceBackupData) => { (data.conversations[0].runRecovery as any).retry = 'safe' },
   (data: WorkspaceBackupData) => { data.conversations[0].runRecoveryReviewedId = recovery.runId },
   (data: WorkspaceBackupData) => { (data.conversations[0].messageEditRevisions as any)[0].timeline[0].text = {} },
+  (data: WorkspaceBackupData) => { data.settings.completionSound = 'on' as unknown as boolean },
 ]
 for (const mutate of malformed) { const data = structuredClone(restored); mutate(data); assert.throws(() => validateData(data)) }
 
