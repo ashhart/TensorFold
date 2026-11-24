@@ -4,18 +4,180 @@ const mtl = @import("metal");
 const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");
 const dw = @import("dspark_weights.zig");
+const plan_ = @import("dspark_plan.zig");
 const pipelines = @import("pipelines.zig");
 const layer = @import("layer.zig");
 const layer_attn = @import("attn.zig");
 const moe = @import("moe.zig");
 const forward = @import("forward.zig");
 
+const Config = @import("dsv41").config.Config;
 const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
 const g = pipelines.glue;
 const cl = @import("calls.zig");
 const attn = pipelines.attn;
 const plus = ctx_.plus;
+
+/// Per-slot confidence-guided wide/narrow block state.
+pub const Adaptive = struct {
+    wide: []bool,
+    conf_tail: []f32,
+    last_n: []u32,
+
+    pub fn init(a: std.mem.Allocator, slots: u32) !Adaptive {
+        const wide = try a.alloc(bool, slots);
+        errdefer a.free(wide);
+        @memset(wide, false);
+        const conf_tail = try a.alloc(f32, slots);
+        errdefer a.free(conf_tail);
+        @memset(conf_tail, 0);
+        const last_n = try a.alloc(u32, slots);
+        @memset(last_n, 0);
+        return .{ .wide = wide, .conf_tail = conf_tail, .last_n = last_n };
+    }
+
+    pub fn deinit(ad: *Adaptive, a: std.mem.Allocator) void {
+        a.free(ad.wide);
+        a.free(ad.conf_tail);
+        a.free(ad.last_n);
+    }
+
+    pub fn reset(ad: *Adaptive, slot: u32) void {
+        if (slot >= ad.wide.len) return;
+        ad.wide[slot] = false;
+        ad.conf_tail[slot] = 0;
+        ad.last_n[slot] = 0;
+    }
+
+    pub fn note(ad: *Adaptive, slot: u32, rows: u32, narrow: u32, block: u32) void {
+        if (slot >= ad.wide.len) return;
+        if (narrow == 0 or narrow >= block) {
+            ad.wide[slot] = rows > narrow;
+            return;
+        }
+        if (rows > narrow) {
+            ad.wide[slot] = !(ad.last_n[slot] >= block and ad.conf_tail[slot] < 0.10);
+        } else {
+            ad.wide[slot] = rows == narrow and ad.conf_tail[slot] >= 0.50;
+        }
+    }
+
+    pub fn record(ad: *Adaptive, slot: u32, n: u32, narrow: u32, block: u32, conf: []const f32) void {
+        if (slot >= ad.conf_tail.len) return;
+        ad.last_n[slot] = n;
+        if (narrow == 0 or narrow >= block) {
+            ad.conf_tail[slot] = 0;
+            return;
+        }
+        var p: f32 = 1.0;
+        for (0..@min(n, narrow)) |i| p *= conf[i];
+        ad.conf_tail[slot] = p;
+    }
+
+    pub fn blockOf(ad: *const Adaptive, slot: u32, narrow: u32, block: u32) u32 {
+        if (narrow == 0 or narrow >= block) return block;
+        return if (slot < ad.wide.len and ad.wide[slot]) block else narrow;
+    }
+};
+
+/// Concurrent ingest scratch sized for up to `max(16, window)` rows across all stages plus a 4-slot ring plan.
+pub const IngestBuf = struct {
+    buf: mtl.Buffer,
+    plan_buf: mtl.Buffer,
+    cap: u32,
+    stages: u32,
+    quant: Ref,
+    h: Ref,
+    hn: Ref,
+    hq: Ref,
+    kv: Ref,
+    kvn: Ref,
+    kvr: Ref,
+    kvq: Ref,
+    kv_stride: usize,
+
+    pub const ring_slots = 4;
+
+    pub fn init(device: mtl.Device, c: *const Config) !IngestBuf {
+        const cap: u32 = @max(pipelines.max_rows, c.window);
+        const stages: u32 = @max(1, c.mtp_layers);
+        const taps_k: usize = @as(usize, @intCast(c.dspark_targets.len)) * c.hidden;
+        const H: usize = c.hidden;
+        const D: usize = c.head_dim;
+        const kv_stride = std.mem.alignForward(usize, @as(usize, cap) * D * 2, 256);
+
+        var off: usize = 0;
+        const take = struct {
+            fn next(o: *usize, len: usize) usize {
+                const at = std.mem.alignForward(usize, o.*, 256);
+                o.* = at + @max(len, 256);
+                return at;
+            }
+        }.next;
+
+        const q_off = take(&off, @as(usize, cap) * taps_k * 2);
+        const h_off = take(&off, @as(usize, cap) * H * 2);
+        const hn_off = take(&off, @as(usize, cap) * H * 2);
+        const hq_off = take(&off, @as(usize, cap) * H * 2);
+        const kv_off = take(&off, @as(usize, stages) * kv_stride);
+        const kvn_off = take(&off, @as(usize, stages) * kv_stride);
+        const kvr_off = take(&off, @as(usize, stages) * kv_stride);
+        const kvq_off = take(&off, @as(usize, stages) * kv_stride);
+
+        const buf = try device.buffer(off, mtl.ResourceOptions.shared);
+        errdefer buf.deinit();
+        @memset(buf.contents()[0..off], 0);
+
+        const plan_bytes = ring_slots * 2 * @as(usize, cap) * 4;
+        const plan_buf = try device.buffer(plan_bytes, mtl.ResourceOptions.shared);
+        errdefer plan_buf.deinit();
+        @memset(plan_buf.contents()[0..plan_bytes], 0);
+
+        return .{
+            .buf = buf,
+            .plan_buf = plan_buf,
+            .cap = cap,
+            .stages = stages,
+            .quant = .{ .buf = buf, .off = q_off },
+            .h = .{ .buf = buf, .off = h_off },
+            .hn = .{ .buf = buf, .off = hn_off },
+            .hq = .{ .buf = buf, .off = hq_off },
+            .kv = .{ .buf = buf, .off = kv_off },
+            .kvn = .{ .buf = buf, .off = kvn_off },
+            .kvr = .{ .buf = buf, .off = kvr_off },
+            .kvq = .{ .buf = buf, .off = kvq_off },
+            .kv_stride = kv_stride,
+        };
+    }
+
+    pub fn deinit(ib: *IngestBuf) void {
+        ib.plan_buf.deinit();
+        ib.buf.deinit();
+    }
+
+    pub fn stageRef(ib: *const IngestBuf, base: Ref, stage_idx: usize) Ref {
+        return plus(base, stage_idx * ib.kv_stride);
+    }
+
+    /// Write `n` ingest positions and destination ring rows into ring slot `ring_idx` (disjoint from queued CBs).
+    pub fn writePlan(ib: *const IngestBuf, c: *const Config, ring_idx: u32, slot: u32, start: u64, n: u32) !struct { pos: Ref, dest: Ref } {
+        if (n == 0 or n > ib.cap) return error.BadRows;
+        const stride_ints: usize = 2 * @as(usize, ib.cap);
+        const base_ints: usize = @as(usize, ring_idx % ring_slots) * stride_ints;
+        const all = ib.plan_buf.slice(i32, ring_slots * stride_ints);
+        const ipos = all[base_ints..][0..ib.cap];
+        const idest = all[base_ints + ib.cap ..][0..ib.cap];
+        for (0..n) |r| {
+            ipos[r] = @intCast(start + r);
+            idest[r] = @intCast(plan_.ringRow(c, slot, start + r));
+        }
+        return .{
+            .pos = .{ .buf = ib.plan_buf, .off = base_ints * 4 },
+            .dest = .{ .buf = ib.plan_buf, .off = (base_ints + ib.cap) * 4 },
+        };
+    }
+};
 
 /// A key of rows (a block's or main rows): wkv, kv_norm, RoPE, act_quant of `hq` [rows][hidden], into pool rows `dest`.
 pub fn keys(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, hq: Ref, ring: mtl.Buffer, pos: Ref, dest: Ref) !void {
@@ -48,15 +210,75 @@ pub fn ingest(x: *const Ctx, e: mtl.ComputeEncoder, d: *const dw.Weights, taps: 
     for (d.stages, rings) |*w, ring| try keys(x, e, w, x.s.hq, ring, pos, dest);
 }
 
-/// A draft launch's rows: their positions, and where their keys, attention records and selected keys are.
+/// Dense FP8 projection for ingest: decode kernels up to 16 rows, bit-equal prompt MMA above 16 rows.
+fn projIngest(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref) !void {
+    if (x.rows > pipelines.max_rows) {
+        const m = pipelines.fp8_mma;
+        return m.encode(&x.p.mma, e, ctx_.cv(m.Ref, in), ctx_.cv(m.Ref, w.w), ctx_.cv(m.Ref, w.s), ctx_.cv(m.Ref, out), .{ .k = w.k, .n = w.n, .rows = x.rows, .out = .bf16 });
+    }
+    return x.proj(e, in, w, out, false);
+}
+
+/// Concurrent batched ingest (1..window rows): mainRows, parallel stages' wkv, then parallel stages' keyStore.
+pub fn ingestConcurrent(x: *const Ctx, e: mtl.ComputeEncoder, d: *const dw.Weights, ib: *const IngestBuf, taps: Ref, rings: []const mtl.Buffer, pos: Ref, dest: Ref) !void {
+    const c = x.c;
+    const f = pipelines.fused;
+    const cv = ctx_.cv;
+    try cl.actqRows(x.p, e, taps, ib.quant, x.rows, d.main_proj.k);
+    e.barrier();
+    try projIngest(x, e, ib.quant, d.main_proj, ib.h);
+    e.barrier();
+    try cl.normq(x.p, e, ib.h, d.main_norm, ib.hn, ib.hq, x.rows, c.hidden, c.eps);
+    e.barrier();
+    for (d.stages, 0..) |*w, i| {
+        try projIngest(x, e, ib.hq, w.wkv, ib.stageRef(ib.kv, i));
+    }
+    e.barrier();
+    for (d.stages, rings, 0..) |*w, ring, i| {
+        const k: f.Kv = .{
+            .kv = cv(f.Ref, ib.stageRef(ib.kv, i)),
+            .w = cv(f.Ref, w.kv_norm),
+            .kvn = cv(f.Ref, ib.stageRef(ib.kvn, i)),
+            .kvr = cv(f.Ref, ib.stageRef(ib.kvr, i)),
+            .kvq = cv(f.Ref, ib.stageRef(ib.kvq, i)),
+            .ring = .{ .buf = ring },
+            .pos = cv(f.Ref, pos),
+            .table = cv(f.Ref, x.table(w.layer)),
+            .dest = cv(f.Ref, dest),
+            .reps = 1,
+        };
+        try cl.key(x.p, e, k, x.rows, c.head_dim, c.eps);
+    }
+}
+
+/// Encode one concurrent ingest command buffer: optional GPU blit undo settle+save, then `ingestConcurrent`.
+pub fn encodeIngestCb(cb: mtl.CommandBuffer, x: *const Ctx, d: *const dw.Weights, ib: *const IngestBuf, undo: anytype, gpu_undo: bool, slot: u32, end: u64, start: u64, taps: Ref, rings: []const mtl.Buffer, pos: Ref, dest: Ref) !void {
+    if (gpu_undo) {
+        undo.encodeSettleAndSave(cb, slot, end, start, x.rows);
+    } else {
+        undo.settle(slot, end);
+        undo.save(slot, start, x.rows);
+    }
+    const e = cb.compute(.concurrent);
+    ingestConcurrent(x, e, d, ib, taps, rings, pos, dest) catch |err| {
+        e.end();
+        return err;
+    };
+    e.end();
+}
+
+/// A draft launch's rows: positions, key destinations, CSA2 meta/sel, and compact DSpark ask records.
 pub const Rows = struct {
     pos: Ref,
     dest: Ref,
     meta: Ref,
     sel: Ref,
+    asks: Ref,
+    n_asks: u32,
+    block: u32,
 };
 
-/// A stage's attention: q and the block's keys, then each row over its context and the block, barriers between.
+/// A stage's attention: q and the block's keys, then bidirectional DSpark block attention (or decode fallback).
 fn attention(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, ring: mtl.Buffer, rows: Rows) !void {
     const c = x.c;
     const s = x.s;
@@ -75,24 +297,33 @@ fn attention(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, ring
     e.barrier();
     try g.rope(gp, e, s.q, s.qrope, rows.pos, table, R, c.heads, D, @intCast(x.tables.positions));
     e.barrier();
-    const b: attn.Bind = .{
-        .q = ctx_.cv(attn.Ref, s.qrope),
-        .w = .{ .buf = ring },
-        .c = .{ .buf = ring },
-        .i = ctx_.cv(attn.Ref, rows.sel),
-        .m = ctx_.cv(attn.Ref, rows.meta),
-        .sk = ctx_.cv(attn.Ref, w.sink),
-        .cs = ctx_.cv(attn.Ref, table),
-        .o = ctx_.cv(attn.Ref, s.o),
-    };
-    try attn.encodeDecode(&x.p.attn, e, b, .{ .rows = R, .heads = c.heads, .out = .bf16 });
+    if (x.p.attn.dspark != null) {
+        try attn.encodeDspark(&x.p.attn, e, ctx_.cv(attn.Ref, s.qrope), .{ .buf = ring }, ctx_.cv(attn.Ref, rows.asks), ctx_.cv(attn.Ref, w.sink), ctx_.cv(attn.Ref, table), ctx_.cv(attn.Ref, s.o), rows.n_asks, rows.block, c.heads, c.window);
+    } else {
+        const b: attn.Bind = .{
+            .q = ctx_.cv(attn.Ref, s.qrope),
+            .w = .{ .buf = ring },
+            .c = .{ .buf = ring },
+            .i = ctx_.cv(attn.Ref, rows.sel),
+            .m = ctx_.cv(attn.Ref, rows.meta),
+            .sk = ctx_.cv(attn.Ref, w.sink),
+            .cs = ctx_.cv(attn.Ref, table),
+            .o = ctx_.cv(attn.Ref, s.o),
+        };
+        try attn.encodeDecode(&x.p.attn, e, b, .{ .rows = R, .heads = c.heads, .out = .bf16 });
+    }
     e.barrier();
     try layer_attn.output(x, e, w);
 }
 
-/// The route's shape of a stage: the drafter's own experts and picks.
+/// The route's shape of a stage: the drafter's own experts, picks, and fused gate+route+plan kernel.
 pub fn shape(x: *const Ctx) !moe.Shape {
-    return .{ .experts = x.c.dspark_experts, .topk = x.c.dspark_topk, .route = x.p.route_dspark orelse return error.NoDspark };
+    return .{
+        .experts = x.c.dspark_experts,
+        .topk = x.c.dspark_topk,
+        .route = x.p.route_dspark orelse return error.NoDspark,
+        .plan = x.p.gate_plan_dspark,
+    };
 }
 
 /// One stage as layer.encode runs a layer, with the draft attention and the drafter's MoE.

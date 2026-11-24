@@ -122,3 +122,62 @@ test "dsv41 metal early picks: greedy picks are the host's first maximum" {
     for (out.slice(u32, rows), 0..) |g, r| bad += @intFromBool(g != pkg.target.Target.argmax(logits[r * vocab ..][0..vocab]));
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+test "dsv41 metal early picks: filtered picker matches host across greedy, raced, min_p, top_k and nucleus" {
+    const a = testing.allocator;
+    const device = try mtl.Device.init();
+    const queue = try device.queue();
+    var picks = try pkg.early_picks.Picks.init(device);
+    defer picks.deinit();
+    const vocab: u32 = 4096;
+    const cases = [_]?lanes.Sampling{
+        null,
+        .{ .seed = 101, .temperature = 0.8, .top_k = 0, .top_p = 1.0 },
+        .{ .seed = 202, .temperature = 0.8, .top_k = 0, .top_p = 1.0, .min_p = 0.05 },
+        .{ .seed = 303, .temperature = 0.8, .top_k = 20, .top_p = 0.95 },
+        .{ .seed = 404, .temperature = 0.8, .top_k = 64, .top_p = 0.90, .min_p = 0.02 },
+        .{ .seed = 505, .temperature = 0.8, .top_k = 0, .top_p = 0.95 },
+    };
+    const rows: u32 = cases.len;
+    const lg = try device.buffer(rows * @as(usize, vocab) * 4, mtl.ResourceOptions.shared);
+    defer lg.deinit();
+    const out = try device.buffer(rows * 4, mtl.ResourceOptions.shared);
+    defer out.deinit();
+    const specs_buf = try device.buffer(rows * @sizeOf(pkg.early_picks.Row), mtl.ResourceOptions.shared);
+    defer specs_buf.deinit();
+    var prng = std.Random.DefaultPrng.init(4109);
+    const rnd = prng.random();
+    const logits = lg.slice(f32, rows * vocab);
+    for (0..rows) |r| {
+        const row = logits[r * vocab ..][0..vocab];
+        for (row) |*v| v.* = rnd.floatNorm(f32) * 1.5 - 6.0;
+        // peaked top logits so pure nucleus stays well inside 256 tokens
+        for (0..12) |k| row[(r * 31 + k * 97) % vocab] = 4.0 - @as(f32, @floatFromInt(k)) * 0.45;
+    }
+    const specs: []pkg.early_picks.Row = @alignCast(std.mem.bytesAsSlice(pkg.early_picks.Row, specs_buf.contents()[0 .. rows * @sizeOf(pkg.early_picks.Row)]));
+    for (cases, 0..) |c, r| specs[r] = pkg.early_picks.Row.of(c, 77 + r);
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.serial);
+        picks.encodeRows(e, .{ .buf = lg }, .{ .buf = out }, .{ .buf = specs_buf }, rows, vocab);
+        e.end();
+        cb.commit();
+        cb.wait();
+    }
+    const ids = try a.alloc(u64, vocab);
+    defer a.free(ids);
+    for (ids, 0..) |*id, i| id.* = i;
+    const vals = try a.alloc(f64, vocab);
+    defer a.free(vals);
+    const got = out.slice(u32, rows);
+    for (cases, 0..) |c, r| {
+        const row = logits[r * vocab ..][0..vocab];
+        const want: u32 = if (c) |s| blk: {
+            for (vals, row) |*o, v| o.* = v;
+            break :blk @intCast(try lanes.sampling.choose(a, vals, ids, 77 + r, s));
+        } else pkg.target.Target.argmax(row);
+        try testing.expectEqual(want, got[r]);
+    }
+}

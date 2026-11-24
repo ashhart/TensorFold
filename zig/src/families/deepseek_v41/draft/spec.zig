@@ -19,8 +19,14 @@ pub const Settings = struct {
 
     /// `fromEnv`, the pass `on` while TF_DSV41_SPEC_DRAFT is unset.
     pub fn fromEnvOr(on: bool) !Settings {
+        return fromEnvOr2(on, false);
+    }
+
+    /// `fromEnv`, with defaults for unset TF_DSV41_SPEC_DRAFT and TF_DSV41_SPEC_NUCLEUS.
+    pub fn fromEnvOr2(on: bool, nucleus: bool) !Settings {
         var s = try fromEnv();
         if (env("TF_DSV41_SPEC_DRAFT") == null) s.on = on;
+        if (env("TF_DSV41_SPEC_NUCLEUS") == null) s.nucleus = nucleus;
         return s;
     }
 

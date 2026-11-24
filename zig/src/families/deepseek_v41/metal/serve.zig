@@ -50,6 +50,8 @@ pub const Options = struct {
     early: bool = true,
     /// drafts on the GPU over the whole vocabulary (TF_DSV41_MARKOV_GPU, on by default at boot)
     gpu_chain: bool = false,
+    /// top-K GPU Markov chain width for filtered sampling (TF_DSV41_MARKOV_TOPK; 0: full-vocab; 1..256: top-K)
+    markov_topk: u32 = 64,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
     /// the device and weights a stored cost table is specific to (0: none named)
@@ -81,7 +83,7 @@ pub const Metal = struct {
         errdefer m.t.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {
-            m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab), .gpu_chain = opt.gpu_chain, .narrow = opt.narrow });
+            m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab), .gpu_chain = opt.gpu_chain, .markov_topk = opt.markov_topk, .narrow = opt.narrow });
             errdefer m.dp.?.deinit();
             m.ad = .{ .x = m.dp.?, .t = m.t };
             if (opt.early) m.early = try early_.Early.init(a, m.dp.?);
@@ -123,6 +125,7 @@ pub const Metal = struct {
             .pass = passFn,
             .calibrate = calibrate,
             .spec_default = m.early != null,
+            .spec_nucleus_default = m.early != null,
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
             .keepalive = m.keepalive(),
