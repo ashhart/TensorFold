@@ -9,6 +9,8 @@ pub fn bytes(d: q.drafter.Any, drafting: bool) usize {
     };
     const c = m.graph.config;
     var caches: usize = 0;
-    if (drafting) for (0..c.layers) |i| caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    if (drafting) {
+        for (0..c.layers) |i| caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    }
     return @as(usize, g.window) * g.stride + caches;
 }

@@ -23,7 +23,6 @@ const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
 const room = helpers.room;
-const drafterRefusal = helpers.drafterRefusal;
 const gibBytes = helpers.gibBytes;
 
 pub const Options = struct {
@@ -357,7 +356,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?q.
     // the MTP head's keys and values: one more attention layer a slot, beside the drafter's ring when there is one
     const head_kv: usize = if (mtp_on) @as(usize, capacity + window) * model.config.kvDim() * 2 * 2 else 0;
     var fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.tapIds().len else q.taps.layers.len, model.frame.capacity, room(model));
-    if (draft_model) |d| if (d.dflash()) |m| fit_prompt.tap_row = memory.tapRowBytes(model.config.hidden, m.graph.config.tap_count, m.graph.config.variant == .v1);
+    if (draft_model) |d| {
+        if (d.dflash()) |m| fit_prompt.tap_row = memory.tapRowBytes(model.config.hidden, m.graph.config.tap_count, m.graph.config.variant == .v1);
+    }
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
