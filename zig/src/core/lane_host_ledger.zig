@@ -64,6 +64,19 @@ pub fn promise(h: *LaneHost, job: *Job) bool {
     return true;
 }
 
+pub const memory_unfit = "the memory prefix this request would run does not fit the memory left for prompts";
+
+/// `job`'s promise raised to a prompt of `prompt_len` rows, as its memory prefix makes it; false: it does not fit.
+pub fn grow(h: *LaneHost, job: *Job, prompt_len: usize) bool {
+    if (!priced(h)) return true;
+    const l = h.info_.ledger.?;
+    const bytes = l.cost(l.ctx, std.math.cast(u32, prompt_len) orelse return false, job.request.max_tokens);
+    h.lock();
+    defer h.unlock();
+    h.kv.?.grow(&job.lease, bytes) catch return false;
+    return true;
+}
+
 /// `job`'s bytes go back (nothing without a ledger or a lease); the caller holds the lock.
 pub fn release(h: *LaneHost, job: *Job) void {
     if (h.kv) |*l| l.finish(&job.lease);
