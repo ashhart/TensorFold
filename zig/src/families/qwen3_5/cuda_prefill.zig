@@ -119,6 +119,11 @@ fn keptCut(len: usize, chunks: []const u32, f: *const Fill, at: usize) usize {
     return end;
 }
 
+test "Qwen stepped prefill: a shared resume continues the latest request chunk's compute grid" {
+    var f: Fill = .{ .at = 3500, .media = null, .kept = .{ .gpa = std.testing.allocator, .marks = &.{} } };
+    try std.testing.expectEqual(@as(usize, 3000 + E.grid_rows), keptCut(3 * E.grid_rows, &.{3000}, &f, 3500));
+}
+
 /// The end of `f`'s next step under `max_rows` (0: the cold cut), its cold cut renewed once the last one landed.
 fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
     if (f.cold <= f.at) f.cold = keptCut(len, chunks, f, f.at);
