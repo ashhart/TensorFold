@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const affine = @import("affine.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const mm_groups = @import("mm_groups.zig");
 const kernels = @import("kernels.zig");
 const fp8 = @import("fp8.zig");
 pub const gather = @import("gather.zig");
@@ -43,6 +44,7 @@ pub const Pipes = struct {
     mm2: affine_mm.Pipes, // and at 2 bits in groups of 64: oQ2's routed experts, gathered
     mm5: affine_mm.Pipes, // and at 5 and 6 bits (oQ4's), split stacks' members too
     mm6: affine_mm.Pipes,
+    mm_grp: [2]mm_groups.Pipes,
     zeros: mtl.Buffer, // expert ids all 0: a dense GLU through the by-ids kernel (the shared expert)
     hash: u64, // every source compiled here
     mm_bm: u32, // affine_mm dense row-tile height: 32 pre-M5 (TF_GLM_M3_FAST), 64 on M5
@@ -68,7 +70,7 @@ pub const Pipes = struct {
         if (p.bf16_nax) |x| x.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
-        inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
+        inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6, p.mm_grp[0], p.mm_grp[1] }) |set| for (set) |x| x.deinit();
     }
 };
 
@@ -116,7 +118,7 @@ pub const gather_source = sources.core_row_projection ++ glue_math ++ sources.gl
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 11 + 7 + fp8.names.len + 4 * affine_mm.names.len]mtl.Pipeline = undefined, // 11 a width, then f8
+    list: [nw * 11 + 7 + fp8.names.len + 4 * affine_mm.names.len + 2 * mm_groups.names.len]mtl.Pipeline = undefined, // 11 a width, then f8
     n: usize = 0,
     released: usize = 0,
 
@@ -194,6 +196,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         h.update(src);
         try lib(made, device, src, &affine_mm.names, out);
     }
+    try mm_groups.buildWide(gpa, device, &h, made, &p.mm_grp, lib);
     p.mm_bm = if (device.tensorUnits()) 64 else 32;
     p.zeros = try device.buffer(64 * 4, mtl.ResourceOptions.shared);
     @memset(p.zeros.slice(i32, 64), 0);
@@ -473,7 +476,7 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
         if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
         summed = true;
         const strides: affine_mm.Strides = .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) };
-        affine_mm.denseBatchBm(e, pipes, io.in, sums, one, part.out, io.rows, 1, strides, p.mm_bm);
+        mm_groups.denseOrAffine(e, p.mm_grp, pipes, io.in, sums, one, part.out, io.rows, q.k, strides, p.mm_bm);
     }
 }
 
@@ -483,10 +486,7 @@ pub const Routed = enum { mm4, mm2, mm5, mm6, mm8, gather, rows };
 pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
     if (native(gate) and native(up) and native(down)) return .mm4;
     if (gate.more == 0 and up.more == 0 and down.more == 0 and gate.group == 64 and up.group == 64 and down.group == 64 and gate.bits == up.bits and gate.bits == down.bits) {
-        if (gate.bits == 2) return .mm2;
-        if (gate.bits == 5) return .mm5;
-        if (gate.bits == 6) return .mm6;
-        if (gate.bits == 8) return .mm8;
+        for ([_]u8{ 2, 5, 6, 8 }, [_]Routed{ .mm2, .mm5, .mm6, .mm8 }) |b, r| if (gate.bits == b) return r;
     }
     for ([_]Affine{ gate, up, down }) |q| if (!gather.supported(q)) return .rows;
     return .gather;

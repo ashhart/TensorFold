@@ -225,10 +225,10 @@ fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref
 }
 
 /// Routed experts' gate, up and SwiGLU into `act` ([n, gate.n]); `groups`: 4/64 in column groups (the same bits).
-fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, groups: bool, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
+fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, grp: ?mm_groups.Pipes, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
     affine_mm.rowSums(e, mm, 64, x_in, p.sums, M, w.gate.k);
-    if (groups) {
-        mm_groups.gatherGlu(e, p.mm.mm_groups, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
+    if (grp) |gp| {
+        mm_groups.gatherGlu(e, gp, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
     } else affine_mm.gatherGlu(e, mm, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
     affine_mm.rowSums(e, mm, 64, p.act, p.sums, n, w.down.k);
 }
@@ -275,7 +275,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     }
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
-            gateUp(p, p.mm.mm_bf16, false, x, e, w, x_in, M, n);
+            gateUp(p, p.mm.mm_bf16, null, x, e, w, x_in, M, n);
             affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
         if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
@@ -313,10 +313,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else wide.routedMm(&p.mm.wide.?, path);
-        const groups = path == .mm4 and mm_groups.fits(w.gate, w.down);
-        if (fwd.on(x, "e_gateup")) gateUp(p, mm, groups, x, e, w, x_in, M, n);
-        if (fwd.on(x, "e_down") and groups) {
-            mm_groups.gatherTo(e, p.mm.mm_groups, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        const grp = if (mm_groups.fits(w.gate, w.down)) mm_groups.forRouted(path, p.mm.mm_groups, p.mm.wide) else null;
+        if (fwd.on(x, "e_gateup")) gateUp(p, mm, grp, x, e, w, x_in, M, n);
+        if (fwd.on(x, "e_down") and grp != null) {
+            mm_groups.gatherTo(e, grp.?, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
         } else if (fwd.on(x, "e_down")) affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0 or !fwd.on(x, "combine")) return;
