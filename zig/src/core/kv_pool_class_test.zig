@@ -236,3 +236,39 @@ test "owner classes: above one class the pool refuses a reclaim store, whose evi
     try one.joinReclaim(.{ .ctx = &x, .call = Never.call });
     try equal(@as(usize, 1), one.reclaims.hooks().len);
 }
+
+test "owner classes: a retired page settles back to its owner class, then the next take returns it from there" {
+    for ([_]u32{ 1, 2 }) |w| {
+        var p = try kv.Pool.initClasses(t, 4 * w, 64, w);
+        defer p.deinit();
+        const c = w - 1; // two classes: a page owned by class 1
+        var l: kv.Lease = .{};
+        try p.reserve(&l, 1, c);
+        const id = try p.take(&l);
+        try equal(c, id % w);
+        try equal(@as(usize, 3), p.classFree(c));
+        try kv.retirement.retire(&p, &l, 0, 18);
+        try kv.retirement.settle(&p, 17); // a reader up to 18 may still read it: neither free nor promised
+        try equal(@as(usize, 3), p.classFree(c));
+        try equal(@as(usize, 0), l.promised);
+        try equal(@as(usize, 1), p.census().pending);
+        try kv.retirement.settle(&p, 18);
+        try equal(@as(usize, 4), p.classFree(c)); // the owner class's count, not only the pool's total
+        try equal(@as(usize, 4 * w), p.census().free);
+        try equal(@as(usize, 1), l.promised);
+        try equal(@as(usize, 1), p.classPromised(c));
+        try equal(@as(usize, 0), p.census().pending);
+        try scanned(&p, &.{l});
+        try equal(id, try p.take(&l)); // the same page, from the same class
+        try equal(@as(usize, 3), p.classFree(c));
+        try kv.retirement.retire(&p, &l, 1, 18); // its readers already done: back on its class's stack at once
+        try equal(@as(usize, 4), p.classFree(c));
+        try kv.retirement.settle(&p, 18);
+        try equal(@as(usize, 1), l.promised);
+        try scanned(&p, &.{l});
+        try equal(id, try p.take(&l));
+        if (w == 2) try equal(@as(usize, 4), p.classFree(0)); // the other class untouched throughout
+        p.finish(&l);
+        try expect(p.idle());
+    }
+}
