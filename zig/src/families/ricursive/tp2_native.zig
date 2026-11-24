@@ -152,6 +152,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoStreamFits => "the CUDA memory budget fits no Ripple stream after the weights: lower --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves one measured ExLlamaV3 pack, 5.0 bits a weight with an 8-bit head (ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw): this pack is another",
         error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
+        error.UnsupportedRicursivePrecision => "Ripple's two-rank CUDA path serves an ExLlamaV3 pack that keeps the release's bf16 values: this checkpoint is another",
         else => null,
     };
 }

@@ -98,14 +98,7 @@ fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usi
     return .{ .buf = w.buffer, .off = w.offset, .n = n, .k = k };
 }
 
-/// torch's bf16 sigmoid of a bf16 scalar: fp32 1 / (1 + exp(-x)), rounded to bf16 (to nearest, ties to even).
-pub fn blendOf(lambda: u16) f32 {
-    const x: f32 = @bitCast(@as(u32, lambda) << 16);
-    const s: f32 = 1.0 / (1.0 + @exp(-x));
-    const bits: u32 = @bitCast(s);
-    const rounded = (bits + 0x7fff + ((bits >> 16) & 1)) & 0xffff0000;
-    return @bitCast(rounded);
-}
+pub const blendOf = cfg.blendOf;
 
 pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
     const h = f.hidden;
