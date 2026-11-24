@@ -10,6 +10,11 @@ const glue = @import("glue.zig");
 const k = @import("dspark_kernels.zig");
 const weight_loader = @import("dspark_weights.zig");
 const state = @import("dspark_state.zig");
+const st = @import("state.zig");
+
+comptime {
+    if (st.feature_row_bytes != state.tap_row_bytes) @compileError("DSpark tail tap row bytes mismatch");
+}
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
@@ -97,6 +102,45 @@ pub const Drafter = struct {
 
     pub fn drafter(d: *Drafter) dr.Drafter {
         return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+    }
+
+    pub fn saveSnap(d: *Drafter, stream: *Stream, at_pos: u32, tap: st.Tap, tap_gen: u64) !?state.Snap {
+        const lane = d.contexts.getPtr(stream) orelse return null;
+        const tail = try resolveTailTap(tap, at_pos, lane.end, tap_gen);
+        return try state.Snap.save(d.target.device, d.target.queue, lane, tail);
+    }
+
+    pub fn restoreSnap(d: *Drafter, stream: *Stream, snap: ?*const state.Snap, at_pos: usize) !void {
+        const lane = d.contexts.getPtr(stream) orelse return;
+        const s = snap orelse return error.DSparkSnapshotMissing;
+        const expected_end = std.math.add(u64, s.end, if (s.tail_off != null) @as(u64, 1) else 0) catch return error.DSparkSnapshotGeometry;
+        if (expected_end != at_pos or expected_end > lane.rings[1]) return error.DSparkSnapshotGeometry;
+        try state.Snap.restore(lane, d.target.queue, s);
+        if (s.tail_off) |tail_off| {
+            errdefer {
+                lane.from = 0;
+                lane.end = 0;
+                lane.held_len = 0;
+            }
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            d.absorbRows(e, lane, at(s.buf, tail_off), s.end, 1);
+            e.end();
+            cb.commit();
+            try failed(cb, "restore tail");
+            lane.end = s.end + 1;
+            lane.held_len = 0;
+        }
+    }
+
+    pub fn resetLane(d: *Drafter, stream: *Stream) void {
+        if (d.contexts.getPtr(stream)) |lane| {
+            lane.from = 0;
+            lane.end = 0;
+            lane.held_len = 0;
+        }
     }
 
     fn cast(ptr: *anyopaque) *Drafter {
@@ -263,8 +307,42 @@ pub const Drafter = struct {
     }
 };
 
+pub fn resolveTailTap(tap: st.Tap, at_pos: u32, lane_end: u64, tap_gen: u64) !?state.Tail {
+    if (lane_end == at_pos) return null;
+    if (lane_end + 1 != at_pos) return error.SnapshotOutOfStep;
+    const buf = tap.buf orelse return error.SnapshotOutOfStep;
+    if (tap.gen) |g| if (g != tap_gen) return error.StaleInkling2Taps;
+    if (lane_end < tap.start) return error.SnapshotOutOfStep;
+    const rows_before = std.math.cast(usize, lane_end - tap.start) orelse return error.SnapshotOutOfStep;
+    if (rows_before >= tap.rows) return error.SnapshotOutOfStep;
+    const delta = std.math.mul(usize, rows_before, state.tap_row_bytes) catch return error.SnapshotOutOfStep;
+    const src_off = std.math.add(usize, tap.off, delta) catch return error.SnapshotOutOfStep;
+    const src_end = std.math.add(usize, src_off, state.tap_row_bytes) catch return error.SnapshotOutOfStep;
+    if (src_end > buf.length()) return error.SnapshotOutOfStep;
+    return .{ .buf = buf, .off = src_off };
+}
+
 test "Mini taps and block depth match checkpoint section eight" {
     try std.testing.expectEqualSlices(u32, &.{ 5, 23, 41, 48 }, &tap_list);
     try std.testing.expectEqual(@as(u32, 48), tap_list[3]);
     try std.testing.expectEqual(@as(u64, 768 * 1032), Drafter.scoreBytes(1024));
+}
+
+test "resolveTailTap preserves non-first-stream tap offset and validates generation and bounds" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const buf = try device.buffer(6 * state.tap_row_bytes, mtl.ResourceOptions.shared);
+    defer buf.deinit();
+    const shared_tap: st.Tap = .{ .buf = buf, .off = 2 * state.tap_row_bytes, .start = 10, .rows = 3, .gen = 7 };
+    try std.testing.expectEqual(@as(?state.Tail, null), try resolveTailTap(shared_tap, 13, 13, 7));
+    const tail = (try resolveTailTap(shared_tap, 13, 12, 7)).?;
+    try std.testing.expectEqual(buf.id, tail.buf.id);
+    try std.testing.expectEqual(4 * state.tap_row_bytes, tail.off);
+    const stable_tap: st.Tap = .{ .buf = buf, .off = 2 * state.tap_row_bytes, .start = 10, .rows = 3, .gen = null };
+    try std.testing.expectEqual(4 * state.tap_row_bytes, (try resolveTailTap(stable_tap, 13, 12, 99)).?.off);
+    try std.testing.expectError(error.StaleInkling2Taps, resolveTailTap(shared_tap, 13, 12, 8));
+    try std.testing.expectError(error.SnapshotOutOfStep, resolveTailTap(shared_tap, 14, 13, 7));
+    try std.testing.expectError(error.SnapshotOutOfStep, resolveTailTap(shared_tap, 13, 11, 7));
+    try std.testing.expectError(error.SnapshotOutOfStep, resolveTailTap(shared_tap, 10, 9, 7));
+    const truncated: st.Tap = .{ .buf = buf, .off = 5 * state.tap_row_bytes + 1, .start = 10, .rows = 1, .gen = 7 };
+    try std.testing.expectError(error.SnapshotOutOfStep, resolveTailTap(truncated, 11, 10, 7));
 }
