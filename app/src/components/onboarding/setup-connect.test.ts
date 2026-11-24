@@ -27,12 +27,13 @@ const installed = [
   { repo: 'synthetic/second-model', fitsMemory: true },
 ]
 const EngineChoice = load('src/components/models/EngineChoice.tsx', { '../../lib/preferences/useFlowText': hook, '../../lib/icons': { Icon: () => null }, '../../lib/engine': { useEngine: () => ({ snapshot: { status: { available: true, state: 'stopped', memoryLimitBytes: 100 }, installed }, error: '' }), formatBytes: () => '100 B' }, '../ui': { Button }, './EngineStatus': { engineDotTone: () => '' }, '../BrandMark': { BrandMark: () => null } }).EngineChoice
+const Field = load('src/components/onboarding/Field.tsx').Field
 const settings = { desktopMode: 'full', providers: [], uiPreferences: { locale: 'en' } }
 const useStore = Object.assign((selector: any) => selector({ settings, saveSettings() {}, setView() {} }), { getState: () => ({ threads: [], settings }), setState() {} })
 const componentImports = {
   '../lib/preferences/useFlowText': hook, '../lib/store': { useStore, requestSettingsSection() {} }, '../lib/ipc': { api: {} }, '../lib/icons': { Icon: () => null }, '../lib/brand': { BrandIcon: () => null, providerBrand: () => 'fixture' }, './ui': { Button, Input: (props: any) => React.createElement('input', props) },
   './settings/shared': { CLOUD_PROVIDER_PRESETS: [], LOCAL_RUNTIME_PRESETS: [], newProviderId: () => 'synthetic', providerPresetNeedsApiKey: () => true }, './onboarding-model': onboarding,
-  './models/EngineChoice': { EngineChoice }, './BrandMark': { BrandMark: () => null }, '../lib/engine': { ENGINE_PROVIDER_ID: 'tensorfold', formatBytes: () => '100 B', useEngine: () => ({ snapshot: null }) },
+  './models/EngineChoice': { EngineChoice }, './onboarding/Field': { Field }, './BrandMark': { BrandMark: () => null }, '../lib/engine': { ENGINE_PROVIDER_ID: 'tensorfold', formatBytes: () => '100 B', useEngine: () => ({ snapshot: null }) },
   '../lib/full-workspace-layout': { savedFullWorkspaceLayout: () => 'chat', fullLayoutPreferenceReadable: () => true }, '../lib/onboarding-landing': { finishOnboardingLanding() {} },
   './onboarding/first-answer/FirstAnswerStep': { FirstAnswerStep: () => null }, './onboarding/first-answer/MinimalSetupGuide': { MinimalSetupGuide: () => null }, './onboarding/first-answer/model': firstModel,
   './onboarding/first-answer/transition': { openFirstAnswerDraft() {} }, '../lib/conversation-drafts': { conversationDraftsFor() {} }, '../lib/desktop-drafts': { desktopDraftPort: null },

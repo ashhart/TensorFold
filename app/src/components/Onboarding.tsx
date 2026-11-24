@@ -36,6 +36,7 @@ import { ENGINE_PROVIDER_ID, formatBytes, useEngine } from '../lib/engine'
 import { fullLayoutPreferenceReadable, savedFullWorkspaceLayout } from '../lib/full-workspace-layout'
 import { finishOnboardingLanding } from '../lib/onboarding-landing'
 import { FirstAnswerStep } from './onboarding/first-answer/FirstAnswerStep'
+import { Field } from './onboarding/Field'
 import { MinimalSetupGuide } from './onboarding/first-answer/MinimalSetupGuide'
 import { firstAnswerNextAction, readFirstAnswerStarter, saveFirstAnswerStarter, type FirstAnswerStarterId, type FirstAnswerReadiness } from './onboarding/first-answer/model'
 import { openFirstAnswerDraft } from './onboarding/first-answer/transition'
@@ -594,17 +595,5 @@ function PresetRow({
       {badge && <span className="shrink-0 rounded-md bg-surface px-2 py-0.5 text-[12px] text-ink-3">{badge}</span>}
       <Icon name="chevronRight" size={14} className="shrink-0 text-ink-4 transition-transform group-hover:translate-x-0.5" />
     </button>
-  )
-}
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return (
-    <label className="block">
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-[13px] font-medium text-ink-2">{label}</span>
-        {hint && <span className="text-[12px] text-ink-4">{hint}</span>}
-      </div>
-      {children}
-    </label>
   )
 }
