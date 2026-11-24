@@ -112,6 +112,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    mods.engine.addImport("engine_api", api);
     const engines = b.createModule(.{
         .root_source_file = b.path("zig/src/native/metal.zig"),
         .target = target,
@@ -120,6 +121,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "tokenizer", .module = tokenizer } },
     });
     engines.addImport("living", mods.living);
+    engines.addImport("kernel_sources", mods.sources);
+    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan" }) |name|
+        engines.addImport(name, mods.engine.import_table.get(name).?);
     const drama3_lib = drama3_build.metallib(b, metal_std);
     b.getInstallStep().dependOn(&b.addInstallFile(drama3_lib, "lib/drama3.metallib").step);
     const drama3_embed = if (shaders) drama3_lib else no_shaders;
@@ -229,15 +233,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
     }) });
     test_step.dependOn(&b.addRunArtifact(pack_cases).step);
-    const load_admission_cases = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    }) });
-    const load_admission_run = b.addRunArtifact(load_admission_cases);
-    b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&load_admission_run.step);
-    test_step.dependOn(&load_admission_run.step);
     const pack_cache_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_pack_cache_cases.zig"),
         .target = target,
@@ -463,6 +458,11 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
+    const inkling2_metal = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig"), .target = target, .optimize = optimize });
+    const inkling2_metal_ref = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/ref.zig"), .target = target, .optimize = optimize });
+    inkling2_metal_ref.addImport("metal", metal);
+    const inkling2_glue_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig"), .target = target, .optimize = optimize });
+    const inkling2_loop_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig"), .target = target, .optimize = optimize });
     // Living Weights' family-neutral learner, which Nemotron's lessons and the server's view of them share
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const engine = b.createModule(.{
@@ -472,7 +472,12 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living }, .{ .name = "tokenizer", .module = tokenizer } },
     });
+    engine.addImport("inkling2_metal", inkling2_metal);
+    engine.addImport("inkling2_metal_ref", inkling2_metal_ref);
+    engine.addImport("inkling2_glue_plan", inkling2_glue_plan);
+    engine.addImport("inkling2_loop_plan", inkling2_loop_plan);
     engine.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
+    engine.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 
@@ -486,8 +491,12 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     m.metal.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/lib" })));
     m.metal.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/include" })));
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
+    m.engine.addImport("engine_api", api);
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
+    engines.addImport("kernel_sources", m.sources);
+    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan" }) |name|
+        engines.addImport(name, m.engine.import_table.get(name).?);
     drama3_build.addNative(b, target, .fast, m.metal, engines, drama3_build.metallib(b, mlxMetalStd(b)));
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
     engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));

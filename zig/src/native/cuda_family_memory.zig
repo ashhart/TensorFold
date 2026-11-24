@@ -68,7 +68,7 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
         return null;
     };
-    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole, o.drafts) catch |err| {
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole, o.drafts, o.rank, o.tp) catch |err| {
         problem.* = (if (@hasDecl(F, "explains_open")) F.explain(null, err) else null) orelse try std.fmt.allocPrint(a, "cannot size this rank's weights ({s})", .{@errorName(err)});
         return null;
     } else whole;
@@ -76,8 +76,8 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
 }
 
 /// `F.weightShare`, plain bytes or an error union (a family whose split settings can be refused).
-fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64, drafts: bool) anyerror!u64 {
-    return F.weightShare(a, io, dir, whole, drafts);
+fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64, drafts: bool, rank: u32, tp: u32) anyerror!u64 {
+    return F.weightShare(a, io, dir, whole, drafts, rank, tp);
 }
 
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.

@@ -78,8 +78,8 @@ pub const Extra = struct {
             .depth = rowDepth,
             .out = .bf16,
             .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } },
-            // Ornith's decode windows: gate and up (1,024 over 3,072), down (3,072 over 1,024)
-            .served = &.{ .{ .rows = 16, .n = 1024, .k = 3072 }, .{ .rows = 1, .n = 3072, .k = 1024 } },
+            // decode windows: Ornith's gate and up (1,024 over 3,072) and down, then the 35B-A3B's (512 over 2,048)
+            .served = &.{ .{ .rows = 16, .n = 1024, .k = 3072 }, .{ .rows = 1, .n = 3072, .k = 1024 }, .{ .rows = 16, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 2048, .k = 512 } },
         };
     }
 

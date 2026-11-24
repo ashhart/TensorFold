@@ -1,6 +1,14 @@
 //! Source and lane regressions with a recording Metal boundary, no shader compiler or GPU work.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const admission = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"), .target = b.graph.host, .link_libc = true }) }));
+    b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&admission.step);
+    all.dependOn(&admission.step);
+    const review = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_review_test.zig"), .target = b.graph.host, .link_libc = true }) }));
+    b.step("test-flashnext-ssd-review-host", "SSD startup, cache and ownership regressions without a device").dependOn(&review.step);
+    all.dependOn(&review.step);
+    const metadata = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_review_test.zig"), .target = b.graph.host, .link_libc = true }), .filters = &.{"REV99 slot metadata"} }));
+    b.step("test-flashnext-ssd-metadata-host", "Forecast accounting preserves legacy pool receipt bytes").dependOn(&metadata.step);
     const rope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/rope_refusal_test.zig"), .target = b.graph.host }) }));
     b.step("test-flashnext-rope-host", "The Metal/HIP config reader refuses scaled RoPE and keeps plain configs' rotary").dependOn(&rope.step);
     all.dependOn(&rope.step);
@@ -9,6 +17,10 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     all.dependOn(&fused_split.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/load_memory.zig"), .target = b.graph.host });
     b.step("test-flashnext-memory-host", "Flash Next allocation floor and working-set refusal without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
+    const bounded = b.createModule(.{ .root_source_file = b.path("zig/flashnext_ssd_budget_test.zig"), .target = b.graph.host, .link_libc = true });
+    const bounded_run = b.addRunArtifact(b.addTest(.{ .root_module = bounded }));
+    b.step("test-flashnext-ssd-budget-host", "Refused SSD pools fit the unchanged ceiling with whole-layer capacity").dependOn(&bounded_run.step);
+    all.dependOn(&bounded_run.step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const empty = b.addWriteFiles().add("flashnext-test-empty.zig", "pub const bytes = \"\";\n");

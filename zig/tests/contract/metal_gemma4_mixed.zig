@@ -92,6 +92,7 @@ pub const Probe = struct {
             defer p.a.free(sb);
             try lane.pack(l, words, f.scales, f.biases, pw, sb);
             const w = try p.rig.input(std.mem.sliceAsBytes(pw));
+            if (l.reg) try lane.regOrder(p.rig.device, &.{.{ .w = ref(w), .n = 32, .k = 256, .bits = width }});
             const meta = try p.rig.input(std.mem.sliceAsBytes(sb));
             p.runs[j] = x;
             p.storage[j] = .{ w, meta };
@@ -140,7 +141,7 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usiz
         defer a.free(source);
         const label = try std.fmt.allocPrint(a, "{s} q{d}", .{ name, width });
         defer a.free(label);
-        problems += try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = label, .threads = @intCast(32 * l.sk), .tg_memory = @intCast(l.threadgroupBytes()), .offline = false }, .function = "tf_lane", .here = source, .pre_m5 = "" }, false);
+        problems += try @import("metal_limits.zig").onThisGpu(a, device, .{ .decl = .{ .name = label, .threads = @intCast(32 * l.sk), .tg_memory = @intCast(l.threadgroupBytes()), .offline = false }, .function = if (l.reg) "tf_lane_reg" else "tf_lane", .here = source, .pre_m5 = "" }, false);
     }
     return problems;
 }

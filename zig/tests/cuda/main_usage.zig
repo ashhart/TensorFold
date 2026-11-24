@@ -3,6 +3,7 @@
 pub const usage =
     \\usage: tf-cuda-test <command>
     \\  qwen4                     synthetic native Qwen4: binary64 logits/tokens, state seams, lanes and copied drafts
+    \\  inkling2-serving MODEL IDS_FILE  Mini CUDA host-reference, resume, admission and copy-rollback serving equivalence
     \\  qwen-draft-frames MODEL DRAFTER IDS OUT  native 27B DFlash frames: raw bytes equal across partitions, controls red
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
@@ -25,6 +26,8 @@ pub const usage =
     \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
     \\  nvfp4-nz5                 NVFP4_NZ5's block 32 experts: E2M1's bytes with each +5 a 4 under a scale 1.25x as large
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
+    \\  group-proj                grouped same-input lane projections: each one's bytes equal its own launch, rows 1-16
+    \\  lane-half-n               TF_QMMF_HALF_BN half tiles (FP4, FP8, FP8G): bytes equal to the 64-column tile, rows 1-16
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
@@ -86,6 +89,7 @@ pub const usage =
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  prompt-segments MODEL IDS_FILE   a prompt run as 2 to 4 staggered segments a call equals one uncut pass, byte for byte
+    \\  qwen-prefill-cap MODEL IDS_FILE   a 12,000-row Qwen prompt cut at 512 rows beside a live stream equals its uncut pass: logits and 64 greedy tokens, byte for byte
     \\  cached-plans-tp2 MODEL IDS_FILE   rank-zero cached plans and prompt resumes with the existing expert rank
     \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back), lone and in shared windows of 2/4/8 streams, against one stream, byte for byte
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
@@ -102,6 +106,7 @@ pub const usage =
     \\  native-fp                 -Dnative-fp-decode: hardware e2m1/e4m3 pair decode equals software on every finite input
     \\  affine4-decode            affine-4 decode at the Qwen3.5 shapes: row counts and segmented launches byte for byte
     \\  absorb-batch              DFlash2 absorb projections over 1/4/8/16 streams' rows in one pass vs each alone, byte for byte
+    \\  wide-rounds               Nemotron Lightning dense calls at 17-32 rows vs 16-row calls (affine-4, NVFP4), byte for byte
     \\  w4a8                      int8-activation prompt matmuls on affine-4 tiles: float64 of their formula, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
@@ -156,6 +161,9 @@ pub const usage =
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
     \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
+    \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
+    \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
+    \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
     \\  moss-contract [ONLY..]    MOSS-Image's own kernels, its decoder's unpack and its encoder's mixer, gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red

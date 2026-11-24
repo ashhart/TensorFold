@@ -113,6 +113,7 @@ pub const Entry = struct {
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     removed_as: @import("prompt_cache_miss.zig").Reason = .evicted, // what the removal ring records when this entry goes
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
+    serial: u64 = 0, // the store's count when it was kept: names it while no lookup borrows it (reborrow)
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
@@ -137,6 +138,7 @@ pub const Store = struct {
     most: usize = std.math.maxInt(usize), // states kept at most: a family's snapshot slots, one a state
     held: u64 = 0,
     clock: u64 = 0,
+    serials: u64 = 0, // entries kept so far: the next one's serial
     entries: std.ArrayList(*Entry) = .empty,
     by_position: std.ArrayList(*Entry) = .empty, // nonowning, longest first; equal positions retain insertion order
     counts: Counts = .{},
@@ -210,6 +212,16 @@ pub const Store = struct {
             return true;
         };
         return false;
+    }
+
+    /// The live entry `serial` names, borrowed again; null when it has been evicted or expired since.
+    pub fn reborrow(s: *Store, serial: u64) ?*Entry {
+        if (serial == 0) return null; // no entry the index holds has it: an unnumbered one is never lent
+        for (s.entries.items) |e| if (e.serial == serial and !e.expired) {
+            e.borrowers += 1;
+            return e;
+        };
+        return null;
     }
 
     /// Whether an outstanding lookup still borrows `saved`'s state: the family spares it while restoring.
