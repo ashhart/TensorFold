@@ -18,7 +18,8 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     @import("h3_image_encoder.zig").compileHost(b, target, metal);
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
-    const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels }, .{ .name = "gpu_turn", .module = b.createModule(.{ .root_source_file = b.path("zig/src/server/gpu_turn.zig"), .target = target, .optimize = .Debug }) } } });
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels }, .{ .name = "gpu_turn", .module = b.createModule(.{ .root_source_file = b.path("zig/src/server/gpu_turn.zig"), .target = target, .optimize = .Debug }) } };
+    const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = imports });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
     const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core } } }) });
     const compile = b.step("compile-h3-host", "Compile the actual H3 tools (tf-h3-dit, tf-h3-image) without compiling or executing shaders");
@@ -28,6 +29,10 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const rounding = b.addRunArtifact(b.addTest(.{ .root_module = modulation, .filters = &.{"modulation bf16:"} }));
     b.step("test-h3-modulation-bf16", "H3's host bf16 rounding against the copy it replaced, no GPU").dependOn(&rounding.step);
     test_step.dependOn(&rounding.step);
+    const block = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/block.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = imports });
+    const bands = b.addRunArtifact(b.addTest(.{ .root_module = block, .filters = &.{"h3 gemm:"} }));
+    b.step("test-h3-gemm", "H3's transformer products in 64-tile bands against MLX's band of 4, on the GPU").dependOn(&bands.step);
+    test_step.dependOn(&bands.step);
     const ahead = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/read_ahead.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const read_test = b.addTest(.{ .root_module = ahead });
     const read_step = b.step("test-h3-read-ahead", "H3 whole-shard reads, truncated or missing files, and prefetch disabled");

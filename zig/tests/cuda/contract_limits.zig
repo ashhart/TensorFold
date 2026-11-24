@@ -31,7 +31,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "flashnext_hcn")) return kk.flashnext_hcn;
     inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple", "gemma4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "nemo_audio", "moss_image", "idol", "idol_decoder", "lfm2_moe", "lfm2", "dots_mocr", "muse_glue", "muse_attention", "muse_linear", "muse_experts2", "muse_dflash", "muse_dflash2", "ricursive", "ricursive_prep" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "nemo_audio", "moss_image", "glm_vision", "idol", "idol_decoder", "lfm2_moe", "lfm2", "dots_mocr", "muse_glue", "muse_attention", "muse_linear", "muse_experts2", "muse_dflash", "muse_dflash2", "ricursive", "ricursive_prep" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "inkling2_attn", "inkling2_pattn", "inkling2_ops", "inkling2_rows", "inkling2_experts", "inkling2_modelopt", "inkling2_loop_math", "inkling2_vision" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "moss_image_decoder", "moss_image_encoder" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
@@ -137,6 +137,7 @@ fn auditLaunch(launch: limits.CudaLaunch, sm: u32) limits.CudaLaunch {
         "qmmf FP8 64-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 32-row tile", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
+        "qmmf BF16 32-row tile, fused slices", // zig/src/cuda/qmmf.zig:225
         "qmmf shared down 32 stride", // zig/src/cuda/qmmf.zig:189
         "prompt16 FP8", // zig/src/cuda/nvfp4.zig:122
         "qmmf FP8 fp32 out 64-row tile", // zig/src/cuda/qmmf.zig:147
@@ -144,6 +145,7 @@ fn auditLaunch(launch: limits.CudaLaunch, sm: u32) limits.CudaLaunch {
         "qmmf FP8 fp32 out 64-row tile, fused slices", // zig/src/cuda/qmmf.zig:151
         "qmmf BF16 fp32 out 32-row tile", // zig/src/cuda/qmmf.zig:147
         "qmmf BF16 fp32 out 32-row tile, cluster of 8", // zig/src/cuda/qmmf.zig:147
+        "qmmf BF16 fp32 out 32-row tile, fused slices", // zig/src/cuda/qmmf.zig:225
         "h3 h3_attention", // zig/src/families/h3/cuda.zig:97
     };
     for (raised) |name| if (std.mem.eql(u8, launch.name, name)) {

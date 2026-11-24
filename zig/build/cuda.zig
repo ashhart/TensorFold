@@ -94,7 +94,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const native = engines(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda }, .{ "core", mods.core }, .{ "lanes", mods.lanes }, .{ "nemotron", mods.nemotron }, .{ "dory", native.engines.import_table.get("dory").? }, .{ "cluster", @import("cluster_cuda.zig").module(b, target, optimize, mods.lanes, mods.core, native.canon, native.verbs) }, .{ "ricursive_cuda", native.engines.import_table.get("ricursive_cuda").? } }) |m| cli.addImport(m[0], m[1]);
     cli.addOptions("build_options", build_options);
-    cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
+    const checkpoint_cli = checkpointCli(b, target, optimize, strip, native.engines, mods.core);
+    cli.addImport("checkpoint_cli", checkpoint_cli);
+    cli.addImport("server_start", @import("server.zig").startModule(b, target, optimize, checkpoint_cli, native.api, mods.core, @import("server.zig").json(b, target, optimize)));
     const cli_exe = b.addExecutable(.{ .name = "tensorfold", .root_module = cli });
     b.installArtifact(cli_exe);
     b.step("compile-cuda-cli", "Compile the CUDA tensorfold CLI without executing a GPU").dependOn(&cli_exe.step);
@@ -457,12 +459,16 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     cli.addImport("lanes", mods.lanes);
     cli.addImport("nemotron", mods.nemotron);
     cli.addOptions("build_options", build_options);
-    cli.addImport("checkpoint_cli", checkpointCli(b, host, .debug, false, native_modules.engines, mods.core));
+    const checkpoint_cli = checkpointCli(b, host, .debug, false, native_modules.engines, mods.core);
+    cli.addImport("checkpoint_cli", checkpoint_cli);
+    cli.addImport("server_start", @import("server.zig").startModule(b, host, .debug, checkpoint_cli, native_modules.api, mods.core, @import("server.zig").json(b, host, .debug)));
     const memory_cli = checkpointCli(b, host, .debug, false, native_modules.engines, mods.core);
     memory_cli.root_source_file = b.path("zig/src/cli/tests.zig");
     b.step("test-cli-memory-host", "Actual checkpoint info memory tests without device or shader producers").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{ "info prints family", "issue 934:", "plan" } })).step);
     b.step("test-info-config", "Info shares the checkpoint config reader and diagnostics").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{"issue 934:"} })).step);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli })).step);
+    const cli_run = b.addRunArtifact(b.addTest(.{ .root_module = cli }));
+    b.step("test-cli-host", "Checkpoint CLI parsing and CUDA start dispatch without devices").dependOn(&cli_run.step);
+    step.dependOn(&cli_run.step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{"plan"} })).step); // plan's verdict tests in the plain `zig build test` gate
 }
 
