@@ -3,7 +3,6 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
-
 #include "exl3_decode.cuh"
 
 namespace ink2o {
@@ -97,10 +96,20 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
         return a.partial_bf16 ? bf(reinterpret_cast<const uint16_t*>(sp)[i]) : reinterpret_cast<const float*>(sp)[i];
     };
     if (a.query) {
-        // every block's sums in one pass and one reduction: each sum adds in the order it did block by block
-        float v[kV];
+        // Normalize each source before its query dot; both passes retain the declared strided/shuffle reduction.
+        float ss[kMaxBlocks + 1] = {};
+        for (int c0 = 0; c0 < C; c0 += kMixCols) {
+            mixStage(a, row, c0, sb, sp);
+            for (int i = threadIdx.x; i < kMixCols && c0 + i < C; i += blockDim.x) {
 #pragma unroll
-        for (int i = 0; i < kV; ++i) v[i] = 0.0f;
+                for (int j = 0; j < kMaxBlocks + 1; ++j)
+                    if (j < n) { const float x = entry(j, i); ss[j] += x * x; }
+            }
+            __syncthreads();
+        }
+        blockSums<kMaxBlocks + 1>(ss, sh);
+        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) rr[j] = rsqrtf(ss[j] / C + 1e-6f); __syncthreads();
+        float v[kV] = {};
         for (int c0 = 0; c0 < C; c0 += kMixCols) {
             mixStage(a, row, c0, sb, sp);
             for (int i = threadIdx.x; i < kMixCols && c0 + i < C; i += blockDim.x) {
@@ -109,26 +118,18 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix(const MixArgs a) {
 #pragma unroll
                 for (int q = 0; q < kMaxQueries; ++q) qc[q] = q < a.nq ? a.query[static_cast<size_t>(q) * C + c] : 0.0f;
 #pragma unroll
-                for (int j = 0; j < kMaxBlocks + 1; ++j) {
-                    if (j < n) {
-                        const float x = entry(j, i);
-                        v[j * (1 + kMaxQueries)] += x * x;
+                for (int j = 0; j < kMaxBlocks + 1; ++j) if (j < n) {
+                    const float normalized = entry(j, i) * rr[j];
 #pragma unroll
-                        for (int q = 0; q < kMaxQueries; ++q)
-                            if (q < a.nq) v[j * (1 + kMaxQueries) + 1 + q] += x * qc[q];
-                    }
+                    for (int q = 0; q < kMaxQueries; ++q)
+                        if (q < a.nq) v[j * (1 + kMaxQueries) + 1 + q] += qc[q] * normalized;
                 }
             }
-            __syncthreads();  // the next slice overwrites the staged one
+            __syncthreads();
         }
         blockSums<kV>(v, sh);
-        if (threadIdx.x == 0)
-            for (int j = 0; j < n; ++j) {
-                const float r = rsqrtf(v[j * (1 + kMaxQueries)] / C + 1e-6f);
-                rr[j] = r;
-                for (int q = 0; q < a.nq; ++q)
-                    wts[q][j] = v[j * (1 + kMaxQueries) + 1 + q] * r * rsqrtf(static_cast<float>(C));
-            }
+        if (threadIdx.x == 0) for (int j = 0; j < n; ++j) for (int q = 0; q < a.nq; ++q) wts[q][j] =
+            v[j * (1 + kMaxQueries) + 1 + q] * rsqrtf(static_cast<float>(C));
         __syncthreads();
         if (threadIdx.x < a.nq) {
             float* l = wts[threadIdx.x];
@@ -199,18 +200,19 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_mix_rows(const MixArgs
     };
     if (a.query) {
         for (int j = 0; j < n; ++j) {
-            float v[1 + kMaxQueries] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float ss[1] = {0.0f};
+            for (int c = threadIdx.x; c < C; c += blockDim.x) { const float x = entry(j, c); ss[0] += x * x; }
+            blockSums<1>(ss, sh); if (threadIdx.x == 0) rr[j] = rsqrtf(ss[0] / C + 1e-6f);
+        }
+        __syncthreads();
+        for (int j = 0; j < n; ++j) {
+            float dots[kMaxQueries] = {0.0f, 0.0f, 0.0f};
             for (int c = threadIdx.x; c < C; c += blockDim.x) {
-                const float x = entry(j, c);
-                v[0] += x * x;
-                for (int q = 0; q < a.nq; ++q) v[1 + q] += x * a.query[static_cast<size_t>(q) * C + c];
+                const float normalized = entry(j, c) * rr[j]; for (int q = 0; q < a.nq; ++q)
+                    dots[q] += a.query[static_cast<size_t>(q) * C + c] * normalized;
             }
-            blockSums<1 + kMaxQueries>(v, sh);
-            const float r = rsqrtf(v[0] / C + 1e-6f);
-            if (threadIdx.x == 0) {
-                rr[j] = r;
-                for (int q = 0; q < a.nq; ++q) wts[q][j] = v[1 + q] * r * rsqrtf(static_cast<float>(C));
-            }
+            blockSums<kMaxQueries>(dots, sh);
+            if (threadIdx.x == 0) for (int q = 0; q < a.nq; ++q) wts[q][j] = dots[q] * rsqrtf(static_cast<float>(C));
         }
         __syncthreads();
         if (threadIdx.x < a.nq) {

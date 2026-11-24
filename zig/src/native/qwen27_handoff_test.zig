@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const slots = @import("qwen27_slots.zig");
+const standing = @import("qwen27_standing.zig");
 const remote = @import("qwen27_remote.zig");
 const Metal = @import("qwen27_lanes.zig").Metal;
 const Remote = api.LaneHost.Remote;
@@ -98,14 +99,14 @@ const Mac = struct {
         const m = current.?;
         m.resumed = 0;
         var cached: ?u32 = null; // what opening left in s.cached, which the fake's own fill overwrites
-        if (slots.resumeAt(&m.back, s.prompt(), s.decode_spans) > 0) {
+        if (standing.resumeAt(&m.back, s.prompt(), s.decode_spans) > 0) {
             const f = try slots.opening(&m.back, s, 0);
             m.resumed = @intCast(f.from);
             cached = s.cached;
             if (f.rewind > 0) m.back.standing.rewind_at = f.rewind; // chunk's saveRewind there, which needs a GPU
         } else {
             const at: usize = if (s.reuse.saved != null) s.reuse.at else 0;
-            const point = slots.rewindPoint(&m.back, s, 0, at, .{});
+            const point = standing.rewindPoint(&m.back, s, 0, at, .{});
             m.back.standing.deinit(gpa); // the pass takes slot 0 from 0 or the restore (takeStanding's .none)
             m.back.standing.rewind_at = point; // saveRewind's blit at the point, which needs a GPU, landed
         }
@@ -117,7 +118,7 @@ const Mac = struct {
     fn release(ctx: *anyopaque, s: *lanes.Stream) void {
         const m: *Mac = @ptrCast(@alignCast(ctx));
         m.offsets[0] = @intCast(s.context.items.len - 1);
-        slots.leave(&m.back, s);
+        standing.leave(&m.back, s);
         m.context.clearRetainingCapacity();
         m.context.appendSlice(gpa, s.context.items) catch unreachable;
         _ = m.released.fetchAdd(1, .acq_rel);
@@ -146,7 +147,7 @@ fn turn(m: *Mac, peer: *Peer, request: *const api.Request, keep: bool) !Heard {
     host.decoded_rows = true; // as the 27B's served host
     host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     remote.keepRule(.{ .host = &host, .back = &m.back }, keep); // as attach, on --prefill-from
-    host.resume_peek = .{ .ctx = &m.back, .at = slots.resumeAt };
+    host.resume_peek = .{ .ctx = &m.back, .at = standing.resumeAt };
     const left = m.released.load(.acquire);
     try host.start();
     defer host.stop();
@@ -175,7 +176,7 @@ test "qwen27 hand-off: the follow-up resumes slot 0 where the pulled turn left i
     const st = &m.back.standing;
     const stood = .{ st.keep_remote, st.remote, st.rewind_at, st.tokens.len }; // what turn 1 left in slot 0
     const back = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 20, 30, 31 }; // the reply rendered without its reasoning
-    const back_at = slots.resumeAt(&m.back, &back, &.{.{ 9, 10 }});
+    const back_at = standing.resumeAt(&m.back, &back, &.{.{ 9, 10 }});
     var follow: [p1.len + 5]u32 = undefined; // the reply sent back as generated (decoded rows 9-11), then a new turn
     @memcpy(follow[0 .. p1.len + 3], m.context.items);
     follow[p1.len + 3] = 40;
@@ -230,7 +231,7 @@ test "qwen27 hand-off: a pass resuming slot 0's remote rows makes no unplanned c
         defer s0.deinit(gpa);
         s0.fill_at.store(32, .monotonic); // a pass that yielded at a landed chunk's end
         m.offsets[0] = 32;
-        slots.leave(&m.back, &s0);
+        standing.leave(&m.back, &s0);
         try t.expect(m.back.standing.tokens.len == 32 and m.back.standing.remote == on_remote);
         // its follow-up: a pull slot 0 overtook (lane_remote.ownFirst), a mark hook, a history end the cache keeps not
         var s = try lanes.Stream.init(gpa, .{ .id = "next", .prompt = &ids, .max_new = 2, .history_len = 200, .reuse = .{ .hook = hook, .pulled = true } });
@@ -249,10 +250,10 @@ test "qwen27 hand-off: a salted request makes no rewind point in slot 0" {
     m.back.rewind = @as(Buffer, undefined); // a rewind buffer: only its presence is read here
     var own = try lanes.Stream.init(gpa, .{ .id = "own", .prompt = &p1, .max_new = 1, .history_len = 8 });
     defer own.deinit(gpa);
-    try t.expectEqual(@as(u32, 8), slots.rewindPoint(&m.back, &own, 0, 7, .{})); // an unsalted one does go back
+    try t.expectEqual(@as(u32, 8), standing.rewindPoint(&m.back, &own, 0, 7, .{})); // an unsalted one does go back
     var s = try lanes.Stream.init(gpa, .{ .id = "salted", .prompt = &p1, .max_new = 1, .history_len = 8, .cache_salt = 1 });
     defer s.deinit(gpa);
-    try t.expectEqual(@as(u32, 0), slots.rewindPoint(&m.back, &s, 0, 7, .{}));
+    try t.expectEqual(@as(u32, 0), standing.rewindPoint(&m.back, &s, 0, 7, .{}));
 }
 
 test "qwen27 hand-off: attach's TF_PREFILL_KEEP reaches slot 0 as it reaches the lane host" {

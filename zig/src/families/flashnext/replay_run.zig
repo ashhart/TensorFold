@@ -114,6 +114,7 @@ pub const Run = struct {
     lane_pipes: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty,
     wide_pipes: lane_w.Cache = .empty, // lane products at other widths than 6/32 (lane_w.zig)
     lane_shape: std.AutoHashMapUnmanaged(*Variant, [3]usize) = .empty, // recorded lane kernels' N, K, SK
+    batch_gdn_wide: ?mtl.Pipeline = null,
     gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
     gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
     tree: ?*@import("tree.zig").Tree = null, // the tree window decode is running, if any (tree.zig)

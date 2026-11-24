@@ -74,7 +74,12 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
                 r.rows = g.rows;
                 const ins = [_]Buf{ v.p, sl.cs[0], sl.so[0], l.conv, l.alog, l.dt, l.norm, t.eps, g.s.m.t.rows };
                 const outs = [_]Buf{ v.gout, sl.cs[1], sl.so[1] };
-                if (r.gdn_pipe) |pipe| fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                const wide = if (g.rows == 8 or g.rows == 16) r.batch_gdn_wide else null;
+                if (wide orelse r.gdn_pipe) |pipe| {
+                    fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48);
+                } else {
+                    try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                }
             }
         } else {
             try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, l.qn, l.kn, l.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });

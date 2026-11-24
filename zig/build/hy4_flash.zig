@@ -17,6 +17,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
             .{ .name = "engram_hash_core", .module = hash },
         },
     });
+    module.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module }));
     test_step.dependOn(&run.step);
     b.step("test-hy4-flash-host", "Hy4-flash checkpoint layout, slot selection, Engram gathers and DFly2 inputs").dependOn(&run.step);
