@@ -77,14 +77,16 @@ pub fn embedNorm(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, table: Re
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-const ARArgs = extern struct { sources: u32, queries: u32 };
-/// sources = completed BF16 blocks plus one unrounded F32 partial; output is one FP32 row per query.
-pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32) void {
-    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+const ARArgs = extern struct { sources: u32, queries: u32, rows: u32, blocks_stride: u32, partial_stride: u32, out_stride: u32 };
+/// Row i of a batch has its blocks, partial and output `*_stride` elements past row 0's.
+pub const ARRows = struct { rows: u32 = 1, blocks_stride: u32 = 0, partial_stride: u32 = 0, out_stride: u32 = 0 };
+/// sources = completed BF16 blocks plus one unrounded F32 partial; output is one FP32 row per query and batch row.
+pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32, batch: ARRows) void {
+    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3 and batch.rows > 0);
     e.setPipeline(p.ar);
     inline for (.{ blocks, partial, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(ARArgs{ .sources = sources_, .queries = queries_ }, 4);
-    e.dispatchGroups(mtl.Size.of(queries_, 1, 1), mtl.Size.of(256, 1, 1));
+    e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = batch.rows, .blocks_stride = batch.blocks_stride, .partial_stride = batch.partial_stride, .out_stride = batch.out_stride }, 4);
+    e.dispatchGroups(mtl.Size.of(queries_, batch.rows, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ConvArgs = extern struct { rows: u32, channels: u32 };
