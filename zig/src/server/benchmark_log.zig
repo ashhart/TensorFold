@@ -16,6 +16,13 @@ pub const Sink = struct {
     secrets: []const []const u8,
     served: []const u8,
     offset: u64 = 0,
+    /// Tests only: the `at`-th write (from 1) puts its first `keep` bytes in the file, then fails, once.
+    fault: struct { at: u32 = 0, keep: usize = 0 } = .{},
+    writes: u32 = 0,
+    /// With keys, a write failed: nothing more is written, so the file stays a prefix of the checked lines.
+    broken: bool = false,
+    /// 1: the parent asks for the held last line now; 2: it is written (an exited child's tail is then whole).
+    cut: std.atomic.Value(u8) = .init(0),
     /// Serve's port from its serving line, read before redaction and never from the file (0: not yet).
     port: std.atomic.Value(u16) = .init(0),
     stop: std.atomic.Value(bool) = .init(false),
@@ -56,9 +63,26 @@ pub const Sink = struct {
     }
 
     fn append(s: *Sink, bytes: []const u8) void {
-        if (bytes.len == 0) return;
-        s.log.writePositionalAll(s.io, bytes, s.offset) catch return;
+        if (bytes.len == 0 or s.broken) return;
+        s.writes += 1;
+        if (s.writes == s.fault.at) {
+            s.log.writePositionalAll(s.io, bytes[0..@min(s.fault.keep, bytes.len)], s.offset) catch {};
+            s.broken = s.secrets.len > 0;
+            return;
+        }
+        s.log.writePositionalAll(s.io, bytes, s.offset) catch {
+            s.broken = s.secrets.len > 0; // a later line written here could join this one's text into a key
+            return;
+        };
         s.offset += bytes.len;
+    }
+
+    /// The held last line written now, checked and with a newline after it, for an exited child whose pipe stays open.
+    pub fn cutHeld(s: *Sink, ms: u32) void {
+        if (s.thread == null or s.done.load(.acquire)) return;
+        s.cut.store(1, .release);
+        var waited: u32 = 0;
+        while (s.cut.load(.acquire) != 2 and !s.done.load(.acquire) and waited < ms) : (waited += 10) s.io.sleep(.fromMilliseconds(10), .awake) catch {};
     }
 
     /// Serve's port once its serving line has gone through the pipe.
@@ -99,6 +123,14 @@ pub const Sink = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         while (true) {
+            if (s.cut.load(.acquire) == 1) {
+                if (over) {
+                    if (s.secrets.len > 0) s.append("\n");
+                } else if (held.items.len > 0) s.line(arena.allocator(), held.items, true);
+                over = false;
+                held.clearRetainingCapacity();
+                s.cut.store(2, .release);
+            }
             const stopping = s.stop.load(.acquire);
             if (stopping) after_stop += 1;
             const ready = posix.poll(&fds, if (stopping) 0 else 100) catch break;
@@ -182,9 +214,15 @@ test "benchmark log: without keys the child's bytes reach the file unchanged" {
 
 /// What the sink wrote for `text`, sent in two writes split at `split`, under `secrets`.
 fn through(io: std.Io, dir: std.Io.Dir, secrets: []const []const u8, text: []const u8, split: usize, out: []u8) ![]const u8 {
+    return faulted(io, dir, secrets, text, split, .{}, out);
+}
+
+/// `through`, with the sink's `at`-th file write failing after `keep` bytes; the file is writable again after.
+fn faulted(io: std.Io, dir: std.Io.Dir, secrets: []const []const u8, text: []const u8, split: usize, fault: @FieldType(Sink, "fault"), out: []u8) ![]const u8 {
     const log = try dir.createFile(io, "child.log", .{ .read = true, .truncate = true });
     defer log.close(io);
     const s = try Sink.open(std.testing.allocator, io, log, secrets, "");
+    s.fault = fault;
     const writer = std.c.dup(s.child.handle);
     try s.started();
     _ = std.c.write(writer, text.ptr, split);
@@ -205,11 +243,17 @@ test "benchmark log: no replacement, marker or held suffix writes a configured k
         .{ .secrets = &.{ "[redacted]-suffix", "fixture-log-key" }, .text = "fixture-log-key-suffix\nnext\n" },
         .{ .secrets = &.{ "[redacted]", "[withheld]" }, .text = "x [redacted]\nnext\n" }, // both fixed texts are keys
         .{ .secrets = &.{"[redacted]"}, .text = "held [" }, // a suffix held at the end of the stream
+        .{ .secrets = &.{"[redacted]"}, .text = "a %5Bredacted%5D b\nnext\n" }, // encoded forms of the same
+        .{ .secrets = &.{"[redacted]"}, .text = "a %255Bredacted%255D b\nnext\n" },
+        .{ .secrets = &.{ "[redacted]-suffix", "fixture-log-key" }, .text = "fixture%2Dlog%2Dkey-suffix\nnext\n" },
+        .{ .secrets = &.{ "[redacted]", "[withheld]" }, .text = "x %5Bredacted%5D\nnext\n" },
+        .{ .secrets = &.{"[redacted]"}, .text = "held %5B" },
     };
     var out: [256]u8 = undefined;
     for (cases) |case| for (0..case.text.len + 1) |split| {
         const got = try through(io, tmp.dir, case.secrets, case.text, split, &out);
         for (case.secrets) |k| try std.testing.expect(std.mem.indexOf(u8, got, k) == null);
+        try std.testing.expect(!try credential.contains(std.testing.allocator, got, case.secrets)); // at any depth
         if (std.mem.endsWith(u8, case.text, "next\n")) try std.testing.expect(std.mem.endsWith(u8, got, "\nnext\n"));
     };
 }
@@ -220,10 +264,42 @@ test "benchmark log: a line past the hold limit writes no configured key" {
     defer tmp.cleanup();
     const long = try std.testing.allocator.alloc(u8, hold_limit + 4096 + 6);
     defer std.testing.allocator.free(long);
-    @memset(long, 'x');
-    @memcpy(long[long.len - 6 ..], "\nnext\n");
     var out: [4096]u8 = undefined;
-    const got = try through(io, tmp.dir, &.{"[redacted]"}, long, 1000, &out);
-    try std.testing.expect(std.mem.indexOf(u8, got, "[redacted]") == null);
-    try std.testing.expect(std.mem.endsWith(u8, got, "\nnext\n"));
+    for ([_][]const u8{ "", "%5Bredacted%5D", "%255Bredacted%255D" }) |planted| {
+        @memset(long, 'x');
+        @memcpy(long[10..][0..planted.len], planted); // before the limit
+        @memcpy(long[long.len - 6 - planted.len ..][0..planted.len], planted); // past it
+        @memcpy(long[long.len - 6 ..], "\nnext\n");
+        const got = try through(io, tmp.dir, &.{"[redacted]"}, long, 1000, &out);
+        try std.testing.expect(!try credential.contains(std.testing.allocator, got, &.{"[redacted]"}));
+        try std.testing.expect(std.mem.endsWith(u8, got, "\nnext\n"));
+    }
+}
+
+test "benchmark log: a write that fails, whole or in part, never lets later lines join into a key in the file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const secrets: []const []const u8 = &.{"abcdef"};
+    var out: [256]u8 = undefined;
+    // writes: 1 "abc", 2 its newline, 3 "def", 4 its newline; then the encoded halves
+    for ([_]struct { text: []const u8, at: u32, keep: usize }{
+        .{ .text = "abc\ndef\n", .at = 2, .keep = 0 }, // the separator fails, then the disk recovers
+        .{ .text = "abc\ndef\n", .at = 1, .keep = 2 }, // a line written in part
+        .{ .text = "abc\ndef\n", .at = 3, .keep = 1 },
+        .{ .text = "%61bc\n%64ef\n", .at = 2, .keep = 0 }, // encoded halves
+        .{ .text = "ab%2563\ndef\n", .at = 2, .keep = 0 }, // nested
+    }) |c| for (0..c.text.len + 1) |split| {
+        const got = try faulted(io, tmp.dir, secrets, c.text, split, .{ .at = c.at, .keep = c.keep }, &out);
+        try std.testing.expect(!try credential.contains(std.testing.allocator, got, secrets));
+    };
+}
+
+test "benchmark log: without keys, ordinary bytes pass unchanged to the end of the stream" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const text = "one\ntwo %5B\n[redacted]\nlast without newline";
+    var out: [256]u8 = undefined;
+    for (0..text.len + 1) |split| try std.testing.expectEqualStrings(text, try through(io, tmp.dir, &.{}, text, split, &out));
 }
