@@ -9,6 +9,7 @@ export type BenchmarkDetails = Pick<ModelBenchmarkReceipt, 'runtime' | 'model' |
 export type ParsedBenchmarkReceipt = ModelBenchmarkReceipt & { hardware: ModelBenchmarkReceipt['hardware'] & { form_factor?: BenchmarkFormFactor | null } }
 const SAMPLE_KEYS = ['fixture_id', 'temperature', 'repeat', 'seed', 'status', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'delivery_seconds', 'delivery_tps', 'ttft_seconds', 'end_to_end_seconds', 'server_decode_tps', 'server_decode_seconds', 'prefill_seconds', 'token_sha', 'error_code']
 const ERROR_CODES = new Set(['http_error', 'connection_error', 'timeout', 'cancelled', 'server_error', 'invalid_stream', 'truncated_stream', 'missing_usage', 'invalid_usage', 'empty_output', 'unexpected_finish', 'token_count_mismatch', 'unmeasured_delivery'])
+const HISTORICAL_RECEIPT_VERSIONS = new Set(['1.0.12', '1.1.0'])
 function invalid(): never { throw new Error('The local benchmark receipt is invalid or contains unsupported fields.') }
 function object(value: any, keys: string[]): void {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) invalid()
@@ -47,8 +48,8 @@ function checkDetails(value: any, expected?: { model: string; serial: boolean; e
   const hasKvCache = settings != null && Object.hasOwn(settings, 'kv_cache')
   const hasThinkingMode = settings != null && Object.hasOwn(settings, 'thinking_mode')
   object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count', ...(hasKvCache ? ['kv_cache'] : []), ...(hasThinkingMode ? ['thinking_mode'] : [])])
-  if (hasKvCache && settings.kv_cache !== null && !['bf16', 'fp8'].includes(settings.kv_cache) || hasThinkingMode && settings.thinking_mode !== 'server_default') invalid()
   if (settings.tokens !== 256 || settings.repetitions !== 5 || settings.context_tokens !== 4096 || settings.managed !== true || settings.rank_count !== 1 || typeof settings.serial !== 'boolean' || !Array.isArray(settings.temperatures) || settings.temperatures.length !== 2 || settings.temperatures[0] !== 1 || settings.temperatures[1] !== 0) invalid()
+  if (hasKvCache && !['bf16', 'fp8'].includes(settings.kv_cache) || hasThinkingMode && settings.thinking_mode !== 'server_default') invalid()
   if (expected && (model.repo_id !== expected.model || settings.serial !== expected.serial)) invalid()
 }
 export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ParsedBenchmarkReceipt {
@@ -61,6 +62,9 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   object(value.suite, ['id', 'sha256'])
   if (!Object.hasOwn(BENCHMARK_SUITES, value.suite.id) || BENCHMARK_SUITES[value.suite.id as keyof typeof BENCHMARK_SUITES] !== value.suite.sha256) invalid()
   checkDetails(value, expected)
+  const isV2 = value.suite.id === 'community-v2'
+  const currentV2 = isV2 && !HISTORICAL_RECEIPT_VERSIONS.has(value.runtime.tensorfold_version)
+  if (currentV2 && !Object.hasOwn(value.settings, 'kv_cache')) invalid()
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
   const fixtureRoutes = new Map<string, string>()
@@ -69,6 +73,7 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
     const hasFinishReason = sample != null && Object.hasOwn(sample, 'finish_reason')
     const hasRoute = sample != null && Object.hasOwn(sample, 'route')
     object(sample, [...SAMPLE_KEYS, ...(hasFinishReason ? ['finish_reason'] : []), ...(hasRoute ? ['route'] : [])])
+    if (currentV2 && (!hasFinishReason || !hasRoute)) invalid()
     if (hasFinishReason && sample.finish_reason !== null && !['stop', 'length'].includes(sample.finish_reason) || hasRoute && !['/v1/chat/completions', '/v1/completions'].includes(sample.route)) invalid()
     if (!['code', 'chat'].includes(sample.fixture_id) || ![0, 1].includes(sample.temperature) || !Number.isInteger(sample.repeat) || sample.repeat < -1 || sample.repeat > 4 || sample.seed !== 1234 + Math.max(0, sample.repeat) || !['ok', 'early_eos', 'error', 'unmeasured'].includes(sample.status) || sample.repeat === -1 && sample.status !== 'error') invalid()
     if (expectedHasRoute === null) expectedHasRoute = hasRoute
@@ -91,8 +96,8 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
       const rate = (sample.completion_tokens - 1) / sample.delivery_seconds
       if (Math.abs(sample.delivery_tps - rate) > Math.max(1e-6, rate * 1e-6)) invalid()
     }
-    const naturalStop = hasFinishReason && sample.finish_reason === 'stop' && sample.completion_tokens !== null && sample.completion_tokens >= 128 && sample.completion_tokens < value.settings.tokens
-    if (sample.status === 'ok' && (sample.completion_tokens !== value.settings.tokens && !naturalStop || sample.delivery_tps === null || sample.error_code !== null)) invalid()
+    const naturalStop = isV2 && sample.temperature > 0 && hasFinishReason && sample.finish_reason === 'stop' && sample.completion_tokens !== null && sample.completion_tokens >= 128 && sample.completion_tokens < value.settings.tokens
+    if (sample.status === 'ok' && (sample.completion_tokens !== value.settings.tokens && !naturalStop || sample.delivery_tps === null || sample.error_code !== null || isV2 && hasFinishReason && sample.finish_reason === null)) invalid()
     if (sample.status === 'early_eos' && (sample.completion_tokens === null || sample.completion_tokens >= 256)) invalid()
   }
   return value as ParsedBenchmarkReceipt
