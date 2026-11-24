@@ -9,86 +9,21 @@ const quant = @import("quant.zig");
 
 pub const dispatch = @import("tfq3_dispatch.zig");
 
-pub const magic_layer: u32 = 0x57504654;
-pub const magic_nonmoe: u32 = 0x4E504654;
-pub const magic_v3_tables: u32 = 0x33565750;
-pub const format_version: u32 = 3;
-pub const section_align: usize = 16384;
+pub const check = @import("tfq3_check.zig");
+pub const magic_layer = check.magic_layer;
+pub const magic_nonmoe = check.magic_nonmoe;
+pub const magic_v3_tables = check.magic_v3_tables;
+pub const format_version = check.format_version;
+pub const section_align = check.section_align;
 pub const max_decode_slots: u32 = 128;
 pub const max_xrot_elems: u32 = 16384 * 4096;
 pub const max_yr_elems: u32 = 8 * 154880;
 pub const max_prefill_tiles: u32 = 16384;
 
-pub const LayerHeader = extern struct {
-    magic: u32,
-    version: u32,
-    layer_idx: u32,
-    num_experts: u32,
-    num_tensors: u32,
-    hidden_size: u32,
-    moe_inter: u32,
-    reserved0: u32,
-    raw_fp8_bytes: u64,
-    stream_words: u64,
-    scale_halfs: u64,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    reserved1: [4]u64,
-    meta_tag: [32]u8,
-};
-
-pub const ExpertMeta = extern struct {
-    b_bits: u32,
-    heat_rank: u32,
-    gate_word_off: u64,
-    up_word_off: u64,
-    down_word_off: u64,
-    gate_sc_off: u32,
-    up_sc_off: u32,
-    down_sc_off: u32,
-    gate_snr_db: f32,
-    up_snr_db: f32,
-    down_snr_db: f32,
-    reserved: [2]u32,
-};
-
-pub const NonMoeHeader = extern struct {
-    magic: u32,
-    version: u32,
-    num_tensors: u32,
-    pad0: u32,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    total_scale_halfs: u64,
-    total_weight_words: u64,
-    pad1: u64,
-};
-
-pub const NonMoeTensorMeta = extern struct {
-    name: [80]u8,
-    R: u32,
-    C: u32,
-    b_bits: u32,
-    sc_off: u32,
-    word_off: u64,
-    word_count: u64,
-    snr_db: f32,
-    pad: [3]u32,
-
-    pub fn nameSlice(self: *const NonMoeTensorMeta) []const u8 {
-        const len = std.mem.indexOfScalar(u8, &self.name, 0) orelse self.name.len;
-        return self.name[0..len];
-    }
-};
-
-comptime {
-    std.debug.assert(@sizeOf(LayerHeader) == 144);
-    std.debug.assert(@sizeOf(ExpertMeta) == 64);
-    std.debug.assert(@sizeOf(NonMoeHeader) == 64);
-    std.debug.assert(@sizeOf(NonMoeTensorMeta) == 128);
-}
+pub const LayerHeader = check.LayerHeader;
+pub const ExpertMeta = check.ExpertMeta;
+pub const NonMoeHeader = check.NonMoeHeader;
+pub const NonMoeTensorMeta = check.NonMoeTensorMeta;
 
 pub const Dims = extern struct {
     rows: u32,
@@ -179,6 +114,20 @@ pub fn emitRun(nm: *const NonMoe, pm: *const NonMoeTensorMeta, out: *affine.Affi
     row.* += n;
 }
 
+/// A KDA layer whose stacked input holds TFQ3 runs and whose f_b and g_b gates are 8-bit/64: the q8 kernels' case.
+pub fn q8Kda(in: affine.Affine, f: affine.Affine, g: affine.Affine) bool {
+    var tfq3_in = false;
+    for (0..@as(usize, in.more) + 1) |i| tfq3_in = tfq3_in or in.run(i).group == 512;
+    return tfq3_in and f.more == 0 and g.more == 0 and f.group == 64 and g.group == 64 and f.bits == 8 and g.bits == 8;
+}
+
+/// moe.zig's one shared-fusion decision over the stored shared projections (check.sharedFusion's rule).
+pub fn sharedFusion(gu: affine.Affine, down: affine.Affine, has_5b: bool, hidden: usize, inter: usize, stages: bool, combine: bool) bool {
+    const g: check.Proj = .{ .runs = @as(usize, gu.more) + 1, .bits = gu.bits, .group = gu.group, .n = gu.n, .k = gu.k };
+    const d: check.Proj = .{ .runs = @as(usize, down.more) + 1, .bits = down.bits, .group = down.group, .n = down.n, .k = down.k };
+    return check.sharedFusion(g, d, has_5b, hidden, inter, stages, combine);
+}
+
 pub fn initLoader(l: anytype) !void {
     l.tfq3_ctx.pw_tables = try loadV3Tables(l.gpa, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, l.dry);
     l.tfq3_ctx.nonmoe = try loadNonMoe(l.gpa, l.arena, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, l.tfq3_ctx.pw_tables, l.dry);
@@ -187,7 +136,8 @@ pub fn initLoader(l: anytype) !void {
 
 pub fn loadMoe(moe: anytype, l: anytype, i: usize, inter: usize, hidden: usize) !bool {
     if (!hasLayer(l.dir, i)) return false;
-    moe.tfq3 = try loadLayer(l.gpa, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, i, l.tfq3_ctx.pw_tables, l.dry);
+    const want: check.LayerWant = .{ .layer = i, .experts = l.c.experts, .hidden = hidden, .inter = inter };
+    moe.tfq3 = try loadLayer(l.gpa, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, want, l.tfq3_ctx.pw_tables, l.dry);
     l.w.has_tfq3 = true;
     const dummy: affine.Ref = .{ .buf = .{ .id = undefined }, .off = 0 };
     moe.gate = .{ .w = dummy, .s = dummy, .b = dummy, .n = @intCast(inter), .k = @intCast(hidden), .bits = 8, .group = 64 };
@@ -255,23 +205,42 @@ pub fn hasLayer(dir: []const u8, layer: usize) bool {
     return true;
 }
 
-fn align16k(n: usize) usize {
-    return std.mem.alignForward(usize, @max(n, 16), section_align);
+/// A file mapped whole (rounded to sections) and read only through `check`'s spans.
+const Mapped = struct {
+    bytes: []align(std.heap.page_size_min) u8,
+    len: usize, // the file's own bytes; the mapping past them is zero
+
+    fn file(m: Mapped) []const u8 {
+        return m.bytes[0..m.len];
+    }
+};
+
+/// Maps `dir/name` (null: no such file); the caller owns the mapping until it hands it to `maps`.
+fn mapFile(dir: []const u8, name: []const u8, least: usize) !?Mapped {
+    var buf: [512]u8 = undefined;
+    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/{s}", .{ dir, name }) catch return error.NameTooLong;
+    buf[s.len] = 0;
+    const fd = platform.c.open(buf[0..s.len :0].ptr, .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return null;
+    defer _ = platform.c.close(fd);
+    const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+    if (end < 0 or end < least) return error.EmptyFile;
+    const len = std.math.cast(usize, end) orelse return error.Tfq3Overflow;
+    const room = try check.mappedLen(len);
+    const bytes = try std.posix.mmap(null, std.mem.alignForward(usize, room, std.heap.pageSize()), .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE }, fd, 0);
+    return .{ .bytes = bytes, .len = len };
 }
 
-fn wrapSection(
-    device: mtl.Device,
-    buffers: *std.ArrayList(mtl.Buffer),
-    gpa: std.mem.Allocator,
-    base: [*]u8,
-    off: u64,
-    byte_len: usize,
-) !mtl.Buffer {
+/// A no-copy view of a checked span (16 KiB aligned, its rounded length inside the mapping).
+fn view(device: mtl.Device, m: Mapped, at: check.Span) !mtl.Buffer {
     const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-    const b = try device.bufferNoCopy(@ptrCast(base + @as(usize, @intCast(off))), align16k(byte_len), opts);
-    errdefer b.deinit();
-    try buffers.append(gpa, b);
-    return b;
+    return device.bufferNoCopy(@ptrCast(m.bytes.ptr + at.off), try check.mappedLen(@max(at.len, 16)), opts);
+}
+
+/// Hands `m` and `views` to the weights in one step that cannot fail: room is reserved first.
+fn keep(buffers: *std.ArrayList(mtl.Buffer), maps: *std.ArrayList(MappedShard), m: Mapped, views: []const mtl.Buffer) void {
+    for (views) |b| buffers.appendAssumeCapacity(b);
+    maps.appendAssumeCapacity(.{ .bytes = m.bytes });
 }
 
 pub fn loadV3Tables(
@@ -283,27 +252,21 @@ pub fn loadV3Tables(
     dir: []const u8,
     dry: bool,
 ) !?mtl.Buffer {
-    var buf: [512]u8 = undefined;
-    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/pw_v3_tables.bin", .{dir}) catch return null;
-    buf[s.len] = 0;
-    const fd = platform.c.open(buf[0..s.len :0].ptr, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return null;
-    defer _ = platform.c.close(fd);
-    const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
-    if (end < 16384) return error.EmptyFile;
-    const fsize: usize = @intCast(end);
-    total_bytes.* += fsize;
-    const page = std.heap.pageSize();
-    const mapped = try std.posix.mmap(null, std.mem.alignForward(usize, fsize, page), .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE }, fd, 0);
-    errdefer std.posix.munmap(mapped);
-    const hdr: [*]const u32 = @ptrCast(@alignCast(mapped.ptr));
-    if (hdr[0] != magic_v3_tables or hdr[1] != format_version) return error.UnsupportedQuantization;
+    const m = (try mapFile(dir, "pw_v3_tables.bin", 16384)) orelse return null;
+    errdefer std.posix.munmap(m.bytes);
+    try check.tables(m.file());
+    const all = try check.span(m.len, 0, m.len, true);
     if (dry) {
-        std.posix.munmap(mapped);
+        std.posix.munmap(m.bytes);
+        total_bytes.* += m.len;
         return .{ .id = undefined };
     }
-    try maps.append(gpa, .{ .bytes = mapped });
-    return try wrapSection(device, buffers, gpa, mapped.ptr, 0, fsize);
+    try buffers.ensureUnusedCapacity(gpa, 1);
+    try maps.ensureUnusedCapacity(gpa, 1);
+    const b = try view(device, m, all);
+    keep(buffers, maps, m, &.{b});
+    total_bytes.* += m.len;
+    return b;
 }
 
 pub fn loadNonMoe(
@@ -317,33 +280,25 @@ pub fn loadNonMoe(
     tables_buf: ?mtl.Buffer,
     dry: bool,
 ) !?NonMoe {
-    var buf: [512]u8 = undefined;
-    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/nonmoe.tffpw", .{dir}) catch return null;
-    buf[s.len] = 0;
-    const fd = platform.c.open(buf[0..s.len :0].ptr, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return null;
-    defer _ = platform.c.close(fd);
-    const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
-    if (end < @sizeOf(NonMoeHeader)) return error.EmptyFile;
-    const fsize: usize = @intCast(end);
-    total_bytes.* += fsize;
-    const page = std.heap.pageSize();
-    const mapped = try std.posix.mmap(null, std.mem.alignForward(usize, fsize, page), .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE }, fd, 0);
-    errdefer std.posix.munmap(mapped);
-    const hdr: *const NonMoeHeader = @ptrCast(@alignCast(mapped.ptr));
-    if (hdr.magic != magic_nonmoe or hdr.version != format_version) return error.UnsupportedQuantization;
-    const n_t: usize = hdr.num_tensors;
-    const m_src: [*]const NonMoeTensorMeta = @ptrCast(@alignCast(mapped.ptr + @as(usize, @intCast(hdr.off_meta))));
-    const metas = try arena.dupe(NonMoeTensorMeta, m_src[0..n_t]);
+    const m = (try mapFile(dir, "nonmoe.tffpw", @sizeOf(NonMoeHeader))) orelse return null;
+    errdefer std.posix.munmap(m.bytes);
+    const at = try check.nonMoe(m.file());
+    const tb = tables_buf orelse return error.UnsupportedQuantization; // its rows decode through the shared table
+    const metas = try arena.alloc(NonMoeTensorMeta, at.count);
+    @memcpy(std.mem.sliceAsBytes(metas), m.file()[at.metas.off..][0..at.metas.len]);
     if (dry) {
-        std.posix.munmap(mapped);
-        return .{ .tables = .{ .id = undefined }, .scales = .{ .id = undefined }, .weights = .{ .id = undefined }, .metas = metas, .bytes = fsize };
+        std.posix.munmap(m.bytes);
+        total_bytes.* += m.len;
+        return .{ .tables = .{ .id = undefined }, .scales = .{ .id = undefined }, .weights = .{ .id = undefined }, .metas = metas, .bytes = m.len };
     }
-    const tb = tables_buf orelse return error.UnsupportedQuantization;
-    try maps.append(gpa, .{ .bytes = mapped });
-    const b_sc = try wrapSection(device, buffers, gpa, mapped.ptr, hdr.off_scales, @as(usize, @intCast(hdr.total_scale_halfs)) * 2);
-    const b_wt = try wrapSection(device, buffers, gpa, mapped.ptr, hdr.off_weights, @as(usize, @intCast(hdr.total_weight_words)) * 4);
-    return .{ .tables = tb, .scales = b_sc, .weights = b_wt, .metas = metas, .bytes = fsize };
+    try buffers.ensureUnusedCapacity(gpa, 2);
+    try maps.ensureUnusedCapacity(gpa, 1);
+    const b_sc = try view(device, m, at.scales);
+    errdefer b_sc.deinit();
+    const b_wt = try view(device, m, at.weights);
+    keep(buffers, maps, m, &.{ b_sc, b_wt });
+    total_bytes.* += m.len;
+    return .{ .tables = tb, .scales = b_sc, .weights = b_wt, .metas = metas, .bytes = m.len };
 }
 
 pub fn loadLayer(
@@ -353,42 +308,32 @@ pub fn loadLayer(
     maps: *std.ArrayList(MappedShard),
     total_bytes: *usize,
     dir: []const u8,
-    layer: usize,
+    want: check.LayerWant,
     v3_tables: ?mtl.Buffer,
     dry: bool,
 ) !Layer {
-    var buf: [512]u8 = undefined;
-    const path = layerPath(&buf, dir, layer) orelse return error.MissingTensor;
-    const fd = platform.c.open(path.ptr, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return error.OpenFailed;
-    defer _ = platform.c.close(fd);
-    const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
-    if (end < @sizeOf(LayerHeader)) return error.EmptyFile;
-    const fsize: usize = @intCast(end);
-    total_bytes.* += fsize;
-    const page = std.heap.pageSize();
-    const mapped = try std.posix.mmap(null, std.mem.alignForward(usize, fsize, page), .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE }, fd, 0);
-    errdefer std.posix.munmap(mapped);
-    const ph: *const LayerHeader = @ptrCast(@alignCast(mapped.ptr));
-    if (ph.magic != magic_layer or ph.version != format_version) return error.UnsupportedQuantization;
-    const metas_ptr: [*]const ExpertMeta = @ptrCast(@alignCast(mapped.ptr + @as(usize, @intCast(ph.off_meta))));
-    var has_5b = false;
-    for (0..ph.num_experts) |ei| {
-        if (metas_ptr[ei].b_bits == 5) {
-            has_5b = true;
-            break;
-        }
-    }
-    if (dry) {
-        std.posix.munmap(mapped);
-        return .{ .layer_idx = @intCast(layer), .bytes = fsize, .tables = .{ .id = undefined }, .meta = .{ .id = undefined }, .scales = .{ .id = undefined }, .weights = .{ .id = undefined }, .has_5b = has_5b };
-    }
+    var name: [32]u8 = undefined;
+    const file = try std.fmt.bufPrint(&name, "layer_{d:0>2}.tffpw", .{want.layer});
+    const m = (try mapFile(dir, file, @sizeOf(LayerHeader))) orelse return error.OpenFailed;
+    errdefer std.posix.munmap(m.bytes);
+    const at = try check.layer(m.file(), want);
     const tb = v3_tables orelse return error.UnsupportedQuantization;
-    try maps.append(gpa, .{ .bytes = mapped });
-    const b_meta = try wrapSection(device, buffers, gpa, mapped.ptr, ph.off_meta, @as(usize, ph.num_experts) * @sizeOf(ExpertMeta));
-    const b_sc = try wrapSection(device, buffers, gpa, mapped.ptr, ph.off_scales, @as(usize, @intCast(ph.scale_halfs)) * 2);
-    const b_wt = try wrapSection(device, buffers, gpa, mapped.ptr, ph.off_weights, @as(usize, @intCast(ph.stream_words)) * 4);
-    return .{ .layer_idx = @intCast(layer), .bytes = fsize, .tables = tb, .meta = b_meta, .scales = b_sc, .weights = b_wt, .has_5b = has_5b };
+    const idx: u32 = @intCast(want.layer);
+    if (dry) {
+        std.posix.munmap(m.bytes);
+        total_bytes.* += m.len;
+        return .{ .layer_idx = idx, .bytes = m.len, .tables = .{ .id = undefined }, .meta = .{ .id = undefined }, .scales = .{ .id = undefined }, .weights = .{ .id = undefined }, .has_5b = at.has_5b };
+    }
+    try buffers.ensureUnusedCapacity(gpa, 3);
+    try maps.ensureUnusedCapacity(gpa, 1);
+    const b_meta = try view(device, m, at.meta);
+    errdefer b_meta.deinit();
+    const b_sc = try view(device, m, at.scales);
+    errdefer b_sc.deinit();
+    const b_wt = try view(device, m, at.weights);
+    keep(buffers, maps, m, &.{ b_meta, b_sc, b_wt });
+    total_bytes.* += m.len;
+    return .{ .layer_idx = idx, .bytes = m.len, .tables = tb, .meta = b_meta, .scales = b_sc, .weights = b_wt, .has_5b = at.has_5b };
 }
 
 pub const Pipe = enum(usize) {
@@ -465,6 +410,7 @@ pub const Pipes = struct {
     yr_buf: mtl.Buffer,
     tile_meta_buf: mtl.Buffer,
     tile_cnt_buf: mtl.Buffer,
+    kda_q8: ?[2]mtl.Pipeline = null, // the KDA parts and window at 8-bit/64 gates (kernels.zig enableTfq3)
     hash: u64,
 
     pub inline fn get(p: *const Pipes, k: Pipe) mtl.Pipeline {
@@ -472,7 +418,12 @@ pub const Pipes = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, glue_math: []const u8) !Pipes {
-        const src = try buildSource(gpa, device.tensorUnits(), glue_math);
+        return initUnits(gpa, device, device.tensorUnits(), glue_math);
+    }
+
+    /// `units`: the M5 tensor-unit source, else the simdgroup one (a test runs both where the GPU can).
+    pub fn initUnits(gpa: std.mem.Allocator, device: mtl.Device, units: bool, glue_math: []const u8) !Pipes {
+        const src = try buildSource(gpa, units, glue_math);
         defer gpa.free(src);
         var h = std.hash.Wyhash.init(0);
         h.update(src);
@@ -508,5 +459,6 @@ pub const Pipes = struct {
         p.yr_buf.deinit();
         p.tile_meta_buf.deinit();
         p.tile_cnt_buf.deinit();
+        if (p.kda_q8) |q| for (q) |x| x.deinit();
     }
 };

@@ -153,9 +153,15 @@ pub fn tryKdaIn(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, in: Ref, out:
     return true;
 }
 
+/// A run's buffers and offsets for check.gluContiguous.
+fn runAt(r: affine.Run) tfq3.check.RunAt {
+    return .{ .w_buf = @intFromPtr(r.w.buf.id), .w_off = r.w.off, .s_buf = @intFromPtr(r.s.buf.id), .s_off = r.s.off, .t_buf = @intFromPtr(r.b.buf.id), .t_off = r.b.off, .row = r.row, .n = r.n, .bits = r.bits, .group = r.group };
+}
+
+/// [gate; up] as one 2n-row launch when up follows gate; false: the caller runs each run at its own addresses.
 pub fn tryDenseGlu(p: ?*const Pipes, e: mtl.ComputeEncoder, gu: Affine, x_in: Ref, out: Ref, n: u32, rows: u32, lim: f32) bool {
     const pw = p orelse return false;
-    if (rows > 7 or gu.more != 1 or gu.group != 512 or gu.runs[0].group != 512 or gu.bits != gu.runs[0].bits) return false;
+    if (rows > 7 or gu.more != 1 or !tfq3.check.gluContiguous(runAt(gu.run(0)), runAt(gu.run(1)), n, gu.k)) return false;
     denseGlu(pw, e, gu.w, gu.s, gu.b, gu.bits, x_in, out, n, gu.k, rows, lim);
     return true;
 }
@@ -210,8 +216,7 @@ pub const FusedArgs = struct {
     branch: Ref,
     routed_scale: f32,
     has_5b: bool,
-    fuse_pw_shared: bool = false,
-    sh_bits: u8 = 5,
+    fuse_pw_shared: bool = false, // moe.zig's tfq3.sharedFusion decision, taken as given
     fuse_combine: bool,
     fuse_route: bool,
 };
@@ -228,7 +233,8 @@ pub fn moeDecode(
 ) void {
     const slots = rows * topk;
     const do_route = a.fuse_route and rows == 1;
-    const do_pw_sh = a.fuse_pw_shared and a.fuse_combine and ((a.has_5b and a.sh_bits == 5) or (!a.has_5b and a.sh_bits == 4));
+    std.debug.assert(!a.fuse_pw_shared or a.fuse_combine); // the combine reads the shared output these launches write
+    const do_pw_sh = a.fuse_pw_shared;
     const d: Dims = .{
         .rows = rows,
         .slots = slots,
