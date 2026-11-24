@@ -105,8 +105,8 @@ __device__ __noinline__ void prune_pass(const Prune& P, int K, int kit, int* pic
 
 // One row's selection by one warp (lane l holds experts l + 32 i).
 __device__ __forceinline__ void select_row(const float* lg, const float* __restrict__ bias, int E, int K, int slots,
-                                           float scale, int kit, int* pick, float* wts, int* psh, int lane,
-                                           const Prune& P) {
+                                           float scale, float eps, int kit, int* pick, float* wts, int* psh,
+                                           int lane, const Prune& P) {
     float s[EPL], ch[EPL];
 #pragma unroll
     for (int i = 0; i < EPL; ++i) {
@@ -148,7 +148,7 @@ __device__ __forceinline__ void select_row(const float* lg, const float* __restr
 #pragma unroll
         for (int t = 0; t < KMAX; ++t) {
             if (t >= K) break;
-            float w = __fmul_rn(scale, __fdiv_rn(sp[t], total));
+            float w = __fmul_rn(scale, __fdiv_rn(sp[t], __fadd_rn(total, eps)));   // eps 0: total itself (>= 0)
             if (kit && !P.on) w = __half2float(__float2half_rn(w));   // pick.kit_weights (with prune: after it)
             pick[t] = ip[t];
             wts[t] = w;
@@ -175,6 +175,7 @@ struct Args {
     int* gmem;
     int GE, maxm, group;
     Prune prune;            // the top-p prune rule folded into the selection (on = 0: off)
+    float eps;              // the weights' denominator is sum + eps (the release reference's 1e-20; EXL3 0)
 };
 
 constexpr int GE_MAX = 512;         // table entries the folded grouping takes
@@ -249,7 +250,7 @@ __device__ __forceinline__ void tail(const Args& a, int r0, int nr, int tid, int
     if (!last_sh) return;
     __threadfence();
     for (int r = warp; r < nr; r += NW)
-        select_row(a.lg + (size_t)(r0 + r) * a.E, a.bias, a.E, a.K, a.slots, a.scale, a.kit,
+        select_row(a.lg + (size_t)(r0 + r) * a.E, a.bias, a.E, a.K, a.slots, a.scale, a.eps, a.kit,
                    a.pick + (size_t)(r0 + r) * a.slots, a.wts + (size_t)(r0 + r) * a.slots, psh + r * a.slots, lane,
                    a.prune);
     if (a.prune.on && lane == 0)                    // the rule, then the kit rounding (each lane 0: its own rows)
@@ -464,6 +465,7 @@ void dsv41_rg_route_cuda(const at::Tensor& X, const at::Tensor& W, const at::Ten
     a.GE = (int)GE;
     a.maxm = group ? (int)gmem.size(1) : 0;          // upstream's Scratch.window: members [maxu, R]
     a.prune = Prune{};
+    a.eps = 0.0f;
     if (!prune.empty()) {                             // fp32 thresholds: the rounding of Triton's float arguments
         a.prune.min_w = (float)prune[0]; a.prune.topp = (float)prune[1]; a.prune.scale = (float)prune[2];
         a.prune.min_k = (int)prune[3]; a.prune.orig = (int)prune[4]; a.prune.drop = (int)prune[5];
