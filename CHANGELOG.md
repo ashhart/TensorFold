@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Automatic serving can admit up to 64 parallel streams when each backend's measured cache and drafter budgets allow, with complete fixed-lane and drafted-stream memory accounting (#4821).
+
 - Qwen3.5 on CUDA: shared prefixes are saved at page boundaries, and `TF_QWEN_KV_SNAPSHOT_GPU=1` keeps prefix snapshots on the device instead of pinned host memory, falling back to host snapshots when device memory is short (#4473).
 
 - Gemma 4 on CUDA (assistant and DFlash drafters) and one more MoE family's CUDA loader: loading now refuses a checkpoint with tensors the engine never binds, each scoped to its own directory or prefix (#4566).
