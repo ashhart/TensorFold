@@ -40,7 +40,7 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.writeAll("}, \"serve\": {\"flags\": {");
     var first = true;
     for (cli.flags) |f| {
-        if (!f.native) continue;
+        if (!f.native or !f.advertised) continue;
         try w.print("{s}\"{s}\": {{", .{ if (first) "" else ", ", f.name });
         first = false;
         const values = f.native_values orelse f.choices;

@@ -15,6 +15,8 @@ pub const Flag = struct {
     choices: []const []const u8 = &.{}, // argparse's choices; empty: any value of the flag's type.
     /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
     native: bool = false,
+    /// Whether ``capabilities`` lists it: a flag this build honours but every valid use refuses is left out.
+    advertised: bool = true,
     native_values: ?[]const []const u8 = null, // The values it honours when only some of the choices.
     /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
     path: bool = false,
@@ -30,6 +32,12 @@ fn served(comptime name: []const u8) bool {
 fn servedBy(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (std.mem.eql(u8, x, name)) return true;
     return false;
+}
+
+/// Whether this build can apply a control vector: the Metal engine on macOS, or a Linux server with the CUDA engine.
+pub fn steers() bool {
+    if (builtin.os.tag == .macos) return true;
+    return builtin.os.tag == .linux and !served("--backend=rocm");
 }
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
