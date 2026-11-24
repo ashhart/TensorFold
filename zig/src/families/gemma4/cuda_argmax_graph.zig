@@ -1,12 +1,12 @@
-//! TF_GEMMA4_ARGMAX_GRAPH=1: a greedy round's argmax in the target graph, no unread tok download, pinned uploads.
+//! TF_GEMMA4_ARGMAX_GRAPH, on unless 0: a greedy round's argmax in the target graph, no unread tok, pinned uploads.
 const std = @import("std");
 const cuda = @import("cuda");
 const fwd = @import("cuda_forward.zig");
 const Pick = cuda.tree_round.Pick;
 
-/// The switch; default off. The startup check refused every malformed value already, so a plain default stands here.
+/// The switch; unset or blank is on, 0 off. The startup check refused every malformed value, so a plain default stands.
 pub fn on() bool {
-    return @import("sys").environment.read(bool, "TF_GEMMA4_ARGMAX_GRAPH", false) catch false;
+    return @import("sys").environment.read(bool, "TF_GEMMA4_ARGMAX_GRAPH", true) catch true;
 }
 
 /// A forward's ids, positions and slots staged in pinned memory, reused only once its last copy is done.
