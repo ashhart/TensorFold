@@ -61,6 +61,7 @@ pub const Cache = struct {
     /// The latest tapped rows a drafter may absorb: positions [start, start + rows), in a scratch's or last_tap.
     tap: Tap = .{},
     last_tap: ?mtl.Buffer = null, // the prompt's last row's taps, kept for the first draft
+    charge: u64 = 0, // the ledger's bytes for the stream (Metal.charge), given back as taken
 
     pub fn setResident(self: *Cache, hook: ?mtl.ResidencySet.Follow) void {
         if (self.follow) |f| mtl.resident.fields.apply(self, f, false);

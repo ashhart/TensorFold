@@ -70,7 +70,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     if (draft) |d| scratch += d.checkpoint.residentBytes() + fr.dflash2.Drafter.fixedBytes(&d.config) + (fr.state.batch_rows + fr.state.prompt_rows) * fr.dflash2_config.max_taps * model.config.hidden * 2;
     const budget = try fr.budget.caches(ram, model.device.maxWorkingSet(), null, model.checkpoint.residentBytes() + scratch);
     const most: usize = @min(model.config.context, fr.state.max_capacity);
-    const fits = fr.budget.longest(&model.config, budget, most);
+    // with a drafter, the first stream's ring is held beside its caches: the window fits both
+    const lane_bytes: u64 = if (draft) |d| fr.dflash2.Drafter.laneBytes(&d.config) else 0;
+    const fits = fr.budget.longestDrafted(&model.config, budget, lane_bytes, most);
     if (o.context) |asked| if (asked > fr.config.max_context) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: the native Ripple engine is checked to {d} tokens; longer contexts are refused until a run at that length qualifies them", .{ asked, fr.config.max_context });
         if (draft) |d| d.deinit();
@@ -79,10 +81,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     };
     const window: i64 = o.context orelse @intCast(@min(fits, fr.config.max_context));
     if (window < 1 or window > fits) {
+        const beside: []const u8 = if (draft != null) " and a stream's drafter ring" else "";
         problem.* = if (o.context) |asked|
-            try std.fmt.allocPrint(a, "--context {d}: this Mac's Ripple caches fit {d} tokens beside the weights under its load limit (75% of RAM)", .{ asked, fits })
+            try std.fmt.allocPrint(a, "--context {d}: this Mac's Ripple caches fit {d} tokens beside the weights{s} under its load limit (75% of RAM)", .{ asked, fits, beside })
         else
-            try a.dupe(u8, "this Mac's load limit (75% of RAM) leaves no room for a Ripple stream's caches beside the weights");
+            try std.fmt.allocPrint(a, "this Mac's load limit (75% of RAM) leaves no room for a Ripple stream's caches beside the weights{s}", .{beside});
         if (draft) |d| d.deinit();
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
@@ -97,7 +100,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.resident = null;
     h.draft = null;
     h.wrap = null;
-    const lane_bytes: u64 = if (draft) |d| fr.dflash2.Drafter.laneBytes(&d.config) else 0;
     h.metal = try fr.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = streams, .budget = budget, .drafts = draft != null, .drafter_bytes = lane_bytes });
     errdefer h.metal.deinit();
     try h.metal.warm();
