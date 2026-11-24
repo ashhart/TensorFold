@@ -28,6 +28,7 @@ pub const Rounds = rounds.Rounds;
 pub const Proposers = rounds.Proposers;
 const rounds = @import("lane_rounds.zig");
 const scoring = @import("lane_host_score.zig");
+const memory_host = @import("lane_host_memory.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
 const lane_trace = @import("lane_trace.zig");
@@ -67,6 +68,8 @@ pub const LaneHost = struct {
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
+    folded_memory: ?api.MemoryController = null, // Folded Memory Weights v3 controller (engine thread only)
+    mem_ops: memory_host.Queue = .{}, // synchronous teach/save/forget ops waiting for an idle engine
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
@@ -132,6 +135,7 @@ pub const LaneHost = struct {
         rows_host.close(h);
         @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
+        memory_host.close(h);
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
         h.lessons.deinit(h.gpa);
@@ -173,6 +177,7 @@ pub const LaneHost = struct {
         .imprint = rows_host.ask,
         .drain = rows_host.drain,
         .load = load.attach,
+        .memory_op = memory_host.call,
     };
 
     const scored_vtable: Engine.VTable = blk: {
@@ -328,6 +333,14 @@ pub const LaneHost = struct {
             lane_stream.freeProposer(h, job);
             recalls.release(job);
         }
+        if (job.memory_snap) |snap| {
+            if (h.folded_memory) |fm| fm.dropSnap(fm.ctx, snap);
+            job.memory_snap = null;
+        }
+        if (job.memory_prompt.len > 0) {
+            h.gpa.free(job.memory_prompt);
+            job.memory_prompt = &.{};
+        }
         h.gpa.destroy(job);
     }
 
@@ -453,16 +466,18 @@ pub const LaneHost = struct {
         if (job.prefilled != null) return;
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
+        const effective_len = job.stream.prompt().len;
+        const filled_new = effective_len -| job.stream.cached;
         h.lock();
-        if (done > began) h.st.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
+        if (done > began) h.st.prefill_rate = @as(f64, @floatFromInt(filled_new)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
         h.st.prefill_at = done;
         job.prefilled = done;
         load.credit(h, job);
         h.unlock();
         @import("lane_host_status.zig").publish(h); // the fill ends here
-        rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
+        rows_host.prefilled(h, filled_new, done - began);
         job.reported();
-        if (h.cache) |store| {
+        if (job.memory_snap == null) if (h.cache) |store| {
             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
             if (job.request.promptOnly()) {
                 // never kept, so a repeat of it is not worth noting
@@ -471,8 +486,8 @@ pub const LaneHost = struct {
             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }
-        }
-        emit(job, .{ .prefilled = job.stream.cached });
+        };
+        emit(job, .{ .prefilled = if (job.memory_snap != null) 0 else job.stream.cached });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);
     }
@@ -528,6 +543,7 @@ pub const LaneHost = struct {
             rows_host.answer(h);
             scoring.answer(h);
             learn.refuse(h);
+            memory_host.answerOneInFlight(h);
             while (h.admitOne()) {}
             fill.run(h);
             h.core.sweep() catch |err| {
@@ -553,6 +569,11 @@ pub const LaneHost = struct {
                     h.unlock();
                     continue;
                 }
+                if (memory_host.ready(h)) {
+                    h.unlock();
+                    memory_host.answer(h);
+                    continue;
+                }
                 if (learn.ready(h)) {
                     h.unlock();
                     learn.step(h);
@@ -560,7 +581,7 @@ pub const LaneHost = struct {
                 }
                 activity.end();
                 if (rows_host.idle(h)) continue;
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
+                if (h.cancels.items.len == 0 and h.mem_ops.asks.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;

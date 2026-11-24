@@ -12,6 +12,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const exact = @import("exact.zig");
 pub const drafter = @import("drafter.zig");
 pub const pricing = @import("pricing.zig");
+pub const memory_adapter = @import("memory_adapter.zig");
 
 test {
     _ = exact;
