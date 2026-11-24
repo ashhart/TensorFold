@@ -9,6 +9,7 @@ const st = @import("state.zig");
 const prompt_mod = @import("prompt.zig");
 const ep_mod = @import("ep.zig");
 pub const fit = @import("load_fit.zig");
+const tfq3 = @import("tfq3.zig");
 pub const fit_reading = @import("fit_reading.zig");
 pub const fit_candidates = @import("fit_candidates.zig");
 
@@ -75,7 +76,7 @@ pub fn layerBytes(l: anytype, i: usize) !usize {
 
 /// Bytes of layer i's routed experts on this Mac at the first one's widths (the rest must match).
 pub fn expertBytes(l: anytype, i: usize) !usize {
-    if (@import("tfq3.zig").hasLayer(l.dir, i)) return 0;
+    if (tfq3.hasLayer(l.dir, i)) return 0;
     const c = l.c;
     const D: usize = c.hidden;
     const every = i == c.layers;
@@ -94,7 +95,7 @@ fn projBytes(l: anytype, i: usize, e: usize, proj: []const u8, n: usize, k: usiz
 fn nonMoeMatBytes(l: anytype, comptime fmt: []const u8, args: anytype, rows: usize, k: usize) !usize {
     var nb: [240]u8 = undefined;
     const name = try std.fmt.bufPrint(&nb, fmt, args);
-    if (l.tfq3_ctx.nonmoe) |*nm| if (nm.find(name) != null) return 0;
+    if (try tfq3.record(&l.tfq3_ctx, name, 0, rows, rows, k) != null) return 0;
     return affine.bytes(rows, k, try l.widths.of(name)) + 3 * 256;
 }
 
@@ -119,18 +120,18 @@ pub fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []
 
 /// A stack with a member in nonmoe.tffpw: each other part's own padded rows (TFQ3 members are mapped, not copied).
 fn tfq3Stack(l: anytype, base: []const u8, parts: []const []const u8, part_rows: []const usize, k: usize, pad: usize) !?usize {
-    const nm = if (l.tfq3_ctx.nonmoe) |*x| x else return null;
+    if (l.tfq3_ctx.nonmoe == null) return null;
     var any = false;
-    for (parts) |p| {
+    for (parts, part_rows) |p, pr| { // one Mac: each part whole, as `stack` asks
         var full: [240]u8 = undefined;
-        any = any or nm.find(try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p })) != null;
+        any = any or try tfq3.record(&l.tfq3_ctx, try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p }), 0, pr, pr, k) != null;
     }
     if (!any) return null;
     var tot: usize = 0;
     for (parts, part_rows) |p, pr| {
         var full: [240]u8 = undefined;
         const full_s = try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p });
-        if (nm.find(full_s) != null) continue;
+        if (try tfq3.record(&l.tfq3_ctx, full_s, 0, pr, pr, k) != null) continue;
         tot += affine.bytes(std.mem.alignForward(usize, pr, pad), k, try l.widths.of(full_s)) + 3 * 256;
     }
     return tot;
