@@ -19,6 +19,13 @@ pub fn run(h: *LaneHost) void {
     if (!@import("lane_thread.zig").start(h)) return;
     // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
     if (h.rounds) |rd| return rounds.run(h, rd);
+    // learning off (no bank: folded_memory is set before the host starts) runs main's loop, memory ops compiled out
+    if (h.folded_memory == null) return loop(false, h);
+    return loop(true, h);
+}
+
+/// The engine thread's loop; `memory` adds the folded-memory ops (a poll between rounds, idle answers, idle wake).
+fn loop(comptime memory: bool, h: *LaneHost) void {
     while (true) {
         @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
         var activity = @import("lane_activity.zig").Activity.enter(h.activity);
@@ -28,7 +35,7 @@ pub fn run(h: *LaneHost) void {
         rows_host.answer(h);
         scoring.answer(h);
         learn.refuse(h);
-        memory_host.answerOneInFlight(h);
+        if (memory) memory_host.answerOneInFlight(h);
         while (h.admitOne()) {}
         fill.run(h);
         h.core.sweep() catch |err| {
@@ -54,7 +61,7 @@ pub fn run(h: *LaneHost) void {
                 h.unlock();
                 continue;
             }
-            if (memory_host.ready(h)) {
+            if (memory and memory_host.ready(h)) {
                 h.unlock();
                 memory_host.answer(h);
                 continue;
@@ -66,7 +73,7 @@ pub fn run(h: *LaneHost) void {
             }
             activity.end();
             if (rows_host.idle(h)) continue;
-            if (h.cancels.items.len == 0 and h.mem_ops.asks.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
+            if (h.cancels.items.len == 0 and (!memory or h.mem_ops.asks.items.len == 0) and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                 h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
