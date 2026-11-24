@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal serves images under `--vision`: PNG, JPEG and WebP decode to 40-pixel patch tokens (resized only past the image budget), the 23-layer vision tower and its projector run on the GPU with the processor's rounding, and the tower's rows replace the image placeholders in a prefill chunk, split across chunks and cache restores like text rows. Without `--vision` images stay refused by name. Each picture the tower runs logs one `inkling2 image tower:` line with the picture's content hash, its rows and the SHA-256 of the BF16 rows it hands to the splice. The tower is checked against an FP64 reference on the original checkpoint, and its kernels carry contract records and planted controls (#4704, refs #4274 and #4387). Thanks to @BlivionIaG.
+
 - Nemotron 3.5 Transcribe on CUDA: chat requests take speech as 16 kHz mono WAV in OpenAI `input_audio` and vLLM `audio_url` parts, up to an hour of audio a request in the model's trained 65,536-token window, with each clip's rows keyed in the prompt cache and MTP drafts running over them; `/v1/models` lists `audio` among its input types (#1632, closes #1549). Thanks to @BobClawblaw.
 
 - Inkling 2 Mini on Metal: the startup line breaks the serve's demand into weights, dense layers and scratch, the state of each stream at the window and what the streams share, beside the room the load limit leaves; which streams and windows start is unchanged (#4705, refs #4274 and #4387).
@@ -15,8 +17,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Kolibri-1 on CUDA: decode rounds of two or more rows replay a CUDA graph captured once a shape, making the eager round's launches, so tokens are unchanged; `TENSORFOLD_KOLIBRI_GRAPHS=0` keeps them eager (#4884).
 
 - Inkling 2 Mini on CUDA: decode experts run a warp over 8 columns with gate and up in one launch, about 3% faster one-stream decode on GB10 on top of #4728, with identical tokens (#4729). Thanks @jschmied.
-
-
 
 - Inkling 2: required and named tool calls use the model's own message format, so a request that needs several calls ends after them instead of repeating until max_tokens; a required single call keeps its parsed tool_calls but its token ids change (#4898).
 
@@ -211,8 +211,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Nemotron's offline build uses the shared expert kernel sources, and two duplicate files are gone; the kernels are unchanged (#4738). Thanks @jschmied.
 
 - Docs: a plan for Inkling 2 Mini on CUDA and Metal in slices a contributor can claim (#4274). Thanks @akol1.
-
-- Inkling 2 Mini on Metal serves images under `--vision`: PNG, JPEG and WebP decode to 40-pixel patch tokens (resized only past the image budget), the 23-layer vision tower and its projector run on the GPU with the processor's rounding, and the tower's rows replace the image placeholders in a prefill chunk, split across chunks and cache restores like text rows. Without `--vision` images stay refused by name. Each picture the tower runs logs one `inkling2 image tower:` line with the picture's content hash, its rows and the SHA-256 of the BF16 rows it hands to the splice. The tower is checked against an FP64 reference on the original checkpoint, and its kernels carry contract records and planted controls (#4704, refs #4274 and #4387). Thanks to @BlivionIaG.
 
 - Docs: the Flash Next HIP recipe adds the measured four-rank serve path and fixes its receipt link (#4669). Thanks @timmyit.
 
