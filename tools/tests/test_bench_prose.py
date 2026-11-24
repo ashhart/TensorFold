@@ -56,9 +56,10 @@ def start_server(handler_fn):
 
 def write_books(directory: str, names: list[str], body: str = "") -> None:
     """Populate a temporary prose directory with synthetic book files."""
-    text = body or ("Alpha beta gamma delta epsilon zeta eta theta. " * 120)
+    text = body if body is not None else ("Alpha beta gamma delta epsilon zeta eta theta. " * 120)
     for idx, name in enumerate(names):
-        (Path(directory) / f"{name}.txt").write_text(f"Book {idx}: {text}", encoding="utf-8")
+        content = f"Book {idx}: {text}" if text else ""
+        (Path(directory) / f"{name}.txt").write_text(content, encoding="utf-8")
 
 
 class BenchProseTests(unittest.TestCase):
@@ -76,7 +77,7 @@ class BenchProseTests(unittest.TestCase):
                 def handler(_path, _body, _u=usage):
                     events = [
                         {"choices": [{"index": 0, "delta": {"content": "hello "}}]},
-                        {"choices": [{"index": 0, "delta": {"content": "world"}}]},
+                        {"choices": [{"index": 0, "delta": {"content": "world"}, "finish_reason": "stop"}]},
                         {"choices": [], "usage": _u, "tensorfold": {"token_sha256": "a" * 64}},
                     ]
                     return 200, "text/event-stream", sse_bytes(events, done=True)
@@ -84,7 +85,7 @@ class BenchProseTests(unittest.TestCase):
                 srv, th, url = start_server(handler)
                 try:
                     with tempfile.TemporaryDirectory() as td:
-                        write_books(td, ["war_and_peace"])
+                        write_books(td, ["war_and_peace"], body=None)
                         with contextlib.redirect_stdout(io.StringIO()):
                             report = bench_prose.run_prose_decode(
                                 url, td, levels=(1,), gen_tokens=4,
@@ -100,7 +101,7 @@ class BenchProseTests(unittest.TestCase):
                 self.assertEqual(pair["draft"]["timing"] is not None, expected_ok)
                 self.assertEqual(report["qualified"], expected_ok)
 
-    def test_drafted_and_plain_pairs_share_prompt_seed_and_full_token_ids(self):
+    def test_drafted_and_plain_pairs_share_prompt_seed_and_require_token_evidence(self):
         seen = []
 
         def handler(_path, body):
@@ -108,7 +109,7 @@ class BenchProseTests(unittest.TestCase):
             ids = [10, 20, 30, 40]
             events = [
                 {"choices": [{"index": 0, "delta": {"content": "part1 "}}]},
-                {"choices": [{"index": 0, "delta": {"content": "part2"}}]},
+                {"choices": [{"index": 0, "delta": {"content": "part2"}, "finish_reason": "stop"}]},
                 {
                     "choices": [],
                     "usage": {"prompt_tokens": 40, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
@@ -120,7 +121,7 @@ class BenchProseTests(unittest.TestCase):
         srv, th, url = start_server(handler)
         try:
             with tempfile.TemporaryDirectory() as td:
-                write_books(td, ["war_and_peace", "monte_cristo"])
+                write_books(td, ["war_and_peace", "monte_cristo"], body=None)
                 with contextlib.redirect_stdout(io.StringIO()):
                     report = bench_prose.run_prose_decode(
                         url, td, levels=(2,), gen_tokens=4, seed=777,
@@ -144,12 +145,37 @@ class BenchProseTests(unittest.TestCase):
         self.assertEqual(pair["draft"]["rows"][0]["token_ids"], [10, 20, 30, 40])
         self.assertTrue(report["qualified"])
 
+        # Missing token_ids and token_sha256 must NOT qualify even when text matches.
+        def no_hash_handler(_path, _body):
+            events = [
+                {"choices": [{"index": 0, "delta": {"content": "same "}}]},
+                {"choices": [{"index": 0, "delta": {"content": "text"}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}}},
+            ]
+            return 200, "text/event-stream", sse_bytes(events, done=True)
+
+        srv, th, url = start_server(no_hash_handler)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                write_books(td, ["war_and_peace"], body=None)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    missing_rep = bench_prose.run_prose_decode(
+                        url, td, levels=(1,), gen_tokens=4,
+                        excerpt_specs=(("short", 100),), sources=bench_prose.DISTINCT_PROSE_8[:1],
+                    )
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            th.join(timeout=5)
+        self.assertEqual(missing_rep["pairs"][0]["token_equal"], [None])
+        self.assertFalse(missing_rep["qualified"])
+
     def test_token_id_mismatch_marks_pair_unequal(self):
         def handler(_path, body):
             ids = [1, 2, 3, 9] if body.get("draft") is False else [1, 2, 3, 4]
             events = [
                 {"choices": [{"index": 0, "delta": {"content": "same "}}]},
-                {"choices": [{"index": 0, "delta": {"content": "text"}}]},
+                {"choices": [{"index": 0, "delta": {"content": "text"}, "finish_reason": "stop"}]},
                 {
                     "choices": [],
                     "usage": {"prompt_tokens": 20, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
@@ -161,7 +187,7 @@ class BenchProseTests(unittest.TestCase):
         srv, th, url = start_server(handler)
         try:
             with tempfile.TemporaryDirectory() as td:
-                write_books(td, ["war_and_peace"])
+                write_books(td, ["war_and_peace"], body=None)
                 with contextlib.redirect_stdout(io.StringIO()):
                     report = bench_prose.run_prose_decode(
                         url, td, levels=(1,), gen_tokens=4,
@@ -174,14 +200,16 @@ class BenchProseTests(unittest.TestCase):
         self.assertEqual(report["pairs"][0]["token_equal"], [False])
         self.assertFalse(report["qualified"])
 
-    def test_incomplete_error_empty_rejected_and_reasoning_accepted_with_monotonic_clock(self):
+    def test_finish_reason_incomplete_error_empty_and_reasoning_with_monotonic_clock(self):
         usage = {"prompt_tokens": 16, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}}
         h = {"token_sha256": "b" * 64}
         cases = [
-            ("missing_done", [{"choices": [{"index": 0, "delta": {"content": "hi"}}]}, {"choices": [], "usage": usage, "tensorfold": h}], False, False),
+            ("missing_done", [{"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}, {"choices": [], "usage": usage, "tensorfold": h}], False, False),
+            ("missing_finish", [{"choices": [{"index": 0, "delta": {"content": "hi"}}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, False),
+            ("unclean_finish", [{"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "content_filter"}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, False),
             ("stream_error", [{"choices": [{"index": 0, "delta": {"content": "hi"}}]}, {"error": {"message": "boom"}}], True, False),
-            ("empty_output", [{"choices": [{"index": 0, "delta": {"role": "assistant"}}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, False),
-            ("reasoning_only", [{"choices": [{"index": 0, "delta": {"reasoning_content": "step1"}}]}, {"choices": [{"index": 0, "delta": {"reasoning_content": " step2"}}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, True),
+            ("empty_output", [{"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "stop"}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, False),
+            ("reasoning_only", [{"choices": [{"index": 0, "delta": {"reasoning_content": "step1"}}]}, {"choices": [{"index": 0, "delta": {"reasoning_content": " step2"}, "finish_reason": "length"}]}, {"choices": [], "usage": usage, "tensorfold": h}], True, True),
         ]
 
         def fail_wall():
@@ -210,48 +238,53 @@ class BenchProseTests(unittest.TestCase):
                     self.assertIsNone(row["ttft_s"])
                     self.assertIsNone(row["decode_tps"])
 
-    def test_compare_prose_loss_length_mismatch_identical_unavailable_and_conditional_labels(self):
+    def test_compare_prose_loss_eos_counts_token_sha256_length_and_conditional_labels(self):
         with tempfile.TemporaryDirectory() as td:
             p16, p8 = Path(td) / "bf16.json", Path(td) / "fp8.json"
+            steps2 = [
+                {"token": "a", "logprob": -0.1, "top": {"a": -0.1}},
+                {"token": "b", "logprob": -0.1, "top": {"b": -0.1}},
+            ]
             bf16 = {
                 "len_case": {
-                    "prompt_tokens": 100, "completion_tokens": 3, "text": "abc", "token_ids": [1, 2, 3],
-                    "steps": [
-                        {"token": "a", "logprob": -0.1, "top": {"a": -0.1, "x": -2.5}},
-                        {"token": "b", "logprob": -0.1, "top": {"b": -0.1}},
-                        {"token": "c", "logprob": -0.1, "top": {"c": -0.1}},
-                    ],
+                    "prompt_tokens": 100, "completion_tokens": 3, "finish_reason": "length", "text": "abc", "token_ids": [1, 2, 3],
+                    "steps": steps2 + [{"token": "c", "logprob": -0.1, "top": {"c": -0.1}}],
                 },
-                "same_case": {
-                    "prompt_tokens": 100, "completion_tokens": 2, "text": "ab", "token_ids": [1, 2],
-                    "steps": [
-                        {"token": "a", "logprob": -0.1, "top": {"a": -0.1}},
-                        {"token": "b", "logprob": -0.1, "top": {"b": -0.1}},
-                    ],
+                "eos_stop_case": {
+                    "prompt_tokens": 100, "completion_tokens": 3, "finish_reason": "stop", "text": "ab",
+                    "token_sha256": "c" * 64, "steps": steps2,
+                },
+                "length_missing_step": {
+                    "prompt_tokens": 100, "completion_tokens": 3, "finish_reason": "length", "text": "ab", "steps": steps2,
+                },
+                "sha_diff_case": {
+                    "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
+                    "token_sha256": "a" * 64, "steps": steps2,
                 },
                 "disjoint_case": {
-                    "prompt_tokens": 100, "completion_tokens": 1, "text": "a", "token_ids": [1],
-                    "steps": [{"token": "a", "logprob": -0.2, "top": {"a": -0.2}}],
+                    "prompt_tokens": 100, "completion_tokens": 1, "finish_reason": "stop", "text": "a",
+                    "token_ids": [1], "steps": [{"token": "a", "logprob": -0.2, "top": {"a": -0.2}}],
                 },
             }
             fp8 = {
                 "len_case": {
-                    "prompt_tokens": 100, "completion_tokens": 2, "text": "ab", "token_ids": [1, 2],
-                    "steps": [
-                        {"token": "a", "logprob": -0.1, "top": {"a": -0.1, "y": -2.5}},
-                        {"token": "b", "logprob": -0.1, "top": {"b": -0.1}},
-                    ],
+                    "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "length", "text": "ab", "token_ids": [1, 2],
+                    "steps": steps2,
                 },
-                "same_case": {
-                    "prompt_tokens": 100, "completion_tokens": 2, "text": "ab", "token_ids": [1, 2],
-                    "steps": [
-                        {"token": "a", "logprob": -0.1, "top": {"a": -0.1}},
-                        {"token": "b", "logprob": -0.1, "top": {"b": -0.1}},
-                    ],
+                "eos_stop_case": {
+                    "prompt_tokens": 100, "completion_tokens": 3, "finish_reason": "stop", "text": "ab",
+                    "token_sha256": "c" * 64, "steps": steps2,
+                },
+                "length_missing_step": {
+                    "prompt_tokens": 100, "completion_tokens": 3, "finish_reason": "length", "text": "ab", "steps": steps2,
+                },
+                "sha_diff_case": {
+                    "prompt_tokens": 100, "completion_tokens": 2, "finish_reason": "stop", "text": "ab",
+                    "token_sha256": "d" * 64, "steps": steps2,
                 },
                 "disjoint_case": {
-                    "prompt_tokens": 100, "completion_tokens": 1, "text": "a", "token_ids": [1],
-                    "steps": [{"token": "a", "logprob": -0.2, "top": {"z": -0.2}}],
+                    "prompt_tokens": 100, "completion_tokens": 1, "finish_reason": "stop", "text": "a",
+                    "token_ids": [1], "steps": [{"token": "a", "logprob": -0.2, "top": {"z": -0.2}}],
                 },
             }
             p16.write_text(json.dumps(bf16), encoding="utf-8")
@@ -262,24 +295,26 @@ class BenchProseTests(unittest.TestCase):
             out = buf.getvalue()
             self.assertFalse(rep["cases"]["len_case"]["identical"])
             self.assertIn("length_mismatch", rep["cases"]["len_case"]["status"])
-            self.assertTrue(rep["cases"]["same_case"]["identical"])
-            self.assertEqual(rep["cases"]["same_case"]["status"], "IDENTICAL")
+            self.assertTrue(rep["cases"]["eos_stop_case"]["identical"])
+            self.assertEqual(rep["cases"]["eos_stop_case"]["status"], "IDENTICAL")
+            self.assertFalse(rep["cases"]["length_missing_step"]["identical"])
+            self.assertEqual(rep["cases"]["length_missing_step"]["status"], "incomplete_steps")
+            self.assertFalse(rep["cases"]["sha_diff_case"]["identical"])
+            self.assertEqual(rep["cases"]["sha_diff_case"]["status"], "token_sha256_mismatch")
             self.assertIsNone(rep["cases"]["disjoint_case"]["step0_cond_kl"])
             self.assertIn("step0_cond_KL=unavailable", out)
             self.assertIn("conditional intersection-only diagnostics", out)
             self.assertNotIn("PPL mult", out)
-            self.assertIsNotNone(rep["chapters"]["missing_support_ref_mean"])
-            self.assertFalse(rep["teacher_forced"]["available"])
 
-    def test_teacher_forced_scores_immutable_tokenized_continuation_and_compares_gt_nll(self):
+    def test_teacher_forced_checks_prefix_and_per_step_gt_identity(self):
         requests_seen = []
 
-        def make_handler(gt_202_lp: float):
+        def make_handler(gt_202_lp: float, prefix_tokens: list[int]):
             def handler(path, body):
                 requests_seen.append((path, body))
                 if path == "/v1/tokenize":
                     if body.get("add_special_tokens"):
-                        return 200, "application/json", json.dumps({"tokens": [101, 102, 103]}).encode()
+                        return 200, "application/json", json.dumps({"tokens": prefix_tokens}).encode()
                     return 200, "application/json", json.dumps({"tokens": [201, 202, 203, 204]}).encode()
                 if path == "/v1/completions":
                     prompt = body["prompt"]
@@ -306,32 +341,36 @@ class BenchProseTests(unittest.TestCase):
             return handler
 
         with tempfile.TemporaryDirectory() as td:
-            write_books(td, ["war_and_peace", "moby_dick"])
-            p16, p8 = Path(td) / "bf16.json", Path(td) / "fp8.json"
-            for lp, path in ((-3.0, p16), (-3.2, p8)):
-                srv, th, url = start_server(make_handler(lp))
+            write_books(td, ["war_and_peace", "moby_dick"], body=None)
+            p16, p8, p_bad_prefix = Path(td) / "bf16.json", Path(td) / "fp8.json", Path(td) / "bad_prefix.json"
+            for lp, pfx, path in ((-3.0, [101, 102, 103], p16), (-3.2, [101, 102, 103], p8), (-3.2, [101, 102, 999], p_bad_prefix)):
+                srv, th, url = start_server(make_handler(lp, pfx))
                 try:
                     with contextlib.redirect_stdout(io.StringIO()):
-                        rec = bench_prose.dump_prose_loss(url, td, str(path), cases=bench_prose.LOSS_CASES[:1], tf_tokens=4)
+                        bench_prose.dump_prose_loss(url, td, str(path), cases=bench_prose.LOSS_CASES[:1], tf_tokens=4)
                 finally:
                     srv.shutdown()
                     srv.server_close()
                     th.join(timeout=5)
-                if path == p16:
-                    tf = rec["_tf_moby_dick_16k"]
-                    self.assertEqual(tf["continuation_token_ids"], [201, 202, 203, 204])
-                    self.assertEqual(tf["continuation_token_count"], 4)
-                    self.assertAlmostEqual(tf["steps"][1]["gt_logprob"], -3.0)
-                    self.assertAlmostEqual(tf["steps"][1]["gt_prob"], math.exp(-3.0))
-                    self.assertEqual(tf["steps"][1]["top1_token_id"], "999")
             with contextlib.redirect_stdout(io.StringIO()):
-                cmp = bench_prose.compare_prose_loss(str(p16), str(p8))
-        self.assertTrue(cmp["teacher_forced"]["available"])
-        self.assertEqual(cmp["teacher_forced"]["continuation_token_count"], 4)
-        self.assertAlmostEqual(cmp["teacher_forced"]["gt_nll_delta"], 0.05)
-        self.assertEqual(sum(1 for p, _ in requests_seen if p == "/v1/completions"), 2)
+                ok_cmp = bench_prose.compare_prose_loss(str(p16), str(p8))
+                bad_pfx_cmp = bench_prose.compare_prose_loss(str(p16), str(p_bad_prefix))
+            tampered = json.loads(p8.read_text(encoding="utf-8"))
+            tampered["_tf_moby_dick_16k"]["steps"][1]["gt_token_id"] = 999
+            p_bad_gt = Path(td) / "bad_gt.json"
+            p_bad_gt.write_text(json.dumps(tampered), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                bad_gt_cmp = bench_prose.compare_prose_loss(str(p16), str(p_bad_gt))
 
-    def test_distinct_long_separates_submitted_completed_rejects_undersized_and_omits_kv_claim(self):
+        self.assertTrue(ok_cmp["teacher_forced"]["available"])
+        self.assertEqual(ok_cmp["teacher_forced"]["continuation_token_count"], 4)
+        self.assertAlmostEqual(ok_cmp["teacher_forced"]["gt_nll_delta"], 0.05)
+        self.assertFalse(bad_pfx_cmp["teacher_forced"]["available"])
+        self.assertEqual(bad_pfx_cmp["teacher_forced"]["reason"], "prefix_mismatch")
+        self.assertFalse(bad_gt_cmp["teacher_forced"]["available"])
+        self.assertEqual(bad_gt_cmp["teacher_forced"]["reason"], "gt_token_id_mismatch")
+
+    def test_distinct_long_failed_stream_not_undersized_and_omits_kv_claim(self):
         def handler(path, body):
             if path.startswith("/health"):
                 return 200, "application/json", json.dumps({"memory": {"active": 1024}}).encode()
@@ -367,12 +406,11 @@ class BenchProseTests(unittest.TestCase):
         self.assertIsNone(rep["observed_kv_resident_tokens"])
         self.assertEqual(rep["submitted_streams"], 2)
         self.assertEqual(rep["completed_streams"], 1)
-        self.assertEqual(rep["completed_completion_tokens"], 12)
-        self.assertFalse(rep["qualified"])
-        self.assertEqual(rep["cell_status"], "undersized")
-        self.assertIn("Stream0_WarAndPeace", rep["undersized_streams"])
-        s0 = next(s for s in rep["streams"] if s["name"] == "Stream0_WarAndPeace")
-        self.assertLess(s0["prompt_tokens"], 500)
+        self.assertEqual(rep["failed_streams"], ["Stream1_LesMiserables"])
+        self.assertEqual(rep["undersized_streams"], ["Stream0_WarAndPeace"])
+        self.assertEqual(rep["cell_status"], "incomplete_and_undersized")
+        s1 = next(s for s in rep["streams"] if s["name"] == "Stream1_LesMiserables")
+        self.assertFalse(s1["undersized"])
 
     def test_distinct_long_reports_observed_kv_and_rejects_non_cold_cache(self):
         for cached_val, expect_ok, expect_status in ((0, True, "ok"), (12, False, "cache_not_cold"), (None, False, "cache_not_cold")):
@@ -402,6 +440,31 @@ class BenchProseTests(unittest.TestCase):
                 self.assertEqual(code, 0 if expect_ok else 1)
                 self.assertIn(f"status={expect_status}", buf.getvalue())
                 self.assertIn("Observed engine KV residency : 1,024 tokens", buf.getvalue())
+
+    def test_invalid_counts_and_empty_source_rejected_before_network_or_division(self):
+        with patch.object(bench_prose.urllib.request, "urlopen", side_effect=AssertionError("must not call server")):
+            with self.assertRaises(ValueError):
+                bench_prose.run_prose_decode("http://127.0.0.1:1", "/nonexistent", levels=(0,))
+            with self.assertRaises(ValueError):
+                bench_prose.run_prose_decode("http://127.0.0.1:1", "/nonexistent", levels=(9,))
+            with self.assertRaises(ValueError):
+                bench_prose.run_prose_decode("http://127.0.0.1:1", "/nonexistent", gen_tokens=0)
+            with self.assertRaises(ValueError):
+                bench_prose.run_distinct_long("http://127.0.0.1:1", "/nonexistent", target_tokens=0, n_streams=1)
+            with self.assertRaises(ValueError):
+                bench_prose.run_distinct_long("http://127.0.0.1:1", "/nonexistent", target_tokens=100, n_streams=9)
+            with self.assertRaises(ValueError):
+                bench_prose.run_distinct_long("http://127.0.0.1:1", "/nonexistent", target_tokens=100, n_streams=1, min_prompt_ratio=0.0)
+            with self.assertRaises(ValueError):
+                bench_prose.dump_prose_loss("http://127.0.0.1:1", "/nonexistent", "out.json", tf_tokens=0)
+            with tempfile.TemporaryDirectory() as td:
+                write_books(td, ["war_and_peace"], body="")
+                with self.assertRaises(ValueError):
+                    bench_prose.calibrate_stream_cpts("http://127.0.0.1:1", td, 1)
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    bench_prose.main(["--mode", "distinct-long", "--streams", "0"])
+                self.assertNotEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

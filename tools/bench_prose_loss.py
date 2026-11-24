@@ -2,10 +2,12 @@
 import hashlib
 import json
 import math
+import re
 import statistics
 import time
 
 CLEAN_FINISH = {"stop", "length"}
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 LOSS_CASES = [
     ("war_peace_2k", "war_and_peace", 25000, 10500, "Provide a concise literary analysis of the character dynamics in this scene."),
@@ -107,6 +109,7 @@ def score_teacher_forced_continuation(post_json, base_url: str, model: str, pref
     mean_nll = statistics.mean(-s["gt_logprob"] for s in steps)
     return {
         "prefix_token_count": len(prefix_ids),
+        "prefix_sha256": sha256_token_ids(prefix_ids),
         "continuation_token_count": len(cont_ids),
         "continuation_token_ids": cont_ids,
         "continuation_sha256": sha256_token_ids(cont_ids),
@@ -130,6 +133,10 @@ def dump_prose_loss(
     tf_file: str = "",
 ) -> dict:
     """Dump chapter top-logprobs and immutable tokenized ground-truth continuation scores to JSON."""
+    if type(tf_tokens) is not int or tf_tokens < 1:
+        raise ValueError("tf_tokens must be a positive integer")
+    if not out_json:
+        raise ValueError("out_json path is required")
     case_list = cases if cases is not None else LOSS_CASES
     print("\n=== REAL-PROSE KV LOSS PROBE (CHAPTER LOGPROBS + IMMUTABLE GROUND-TRUTH CONTINUATION) ===")
     records: dict = {}
@@ -226,8 +233,13 @@ def _cond_intersection_step(t16: dict, t8: dict) -> dict:
             "missing_support_ref": missing_ref, "missing_support_cand": missing_cand}
 
 
+def _valid_sha256(value) -> str | None:
+    """Return lowercase 64-hex SHA-256 string if valid, else None."""
+    return value if isinstance(value, str) and SHA256_RE.match(value) else None
+
+
 def _compare_sequences(r16: dict, r8: dict) -> dict:
-    """Compare complete token sequences, token IDs, and lengths before declaring IDENTICAL."""
+    """Compare complete token sequences, EOS-aware lengths, token IDs, and full hashes before declaring IDENTICAL."""
     s16, s8 = r16.get("steps") or [], r8.get("steps") or []
     ids16, ids8 = r16.get("token_ids"), r8.get("token_ids")
     if not s16 or not s8:
@@ -235,9 +247,11 @@ def _compare_sequences(r16: dict, r8: dict) -> dict:
                 "len_ref": len(s16), "len_cand": len(s8)}
     for rec, steps in ((r16, s16), (r8, s8)):
         ctok = rec.get("completion_tokens")
-        if type(ctok) is int and ctok != len(steps):
-            return {"identical": False, "first_diff_step": None, "status": "incomplete_steps",
-                    "len_ref": len(s16), "len_cand": len(s8)}
+        if type(ctok) is int:
+            eos_slack = 1 if rec.get("finish_reason") == "stop" else 0
+            if len(steps) > ctok or len(steps) + eos_slack < ctok:
+                return {"identical": False, "first_diff_step": None, "status": "incomplete_steps",
+                        "len_ref": len(s16), "len_cand": len(s8)}
     shared = min(len(s16), len(s8))
     for i in range(shared):
         tok_diff = s16[i].get("token") != s8[i].get("token")
@@ -248,14 +262,56 @@ def _compare_sequences(r16: dict, r8: dict) -> dict:
     if len(s16) != len(s8):
         return {"identical": False, "first_diff_step": shared,
                 "status": f"length_mismatch ({len(s16)} vs {len(s8)})", "len_ref": len(s16), "len_cand": len(s8)}
+    c16, c8 = r16.get("completion_tokens"), r8.get("completion_tokens")
+    if type(c16) is int and type(c8) is int and c16 != c8:
+        return {"identical": False, "first_diff_step": shared,
+                "status": f"completion_tokens_mismatch ({c16} vs {c8})", "len_ref": len(s16), "len_cand": len(s8)}
+    if r16.get("finish_reason") != r8.get("finish_reason") and (r16.get("finish_reason") is not None or r8.get("finish_reason") is not None):
+        return {"identical": False, "first_diff_step": None, "status": "finish_reason_mismatch",
+                "len_ref": len(s16), "len_cand": len(s8)}
     if (ids16 is not None or ids8 is not None) and ids16 != ids8:
         return {"identical": False, "first_diff_step": None, "status": "token_ids_mismatch",
                 "len_ref": len(s16), "len_cand": len(s8)}
+    sha16, sha8 = r16.get("token_sha256"), r8.get("token_sha256")
+    if sha16 is not None or sha8 is not None:
+        v16, v8 = _valid_sha256(sha16), _valid_sha256(sha8)
+        if v16 is None or v8 is None or v16 != v8:
+            return {"identical": False, "first_diff_step": None, "status": "token_sha256_mismatch",
+                    "len_ref": len(s16), "len_cand": len(s8)}
     if r16.get("text") != r8.get("text") or r16.get("reasoning", "") != r8.get("reasoning", ""):
         return {"identical": False, "first_diff_step": None, "status": "text_mismatch",
                 "len_ref": len(s16), "len_cand": len(s8)}
     return {"identical": True, "first_diff_step": None, "status": "IDENTICAL",
             "len_ref": len(s16), "len_cand": len(s8)}
+
+
+def _valid_tf_pair(tf16, tf8) -> tuple[bool, str | None]:
+    """Verify both teacher-forced dumps share identical prefix, continuation IDs, and per-step GT identity."""
+    if not isinstance(tf16, dict) or not isinstance(tf8, dict):
+        return False, "missing_teacher_forced"
+    p_cnt16, p_cnt8 = tf16.get("prefix_token_count"), tf8.get("prefix_token_count")
+    p_sha16, p_sha8 = _valid_sha256(tf16.get("prefix_sha256")), _valid_sha256(tf8.get("prefix_sha256"))
+    if type(p_cnt16) is not int or p_cnt16 < 1 or p_cnt16 != p_cnt8 or p_sha16 is None or p_sha16 != p_sha8:
+        return False, "prefix_mismatch"
+    cont16 = valid_token_ids(tf16.get("continuation_token_ids"))
+    cont8 = valid_token_ids(tf8.get("continuation_token_ids"))
+    if cont16 is None or cont8 is None or cont16 != cont8:
+        return False, "continuation_mismatch"
+    expected_sha = sha256_token_ids(cont16)
+    for tf in (tf16, tf8):
+        if tf.get("continuation_sha256") is not None and tf.get("continuation_sha256") != expected_sha:
+            return False, "continuation_sha_mismatch"
+    s16, s8 = tf16.get("steps") or [], tf8.get("steps") or []
+    if len(s16) != len(cont16) or len(s8) != len(cont16):
+        return False, "step_count_mismatch"
+    for tid, x16, x8 in zip(cont16, s16, s8):
+        if not isinstance(x16, dict) or not isinstance(x8, dict):
+            return False, "invalid_step"
+        if x16.get("gt_token_id") != tid or x8.get("gt_token_id") != tid:
+            return False, "gt_token_id_mismatch"
+        if x16.get("gt_token") != x8.get("gt_token"):
+            return False, "gt_token_text_mismatch"
+    return True, None
 
 
 def compare_prose_loss(bf16_json: str, fp8_json: str) -> dict:
@@ -326,13 +382,8 @@ def compare_prose_loss(bf16_json: str, fp8_json: str) -> dict:
 
     tf_summary: dict = {"available": False}
     tf16, tf8 = b16.get("_tf_moby_dick_16k"), f8.get("_tf_moby_dick_16k")
-    if (
-        isinstance(tf16, dict)
-        and isinstance(tf8, dict)
-        and tf16.get("continuation_token_ids")
-        and tf16.get("continuation_token_ids") == tf8.get("continuation_token_ids")
-        and len(tf16.get("steps") or []) == len(tf16["continuation_token_ids"]) == len(tf8.get("steps") or [])
-    ):
+    tf_ok, tf_reason = _valid_tf_pair(tf16, tf8)
+    if tf_ok:
         s16, s8 = tf16["steps"], tf8["steps"]
         gt_lps16 = [finite_num(x.get("gt_logprob")) for x in s16]
         gt_lps8 = [finite_num(x.get("gt_logprob")) for x in s8]
@@ -355,6 +406,8 @@ def compare_prose_loss(bf16_json: str, fp8_json: str) -> dict:
             gt_diffs = [abs(a - b) for a, b in zip(gt_lps16, gt_lps8)]
             tf_summary = {
                 "available": True,
+                "prefix_token_count": tf16["prefix_token_count"],
+                "prefix_sha256": tf16["prefix_sha256"],
                 "continuation_token_count": n_tok,
                 "continuation_sha256": tf16.get("continuation_sha256"),
                 "gt_nll_ref": nll16,
@@ -377,7 +430,11 @@ def compare_prose_loss(bf16_json: str, fp8_json: str) -> dict:
             print(f"    Ground-Truth |Δlogprob|          : mean={tf_summary['gt_abs_dlogprob_mean']:.5f}, max={tf_summary['gt_abs_dlogprob_max']:.5f}")
             print(f"    Top-1 Greedy Token Agreement     : {tagree}/{n_tok} ({tf_summary['top1_agree_pct']:.2f}%)")
             print(f"    Conditional Intersection KL/TVD  : kl={_fmt(tf_summary['conditional_intersection_kl_mean'])}, tvd={_fmt(tf_summary['conditional_intersection_tvd_mean'])}")
+        else:
+            tf_summary = {"available": False, "reason": "invalid_gt_logprob"}
+            print("\n  IMMUTABLE GROUND-TRUTH CONTINUATION: unavailable (invalid_gt_logprob)")
     else:
-        print("\n  IMMUTABLE GROUND-TRUTH CONTINUATION: unavailable (missing or mismatched continuation)")
+        tf_summary = {"available": False, "reason": tf_reason}
+        print(f"\n  IMMUTABLE GROUND-TRUTH CONTINUATION: unavailable ({tf_reason})")
 
     return {"mode": "prose-loss-compare", "cases": cases_out, "chapters": chapter_summary, "teacher_forced": tf_summary}
