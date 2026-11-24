@@ -230,7 +230,7 @@ pub const Kernels = struct {
         var span = profile.begin(k.profiler, input_encoder, .dense);
         // Prompt rows take the checkpoint matrix's split, as decoded rows already do through `p.slices`.
         const gn = if (p.gn != 0) p.gn else p.n;
-        const sk = if (k.prompt) projection.promptSplit(gn, p.k) orelse p.slices else p.slices;
+        const sk = if (k.prompt) projection.promptSlices(p.bits, p.group, gn, p.k, p.slices) else p.slices;
         span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
         errdefer span.cancel();
         const e = span.encoder;

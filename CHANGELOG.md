@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.8-27B on Metal M5: 5-bit and 6-bit group-64 checkpoints split K for decode and prompt rows as v1.3.4 did again, so their sums run in v1.3.4's order; #4419 had moved them onto the 4-bit M5 split tables, and its register-direct kernels stay, at the restored splits. Gemma 4 and 4-bit are unchanged.
+
 - Nemotron 3.5 Transcribe on CUDA: chat requests take speech as 16 kHz mono WAV in OpenAI `input_audio` and vLLM `audio_url` parts, up to an hour of audio a request in the model's trained 65,536-token window, with each clip's rows keyed in the prompt cache and MTP drafts running over them; `/v1/models` lists `audio` among its input types (#1632, closes #1549). Thanks to @BobClawblaw.
 
 - Inkling 2 Mini on Metal: the startup line breaks the serve's demand into weights, dense layers and scratch, the state of each stream at the window and what the streams share, beside the room the load limit leaves; which streams and windows start is unchanged (#4705, refs #4274 and #4387).

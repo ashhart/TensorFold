@@ -34,6 +34,17 @@ pub fn promptSplit(n: usize, k: usize) ?u32 {
     return null;
 }
 
+/// A tensor-unit lane matrix's split: 4-bit g64 its M5 table; 5/6-bit g64 keep v1.3.4's `split` (its fp32 K order).
+pub fn laneSplit(bits: u8, group: u32, key: Split) u32 {
+    return if (bits == 4 and group == 64) key.m5 orelse key.slices else key.slices;
+}
+
+/// A prompt pass's split: 5/6-bit g64 keep the decode split (v1.3.4's prompt bits); other widths as before.
+pub fn promptSlices(bits: u8, group: u32, gn: usize, k: usize, slices: u32) u32 {
+    if (group == 64 and (bits == 5 or bits == 6)) return slices;
+    return promptSplit(gn, k) orelse slices;
+}
+
 /// A part's rows in the checkpoint, which are the staged rows on one Mac.
 fn globalRows(p: Triple) usize {
     return if (p.gn != 0) p.gn else p.weight.shape[0];
@@ -52,7 +63,7 @@ fn splitRows(parts: []const Triple) usize {
 }
 
 /// The K split a staged matrix takes: the tensor's rows key the fp32 order, the fused checkpoint rows the M5 table.
-const Split = struct { slices: u32, m5: ?u32 };
+pub const Split = struct { slices: u32, m5: ?u32 };
 
 fn splitFor(parts: []const Triple, k: usize) !Split {
     return .{ .slices = try split(tensorRows(parts[0]), k), .m5 = m5Split(splitRows(parts), k) };
@@ -79,7 +90,7 @@ pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Arr
         n = try std.math.add(usize, n, rows);
     }
     if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices, gn);
-    if (group == 64 and (bits == 4 or bits == 5 or bits == 6)) slices = key.m5 orelse slices;
+    slices = laneSplit(bits, group, key);
     if (bits != 4 or group != 64) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices, gn);
     const w = try device.buffer(n * k / 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(allocator, w) catch |err| {
