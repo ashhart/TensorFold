@@ -88,7 +88,7 @@ fn shared(s: *Script, raw: *Raw, keep: bool) !void {
     var chains: rule.ChainLevel(Script.Chains) = .{ .timer = .{ .s = s } };
     try rule.measureWidths(windows, &chains, raw.verify[1..], keep);
     if (!keep) raw.verify[0] = 0;
-    try rule.smooth(windows, raw.verify[1..]);
+    try rule.smoothSerial(windows, raw.verify[1..]);
     const level = chains.level();
     raw.level = if (keep) @min(raw.level, level) else level;
 }
