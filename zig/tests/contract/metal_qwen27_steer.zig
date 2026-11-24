@@ -54,13 +54,9 @@ fn edit(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8
     return std.mem.concat(a, u8, &.{ text[0..at], to, text[at + from.len ..] });
 }
 
-/// The family's source with the specialization its width needs, and the fault a control plants.
+/// The family's source as production compiles it, with the fault a control plants.
 fn source(a: std.mem.Allocator, variant: Variant) ![]u8 {
-    const template = tf.qwen27.runtime_sources.norm_steer;
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownSource;
-    const definitions = try std.fmt.allocPrint(a, "constexpr int K={d};", .{width});
-    defer a.free(definitions);
-    const text = try std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+    const text = try tf.qwen27.quant_gpu.specializedSource(a, .{ .kind = .norm_steer, .k = width });
     defer a.free(text);
     return switch (variant) {
         .production => a.dupe(u8, text),
@@ -70,13 +66,9 @@ fn source(a: std.mem.Allocator, variant: Variant) ![]u8 {
     };
 }
 
-/// The plain norm's source with the specialization its width needs.
+/// The plain norm's source as production compiles it, padded rows included: the launch dispatches them.
 fn normSource(a: std.mem.Allocator) ![]u8 {
-    const template = tf.qwen27.runtime_sources.norm_xs;
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownSource;
-    const definitions = try std.fmt.allocPrint(a, "constexpr int K={d};", .{width});
-    defer a.free(definitions);
-    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+    return tf.qwen27.quant_gpu.specializedSource(a, .{ .kind = .norm, .k = width, .xs = true });
 }
 
 /// One kernel's device side: the rig's buffers, the reference beside them and the launch.
