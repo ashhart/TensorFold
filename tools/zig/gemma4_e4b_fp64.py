@@ -91,19 +91,11 @@ for L in layers:
     if EMULATE: emulations('o', L, x, dequant32(base + 'self_attn.o_proj'), ref, mag, load(f'o_L{L}.tile'))
     x = load(f'gateup_L{L}.x')
     g, u = dequant(base + 'mlp.gate_proj'), dequant(base + 'mlp.up_proj')
-    n = g.shape[0]
-    inter = np.empty((2 * n, g.shape[1]))
-    for blk in range(n // 16):  # the row path's layout: 16 gate rows, 16 up rows, alternately
-        inter[32 * blk:32 * blk + 16] = g[16 * blk:16 * blk + 16]
-        inter[32 * blk + 16:32 * blk + 32] = u[16 * blk:16 * blk + 16]
+    inter = np.concatenate([g, u], 0)  # the row path's layout: all gate rows, then all up rows
     ref = x @ inter.T; mag = np.abs(x) @ np.abs(inter).T
     for mode in ('win', 'tile'): add('gate_up', mode, L, load(f'gateup_L{L}.{mode}'), ref, mag)
     if EMULATE:
-        g32, u32 = dequant32(base + 'mlp.gate_proj'), dequant32(base + 'mlp.up_proj')
-        i32 = np.empty((2 * n, g32.shape[1]), np.float32)
-        for blk in range(n // 16):
-            i32[32 * blk:32 * blk + 16] = g32[16 * blk:16 * blk + 16]
-            i32[32 * blk + 16:32 * blk + 32] = u32[16 * blk:16 * blk + 16]
+        i32 = np.concatenate([dequant32(base + 'mlp.gate_proj'), dequant32(base + 'mlp.up_proj')], 0)
         emulations('gate_up', L, x, i32, ref, mag, load(f'gateup_L{L}.tile'))
     x = load(f'down_L{L}.x'); Wm = dequant(base + 'mlp.down_proj'); ref = x @ Wm.T; mag = np.abs(x) @ np.abs(Wm).T
     for mode in ('win', 'tile'): add('down', mode, L, load(f'down_L{L}.{mode}'), ref, mag)
