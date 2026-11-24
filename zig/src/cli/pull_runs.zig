@@ -40,6 +40,8 @@ const Shared = struct {
     runs: []const Run,
     check: Check,
     max: u64,
+    bodies: []Auth.Body,
+    positions: []u64,
     next: std.atomic.Value(usize) = .init(0),
     bytes: std.atomic.Value(u64) = .init(0),
     running: std.atomic.Value(u32) = .init(0),
@@ -51,11 +53,26 @@ pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Ru
     if (runs.len == 0) return;
     const w = std.Io.Dir.cwd();
     for (targets) |t| {
+        if (auth.bearer != null) {
+            const old = w.openFile(io, t.path, .{}) catch null;
+            if (old) |file| {
+                file.close(io);
+                if (auth.fileContains(a, io, t.path) catch true) {
+                    w.deleteFile(io, t.path) catch {};
+                    return error.HubCredentialBody;
+                }
+            }
+        }
         const f = try w.createFile(io, t.path, .{ .read = true, .truncate = false });
         defer f.close(io);
         // the file keeps its full size so the release's offsets hold; bytes no run brings stay holes on disk
         if ((try f.length(io)) != t.size) try f.setLength(io, t.size);
     }
+    const bodies = try a.alloc(Auth.Body, targets.len);
+    for (bodies) |*body| body.* = .init(auth);
+    defer for (bodies) |*body| body.deinit(a);
+    const positions = try a.alloc(u64, targets.len);
+    @memset(positions, 0);
     const links = try a.alloc(Link, targets.len);
     for (links) |*l| l.* = .{};
     var max: u64 = 0;
@@ -64,10 +81,10 @@ pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Ru
         max = @max(max, r.end - r.first);
         left += r.end - r.first;
     }
-    var s: Shared = .{ .io = io, .auth = auth, .targets = targets, .links = links, .runs = runs, .check = check, .max = max };
+    var s: Shared = .{ .io = io, .auth = auth, .targets = targets, .links = links, .runs = runs, .check = check, .max = max, .bodies = bodies, .positions = positions };
     var failures: [workers]?anyerror = @splat(null);
     var threads: [workers]std.Thread = undefined;
-    const n = @min(workers, runs.len);
+    const n = if (auth.bearer != null) @min(@as(usize, 1), runs.len) else @min(workers, runs.len);
     s.running.store(@intCast(n), .release);
     for (0..n) |i| threads[i] = std.Thread.spawn(.{}, worker, .{ &s, &failures[i] }) catch |e| {
         s.stop.store(true, .release);
@@ -88,7 +105,14 @@ pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Ru
         progress.?.flush() catch {};
     }
     for (threads[0..n]) |t| t.join();
-    for (failures[0..n]) |f| if (f) |e| return e;
+    for (failures[0..n]) |failure| if (failure) |e| {
+        if (e == error.HubCredentialBody) for (targets) |t| w.deleteFile(io, t.path) catch {};
+        return e;
+    };
+    finish(&s) catch |e| {
+        if (e == error.HubCredentialBody) for (targets) |t| w.deleteFile(io, t.path) catch {};
+        return e;
+    };
 }
 
 fn worker(s: *Shared, failure: *?anyerror) void {
@@ -141,6 +165,7 @@ const Open = struct {
 
 /// One run: fetched whole into `buf`, checked, then written; a stale link is resolved again.
 fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u8) !void {
+    if (s.auth.bearer != null and r.first != s.positions[r.file]) return error.RangeUnsupported;
     var last: anyerror = error.ReadFailed;
     var wait_ms: u64 = 250;
     for (0..attempts) |_| {
@@ -163,11 +188,35 @@ fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u
             last = error.ChecksumMismatch;
             continue;
         }
-        try file.writePositionalAll(s.io, buf, r.first);
+        if (s.auth.bearer == null) {
+            try file.writePositionalAll(s.io, buf, r.first);
+        } else {
+            const body = &s.bodies[r.file];
+            const held = body.buffered();
+            const safe = try body.feed(std.heap.page_allocator, buf);
+            if (safe.len > 0) {
+                try file.writePositionalAll(s.io, safe, r.first - @as(u64, @intCast(held)));
+                body.commit(safe.len);
+            }
+            s.positions[r.file] = r.end;
+        }
         _ = s.bytes.fetchAdd(buf.len, .monotonic);
         return;
     }
     return last;
+}
+
+fn finish(s: *Shared) !void {
+    if (s.auth.bearer == null) return;
+    for (s.targets, s.positions, s.bodies) |target, position, *body| {
+        if (position != target.size) return error.ShortRange;
+        const tail = try body.finish(std.heap.page_allocator);
+        if (tail.len > 0) {
+            const file = try std.Io.Dir.cwd().openFile(s.io, target.path, .{ .mode = .read_write });
+            defer file.close(s.io);
+            try file.writePositionalAll(s.io, tail, target.size - @as(u64, @intCast(tail.len)));
+        }
+    }
 }
 
 /// The storage link the hub redirects `file` to, asked once and again when it grows old or is refused.

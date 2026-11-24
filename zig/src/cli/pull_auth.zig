@@ -63,6 +63,85 @@ pub const Auth = struct {
         return credential.contains(std.heap.page_allocator, text, &.{secret}) catch true;
     }
 
+    /// Refuse complete raw or encoded credentials; ambiguous suffixes stay buffered until later bytes decide.
+    pub const Body = struct {
+        auth: Auth,
+        pending: std.ArrayList(u8) = .empty,
+
+        pub fn init(auth: Auth) Body {
+            return .{ .auth = auth };
+        }
+
+        pub fn deinit(b: *Body, a: Allocator) void {
+            b.pending.deinit(a);
+        }
+
+        pub fn buffered(b: *const Body) usize {
+            return b.pending.items.len;
+        }
+
+        /// The prefix now proven safe; the caller writes it once, then commits that exact length.
+        pub fn feed(b: *Body, a: Allocator, bytes: []const u8) ![]const u8 {
+            try b.pending.appendSlice(a, bytes);
+            const bearer = b.auth.bearer orelse return b.pending.items;
+            const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+            if (secret.len == 0) return b.pending.items;
+            const secrets = [_][]const u8{secret};
+            var matcher = credential.Matcher.init(a, b.pending.items);
+            defer matcher.deinit();
+            var i: usize = 0;
+            while (i < b.pending.items.len) : (i += 1) {
+                const found = try matcher.secretAt(i, &secrets);
+                if (found.consumed > 0) return error.HubCredentialBody;
+                if (found.hold and found.prefix_len > 0) return b.pending.items[0..i];
+            }
+            return b.pending.items;
+        }
+
+        pub fn commit(b: *Body, sent: usize) void {
+            const left = b.pending.items.len - sent;
+            std.mem.copyForwards(u8, b.pending.items[0..left], b.pending.items[sent..]);
+            b.pending.shrinkRetainingCapacity(left);
+        }
+
+        /// The real end of a contiguous body: an incomplete encoding is data, a full key is not.
+        pub fn finish(b: *Body, a: Allocator) ![]const u8 {
+            const bearer = b.auth.bearer orelse return b.pending.items;
+            const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+            if (secret.len == 0) return b.pending.items;
+            var matcher = credential.Matcher.init(a, b.pending.items);
+            defer matcher.deinit();
+            if (try matcher.spanFrom(0, secret) != null) return error.HubCredentialBody;
+            return b.pending.items;
+        }
+    };
+
+    /// A cached file with a complete raw or nested-encoded key, checked without whole-file allocation.
+    pub fn fileContains(auth: Auth, a: Allocator, io: std.Io, path: []const u8) !bool {
+        if (auth.bearer == null) return false;
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var body: Body = .init(auth);
+        defer body.deinit(a);
+        var buf: [64 << 10]u8 = undefined;
+        var offset: u64 = 0;
+        while (true) {
+            const n = try file.readPositionalAll(io, &buf, offset);
+            if (n == 0) break;
+            const safe = body.feed(a, buf[0..n]) catch |err| {
+                if (err == error.HubCredentialBody) return true;
+                return err;
+            };
+            body.commit(safe.len);
+            offset += n;
+        }
+        _ = body.finish(a) catch |err| {
+            if (err == error.HubCredentialBody) return true;
+            return err;
+        };
+        return false;
+    }
+
     /// Server-controlled text with each plain or repeatedly percent-encoded credential occurrence replaced.
     pub fn redact(auth: Auth, a: Allocator, text: []const u8) ![]const u8 {
         const bearer = auth.bearer orelse return text;

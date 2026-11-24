@@ -142,6 +142,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
                 std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
                 break :blob_exists;
             }
+            if (auth.fileContains(a, io, blob_path) catch true) {
+                std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
+                break :blob_exists;
+            }
             try out.print("  {s}: cached\n", .{e.path});
             try linkIntoSnapshot(a, io, snapshot_dir, e.path, blob_name);
             continue;

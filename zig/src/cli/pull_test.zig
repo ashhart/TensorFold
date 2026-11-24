@@ -317,8 +317,8 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     defer fake_hub.stopServer();
     const root = try std.fmt.allocPrint(a, ".tf-pull-test-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
-    const env = try testEnv(a, try fake_hub.endpoint(a));
-
+    var env = try testEnv(a, try fake_hub.endpoint(a));
+    try env.put("HF_TOKEN", "fixture-resume-token");
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
