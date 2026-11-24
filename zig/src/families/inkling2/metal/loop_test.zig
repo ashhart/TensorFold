@@ -10,7 +10,8 @@ fn near(want: f64, got: f64) !void {
 }
 
 test "loop entries have unique symbols, launch records and disabled FP contraction" {
-    for (std.enums.values(p.Kind), records) |kind, record| {
+    const kinds = std.enums.values(p.Kind);
+    for (kinds, records[0..kinds.len]) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
         try t.expectEqual(@as(u32, 256), record.threads);
@@ -20,6 +21,18 @@ test "loop entries have unique symbols, launch records and disabled FP contracti
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_LOOP_SCALE = 0x1.555556p-6f") != null);
     try t.expect(std.mem.indexOf(u8, shader, "LoopMathSpecMissing") == null);
+}
+
+test "the split gates' three launches follow the kinds' records, one symbol each" {
+    const split = records[std.enums.values(p.Kind).len..];
+    try t.expectEqual(@as(usize, 3), split.len);
+    const symbols = [_][]const u8{ "tf_inkling2_loop_norm", "tf_inkling2_loop_down", "tf_inkling2_loop_apply" };
+    for (split, symbols, [_]u32{ 256, 32, 256 }) |record, symbol, threads| {
+        try t.expect(std.mem.endsWith(u8, record.name, symbol));
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, symbol));
+        try t.expectEqual(threads, record.threads);
+        try t.expectEqual(record.threads, record.reserved);
+    }
 }
 
 test "shape admission and dispatch geometry fix H=2304, rank 64 and 48 messages" {
