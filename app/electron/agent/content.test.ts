@@ -30,6 +30,18 @@ ok('buildUserContent returns a plain string when there are no attachments')
   ok('buildUserContent folds documents into the text as labelled blocks')
 }
 
+// Empty and whitespace-only documents still need their labelled presence and filename.
+{
+  for (const [name, text] of [['empty.txt', ''], ['blank.txt', ' \n\t ']] as const) {
+    const out = buildUserContent('', [doc(name, text)])
+    assert.strictEqual(typeof out, 'string')
+    assert.notStrictEqual(out, '')
+    assert.ok((out as string).includes(`<attached file: ${name}>`))
+    assert.ok((out as string).includes('</attached file>'))
+  }
+  ok('buildUserContent retains empty and whitespace-only document blocks and filenames')
+}
+
 // images → content-parts array with text + image_url blocks
 {
   const out = buildUserContent('look', [img('p.png'), doc('n.txt', 'notes')])

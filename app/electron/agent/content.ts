@@ -27,7 +27,7 @@ export function buildUserContent(text: string, attachments: Attachment[] | undef
     if ((item.status && item.status !== 'ready') || (item.extraction && item.extraction.state !== 'accepted')) throw new Error(`Attachment ${item.name} is not ready to send.`)
   }
   if (!list.length) return text
-  const docs = list.filter((a) => a.kind === 'document' && a.text && a.text.trim())
+  const docs = list.filter((a) => a.kind === 'document' && typeof a.text === 'string')
   const images = list.filter((a) => a.kind === 'image')
   const docText = docs.map((d) => `\n\n<attached file: ${d.name}>\n${d.text}\n</attached file>`).join('')
   const imageNotes = images.map((i) => `\n[attached image: ${i.name}]`).join('')
