@@ -176,6 +176,7 @@ export interface PreflightContext extends HubDeps {
   installedRevision?: (repo: string) => Promise<string | null>
   drafterFor: (repo: string) => string | null
   cachedBytes: (repo: string) => Promise<number>
+  freeDiskBytes: () => Promise<number | null>
   now?: () => number
 }
 
