@@ -82,6 +82,12 @@ const Validation = struct {
     }
 };
 
+/// Finish the CUDA target's checkpoint after its layers have been read.
+pub fn finishCuda(ck: *core.Checkpoint, model: config.Model) !void {
+    _ = model;
+    try refuseLeftovers(ck, error.UnusedHy4Tensors);
+}
+
 /// `ck` names `get` never took, refused with up to five named.
 pub fn refuseLeftovers(ck: *const core.Checkpoint, comptime err: anyerror) !void {
     var n: usize = 0;
