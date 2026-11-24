@@ -74,9 +74,6 @@ pub fn partialSlot(l: Layer, c: usize, pos: usize) ?usize {
     if (c < lo / l.chunk or c > pos / l.chunk) return null;
     return c - lo / l.chunk;
 }
-pub fn tableBytes(rows: usize, heads: u32) usize {
-    return rows * heads * extent * 2;
-}
 pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
     return rows * heads * n_chunks * (head_dim * 4 + 8);
 }
