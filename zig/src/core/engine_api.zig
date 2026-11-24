@@ -191,6 +191,8 @@ pub const Info = struct {
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.
     slide_conversations: bool = false,
+    /// Folded Memory Weights v3 is active for `--slide` (fast weight compilation & exact deletion).
+    folded_memory: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
@@ -366,6 +368,11 @@ pub const LearnSink = @import("learning_api.zig").LearnSink;
 pub const LearnError = @import("learning_api.zig").LearnError;
 pub const Learner = @import("learning_api.zig").Learner;
 pub const pocket_audit = @import("pocket_audit.zig");
+pub const memory_api = @import("memory_api.zig");
+pub const MemoryOp = memory_api.MemoryOp;
+pub const MemoryResult = memory_api.MemoryResult;
+pub const MemoryController = memory_api.MemoryController;
+pub const MemorySnapHandle = memory_api.SnapHandle;
 
 pub const Engine = struct {
     ctx: *anyopaque,
@@ -401,6 +408,8 @@ pub const Engine = struct {
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
         /// A reference WAV file's codec rows in `gpa`, on the speech engine's own thread; null: it encodes no voices.
         encode_voice: ?*const fn (ctx: *anyopaque, gpa: Allocator, wav: []const u8) EncodeVoiceError![][10]i32 = null,
+        /// Folded Memory Weights v3 synchronous op on the engine thread; null when not attached.
+        memory_op: ?*const fn (ctx: *anyopaque, op: *const MemoryOp) MemoryResult = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -484,6 +493,12 @@ pub const Engine = struct {
     pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
         const f = e.vtable.refusal orelse return null;
         return f(e.ctx, request, out);
+    }
+
+    /// Folded Memory Weights v3 engine-thread op (init/teach_chunk/save/forget/clear/stats).
+    pub fn memoryOp(e: Engine, op: *const MemoryOp) MemoryResult {
+        const f = e.vtable.memory_op orelse return .{ .err = "folded memory weights are not supported by this engine" };
+        return f(e.ctx, op);
     }
 };
 

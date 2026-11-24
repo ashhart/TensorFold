@@ -6,3 +6,4 @@ pub const Model = @import("model.zig").Model;
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
+pub const memory_adapter = @import("memory_adapter.zig");
