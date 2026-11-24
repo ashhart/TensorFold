@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiMo-V2.6-Flash on CUDA: served on two GB10s from a 3-bit EXL3 pack, with the pack's DFlash drafter and the prompt cache on; any other GPU or number of GPUs is refused by name, and main's shared prompt kernels gain 3-bit support (#728, refs #725). Thanks to @ajensenwaud.
+
 - Flash Next on CUDA prefill: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` runs only the cache-writing part of the MTP step during prefill, skipping proposal and query work whose outputs prefill never reads; off by default (#4529).
 
 - `tensorfold start` selects a fitting catalog model, downloads it with consent, starts a local server and checks its reply; startup, chat, pull and the managed server's log keep API keys out of output (#4852).
