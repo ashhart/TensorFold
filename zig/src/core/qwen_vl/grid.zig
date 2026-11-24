@@ -1,5 +1,6 @@
 //! A Qwen-VL tower's host tables for one image: each patch's place, its learned-position taps and its rotary angles.
 const std = @import("std");
+const rope_freq = @import("../rope_freq.zig");
 
 /// Patch `i` of a grid `gw` patches wide, in merge order: its (row, column).
 pub fn place(i: usize, gw: u32, merge: u32) [2]u32 {
@@ -61,8 +62,13 @@ pub fn torchTaps(row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
     return tapsOf(true, row, col, gh, gw, side);
 }
 
-/// The axial rotary's frequencies as torch makes them in fp32: 1 / theta^(2i / (head_dim / 2)), head_dim / 4 of them.
+/// The axial rotary's frequencies as transformers makes them in fp32: 1 / theta^(2i / (head_dim / 2)).
 pub fn invFreq(out: []f32, head_dim: u32, theta: f32) void {
+    rope_freq.inverseFrequencies(theta, head_dim / 2, out);
+}
+
+/// The f32 pow form `invFreq` replaced; the HIP tower keeps it until its replies are checked on an AMD GPU (#1852).
+pub fn invFreqF32Pow(out: []f32, head_dim: u32, theta: f32) void {
     const half: f32 = @floatFromInt(head_dim / 2);
     for (out, 0..) |*f, i| f.* = 1.0 / std.math.pow(f32, theta, @as(f32, @floatFromInt(2 * i)) / half);
 }
@@ -153,4 +159,48 @@ test "the axial rotary of a 72-wide head: 18 row frequencies, 18 column, repeate
     // patch 1 sits at (0, 1): rows turn by 0, columns by 1
     try std.testing.expectEqual(@as(f32, 0), sin[1 * 72 + 0]);
     try std.testing.expectEqual(@as(f32, @floatCast(@sin(@as(f64, 1)))), sin[1 * 72 + 18]);
+}
+
+/// The words a moved table changes and the largest change in ulp; when `loud`, prints both tables side by side.
+fn moved(label: []const u8, old: []const f32, new: []const f32, loud: bool) [2]u32 {
+    var differ: u32 = 0;
+    var max_ulp: u32 = 0;
+    if (loud) std.debug.print("\n{s} (index | old bits | new bits | absolute | relative)\n", .{label});
+    for (old, new, 0..) |o, n, i| {
+        const bo: u32 = @bitCast(o);
+        const bn: u32 = @bitCast(n);
+        const abs: f64 = @abs(@as(f64, o) - @as(f64, n));
+        const rel: f64 = abs / @abs(@as(f64, o));
+        if (bo != bn) {
+            differ += 1;
+            max_ulp = @max(max_ulp, if (bo > bn) bo - bn else bn - bo);
+        }
+        if (loud) std.debug.print("{d:3} {x:0>8} {x:0>8} {e:.3} {e:.3}\n", .{ i, bo, bn, abs, rel });
+    }
+    return .{ differ, max_ulp };
+}
+
+/// Silent when the table moves as pinned; otherwise names both counts, prints every word and fails.
+fn expectMoved(label: []const u8, old: []const f32, new: []const f32, differ: u32, max_ulp: u32) !void {
+    const got = moved(label, old, new, false);
+    std.testing.expectEqual([2]u32{ differ, max_ulp }, got) catch |e| {
+        const line = "\n{s}: expected {d} words to move by at most {d} ulp, got {d} by at most {d}\n";
+        std.debug.print(line, .{ label, differ, max_ulp, got[0], got[1] });
+        _ = moved(label, old, new, true);
+        return e;
+    };
+}
+
+test "the axial rotary's old f32 pow against the helper: 8 of 18 words move on 72-wide heads, 4 of 16 on 64-wide" {
+    var old: [18]f32 = undefined;
+    var new: [18]f32 = undefined;
+    invFreqF32Pow(&old, 72, 10000);
+    invFreq(&new, 72, 10000);
+    try expectMoved("Qwen-VL tower, 72-wide heads, theta 1e4 over 36", &old, &new, 8, 3);
+    // the HIP tower's 64-wide heads: what moving it would change; it keeps invFreqF32Pow for now
+    var old64: [16]f32 = undefined;
+    var new64: [16]f32 = undefined;
+    invFreqF32Pow(&old64, 64, 10000);
+    invFreq(&new64, 64, 10000);
+    try expectMoved("HIP Qwen-VL tower, 64-wide heads, theta 1e4 over 32", &old64, &new64, 4, 2);
 }
