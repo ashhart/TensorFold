@@ -9,10 +9,8 @@ assert.equal(assertBundledBenchmarkVersion(BENCHMARK_ENGINE_VERSION), BENCHMARK_
 for (const version of ['1.0.12', '9.9.9', null]) assert.throws(() => assertBundledBenchmarkVersion(version), /bundled TensorFold/, 'live benchmark admission requires the approved pinned engine')
 const parsed = parseBenchmarkReceipt(JSON.stringify(receipt), { model: receipt.model.repo_id, serial: false })
 assert.deepEqual(parsed, receipt, 'the current receipt preserves cache, thinking, finish reason and route')
-for (const [kvCache, finishReason] of [['fp8', 'stop'], [null, null]] as const) {
-  const variant = structuredClone(receipt); variant.settings.kv_cache = kvCache; variant.samples[0].finish_reason = finishReason
-  assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(variant)), variant)
-}
+const fp8Variant = structuredClone(receipt); fp8Variant.settings.kv_cache = 'fp8'; fp8Variant.samples[0].finish_reason = 'stop'
+assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(fp8Variant)), fp8Variant)
 assert.equal(benchmarkProtocolComplete(parsed), true)
 assert.equal(benchmarkCells(parsed)[0].successful, 5)
 assert.equal(benchmarkCells(parsed)[0].deliveryTokensPerSecond?.median, 100)
@@ -53,12 +51,18 @@ for (const mutate of [
   (value: any) => { value.samples.push(value.samples[0]) },
   (value: any) => { value.samples[0].completion_tokens = 257 },
   (value: any) => { Object.assign(value.samples[5], { completion_tokens: 127, delivery_seconds: 1.26, delivery_tps: 100, finish_reason: 'stop' }) },
+  (value: any) => { Object.assign(value.samples[15], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: 'stop' }) },
+  (value: any) => { value.suite = { id: 'community-v1', sha256: BENCHMARK_SUITES['community-v1'] }; Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: 'stop' }) },
   (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: null }) },
   (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100 }); delete value.samples[5].finish_reason },
   (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: 'length' }) },
+  (value: any) => { value.samples[0].finish_reason = null },
+  (value: any) => { delete value.samples[0].finish_reason },
   (value: any) => { value.created_at = '2026-02-30T00:00:00Z' },
   (value: any) => { value.suite.sha256 = '0'.repeat(64) },
   (value: any) => { value.settings.managed = false },
+  (value: any) => { value.settings.kv_cache = null },
+  (value: any) => { delete value.settings.kv_cache },
   (value: any) => { value.settings.kv_cache = 'int8' },
   (value: any) => { value.settings.thinking_mode = 'disabled' },
   (value: any) => { value.settings.extra = true },
@@ -69,6 +73,7 @@ for (const mutate of [
   (value: any) => { value.samples[10].route = '/v1/chat/completions' },
   (value: any) => { delete value.samples[1].route },
   (value: any) => { for (const sample of value.samples) if (sample.fixture_id === 'chat') delete sample.route },
+  (value: any) => { for (const sample of value.samples) delete sample.route },
   (value: any) => { value.samples[0].extra = true },
   (value: any) => { value.settings.context_tokens = 8192 },
   (value: any) => { value.runtime.dependencies.private_path = '/private/operator' },
@@ -123,6 +128,9 @@ console.log('Studio accepts absent, null and six coarse product families, preser
 assert.equal(parsed.suite.id, 'community-v2', 'the synthetic receipt is the engine\'s current suite')
 const legacy = structuredClone(receipt); legacy.suite = { id: 'community-v1', sha256: BENCHMARK_SUITES['community-v1'] }
 assert.equal(parseBenchmarkReceipt(JSON.stringify(legacy)).suite.id, 'community-v1', 'older engines\' community-v1 receipts still parse')
+const legacyNoRoute = structuredClone(legacy); delete legacyNoRoute.settings.kv_cache; delete legacyNoRoute.settings.thinking_mode
+for (const sample of legacyNoRoute.samples) { delete sample.finish_reason; delete sample.route }
+assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(legacyNoRoute)), legacyNoRoute, 'historical community-v1 receipts without route or finish_reason remain readable')
 for (const suite of [{ id: 'community-v3', sha256: BENCHMARK_SUITES['community-v2'] }, { id: 'community-v2', sha256: BENCHMARK_SUITES['community-v1'] }, { id: 'community-v1', sha256: BENCHMARK_SUITES['community-v2'] }, { id: 'community-v2', sha256: '0'.repeat(64) }]) {
   const wrong = structuredClone(receipt) as any; wrong.suite = suite
   assert.throws(() => parseBenchmarkReceipt(JSON.stringify(wrong)), /invalid|unsupported/, `suite ${suite.id} with the wrong or unknown hash is refused`)
