@@ -353,6 +353,9 @@ class BenchProseTests(unittest.TestCase):
                     ], done=True)
                     self.wfile.write(c2)
                     self.wfile.flush()
+                    # Keep the lock past the last write, so the client's own scheduling delay on a busy host cannot
+                    # stamp this stream's last token after the next stream's first one and read it as an overlap.
+                    time.sleep(0.25)
 
         srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SerialHandler)
         th = threading.Thread(target=srv.serve_forever, daemon=True)
