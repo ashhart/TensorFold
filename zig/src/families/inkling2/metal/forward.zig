@@ -198,11 +198,17 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     }
 }
 
-fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, base: usize, rows: usize) Ref {
     const channels = state.convWidth(conv_state);
     const taps = cache.staged(slot, conv_state, 0);
     copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
     copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), cache.staged(slot, conv_state, 3), rows * channels);
+    return taps;
+}
+
+fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+    const channels = state.convWidth(conv_state);
+    const taps = stageConvInput(m, e, cache, slot, conv_state, raw, base, rows);
     if (is_tree) {
         tree.convStatic(&m.tree, e, taps, r(weight), at(s.conv_src, base * 4 * 4), at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
     } else {
@@ -227,8 +233,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             .segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
         };
         const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
-        try convInputForAttention(m, e, s, cache, v, base, rows, true, sm.is_tree);
-        try convInputForAttention(m, e, s, cache, v, base, rows, false, sm.is_tree);
+        convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
         const rel_ref = a(at(s.rel_prep, base * state.rel_width * 2));
         const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
         const q_ref = a(at(s.q_prep, base * state.query_width * 2));
@@ -250,24 +255,43 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     }
 }
 
-fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, key: bool, is_tree: bool) !void {
+fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, is_tree: bool) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
-    const raw = if (key) at(s.k_conv, base * state.kv_width * 2) else at(s.v_conv, base * state.kv_width * 2);
-    const projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2);
-    const normalized = if (key) at(s.k_norm, 0) else if (v.hasMessages() or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    const taps = cache.staged(v.cache_slot, if (key) 0 else 1, 0);
-    copyBf16(m, e, cache.history(v.cache_slot, if (key) 0 else 1), taps, 3 * state.kv_width);
-    copyBf16(m, e, projected, cache.staged(v.cache_slot, if (key) 0 else 1, 3), rows * state.kv_width);
+    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
+    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
+    const k_out = at(s.k_conv, base * state.kv_width * 2);
+    const v_out = at(s.v_conv, base * state.kv_width * 2);
+    const k_in = at(s.k_norm, base * state.hidden * 2);
+    const v_norm = if (v.hasMessages() or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
+    const v_in = at(v_norm.buf, v_norm.off + base * state.hidden * 2);
     if (is_tree) {
         const src = at(s.conv_src, base * 4 * 4);
-        switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-            .static => |weight| tree.convStatic(&m.tree, e, taps, r(weight), src, raw, @intCast(rows), state.kv_width),
-            .dynamic => |d| tree.convDynamic(&m.tree, e, taps, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), src, raw, @intCast(rows), state.kv_width),
+        switch (w.attn.k_conv) {
+            .static => |kw| tree.convStatic(&m.tree, e, k_taps, r(kw), src, k_out, @intCast(rows), state.kv_width),
+            .dynamic => |kd| tree.convDynamic(&m.tree, e, k_taps, k_in, r(kd.static_w), r(kd.projection), src, k_out, @intCast(rows), state.kv_width),
         }
-    } else switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-        .static => |weight| glue.convStatic(&m.glue, e, taps, r(weight), raw, @intCast(rows), state.kv_width),
-        .dynamic => |d| glue.convDynamic(&m.glue, e, taps, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), raw, @intCast(rows), state.kv_width),
+        switch (w.attn.v_conv) {
+            .static => |vw| tree.convStatic(&m.tree, e, v_taps, r(vw), src, v_out, @intCast(rows), state.kv_width),
+            .dynamic => |vd| tree.convDynamic(&m.tree, e, v_taps, v_in, r(vd.static_w), r(vd.projection), src, v_out, @intCast(rows), state.kv_width),
+        }
+        return;
+    }
+    switch (w.attn.k_conv) {
+        .static => |kw| switch (w.attn.v_conv) {
+            .static => |vw| glue.convStaticKv(&m.glue, e, k_taps, r(kw), k_out, v_taps, r(vw), v_out, @intCast(rows), state.kv_width),
+            .dynamic => |vd| {
+                glue.convStatic(&m.glue, e, k_taps, r(kw), k_out, @intCast(rows), state.kv_width);
+                glue.convDynamic(&m.glue, e, v_taps, v_in, r(vd.static_w), r(vd.projection), v_out, @intCast(rows), state.kv_width);
+            },
+        },
+        .dynamic => |kd| switch (w.attn.v_conv) {
+            .dynamic => |vd| glue.convDynamicKv(&m.glue, e, k_taps, k_in, r(kd.static_w), r(kd.projection), k_out, v_taps, v_in, r(vd.static_w), r(vd.projection), v_out, @intCast(rows), state.kv_width),
+            .static => |vw| {
+                glue.convDynamic(&m.glue, e, k_taps, k_in, r(kd.static_w), r(kd.projection), k_out, @intCast(rows), state.kv_width);
+                glue.convStatic(&m.glue, e, v_taps, r(vw), v_out, @intCast(rows), state.kv_width);
+            },
+        },
     }
 }
 
