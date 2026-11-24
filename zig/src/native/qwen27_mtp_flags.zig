@@ -24,6 +24,18 @@ pub fn deviceRefusal(drafts: ?u32, tensor_units: bool, pages: bool) ?Refused {
 }
 pub const Refused = struct { err: anyerror, why: []const u8 };
 
+/// The MTP head's device check, then its weights from `file` beside the checkpoint; `why` names a refusal.
+pub fn openHead(model: anytype, io: std.Io, dir: []const u8, drafts: ?u32, pages: bool, file: []const u8, a: std.mem.Allocator, why: *[]const u8) !void {
+    if (deviceRefusal(drafts, model.device.tensorUnits(), pages)) |r| {
+        why.* = r.why;
+        return r.err;
+    }
+    if ((drafts orelse 0) > 0) model.loadMtp(io, dir) catch |err| {
+        if (err == error.MissingMtpFile) why.* = try std.fmt.allocPrint(a, "--mtp-drafts: Qwen3.8-27B's MTP head is read from {s} beside the checkpoint, and {s} has none", .{ file, dir });
+        return err;
+    };
+}
+
 /// Hashes the disk identity's mode words; the head's word joins only when it is on, as main keys the rest.
 pub fn identityWords(w: *std.hash.Wyhash, words: []const u64, head: bool) void {
     w.update(std.mem.sliceAsBytes(words));

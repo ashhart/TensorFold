@@ -3,6 +3,7 @@ const std = @import("std");
 const tf = @import("tensorfold");
 const lanes = @import("lanes");
 const native = @import("qwen27_lanes.zig");
+const Tree = tf.qwen27.dflash.selector.Tree;
 const a = std.testing.allocator;
 const Counted = struct {
     fake: lanes.fake.Fake = .{ .gpa = a },
@@ -132,4 +133,28 @@ test "qwen27 grants: a shared round's sampled proposals keep the drafter's score
     s.sampling = .{ .seed = 7 };
     try std.testing.expect(follows(true, &s));
     try std.testing.expect(!follows(false, &s));
+    // DFlash2 and DSpine take the stream's draw from one rule: alone, drafting on from where the stream stands
+    const draw = @import("qwen27_drafts.zig").drawFor;
+    try std.testing.expectEqual(@as(u64, 7), draw(true, &s, 5, 4).?.seed);
+    try std.testing.expect(draw(false, &s, 5, 4) == null); // a shared round: the drafter's own scores
+    try std.testing.expect(draw(true, &s, 6, 4) == null);
+    s.sampling = null;
+    try std.testing.expect(draw(true, &s, 5, 4) == null);
+}
+
+test "qwen27 grants: a tree's path scores give each node its own chance given its parent, never above one" {
+    // DSpine's shared walker grows own log-chances; Tree.scores are paths, as `local` reads them
+    var parents = [_]i32{ -1, -1, 0, 1 };
+    const own = [_]f64{ -0.1, -2.5, -0.7, -0.2 };
+    var tokens = [_]u32{ 1, 2, 3, 4 };
+    var scores = own;
+    lanes.draft_tree.pathScores(&parents, &scores);
+    const t: Tree = .{ .gpa = a, .tokens = &tokens, .parents = &parents, .scores = &scores };
+    for (own, 0..) |o, i| {
+        try std.testing.expectApproxEqAbs(o, native.Metal.local(t, i), 1e-12);
+        try std.testing.expect(@exp(native.Metal.local(t, i)) <= 1);
+    }
+    var raw = own; // planted: own log-chances stored as scores, node 3's chance reads e^2.3
+    const planted: Tree = .{ .gpa = a, .tokens = &tokens, .parents = &parents, .scores = &raw };
+    try std.testing.expect(@exp(native.Metal.local(planted, 3)) > 1);
 }

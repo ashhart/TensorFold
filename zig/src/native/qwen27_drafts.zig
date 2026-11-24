@@ -28,6 +28,11 @@ pub fn followsDraw(lone: bool, s: *const lanes.Stream) bool {
     return lone and s.sampling != null;
 }
 
+/// The draw a tree aims at: a lone sampled stream's, drafting on from where it stands; else none (drafter scores).
+pub fn drawFor(lone: bool, s: *const lanes.Stream, position: u64, stands: u64) @TypeOf(s.sampling) {
+    return if (position == stands + 1 and followsDraw(lone, s)) s.sampling else null;
+}
+
 /// Only slots that currently draft compete for rows in the next shared allocation.
 fn live(b: *const Metal) usize {
     var n: usize = 0;
@@ -47,6 +52,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     errdefer mtl.pass_metrics.end();
     @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;
+    var asks: [8]q.dspine.runtime.Ask = undefined;
     var owners: [8]u32 = undefined;
     var draws: [8]Draw = undefined;
     var n: usize = 0;
@@ -70,20 +76,23 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         if (requests.len == 1) mtl.pass_metrics.begin(b.pass_profile, "lanes", b.window, mtl.clock.seconds);
         b.dropTreeOf(slot);
         const stands = b.runner.offsets[slot] + b.early[slot];
-        if ((if (slot == 0) g.draft.committed_end else b.contexts[slot].?.committed_end) != stands) return error.BadDraftPosition;
+        if ((if (slot == 0) g.draft.committedEnd() else b.contexts[slot].?.committed_end) != stands) return error.BadDraftPosition;
         const room = b.runner.capacity - stands;
         if (r.depth == 0 or room < 2) continue;
         const pending = if (r.rows != null) r.follow[r.follow.len - 1] else try b.value(r.first orelse return error.NoFirstToken);
         const nodes = @import("qwen27_window.zig").proposal(b.window, b.copies, r.depth, @intCast(room), lone);
-        if (b.draft_block.enabled) try g.draft.setTreeBlock(if (lone and slot == 0) b.draft_block.rows(@intFromPtr(r.stream)) else draft_block.wide);
+        if (b.draft_block.enabled) if (g.draft.dflash()) |m| try m.setTreeBlock(if (lone and slot == 0) b.draft_block.rows(@intFromPtr(r.stream)) else draft_block.wide);
         if (slot == 0) if (g.proposer) |p| {
             b.trees[0] = try p.call(p.ptr, pending, nodes);
             continue;
         };
-        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
         // a lone sampled stream's tree ranks its candidates as the target's keyed race will draw them
-        if (r.position == stands + 1 and followsDraw(lone, r.stream)) {
-            const x = r.stream.sampling.?;
+        const drawn = drawFor(lone, r.stream, r.position, stands);
+        if (g.draft.* == .dspine) { // a shared round reads each node's chance from its scores: no noise in them
+            asks[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .sampling = drawn, .position = r.position };
+        }
+        batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
+        if (drawn) |x| {
             draws[n] = .{ .seed = x.seed };
             batch[n].noise = draws[n].noise();
             batch[n].temperature = x.temperature;
@@ -91,11 +100,11 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
-            try proposeAll(b, batch[0..n], owners[0..n]);
+            try proposeAll(b, batch[0..n], asks[0..n], owners[0..n]);
             n = 0;
         }
     }
-    if (n > 0) try proposeAll(b, batch[0..n], owners[0..n]);
+    if (n > 0) try proposeAll(b, batch[0..n], asks[0..n], owners[0..n]);
     for (requests) |r| {
         const slot = b.slotOf(r.stream) orelse continue;
         if (b.trees[slot]) |*t| {
@@ -106,10 +115,18 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
 }
 
 /// The batch's trees: a stream alone takes its own pass (slot 0's fused absorb and block); several share one.
-fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
+fn proposeAll(b: *Metal, batch: []const Proposal, asks: []const q.dspine.runtime.Ask, owners: []const u32) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const m = b.draft.?.generation.draft;
+    var trees: [8]Tree = undefined;
+    const m = switch (b.draft.?.model) {
+        .dflash2 => |m| m,
+        .dspine => |m| { // DSpine: every stream's block in one pass over its own context
+            try m.proposeMany(asks, trees[0..asks.len]);
+            for (owners, trees[0..asks.len]) |slot, t| b.trees[slot] = t;
+            return;
+        },
+    };
     if (batch.len == 1) {
         const p = batch[0];
         const x = p.context orelse {
@@ -126,7 +143,6 @@ fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
         b.trees[owners[0]] = try tree;
         return;
     }
-    var trees: [8]Tree = undefined;
     try m.proposeBatch(batch, trees[0..batch.len]);
     for (owners, trees[0..batch.len]) |slot, t| b.trees[slot] = t;
 }

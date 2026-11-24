@@ -125,7 +125,7 @@ pub const Metal = struct {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
             for (b.contexts[1..runner.ready], 1..) |*x, slot| {
-                x.* = try Context.initGrow(gpa, d.model, slot < b.draft_slots, runner.kv_step);
+                x.* = try newContext(gpa, d, slot < b.draft_slots, runner.kv_step);
                 x.*.?.settle = .{ .ctx = runner, .slot = @intCast(slot), .run = q.decode_round.Runner.settleOpaque };
             }
         }
@@ -192,7 +192,15 @@ pub const Metal = struct {
         const d = b.draft orelse return null;
         if (slot == 0) return d.model.ring();
         const x = b.contexts[slot] orelse return null;
-        return x.ring(d.model.graph.config);
+        return x.ring();
+    }
+
+    /// A slot past 0's drafter context: its taps ring, and the drafter's K/V caches when it drafts.
+    pub fn newContext(gpa: std.mem.Allocator, d: *Draft, drafting: bool, step: ?u32) !*Context {
+        return switch (d.model) {
+            .dflash2 => |m| Context.initGrow(gpa, m, drafting, step),
+            .dspine => |m| m.newContext(gpa, drafting),
+        };
     }
 
     /// Whether `slot`'s stream drafts its own trees.

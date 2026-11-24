@@ -83,7 +83,7 @@ const Commit = struct {
         }
         try c.b.runner.completeDeviceKeep(&c.b.round.?, c.path);
         try c.d.generation.draft.absorb(.{ .buf = c.d.generation.taps }, @intCast(c.path.len));
-        if (c.d.generation.draft.committed_end != c.b.runner.offsets[0]) return error.BadDraftPosition;
+        if (c.d.generation.draft.committedEnd() != c.b.runner.offsets[0]) return error.BadDraftPosition;
     }
 };
 

@@ -11,6 +11,7 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
+const slot_context = @import("qwen27_slots_context.zig");
 
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
@@ -254,7 +255,7 @@ fn keepsEnd(s: *const lanes.Stream) bool {
 fn standsAt(b: *const Metal, at: usize) bool {
     if (b.runner.failed or b.runner.active != null or b.runner.offsets[0] != at) return false;
     const d = b.draft orelse return true;
-    return !d.model.backend.failed and d.model.committed_end == at;
+    return !d.model.failed() and d.model.committedEnd() == at;
 }
 
 /// How `s` resumes from what slot 0 stands at, past the cache's restore point `kept_at` (qwen27_resume.zig).
@@ -272,10 +273,7 @@ fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
     switch (plan) {
         .none => return 0,
         .here => |n| {
-            if (b.draft) |d| {
-                try d.model.reset(); // a new session over the kept taps, as after a restore
-                d.model.committed_end = n;
-            }
+            if (b.draft) |d| try d.model.standAt(n);
             return n;
         },
         .back => |h| {
@@ -343,7 +341,7 @@ pub fn rewindInit(b: *Metal, room: u64, cache: u64) ?mtl.Buffer {
 
 /// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
 fn recover(b: *Metal, s: *const lanes.Stream) !void {
-    const drafter = if (b.draft) |d| d.model.backend.failed else false;
+    const drafter = if (b.draft) |d| d.model.failed() else false;
     if (!b.runner.failed and !drafter) return;
     for (b.owners[0..b.runner.slots]) |o| if (o != null and o != s) return error.RoundGpuFailure;
     b.standing.deinit(b.gpa); // the failure may have left slot 0 anywhere
@@ -358,8 +356,8 @@ fn recover(b: *Metal, s: *const lanes.Stream) !void {
 /// Empty `slot`'s own drafter state past slot 0 (its taps ring and session), as a fresh prompt starts it.
 fn clearContext(b: *Metal, slot: u32) !void {
     if (slot == 0) return;
-    const d = b.draft orelse return;
-    if (b.contexts[slot]) |x| try x.reset(d.model.graph.config);
+    if (b.draft == null) return;
+    if (b.contexts[slot]) |x| try x.reset();
 }
 
 /// A prompt chunk's `rows` taps into a slot's ring.
@@ -405,29 +403,19 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     const context_missing = b.draft != null and slot > 0 and b.contexts[slot] == null;
     if (!kv and !context_missing) return;
     const drafting = slot < b.draft_slots;
-    const context_bytes: usize = if (b.draft) |d| contextBytes(d.model.graph.config, drafting) else 0;
+    const context_bytes: usize = if (b.draft) |d| slot_context.bytes(d.model, drafting) else 0;
     const need = (if (kv) b.runner.slotBytes() else 0) + (if (context_missing) context_bytes else 0);
     if (b.grow) |g| if (!g.room(g.ctx, need, s)) return error.LaneMemory;
     var added: std.ArrayList(mtl.Buffer) = .empty;
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
     if (context_missing) {
-        const x = try Context.initGrow(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
+        const x = try Metal.newContext(b.gpa, b.draft.?, drafting, b.runner.kv_step);
         x.settle = .{ .ctx = b.runner, .slot = slot, .run = q.decode_round.Runner.settleOpaque };
         b.contexts[slot] = x;
         try x.buffers(&added, b.gpa);
     }
     if (b.grow) |g| g.added(g.ctx, added.items);
-}
-
-/// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
-fn contextBytes(c: q.dflash.config.Config, drafting: bool) usize {
-    const ring = @as(usize, c.span()) * c.ringWidth() * 2;
-    var caches: usize = 0;
-    if (drafting) for (0..c.layers) |i| {
-        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
-    };
-    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
@@ -447,7 +435,11 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     if (slot == 0 and b.draft_block.enabled) {
         std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
         b.draft_block.drop();
-        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+        if (b.draft) |d| {
+            if (d.generation.draft.dflash()) |m| {
+                m.tree_block = @import("qwen27_draft_block.zig").wide;
+            }
+        }
     }
     if (slot == 0) leave(b, s);
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
@@ -571,8 +563,8 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
-        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
-        const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
+        if (b.draft_block.enabled) if (g.draft.dflash()) |m| try m.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
+        const result = if (g.draft.dflash() != null and b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
             try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
