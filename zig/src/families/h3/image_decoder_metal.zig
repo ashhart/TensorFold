@@ -102,8 +102,8 @@ pub const Decoder = struct {
         return @as([*]u16, @ptrCast(@alignCast(d.weights.contents())))[0..d.plan.total()];
     }
 
-    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, read ahead, F32 rounded to bf16.
-    pub fn load(d: *Decoder, io: std.Io, path: [*:0]const u8) !void {
+    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, read ahead (bytes returned), bf16.
+    pub fn load(d: *Decoder, io: std.Io, path: [*:0]const u8) !u64 {
         const map = try mtl.MappedFile.open(path);
         defer map.deinit();
         var arena = std.heap.ArenaAllocator.init(d.gpa);
@@ -114,8 +114,9 @@ pub const Decoder = struct {
             const e = w.header.get(it.name).?;
             s.* = .{ .path = path, .lo = w.start + e.begin, .hi = w.start + e.end };
         }
-        _ = try read_ahead.read(d.gpa, io, spans);
+        const ahead = try read_ahead.read(d.gpa, io, spans);
         host.read(w, d.params());
+        return ahead;
     }
 
     /// Synthetic weights from `seed` for the self-test: matrices by their fan-in, gains near 1, small biases.
