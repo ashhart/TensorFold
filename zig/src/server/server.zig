@@ -180,7 +180,8 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
-        srv.empty_system_prefix = text.encode(a, "<|im_start|>system\n<|im_end|>\n", false) catch &.{};
+        // the header a memory prompt strips, encoded only where the engine serves learning
+        if (srv.info.folded_memory) srv.empty_system_prefix = text.encode(a, "<|im_start|>system\n<|im_end|>\n", false) catch &.{};
         srv.info.thinking_applicable = srv.close_id != null;
         srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
