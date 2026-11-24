@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on CUDA: `tf-h3-image-prompt-cuda` runs the prompt path (Qwen3-VL to layer 50 and the token refiner) and `tf-h3-image-decoder-cuda` the image decoder, each writing the file its Metal sibling writes and carrying a self-test against the host's float64 reference (#3733). Thanks to @plotarmordev.
+
 - GLM on Metal: `GLM_ROUND_PROF` reports per-round host and GPU time sums (#3894). Thanks @gilby.
 
 - Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
