@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout`.
+- Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout` (#4963).
 
 - Inkling 2 Mini on Metal: the router's and loop gates' dots run a thread per output with main's serial arithmetic (one row keeps main's kernels), so prompts reach the first token about 42% sooner and four streams decode about 64% faster on an M5 Ultra, with identical tokens (#4912).
 
@@ -13,8 +13,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Kolibri-1 on CUDA: decode rounds of two or more rows replay a CUDA graph captured once a shape, making the eager round's launches, so tokens are unchanged; `TENSORFOLD_KOLIBRI_GRAPHS=0` keeps them eager (#4884).
 
 - Inkling 2 Mini on CUDA: decode experts run a warp over 8 columns with gate and up in one launch, about 3% faster one-stream decode on GB10 on top of #4728, with identical tokens (#4729). Thanks @jschmied.
-
-
 
 - Inkling 2: required and named tool calls use the model's own message format, so a request that needs several calls ends after them instead of repeating until max_tokens; a required single call keeps its parsed tool_calls but its token ids change (#4898).
 
