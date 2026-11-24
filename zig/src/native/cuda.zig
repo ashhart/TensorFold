@@ -560,6 +560,7 @@ test "Flash Next takes --vision at family admission" {
 test {
     _ = @import("cuda_health_test.zig");
     _ = @import("cuda_ceiling_test.zig");
+    _ = @import("cuda_open_refusal_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
     _ = kv_pages;
