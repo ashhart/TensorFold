@@ -11,6 +11,7 @@ const Box = struct {
     tokens: std.ArrayList(u32) = .empty,
     failed: bool = false,
     reason: ?api.Reason = null,
+    memory_version: ?u64 = null,
     message: [160]u8 = @splat(0), // the finish's message, cut to fit
     fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *@This() = @ptrCast(@alignCast(ctx));
@@ -22,6 +23,7 @@ const Box = struct {
             },
             .finished => |f| {
                 b.reason = f.reason;
+                b.memory_version = f.stats.memory_version;
                 const n = @min(f.message.len, b.message.len);
                 @memcpy(b.message[0..n], f.message[0..n]);
             },
@@ -50,11 +52,15 @@ const Ctrl = struct {
     routed: u32 = 0,
     dropped: u32 = 0,
     handle: ?api.MemorySnapHandle = null,
+    version: u64 = 7,
     fn of(ctx: *anyopaque) *Ctrl {
         return @ptrCast(@alignCast(ctx));
     }
     pub fn controller(c: *Ctrl) api.MemoryController {
-        return .{ .ctx = c, .hasUnits = has, .routeAndCompose = route, .dropSnap = drop, .exec = exec };
+        return .{ .ctx = c, .hasUnits = has, .routeAndCompose = route, .dropSnap = drop, .exec = exec, .version = versionOf };
+    }
+    fn versionOf(ctx: *anyopaque) u64 {
+        return of(ctx).version;
     }
     fn has(_: *anyopaque) bool {
         return true;
@@ -211,4 +217,16 @@ test "folded memory: a memory prefix is priced like any prompt, and a request it
     try t.expectStringStartsWith(&got.message, "the memory prefix this request would run does not fit");
     try t.expectEqual(@as(u32, 1), c.dropped);
     try t.expectEqual(@as(usize, 0), got.tokens.items.len);
+}
+
+test "folded memory: a reply reports the memory version its routing saw, and none when learning is off" {
+    var c: Ctrl = .{ .version = 41 };
+    var on: Box = .{};
+    defer on.deinit();
+    try reply(&c, true, &on, null);
+    try t.expectEqual(@as(?u64, 41), on.memory_version);
+    var off: Box = .{};
+    defer off.deinit();
+    try reply(&c, false, &off, null);
+    try t.expectEqual(@as(?u64, null), off.memory_version);
 }
