@@ -50,6 +50,7 @@ pub const Job = struct {
     backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
     memory_snap: ?*anyopaque = null, // Folded Memory Weights v3 transient Snap (freed on job finish)
     memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
+    memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {

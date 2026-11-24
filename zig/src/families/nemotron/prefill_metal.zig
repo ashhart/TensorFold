@@ -104,6 +104,7 @@ const Ops = struct {
             } else |_| {};
             s.cached = @intCast(at);
             s.reuse_failed = at == 0;
+            if (s.reuse_failed) try lanes.memory_restore.refuseFallback(s); // never a placeholder row as text
         }
         s.fill_at.store(@intCast(at), .monotonic); // a restored prefix is done the moment it is restored
         return at;
