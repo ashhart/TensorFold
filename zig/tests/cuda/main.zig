@@ -274,6 +274,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-ref-dsa")) return @import("glm_ref_dsa.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "affine8")) return affine8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
