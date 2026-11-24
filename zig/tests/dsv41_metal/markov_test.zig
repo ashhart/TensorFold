@@ -78,3 +78,61 @@ fn ranked(rank: u32) !void {
     std.debug.print("{s} dsv41 metal markov rank {d}: {d} GPU draft rows equal the host's whole-vocabulary chain, {d} near-ties apart, {d} wrong\n", .{ if (bad == 0) "PASS" else "FAIL", rank, rows - near, near, bad });
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+test "dsv41 metal markov: top-K single-TG GPU chain matches host candidateRows and filtered sampling" {
+    const a = testing.allocator;
+    var c = fixture.dsparkConfig();
+    c.dspark_markov_rank = 256;
+    const K: usize = 64;
+    const ds = try fds.Ds.initWith(a, testing.io, c, limit, 83, 3, .{ .gpu_chain = true, .markov_topk = K, .candidates = K });
+    defer ds.deinit();
+    try testing.expect(ds.pass.mk != null);
+    const n: usize = c.dspark_block;
+    const V: usize = c.vocab;
+    const D: usize = c.hidden;
+    const mk = ds.pass.markov();
+    const params = [_]host.dspark.Params{
+        .{ .seed = 101, .pos0 = 301, .sampled = true, .temperature = 0.8, .top_k = 20, .top_p = 0.95 },
+        .{ .seed = 202, .pos0 = 312, .sampled = true, .temperature = 0.8, .top_k = 0, .top_p = 0.95 },
+        .{ .seed = 303, .pos0 = 323, .sampled = true, .temperature = 0.8, .top_k = 0, .top_p = 1.0, .min_p = 0.05 },
+    };
+    var asks: [3]pkg.dspark.Ask = undefined;
+    var outs: [3]fds.Out = undefined;
+    var props: [3]pkg.dspark.Proposal = undefined;
+    const cand_got = try a.alloc(i32, 3 * n * K);
+    defer a.free(cand_got);
+    const base_got = try a.alloc(f32, 3 * n * K);
+    defer a.free(base_got);
+    for (0..3) |s| {
+        const at: u64 = 300 + 11 * s;
+        ds.pass.reset(@intCast(s));
+        try ds.ingest(@intCast(s), at - 150, 150, 70 + s);
+        asks[s] = fds.Ds.ask(@intCast(s), @intCast((23 * s + 7) % V), at, params[s]);
+        outs[s] = try fds.Out.init(a, &c);
+        props[s] = .{ .drafts = outs[s].drafts, .conf = outs[s].conf, .cand = cand_got[s * n * K ..][0 .. n * K], .base = base_got[s * n * K ..][0 .. n * K] };
+    }
+    defer for (outs) |o| o.deinit(a);
+    try ds.pass.propose(&asks, &props);
+    const logits = ds.pass.b.logitsOf(&c, 3 * n);
+    const hf: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, ds.pass.b.bytes(ds.pass.b.hf, 2 * 3 * n * D)));
+    const cand_want = try a.alloc(i32, 3 * n * K);
+    defer a.free(cand_want);
+    const base_want = try a.alloc(f32, 3 * n * K);
+    defer a.free(base_want);
+    try host.dspark.candidateRows(logits, V, K, cand_want, base_want);
+    for (cand_want, cand_got) |w, g| try testing.expectEqual(w, g);
+    for (base_want, base_got) |w, g| try testing.expectEqual(w, g);
+    var bad: usize = 0;
+    for (0..3) |s| {
+        var hid: [16 * 256]f32 = undefined;
+        for (hid[0 .. n * D], hf[s * n * D ..][0 .. n * D]) |*h, v| h.* = host.dspark.bf16(v);
+        var want: [16]u32 = undefined;
+        var wconf: [16]f32 = undefined;
+        try host.dspark.chain(a, mk, cand_want[s * n * K ..][0 .. n * K], base_want[s * n * K ..][0 .. n * K], K, asks[s].anchor, asks[s].params, hid[0 .. n * D], want[0..n], wconf[0..n]);
+        for (0..n) |i| {
+            if (@abs(outs[s].conf[i] - wconf[i]) > 1e-4) bad += 1;
+            if (outs[s].drafts[i] != want[i]) bad += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}

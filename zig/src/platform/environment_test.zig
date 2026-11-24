@@ -248,6 +248,9 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_DSV41_DSPARK_BLOCK", .raw = "7", .n = 7 },
     .{ .name = "TF_DSV41_MARKOV_GPU", .raw = "1", .n = 1 },
+    .{ .name = "TF_DSV41_MARKOV_TOPK", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_MARKOV_TOPK", .raw = "64", .n = 64 },
+    .{ .name = "TF_DSV41_MARKOV_TOPK", .raw = "256", .n = 256 },
     .{ .name = "TENSORFOLD_API_KEY", .raw = " example-key-1, example-key-2\n", .n = 0 },
     .{ .name = "HF_TOKEN", .raw = " hf_Example\n", .n = 0 },
     .{ .name = "HUGGING_FACE_HUB_TOKEN", .raw = "hf_Example", .n = 0 },
@@ -335,7 +338,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "GLM_POOL_TOKENS", "4294967232" },          .{ "GLM_POOL_TOKENS", "2k" },
         .{ "GLM_POOL_TOKENS", "+2000000" },            .{ "GLM_POOL_TOKENS", "-1" },
         .{ "GLM_POOL_TOKENS", "1e6" },                 .{ "GLM_POOL_TOKENS", "lots" },
-        .{ "TF_MTP_BITS", "8" },
+        .{ "TF_MTP_BITS", "8" },                       .{ "TF_DSV41_MARKOV_TOPK", "257" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

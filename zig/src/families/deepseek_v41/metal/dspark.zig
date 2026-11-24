@@ -44,8 +44,10 @@ pub const Launch = struct {
     rows: u32,
     n: u32,
     asks: []const Ask,
-    /// asks whose chain runs on the GPU behind the head (the whole vocabulary; greedy, or keyed rows the host races)
+    /// asks whose chain runs on the GPU behind the head
     gpu: bool = false,
+    /// whether this launch needs top-K GPU Markov filtering (greedy/raced asks stay on shared-w2 full-vocab)
+    use_topk: bool = false,
     at: [R]u32 = undefined,
 };
 
@@ -58,27 +60,8 @@ pub const Options = struct {
     narrow: u32 = 0,
     /// chains on the GPU over the whole vocabulary (the release's rule) in place of the candidates' chain
     gpu_chain: bool = false,
-};
-
-/// The GPU chain's kernels, the heads' tables on the device and its results.
-const Chain = struct {
-    p: mkv.Pipelines,
-    t: mkv.Tables,
-    o: mkv.Out,
-
-    fn init(device: mtl.Device, m: host.dspark.Markov) !Chain {
-        var p = try mkv.Pipelines.load(device, m.rank);
-        errdefer p.deinit();
-        var t = try mkv.Tables.init(device, m.w1, m.w2, m.conf.?);
-        errdefer t.deinit();
-        return .{ .p = p, .t = t, .o = try mkv.Out.init(device) };
-    }
-
-    fn deinit(ch: *Chain) void {
-        ch.p.deinit();
-        ch.t.deinit();
-        ch.o.deinit();
-    }
+    /// top-K candidates per row for the resident single-TG GPU Markov chain (0: full-vocab only; 1..256: top-K)
+    markov_topk: u32 = 0,
 };
 
 /// The drafter's state and working buffers; the config, kernels, scratch, rope tables and heads are borrowed.
@@ -119,7 +102,7 @@ pub const Pass = struct {
     /// a pass queued by `begin` that `collect` finishes
     begun: ?Begun = null,
     /// chains on the GPU (Options.gpu_chain, with a confidence head of a rank the kernels take)
-    mk: ?Chain = null,
+    mk: ?mkv.Chain = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
         if (c.mtp_layers == 0 or p.route_dspark == null or w.stages.len != c.mtp_layers) return error.NoDspark;
@@ -153,7 +136,10 @@ pub const Pass = struct {
         @memset(x.wide, false);
         x.undo = try undo_.Undo.init(a, device, c, x.rings, opt.slots);
         errdefer x.undo.deinit();
-        if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) x.mk = try Chain.init(device, w.markov(c));
+        if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) {
+            const mk_topk: u32 = if (opt.markov_topk > 0) @min(@min(opt.markov_topk, mkv.max_topk), c.vocab) else 0;
+            x.mk = try mkv.Chain.init(device, w.markov(c), mk_topk);
+        }
         x.resident = x.holdResident();
         return x;
     }
@@ -361,9 +347,15 @@ pub const Pass = struct {
 
     // propose ------------------------------------------------------------------------------------------------------
 
-    /// Whether an ask's drafts can be drawn by the GPU chain: greedy, or keyed where the host races the row.
+    /// Whether an ask needs top-K filtering (top_k/top_p/min_p) rather than full-vocab greedy/raced GPU Markov.
+    pub fn needsTopK(x: *const Pass, p: Params) bool {
+        return p.sampled and !picks_.raced(p.sampling().?, x.c.vocab);
+    }
+
+    /// Whether GPU chain draws this ask (top-K handles all sampling; full-vocab handles greedy and raced).
     pub fn drawsOnGpu(x: *const Pass, p: Params) bool {
-        return x.mk != null and (!p.sampled or picks_.raced(p.sampling().?, x.c.vocab));
+        const m = x.mk orelse return false;
+        return m.topk > 0 or !x.needsTopK(p);
     }
 
     /// The most slots a launch carries (rows are limited to 16).
@@ -376,10 +368,13 @@ pub const Pass = struct {
         const n = x.blockFor(asks);
         if (asks.len == 0 or asks.len > x.group()) return error.Slots;
         var l: Launch = .{ .rows = @intCast(asks.len * n), .n = n, .asks = asks, .gpu = x.mk != null };
-        for (asks) |a| l.gpu = l.gpu and x.drawsOnGpu(a.params);
-        if (l.gpu) for (asks, x.mk.?.o.asks()[0..asks.len]) |a, *k| {
-            k.* = askOf(a.params);
-        };
+        var any_topk = false;
+        for (asks) |a| {
+            l.gpu = l.gpu and x.drawsOnGpu(a.params);
+            any_topk = any_topk or x.needsTopK(a.params);
+        }
+        l.use_topk = l.gpu and x.mk != null and x.mk.?.topk > 0 and any_topk;
+        if (l.gpu) for (asks, 0..) |a, j| x.mk.?.writeAsk(j, a.params);
         if (x.hasQueued()) {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -436,7 +431,11 @@ pub const Pass = struct {
         const m = &(x.mk orelse return error.NoGpuChain);
         const n = l.n;
         e.barrier();
-        mkv.encode(&m.p, e, &m.t, &m.o, ctx_.cv(mkv.Ref, x.b.logits), ctx_.cv(mkv.Ref, x.b.hf), ctx_.cv(mkv.Ref, x.b.ids), x.c.vocab, x.c.hidden, l.rows / n, n);
+        if (l.use_topk and m.topk > 0) {
+            mkv.encodeTopK(&m.p, e, &m.t, &m.o, ctx_.cv(mkv.Ref, x.b.logits), ctx_.cv(mkv.Ref, x.b.hf), ctx_.cv(mkv.Ref, x.b.ids), x.c.vocab, x.c.hidden, l.rows / n, n, m.topk);
+        } else {
+            mkv.encode(&m.p, e, &m.t, &m.o, ctx_.cv(mkv.Ref, x.b.logits), ctx_.cv(mkv.Ref, x.b.hf), ctx_.cv(mkv.Ref, x.b.ids), x.c.vocab, x.c.hidden, l.rows / n, n);
+        }
     }
 
     /// Candidates and the Markov chain over a launch's head outputs, each ask's results into `out` (its order).
@@ -449,6 +448,7 @@ pub const Pass = struct {
         const D: usize = x.c.hidden;
         const V: usize = x.c.vocab;
         if (out.len != l.asks.len) return error.BadOutput;
+        if (l.gpu) return x.finishGpu(l, out, k);
         var arena = std.heap.ArenaAllocator.init(x.a);
         defer arena.deinit();
         const sa = arena.allocator();
@@ -458,7 +458,6 @@ pub const Pass = struct {
         const base = try sa.alloc(f32, l.rows * k);
         const hid = try sa.alloc(f32, n * D);
         const mk = x.markov();
-        if (l.gpu) return x.finishGpu(l, out, logits, k, cand, base);
         try host.dspark.candidateRows(logits, V, k, cand, base);
         for (l.asks, out, 0..) |a, *o, j| {
             if (o.drafts.len != B or o.conf.len != B) return error.BadOutput;
@@ -472,13 +471,18 @@ pub const Pass = struct {
         }
     }
 
-    /// A GPU chain's results: each ask's drafts and confidences as its kernels left them; candidates only for trees.
-    fn finishGpu(x: *Pass, l: *const Launch, out: []Proposal, logits: []const f32, k: usize, cand: []i32, base: []f32) !void {
+    /// A GPU chain's results: drafts and confidences as left on GPU; top-K GPU candidates copied directly for trees.
+    fn finishGpu(x: *Pass, l: *const Launch, out: []Proposal, k: usize) !void {
         const n: usize = l.n;
         const B: usize = x.c.dspark_block;
         const m = &x.mk.?;
         const drafts = m.o.drafts(l.rows);
         const conf = m.o.conf(l.rows);
+        const gpu_cands = l.use_topk and m.topk > 0 and k == m.topk;
+        var cpu_cand: ?[]i32 = null;
+        var cpu_base: ?[]f32 = null;
+        defer if (cpu_cand) |b| x.a.free(b);
+        defer if (cpu_base) |b| x.a.free(b);
         for (out, 0..) |*o, j| {
             if (o.drafts.len != B or o.conf.len != B) return error.BadOutput;
             @memcpy(o.drafts[0..n], drafts[j * n ..][0..n]);
@@ -486,10 +490,17 @@ pub const Pass = struct {
             @memset(o.drafts[n..], o.drafts[n - 1]);
             @memset(o.conf[n..], 0);
             if (o.cand == null and o.base == null) continue;
-            const cd = cand[j * n * k ..][0 .. n * k];
-            const cv = base[j * n * k ..][0 .. n * k];
-            try host.dspark.candidateRows(logits[j * n * x.c.vocab ..][0 .. n * x.c.vocab], x.c.vocab, k, cd, cv);
-            try copyCands(o, B, k, cd, cv);
+            if (gpu_cands) {
+                try copyCands(o, B, k, m.o.cand(l.rows, k)[j * n * k ..][0 .. n * k], m.o.base(l.rows, k)[j * n * k ..][0 .. n * k]);
+                continue;
+            }
+            if (cpu_cand == null) {
+                cpu_cand = try x.a.alloc(i32, n * k);
+                cpu_base = try x.a.alloc(f32, n * k);
+            }
+            const logits = x.b.logitsOf(x.c, l.rows);
+            try host.dspark.candidateRows(logits[j * n * x.c.vocab ..][0 .. n * x.c.vocab], x.c.vocab, k, cpu_cand.?, cpu_base.?);
+            try copyCands(o, B, k, cpu_cand.?, cpu_base.?);
         }
     }
 

@@ -150,7 +150,7 @@ pub const Early = struct {
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
         if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
         // the GPU chain's draws for the next ask: its first draft's position is the accept's (pos_base + accepted)
-        if (x.mk) |*m| m.o.asks()[0] = dspark.askOf(host.dspark.Params.of(g.sampling, 0));
+        if (x.mk) |*m| m.writeAsk(0, host.dspark.Params.of(g.sampling, 0));
         const all = e.plans.slice(i32, @as(usize, R) * Plan.ints);
         for (0..n) |acc| {
             const m = all[acc * Plan.ints ..][0..Plan.ints];
