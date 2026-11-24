@@ -78,25 +78,24 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
     return json.stringify(a, .{ .object = o }, .{});
 }
 
+const RequestStrings = struct {
+    a: Allocator,
+    forms: []const []const u8,
+    found: bool = false,
+
+    fn visit(context: *anyopaque, text: []const u8) Allocator.Error!void {
+        const s: *RequestStrings = @ptrCast(@alignCast(context));
+        if (!s.found) s.found = try credential.contains(s.a, text, s.forms);
+    }
+};
+
 fn containsRequest(a: Allocator, request: []const u8, forms: []const []const u8) Allocator.Error!bool {
     if (try credential.contains(a, request, forms)) return true;
-    return switch (try json.parse(a, request)) {
-        .ok => |value| try containsJsonValue(a, value, forms),
-        .err => false, // Non-JSON direct callers retain the exact serialized-byte check above.
+    var strings: RequestStrings = .{ .a = a, .forms = forms };
+    return switch (try json.scanStrings(a, request, &strings, &RequestStrings.visit)) {
+        .ok => strings.found,
+        .err => true, // A direct application/json body that cannot be parsed completely never leaves.
     };
-}
-
-fn containsJsonValue(a: Allocator, value: json.Value, forms: []const []const u8) Allocator.Error!bool {
-    switch (value) {
-        .string => |text| return credential.contains(a, text, forms),
-        .array => |items| for (items) |item| if (try containsJsonValue(a, item, forms)) return true,
-        .object => |object| for (object.keys(), object.values()) |key, item| {
-            if (try credential.contains(a, key, forms)) return true;
-            if (try containsJsonValue(a, item, forms)) return true;
-        },
-        else => {},
-    }
-    return false;
 }
 
 /// The exact serialized request, or null when credential containment suppresses it; null must never be POSTed.
