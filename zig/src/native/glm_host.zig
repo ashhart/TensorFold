@@ -47,14 +47,15 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 }
 
 /// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
-fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
+fn fit(eng: *const ge.Engine, want: u32, fixed: bool, pool_tokens: ?u32) !u32 {
     const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024 + glm.metal_dflash_load.streamBytes(eng);
     const used = eng.w.bytes + eng.arena.bytes + glm.vision.heldBytes(eng.vision) + glm.metal_dflash_load.heldBytes(eng);
     const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
     if (n < want and fixed) {
-        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, @as(f64, @floatFromInt(limit)) / 1e9, eng.limit.source(), n });
+        var buf: [320]u8 = undefined;
+        std.log.err("glm: {s}", .{glm.pool_size.fitProblem(&buf, want, eng.s.cap, limit, eng.limit.source(), n, pool_tokens)});
         return error.OverMemoryLimit;
     }
     return n;
@@ -103,7 +104,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.eng = eng;
     h.follower = null;
     h.learned = null;
-    h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed));
+    h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed, pool_tokens));
     errdefer h.slots.deinit(gpa);
     glm.residency.wire(eng, io);
     try glm.metal_dflash_load.joinResidency(gpa, eng);

@@ -186,21 +186,23 @@ pub const Engine = struct {
         // --vision: the image tower and its rows count against the limit beside the weights and caches
         const tower = if (vision) |lim| vision_mod.planBytes(lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
-            var lean = e.c;
-            lean.mtp = 0;
-            const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
-                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
-                e.c = lean;
-                plan_bytes = lean_bytes;
+        const LeanPlan = struct {
+            gpa: std.mem.Allocator,
+            device: mtl.Device,
+            dir: []const u8,
+            pub fn planBytes(self: @This(), lean: *const cfg.Config) !usize {
+                return load_plan.planBytes(self.gpa, self.device, self.dir, lean);
             }
-        }
-        var pool_why: [400]u8 = undefined;
-        if (pool_tokens) |t| if (try pool_size.check(&pool_why, gpa, &e.c, t, cap, chunked, plan_bytes + tower, limit, e.limit.source())) |why| {
-            std.log.err("glm: {s}", .{why}); // GLM_POOL_TOKENS, by name
-            return error.OverMemoryLimit;
         };
+        var pool_why: [400]u8 = undefined;
+        switch (try pool_size.planFit(&pool_why, gpa, &e.c, pool_tokens, cap, chunked, link != null, tower, limit, e.limit.source(), &plan_bytes, LeanPlan{ .gpa = gpa, .device = e.device, .dir = dir })) {
+            .ok => {},
+            .dropped_mtp => std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() }),
+            .refused => |why| {
+                std.log.err("glm: {s}", .{why}); // GLM_POOL_TOKENS, by name
+                return error.OverMemoryLimit;
+            },
+        }
         if (platform.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();

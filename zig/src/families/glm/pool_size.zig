@@ -62,3 +62,51 @@ pub fn contextWords(buf: []u8, window: u32, tokens: ?u32, capacity: u32) []const
     const t = tokens orelse return std.fmt.bufPrint(buf, "context {d} tokens", .{window}) catch "context";
     return std.fmt.bufPrint(buf, "context {d} tokens a stream in a shared pool of {d} tokens ({s}={d})", .{ window, capacity, name, t }) catch "context";
 }
+
+/// Result of checking startup weight and pool fit against the load limit.
+pub const StartupOutcome = union(enum) {
+    ok,
+    dropped_mtp,
+    refused: []const u8,
+};
+
+/// Drops MTP only when `tokens == null` and leaning out MTP fits, then checks explicit `GLM_POOL_TOKENS`.
+pub fn planFit(
+    buf: []u8,
+    gpa: std.mem.Allocator,
+    c: *cfg.Config,
+    tokens: ?u32,
+    cap: u32,
+    chunked: bool,
+    paired: bool,
+    tower: usize,
+    limit: usize,
+    source: []const u8,
+    plan_bytes: *usize,
+    lean_ctx: anytype,
+) !StartupOutcome {
+    var outcome: StartupOutcome = .ok;
+    if (tokens == null and c.mtp > 0 and !paired and plan_bytes.* + tower + try load_plan.leastArena(gpa, c, cap, chunked) > limit) {
+        var lean = c.*;
+        lean.mtp = 0;
+        const lean_bytes = try lean_ctx.planBytes(&lean);
+        if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+            c.* = lean;
+            plan_bytes.* = lean_bytes;
+            outcome = .dropped_mtp;
+        }
+    }
+    if (tokens) |t| if (try check(buf, gpa, c, t, cap, chunked, plan_bytes.* + tower, limit, source)) |why| {
+        return .{ .refused = why };
+    };
+    return outcome;
+}
+
+/// Refusal text when `want` fixed streams do not fit; blames `GLM_POOL_TOKENS` when set instead of `--context`.
+pub fn fitProblem(buf: []u8, want: u32, cap: usize, limit: usize, source: []const u8, fit_count: u32, tokens: ?u32) []const u8 {
+    const lim_gb = @as(f64, @floatFromInt(limit)) / 1e9;
+    if (tokens) |t| {
+        return std.fmt.bufPrint(buf, "{d} streams beside {s}={d} pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or {s})", .{ want, name, t, lim_gb, source, fit_count, name }) catch name;
+    }
+    return std.fmt.bufPrint(buf, "{d} streams of {d}-token caches pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or --context)", .{ want, cap, lim_gb, source, fit_count }) catch "--parallel";
+}
