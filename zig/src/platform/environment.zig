@@ -21,6 +21,8 @@ pub const Rule = struct {
     base: u8 = 10,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
+    /// A whole number must be a multiple of this (0 included).
+    multiple: u64 = 1,
     /// A `.word` setting matches its texts in any case.
     ignore_case: bool = false,
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
@@ -78,6 +80,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
+    .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps shared-prefix snapshots on the device)" },
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
@@ -102,6 +105,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
+    .{ .name = "TF_Q27_KV_GROW", .scope = .metal, .kind = .u32, .multiple = 16, .blank_default = false, .forms = "0 (off, the default) or a row count that is a multiple of 16, at most 4294967280" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
@@ -395,6 +399,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     };
     if (n > max or n < r.min or n > r.max) return error.InvalidEnvironment;
     if (r.only.len > 0 and std.mem.indexOfScalar(u64, r.only, n) == null) return error.InvalidEnvironment;
+    if (n % r.multiple != 0) return error.InvalidEnvironment;
     if ((r.kind == .positive or r.kind == .segments or r.kind == .mib) and n == 0) return error.InvalidEnvironment;
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
@@ -524,47 +529,7 @@ pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
     return if (text.len == 0) null else text;
 }
 
-pub const Flags = struct {
-    cuda: bool = false,
-    metal: bool = false,
-    xpu: bool = false,
-    slide: bool = false,
-    hooks: bool = false,
-    dsv41: bool = false,
-    gemma4: bool = false,
-    drama3: bool = false,
-    glm: bool = false,
-    flashnext: bool = false,
-    nemotron: bool = false,
-    minimax_m3: bool = false,
-    chat: bool = false,
-    hub: bool = false,
-    device: ?u32 = null,
-    segments: ?u32 = null,
-    carveout: bool = false,
-    /// --parallel named: TENSORFOLD_PARALLEL then stays out of the way, as a flag-named device does.
-    parallel_named: bool = false,
-
-    fn includes(f: Flags, scope: Scope) bool {
-        return switch (scope) {
-            .common => true,
-            .cuda => f.cuda,
-            .metal => f.metal,
-            .xpu => f.xpu,
-            .slide => f.slide,
-            .hooks => f.hooks,
-            .dsv41 => f.dsv41,
-            .gemma4 => f.gemma4,
-            .drama3 => f.drama3,
-            .glm => f.glm,
-            .flashnext => f.flashnext,
-            .nemotron => f.nemotron,
-            .minimax_m3 => f.minimax_m3,
-            .chat => f.chat,
-            .hub => f.hub,
-        };
-    }
-};
+pub const Flags = @import("environment_flags.zig").Flags;
 
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
@@ -592,4 +557,5 @@ pub const Process = struct {
 test {
     _ = @import("environment_test.zig");
     _ = @import("environment_flashnext_test.zig");
+    _ = @import("environment_kv_test.zig");
 }
