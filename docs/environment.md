@@ -13,6 +13,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_PARALLEL` | Whole count 1 through 4096, or `auto` (`auto` = 8); default: what `--parallel` says. Read only when `--parallel` is not on the command line, so the flag wins; blank keeps the default; other values are refused at server startup |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
 | `TENSORFOLD_PREFIX_WAIT_MS` | Whole milliseconds 0 through 4294967295; zero disables waiting; default 60000 |
+| `TENSORFOLD_PRIORITY_AGE_MS` | Whole milliseconds 0 through 4294967295; default 0. Above 0, a background request queued for at least this long may be admitted before foreground requests. Eligibility, memory and lane limits still apply; 0 keeps foreground-first FIFO |
 | `TENSORFOLD_PULL_CONNECT_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for a connection to the hub, the storage host or the proxy; default 30 |
 | `TENSORFOLD_PULL_STALL_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for the next byte before it resumes the file with a range request (at most 3 times); default 60 |
 | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
