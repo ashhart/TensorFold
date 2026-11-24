@@ -307,10 +307,11 @@ export class EngineService {
     return this.controlVector.snapshot()
   }
 
-  // The file the operator picked, from the OS picker: it is remembered, not applied.
+  // The file the operator picked, from the OS picker: it is remembered, not applied on its
+  // own, and it shares the feature-change queue so it cannot restore a value already replaced.
   async chooseControlVector(file: string): Promise<EngineControlVectorSnapshot> {
     await this.status()
-    return this.controlVector.choose(file)
+    return this.changeFeature(() => this.controlVector.choose(file))
   }
 
   // Whether the vector is in force, and at what strength.

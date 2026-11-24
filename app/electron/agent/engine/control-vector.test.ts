@@ -89,6 +89,46 @@ async function main() {
     assert.equal(cleared.file, null)
     assert.equal(cleared.enabled, false)
   } finally { await svc.unload().catch(() => {}); await h.cleanup() }
+
+  // The picker shares the feature-change queue: a strength or state change still pending when
+  // the operator picks cannot be lost to the values the picker read before that change landed.
+  const overlap = await makeHarness({ FAKE_ENGINE_GLP: '1' })
+  const held = service(overlap)
+  try {
+    await seedModel(overlap.hub, MODEL)
+    await held.load(MODEL)
+    const first = path.join(overlap.root, 'first.gguf')
+    const second = path.join(overlap.root, 'second.gguf')
+    await fs.writeFile(first, 'glp')
+    await fs.writeFile(second, 'glp')
+    await held.chooseControlVector(first)
+    await held.setControlVector({ enabled: true, alpha: 2 })
+    // Hold the queued restart so the picker reads the preferences before that change lands.
+    const reconfigure = held.supervisor.reconfigure.bind(held.supervisor)
+    let release = () => {}
+    let gate = Promise.resolve()
+    held.supervisor.reconfigure = (apply, rollback) => reconfigure(async () => { await gate; await apply() }, rollback)
+    const hold = () => { gate = new Promise<void>((resolve) => { release = resolve }) }
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+    hold()
+    const alpha = held.setControlVector({ alpha: 5 })
+    const picked = held.chooseControlVector(second)
+    await drain()
+    release()
+    const [, pickedState] = await Promise.all([alpha, picked])
+    assert.equal(pickedState.alpha, 5, 'the picker sees the pending strength, not the one it replaced')
+    assert.deepEqual(new EnginePreferenceStore(overlap.root).get().controlVector, { enabled: true, file: second, alpha: 5 }, 'the pending strength and the picked file both survive')
+
+    hold()
+    const off = held.setControlVector({ enabled: false })
+    const swapped = held.chooseControlVector(first)
+    await drain()
+    release()
+    const [, swappedState] = await Promise.all([off, swapped])
+    assert.equal(swappedState.enabled, false, 'the picker sees the pending state, not the one it replaced')
+    assert.deepEqual(new EnginePreferenceStore(overlap.root).get().controlVector, { enabled: false, file: first, alpha: 5 }, 'the pending state and the picked file both survive')
+  } finally { await held.unload().catch(() => {}); await overlap.cleanup() }
 }
 
 main().then(() => process.exit(0), (error) => { console.error(error); process.exit(1) })

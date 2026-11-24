@@ -8,6 +8,9 @@ See the [engine changelog](../CHANGELOG.md) for engine releases.
 These are highlights from changes merged after Desktop 1.0.0. They are available in builds from
 current source and are awaiting a packaged Desktop release.
 
+- Choosing a control vector file applies it in the same serialized engine-settings change as its
+  strength and on/off state, so a pick made while one of those is pending keeps all three.
+  [#1951](https://github.com/ashhart/TensorFold/pull/1951)
 - Search in **Current conversation** ignores the project filter from **All saved conversations**.
   Switching back restores the selected project. [#3900](https://github.com/ashhart/TensorFold/pull/3900)
 - **Planning only** opens the model picker on **Local**. The regular model button opens **All**.
