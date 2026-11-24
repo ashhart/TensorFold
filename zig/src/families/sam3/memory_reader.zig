@@ -83,7 +83,7 @@ pub fn condition(rt: *Runtime, coarse_image: Tensor, entries: []const Entry, rec
     for (pointers, 0..) |slot, l| times[l] = try timeBlock(rt, tracker, slot.offset, recall_plan.horizon(frames), tokens);
     const keys = rotatedRows(grid.len, rows) + pointers.len * tokens;
     if (!grouped) try attention.reserve(rt, rows, keys);
-    const cached = grouped and rt.routes.precision == .mixed;
+    const cached = grouped and rt.observer == null;
     const zeros: ?Tensor = if (grouped and !cached) try elementwise.hostFill(rt, pointers.len * tokens * hidden, 0) else null;
     try rt.observe("tracker.position", position, &.{ 1, side, side, hidden });
     try rt.observe("tracker.memory_spatial_position", memory_position, &.{ 1, side, side, width });

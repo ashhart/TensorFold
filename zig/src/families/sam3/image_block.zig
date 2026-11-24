@@ -53,24 +53,57 @@ fn runFp32(rt: *Runtime, block: Scope, x: Tensor, full_grid: bool, table: rotary
     const tiled = !full_grid;
     const m = rt.mark();
     const qkv_planes = try projection.takesPlanes(block, "attn.qkv", .qkv);
-    var n1 = try norms.trunkPlanes(block, "norm1", x, norm_eps, qkv_planes, tiled) orelse
-        try norms.layerNorm(block, "norm1", x, norm_eps, .trunk);
-    if (tiled and n1.dtype == .f32) n1 = try spatial.tiles(rt, n1, width, .into_tiles);
-    try observeInput(block, "attn.qkv", n1, width);
-    const z = if (qkv_planes)
-        try projection.trunkPlanes(block, "attn.qkv", n1, .qkv, null, false)
-    else
-        try projection.trunkFp32(block, "attn.qkv", n1, .qkv);
-    const q, const k, const v = try rotary.splitRotate(rt, z, table, .f32);
-    const o = try attention.trunk(rt, q, k, v, full_grid);
-    try observeInput(block, "attn.proj", o, width);
-    const x1 = if (try projection.takesPlanes(block, "attn.proj", .attention_out))
-        try projection.trunkPlanes(block, "attn.proj", o, .attention_out, x, tiled)
-    else
-        try attentionOut(rt, block, o, x, tiled);
+    const qkv_wide = !qkv_planes and try projection.takesWide(block, "attn.qkv");
+    const z = if (qkv_planes) blk: {
+        const n1 = try norms.trunkPlanes(block, "norm1", x, norm_eps, true, tiled) orelse
+            try norms.layerNorm(block, "norm1", x, norm_eps, .trunk);
+        try observeInput(block, "attn.qkv", n1, width);
+        break :blk try projection.trunkPlanes(block, "attn.qkv", n1, .qkv, null, false);
+    } else if (qkv_wide) blk: {
+        if (try norms.trunkWide(block, "norm1", x, norm_eps, tiled)) |n1| {
+            try observeInput(block, "attn.qkv", n1.tensor, width);
+            break :blk (try projection.trunkWide(block, "attn.qkv", n1.tensor, .qkv, n1.flag, null, false, false)).tensor;
+        }
+        var n1 = try norms.layerNorm(block, "norm1", x, norm_eps, .trunk);
+        if (tiled) n1 = try spatial.tiles(rt, n1, width, .into_tiles);
+        try observeInput(block, "attn.qkv", n1, width);
+        break :blk try projection.trunkFp32(block, "attn.qkv", n1, .qkv);
+    } else blk: {
+        var n1 = try norms.layerNorm(block, "norm1", x, norm_eps, .trunk);
+        if (tiled) n1 = try spatial.tiles(rt, n1, width, .into_tiles);
+        try observeInput(block, "attn.qkv", n1, width);
+        break :blk try projection.trunkFp32(block, "attn.qkv", n1, .qkv);
+    };
+    const proj_planes = try projection.takesPlanes(block, "attn.proj", .attention_out);
+    const proj_wide = !proj_planes and try projection.takesWide(block, "attn.proj");
+    const x1 = if (proj_wide and rt.routes.exactDevice() and rt.config.vision_width / rt.config.vision_heads == 64) blk: {
+        const flag_count = try attention.trunkFlagCount(rt, full_grid);
+        const split = try rotary.splitRotateFlag(rt, z, table, flag_count);
+        const attended = try attention.trunkPrechecked(rt, split.q, split.k, split.v, full_grid, split.flags);
+        try observeInput(block, "attn.proj", attended.tensor, width);
+        break :blk (try projection.trunkWide(block, "attn.proj", attended.tensor, .attention_out, attended.wide_flag, x, tiled, false)).tensor;
+    } else blk: {
+        const q, const k, const v = try rotary.splitRotate(rt, z, table, .f32);
+        const o = try attention.trunk(rt, q, k, v, full_grid);
+        try observeInput(block, "attn.proj", o, width);
+        break :blk if (proj_planes)
+            try projection.trunkPlanes(block, "attn.proj", o, .attention_out, x, tiled)
+        else if (proj_wide)
+            (try projection.trunkWide(block, "attn.proj", o, .attention_out, null, x, tiled, false)).tensor
+        else
+            try attentionOut(rt, block, o, x, tiled);
+    };
     rt.rewind(m, &.{x1});
     const fc2_planes = try projection.takesPlanes(block, "mlp.fc2", .contract);
     const fc1_planes = fc2_planes and try projection.takesPlanes(block, "mlp.fc1", .expand);
+    if (!fc2_planes and try projection.takesWide(block, "mlp.fc1") and try projection.takesWide(block, "mlp.fc2")) {
+        if (try norms.trunkWide(block, "norm2", x1, norm_eps, false)) |n2| {
+            try observeInput(block, "mlp.fc1", n2.tensor, width);
+            const e = try projection.trunkWide(block, "mlp.fc1", n2.tensor, .expand, n2.flag, null, false, true);
+            try observeInput(block, "mlp.fc2", e.tensor, rt.config.vision_mlp);
+            return (try projection.trunkWide(block, "mlp.fc2", e.tensor, .contract, e.flag, x1, false, false)).tensor;
+        }
+    }
     const n2 = try norms.trunkPlanes(block, "norm2", x1, norm_eps, fc1_planes, false) orelse
         try norms.layerNorm(block, "norm2", x1, norm_eps, .trunk);
     try observeInput(block, "mlp.fc1", n2, width);

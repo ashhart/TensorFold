@@ -122,6 +122,45 @@ fn trunkRouteFor(routes: Routes, full_grid: bool) TrunkRoute {
     return if (full_grid) .core_full else .core_tiles;
 }
 
+pub const TrunkOut = struct { tensor: Tensor, wide_flag: Tensor };
+
+/// Flag words needed for a prechecked trunk attention call (domain + per-tile rescale + 1 output wide flag).
+pub fn trunkFlagCount(rt: *Runtime, full_grid: bool) !usize {
+    const config = rt.config;
+    const heads = config.vision_heads;
+    if (heads == 0 or config.vision_width % heads != 0 or config.tile_side == 0) return error.SamAttentionShape;
+    const side = config.featureSide();
+    if (side % config.tile_side != 0) return error.SamAttentionShape;
+    const tokens = side * side;
+    const tile = config.tile_side * config.tile_side;
+    const tiles = tokens / tile;
+    const rows = if (full_grid) tokens else tile;
+    const batch = if (full_grid) @as(usize, 1) else tiles;
+    const nq = (rows + 63) / 64;
+    return 2 + nq * heads * batch;
+}
+
+/// Prechecked FP32 device trunk attention: skips clear/domain and writes the output wide flag at flags[count - 1].
+pub fn trunkPrechecked(rt: *Runtime, q: Tensor, k: Tensor, v: Tensor, full_grid: bool, flags: Tensor) !TrunkOut {
+    const config = rt.config;
+    const heads = config.vision_heads;
+    if (heads == 0 or config.vision_width % heads != 0 or config.tile_side == 0) return error.SamAttentionShape;
+    const d = config.vision_width / heads;
+    const side = config.featureSide();
+    if (side % config.tile_side != 0) return error.SamAttentionShape;
+    const tokens = side * side;
+    const tile = config.tile_side * config.tile_side;
+    const tiles = tokens / tile;
+    if (q.count != tokens * config.vision_width or k.count != q.count or v.count != q.count) return error.SamAttentionShape;
+    const wide_idx = (try trunkFlagCount(rt, full_grid)) - 1;
+    if (flags.count <= wide_idx) return error.SamAttentionShape;
+    const out = try rt.hold(if (full_grid)
+        try attention_split32.runPrechecked(rt.gpu, q, k, v, .{ 1, heads, tokens, tokens, d }, flags, wide_idx)
+    else
+        try attention_device.runPrechecked(rt.gpu, q, k, v, .{ tiles, heads, tile, tile, d }, flags, wide_idx));
+    return .{ .tensor = out, .wide_flag = runtime.part(flags, wide_idx, 1) };
+}
+
 /// Trunk attention over the grid (one batch of all tokens) or over its tiles (one batch item per tile, tile order).
 pub fn trunk(rt: *Runtime, q: Tensor, k: Tensor, v: Tensor, full_grid: bool) !Tensor {
     const config = rt.config;

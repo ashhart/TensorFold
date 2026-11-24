@@ -87,14 +87,36 @@ pub fn rotate(rt: *Runtime, x: Tensor, heads: usize, width: usize, table: Table,
         .side = 0,
         .scale = 1,
     };
-    try rt.gpu.dispatch(abi.rotate, &.{ x, table.tensor, out }, params, Size.of(x.count, 1, 1), group);
+    try rt.gpu.dispatch(abi.rotate, &.{ x, table.tensor, out }, params, Size.of(x.count / 4, 1, 1), group);
     return out;
+}
+
+pub const SplitFlagged = struct { q: Tensor, k: Tensor, v: Tensor, flags: Tensor };
+
+pub fn splitRotateFlag(rt: *Runtime, qkv: Tensor, table: Table, flag_count: usize) !SplitFlagged {
+    const width = rt.config.vision_width;
+    if (qkv.dtype != .f32) return error.SamRotaryType;
+    if (flag_count == 0 or table.head_width == 0 or table.head_width % 4 != 0 or width % table.head_width != 0 or qkv.count % (3 * width) != 0 or qkv.count == 0)
+        return error.SamRotaryShape;
+    const rows = qkv.count / (3 * width);
+    var parts: [3]Tensor = undefined;
+    for (&parts) |*item| item.* = try rt.deviceTensor(rows * width, .f32);
+    const flags = try rt.deviceTensor(flag_count, .f32);
+    const params = abi.RotarySplit{
+        .rows = try word(rows),
+        .width = try word(width),
+        .head_width = try word(table.head_width),
+        .positions = try word(table.positions),
+    };
+    try rt.gpu.dispatch("sam_attention_device_clear", &.{flags}, try word(flag_count), Size.of(flag_count, 1, 1), Size.of(128, 1, 1));
+    try rt.gpu.dispatch(abi.rotate_split_f32_flag, &.{ qkv, table.tensor, parts[0], parts[1], parts[2], flags }, params, Size.of(rows * width / 4, 1, 1), group);
+    return .{ .q = parts[0], .k = parts[1], .v = parts[2], .flags = flags };
 }
 
 pub fn splitRotate(rt: *Runtime, qkv: Tensor, table: Table, out: DType) ![3]Tensor {
     const width = rt.config.vision_width;
     if (qkv.dtype != .f32 or (out != .f32 and out != .f16)) return error.SamRotaryType;
-    if (table.head_width == 0 or width % table.head_width != 0 or qkv.count % (3 * width) != 0 or qkv.count == 0)
+    if (table.head_width == 0 or table.head_width % 4 != 0 or width % table.head_width != 0 or qkv.count % (3 * width) != 0 or qkv.count == 0)
         return error.SamRotaryShape;
     const rows = qkv.count / (3 * width);
     var parts: [3]Tensor = undefined;
@@ -106,7 +128,7 @@ pub fn splitRotate(rt: *Runtime, qkv: Tensor, table: Table, out: DType) ![3]Tens
         .positions = try word(table.positions),
     };
     const name = if (out == .f16) abi.rotate_split_f16 else abi.rotate_split_f32;
-    try rt.gpu.dispatch(name, &.{ qkv, table.tensor, parts[0], parts[1], parts[2] }, params, Size.of(rows * width, 1, 1), group);
+    try rt.gpu.dispatch(name, &.{ qkv, table.tensor, parts[0], parts[1], parts[2] }, params, Size.of(rows * width / 4, 1, 1), group);
     return parts;
 }
 

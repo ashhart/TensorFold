@@ -20,6 +20,7 @@ pub const group_norm = "sam3_group_norm";
 pub const rotary_table = "sam3_rotary_table";
 pub const rotate = "sam3_rotate";
 pub const rotate_split_f32 = "sam3_rotate_split_f32";
+pub const rotate_split_f32_flag = "sam3_rotate_split_f32_flag";
 pub const rotate_split_f16 = "sam3_rotate_split_f16";
 pub const tile_project = "sam3_tile_project";
 pub const tile_project_gelu = "sam3_tile_project_gelu";

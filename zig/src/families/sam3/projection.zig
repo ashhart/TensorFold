@@ -27,7 +27,14 @@ fn affineAt(p: Scope, x: Tensor) !Tensor {
     const weight = try p.param("weight");
     const bias = try p.param("bias");
     if (weight.count != out * in or bias.count != out) return error.SamProjectionShape;
-    return p.rt.hold(try p.rt.gpu.linear(x, weight, bias, x.count / in, out, in));
+    const rows = x.count / in;
+    if (p.rt.routes.exactDevice() and x.dtype == .f32 and weight.dtype == .f32 and bias.dtype == .f32 and
+        out <= 4736 and in <= 4736)
+    {
+        const flags = try wideFlags(p, weight, bias, out, in);
+        return p.rt.hold(try dense_device.runCached(p.rt.gpu, x, weight, bias, flags, rows, out, in, .wide));
+    }
+    return p.rt.hold(try p.rt.gpu.linear(x, weight, bias, rows, out, in));
 }
 
 /// One third of the packed `in_proj_weight` `[3W, W]` and `in_proj_bias` `[3W]` under `s`.
@@ -40,7 +47,13 @@ pub fn packedPart(s: Scope, x: Tensor, which: Part) !Tensor {
     const index: usize = @backingInt(which);
     const w = runtime.part(weight, index * width * width, width * width);
     const b = runtime.part(bias, index * width, width);
-    return s.rt.hold(try s.rt.gpu.linear(x, w, b, x.count / width, width, width));
+    const rows = x.count / width;
+    if (s.rt.routes.exactDevice() and x.dtype == .f32 and w.dtype == .f32 and b.dtype == .f32 and width <= 4736) {
+        const name = try s.rt.print("wide-operands.{s}.{s}", .{ try s.key("in_proj_weight"), @tagName(which) });
+        const flags = try wideFlagsNamed(s.rt, name, w, b, width, width);
+        return s.rt.hold(try dense_device.runCached(s.rt.gpu, x, w, b, flags, rows, width, width, .wide));
+    }
+    return s.rt.hold(try s.rt.gpu.linear(x, w, b, rows, width, width));
 }
 
 /// `leaf.layers.0 … layers.(depth−1)` with ReLU between layers and none after the last.
@@ -77,11 +90,15 @@ fn trunkKernel(exact_device: bool, weight_f16: bool, operand_exact: bool, role: 
     };
 }
 
+fn wideFlagsNamed(rt: *Runtime, name: []const u8, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
+    if (rt.constant(name)) |flags| return flags;
+    return rt.adoptConstant(name, try dense_device.operandFlags(rt.gpu, weight, bias, cols, depth));
+}
+
 /// The weight and bias domain flags of the wide layouts for the weight under `p`, computed once and kept.
 pub fn wideFlags(p: Scope, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
     const name = try p.rt.print("wide-operands.{s}", .{try p.key("weight")});
-    if (p.rt.constant(name)) |flags| return flags;
-    return p.rt.adoptConstant(name, try dense_device.operandFlags(p.rt.gpu, weight, bias, cols, depth));
+    return wideFlagsNamed(p.rt, name, weight, bias, cols, depth);
 }
 
 /// The device layout of a trunk projection whose checkpoint weight is not FP16.
@@ -91,6 +108,42 @@ pub fn fp32WeightLayout(role: TrunkRole) dense_device.Layout {
         .expand => .wide_gelu,
         .contract => .wide_compensated,
     };
+}
+
+pub const WideOut = struct { tensor: Tensor, flag: ?Tensor = null };
+
+/// True when the trunk projection `leaf` under `s` uses the FP32 wide device route.
+pub fn takesWide(s: Scope, leaf: []const u8) !bool {
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    return s.rt.routes.exactDevice() and shape.dtype != .f16;
+}
+
+/// Fused FP32 wide trunk projection with optional precomputed input flag, residual/tile epilogue, and output flag.
+pub fn trunkWide(s: Scope, leaf: []const u8, x: Tensor, role: TrunkRole, input_flag: ?Tensor, residual: ?Tensor, tiled: bool, emit_flag: bool) !WideOut {
+    const rt = s.rt;
+    if (!rt.routes.exactDevice()) return error.SamProjectionRoute;
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    if (shape.rank != 2 or shape.dtype == .f16) return error.SamProjectionShape;
+    const cols = shape.dim(0);
+    const depth = shape.dim(1);
+    if (cols == 0 or depth == 0 or x.count % depth != 0) return error.SamProjectionShape;
+    const rows = x.count / depth;
+    const weight = try p.param("weight");
+    const bias = try p.param("bias");
+    const wflags = try wideFlags(p, weight, bias, cols, depth);
+    const epilogue: dense_device.WideEpilogue = if (residual) |r|
+        (if (tiled) .{ .tile_residual = r } else .{ .residual = r })
+    else
+        .none;
+    const res = try dense_device.runWide(rt.gpu, x, weight, bias, wflags, input_flag, rows, cols, depth, fp32WeightLayout(role), epilogue, emit_flag);
+    const out = rt.hold(res.out) catch |err| {
+        if (res.flag) |f| f.deinit();
+        return err;
+    };
+    const flag = if (res.flag) |f| try rt.hold(f) else null;
+    return .{ .tensor = out, .flag = flag };
 }
 
 /// The FP32 trunk projection routes; `expand` returns the GELU-activated expansion.

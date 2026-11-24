@@ -118,13 +118,14 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     const projections = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-projections");
     const planes_benchmark = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-planes");
     const attention_benchmark = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-device-attention");
+    const int8_benchmark = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-int8-nax");
     const projection_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-projection");
     const operator_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-operator");
     const mps_check = args.len == 3 and std.mem.eql(u8, args[1], "--check-mps-ndarray");
     const trunk_replay = args.len >= 5 and std.mem.eql(u8, args[1], "--replay-trunk");
     const trunk_calibration = args.len == 3 and std.mem.eql(u8, args[1], "--calibrate-trunk");
     const normalization_replay = (args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "--replay-normalization");
-    if (!trunk_replay and !trunk_calibration and !normalization_replay and !decoder_replay and !text_replay and !replay and !projections and !planes_benchmark and !attention_benchmark and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
+    if (!trunk_replay and !trunk_calibration and !normalization_replay and !decoder_replay and !text_replay and !replay and !projections and !planes_benchmark and !attention_benchmark and !int8_benchmark and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     const small_baseline = projection_replay and args.len == 5 and std.mem.eql(u8, args[4], "--compensated-baseline");
@@ -140,6 +141,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (projections) return @import("projection_checks.zig").run(&g);
     if (planes_benchmark) return @import("projection_checks.zig").benchmarkPlanes(&g);
     if (attention_benchmark) return @import("attention_bench.zig").run(&g);
+    if (int8_benchmark) return @import("wide_checks.zig").benchmarkInt8Nax(&g);
     if (mps_check) return @import("mps_ndarray_probe.zig").check(init, &g, args[2]);
     if (projection_replay) return @import("projection_replay.zig").run(init, &g, args[2..]);
     if (operator_replay) return @import("attention_operator_replay.zig").run(init, &g, args[2..]);

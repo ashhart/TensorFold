@@ -124,6 +124,8 @@ pub fn conv(s: Scope, leaf: []const u8, x: FeatureMap, placement: Placement) !Fe
     const weight = try packedWeight(scope, "conv", abi.conv_pack, .{ out, in, kernel * kernel });
     const output = try rt.deviceTensor(try std.math.mul(usize, pixels, out), .f32);
     const direct = kernel == 1 and placement.stride == 1 and placement.pad == 0;
+    const use_dense = denseConv(rt.routes, out, width);
+    const wide_flags: ?Tensor = if (use_dense and info.dtype != .f16) try projection.wideFlags(scope, weight, bias, out, width) else null;
     const chunk = chunkPixels(width);
     var first: usize = 0;
     while (first < pixels) : (first += chunk) {
@@ -136,7 +138,10 @@ pub fn conv(s: Scope, leaf: []const u8, x: FeatureMap, placement: Placement) !Fe
             break :blk unfolded;
         };
         const dst = runtime.part(output, first * out, rows * out);
-        if (denseConv(rt.routes, out, width)) {
+        if (wide_flags) |flags| {
+            const layout: dense_device.Layout = if (kernel == 3) .wide_compensated else .wide;
+            try dense_device.intoCached(rt.gpu, columns, weight, bias, flags, dst, rows, out, width, layout);
+        } else if (use_dense) {
             const layout: dense_device.Layout = if (kernel == 3) .nk_compensated else .nk;
             try dense_device.into(rt.gpu, columns, weight, bias, dst, rows, out, width, layout);
         } else {

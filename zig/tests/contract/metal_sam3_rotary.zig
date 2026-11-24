@@ -17,9 +17,9 @@ const split_width = 64;
 const Edit = struct { function: []const u8, edit: [2][]const u8 };
 const edits = [_]Edit{
     .{ .function = "sam3_rotary_table", .edit = tbl.table_edit },
-    .{ .function = "sam3_rotate", .edit = .{ "y[i] = x[i] * cosine + x[i ^ 1u] * turned;", "y[i] = x[i] * cosine - x[i ^ 1u] * turned;" } },
-    .{ .function = "sam3_rotate_split_f32", .edit = .{ "b = a + p.width;", "b = a;" } },
-    .{ .function = "sam3_rotate_split_f16", .edit = .{ "v[i] = T(x[a + 2u * p.width]);", "v[i] = T(x[a + p.width]);" } },
+    .{ .function = "sam3_rotate", .edit = .{ "y4[i] = sam3_rotary_quad(x4[i], cs);", "y4[i] = sam3_rotary_quad(x4[i], float4(cs.x, -cs.y, cs.z, -cs.w));" } },
+    .{ .function = "sam3_rotate_split_f32", .edit = .{ "b = a + quads;", "b = a;" } },
+    .{ .function = "sam3_rotate_split_f16", .edit = .{ "const float4 vv = x4[a + 2u * quads];", "const float4 vv = x4[a + quads];" } },
 };
 
 pub fn text(a: std.mem.Allocator, control: ?[]const u8) ![]u8 {
@@ -158,7 +158,7 @@ const Turn = struct {
             pass.e.setBuffer(p.outs[0].buf, p.outs[0].off, 2);
             pass.e.setValue(tbl.Rotary{ .rows = @intCast(s.rows), .heads = @intCast(s.n / p.d()), .head_width = @intCast(p.d()), .rotated_rows = @intCast(p.rotated()), .positions = memory_positions, .side = 0, .scale = 1 }, 3);
         }
-        pass.e.dispatchThreads(mtl.Size.of(s.rows * s.n, 1, 1), mtl.Size.of(256, 1, 1));
+        pass.e.dispatchThreads(mtl.Size.of(s.rows * s.n / 4, 1, 1), mtl.Size.of(256, 1, 1));
         try p.rig.finish(pass);
     }
 

@@ -40,6 +40,29 @@ fn planesRoute(routes: Routes, width: usize, eps: f32, count: usize, consumer_pl
     return compensated(.trunk, routes, width, eps) and count == planes_rows * compensated_width and consumer_planes;
 }
 
+pub const WideNorm = struct { tensor: Tensor, flag: Tensor };
+
+/// Trunk block norm writing FP32 + a 1-word wide-domain flag (in tile order when `tiled`), else null.
+pub fn trunkWide(s: Scope, leaf: []const u8, x: Tensor, eps: f32, tiled: bool) !?WideNorm {
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    if (shape.rank != 1) return error.SamNormShape;
+    const width = shape.dim(0);
+    if (x.dtype != .f32 or !compensated(.trunk, s.rt.routes, width, eps)) return null;
+    if (tiled and x.count != planes_rows * compensated_width) return null;
+    const weight = try p.param("weight");
+    const bias = try p.param("bias");
+    if (weight.count != width or bias.count != width) return error.SamNormShape;
+    const rt = s.rt;
+    const res = try normalization.runWide(rt.gpu, x, weight, bias, width, eps, tiled);
+    const out = rt.hold(res.out) catch |err| {
+        res.flag.deinit();
+        return err;
+    };
+    const flag = try rt.hold(res.flag);
+    return .{ .tensor = out, .flag = flag };
+}
+
 /// Route N-planes: trunk block norm as FP16 planes for a planes consumer (tile order when `tiled`), else null.
 pub fn trunkPlanes(s: Scope, leaf: []const u8, x: Tensor, eps: f32, consumer_planes: bool, tiled: bool) !?Tensor {
     const p = try s.sub(leaf);

@@ -52,8 +52,8 @@ inline uint sam_scaled_bits(float2 sum, int exponent) {
 }
 
 template<bool DROP_TAIL, bool KN = false, typename Weight = float>
-inline void sam_dense_small(const device float *x, const device Weight *weight, const device float *bias,
-    device float *out, constant SamDenseShape &shape, uint2 group, uint subgroup, uint lane) {
+inline void sam_dense_small_at(const device float *x, const device Weight *weight, const device float *bias,
+    device float *out, constant SamDenseShape &shape, uint2 group, uint subgroup, uint lane, uint dst_row) {
     const uint column = group.x * 4 + subgroup, row = group.y, depth = shape.depth;
     if (column >= shape.columns || row >= shape.rows) return;
     const device float *a = x + row * depth;
@@ -92,11 +92,11 @@ inline void sam_dense_small(const device float *x, const device Weight *weight, 
     smallest = simd_min(smallest);
     subnormal = simd_or(subnormal);
     if (exceptional) {
-        if (lane == 0) out[row * shape.columns + column] = as_type<float>((exceptional & 4u) || (exceptional & 3u) == 3u ? 0x7fc00000u : exceptional & 2u ? 0xff800000u : 0x7f800000u);
+        if (lane == 0) out[ulong(dst_row) * shape.columns + column] = as_type<float>((exceptional & 4u) || (exceptional & 3u) == 3u ? 0x7fc00000u : exceptional & 2u ? 0xff800000u : 0x7f800000u);
         return;
     }
     if (largest == -2048) {
-        if (lane == 0) out[row * shape.columns + column] = 0;
+        if (lane == 0) out[ulong(dst_row) * shape.columns + column] = 0;
         return;
     }
     const bool scaled = subnormal || largest > 64 || smallest < -64;
@@ -126,8 +126,14 @@ inline void sam_dense_small(const device float *x, const device Weight *weight, 
             const float value = scaled ? ldexp(sam_binary_mantissa(addend), sam_binary_exponent(addend) - scale) : bias[column];
             sam_pair_add(sum, value);
         }
-        out[row * shape.columns + column] = as_type<float>(sam_scaled_bits(sum, scale));
+        out[ulong(dst_row) * shape.columns + column] = as_type<float>(sam_scaled_bits(sum, scale));
     }
+}
+
+template<bool DROP_TAIL, bool KN = false, typename Weight = float>
+inline void sam_dense_small(const device float *x, const device Weight *weight, const device float *bias,
+    device float *out, constant SamDenseShape &shape, uint2 group, uint subgroup, uint lane) {
+    sam_dense_small_at<DROP_TAIL, KN, Weight>(x, weight, bias, out, shape, group, subgroup, lane, group.y);
 }
 
 #define SAM_DENSE_SMALL(NAME, DROP) \

@@ -145,7 +145,7 @@ const Probe = struct {
     width: usize = dim,
     passes: [2]?mtl.Pipeline = .{ null, null },
     split_passes: [3]?mtl.Pipeline = @splat(null),
-    device_passes: [6]?mtl.Pipeline = @splat(null),
+    device_passes: [5]?mtl.Pipeline = @splat(null),
     split32_passes: [6]?mtl.Pipeline = @splat(null),
     shape: c.Shape = undefined,
     stress: bool = false,
@@ -168,7 +168,7 @@ const Probe = struct {
             .out = .f32,
             .replaces = if (p.replacement) "split-value SAM D256 attention" else null,
             .served = if (p.device and p.width == 32) (if (p.batched) &device32_batches else &device32_shapes) else if (p.device) (if (p.batched) &device_batches else &device_shapes) else if (p.split) (if (p.batched) &split_batches else &split_shapes) else if (p.batched) &batch_shapes else &single_shapes,
-            .tiles = .{ .{ .size = if (p.device and !p.split and p.width == 64) 32 else 64 }, .{}, .{ .size = if (p.device and (if (p.split) p.width == 32 else p.width == 64)) 64 else 32 } },
+            .tiles = .{ .{ .size = 64 }, .{}, .{ .size = if (p.device) 64 else 32 } },
         };
     }
 
@@ -250,14 +250,14 @@ const Probe = struct {
         p.out = try p.rig.output(p.count() * 4);
         if (p.replacement) p.base = try p.rig.scratch(p.count() * 4);
         if (p.device) {
-            p.work[0] = try p.rig.scratch((1 + (s.rows + 63) / 64 * p.heads() * p.batches()) * 4);
+            const nq = (s.rows + 63) / 64;
+            p.work[0] = try p.rig.scratch((1 + nq * p.heads() * p.batches()) * 4);
             if (p.split) {
-                const chunk = sources.sam3_attention_split32.chunk_blocks * 32;
+                const plan = sources.sam3_attention_split32.splitsFor(p.batches(), p.heads(), nq, s.k);
                 const planes = p.batches() * p.heads() * s.rows;
-                const splits = (s.k + chunk - 1) / chunk;
-                p.work[1] = try p.rig.scratch(planes * splits * p.width * 4);
-                p.work[2] = try p.rig.scratch(planes * splits * 3 * 4);
-            } else p.work[1] = try p.rig.scratch(if (p.width == 64 and s.rows == 576 and s.k == 576) (p.k.len * 2 + p.batches() * p.heads() * 64) * 4 else 4);
+                p.work[1] = try p.rig.scratch(planes * plan.splits * p.width * 4);
+                p.work[2] = try p.rig.scratch(planes * plan.splits * 3 * 4);
+            }
         } else if (p.two_pass or p.split) {
             const blocks = (s.k + 31) / 32;
             const planes = p.batches() * p.heads() * s.rows;
@@ -290,9 +290,9 @@ const Probe = struct {
                 binding.* = .{ .buffer = r.buf, .offset = r.off };
             var split_params: [27]i32 = undefined;
             @memcpy(split_params[0..24], &params);
-            const chunk = sources.sam3_attention_split32.chunk_blocks * 32;
-            split_params[24] = @intCast((s.k + chunk - 1) / chunk);
-            split_params[25] = sources.sam3_attention_split32.chunk_blocks;
+            const plan = sources.sam3_attention_split32.splitsFor(p.batches(), nheads, nq, s.k);
+            split_params[24] = @intCast(plan.splits);
+            split_params[25] = @intCast(plan.chunk_blocks);
             split_params[26] = @bitCast(1 / @sqrt(@as(f32, @floatFromInt(p.width))));
             var pipes: [6]mtl.Pipeline = undefined;
             for (p.split32_passes, &pipes) |pipe, *value| value.* = pipe.?;
@@ -301,13 +301,13 @@ const Probe = struct {
         }
         if (p.device) {
             const Binding = struct { buffer: mtl.Buffer, offset: usize };
-            var refs: [6]Binding = undefined;
-            for ([_]rig_.Ref{ p.ins[0], p.ins[1], p.ins[2], p.out, p.work[0], p.work[1] }, &refs) |r, *binding|
+            var refs: [5]Binding = undefined;
+            for ([_]rig_.Ref{ p.ins[0], p.ins[1], p.ins[2], p.out, p.work[0] }, &refs) |r, *binding|
                 binding.* = .{ .buffer = r.buf, .offset = r.off };
             var device_params: [25]i32 = undefined;
             @memcpy(device_params[0..24], &params);
             device_params[24] = @bitCast(1 / @sqrt(@as(f32, @floatFromInt(p.width))));
-            var pipes: [6]mtl.Pipeline = undefined;
+            var pipes: [5]mtl.Pipeline = undefined;
             for (p.device_passes, &pipes) |pipe, *value| value.* = pipe.?;
             sources.sam3_attention_device.encode(mtl, pass.e, pipes, refs, device_params, !p.control);
             return p.rig.finish(pass);
@@ -382,9 +382,9 @@ const Probe = struct {
         const tau = kv[2 * s.k * width + s.k ..];
         var query: [dim]f64 = undefined;
         const blocks: f64 = @floatFromInt((s.k + 31) / 32);
-        const chunk: usize = if (p.device and p.split) sources.sam3_attention_split32.chunk_blocks else sources.sam3_attention_split.chunk_blocks;
-        const chunk_blocks: f64 = @min(blocks, @as(f64, @floatFromInt(chunk)));
-        const splits: f64 = @ceil(blocks / @as(f64, @floatFromInt(chunk)));
+        const plan: sources.sam3_attention_split32.SplitPlan = if (p.device and p.split) sources.sam3_attention_split32.splitsFor(p.batches(), p.heads(), (s.rows + 63) / 64, s.k) else .{ .splits = (@as(usize, @intFromFloat(blocks)) + sources.sam3_attention_split.chunk_blocks - 1) / sources.sam3_attention_split.chunk_blocks, .chunk_blocks = sources.sam3_attention_split.chunk_blocks };
+        const chunk_blocks: f64 = @min(blocks, @as(f64, @floatFromInt(plan.chunk_blocks)));
+        const splits: f64 = @floatFromInt(plan.splits);
         const form = ar.Form{
             .score = if (p.device) @max(16 + 6 * 4, 4 * 6 * ar.mma_step) else @as(f64, @floatFromInt(width / 16 * 6 * ar.mma_step)),
             .score_round = 4,

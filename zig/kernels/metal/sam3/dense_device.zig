@@ -43,9 +43,19 @@ pub fn encode(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline,
 
 pub const operands_name = "sam_dense_wide_operands";
 pub const cached_names = [_][]const u8{ "sam_dense_wide_seed", "sam_dense_wide_rows" };
+pub const wide_plan_name = "sam_dense_wide_plan";
+pub const wide_gelu_flag_names = [_][]const u8{ "sam_dense_wide_plan", "sam_dense_wide_gelu_flag", "sam_dense_device_gelu_fallback" };
+pub const wide_plain_residual_names = [_][]const u8{ "sam_dense_wide_plan", "sam_dense_wide_plain_residual", "sam_dense_wide_residual_fallback" };
+pub const wide_plain_tiled_names = [_][]const u8{ "sam_dense_wide_plan", "sam_dense_wide_plain_tiled", "sam_dense_wide_tiled_fallback" };
+pub const wide_comp_residual_names = [_][]const u8{ "sam_dense_wide_plan", "sam_dense_wide_compensated_residual", "sam_dense_wide_residual_fallback" };
 
 /// Wide layout with cached weight flags: pipes seed, rows, plan, product, fallback; refs x, w, b, out, domain, flags.
 pub fn encodeCached(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline, refs: anytype, shape: [3]u32) void {
+    encodeCachedExtra(mtl, e, pipes, refs, shape, null);
+}
+
+/// Cached wide layout with optional buffer(6) (residual or out_flag) bound on product and fallback.
+pub fn encodeCachedExtra(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline, refs: anytype, shape: [3]u32, extra: anytype) void {
     const count: u32 = shape[0] * shape[2];
     e.setPipeline(pipes[0]);
     e.setBuffer(refs[4].buffer, refs[4].offset, 0);
@@ -67,9 +77,35 @@ pub fn encodeCached(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pip
     for (0..4) |i| e.setBuffer(refs[i].buffer, refs[i].offset, i);
     e.setValue(shape, 4);
     e.setBuffer(refs[4].buffer, refs[4].offset, 5);
+    if (@TypeOf(extra) != @TypeOf(null)) {
+        if (extra) |ref| e.setBuffer(ref.buffer, ref.offset, 6);
+    }
     e.dispatchIndirect(refs[4].buffer, refs[4].offset + 4, mtl.Size.of(128, 1, 1));
     e.barrier();
     e.setPipeline(pipes[4]);
+    e.dispatchIndirect(refs[4].buffer, refs[4].offset + 16, mtl.Size.of(128, 1, 1));
+    e.barrier();
+}
+
+/// Precomputed weight+input flags: pipes plan, product, fallback; refs x, w, b, out, domain, wflag, iflag, extra.
+pub fn encodeReady(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [3]mtl.Pipeline, refs: anytype, shape: [3]u32, emit_flag: bool, bind_extra: bool) void {
+    e.setPipeline(pipes[0]);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 0);
+    e.setBuffer(refs[5].buffer, refs[5].offset, 1);
+    e.setBuffer(refs[6].buffer, refs[6].offset, 2);
+    e.setBuffer(refs[7].buffer, refs[7].offset, 3);
+    e.setValue(shape, 4);
+    e.setValue(@as(u32, @intFromBool(emit_flag)), 5);
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(128, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[1]);
+    for (0..4) |i| e.setBuffer(refs[i].buffer, refs[i].offset, i);
+    e.setValue(shape, 4);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 5);
+    if (bind_extra) e.setBuffer(refs[7].buffer, refs[7].offset, 6);
+    e.dispatchIndirect(refs[4].buffer, refs[4].offset + 4, mtl.Size.of(128, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[2]);
     e.dispatchIndirect(refs[4].buffer, refs[4].offset + 16, mtl.Size.of(128, 1, 1));
     e.barrier();
 }
