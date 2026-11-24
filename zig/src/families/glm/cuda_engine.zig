@@ -176,22 +176,8 @@ pub const Engine = struct {
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         if (held.count > 1) try held_shares.refused(&o, o.drafter, o.vision != null or has_packs);
-        const Tile = struct {
-            gpa: std.mem.Allocator,
-            mk: *const mm_mod.Kernels,
-            s: cuda.Stream,
-            d: *const cuda.Driver,
-            enabled: bool,
-            dense: u8,
-            head: u8,
-            packs: *mm_mod.Packed,
-            pub fn apply(t: @This(), w: *weights.Weights) !void {
-                try tile.padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
-                if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
-            }
-        };
-        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
-        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
+        const tiler: tile.Tiler = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, tile.Tiler.apply);
         errdefer e.w.deinit();
         errdefer {
             gpa.free(e.packs.ptrs);
