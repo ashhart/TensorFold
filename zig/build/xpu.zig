@@ -169,6 +169,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         m.addImport("xpu_qwen27_kernels", embedded);
         m.addImport("ze", ze_mod);
         m.addImport("xpu_tp", tp_mod);
+        m.addImport("device_id", device_id_mod);
         m.addImport("core", runner_core);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = t[0], .root_module = m }), .{}).step);
     }
@@ -441,7 +442,7 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     b.step("test-flashnext-xpu-host", "The XPU Flash Next TP sharding, token-id bounds, and PLE hash checks without devices").dependOn(&fn_tests.step);
     step.dependOn(&fn_tests.step);
     // the device seam check is compiled on the host too; running it needs a B70 and a checkpoint
-    const tail_test = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const tail_test = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty }, .{ .name = "device_id", .module = device } } });
     const tail_exe = b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test-host", .root_module = tail_test });
     b.step("compile-xpu-qwen27-tail-host", "Compile the XPU 27B prompt-tail device check without devices").dependOn(&tail_exe.step);
     const linux = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
@@ -451,6 +452,7 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const tp_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true });
     tp_linux.addImport("ze", ze_linux);
     const empty_linux = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const glue_tp2 = [_]u8{};\npub const glue_tp4 = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const decode_tp2 = [_]u8{};\npub const decode_tp4 = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const tp = [_]u8{};\npub const flashnext = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n"), .target = linux });
-    const tail_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze_linux }, .{ .name = "xpu_tp", .module = tp_linux }, .{ .name = "core", .module = core_linux }, .{ .name = "xpu_qwen27_kernels", .module = empty_linux } } });
+    const device_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze_linux }} });
+    const tail_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze_linux }, .{ .name = "xpu_tp", .module = tp_linux }, .{ .name = "core", .module = core_linux }, .{ .name = "xpu_qwen27_kernels", .module = empty_linux }, .{ .name = "device_id", .module = device_linux } } });
     b.step("compile-xpu-qwen27-tail-linux", "Cross-compile the XPU 27B prompt-tail device check for Linux").dependOn(&b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test", .root_module = tail_linux }).step);
 }
