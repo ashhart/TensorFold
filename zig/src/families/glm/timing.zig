@@ -80,7 +80,6 @@ pub fn schedule(windows: anytype, heads: anytype, agree: anytype, lead: bool, he
     if (head) for (&t.head, 0..) |*h, i| {
         h.* = try cost_rule.fastest(heads, i);
     };
-    try cost_rule.smoothSynced(windows, &t.window, agree, lead);
     const drifted = if (reference) |r| cost_rule.drifted(&t.window, &r.window) else false;
     if (try agree.decide(lead and drifted)) {
         try measureWindows(windows, &t.window, true, agree, lead);
@@ -92,9 +91,9 @@ pub fn schedule(windows: anytype, heads: anytype, agree: anytype, lead: bool, he
 }
 
 fn measureWindows(windows: anytype, ms: []f64, keep: bool, agree: anytype, lead: bool) !void {
+    if (keep) try cost_rule.again(windows, ms) else try cost_rule.serialWindowsSynced(windows, ms, agree, lead);
     var invalid = false;
-    cost_rule.measureWindows(windows, ms, keep) catch |err| {
-        if (err != error.InvalidWindowCost) return err;
+    for (ms) |m| if (!(m > 0) or !std.math.isFinite(m)) {
         invalid = true;
     };
     if (try agree.decide(lead and invalid)) return error.InvalidWindowCost;
@@ -237,8 +236,59 @@ test "both Macs make the same timing calls, and only rank 0's word starts a seco
     }
     try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
     const full = warm + 2 * (st.max_rows + 2) * (1 + cost_rule.reps);
-    try std.testing.expect(runs[0].items.len >= full and runs[0].items.len <= full + st.max_rows);
+    try std.testing.expectEqual(full + 4 * (1 + cost_rule.reps), runs[0].items.len);
     try std.testing.expectEqual(decisions.bits.items.len, decisions.at);
+}
+
+test "GLM cold timing: stateful windows match the serial oracle on both ranks, including drift retry" {
+    const Stateful = struct {
+        calls: *std.ArrayList(usize),
+        lead: bool,
+        head: bool = false,
+
+        pub fn time(s: @This(), i: usize) !f64 {
+            const at = s.calls.items.len;
+            try s.calls.append(std.testing.allocator, i + if (s.head) st.max_rows else @as(usize, 0));
+            const width: f64 = @floatFromInt(i);
+            return (if (s.lead) 10 + width else 600 - 32 * width) + @as(f64, @floatFromInt(at));
+        }
+    };
+    const gpa = std.testing.allocator;
+    for ([_]bool{ false, true }) |retry| for ([_]bool{ false, true }) |head| {
+        var runs: [2]std.ArrayList(usize) = .{ .empty, .empty };
+        defer for (&runs) |*r| r.deinit(gpa);
+        var decisions: Decisions = .{};
+        defer decisions.bits.deinit(gpa);
+        const reference: Timed = .{ .window = @splat(1), .head = .{ 1, 1 } };
+        for ([_]bool{ true, false }, &runs) |lead, *calls| {
+            decisions.lead = lead;
+            const windows: Stateful = .{ .calls = calls, .lead = lead };
+            const heads: Stateful = .{ .calls = calls, .lead = lead, .head = true };
+            const timed = try schedule(windows, heads, &decisions, lead, head, if (lead and retry) reference else null);
+            if (lead) for (timed.window, 0..) |ms, i| {
+                const expected = 10 + @as(f64, @floatFromInt(i + warm + 8 * i + 1));
+                try std.testing.expectEqual(expected, ms);
+            };
+        }
+        try std.testing.expectEqualSlices(usize, runs[0].items, runs[1].items);
+        try std.testing.expectEqual(decisions.bits.items.len, decisions.at);
+        var at: usize = 0;
+        for (0..warm) |_| {
+            try std.testing.expectEqual(st.max_rows - 1, runs[0].items[at]);
+            at += 1;
+        }
+        for (0..@as(usize, if (retry) 2 else 1)) |_| {
+            for (0..st.max_rows) |i| for (0..8) |_| {
+                try std.testing.expectEqual(i, runs[0].items[at]);
+                at += 1;
+            };
+            if (head) for (0..2) |i| for (0..8) |_| {
+                try std.testing.expectEqual(st.max_rows + i, runs[0].items[at]);
+                at += 1;
+            };
+        }
+        try std.testing.expectEqual(at, runs[0].items.len);
+    };
 }
 
 fn invalidClocks(bad_leader: bool) !void {
