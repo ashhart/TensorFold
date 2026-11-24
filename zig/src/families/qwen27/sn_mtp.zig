@@ -87,8 +87,6 @@ pub const Mtp = struct {
         if (slots == 0 or capacity < 16 or model.kernels.sn == null or (model.weights.embed_bf16 == null and model.weights.embed.weight.shape[0] == 0)) {
             return error.MissingSenseNovaMtpPrereqs;
         }
-        var w_owned = weights;
-        errdefer w_owned.deinit();
         const cfg = model.config;
         const dev = model.device;
         const units = dev.tensorUnits();
@@ -128,13 +126,13 @@ pub const Mtp = struct {
         }
         var draft_head: ?core.sensenova_loop.linear_gpu.AwqMatrix = null;
         errdefer if (draft_head) |*dh| dh.deinit();
-        if (w_owned.bits == 4 and model.weights.head.bits == 16 and model.kernels.sn != null and model.weights.head.sn != null) {
+        if (weights.bits == 4 and model.weights.head.bits == 16 and model.kernels.sn != null and model.weights.head.sn != null) {
             const runs = model.weights.head.sn.?.runs;
             if (runs.len == 1 and runs[0].mat == .bf16) {
                 draft_head = try mtp_weights.quantizeMat(&model.kernels.sn.?, model.queue, runs[0].mat.bf16);
             }
         }
-        if (w_owned.bits == 4 or draft_head != null) {
+        if (weights.bits == 4 or draft_head != null) {
             try model.kernels.sn.?.reserve(@import("gpu_frame.zig").max_rows, true);
         }
         const ctxs = try gpa.alloc(?StreamCtx, slots);
@@ -150,7 +148,7 @@ pub const Mtp = struct {
         m.* = .{
             .gpa = gpa,
             .model = model,
-            .weights = w_owned,
+            .weights = weights,
             .attention = attention,
             .ops = ops,
             .geometry = geometry,
@@ -171,7 +169,7 @@ pub const Mtp = struct {
             .intermediate = cfg.intermediate,
             .vocab = cfg.vocab,
             .abs_rows = eff_batch,
-            .bits = w_owned.bits,
+            .bits = weights.bits,
             .draft_head = draft_head,
             .depth = depth,
             .plain_guard = plain_guard,
