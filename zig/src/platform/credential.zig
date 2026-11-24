@@ -103,6 +103,7 @@ pub const Matcher = struct {
         var hold = false;
         for (secret, 0..) |wanted, matched_len| {
             next.clearRetainingCapacity();
+            var partial_byte = false;
             for (states.items) |at| {
                 if (at == m.text.len) {
                     hold = true;
@@ -113,16 +114,12 @@ pub const Matcher = struct {
                     continue;
                 }
                 const decoded = try m.decode(at, wanted);
+                partial_byte = partial_byte or decoded.partial;
                 hold = hold or decoded.partial;
                 for (0..decoded.len()) |index| try appendUnique(m.a, next, decoded.at(index));
             }
             if (next.items.len == 0) {
-                // An original '%' is a partial representation of the current decoded byte, even when its escape is cut.
-                var partial_byte = false;
-                for (states.items) |at| if (at < m.text.len and m.text[at] == '%') {
-                    partial_byte = true;
-                    break;
-                };
+                // Unfinished decoding and a hex high nibble are partial; a non-hex continuation is not.
                 return .{ .secret_len = secret.len, .prefix_len = matched_len + @intFromBool(partial_byte), .hold = hold };
             }
             const swap = states;
@@ -267,13 +264,24 @@ pub fn sensitivePrefix(a: Allocator, text: []const u8, secrets: []const []const 
     // Hold and prefix length belong to one secret; combining them across secrets can consume a safe suffix.
     for (secrets) |secret| {
         if (secret.len == 0) continue;
+        var own: usize = 0;
         for (1..text.len + 1) |end| {
             var matcher = Matcher.init(a, text[0..end]);
             defer matcher.deinit();
             const found = try matcher.matchSecret(0, secret);
-            if (found.prefix_len >= min_prefix) sensitive = @max(sensitive, if (found.hold) end else end - 1);
-            if (!found.hold) break;
+            if (found.hold) {
+                if (found.prefix_len >= min_prefix) own = @max(own, end);
+                continue;
+            }
+            if (found.prefix_len >= min_prefix) {
+                own = end - 1;
+                break;
+            }
+            // A disproved escape below the real decoded prefix minimum is safe.
+            own = 0;
+            break;
         }
+        sensitive = @max(sensitive, own);
     }
     return sensitive;
 }

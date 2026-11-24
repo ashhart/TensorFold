@@ -331,6 +331,18 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and refuses 
     }
     try std.testing.expectEqualStrings("Bearer fixture-caf\xe9", f.header(0, "authorization").?);
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).head, token) == null);
+    const unicode_secret = "\u{e9}abc";
+    const unicode_credentials = try turn.Credentials.init(a, &.{unicode_secret});
+    const unicode_body = try turn.body(a, .{ .model = "m" }, &h, unicode_secret);
+    const escape_at = std.mem.indexOf(u8, unicode_body, "\\u00e9abc").?;
+    unicode_body[escape_at + 4] = 'E';
+    const unicode_refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), null, unicode_credentials, unicode_body, &out.writer, .{});
+    switch (unicode_refused) {
+        .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqual(@as(usize, 0), f.refusals());
     const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
     switch (refused) {
         .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
