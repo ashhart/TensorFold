@@ -31,6 +31,7 @@ const max_key_blocks = dc.global_window / key_block + 2;
 const Lane = struct {
     k: [dc.max_layers]mtl.Buffer,
     v: [dc.max_layers]mtl.Buffer,
+    made: bool = false, // the ring is made at the stream's first absorb or hold, after the target admitted its charge
     end: u64 = 0, // context rows absorbed: positions [from, end)
     from: u64 = 0, // the first position held (a resumed prompt's drafter context starts there)
     held: [max_block]u32 = @splat(0),
@@ -168,6 +169,7 @@ pub const Drafter = struct {
     }
 
     fn laneResident(d: *const Drafter, l: *const Lane, f: mtl.ResidencySet.Follow, on: bool) void {
+        if (!l.made) return;
         for (0..d.config.layers) |i| for ([_]mtl.Buffer{ l.k[i], l.v[i] }) |x| if (on) f.join(f.ctx, x) else f.leave(f.ctx, x);
     }
 
@@ -188,10 +190,18 @@ pub const Drafter = struct {
         return .{ .depth = d.config.block - 1, .step_ms = d.step_ms, .plain_guard = true, .stream_bytes = laneBytes(&d.config) };
     }
 
+    /// A lane with its ring made (warm's).
     fn newLane(d: *Drafter) !*Lane {
         const l = try d.gpa.create(Lane);
         errdefer d.gpa.destroy(l);
         l.* = .{ .k = undefined, .v = undefined };
+        try d.makeRing(l);
+        return l;
+    }
+
+    /// The lane's ring buffers, once; a failure leaves none made.
+    fn makeRing(d: *Drafter, l: *Lane) !void {
+        if (l.made) return;
         var made: usize = 0;
         errdefer for (0..made) |i| {
             l.k[i].deinit();
@@ -206,24 +216,26 @@ pub const Drafter = struct {
             };
             made += 1;
         }
+        l.made = true;
         if (d.follow) |f| d.laneResident(l, f, true);
-        return l;
     }
 
     fn dropLane(d: *Drafter, l: *Lane) void {
         if (d.follow) |f| d.laneResident(l, f, false);
-        for (0..d.config.layers) |i| {
+        if (l.made) for (0..d.config.layers) |i| {
             l.k[i].deinit();
             l.v[i].deinit();
-        }
+        };
         d.gpa.destroy(l);
     }
 
     fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
         const d = cast(ptr);
         if (d.lanes.contains(s)) return error.DraftStreamOpen;
-        const l = try d.newLane();
-        errdefer d.dropLane(l);
+        // no ring yet: on the streamed prompt pass this runs before the target admits the stream's charge
+        const l = try d.gpa.create(Lane);
+        errdefer d.gpa.destroy(l);
+        l.* = .{ .k = undefined, .v = undefined };
         try d.lanes.put(d.gpa, s, l);
     }
 
@@ -285,6 +297,7 @@ pub const Drafter = struct {
         const width: usize = dc.max_taps * @as(usize, c.hidden) * 2;
         for (items) |it| {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
+            try d.makeRing(l);
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width) return error.DraftFeaturesUnsupported;
             if (it.start > l.end or l.end == 0) l.from = it.start; // the rows before it were restored, not absorbed
@@ -385,6 +398,7 @@ pub const Drafter = struct {
         const c = &d.config;
         for (items) |it| {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
+            try d.makeRing(l);
             if (it.depth == 0 or it.depth > c.block - 1 or it.position == 0) return error.DraftDepth;
             const anchor = it.position - 1;
             if (l.end != anchor) return error.DraftContextGap;
