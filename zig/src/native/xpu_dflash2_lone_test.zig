@@ -19,9 +19,11 @@ fn engine(cfg: *lanes.Config, target: *lanes.fake.Fake, clock: *lanes.fake.Fixed
 /// A world's round ms by drafts: a verify costs `per` more a node, over `base`.
 const World = struct { base: f64, per: f64 };
 
-/// A lone stream of `context` tokens for `rounds` rounds in `world`: the nodes of its first round and of its last.
-fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u32) !struct { first: u32, last: u32 } {
-    const n = ad.priced(nodes) orelse return .{ .first = nodes, .last = nodes };
+/// A lone stream of `context` tokens for `rounds` rounds in `world`: the nodes of its first, last, fewest, most rounds.
+const Nodes = struct { first: u32, last: u32, least: u32, most: u32 };
+
+fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u32) !Nodes {
+    const n = ad.priced(nodes) orelse return .{ .first = nodes, .last = nodes, .least = nodes, .most = nodes };
     const prompt = try gpa.alloc(u32, context);
     defer gpa.free(prompt);
     @memset(prompt, 3);
@@ -38,15 +40,19 @@ fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u3
     ad.chances(&landing, false, parents[0..n], own[0..n], chance[0..n]);
     var first: u32 = 0;
     var last: u32 = 0;
+    var least: u32 = 99;
+    var most: u32 = 0;
     for (0..rounds) |i| {
         const pick = try ad.width(e, &s, chance[0..n]);
         if (i == 0) first = pick.nodes;
         last = pick.nodes;
+        least = @min(least, pick.nodes);
+        most = @max(most, pick.nodes);
         s.rounds += 1;
         if (s.rounds > 1) try ad.measured(e, &s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
     }
     ad.retain(e, &s); // the driver's own filing when its stream ends
-    return .{ .first = first, .last = last };
+    return .{ .first = first, .last = last, .least = least, .most = most };
 }
 
 /// The drafts maximizing the tokens a ms in `world`, the chain of 85 % drafts `lone` grows, at most `cap`.
@@ -78,11 +84,12 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     const shallow: World = .{ .base = 30, .per = 1 };
     const deep: World = .{ .base = 70, .per = 21.5 };
     const long = 131072;
-    // a short first stream of a band draws the cap's tree throughout and files only that width; the next one adapts
+    // a band's first stream draws its prior throughout and files only that width; the next one adapts from it
     const cold = try lone(&e, 100, shallow, 120, 15);
-    try std.testing.expectEqual(@as(u32, 15), cold.first);
-    try std.testing.expectEqual(@as(u32, 15), cold.last);
+    try std.testing.expectEqual(Nodes{ .first = 15, .last = 15, .least = 15, .most = 15 }, cold);
     const wide = try lone(&e, 100, shallow, 120, 15);
+    const deep_cold = try lone(&e, long, deep, 120, 15);
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, deep_cold);
     const narrow = try lone(&e, long, deep, 120, 15);
     try std.testing.expectEqual(best(shallow, 15), wide.last);
     try std.testing.expectEqual(best(deep, 15), narrow.last);
@@ -91,9 +98,18 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     try std.testing.expectEqual(wide.last, (try lone(&e, 120, shallow, 1, 15)).first);
 }
 
-test "draft sources: a cold band's first request is fixed only below cold_context" {
+test "draft sources: a cold band's first request draws a prior by prompt length, under the cap" {
     const world: World = .{ .base = 70, .per = 21.5 };
-    for ([_]usize{ ad.cold_context - 1, ad.cold_context }) |context| {
+    const cases = [_]struct { context: usize, cap: u32, nodes: u32 }{
+        .{ .context = ad.cold_context - 1, .cap = 15, .nodes = 15 },
+        .{ .context = ad.cold_context, .cap = 15, .nodes = 7 },
+        .{ .context = 8191, .cap = 15, .nodes = 7 },
+        .{ .context = 8192, .cap = 15, .nodes = 3 },
+        .{ .context = 131072, .cap = 15, .nodes = 3 },
+        .{ .context = 100, .cap = 3, .nodes = 3 },
+        .{ .context = 4000, .cap = 5, .nodes = 5 },
+    };
+    for (cases) |c| {
         var cfg: lanes.Config = undefined;
         var target: lanes.fake.Fake = undefined;
         var clock: lanes.fake.FixedClock = undefined;
@@ -101,8 +117,9 @@ test "draft sources: a cold band's first request is fixed only below cold_contex
         defer e.deinit();
         defer cfg.deinit(gpa);
         defer target.deinit();
-        const r = try lone(&e, context, world, 120, 15);
-        try std.testing.expectEqual(if (context < ad.cold_context) 15 else best(world, 15), r.last);
+        const r = try lone(&e, c.context, world, 60, c.cap);
+        try std.testing.expectEqual(c.nodes, r.least);
+        try std.testing.expectEqual(c.nodes, r.most);
     }
 }
 

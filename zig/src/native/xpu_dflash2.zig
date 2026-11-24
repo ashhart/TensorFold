@@ -32,13 +32,18 @@ pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own
     for (out, parents[0..out.len], own[0..out.len]) |*o, parent, x| o.* = landing.chance(sampled, x) * (if (parent >= 0) out[@intCast(parent)] else 1);
 }
 
-/// Prompt rows from which a band's first request calibrates: the drafter's window plus one (xpu/drafter.zig WIN + 1).
+/// Prompt rows from which a cold band's prior narrows: the drafter's window plus one (xpu/drafter.zig WIN + 1).
 pub const cold_context = 2048;
+
+/// A cold band's fixed nodes by prompt rows: the full tree, then 7 in band 0, then 3 (the best fixed trees measured).
+pub fn prior(rows: usize) u32 {
+    return if (rows < cold_context) 15 else if (lone_costs.band(rows) == 0) 7 else 3;
+}
 
 /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
 pub const Width = struct { nodes: u32, trial: ?u32 = null };
 
-/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a short cold band: all).
+/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a cold band: its prior).
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
@@ -46,10 +51,10 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
         s.prices_seeded = true;
         _ = try e.rule.rates(lanes.windows.who(s));
         const kept = lone_costs.slot(&e.lone_kept, s).*;
-        s.lone_cold = kept == null and s.context.items.len < cold_context; // a short cold request files the cap's times
+        s.lone_cold = if (kept == null) prior(s.context.items.len) else 0; // no trial; it files the prior's times
         try lone_costs.seed(e.gpa, kept, s);
     }
-    if (s.lone_cold) return .{ .nodes = @intCast(chance.len) };
+    if (s.lone_cold > 0) return .{ .nodes = @min(s.lone_cold, @as(u32, @intCast(chance.len))) }; // the cap wins
     // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
     var buf: [2048]u8 align(16) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&buf);
