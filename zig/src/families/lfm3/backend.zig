@@ -49,6 +49,10 @@ pub const Metal = struct {
 
     pub fn deinit(self: *Metal) void {
         mtl.resident.streams.set(self, null);
+        while (self.fills.count() > 0) {
+            var keys = self.fills.keyIterator();
+            self.closing(keys.next().?.*);
+        }
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -287,7 +291,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
-        _ = self.fills.remove(stream); // a stream that leaves mid-pass
+        self.closing(stream); // a stream that leaves mid-pass
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
