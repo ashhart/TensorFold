@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini: `enable_thinking: false` and `reasoning_effort: "none"` now reach the chat template as thinking effort 0 instead of the default 0.9; thinking-on replies are unchanged (#4876).
+
 - Inkling 2 Mini on CUDA: the loop gate runs as a down half and an up half, so one-stream decode is about 28% faster on GB10 with identical tokens (#4697). Thanks @jschmied.
 
 - Server: `POST /v1/prompt_cache/flush` takes an optional `retain` count that keeps the most recently used prompt states in RAM and on disk; without it the flush is unchanged (#4856).
