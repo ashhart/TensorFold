@@ -11,6 +11,7 @@ pub const HostBuffer = memory.HostBuffer;
 pub const usage = memory.usage;
 pub const Usage = memory.Usage;
 pub const Stream = @import("stream.zig").Stream;
+pub const Event = @import("stream.zig").Event;
 pub const Module = @import("module.zig").Module;
 pub const Function = @import("module.zig").Function;
 pub const launch = @import("launch.zig");

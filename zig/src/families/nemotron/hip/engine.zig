@@ -44,13 +44,12 @@ pub const Engine = struct {
     pub const Cancel = struct { ctx: *anyopaque, check: *const fn (*anyopaque) bool };
 
     pub const Poll = struct {
-        stream: hip.Stream,
+        edges: @import("hip_serve").cancel.Layers(hip.Stream, hip.Event),
         cancel: Cancel,
 
         fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
             const p: *Poll = @ptrCast(@alignCast(ctx));
-            try p.stream.synchronize();
-            if (p.cancel.check(p.cancel.ctx)) return error.Cancelled;
+            try p.edges.edge(p.cancel.ctx, p.cancel.check);
         }
     };
 
@@ -58,7 +57,8 @@ pub const Engine = struct {
     pub fn poll(e: anytype, cancel: ?Cancel, rows: usize, p: *Poll) ?forward.Trace {
         const c = cancel orelse return null;
         if (!prefix.pollsLayers(e.o.world, rows)) return null;
-        p.* = .{ .stream = e.stream, .cancel = c };
+        const events = if (@hasField(@TypeOf(e.*), "edge_events")) e.edge_events else null; // a recorded engine has none
+        p.* = .{ .edges = .{ .stream = e.stream, .events = events }, .cancel = c };
         return .{ .ctx = p, .layer = Poll.layer };
     }
 
@@ -68,6 +68,7 @@ pub const Engine = struct {
     ctx: hip.Context,
     lib: hip.Launcher,
     stream: hip.Stream,
+    edge_events: [2]hip.Event = undefined, // a polled prompt pass's layer edges (Poll)
     o: Options,
     cfg: config.Config,
     weights: loader.Weights,
@@ -123,6 +124,10 @@ pub const Engine = struct {
         e.act = if (caps.act == .f16) .f16 else .bf16;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
+        e.edge_events[0] = try hip.Event.init(&e.driver, false);
+        errdefer e.edge_events[0].deinit();
+        e.edge_events[1] = try hip.Event.init(&e.driver, false);
+        errdefer e.edge_events[1].deinit();
         e.comm = null;
         // RCCL's init waits for every rank: none enters it unless every rank got this far
         _ = try steps.done(.{ 0, 0 }, .first);
@@ -195,6 +200,7 @@ pub const Engine = struct {
         e.arena.deinit();
         e.weights.deinit();
         if (e.comm) |c| c.close();
+        for (&e.edge_events) |*ev| ev.deinit();
         e.stream.deinit();
         e.lib.unload();
         e.ctx.deinit();
