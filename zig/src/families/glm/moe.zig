@@ -49,6 +49,43 @@ pub fn block(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref,
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
+    } else if (w.tfq3) |*tl| {
+        const full = (s & (Class.shared | Class.routed | Class.combine) == 0) and on(x, "combine");
+        const fuse_pw_sh = full and w.sh_gate_up.more == 0 and w.sh_gate_up.group == 512 and w.sh_down.more == 0 and w.sh_down.group == 512 and on(x, "s_gateup") and on(x, "s_down");
+        const fuse_rt = rows == 1 and x.fused_route and (s & Class.route == 0) and (full or s & Class.routed == 0) and on(x, "r_topk");
+        if (!fuse_pw_sh and s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.route == 0) {
+            if (fuse_rt) {
+                if (on(x, "r_router")) logits(x, e, w, x_in, rows);
+            } else route(x, e, w, x_in, rows);
+        }
+        if (full or s & Class.routed == 0) {
+            wide.tfq3.dispatch.moeDecode(&x.k.wide.?.tfq3.?, e, tl, .{
+                .x_in = x_in,
+                .logits_r = sc.logits_r,
+                .bias = w.bias,
+                .pick = sc.pick,
+                .uids = sc.uids,
+                .umem = sc.umem,
+                .ucount = sc.ucount,
+                .wts = sc.wts,
+                .sh_gu_w = w.sh_gate_up.w,
+                .sh_gu_s = w.sh_gate_up.s,
+                .sh_dn_w = w.sh_down.w,
+                .sh_dn_s = w.sh_down.s,
+                .act = sc.act,
+                .ye = sc.ye,
+                .ys = sc.ys,
+                .branch = sc.branch,
+                .routed_scale = c.routed_scale,
+                .has_5b = tl.has_5b,
+                .fuse_pw_shared = fuse_pw_sh,
+                .sh_bits = w.sh_gate_up.bits,
+                .fuse_combine = full,
+                .fuse_route = fuse_rt,
+            }, rows, c.topk, c.experts, c.swiglu_limit);
+            if (full) return false;
+        }
     } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
         const one = rows == 1 and x.fused_route; // the gate/up groups replay the select: the logits alone
         if (s & Class.route == 0 and one and on(x, "r_router")) logits(x, e, w, x_in, rows);

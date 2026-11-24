@@ -54,20 +54,20 @@ pub fn layerBytes(l: anytype, i: usize) !usize {
     switch (c.kind(@intCast(i))) {
         .kda => {
             const W: usize = c.kdaWidth();
-            n += try stackBytes(l, a, .{i}, &wts.kda_in, c.kdaProj(), D, 64) + q.b(W, c.kda_dim, try l.widthAt(a ++ "f_b_proj", .{i}));
-            n += q.b(W, c.kda_dim, try l.widthAt(a ++ "g_b_proj", .{i})) + q.b(D, W, try l.widthAt(a ++ "o_proj", .{i})) + 3 * W * c.conv * 4 + 8 * 1024 + W * 4;
+            n += try stackBytes(l, a, .{i}, &wts.kda_in, &.{ W, W, W, c.kda_dim, c.kda_dim, c.kda_heads }, D, 64) + try nonMoeMatBytes(l, a ++ "f_b_proj", .{i}, W, c.kda_dim);
+            n += try nonMoeMatBytes(l, a ++ "g_b_proj", .{i}, W, c.kda_dim) + try nonMoeMatBytes(l, a ++ "o_proj", .{i}, D, W) + 3 * W * c.conv * 4 + 8 * 1024 + W * 4;
         },
         .mla => {
-            n += try stackBytes(l, a, .{i}, &wts.mla_x, c.xProj(), D, 64) + try stackBytes(l, a, .{i}, &wts.mla_qr, c.qrProj(), c.q_lora, 1);
-            n += q.b(D, c.mla_heads * c.v_dim, try l.widthAt(a ++ "o_proj", .{i})) + 16 * 1024 + c.i_dim * D * 2;
+            n += try stackBytes(l, a, .{i}, &wts.mla_x, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, D, 64) + try stackBytes(l, a, .{i}, &wts.mla_qr, &.{ c.mla_heads * c.nope, c.i_heads * c.i_dim }, c.q_lora, 1);
+            n += try nonMoeMatBytes(l, a ++ "o_proj", .{i}, D, c.mla_heads * c.v_dim) + 16 * 1024 + c.i_dim * D * 2;
             if (l.has(a ++ "embed_q.weight", .{i})) {
                 n += q.b(c.mla_heads * c.kv_lora, c.nope, try l.widthAt(a ++ "embed_q", .{i})) + q.b(c.mla_heads * c.v_dim, c.kv_lora, try l.widthAt(a ++ "unembed_out", .{i}));
             } else n += q.b(c.mla_heads * (c.nope + c.v_dim), c.kv_lora, try l.widthAt(a ++ "kv_b_proj", .{i}));
         },
     }
     if (c.isMoe(@intCast(i))) {
-        n += c.experts * D * 2 + c.experts * 4 + try stackBytes(l, m ++ "shared_experts.", .{i}, &wts.gate_up, 2 * c.moe_inter, D, 1) + q.b(D, c.moe_inter, try l.widthAt(m ++ "shared_experts.down_proj", .{i})) + 2048;
-    } else n += try stackBytes(l, m, .{i}, &wts.gate_up, 2 * c.dense_inter, D, 1) + q.b(D, c.dense_inter, try l.widthAt(m ++ "down_proj", .{i}));
+        n += c.experts * D * 2 + c.experts * 4 + try stackBytes(l, m ++ "shared_experts.", .{i}, &wts.gate_up, &.{ c.moe_inter, c.moe_inter }, D, 1) + try nonMoeMatBytes(l, m ++ "shared_experts.down_proj", .{i}, D, c.moe_inter) + 2048;
+    } else n += try stackBytes(l, m, .{i}, &wts.gate_up, &.{ c.dense_inter, c.dense_inter }, D, 1) + try nonMoeMatBytes(l, m ++ "down_proj", .{i}, D, c.dense_inter);
     const eh = wts.prefix ++ "layers.{d}.eh_proj";
     if (i == c.layers) n += 3 * (D * 2 + 256) + if (l.has(eh ++ ".scales", .{i})) q.b(D, 2 * D, try l.widthAt(eh, .{i})) else D * 2 * D * 2 + 256;
     return n;
@@ -75,6 +75,7 @@ pub fn layerBytes(l: anytype, i: usize) !usize {
 
 /// Bytes of layer i's routed experts on this Mac at the first one's widths (the rest must match).
 pub fn expertBytes(l: anytype, i: usize) !usize {
+    if (@import("tfq3.zig").hasLayer(l.dir, i)) return 0;
     const c = l.c;
     const D: usize = c.hidden;
     const every = i == c.layers;
@@ -90,22 +91,26 @@ fn projBytes(l: anytype, i: usize, e: usize, proj: []const u8, n: usize, k: usiz
     return affine.bytes(n, k, try l.widths.expert(i, e, proj));
 }
 
-/// A stack's bytes: its rows, padded to `pad` a run (a part each once widths differ), at the costliest bytes a row.
-fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []const []const u8, rows: usize, k: usize, pad: usize) !usize {
+fn nonMoeMatBytes(l: anytype, comptime fmt: []const u8, args: anytype, rows: usize, k: usize) !usize {
+    var nb: [240]u8 = undefined;
+    const name = try std.fmt.bufPrint(&nb, fmt, args);
+    if (l.tfq3_ctx.nonmoe) |*nm| if (nm.find(name) != null) return 0;
+    return affine.bytes(rows, k, try l.widths.of(name)) + 3 * 256;
+}
+
+/// A stack's safetensors bytes, skipping members served zero-copy from nonmoe.tffpw.
+fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []const []const u8, part_rows: []const usize, k: usize, pad: usize) !usize {
     var name: [200]u8 = undefined;
     const base = try std.fmt.bufPrint(&name, fmt, args);
-    var most: usize = 0;
-    var first: ?wts.Width = null;
-    var mixed = false;
-    for (parts) |p| {
+    var tot: usize = 0;
+    for (parts, part_rows) |p, pr| {
         var full: [240]u8 = undefined;
-        const w = try l.widths.of(try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p }));
-        most = @max(most, affine.bytes(1, k, w));
-        mixed = mixed or (first != null and !std.meta.eql(first.?, w));
-        if (first == null) first = w;
+        const full_s = try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p });
+        if (l.tfq3_ctx.nonmoe) |*nm| if (nm.find(full_s) != null) continue;
+        const w = try l.widths.of(full_s);
+        tot += affine.bytes(std.mem.alignForward(usize, pr, pad), k, w) + 3 * 256;
     }
-    const runs = if (mixed) parts.len else 1;
-    return (std.mem.alignForward(usize, rows, pad) + (runs - 1) * pad) * most + runs * 3 * 256;
+    return tot;
 }
 
 /// Fewest bytes of caches and buffers a load of `cap` tokens takes (shortest prompt chunks), counted, not allocated.

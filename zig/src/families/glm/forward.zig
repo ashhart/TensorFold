@@ -261,11 +261,9 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
         gb = .{ g, g, g };
     }
     // An Ultra's GPU, 2+ rows: each head on two threadgroups (raw outputs, gates in gu), then each row's head normed
-    const parts = gate == .generated and x.k.kda_split and c.tp == 1 and rows > 1;
-    e.setPipeline(switch (gate) {
-        .generated => if (parts) x.k.kda_parts else if (rows > 1) (if (c.tp > 1) x.k.kda_window_tp else x.k.kda_window) else if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
-        .pre, .fused => |p| p,
-    });
+    const sel = x.k.kdaSelect(gate, w.f_b, w.g_b, c.tp, rows);
+    const parts = sel.parts;
+    e.setPipeline(sel.pipe);
     bind(e, 0, .{proj});
     shape(e, 1, .{ rows, c.kdaProj() });
     bind(e, 2, .{ L.cs[cur], w.conv_w, fb[0], fb[1], fb[2], gb[0], gb[1], gb[2], w.a, w.dt_bias, L.st[cur], if (parts) x.sc.gu else w.o_norm });
@@ -486,6 +484,7 @@ fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref
     if (!on(x, "dense")) return;
     const c = x.c;
     const sc = x.sc;
+    if (c.tp == 1 and wide.tfq3.dispatch.tryDenseGlu(if (x.k.wide) |*w_p| if (w_p.tfq3) |*t| t else null else null, e, w.gate_up, x_in, sc.actd, c.dense_inter, rows, c.swiglu_limit)) return qmv(x, e, x.k.qmv_dense_down, sc.actd, w.down, sc.branch, rows);
     qmv(x, e, if (c.tp > 1) x.k.qmv_dense_gu_tp else x.k.qmv_dense_gu, x_in, w.gate_up, sc.gu, rows);
     e.setPipeline(x.k.swiglu);
     bind(e, 0, .{ sc.gu, sc.actd });
