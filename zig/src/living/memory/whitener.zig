@@ -131,13 +131,15 @@ pub const LayerWhitener = struct {
         }
 
         const k_req = @min(k_pcs_target, @min(n_total, dim));
+        // one owner at a time: `basis_buf` until it becomes `basis` (or its shrunk copy does), then `basis`
         const basis_buf = try gpa.alloc(f32, k_req * dim);
-        errdefer gpa.free(basis_buf);
-        const k_got = try quant.topRightSingularVectors(gpa, centered, n_total, dim, k_req, basis_buf);
-        const basis = if (k_got == k_req) basis_buf else blk: {
-            const shrunk = try gpa.dupe(f32, basis_buf[0 .. k_got * dim]);
+        const k_got = quant.topRightSingularVectors(gpa, centered, n_total, dim, k_req, basis_buf) catch |e| {
             gpa.free(basis_buf);
-            break :blk shrunk;
+            return e;
+        };
+        const basis = if (k_got == k_req) basis_buf else blk: {
+            defer gpa.free(basis_buf);
+            break :blk try gpa.dupe(f32, basis_buf[0 .. k_got * dim]);
         };
         errdefer gpa.free(basis);
 
@@ -324,12 +326,9 @@ pub fn selectPrototypes(
         try weights.append(gpa, @max(tr.spec[best], 0.25));
     }
     const count = weights.items.len;
-    return .{
-        .vecs = try vecs.toOwnedSlice(gpa),
-        .weights = try weights.toOwnedSlice(gpa),
-        .count = count,
-        .dim = dim,
-    };
+    const owned = try vecs.toOwnedSlice(gpa);
+    errdefer gpa.free(owned); // the list gave it up: freed here if the weights cannot follow
+    return .{ .vecs = owned, .weights = try weights.toOwnedSlice(gpa), .count = count, .dim = dim };
 }
 
 test "whitener: removes dominant background direction and assigns high specificity to novel vectors" {
