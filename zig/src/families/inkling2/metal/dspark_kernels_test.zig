@@ -31,7 +31,8 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
         try t.expectEqual(record.threads, record.reserved);
         const threadgroup: u32 = switch (kind) {
             .fuse_taps => 32,
-            .block_qkv, .context_kv, .attention, .residual_norm => 16,
+            .block_qkv, .context_kv, .residual_norm => 16,
+            .attention => 528,
             else => 0,
         };
         try t.expectEqual(threadgroup, record.tg_memory);
@@ -44,7 +45,7 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
     try t.expectEqual(@as(usize, 4), @sizeOf(k.CountArgs));
     try t.expectEqual(@as(usize, 8), @sizeOf(k.BaseArgs));
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
-    try t.expect(std.mem.indexOf(u8, shader, "DSP_SCALE = 0x1.6a09e6p-7f") != null);
+    try t.expect(std.mem.indexOf(u8, shader, "DSP_SCALE = 0x1.6a09e6p-4f") != null);
 }
 
 test "raw base projection rounds the dot without applying target softcap" {

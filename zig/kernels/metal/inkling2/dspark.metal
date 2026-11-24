@@ -9,7 +9,7 @@ constant uint DSP_HEAD = 128;
 constant uint DSP_RANK = 256;
 constant uint DSP_RNN = 768;
 constant float DSP_EPS = 1e-6f;
-constant float DSP_SCALE = 0x1.6a09e6p-7f;
+constant float DSP_SCALE = 0x1.6a09e6p-4f;
 
 struct DsparkPositionArgs { uint base; };
 struct DsparkContextArgs { uint base, rows, ring; };
@@ -121,6 +121,7 @@ static inline float dspark_attention_score(const device bfloat* q, const device 
   return dot * DSP_SCALE;
 }
 
+// A threadgroup a (row, head): thread t scores keys t, t + 128, ...; the denominator and value sums stay in key order.
 kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const device bfloat* block_k [[buffer(1)]], const device bfloat* block_v [[buffer(2)]], const device bfloat* context_k [[buffer(3)]], const device bfloat* context_v [[buffer(4)]], device float* scores [[buffer(5)]], device bfloat* out [[buffer(6)]], constant DsparkAttentionArgs& a [[buffer(7)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 24, h = group % 24, kv = h / 3;
   const uint q_at = row * DSP_Q + h * DSP_HEAD;
@@ -129,35 +130,42 @@ kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const
   const uint retained = a.committed - first;
   const uint count = retained + 8;
   const uint score_at = group * count;
-  threadgroup float peak, denominator;
+  threadgroup float peaks[128], peak, denominator;
+  float m = -INFINITY;
+  for (uint j = d; j < count; j += 128) {
+    const float s = j < retained
+        ? dspark_attention_score(q, context_k, q_at, ((first + j) % a.ring) * DSP_KV + kv * DSP_HEAD)
+        : dspark_attention_score(q, block_k, q_at, (j - retained) * DSP_KV + kv * DSP_HEAD);
+    scores[score_at + j] = s;
+    m = max(m, s);
+  }
+  peaks[d] = m;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (d == 0) {
-    float m = -INFINITY;
-    for (uint j = 0; j < retained; ++j) {
-      const uint position = first + j;
-      const float s = dspark_attention_score(q, context_k, q_at, (position % a.ring) * DSP_KV + kv * DSP_HEAD);
-      scores[score_at + j] = s;
-      m = max(m, s);
-    }
-    for (uint j = 0; j < 8; ++j) {
-      const float s = dspark_attention_score(q, block_k, q_at, j * DSP_KV + kv * DSP_HEAD);
-      scores[score_at + retained + j] = s;
-      m = max(m, s);
-    }
+    float top = -INFINITY;
+    for (uint t = 0; t < 128; ++t) top = max(top, peaks[t]);
+    peak = top;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint j = d; j < count; j += 128) scores[score_at + j] = exp(scores[score_at + j] - peak);
+  threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+  if (d == 0) {
     float sum = 0.0f;
-    for (uint j = 0; j < count; ++j) sum += exp(scores[score_at + j] - m);
-    peak = m;
+    for (uint j = 0; j < count; ++j) sum += scores[score_at + j];
     denominator = sum;
   }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint j = d; j < count; j += 128) scores[score_at + j] = scores[score_at + j] / denominator;
   threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
   float value = 0.0f;
   for (uint j = 0; j < retained; ++j) {
     const uint position = first + j;
     const uint v_at = (position % a.ring) * DSP_KV + kv * DSP_HEAD + d;
-    value += (exp(scores[score_at + j] - peak) / denominator) * float(context_v[v_at]);
+    value += scores[score_at + j] * float(context_v[v_at]);
   }
   for (uint j = 0; j < 8; ++j) {
     const uint v_at = (j * DSP_KV + kv * DSP_HEAD) + d;
-    value += (exp(scores[score_at + retained + j] - peak) / denominator) * float(block_v[v_at]);
+    value += scores[score_at + retained + j] * float(block_v[v_at]);
   }
   out[out_at] = bfloat(value);
 }
@@ -199,14 +207,14 @@ kernel void tf_ink2_dspark_kappa(const device bfloat* y [[buffer(0)]], const dev
   out[i] = sum;
 }
 
-kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device bfloat* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+static inline void dspark_recurrent_step(const device bfloat* state, const device float* kappa, const device bfloat* rnn_weight, const device bfloat* markov, device bfloat* z, device bfloat* next_state, device bfloat* lambda, uint token, uint i) {
   if (i >= DSP_RANK) return;
   float values[3];
   for (uint part = 0; part < 3; ++part) {
     const uint channel = part * DSP_RANK + i;
     float sum = 0.0f;
     for (uint d = 0; d < DSP_RANK; ++d) sum += float(state[d]) * float(rnn_weight[channel * 5120 + d]);
-    for (uint d = 0; d < DSP_RANK; ++d) sum += float(markov[uint64_t(a.token) * DSP_RANK + d]) * float(rnn_weight[channel * 5120 + 256 + d]);
+    for (uint d = 0; d < DSP_RANK; ++d) sum += float(markov[uint64_t(token) * DSP_RANK + d]) * float(rnn_weight[channel * 5120 + 256 + d]);
     sum += float(kappa[channel]);
     const bfloat rounded = bfloat(sum);
     z[channel] = rounded;
@@ -221,12 +229,60 @@ kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], c
   lambda[i] = bfloat(tanh(values[2]));
 }
 
-kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], const device bfloat* y [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkBaseArgs& a [[buffer(3)]], uint i [[thread_position_in_grid]]) {
-  if (i >= a.rows * a.vocab) return;
-  const uint row = i / a.vocab, id = i % a.vocab;
-  float dot = 0.0f;
-  for (uint d = 0; d < DSP_H; ++d) dot += float(unembed[id * DSP_H + d]) * float(y[row * DSP_H + d]);
-  out[i] = bfloat(dot);
+kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+  dspark_recurrent_step(state, kappa, rnn_weight, markov, z, next_state, lambda, a.token, i);
+}
+
+// The recurrent step after held[a.token]: the chain's previous token read on the GPU.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_chain_step(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], const device uint* held [[buffer(8)]], uint i [[thread_position_in_grid]]) {
+  dspark_recurrent_step(state, kappa, rnn_weight, markov, z, next_state, lambda, held[a.token], i);
+}
+
+// held[a.token + 1] = the first greatest of the 200,058 logits; a NaN is never chosen unless logit 0 is one.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void tf_ink2_dspark_chain_pick(const device bfloat* logits [[buffer(0)]], device uint* held [[buffer(1)]], constant DsparkTokenArgs& a [[buffer(2)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float values[32];
+  threadgroup uint places[32];
+  float best = -INFINITY;
+  uint at = 0xffffffffu;
+  for (uint i = t; i < 200058u; i += 1024u) {
+    const float raw = float(logits[i]);
+    const float v = isnan(raw) ? -INFINITY : raw;
+    if (v > best || (v == best && i < at)) { best = v; at = i; }
+  }
+  for (ushort o = 16; o > 0; o >>= 1) {
+    const float ov = simd_shuffle_xor(best, o);
+    const uint oi = simd_shuffle_xor(at, o);
+    if (ov > best || (ov == best && oi < at)) { best = ov; at = oi; }
+  }
+  if (lane == 0) { values[sg] = best; places[sg] = at; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t != 0) return;
+  for (uint g = 0; g < 32; ++g)
+    if (values[g] > best || (values[g] == best && places[g] < at)) { best = values[g]; at = places[g]; }
+  held[a.token + 1] = isnan(float(logits[0])) ? 0u : at;
+}
+
+// A simdgroup an id: eight columns a lane a step, every row sharing the read of unembed[id]; rounded once to BF16.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], const device bfloat* y [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkBaseArgs& a [[buffer(3)]],
+    uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint id = tg * 8 + sg;
+  if (id >= a.vocab) return;
+  const device bfloat* w = unembed + size_t(id) * DSP_H;
+  float acc[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint i = 8 * lane; i < DSP_H; i += 256) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
+    for (uint row = 0; row < a.rows; ++row) {
+      const device bfloat* x = y + size_t(row) * DSP_H + i;
+      acc[row] += dot(w0, float4(*(const device bfloat4*)x)) + dot(w1, float4(*(const device bfloat4*)(x + 4)));
+    }
+  }
+  for (uint row = 0; row < a.rows; ++row) {
+    const float sum = simd_sum(acc[row]);
+    if (lane == 0) out[size_t(row) * a.vocab + id] = bfloat(sum);
+  }
 }
 
 kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const device bfloat* phi [[buffer(1)]], const device bfloat* beta [[buffer(2)]], const device bfloat* lambda [[buffer(3)]], device bfloat* out [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint i [[thread_position_in_grid]]) {
