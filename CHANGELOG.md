@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Drama 3 on CUDA: semantic guidance (`--cfg-gamma` and the other guidance flags) now works, as it does on Metal (#4153). Thanks @plotarmordev.
+
 - Tools: `tools/exact_restarts.py` checks the exact path end to end, comparing token ids across fresh restarts, `--parallel` levels, busy versus alone requests, and drafting on versus off (#4574).
 
 - Gemma 4 on CUDA (assistant and DFlash drafters) and one more MoE family's CUDA loader: loading now refuses a checkpoint with tensors the engine never binds, each scoped to its own directory or prefix (#4566).
