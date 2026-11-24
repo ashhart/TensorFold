@@ -1,6 +1,9 @@
-//! Scalar twins of the Metal engines' cache packers and dequantisers, matching each kernel's float operations.
+/// Scalar twins of the Metal engines' cache packers and dequantisers, matching each kernel's float operations.
+/// A packer returns `error.NotExact` rather than a row the format would hold with different values.
 const std = @import("std");
 const c = @import("codec.zig");
+
+pub const Error = error{NotExact};
 
 fn rne(x: f32) f32 {
     const f = @floor(x);
@@ -49,7 +52,7 @@ fn amaxOf(x: []const u16) f32 {
 const min_e8: f32 = 6.0 * 0x1p-126;
 
 /// main's index-key packer: 32-value E2M1 blocks, E8M0 scale; a NaN/inf block packs zero codes under byte 255.
-pub fn releaseIndexKey(x: *const [128]u16, out: *[68]u8) void {
+pub fn releaseIndexKey(x: *const [128]u16, out: *[68]u8) Error!void {
     const inv6: f32 = 1.0 / 6.0;
     for (0..4) |g| {
         const blk = x[32 * g ..][0..32];
@@ -69,10 +72,13 @@ pub fn releaseIndexKey(x: *const [128]u16, out: *[68]u8) void {
         }
         out[64 + g] = @intCast(e + 127);
     }
+    var back: [128]u16 = undefined;
+    unpackIndex(out, &back);
+    if (!std.mem.eql(u16, x, &back)) return error.NotExact;
 }
 
 /// kind 0, `window_fp8`: 32-value E4M3 blocks, UE8M0 scale 2^ceil(log2(max(amax, 1e-4) / 448)); 512 codes, 16 scales.
-pub fn window(x: *const [512]u16, out: *[528]u8) void {
+pub fn window(x: *const [512]u16, out: *[528]u8) Error!void {
     for (0..16) |g| {
         const blk = x[32 * g ..][0..32];
         const e = log2Ceil(@max(amaxOf(blk), 1e-4) / 448.0);
@@ -80,10 +86,13 @@ pub fn window(x: *const [512]u16, out: *[528]u8) void {
         for (blk, 0..) |v, j| out[32 * g + j] = e4code(c.bf16ToF32(v) / scale);
         out[512 + g] = @intCast(e + 127);
     }
+    var back: [512]u16 = undefined;
+    unpackWindow(out, &back);
+    if (!std.mem.eql(u16, x, &back)) return error.NotExact;
 }
 
 /// kind 1, `main_fp4`: 16-value blocks, E4M3 scale of max(amax, 6 2^-9) / 6, E2M1 nibbles; 256 code bytes, 32 scales.
-pub fn mainRow(x: *const [512]u16, out: *[288]u8) void {
+pub fn mainRow(x: *const [512]u16, out: *[288]u8) Error!void {
     for (0..32) |g| {
         const blk = x[16 * g ..][0..16];
         const sc = e4code(@max(amaxOf(blk), 6.0 * 0x1p-9) / 6.0);
@@ -95,10 +104,13 @@ pub fn mainRow(x: *const [512]u16, out: *[288]u8) void {
         }
         out[256 + g] = sc;
     }
+    var back: [512]u16 = undefined;
+    unpackMain(out, &back);
+    if (!std.mem.eql(u16, x, &back)) return error.NotExact;
 }
 
 /// kind 2, `index_fp4`: 32-value blocks, UE8M0 scale 2^ceil(log2(max(amax, 6 2^-126) / 6)); 64 codes, 4 scales.
-pub fn index(x: *const [128]u16, out: *[68]u8) void {
+pub fn index(x: *const [128]u16, out: *[68]u8) Error!void {
     for (0..4) |g| {
         const blk = x[32 * g ..][0..32];
         const e = log2Ceil(@max(amaxOf(blk), min_e8) / 6.0);
@@ -110,6 +122,9 @@ pub fn index(x: *const [128]u16, out: *[68]u8) void {
         }
         out[64 + g] = @intCast(e + 127);
     }
+    var back: [128]u16 = undefined;
+    unpackIndex(out, &back);
+    if (!std.mem.eql(u16, x, &back)) return error.NotExact;
 }
 
 /// `dsv41_unpack` kind 0: bf16 of e4m3(code) * 2^(scale - 127).

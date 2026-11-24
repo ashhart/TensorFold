@@ -35,9 +35,10 @@ index keys as 132 bytes (128 e4m3 and a power-of-two fp32 scale). The Metal engi
 | served lane (the EXL3 Metal lane) | 528 B (fp8 e4m3 + UE8M0, 32-blocks), slot `pos % 128` | 288 B (E2M1 + E4M3, 16-blocks) | 68 B |
 
 So the conversion is not a memcpy. CUDA fp8 decodes to bf16 exactly (a product of an e4m3 value and a power of two), the
-neutral form loses nothing, and the importer packs it with scalar mirrors of each Metal packer (`fp4.zig`). The loss is
-exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served lane), RoPE dims of a window row to fp8
-(served lane), index keys to fp4 (both).
+neutral form loses nothing, and the importer packs it with scalar mirrors of each Metal packer (`fp4.zig`). A packer
+returns `error.NotExact` instead of a row the lane's format would hold with other values, so a hand-off lands only when
+it is lossless there: an fp4 pool row, an fp8 window row and an fp4 index key each take a record whose values are
+already on that format's grid, and one that is not is refused rather than rounded.
 
 ## Tests
 
