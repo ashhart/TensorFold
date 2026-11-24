@@ -224,12 +224,6 @@ fn learnCore(
     srv.slide.mark(id, .learning);
     srv.slide.phase(id, .reading);
 
-    if (opts.replace_id) |old_id| {
-        _ = srv.engine.memoryOp(&.{ .forget_parent = old_id });
-        srv.slide.note(old_id, std.fmt.allocPrint(a, "replaced by fact {d}", .{id}) catch "replaced");
-        srv.slide.mark(old_id, .replaced);
-    }
-
     var total_tokens: u32 = 0;
     var unit_count: usize = 0;
     var superseded_pid: u32 = 0;
@@ -357,6 +351,15 @@ fn learnCore(
     if (save_res.err != null) {
         _ = srv.engine.memoryOp(&.{ .forget_parent = id });
         return error.SaveFailed;
+    }
+    // the replaced fact goes only once its replacement is durable; if it cannot, the new one is withdrawn instead
+    if (opts.replace_id) |old_id| {
+        if (srv.engine.memoryOp(&.{ .forget_parent = old_id }).err != null) {
+            _ = srv.engine.memoryOp(&.{ .forget_parent = id });
+            return error.ReplaceFailed;
+        }
+        srv.slide.note(old_id, std.fmt.allocPrint(a, "replaced by fact {d}", .{id}) catch "replaced");
+        srv.slide.mark(old_id, .replaced);
     }
 
     // Apply undoable supersession tombstone AFTER new unit is persisted!
@@ -626,9 +629,9 @@ pub fn forgetMany(srv: *Server, conn: *Conn, a: Allocator, ids: []const u32, rea
     sse.done(conn) catch {};
 }
 
-/// Clears every taught memory unit and removes `living-weights.safetensors`.
-pub fn clearAll(srv: *Server) void {
+/// Clears every taught memory unit and removes `living-weights.safetensors`: the error when its files stay.
+pub fn clearAll(srv: *Server) ?[]const u8 {
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
-    _ = srv.engine.memoryOp(&.clear_all);
+    return srv.engine.memoryOp(&.clear_all).err;
 }

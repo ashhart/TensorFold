@@ -174,26 +174,23 @@ pub const Holder = struct {
                 };
             },
             .forget_parent => |pid| {
-                const removed = b.forgetParent(pid);
-                const nbytes = b.persistTombstone(.forget_parent, pid, 0) catch |e| {
+                // durable first: on a failed write the bank is unchanged and the error is the result
+                const removed = b.forgetDurable(pid) catch |e| {
                     return .{ .err = @errorName(e) };
                 };
                 return .{
                     .units = b.activeUnitCount(),
                     .affected = removed,
-                    .bytes = nbytes,
+                    .bytes = b.last_bytes,
                     .deltas = b.pending_deltas,
                     .clusters = @intCast(b.cluster_index.n_clusters),
                 };
             },
             .clear_all => {
-                const removed: u32 = @intCast(b.units.items.len);
-                for (b.units.items) |*u| u.deinit(b.gpa);
-                b.units.clearRetainingCapacity();
-                const nbytes = b.saveFull() catch |e| {
+                const removed = b.clearDurable() catch |e| { // the files go first: on failure the units stay
                     return .{ .err = @errorName(e) };
                 };
-                return .{ .units = 0, .affected = removed, .bytes = nbytes };
+                return .{ .units = 0, .affected = removed, .bytes = 0 };
             },
             .stats => {
                 return .{
