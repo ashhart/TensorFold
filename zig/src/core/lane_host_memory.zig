@@ -1,5 +1,4 @@
-//! Engine.memoryOp for LaneHost: HTTP/background threads post Folded Memory Weights ops, and the
-//! engine thread executes them either idle OR interleaved mid-flight between decode rounds!
+//! Engine.memoryOp for LaneHost: threads post memory ops; the engine thread runs them idle or between rounds.
 const std = @import("std");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
@@ -39,10 +38,7 @@ pub fn ready(h: *const LaneHost) bool {
     return h.folded_memory != null and h.mem_ops.asks.items.len > 0 and h.admitted.items.len == 0;
 }
 
-/// Runs AT MOST ONE queued memory op mid-flight between decode rounds whenever safe:
-/// - CPU-only ops (`save`, `forget_parent`, `stats`, `clear_all`) run immediately between rounds.
-/// - GPU compile ops (`init`, `teach_chunk`) run whenever the engine is idle OR at least one spare
-///   lane is free (`admitted < lanes`), letting live streaming traffic keep flowing with minimal pause!
+/// Runs at most one queued memory op between rounds; GPU ops (`init`, `teach_chunk`) need idle or a free lane.
 pub fn answerOneInFlight(h: *LaneHost) void {
     if (h.folded_memory == null) return; // set before the host starts: without a bank, no lock between rounds
     h.lock();

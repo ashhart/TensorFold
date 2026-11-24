@@ -136,8 +136,7 @@ pub fn runHidden(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const
     return runImpl(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, .{}, true);
 }
 
-/// Folded Memory Weights v6 partial forward (pure attention): runs layers `0..=layer_sem`,
-/// capturing post-layer BF16 residuals at `layer_lex` and `layer_sem` with strict command-buffer sync.
+/// Partial forward through layer `layer_sem`, copying BF16 residuals at `layer_lex` and `layer_sem` (synced).
 pub fn runPartial(
     m: *const Model,
     s: *st.Scratch,

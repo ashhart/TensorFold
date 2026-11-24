@@ -259,7 +259,7 @@ test "memory bank(v6): delta journal replay, temporal belief revision + undo res
     const pref_ids = [_]u32{ 1, 2, 3, 4 };
     const suf_ids = [_]u32{ 5, 6 };
 
-    // Part A: Hybrid bank -> base save -> delta append -> belief supersession -> reload replay -> undo restore -> sleep-time consolidation
+    // Part A: hybrid bank: save, delta, supersession, reload replay, undo restore, consolidation
     {
         const arch = ArchSpec{
             .family = .qwen3_5,
@@ -330,7 +330,7 @@ test "memory bank(v6): delta journal replay, temporal belief revision + undo res
         try std.testing.expectEqual(@as(u32, 4 + 5 + 2), s_old.at);
         backend.dropSnap(backend.ctx, s_old.saved);
 
-        // 5. Teach 2 standing policies -> sleep-time consolidation builds unified spectral `skill_rec` & compacts deltas!
+        // 5. Teach 2 standing policies -> consolidation builds spectral `skill_rec` and compacts deltas
         const pol1 = [_]u32{ 50, 51, 52 };
         const pol2 = [_]u32{ 53, 54, 55 };
         _ = try b2.teachChunk(.{ .parent_id = 10, .body_ids = &pol1, .gate_ids = &.{}, .is_standing = true });

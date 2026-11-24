@@ -1,5 +1,4 @@
-//! Self-contained safetensors reader & atomic writer for Folded Memory Weights (`living-weights.safetensors`).
-//! Stores ONLY pure numerical weight tensors + structural metadata (ZERO raw plaintext!).
+//! Safetensors reader and atomic writer for Folded Memory Weights: numeric tensors and metadata, no plaintext.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

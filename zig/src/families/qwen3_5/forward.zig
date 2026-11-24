@@ -120,8 +120,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     }
 }
 
-/// Partial forward on `tokens` (at most `s.rows`) through layer `layer_sem`, capturing the exact
-/// post-block residual hidden states at `layer_lex` and `layer_sem` into `tap_lex` and `s.h` (bf16).
+/// Partial forward to `layer_sem`; residuals at `layer_lex` -> `tap_lex`, at `layer_sem` -> `s.h` (bf16).
 pub fn runPartial(
     m: *Model,
     s: *st.Scratch,
@@ -159,8 +158,7 @@ pub fn runPartial(
     for (m.weights.blocks, 0..) |block, i| {
         enc.norm(s.h, if (i == 0) null else s.r, block.input_norm, s.x, total);
         if (i == layer_lex + 1) {
-            // `s.h` is untracked Metal storage: commit+wait before reading `s.h` so there is
-            // zero cross-encoder hazard between compute, copy, and the remaining layers!
+            // `s.h` is untracked Metal storage: commit and wait before reading it.
             enc.e.end();
             cb.commit();
             cb.wait();
