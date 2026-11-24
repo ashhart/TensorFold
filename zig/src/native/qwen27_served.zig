@@ -554,4 +554,5 @@ test {
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_served_test.zig");
     _ = @import("qwen27_startup_line.zig");
+    _ = @import("qwen27_mtp.zig");
 }
