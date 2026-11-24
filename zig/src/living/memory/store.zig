@@ -9,24 +9,12 @@ pub const format_tag_v4 = "tf-living-memory-v4";
 pub const format_tag_v3 = "tf-living-memory-v3";
 pub const file_name = "living-weights.safetensors";
 pub const delta_file_name = "living-weights.delta";
-pub const delta_magic = [4]u8{ 'T', 'F', 'D', '6' };
-
-pub const DeltaOp = enum(u8) {
-    add_unit = 1,
-    forget_parent = 2,
-    supersede_parent = 3,
-    reinforce_parent = 4,
-};
-
-pub const DeltaFrame = struct {
-    op: DeltaOp,
-    payload: []u8,
-
-    pub fn deinit(self: *DeltaFrame, gpa: Allocator) void {
-        gpa.free(self.payload);
-        self.* = undefined;
-    }
-};
+const journal = @import("journal.zig");
+pub const delta_magic = journal.delta_magic;
+pub const DeltaOp = journal.DeltaOp;
+pub const DeltaFrame = journal.DeltaFrame;
+pub const appendDeltaFrame = journal.appendDeltaFrame;
+pub const readDeltaFrames = journal.readDeltaFrames;
 
 pub const DType = enum {
     u8,
@@ -137,9 +125,21 @@ pub fn writeFileAtomic(
         for (tensors) |t| {
             if (t.bytes.len > 0) try f.writeStreamingAll(io, t.bytes);
         }
+        try f.sync(io); // the bytes are on disk before the name points at them
     }
     try Io.Dir.cwd().rename(tmp_path, Io.Dir.cwd(), path, io);
+    try syncParent(io, path);
     return @intCast(8 + hdr.items.len + offset);
+}
+
+/// The rename itself made durable: the directory holding `path` synced (POSIX; Windows has no directory sync).
+pub fn syncParent(io: Io, path: []const u8) !void {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    // iterate opens a real descriptor (not O_PATH), which fsync takes
+    var d = try Io.Dir.cwd().openDir(io, std.fs.path.dirname(path) orelse ".", .{ .iterate = true });
+    defer d.close(io);
+    const handle: Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+    try handle.sync(io);
 }
 
 fn appendJsonString(gpa: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
@@ -290,72 +290,6 @@ pub fn serializeToBytes(
         }
     }
     return out;
-}
-
-/// Appends one CRC32-protected binary frame to `<model_dir>/living-weights.delta` in O(1 unit) (< 1 ms!).
-/// Layout: [4B magic "TFD6"][1B op][3B zero][8B payload_len LE][4B crc32 LE][4B zero][payload...]
-pub fn appendDeltaFrame(io: Io, delta_path: []const u8, op: DeltaOp, payload: []const u8) !u64 {
-    const f = try Io.Dir.cwd().createFile(io, delta_path, .{ .truncate = false, .read = true });
-    defer f.close(io);
-    const end_off = try f.length(io);
-
-    var hdr: [24]u8 = @splat(0);
-    @memcpy(hdr[0..4], &delta_magic);
-    hdr[4] = @backingInt(op);
-    std.mem.writeInt(u64, hdr[8..16], @intCast(payload.len), .little);
-    std.mem.writeInt(u32, hdr[16..20], std.hash.Crc32.hash(payload), .little);
-
-    try f.writePositionalAll(io, &hdr, end_off);
-    if (payload.len > 0) {
-        try f.writePositionalAll(io, payload, end_off + hdr.len);
-    }
-    return end_off + hdr.len + payload.len;
-}
-
-/// Reads all valid CRC-verified frames from `living-weights.delta`.
-/// Crash-safe: any truncated or corrupted tail frame stops iteration cleanly without failing startup!
-pub fn readDeltaFrames(gpa: Allocator, io: Io, delta_path: []const u8) ![]DeltaFrame {
-    const f = Io.Dir.cwd().openFile(io, delta_path, .{}) catch return try gpa.alloc(DeltaFrame, 0);
-    defer f.close(io);
-    const total_len = std.math.cast(usize, try f.length(io)) orelse return try gpa.alloc(DeltaFrame, 0);
-    if (total_len < 24) return try gpa.alloc(DeltaFrame, 0);
-
-    const raw = try gpa.alloc(u8, total_len);
-    defer gpa.free(raw);
-    const got = try f.readPositionalAll(io, raw, 0);
-    if (got != total_len) return try gpa.alloc(DeltaFrame, 0);
-
-    var frames: std.ArrayList(DeltaFrame) = .empty;
-    errdefer {
-        for (frames.items) |*fr| fr.deinit(gpa);
-        frames.deinit(gpa);
-    }
-
-    var off: usize = 0;
-    while (off + 24 <= raw.len) {
-        if (!std.mem.eql(u8, raw[off .. off + 4], &delta_magic)) break;
-        const op_raw = raw[off + 4];
-        const op: DeltaOp = switch (op_raw) {
-            1 => .add_unit,
-            2 => .forget_parent,
-            3 => .supersede_parent,
-            4 => .reinforce_parent,
-            else => break,
-        };
-        const plen_u64 = std.mem.readInt(u64, raw[off + 8 ..][0..8], .little);
-        const plen = std.math.cast(usize, plen_u64) orelse break;
-        if (plen > 256 * 1024 * 1024 or off + 24 + plen > raw.len) break;
-        const expected_crc = std.mem.readInt(u32, raw[off + 16 ..][0..4], .little);
-        const slice = raw[off + 24 .. off + 24 + plen];
-        if (std.hash.Crc32.hash(slice) != expected_crc) break;
-
-        try frames.append(gpa, .{
-            .op = op,
-            .payload = try gpa.dupe(u8, slice),
-        });
-        off += 24 + plen;
-    }
-    return frames.toOwnedSlice(gpa);
 }
 
 /// Checks quickly whether `<dir>/living-weights.safetensors` exists and carries a supported Folded Memory format tag.
@@ -516,54 +450,4 @@ test "store: atomic safetensors write + read roundtrip with metadata and all dty
     const got_bf16 = try loaded.copyBf16(gpa, "t.bf16", 2);
     defer gpa.free(got_bf16);
     try std.testing.expectEqualSlices(u16, &bf16_vals, got_bf16);
-}
-
-test "store(v6): crash-safe CRC delta journal append, replay, and truncated-tail recovery" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(dir);
-    const dpath = try std.fs.path.join(gpa, &.{ dir, delta_file_name });
-    defer gpa.free(dpath);
-
-    const vals = [_]f32{ 3.5, -1.25 };
-    const meta = [_]MetaKV{.{ .key = "uid", .value = "7" }};
-    const tensors = [_]TensorSpec{
-        .{ .name = "u.t", .dtype = .f32, .shape = &.{2}, .bytes = std.mem.sliceAsBytes(&vals) },
-    };
-    const blob = try serializeToBytes(gpa, &meta, &tensors);
-    defer gpa.free(blob);
-
-    _ = try appendDeltaFrame(io, dpath, .add_unit, blob);
-    var sup: [8]u8 = undefined;
-    std.mem.writeInt(u32, sup[0..4], 2, .little);
-    std.mem.writeInt(u32, sup[4..8], 7, .little);
-    _ = try appendDeltaFrame(io, dpath, .supersede_parent, &sup);
-
-    // Simulate a sudden power-loss partial frame appended at the tail
-    {
-        const f = try Io.Dir.cwd().createFile(io, dpath, .{ .truncate = false, .read = true });
-        defer f.close(io);
-        const end = try f.length(io);
-        try f.writePositionalAll(io, "TFD6\x01\x00\x00\x00\x99\x00\x00", end);
-    }
-
-    const frames = try readDeltaFrames(gpa, io, dpath);
-    defer {
-        for (frames) |*fr| fr.deinit(gpa);
-        gpa.free(frames);
-    }
-    try std.testing.expectEqual(@as(usize, 2), frames.len);
-    try std.testing.expectEqual(DeltaOp.add_unit, frames[0].op);
-    try std.testing.expectEqual(DeltaOp.supersede_parent, frames[1].op);
-
-    // Parse the safetensors blob inside frame 0
-    var lf = try parseOwnedBytes(gpa, try gpa.dupe(u8, frames[0].payload));
-    defer lf.deinit();
-    try std.testing.expectEqualStrings("7", lf.getMeta("uid").?);
-    const got = try lf.copyF32(gpa, "u.t", 2);
-    defer gpa.free(got);
-    try std.testing.expectEqualSlices(f32, &vals, got);
 }
