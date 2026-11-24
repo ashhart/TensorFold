@@ -15,6 +15,7 @@ const Script = struct {
     cancels: usize = 0,
     await_cancel: bool = false,
     logprobs: bool = false,
+    reason: api.Reason = .length, // how the engine ends the script: stop for a reply that ends on its own
     active: ?struct { id: api.Id, sink: api.Sink } = null,
 
     fn engine(s: *Script) api.Engine {
@@ -47,7 +48,7 @@ const Script = struct {
             }
             sink.event(sink.ctx, id, &.{ .tokens = batch });
         }
-        if (!s.await_cancel) sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .length } });
+        if (!s.await_cancel) sink.event(sink.ctx, id, &.{ .finished = .{ .reason = s.reason } });
     }
 
     fn cancel(ctx: *anyopaque, _: api.Id) void {
@@ -332,7 +333,7 @@ test "token stream: a call's logprob entries name their positions in the last ch
     const reply = "ok <tool_call>\n{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}\n</tool_call>";
     const ids = try a.alloc(u32, reply.len);
     for (ids, reply) |*id, byte| id.* = byte;
-    var script: Script = .{ .ids = ids, .stride = 4, .logprobs = true };
+    var script: Script = .{ .ids = ids, .stride = 4, .logprobs = true, .reason = .stop };
     const srv = try Server.init(std.testing.allocator, std.testing.io, script.engine(), exactText(&text, &table), .{
         .served_name = "m",
         .model_ids = &.{"m"},
@@ -400,7 +401,7 @@ test "token stream: reasoning and tools keep ordinary deltas including the final
     };
     for (cases) |case| for ([_]usize{ 1, 128 }) |stride| {
         const expected = try preflight.TestText.encode(&text, a, case.reply, false);
-        var script: Script = .{ .ids = expected, .stride = stride };
+        var script: Script = .{ .ids = expected, .stride = stride, .reason = .stop };
         const srv = try Server.init(std.testing.allocator, std.testing.io, script.engine(), text.text(), .{
             .served_name = "m",
             .model_ids = &.{"m"},
