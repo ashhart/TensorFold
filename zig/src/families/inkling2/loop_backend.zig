@@ -29,9 +29,9 @@ pub fn laneAllocs(vocab: u32) [2]usize {
 
 /// The device bytes each served stream holds: its model slot (engine.slotAllocs) and its lane buffers.
 pub fn streamBytes(m: *const Model) u64 {
-    const slot = engine.slotAllocs(&m.layout, m.w.p.n_visits);
+    const slot = engine.slotAllocs(&m.layout, m.w);
     const lane = laneAllocs(m.w.c.text.unpadded_vocab);
-    return slot[0] + slot[1] + lane[0] + lane[1];
+    return slot[0] + slot[1] + slot[2] + slot[3] + lane[0] + lane[1];
 }
 
 pub const Backend = struct {
