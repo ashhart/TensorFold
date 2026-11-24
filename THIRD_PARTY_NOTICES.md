@@ -74,7 +74,7 @@ model math.
 ## Vulkan shaders from omarchy-mlx
 
 These files in `zig/kernels/vulkan/` come from [omarchy-mlx](https://github.com/joshuaswarren/omarchy-mlx),
-MIT License, Copyright © 2026 Joshua Warren and mlx-omarchy contributors. The first lines of each file name its
+MIT License, Copyright © 2026 Joshua Warren. The first lines of each file name its
 source path and commit. The native Vulkan path does not link MLX.
 
 - `argreduce_chunk.comp`
