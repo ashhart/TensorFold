@@ -24,7 +24,7 @@ export interface AppState {
   settings: Settings | null
   threads: Thread[]
   view: View
-  notice: { kind: 'error' | 'info'; message: string; authored?: true } | null
+  notice: { kind: 'error' | 'info'; message: string; authored?: true; persistent?: true } | null
   status: Record<string, RunStatus>
   approvals: Record<string, Approval[]>
   resolvedTheme: 'light' | 'dark'
@@ -99,7 +99,7 @@ export interface AppState {
   cycleApprovalMode(): void
   setView(v: View): void
   dismissNotice(): void
-  setNotice(notice: { kind: 'error' | 'info'; message: string; authored?: true } | null): void
+  setNotice(notice: { kind: 'error' | 'info'; message: string; authored?: true; persistent?: true } | null): void
   newThread(projectId?: string | null): Promise<void>
   newChat(projectId?: string | null): Promise<void>
   // Fork a thread from one of its turn checkpoints (VST-036). The host creates and seeds
