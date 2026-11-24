@@ -1,9 +1,10 @@
-//! A managed child's output reaches its log file only through the parent: read from a pipe, keys replaced first.
+//! A managed child's output reaches its log file only through the parent: read from a pipe, a line at a time.
 const std = @import("std");
 const sse = @import("benchmark_sse.zig");
+const credential = @import("sys").credential;
 const posix = std.posix;
 
-/// Held bytes past this length are written as one replacement instead of waiting for more.
+/// A line past this length is withheld through its newline instead of waiting for more.
 const hold_limit = 1 << 20;
 
 pub const Sink = struct {
@@ -13,13 +14,16 @@ pub const Sink = struct {
     /// The child's stdout and stderr; the parent closes its own copy once the child holds it.
     child: std.Io.File,
     secrets: []const []const u8,
+    served: []const u8,
     offset: u64 = 0,
+    /// Serve's port from its serving line, read before redaction and never from the file (0: not yet).
+    port: std.atomic.Value(u16) = .init(0),
     stop: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
     /// A pipe in front of `log`; `secrets` (raw keys) are replaced wherever they or their encodings occur.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, log: std.Io.File, secrets: []const []const u8) !*Sink {
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, log: std.Io.File, secrets: []const []const u8, served: []const u8) !*Sink {
         var fds: [2]posix.fd_t = undefined;
         if (std.c.pipe(&fds) != 0) return error.PipeFailed;
         for (fds) |fd| _ = std.c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
@@ -27,7 +31,7 @@ pub const Sink = struct {
             for (fds) |fd| _ = std.c.close(fd);
             return e;
         };
-        s.* = .{ .io = io, .log = log, .read_fd = fds[0], .child = .{ .handle = fds[1], .flags = .{ .nonblocking = false } }, .secrets = secrets };
+        s.* = .{ .io = io, .log = log, .read_fd = fds[0], .child = .{ .handle = fds[1], .flags = .{ .nonblocking = false } }, .secrets = secrets, .served = served };
         return s;
     }
 
@@ -57,13 +61,43 @@ pub const Sink = struct {
         s.offset += bytes.len;
     }
 
+    /// Serve's port once its serving line has gone through the pipe.
+    pub fn servingPort(s: *const Sink) ?u16 {
+        const p = s.port.load(.acquire);
+        return if (p == 0) null else p;
+    }
+
+    /// With keys, the exact text written for one line: its keys replaced, and the result itself free of every key.
+    fn written(s: *const Sink, a: std.mem.Allocator, raw: []const u8) []const u8 {
+        const candidate = sse.redact(a, raw, s.secrets) catch return s.marker(a);
+        return if (credential.contains(a, candidate, s.secrets) catch true) s.marker(a) else candidate;
+    }
+
+    /// The fixed text in place of a withheld line, or nothing when that text is itself a key.
+    fn marker(s: *const Sink, a: std.mem.Allocator) []const u8 {
+        return if (credential.contains(a, credential.withheld, s.secrets) catch true) "" else credential.withheld;
+    }
+
+    /// One whole line (`newline`: it ended in one, else the stream ended): readiness from its raw bytes, then the file.
+    fn line(s: *Sink, a: std.mem.Allocator, raw: []const u8, newline: bool) void {
+        if (s.served.len > 0 and s.port.load(.acquire) == 0) {
+            if (@import("benchmark_server.zig").servingPort(raw, s.served)) |p| s.port.store(p, .release);
+        }
+        if (s.secrets.len == 0) return; // written as it came
+        s.append(s.written(a, raw));
+        if (newline) s.append("\n");
+    }
+
     fn run(s: *Sink) void {
         defer s.done.store(true, .release);
-        var held: std.ArrayList(u8) = .empty;
+        var held: std.ArrayList(u8) = .empty; // the current line, up to hold_limit
         defer held.deinit(std.heap.page_allocator);
+        var over = false; // the current line passed hold_limit: nothing more of it is kept or written
         var buf: [64 << 10]u8 = undefined;
         var fds = [_]posix.pollfd{.{ .fd = s.read_fd, .events = posix.POLL.IN, .revents = 0 }};
         var after_stop: u32 = 0;
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
         while (true) {
             const stopping = s.stop.load(.acquire);
             if (stopping) after_stop += 1;
@@ -75,29 +109,31 @@ pub const Sink = struct {
             if (after_stop > 256) break; // a writer that never pauses cannot hold the stop
             const n = posix.read(s.read_fd, &buf) catch break;
             if (n == 0) break;
-            if (s.secrets.len == 0) {
-                s.append(buf[0..n]);
-                continue;
-            }
-            held.appendSlice(std.heap.page_allocator, buf[0..n]) catch break;
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            const piece = sse.redactPiece(arena.allocator(), held.items, s.secrets) catch {
-                s.append("[redacted]");
+            if (s.secrets.len == 0) s.append(buf[0..n]);
+            var rest = buf[0..n];
+            while (rest.len > 0) {
+                const end = std.mem.indexOfScalar(u8, rest, '\n');
+                const part = rest[0 .. end orelse rest.len];
+                rest = if (end) |e| rest[e + 1 ..] else rest[rest.len..];
+                if (!over) held.appendSlice(std.heap.page_allocator, part) catch {
+                    over = true;
+                };
+                if (!over and held.items.len > hold_limit) over = true;
+                if (over and held.items.len > 0) {
+                    if (s.secrets.len > 0) s.append(s.marker(arena.allocator()));
+                    held.clearRetainingCapacity();
+                }
+                if (end == null) continue;
+                if (over) {
+                    if (s.secrets.len > 0) s.append("\n");
+                    over = false;
+                } else s.line(arena.allocator(), held.items, true);
                 held.clearRetainingCapacity();
-                continue;
-            };
-            s.append(piece.text);
-            const rest = piece.rest.len;
-            std.mem.copyForwards(u8, held.items[0..rest], piece.rest);
-            held.shrinkRetainingCapacity(rest);
-            if (held.items.len > hold_limit) {
-                s.append("[redacted]");
-                held.clearRetainingCapacity();
+                _ = arena.reset(.retain_capacity);
             }
         }
-        // a suffix still held could become a key: its place is marked, its bytes are not written
-        if (held.items.len > 0) s.append("[redacted]");
+        // a last line without its newline is whole now: nothing can follow it
+        if (!over and held.items.len > 0) s.line(arena.allocator(), held.items, false);
     }
 };
 
@@ -110,7 +146,7 @@ test "benchmark log: a key written to the child's stream reaches the file only a
     for (0..text.len) |split| {
         const log = try tmp.dir.createFile(io, "child.log", .{ .read = true, .truncate = true });
         defer log.close(io);
-        const s = try Sink.open(std.testing.allocator, io, log, &.{secret});
+        const s = try Sink.open(std.testing.allocator, io, log, &.{secret}, "");
         const writer = std.c.dup(s.child.handle);
         try s.started();
         _ = std.c.write(writer, text.ptr, split);
@@ -133,7 +169,7 @@ test "benchmark log: without keys the child's bytes reach the file unchanged" {
     defer tmp.cleanup();
     const log = try tmp.dir.createFile(io, "child.log", .{ .read = true });
     defer log.close(io);
-    const s = try Sink.open(std.testing.allocator, io, log, &.{});
+    const s = try Sink.open(std.testing.allocator, io, log, &.{}, "");
     const writer = std.c.dup(s.child.handle);
     try s.started();
     _ = std.c.write(writer, "plain output\n", 13);
@@ -142,4 +178,52 @@ test "benchmark log: without keys the child's bytes reach the file unchanged" {
     s.close(std.testing.allocator);
     var out: [64]u8 = undefined;
     try std.testing.expectEqualStrings("plain output\n", out[0..try log.readPositionalAll(io, &out, 0)]);
+}
+
+/// What the sink wrote for `text`, sent in two writes split at `split`, under `secrets`.
+fn through(io: std.Io, dir: std.Io.Dir, secrets: []const []const u8, text: []const u8, split: usize, out: []u8) ![]const u8 {
+    const log = try dir.createFile(io, "child.log", .{ .read = true, .truncate = true });
+    defer log.close(io);
+    const s = try Sink.open(std.testing.allocator, io, log, secrets, "");
+    const writer = std.c.dup(s.child.handle);
+    try s.started();
+    _ = std.c.write(writer, text.ptr, split);
+    _ = std.c.write(writer, text[split..].ptr, text.len - split);
+    _ = std.c.close(writer);
+    s.settle(5000);
+    s.close(std.testing.allocator);
+    return out[0..try log.readPositionalAll(io, out, 0)];
+}
+
+test "benchmark log: no replacement, marker or held suffix writes a configured key, at any split" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { secrets: []const []const u8, text: []const u8 }{
+        .{ .secrets = &.{"[redacted]"}, .text = "a [redacted] b\nnext\n" }, // the key is the replacement text
+        // a replacement completes a key
+        .{ .secrets = &.{ "[redacted]-suffix", "fixture-log-key" }, .text = "fixture-log-key-suffix\nnext\n" },
+        .{ .secrets = &.{ "[redacted]", "[withheld]" }, .text = "x [redacted]\nnext\n" }, // both fixed texts are keys
+        .{ .secrets = &.{"[redacted]"}, .text = "held [" }, // a suffix held at the end of the stream
+    };
+    var out: [256]u8 = undefined;
+    for (cases) |case| for (0..case.text.len + 1) |split| {
+        const got = try through(io, tmp.dir, case.secrets, case.text, split, &out);
+        for (case.secrets) |k| try std.testing.expect(std.mem.indexOf(u8, got, k) == null);
+        if (std.mem.endsWith(u8, case.text, "next\n")) try std.testing.expect(std.mem.endsWith(u8, got, "\nnext\n"));
+    };
+}
+
+test "benchmark log: a line past the hold limit writes no configured key" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const long = try std.testing.allocator.alloc(u8, hold_limit + 4096 + 6);
+    defer std.testing.allocator.free(long);
+    @memset(long, 'x');
+    @memcpy(long[long.len - 6 ..], "\nnext\n");
+    var out: [4096]u8 = undefined;
+    const got = try through(io, tmp.dir, &.{"[redacted]"}, long, 1000, &out);
+    try std.testing.expect(std.mem.indexOf(u8, got, "[redacted]") == null);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\nnext\n"));
 }
