@@ -28,7 +28,7 @@ pub const Layer = struct {
     post_ffn: u64,
     /// q_norm then k_norm, fp32 [2, 128].
     qk_norm: u64,
-    /// sigmoid(value_res_lambda): v_proj's input is lerp(seed, normed, blend).
+    /// sigmoid(value_res_lambda) rounded to bf16: v_proj's input is lerp(seed, normed, blend).
     blend: f32,
     q: Weight,
     k: Weight,
@@ -125,6 +125,13 @@ pub fn exl3(w: *Weights, d: *const cuda.Driver, ck: *core.Checkpoint, base: []co
     return out;
 }
 
+/// The blend from value_res_lambda as a pack stores it (fp32): the release's bf16 value, refused when it is not one.
+fn blendOf(lambda: [4]u8) !f32 {
+    const bits = std.mem.readInt(u32, &lambda, .little);
+    if (bits & 0xffff != 0) return error.UnsupportedRicursivePrecision;
+    return config.blendOf(@intCast(bits >> 16));
+}
+
 /// The whole pack (or a rank's share) onto the device.
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint, c: config.Config, cut: Cut) !Weights {
     if (!c.exl3) return error.UnsupportedRicursivePrecision;
@@ -151,8 +158,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         l.qk_norm = try w.put(d, std.mem.sliceAsBytes(&qk));
         const lam = try ck.get(try name(&buf, "{s}self_attn.value_res_lambda", .{p}));
         if (lam.dtype != .f32 or lam.numel() != 1) return error.UnexpectedTensor;
-        const x: f32 = @bitCast(std.mem.readInt(u32, lam.bytes[0..4], .little));
-        l.blend = 1.0 / (1.0 + @exp(-x)); // torch.sigmoid(lambda).item(), as the reference folds it once
+        l.blend = try blendOf(lam.bytes[0..4].*);
         const qw = c.queryWidth();
         const kw = c.kvWidth();
         l.q = try exl3(&w, d, ck, try name(&buf, "{s}self_attn.q_proj", .{p}), qw, h, .columns, cut);
@@ -175,4 +181,12 @@ test "ricursive cut: halves on 128-wide blocks, refused off them" {
     try std.testing.expectEqual(@as(usize, 50176), (try c.span(100352)).lo);
     try std.testing.expectError(error.RicursiveCut, c.span(1000));
     try std.testing.expectError(error.RicursiveCut, (Cut{ .rank = 2, .world = 2 }).span(1024));
+}
+
+test "ricursive tp2 blend: the bf16 sigmoid of a bf16 lambda, any other lambda refused" {
+    const one: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, 0x3f800000)); // lambda 1: 0.7310586 is no bf16 value
+    try std.testing.expectEqual(@as(f32, 0.73046875), try blendOf(one));
+    try std.testing.expectEqual(@as(f32, 0.5), try blendOf(@splat(0)));
+    const off: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, 0x3f800001)); // a float bf16 cannot hold
+    try std.testing.expectError(error.UnsupportedRicursivePrecision, blendOf(off));
 }
