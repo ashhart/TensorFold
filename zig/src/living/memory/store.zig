@@ -86,6 +86,7 @@ pub fn writeFileAtomic(
         try hdr.append(gpa, ':');
         try appendJsonString(gpa, &hdr, kv.value);
     }
+    try appendCrc(gpa, &hdr, meta.len > 0, tensors);
     try hdr.append(gpa, '}');
 
     var offset: usize = 0;
@@ -119,7 +120,7 @@ pub fn writeFileAtomic(
     defer gpa.free(tmp_path);
 
     {
-        const f = try Io.Dir.cwd().createFile(io, tmp_path, .{});
+        const f = try Io.Dir.cwd().createFile(io, tmp_path, .{ .permissions = private_file });
         errdefer Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
         defer f.close(io);
 
@@ -256,6 +257,7 @@ pub fn serializeToBytes(
         try hdr.append(gpa, ':');
         try appendJsonString(gpa, &hdr, kv.value);
     }
+    try appendCrc(gpa, &hdr, meta.len > 0, tensors);
     try hdr.append(gpa, '}');
 
     var offset: usize = 0;
@@ -402,6 +404,11 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
         });
     }
 
+    // the data section's CRC, when the writer recorded it: a flipped byte is refused before any value is used
+    if (meta.get("data_crc32")) |want| {
+        const got = std.hash.Crc32.hash(raw[data_base..]);
+        if ((std.fmt.parseInt(u32, want, 10) catch return error.LivingWeightsCorrupt) != got) return error.LivingWeightsCorrupt;
+    }
     return .{
         .gpa = gpa,
         .arena = arena,
@@ -409,6 +416,17 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
         .meta = meta,
         .tensors = tensors,
     };
+}
+
+/// Learned memory is private: the base, its temporary and the journal are created readable by the owner alone.
+pub const private_file: Io.File.Permissions = if (@hasDecl(Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file;
+
+/// `"data_crc32"` over every tensor's bytes in order, which is the data section the header describes.
+fn appendCrc(gpa: Allocator, hdr: *std.ArrayList(u8), comma: bool, tensors: []const TensorSpec) !void {
+    var crc = std.hash.Crc32.init();
+    for (tensors) |t| crc.update(t.bytes);
+    var buf: [40]u8 = undefined;
+    try hdr.appendSlice(gpa, try std.fmt.bufPrint(&buf, "{s}\"data_crc32\":\"{d}\"", .{ if (comma) "," else "", crc.final() }));
 }
 
 test "store: atomic safetensors write + read roundtrip with metadata and all dtypes" {
