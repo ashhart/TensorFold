@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: `tf-h3-image-prompt` writes a whole text-to-image case from a size and a seed (the canvas, the size and the seed's starting rows), so text to image runs end to end with TensorFold's own tools, and `tf-h3-image ... free` exits 0 when there is no reference to gate against (#2781).
+
 - Flash Next on Metal: `--ssd-experts GIB` now fits an oversized SSD expert pool to the load ceiling instead of refusing the load; nothing changes without the flag (#4811).
 
 - Metal on M5: 5-bit and 6-bit group-64 checkpoints get split-plane storage and register-direct lane kernels (#4419). Thanks @gilby.
