@@ -7,6 +7,7 @@ const moe_route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const mm_groups = @import("mm_groups.zig");
 const hc = @import("../../core/hc.zig");
+const affine = @import("affine.zig");
 const wide = @import("wide.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
@@ -49,6 +50,8 @@ pub const Kernels = struct {
     kda_window: mtl.Pipeline, // windows of 2+ rows: kda_rows' values, the rows' gates, convolutions and norms at once
     kda_window_tp: mtl.Pipeline,
     kda_parts: mtl.Pipeline, // all 64 heads on two threadgroups each (their value columns), raw outputs and gates
+    kda_parts_q8: mtl.Pipeline,
+    kda_window_q8: mtl.Pipeline,
     kda_norm: mtl.Pipeline, // then each row's head normed and gated: kda_rows' values
     kda_split: bool = false, // 2+ row steps take kda_parts and kda_norm (an Ultra's GPU idles at 64 groups)
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
@@ -137,6 +140,27 @@ pub const Kernels = struct {
         if (k.wide != null) return;
         k.wide = try wide.load(gpa, device);
         k.source_hash ^= k.wide.?.hash;
+    }
+
+    /// Compile TFQ3 pipelines lazily when a checkpoint contains TFQ3 layers or non-MoE tensors.
+    pub fn enableTfq3(k: *Kernels, gpa: std.mem.Allocator, device: mtl.Device) !void {
+        try k.widen(gpa, device);
+        const w = &k.wide.?;
+        if (w.tfq3 != null) return;
+        w.tfq3 = try wide.tfq3.Pipes.init(gpa, device, wide.glue_math);
+        k.source_hash ^= w.tfq3.?.hash;
+    }
+
+    /// Pick the KDA recurrence pipeline and whether Ultra split-parts mode applies (4-bit or 8-bit/64 gates).
+    pub fn kdaSelect(k: *const Kernels, gate: wide.KdaGate, f_b: affine.Affine, g_b: affine.Affine, tp: u32, rows: u32) struct { pipe: mtl.Pipeline, parts: bool } {
+        const is_q8 = f_b.more == 0 and g_b.more == 0 and f_b.group == 64 and g_b.group == 64 and f_b.bits == 8 and g_b.bits == 8;
+        const parts = ((gate == .generated and rows > 1) or is_q8) and k.kda_split and tp == 1;
+        const pipe = switch (gate) {
+            .generated => if (parts) k.kda_parts else if (rows > 1) (if (tp > 1) k.kda_window_tp else k.kda_window) else if (tp > 1) k.kda_rows_tp else k.kda_rows,
+            .fused => |p| if (is_q8 and parts) k.kda_parts_q8 else if (is_q8 and rows > 1 and tp == 1) k.kda_window_q8 else p,
+            .pre => |p| p,
+        };
+        return .{ .pipe = pipe, .parts = parts };
     }
 };
 
@@ -330,8 +354,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const m3_def = if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, m3_def, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
     defer gpa.free(kda_src);
-    var kda_out: [10]mtl.Pipeline = undefined;
-    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp", "glm_kda_parts", "glm_kda_norm" }, .out = &kda_out };
+    var kda_out: [12]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp", "glm_kda_parts", "glm_kda_norm", "glm_kda_parts_q8", "glm_kda_window_q8" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     var sparse_out: [3]mtl.Pipeline = undefined;
@@ -445,6 +469,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.kda_window_tp = kda_out[7];
     k.kda_parts = kda_out[8];
     k.kda_norm = kda_out[9];
+    k.kda_parts_q8 = kda_out[10];
+    k.kda_window_q8 = kda_out[11];
     k.kda_split = splitKda(std.mem.span(device.name()));
     k.sparse_nax = sparse_out[0];
     k.sparse_split = sparse_out[1];
