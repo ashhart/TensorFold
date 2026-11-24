@@ -79,7 +79,11 @@ fn retainFromBody(a: Allocator, raw: []const u8) (Allocator.Error || error{Inval
 }
 /// POST /v1/prompt_cache/flush under the request cancel route's rule: an admin key, or a direct loopback caller.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
-    const body = http_body.read(conn, a, http_body.limit) catch return conn.sendError(a, 500, "out of memory", null) catch {};
+    // main read and dropped the body here and flushed all: a body not read, or refused, is still that full flush
+    const raw: []const u8 = if (http_body.read(conn, a, http_body.limit)) |body| switch (body) {
+        .ok => |b| b,
+        .refused => "",
+    } else |_| "";
     const keyed = if (srv.keys) |k| k.enabled() else false;
     if (!cancel_ids.allowed(keyed, conn)) {
         if (keyed) return @import("auth_scope_reply.zig").deny(conn, false, .route);
@@ -94,12 +98,11 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         const message = "the model is unloaded: no state is in RAM, and those on disk stay until a flush while it is loaded";
         return routes.sendValue(conn, a, 503, failure(a, message, "server_error", "model_unloaded") catch return);
     };
-    const raw = switch (body) {
-        .ok => |b| b,
-        .refused => |message| return routes.sendValue(conn, a, 400, failure(a, message, "invalid_request_error", "invalid_request_error") catch return),
-    };
     const retain = retainFromBody(a, raw) catch |err| switch (err) {
-        error.OutOfMemory => return conn.sendError(a, 500, "out of memory", null) catch {},
+        // a body that cannot name retain (raw or escaped) is main's full flush even when its JSON cannot be read
+        error.OutOfMemory => if (std.mem.indexOf(u8, raw, "retain") == null and std.mem.indexOfScalar(u8, raw, '\\') == null) 0 else {
+            return conn.sendError(a, 500, "out of memory", null) catch {};
+        },
         error.InvalidRetain => return routes.sendValue(conn, a, 400, failure(a, "retain must be a nonnegative 32-bit integer", "invalid_request_error", "invalid_request_error") catch return),
     };
     const got = answerRetaining(srv.gpa, srv.io, a, srv.engine, wait_ms, retain) catch return conn.sendError(a, 500, "out of memory", null) catch {};
