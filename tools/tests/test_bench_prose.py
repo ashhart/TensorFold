@@ -120,6 +120,9 @@ class BenchProseTests(unittest.TestCase):
                 self.wfile.write(sse_bytes([{"choices": [{"index": 0, "delta": {"content": "part1 "}}]}], done=False))
                 self.wfile.flush()
                 barrier.wait(timeout=5)
+                # Both streams are past their first token here; hold before the last one so the client's own
+                # scheduling delay on a busy host cannot stamp one stream's end before the other's start.
+                time.sleep(0.25)
                 self.wfile.write(sse_bytes([
                     {"choices": [{"index": 0, "delta": {"content": "part2"}, "finish_reason": "stop"}]},
                     {"choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 0}},
