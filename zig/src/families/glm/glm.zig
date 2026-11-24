@@ -21,6 +21,7 @@ pub const affine = @import("affine.zig");
 pub const quant = @import("quant.zig");
 pub const wide = @import("wide.zig");
 pub const tfq3 = @import("tfq3.zig");
+pub const load_plan = @import("load_plan.zig");
 pub const mm_groups = @import("mm_groups.zig");
 pub const vision = @import("vision.zig");
 pub const image = @import("image.zig");
