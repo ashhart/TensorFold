@@ -26,14 +26,20 @@ pub fn callEnd(srv: anytype, eos: []const u32) bool {
     return std.mem.indexOfScalar(u32, eos, end) != null;
 }
 
-/// Whether `t` ends a required call's bare reply: its end of message after a complete call ends the turn.
+/// Whether `t` ends a required call's bare reply: only after complete calls, with nothing open or refused after them.
 pub fn endsBare(g: anytype, t: u32) Allocator.Error!bool {
     if (!g.call_end or !g.chat or g.ignore_eos) return false;
     if (g.srv.text.tokenId("<|end_message|>") != t) return false;
     const before = g.collected.items[0 .. g.collected.items.len - 1];
     if (before.len == 0 or g.srv.text.tokenId("<|message_model|>") == before[0]) return false;
-    const text = try g.srv.text.decode(g.a, before);
-    return (try @import("tool_parse.zig").parse(g.a, text, g.tools, null)).calls != null;
+    // an earlier bare end of message closes nothing and carries no text: only the other ids are the reply's
+    var kept: std.ArrayList(u32) = .empty;
+    for (before) |id| if (id != t) try kept.append(g.a, id);
+    const text = try g.srv.text.decode(g.a, kept.items);
+    const parsed = try @import("tool_parse.zig").parse(g.a, text, g.tools, null);
+    // an unclosed or malformed call, or any text, left beside the calls means the reply is not yet only calls
+    const rest = std.mem.trim(u8, parsed.content, " \t\r\n");
+    return parsed.calls != null and parsed.rejected_envelopes == 0 and rest.len == 0;
 }
 
 /// Tokens a stop check decodes: the longest stop's bytes plus 8, as a byte token can carry one byte of a character.
