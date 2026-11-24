@@ -24,9 +24,9 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/lfm3-1.7b-nvfp4" --port
 
 The contract is weight-only: the stored weights are served exactly as loaded and run with bf16 inputs, as in main's
 other weight-only modes, and TensorFold adds no activation quantization of its own. The release's input scales are read
-and not applied; activations stay bf16.
+and not applied; activations stay bf16. For FP8, the dynamic FP8 input step is not applied.
 
-Both exports run weight-only. NVFP4: the FFN's FP4 weights (w1, w3, w2, E2M1 in groups of 16 with e4m3 block scales
+NVFP4: the FFN's FP4 weights (w1, w3, w2, E2M1 in groups of 16 with e4m3 block scales
 and one fp32 tensor scale) are used as stored, and every activation stays bf16. The export also carries static FP4
 input scales; they are read, because the admission requires them, but not applied. The mixers (conv, q/k/v/gate, o), the embedding
 and the tied head are bf16 in the export and run as bf16.
