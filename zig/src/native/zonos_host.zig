@@ -31,7 +31,12 @@ pub const clip_bytes: u64 = 5_643_510_688;
 
 /// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
 pub fn need(context: u32, frames: u32) u64 {
-    return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
+    return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(codecOptions(frames));
+}
+
+/// The codec at a frame budget: its usual pass, or the whole budget when that is shorter.
+pub fn codecOptions(frames: u32) z3.codec.Options {
+    return .{ .max_frames = frames, .pass_frames = @min(frames, (z3.codec.Options{}).pass_frames) };
 }
 
 const Door = struct {
@@ -53,7 +58,16 @@ pub fn budget(context: u32, max_frames: ?u32) !struct { frames: u32, prompt: u32
     if (context < 1025 or context > cfg.max_seqlen) return error.BadZonosContext;
     const frames = max_frames orelse @min(default_frames, context / 2);
     if (frames < C + 2 or frames >= context) return error.BadZonosFrames;
+    codecOptions(frames).validate() catch return error.BadZonosFrames;
     return .{ .frames = frames, .prompt = context - frames };
+}
+
+/// What a load opens with, before it touches the device: the budget, the codec's options and the bytes it admits.
+pub const Plan = struct { frames: u32, prompt: u32, codec: z3.codec.Options, need: u64 };
+
+pub fn plan(o: Options) !Plan {
+    const b = try budget(o.context, o.max_frames);
+    return .{ .frames = b.frames, .prompt = b.prompt, .codec = codecOptions(b.frames), .need = need(o.context, b.frames) };
 }
 
 /// What a request's prompt rows name: [reference prefix | speaker row] conditions, the text from BOS to EOS, silence.
@@ -354,15 +368,15 @@ const Host = struct {
 
 /// `dir`: a snapshot of the release's repository.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !api.Opened {
-    const b = try budget(o.context, o.max_frames);
+    const b = try plan(o);
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     var rel = try z3.release.open(gpa, io, dir, null);
     errdefer rel.deinit();
-    var door: Door = .{ .o = o, .need = need(o.context, b.frames) };
+    var door: Door = .{ .o = o, .need = b.need };
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check } });
     errdefer e.destroy();
-    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
+    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, b.codec);
     errdefer codec.destroy();
     if (cuda.usage(false).device > door.need) return error.LoadOverItsAdmission;
     const kept = try gpa.dupe(u8, dir);
@@ -410,6 +424,24 @@ test "budget: the release's frame budget where the context holds it, the rest fo
     try t.expectError(error.BadZonosContext, budget(32769, null));
     try t.expectError(error.BadZonosFrames, budget(4096, 4096));
     try t.expectError(error.BadZonosFrames, budget(4096, 5));
+    try t.expectEqual(@as(u32, 8192), (try budget(32768, 8192)).frames);
+    try t.expectError(error.BadZonosFrames, budget(32768, 8193));
+}
+
+test "plan: every frame budget a load admits is one the codec opens with, its pass no longer than the budget" {
+    const t = std.testing;
+    for ([_]u32{ 12, 16, 31, 32 }) |n| {
+        const p = try plan(.{ .max_frames = n });
+        try t.expectEqual(n, p.frames);
+        try p.codec.validate();
+        try t.expectEqual(@as(usize, n), p.codec.max_frames);
+        try t.expectEqual(@as(usize, @min(n, 32)), p.codec.pass_frames);
+        try t.expectEqual(need(4096, n), p.need);
+    }
+    try t.expectError(error.BadZonosFrames, plan(.{ .max_frames = 11 }));
+    const d = try plan(.{});
+    try t.expectEqual(@as(usize, 32), d.codec.pass_frames);
+    try t.expectEqual(@as(u64, 3_828_406_528), d.need);
 }
 
 test "chunkFrames: a streamed reply's chunks double to a second" {

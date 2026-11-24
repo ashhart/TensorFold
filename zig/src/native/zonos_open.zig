@@ -47,7 +47,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     _ = zonos_host.budget(std.math.cast(u32, window) orelse 0, o.max_frames) catch |e| {
         problem.* = switch (e) {
             error.BadZonosContext => "ZONOS3 Mini supports --context 1025 through 32768",
-            error.BadZonosFrames => "ZONOS3 Mini's --max-frames must be at least 12 and below --context",
+            error.BadZonosFrames => "ZONOS3 Mini's --max-frames must be 12 through 8192 and below --context",
         };
         return null;
     };
