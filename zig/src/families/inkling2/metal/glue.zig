@@ -45,9 +45,10 @@ pub const Pipelines = struct {
             "tf_inkling2_expert_combine",
             "tf_inkling2_route_scores",
             "tf_inkling2_route_select",
-        }, &pipes) |name, *pipe| {
+        }, [_]usize{ 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
+            if (pipe.maxThreads() < req_threads) return error.GlueThreads;
         }
         return .{
             .embed_norm = pipes[0],

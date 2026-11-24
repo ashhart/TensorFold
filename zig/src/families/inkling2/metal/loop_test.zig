@@ -9,6 +9,12 @@ fn near(want: f64, got: f64) !void {
     try t.expectApproxEqAbs(want, got, 1e-10);
 }
 
+fn expectMaxThreads(threads: u32, symbol: []const u8) !void {
+    var hdr: [96]u8 = undefined;
+    const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ threads, symbol });
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
+}
+
 test "loop entries have unique symbols, launch records and disabled FP contraction" {
     const kinds = std.enums.values(p.Kind);
     for (kinds, records[0..kinds.len]) |kind, record| {
@@ -17,6 +23,7 @@ test "loop entries have unique symbols, launch records and disabled FP contracti
         try t.expectEqual(@as(u32, 256), record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try t.expectEqual(p.geometry(kind, .{ .rows = 1, .n = 1, .k = 1 }).tg_memory, record.tg_memory);
+        try expectMaxThreads(record.threads, kind.symbol());
     }
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_LOOP_SCALE = 0x1.555556p-6f") != null);
@@ -32,6 +39,7 @@ test "the split gates' three launches follow the kinds' records, one symbol each
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, symbol));
         try t.expectEqual(threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
+        try expectMaxThreads(record.threads, symbol);
     }
 }
 

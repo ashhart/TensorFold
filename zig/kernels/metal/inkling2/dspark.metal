@@ -19,6 +19,7 @@ struct DsparkResidualArgs { uint init; };
 struct DsparkCountArgs { uint count; };
 struct DsparkBaseArgs { uint rows, vocab; };
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_init_rows(const device bfloat* anchor [[buffer(0)]], const device bfloat* mask [[buffer(1)]], device bfloat* rows [[buffer(2)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
   for (uint d = t; d < DSP_H; d += 256) {
     const device bfloat* src = row == 0 ? anchor : mask;
@@ -26,6 +27,7 @@ kernel void tf_ink2_dspark_init_rows(const device bfloat* anchor [[buffer(0)]], 
   }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_fuse_taps(const device bfloat* taps [[buffer(0)]], const device bfloat* fuse_weight [[buffer(1)]], const device bfloat* norm_weight [[buffer(2)]], device bfloat* c [[buffer(3)]], device bfloat* newest_f [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
   const uint fusion = group / a.count, row = group % a.count;
   threadgroup float alpha[4];
@@ -61,6 +63,7 @@ static inline float dspark_rope_angle(uint d, uint position) {
   return float(position) * frequency;
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void tf_ink2_dspark_block_qkv(const device bfloat* q_raw [[buffer(0)]], const device bfloat* k_raw [[buffer(1)]], const device bfloat* v_raw [[buffer(2)]], const device bfloat* q_weight [[buffer(3)]], const device bfloat* k_weight [[buffer(4)]], device bfloat* q [[buffer(5)]], device bfloat* k [[buffer(6)]], device bfloat* v [[buffer(7)]], constant DsparkPositionArgs& a [[buffer(8)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 40, work = group % 40;
   threadgroup float scale;
@@ -94,6 +97,7 @@ kernel void tf_ink2_dspark_block_qkv(const device bfloat* q_raw [[buffer(0)]], c
   if (query) q[at] = bfloat(rotated); else k[at] = bfloat(rotated);
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void tf_ink2_dspark_context_kv(const device bfloat* k_raw [[buffer(0)]], const device bfloat* v_raw [[buffer(1)]], const device bfloat* weight [[buffer(2)]], device bfloat* keys [[buffer(3)]], device bfloat* values [[buffer(4)]], constant DsparkContextArgs& a [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 8, h = group % 8;
   threadgroup float scale;
@@ -121,6 +125,7 @@ static inline float dspark_attention_score(const device bfloat* q, const device 
   return dot * DSP_SCALE;
 }
 
+[[max_total_threads_per_threadgroup(128)]]
 kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const device bfloat* block_k [[buffer(1)]], const device bfloat* block_v [[buffer(2)]], const device bfloat* context_k [[buffer(3)]], const device bfloat* context_v [[buffer(4)]], device float* scores [[buffer(5)]], device bfloat* out [[buffer(6)]], constant DsparkAttentionArgs& a [[buffer(7)]], uint group [[threadgroup_position_in_grid]], uint d [[thread_position_in_threadgroup]]) {
   const uint row = group / 24, h = group % 24, kv = h / 3;
   const uint q_at = row * DSP_Q + h * DSP_HEAD;
@@ -162,6 +167,7 @@ kernel void tf_ink2_dspark_attention(const device bfloat* q [[buffer(0)]], const
   out[out_at] = bfloat(value);
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_residual_norm(const device bfloat* x [[buffer(0)]], const device bfloat* residual [[buffer(1)]], const device bfloat* weight [[buffer(2)]], device bfloat* new_residual [[buffer(3)]], device bfloat* normalized [[buffer(4)]], constant DsparkResidualArgs& a [[buffer(5)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
   threadgroup float scale;
   if (t == 0) {
@@ -183,12 +189,14 @@ kernel void tf_ink2_dspark_residual_norm(const device bfloat* x [[buffer(0)]], c
   }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_swiglu(const device bfloat* g [[buffer(0)]], const device bfloat* u [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkCountArgs& a [[buffer(3)]], uint i [[thread_position_in_grid]]) {
   if (i >= a.count) return;
   const float gate = float(g[i]);
   out[i] = bfloat((gate / (1.0f + exp(-gate))) * float(u[i]));
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_kappa(const device bfloat* y [[buffer(0)]], const device bfloat* f [[buffer(1)]], const device bfloat* weight [[buffer(2)]], const device bfloat* bias [[buffer(3)]], device float* out [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint i [[thread_position_in_grid]]) {
   const uint row = i / DSP_RNN, channel = i % DSP_RNN;
   if (row >= a.count) return;
@@ -199,6 +207,7 @@ kernel void tf_ink2_dspark_kappa(const device bfloat* y [[buffer(0)]], const dev
   out[i] = sum;
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
   if (i >= DSP_RANK) return;
   float values[3];
@@ -221,6 +230,7 @@ kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], c
   lambda[i] = bfloat(tanh(values[2]));
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], const device bfloat* y [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkBaseArgs& a [[buffer(3)]], uint i [[thread_position_in_grid]]) {
   if (i >= a.rows * a.vocab) return;
   const uint row = i / a.vocab, id = i % a.vocab;
@@ -229,6 +239,7 @@ kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], cons
   out[i] = bfloat(dot);
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const device bfloat* phi [[buffer(1)]], const device bfloat* beta [[buffer(2)]], const device bfloat* lambda [[buffer(3)]], device bfloat* out [[buffer(4)]], constant DsparkCountArgs& a [[buffer(5)]], uint i [[thread_position_in_grid]]) {
   if (i >= a.count) return;
   float dot = 0.0f;

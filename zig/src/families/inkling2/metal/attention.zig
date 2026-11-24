@@ -29,9 +29,10 @@ pub const Kernels = struct {
         var pipes: [5]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for ([_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib }, [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt" }, &pipes) |lib, name, *pipe| {
+        for ([_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib }, [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt" }, [_]usize{ 32, 256, 32, 128, 256 }, &pipes) |lib, name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
+            if (pipe.maxThreads() < req_threads) return error.AttentionThreads;
         }
         return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .rel_table = pipes[1], .decode = pipes[2], .merge = pipes[3], .prompt = pipes[4], .units = units };
     }

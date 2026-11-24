@@ -11,6 +11,7 @@ constant uint INKLING_LOOP_MESSAGES = 48;
 
 struct InkLoopArgs { uint rows; };
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_loop_messages(
     const device bfloat* bank0 [[buffer(0)]], const device bfloat* bank1 [[buffer(1)]],
     const device float* q_mlp [[buffer(2)]], const device float* kv [[buffer(3)]],
@@ -80,6 +81,7 @@ kernel void tf_inkling2_loop_messages(
   }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_loop_gates(
     const device float* h [[buffer(0)]], const device float* m [[buffer(1)]],
     const device bfloat* down [[buffer(2)]], const device bfloat* forget [[buffer(3)]],
