@@ -293,6 +293,16 @@ test "a vector derived at another site is not refused where the engine steers" {
     try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
 }
 
+test "the control vector's flags are listed only where this build can apply one" {
+    // A build that honours the flag but refuses every valid use is not advertised (cli_capabilities.zig's listing).
+    try std.testing.expectEqual(@as(usize, 2), serve.flags.len);
+    const steers_here = @import("cli.zig").steers();
+    for (serve.flags) |flag| {
+        try std.testing.expect(flag.native);
+        try std.testing.expectEqual(steers_here, flag.advertised);
+    }
+}
+
 test {
     _ = @import("glp_startup_paired_test.zig");
 }

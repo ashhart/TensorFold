@@ -8,10 +8,10 @@ const log = @import("log.zig");
 const cfg = @import("checkpoint_config");
 const cli = @import("cli.zig");
 
-/// The flags the control vector adds to the server's own.
+/// The flags the control vector adds to the server's own; a build that cannot apply one does not list them.
 pub const flags = [_]cli.Flag{
-    .{ .name = "--glp", .path = true, .native = true },
-    .{ .name = "--glp-alpha", .native = true },
+    .{ .name = "--glp", .path = true, .native = true, .advertised = cli.steers() },
+    .{ .name = "--glp-alpha", .native = true, .advertised = cli.steers() },
 };
 
 /// The model type of the family a residual vector steers: Qwen3.8-27B, on the Metal engine.
