@@ -87,7 +87,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.metal.deinit();
     if (model.config.kind == .vision_language) if (o.vision) |requested| {
         h.vision = try images.open(gpa, io, model, o.dir, requested);
-        h.metal.images = .{ .ctx = h.vision.?, .prepare = images.Vision.encode };
+        h.metal.images = .{ .ctx = h.vision.?, .begin = images.Vision.begin, .end = images.Vision.end };
     };
     errdefer if (h.vision) |v| v.deinit();
     const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
