@@ -437,13 +437,13 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     h.folded_mem = null;
-    if (o.dir.len > 0 and (o.slide or mem_ctrl.hasSavedFile(gpa, io, o.dir))) {
+    if (o.dir.len > 0 and o.slide) { // a saved bank alone never attaches it: --slide asks for learning
         const adapter = try qwen27_mem.Adapter.init(gpa, h.back);
         errdefer adapter.deinit(gpa);
         const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, qwen27_mem.Adapter.deinitOpaque);
         h.folded_mem = holder;
         h.host.folded_memory = holder.controller();
-        if (o.slide) h.host.info_.folded_memory = true;
+        h.host.info_.folded_memory = true;
     }
     errdefer if (h.folded_mem) |fm| fm.deinit();
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers

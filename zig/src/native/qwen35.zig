@@ -198,13 +198,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.folded_mem = null;
-    if (o.slide or mem_ctrl.hasSavedFile(gpa, io, o.dir)) {
+    if (o.slide) { // a saved bank alone never attaches it: --slide asks for learning
         const adapter = try q.memory_adapter.Adapter.init(gpa, h.metal);
         errdefer adapter.deinit(gpa);
         const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, q.memory_adapter.Adapter.deinitOpaque);
         h.folded_mem = holder;
         h.host.folded_memory = holder.controller();
-        if (o.slide) h.host.info_.folded_memory = true;
+        h.host.info_.folded_memory = true;
     }
     errdefer if (h.folded_mem) |fm| fm.deinit();
     try h.host.start();
