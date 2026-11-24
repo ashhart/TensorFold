@@ -156,8 +156,9 @@ test "the tied 4B and 0.8B qualify and strangers still refuse" {
         \\"linear_num_key_heads":16,"linear_num_value_heads":16,"linear_key_head_dim":128,
         \\"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"eos_token_id":151643,"tie_word_embeddings":true}
     ;
+    var problem: cfg.Problem = .{};
     inline for (.{ tied4b, tied08 }) |text| {
-        const c = try cfg.parse(a, text, null);
+        const c = try cfg.parseTied(a, text, null, &problem, true);
         try model.supported(c);
     }
     const stranger =
@@ -166,6 +167,6 @@ test "the tied 4B and 0.8B qualify and strangers still refuse" {
         \\"linear_num_key_heads":16,"linear_num_value_heads":16,"linear_key_head_dim":128,
         \\"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"eos_token_id":151643,"tie_word_embeddings":true}
     ;
-    const c = try cfg.parse(a, stranger, null);
+    const c = try cfg.parseTied(a, stranger, null, &problem, true);
     try std.testing.expectError(error.UnqualifiedQwenShape, model.supported(c));
 }
