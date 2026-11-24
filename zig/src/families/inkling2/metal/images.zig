@@ -11,6 +11,13 @@ pub const Encoder = struct {
     encode: *const fn (ctx: *anyopaque, image: lanes.stream.Image) anyerror!mtl.Buffer,
 };
 
+/// The SHA-256 of a picture's BF16 rows as lowercase hex, the tower output the splice takes.
+pub fn digestHex(rows: []const u8) [64]u8 {
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(rows, &sum, .{});
+    return std.fmt.bytesToHex(sum, .lower);
+}
+
 pub const Rows = struct {
     gpa: std.mem.Allocator,
     whole: []fwd.ImageRows,
@@ -36,6 +43,8 @@ pub const Rows = struct {
             self.whole[self.made] = .{ .row = im.at, .rows = im.tokens, .buf = buffer };
             self.made += 1;
             if (buffer.length() < @as(usize, im.tokens) * state.hidden * 2) return error.BadInklingImageRows;
+            const bytes = buffer.slice(u8, @as(usize, im.tokens) * state.hidden * 2);
+            std.log.info("inkling2 image tower: picture={x:0>16} rows={d} sha256={s}", .{ im.hash, im.tokens, digestHex(bytes) });
         }
         return self;
     }

@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const config = @import("../config.zig");
 const image = @import("vision_image.zig");
+const images = @import("images.zig");
 const tables = @import("vision_tables.zig");
 
 const picture = core.picture;
@@ -231,4 +232,9 @@ test "bytes that are not a supported picture are refused with words for the clie
     try t.expect(std.meta.isError(image.prepare(t.io, a, png_rgb[0 .. png_rgb.len / 2], 16)));
     try t.expect(image.problem(error.NoImageBudget) != null);
     try t.expect(image.problem(error.Invalid) == null); // the server words Invalid itself
+}
+
+test "a picture's rows are logged as the lowercase SHA-256 of their BF16 bytes" {
+    try t.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &images.digestHex("abc"));
+    try t.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &images.digestHex(""));
 }
