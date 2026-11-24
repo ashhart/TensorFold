@@ -22,8 +22,8 @@ pub const Fault = enum { none, bf16_group_sums, unshuffled_nibbles };
 pub const Entry = struct { name: []const u8, kind: Kind, tile: usize = int4.plan_tile, fault: Fault = .none, gu: ?scalar.Fault = null };
 
 /// The checkpoint's shapes: hidden 2,560, experts of width 640, a head of 248,320 rows (its config.json).
-const dims = 2560;
-const width = 640;
+pub const dims = 2560;
+pub const width = 640;
 const vocab = 248320;
 /// Experts the tables hold: every expert the plan's picks name. The plan itself routes over the checkpoint's 512.
 const used = 8;
