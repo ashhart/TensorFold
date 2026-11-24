@@ -151,11 +151,15 @@ def stream_chat(url: str, body: dict, timeout: int = 600) -> dict:
     complete = error is None and reply.end == "done"
     if error is None and not complete:
         error = "incomplete_stream"
-    observed = reply.evidence.finish(reply.usage, reply.runtime, complete)
+    finish_reasons = [reply.finish[i] for i in sorted(reply.finish)]
+    clean_finish = bool(finish_reasons) and all(r in CLEAN_FINISH for r in finish_reasons)
+    observed = reply.evidence.finish(reply.usage, reply.runtime, complete and clean_finish)
     has_output = reply.evidence.observed_output and bool(reply.pieces)
     tokens, prompt_tokens = observed["tokens"], observed["prompt_tokens"]
-    accepted = complete and has_output and prompt_tokens is not None and tokens is not None and tokens > 0
-    if error is None and not has_output:
+    accepted = complete and clean_finish and has_output and prompt_tokens is not None and tokens is not None and tokens > 0
+    if error is None and not clean_finish:
+        error = "unclean_finish_reason"
+    elif error is None and not has_output:
         error = "no_output"
     elif error is None and not accepted:
         error = "invalid_usage"
@@ -171,13 +175,24 @@ def stream_chat(url: str, body: dict, timeout: int = 600) -> dict:
     decode_tps = ((tokens - 1) / (last - first)) if (accepted and tokens > 1 and last > first) else None
 
     return {
-        "accepted": accepted, "complete": complete, "completion": reply.completion(), "error": error,
+        "accepted": accepted, "complete": complete and clean_finish, "completion": reply.completion(),
+        "finish_reasons": finish_reasons, "error": error,
         "prompt_tokens": prompt_tokens, "cached_tokens": observed["cached_tokens"],
         "cache_state": observed["cache_state"], "tokens": tokens, "sent": sent, "first": first, "last": last,
         "ttft_s": ttft_s, "decode_tps": decode_tps, "token_ids": token_ids,
         "token_sha256": token_sha256 if accepted else None,
         "output_sha256": observed["output_sha256"] if accepted else None,
     }
+
+
+def _validate_decode_args(levels, gen_tokens: int, pool_len: int) -> list[int]:
+    """Validate prose-decode counts before issuing any HTTP requests."""
+    if type(gen_tokens) is not int or gen_tokens < 1:
+        raise ValueError("gen_tokens must be a positive integer")
+    vals = list(levels)
+    if not vals or any(type(n) is not int or n < 1 or n > pool_len for n in vals):
+        raise ValueError(f"levels must be integers between 1 and {pool_len}")
+    return vals
 
 
 def run_prose_decode(
@@ -192,6 +207,7 @@ def run_prose_decode(
 ) -> dict:
     """Run paired drafted/plain distinct-prose decode with identical prompts, seeds, and cold-cache verification."""
     pool = sources if sources is not None else DISTINCT_PROSE_8
+    checked_levels = _validate_decode_args(levels, gen_tokens, len(pool))
     print("\n=== REALISTIC DISTINCT-PROSE MULTI-STREAM DECODE BENCHMARK (SSE TTFT + PURE DECODE) ===", flush=True)
     report = {"mode": "prose-decode", "seed": seed, "gen_tokens": gen_tokens, "pairs": [], "qualified": True}
 
@@ -199,12 +215,14 @@ def run_prose_decode(
         prompts = []
         for i, (book, off, _, question) in enumerate(pool):
             raw_book = load_book(prose_dir, book)
+            if not raw_book.strip():
+                raise ValueError(f"empty source book for {book}")
             txt = raw_book[off : off + excerpt_chars] if len(raw_book) > off else raw_book[:excerpt_chars]
             prompt_text = f"[Excerpt {i + 1} — {book}]\n\n{txt}\n\nTask: {question}"
             prompts.append((book, prompt_text, seed + i, sha256_text(prompt_text)))
         print(f"  --- Workload: {tag} ({len(prompts)} distinct novels) ---", flush=True)
 
-        for n in levels:
+        for n in checked_levels:
             arms = {}
             for draft_on in (True, False):
                 def one(idx, _draft=draft_on):
@@ -258,7 +276,8 @@ def run_prose_decode(
             tok_eq = [pair_token_equal(d, p) for d, p in zip(d_rows, p_rows)]
             out_eq = [pair_output_equal(d, p) for d, p in zip(d_rows, p_rows)]
             pair_qualified = (arms["draft"]["cold_verified"] and arms["plain"]["cold_verified"]
-                              and prompts_identical and seeds_identical and False not in tok_eq and False not in out_eq)
+                              and prompts_identical and seeds_identical
+                              and all(v is True for v in tok_eq) and all(v is True for v in out_eq))
             if not pair_qualified:
                 report["qualified"] = False
             report["pairs"].append({
@@ -298,17 +317,23 @@ def build_stream_manuscript(prose_dir: str, idx: int, target_tokens: int, chars_
 
 
 def calibrate_stream_cpts(base_url: str, prose_dir: str, n_streams: int, model: str = "model", sources=None) -> list[float]:
-    """Estimate characters per token for each stream's source corpus."""
+    """Estimate characters per token for each stream's source corpus; reject empty sources cleanly."""
     pool = sources if sources is not None else STREAM_SOURCES_500K
+    if type(n_streams) is not int or n_streams < 1 or n_streams > len(pool):
+        raise ValueError(f"n_streams must be between 1 and {len(pool)}")
     cpts = []
     for idx in range(n_streams):
         name, books, _, _ = pool[idx]
         joined = "\n\n".join(load_book(prose_dir, b) for b in books)
+        if not joined.strip():
+            raise ValueError(f"calibration failed for {name}: empty source text")
         n = min(len(joined), 2_300_000)
         if n > 60000:
             sample = joined[n // 6 : n // 6 + 20000] + "\n" + joined[n // 2 : n // 2 + 20000] + "\n" + joined[(5 * n) // 6 : (5 * n) // 6 + 20000]
         else:
-            sample = joined[: max(1, min(n, 4000))]
+            sample = joined[: min(n, 4000)]
+        if not sample:
+            raise ValueError(f"calibration failed for {name}: empty sample")
         res = post_json(f"{base_url}/v1/chat/completions", {
             "model": model, "messages": [{"role": "user", "content": sample}],
             "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0, "max_tokens": 1,
@@ -317,6 +342,8 @@ def calibrate_stream_cpts(base_url: str, prose_dir: str, n_streams: int, model: 
         if not ptok:
             raise ValueError(f"calibration failed for {name}: invalid prompt_tokens")
         cpt = len(sample) / ptok
+        if cpt <= 0.0:
+            raise ValueError(f"calibration failed for {name}: non-positive chars/tok")
         cpts.append(cpt)
         print(f"  Calibrated {name:24s}: {cpt:.4f} chars/tok (available={int(len(joined) / cpt):,} tok)", flush=True)
     return cpts
@@ -337,10 +364,17 @@ def _observed_kv_residency(health: dict) -> int | None:
 def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_streams: int, model: str = "model",
                       min_prompt_ratio: float = 0.95, sources=None) -> dict:
     """Run N distinct long-context prose streams with separate submitted/completed totals and undersized-cell checks."""
+    pool = sources if sources is not None else STREAM_SOURCES_500K
+    if type(target_tokens) is not int or target_tokens < 1:
+        raise ValueError("target_tokens must be a positive integer")
+    if type(n_streams) is not int or n_streams < 1 or n_streams > len(pool):
+        raise ValueError(f"n_streams must be between 1 and {len(pool)}")
+    if type(min_prompt_ratio) not in (int, float) or not math.isfinite(min_prompt_ratio) or not (0.0 < min_prompt_ratio <= 1.0):
+        raise ValueError("min_prompt_ratio must be finite and in (0, 1]")
     print(f"\n=== {n_streams}x TARGET {target_tokens:,}-TOKEN DISTINCT REAL-PROSE CONCURRENT BENCHMARK ===", flush=True)
-    cpts = calibrate_stream_cpts(base_url, prose_dir, n_streams, model=model, sources=sources)
+    cpts = calibrate_stream_cpts(base_url, prose_dir, n_streams, model=model, sources=pool)
     min_prompt_tokens = math.ceil(target_tokens * min_prompt_ratio)
-    payloads = [build_stream_manuscript(prose_dir, i, target_tokens, cpts[i], sources=sources) for i in range(n_streams)]
+    payloads = [build_stream_manuscript(prose_dir, i, target_tokens, cpts[i], sources=pool) for i in range(n_streams)]
     est_tokens = [int(len(ms) / cpts[i]) for i, (_, _, ms, _) in enumerate(payloads)]
 
     for i, (name, codes, ms, src_short) in enumerate(payloads):
@@ -358,12 +392,12 @@ def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_strea
         except Exception as exc:  # noqa: BLE001 - capture per-stream failures without losing submitted totals
             return {"name": name, "accepted": False, "error": type(exc).__name__, "est_prompt_tokens": est_tokens[i],
                     "prompt_tokens": None, "cached_tokens": None, "cache_state": "unverified", "tokens": None,
-                    "elapsed_s": time.perf_counter() - t0, "hits": 0, "undersized": True, "source_undersized": src_short}
+                    "elapsed_s": time.perf_counter() - t0, "hits": 0, "undersized": src_short, "source_undersized": src_short}
         el = time.perf_counter() - t0
         if res.get("error"):
             return {"name": name, "accepted": False, "error": "server_error", "est_prompt_tokens": est_tokens[i],
                     "prompt_tokens": None, "cached_tokens": None, "cache_state": "unverified", "tokens": None,
-                    "elapsed_s": el, "hits": 0, "undersized": True, "source_undersized": src_short}
+                    "elapsed_s": el, "hits": 0, "undersized": src_short, "source_undersized": src_short}
         choices = res.get("choices") or []
         ch = choices[0] if choices else {}
         msg = ch.get("message") or {}
@@ -372,7 +406,7 @@ def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_strea
         usage = parse_usage(res.get("usage"), complete=complete)
         accepted = complete and usage["prompt_tokens"] is not None and usage["tokens"] is not None and usage["tokens"] > 0
         ptok = usage["prompt_tokens"]
-        undersized = src_short or ptok is None or ptok < min_prompt_tokens
+        undersized = src_short or (ptok is not None and ptok < min_prompt_tokens)
         hits = sum(1 for c in codes if c in txt or c in reasoning) if accepted else 0
         status = "OK" if accepted else f"FAILED({ch.get('finish_reason') or 'no_output'})"
         print(f"  [{status:12s} {name:24s}] prompt={ptok} (cached={usage['cached_tokens']}, {usage['cache_state']}), gen={usage['tokens']}, {el:.1f}s, markers={hits}/3", flush=True)
@@ -390,6 +424,7 @@ def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_strea
 
     completed = [r for r in results if r["accepted"]]
     cold_completed = [r for r in completed if r["cache_state"] == "cold"]
+    failed_names = [r["name"] for r in results if not r["accepted"]]
     undersized_names = [r["name"] for r in results if r["undersized"]]
     submitted_est = sum(r["est_prompt_tokens"] for r in results)
     reported_prompt = sum(r["prompt_tokens"] for r in results if r["prompt_tokens"] is not None)
@@ -405,19 +440,24 @@ def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_strea
     except Exception:
         pass
 
-    cell_status = "ok"
-    if undersized_names:
-        cell_status = "undersized"
-    elif len(completed) != n_streams:
+    if failed_names and undersized_names:
+        cell_status = "incomplete_and_undersized"
+    elif failed_names:
         cell_status = "incomplete"
+    elif undersized_names:
+        cell_status = "undersized"
     elif len(cold_completed) != n_streams:
         cell_status = "cache_not_cold"
+    else:
+        cell_status = "ok"
     qualified = cell_status == "ok"
 
     print(f"\n=== {n_streams}x DISTINCT REAL-PROSE SUMMARY (status={cell_status}) ===")
     print(f"  Submitted streams            : {n_streams} (est_prompt={submitted_est:,}, reported_prompt={reported_prompt:,})")
     print(f"  Completed streams            : {len(completed)}/{n_streams} (prompt={completed_prompt:,}, completion={completed_gen:,})")
     print(f"  Verified cold streams        : {len(cold_completed)}/{n_streams} (cold_completed_prompt={cold_prompt:,})")
+    if failed_names:
+        print(f"  Failed streams               : {', '.join(failed_names)}")
     if undersized_names:
         print(f"  Undersized cells (<{min_prompt_tokens:,} tok): {', '.join(undersized_names)}")
     if observed_kv is not None:
@@ -429,10 +469,11 @@ def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_strea
         "mode": "distinct-long", "target_tokens": target_tokens, "min_prompt_tokens": min_prompt_tokens,
         "cell_status": cell_status, "qualified": qualified, "submitted_streams": n_streams,
         "completed_streams": len(completed), "cold_verified_streams": len(cold_completed),
-        "submitted_est_prompt_tokens": submitted_est, "reported_prompt_tokens": reported_prompt,
-        "completed_prompt_tokens": completed_prompt, "completed_completion_tokens": completed_gen,
-        "cold_completed_prompt_tokens": cold_prompt, "undersized_streams": undersized_names,
-        "observed_kv_resident_tokens": observed_kv, "wall_s": wall, "marker_hits": tot_hits, "streams": results,
+        "failed_streams": failed_names, "submitted_est_prompt_tokens": submitted_est,
+        "reported_prompt_tokens": reported_prompt, "completed_prompt_tokens": completed_prompt,
+        "completed_completion_tokens": completed_gen, "cold_completed_prompt_tokens": cold_prompt,
+        "undersized_streams": undersized_names, "observed_kv_resident_tokens": observed_kv,
+        "wall_s": wall, "marker_hits": tot_hits, "streams": results,
     }
 
 
@@ -458,13 +499,29 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     if a.mode == "prose-decode":
-        levels = tuple(int(x) for x in a.levels.split(","))
+        try:
+            levels = tuple(int(x) for x in a.levels.split(","))
+            _validate_decode_args(levels, a.gen_tokens, len(DISTINCT_PROSE_8))
+        except ValueError as exc:
+            ap.error(str(exc))
         report = run_prose_decode(a.url, a.prose_dir, model=a.model, levels=levels, gen_tokens=a.gen_tokens, seed=a.seed)
     elif a.mode == "prose-loss-dump":
+        if a.tf_tokens < 1:
+            ap.error("--tf-tokens must be positive")
+        if not a.out:
+            ap.error("--out is required for prose-loss-dump")
         report = dump_prose_loss(a.url, a.prose_dir, a.out, model=a.model, tf_tokens=a.tf_tokens, tf_file=a.tf_file)
     elif a.mode == "prose-loss-compare":
+        if not a.bf16 or not a.fp8:
+            ap.error("--bf16 and --fp8 are required for prose-loss-compare")
         report = compare_prose_loss(a.bf16, a.fp8)
     else:
+        if a.tokens < 1:
+            ap.error("--tokens must be positive")
+        if a.streams < 1 or a.streams > len(STREAM_SOURCES_500K):
+            ap.error(f"--streams must be between 1 and {len(STREAM_SOURCES_500K)}")
+        if not math.isfinite(a.min_prompt_ratio) or not (0.0 < a.min_prompt_ratio <= 1.0):
+            ap.error("--min-prompt-ratio must be finite and in (0, 1]")
         report = run_distinct_long(a.url, a.prose_dir, a.tokens, a.streams, model=a.model, min_prompt_ratio=a.min_prompt_ratio)
 
     if a.output:
