@@ -32,3 +32,9 @@ const Context = struct {
 pub fn absorb(pipeline: mtl.Pipeline, queue: mtl.Queue, taps: Taps, ring: Ring, rows: u32) !void {
     try policy.absorb(Context{ .taps = taps, .ring = ring, .pipeline = pipeline, .queue = queue }, rows);
 }
+
+/// `absorb` for a runner's own queue and taps, marking the runner failed when the copy fails.
+pub fn absorbFor(runner: anytype, pipeline: mtl.Pipeline, ring: Ring, rows: u32) !void {
+    errdefer runner.failed = true;
+    try absorb(pipeline, runner.model.queue, runner.taps, ring, rows);
+}
