@@ -52,7 +52,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
     } else if (o.mtp_drafts != null or o.mtp_confidence != null) {
         if (qwen_mtp and o.mtp_confidence != null) return "--mtp-confidence is not supported by the Qwen CUDA MTP head";
         if (!qwen_mtp and !std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
-            !std.mem.eql(u8, o.model_type, nemotron.omni.model_type))
+            !std.mem.eql(u8, o.model_type, nemotron.omni.model_type) and !std.mem.eql(u8, o.model_type, nemotron.transcribe.model_type))
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }
     if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
@@ -66,6 +66,18 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
         if (unranked(o)) |why| return why;
     return null;
+}
+
+test "Nemotron 3.5 Transcribe takes --mtp-drafts and --mtp-confidence as the other Nemotron checkpoints do" {
+    const types = [_][]const u8{ nemotron.native.model_type, nemotron.omni.model_type, nemotron.transcribe.model_type };
+    for (types) |t| {
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .mtp_drafts = 2 }) == null);
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .mtp_confidence = 0.5 }) == null);
+    }
+    // a family whose drafts are not tunable still refuses each flag by name
+    const fixed = "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
+    try std.testing.expectEqualStrings(fixed, backend(.{ .dir = "d", .model_type = "lfm2", .mtp_drafts = 2 }).?);
+    try std.testing.expectEqualStrings(fixed, backend(.{ .dir = "d", .model_type = "lfm2", .mtp_confidence = 0.5 }).?);
 }
 
 /// LFM2 opens outside `family()`: its ranks are refused here, and --vision goes on to core's gate in its open.
