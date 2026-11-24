@@ -12,6 +12,7 @@ pub const Block = rules.Block(Ref);
 /// The shards of a checkpoint folder that hold the tensors it was opened for, each mapped once.
 pub const Shards = struct {
     files: []tensors.Tensors,
+    ahead: u64,
 
     pub fn deinit(s: *Shards, gpa: std.mem.Allocator) void {
         for (s.files) |*f| f.deinit();
@@ -73,8 +74,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const
         var it = out[made - 1].names.iterator();
         while (it.next()) |e| if (wanted.accepts(e.key_ptr.*)) try spans.append(arena, out[made - 1].span(e.value_ptr.*));
     }
-    _ = try read_ahead.read(gpa, io, spans.items);
-    return .{ .files = out };
+    const ahead = try read_ahead.read(gpa, io, spans.items);
+    return .{ .files = out, .ahead = ahead };
 }
 
 /// The index's names, for the text model's prefix.
@@ -202,3 +203,4 @@ pub fn loadRefiner(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: 
     }
     return r;
 }
+
