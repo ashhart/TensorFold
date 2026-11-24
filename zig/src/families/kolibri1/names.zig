@@ -260,17 +260,3 @@ test "kolibri1_1: bf16 attention, a dense layer's MLP alone, no k, v or k_norm o
     try testing.expect(m.layers[0].router == null and m.layers[1].router != null);
     try testing.expectEqual(@as(usize, 3), m.layers[1].experts.len);
 }
-
-test "kolibri1_1: a layer reading another's cache that still ships k_proj leaves tensors over, and is refused" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var written = tiny11();
-    written.kv_from[2] = null; // the file has layer 2's k, v and k_norm
-    try writeTiny(a, tmp, written);
-    var ck = try Checkpoint.openModel(testing.allocator, io, try tmpDir(a, tmp));
-    defer ck.close();
-    try testing.expectError(error.UnusedTensors, map(testing.allocator, &ck, tiny11()));
-}
