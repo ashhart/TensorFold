@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: decode's QKV projection runs a warp per 32 outputs over staged weight rows, so one-stream decode is about 50% faster on GB10 and four streams about 37% faster, with identical tokens (#4718). Thanks @jschmied.
+
 - Server: `POST /v1/prompt_cache/flush` takes an optional `retain` count that keeps the most recently used prompt states in RAM and on disk; without it the flush is unchanged (#4856).
 
 - Flash Next on CUDA: the pass scratch now has room for the MTP head's own rows, so a 128 to 1,023-token prompt with drafts on no longer writes past it (#4801). Thanks @BadAd84.
