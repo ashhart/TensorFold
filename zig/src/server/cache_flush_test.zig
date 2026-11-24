@@ -94,7 +94,12 @@ fn call(srv: *Server, a: Allocator, c: Caller) !struct { status: u16, body: json
     if (c.fail_parse) try t.expect(fault.failed);
     const out = wire.bytes.items;
     const at = std.mem.indexOf(u8, out, "\r\n\r\n") orelse return error.MissingHttpHead;
-    return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = (try json.parse(a, out[at + 4 ..])).ok };
+    // a reply that is not JSON (a plain 500) reads as null, so its status is what a test reports, not a panic
+    const body: json.Value = switch (try json.parse(a, out[at + 4 ..])) {
+        .ok => |v| v,
+        .err => .null,
+    };
+    return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = body };
 }
 
 fn code(body: json.Value) []const u8 {
