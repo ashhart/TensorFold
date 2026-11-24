@@ -81,7 +81,7 @@ fn writeFrame(io: Io, f: Io.File, at: u64, op: DeltaOp, payload: []const u8) !u6
 
 /// One frame appended for base `generation`, synced before return: a torn tail cut first, another generation restarted.
 pub fn appendDeltaFrame(gpa: Allocator, io: Io, delta_path: []const u8, generation: u64, op: DeltaOp, payload: []const u8) !u64 {
-    const f = try Io.Dir.cwd().createFile(io, delta_path, .{ .truncate = false, .read = true });
+    const f = try Io.Dir.cwd().createFile(io, delta_path, .{ .truncate = false, .read = true, .permissions = store.private_file });
     defer f.close(io);
     const raw = try readJournal(gpa, io, f);
     defer gpa.free(raw);
