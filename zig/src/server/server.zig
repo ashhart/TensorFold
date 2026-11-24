@@ -78,6 +78,8 @@ pub const Server = struct {
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
+    /// Template's empty system turn prefix (`<|im_start|>system\n<|im_end|>\n`), stripped when Folded Memory fires.
+    empty_system_prefix: []const u32 = &.{},
     metrics: metrics.Metrics,
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
@@ -110,6 +112,8 @@ pub const Server = struct {
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
+    /// Non-blocking in-flight chat learner for Folded Memory Weights v5 (started when --slide is on).
+    inflight: @import("slide_inflight.zig").Worker = .{},
     /// The folder's snapshot made or hashed whole by this process (under teacher.learning): later lessons trust it.
     snapshot_checked: bool = false,
     /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
@@ -176,6 +180,7 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        srv.empty_system_prefix = text.encode(a, "<|im_start|>system\n<|im_end|>\n", false) catch &.{};
         srv.info.thinking_applicable = srv.close_id != null;
         srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
@@ -184,6 +189,7 @@ pub const Server = struct {
             var step: [32]u8 = undefined;
             log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
+        if (srv.info.folded_memory) srv.inflight.start(gpa, io, srv);
         return srv;
     }
 
@@ -193,6 +199,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.inflight.shutdown(); // drain any pending in-flight chat learning before engine/slide tear down
         srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();

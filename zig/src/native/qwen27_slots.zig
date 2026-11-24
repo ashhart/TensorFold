@@ -243,7 +243,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and resume_rules.plain(s.cache_salt);
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null and resume_rules.plain(s.cache_salt);
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
