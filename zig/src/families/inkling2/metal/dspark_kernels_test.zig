@@ -11,6 +11,7 @@ fn expectedWidth(kind: k.Kind) u32 {
         .block_qkv, .context_kv => 128,
         .attention => 768,
         .kappa => 64,
+        .logits_q4 => 256,
         else => 256,
     };
 }
@@ -32,7 +33,9 @@ fn f32v(v: f64) f64 {
 test "DSpark symbols, records, ABIs and disabled contraction are exact" {
     for (std.enums.values(k.Kind), records) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        const decl = try std.fmt.allocPrint(t.allocator, "kernel void {s}(", .{kind.symbol()});
+        defer t.allocator.free(decl);
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, decl));
         const width = expectedWidth(kind);
         try t.expectEqual(width, kind.requiredThreads());
         try t.expectEqual(width, record.threads);
@@ -63,6 +66,7 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
     try t.expectEqual(@as(usize, 8), @sizeOf(k.BaseArgs));
     try t.expectEqual(@as(usize, 28), @sizeOf(k.LogitsArgs));
     try t.expectEqual(@as(usize, 16), @sizeOf(k.GroupStat));
+    try t.expectEqual(@as(usize, 16), @sizeOf(k.LogitsQ4Args));
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "DSP_SCALE = 0x1.6a09e6p-4f") != null);
 }
@@ -182,4 +186,28 @@ test "DSpark Metal pipelines load and satisfy each kernel's required threadgroup
         const kind: k.Kind = @fromBackingInt(@intCast(i));
         try t.expect(@field(pipes, name).maxThreads() >= expectedWidth(kind));
     }
+}
+
+test "q4 logits dequantize each group s*q+b before accumulation and apply optional softcap" {
+    const q4 = @import("draft_head_q4.zig");
+    var src: [64]u16 = undefined;
+    for (0..64) |i| src[i] = @import("bf16_round").bits(@as(f32, @floatFromInt(i)) * 0.25 - 4.0);
+    var words: [8]u32 = undefined;
+    var scales: [1]u16 = undefined;
+    var biases: [1]u16 = undefined;
+    try q4.quantizeGroups(&src, &words, &scales, &biases, 0, 1);
+    const s = q4.asFloat(scales[0]);
+    const b = q4.asFloat(biases[0]);
+    var acc: f32 = 0;
+    for (0..64) |i| {
+        const code = (words[i / 8] >> @as(u5, @intCast(4 * (i % 8)))) & 0xf;
+        const wv = s * @as(f32, @floatFromInt(code)) + b;
+        acc += wv * 1.0;
+    }
+    const raw = bf(acc);
+    const capped = bf(30.0 * std.math.tanh(raw / 30.0));
+    try near(raw, bf(acc));
+    try t.expect(@abs(raw) > 30.0);
+    try t.expect(capped <= 30.0 and capped > 29.9);
+    try t.expect(std.mem.indexOf(u8, shader, "kernel void tf_ink2_dspark_logits_q4") != null);
 }

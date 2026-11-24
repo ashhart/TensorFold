@@ -143,6 +143,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_MTP_PLAIN_GUARD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 enables plain-round guard alongside MTP; unset or blank is 1)" },
     .{ .name = "TF_MTP_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 16 }, .first_digit = true, .forms = "4 or 16 (MTP weight bits; unset or blank defaults to 4)" },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the streams' keys and values in core-pool pages; unset or blank is 0)" },
+    .{ .name = "TF_INKLING2_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes Inkling 2 Mini's draft head to 4-bit affine groups of 64 at load when memory allows; target verification keeps BF16; default 0)" },
     .{ .name = "TF_QWEN35_CHUNK", .scope = .metal, .kind = .size, .min = 1, .forms = "whole prompt rows a prefill pass, 1 to the served context window (default 128)" },
     .{ .name = "TF_DSV41_SMALL", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 reads a DeepSeek-V4.1 Metal checkpoint's config at its own small shapes)" },
     .{ .name = "TF_DSV41_ASSETS", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
