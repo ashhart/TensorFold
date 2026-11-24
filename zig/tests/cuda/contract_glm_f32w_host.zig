@@ -59,7 +59,7 @@ test "GLM norm nonfinite fixture includes both infinity signs together and leave
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_]bool{ false, true }) |hc| for ([_]usize{ 512, 1536, 4096 }) |width| {
+    for ([_]bool{ false, true }) |hc| for ([_]usize{ 512, 1536, 2048, 4096, 6144 }) |width| {
         if (hc and width != ref.d) continue;
         const in = try ref.fillWidth(a, hc, width, 5, .nonfinite, 7, false);
         const stride = width * @as(usize, if (hc) ref.s else 1);
@@ -130,4 +130,35 @@ test "GLM norm contract declares prompt-capacity rows and simulates its stated a
         try std.testing.expect(entry.width == 512 or entry.width == 1536 or entry.width == 4096);
         try std.testing.expect(std.mem.startsWith(u8, entry.old, "tf_ctl_glm_old_"));
     }
+}
+
+test "full GLM-5.3's norm widths: 64-sums separate BF16, f32 sums meet the bound, and every width has a record" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var controls: usize = 0;
+    for (impl.wide_entries) |entry| {
+        if (entry.row0) controls += 1;
+        var recorded = false;
+        for (core.contract.registry.landed_cuda) |record| recorded = recorded or std.mem.eql(u8, record.launch.symbol, entry.symbol);
+        try std.testing.expect(recorded);
+        const spec = impl.specWidth(entry.which, entry.width);
+        if (entry.which == .norm_y) for (spec.served) |shape| try std.testing.expectEqual(entry.width, shape.k);
+        const exact = entry.which == .norm_sums;
+        const in = try ref.fillWidth(a, false, entry.width, 2, .stress, 0x6b63, exact);
+        const n = 2 * count(entry.which, entry.width);
+        const want = try a.alloc(f64, n);
+        const mag = try a.alloc(f64, n);
+        const got = try a.alloc(f64, n);
+        try outputs(a, in, entry.which, .{}, want, mag);
+        if (exact) for (want) |v| try std.testing.expectEqual(@as(f64, 511), v);
+        for ([_]g.Order{ .sequential, .pairwise, .strided }) |order| {
+            try outputs(a, in, entry.which, .{ .acc = .f32, .order = order }, got, mag);
+            for (got, want) |v, target| try std.testing.expect(@abs(v - target) <= c.boundExact(spec, target));
+            if (!exact) continue;
+            try outputs(a, in, entry.which, .{ .acc = .bf16, .order = order }, got, mag);
+            for (got, want) |v, target| try std.testing.expect(@abs(v - target) / c.boundExact(spec, target) >= spec.sums.bf16);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), controls);
 }
