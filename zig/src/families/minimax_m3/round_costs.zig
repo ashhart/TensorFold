@@ -17,19 +17,29 @@ pub fn windows(total: usize, window: usize, out: []usize) []usize {
     return out[0..n];
 }
 
+/// Timed shared segments use the real verification-window limit, capped by the throwaway cache's context.
+pub fn measurementWindows(total: usize, window_rows: usize, capacity: usize, out: []usize) []usize {
+    return windows(total, @min(window_rows, capacity), out);
+}
+
 /// The lane facts: `window` prices one stream's window by rows, `shared` a shared round by its total rows.
 pub fn facts(window_rows: u32, batch_rows: u32, streams: u32, drafts: bool, window: []const Cost, shared: []const Cost) lanes.Model {
     // rows are independent in every decode kernel, so any width, alone or beside other streams, gives one-row bits
     return .{ .exact_width = window_rows, .gpu_tokens = !drafts, .hidden_rows = true, .batch_rows = batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = streams, .streams_exact = true, .window_costs = window, .shared_costs = shared };
 }
 
-test "MiniMax-M3 round costs: a shared round's rows split into 8-row windows, the remainder last" {
+test "MiniMax-M3 round costs: timed segments match real 16-row windows, capped by measurement capacity" {
     var buf: [4]usize = undefined;
-    try std.testing.expectEqualSlices(usize, &.{ 8, 4 }, windows(12, 8, &buf));
-    try std.testing.expectEqualSlices(usize, &.{ 8, 8 }, windows(16, 8, &buf));
-    try std.testing.expectEqualSlices(usize, &.{ 8, 8, 8 }, windows(24, 8, &buf));
-    try std.testing.expectEqualSlices(usize, &.{ 8, 8, 8, 8 }, windows(32, 8, &buf));
-    for (shared_widths) |w| try std.testing.expect(windows(w, 8, &buf).len <= buf.len);
+    try std.testing.expectEqualSlices(usize, &.{12}, measurementWindows(12, 16, 256, &buf));
+    try std.testing.expectEqualSlices(usize, &.{16}, measurementWindows(16, 16, 256, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 16, 8 }, measurementWindows(24, 16, 256, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 16, 16 }, measurementWindows(32, 16, 256, &buf));
+    for (shared_widths) |w| try std.testing.expect(measurementWindows(w, 16, 256, &buf).len <= buf.len);
+    try std.testing.expectEqualSlices(usize, &.{ 8, 4 }, measurementWindows(12, 16, 8, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 8, 8 }, measurementWindows(16, 16, 8, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 8, 8, 8 }, measurementWindows(24, 16, 8, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 8, 8, 8, 8 }, measurementWindows(32, 16, 8, &buf));
+    for (shared_widths) |w| try std.testing.expect(measurementWindows(w, 16, 8, &buf).len <= buf.len);
 }
 
 test "MiniMax-M3 round costs: 16 and 32 rows are priced from the timed rounds, not at 2x and 4x the 8-row window" {

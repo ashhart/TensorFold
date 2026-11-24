@@ -136,7 +136,7 @@ pub const Metal = struct {
         try self.measureShared(capacity);
     }
 
-    /// Shared rounds of 12-32 rows, timed as measure() times a window: streams' windows of up to max_window rows each.
+    /// Shared rounds of 12-32 rows, timed as real verify windows capped by the timing cache's context.
     fn measureShared(self: *Metal, capacity: usize) !void {
         const c = &self.model.config;
         var caches: [st.batch_rows / max_window]st.Cache = undefined;
@@ -147,7 +147,7 @@ pub const Metal = struct {
         for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
         for (round_costs.shared_widths, 0..) |total, j| {
             var rows: [caches.len]usize = undefined;
-            const parts = round_costs.windows(total, max_window, &rows);
+            const parts = round_costs.measurementWindows(total, st.window_rows, capacity, &rows);
             var segments: [caches.len]fwd.Segment = undefined;
             for (parts, 0..) |n, i| segments[i] = .{ .cache = &caches[i], .rows = n };
             var ms: f64 = 0;
