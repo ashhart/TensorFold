@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA and HIP: one core gate decides `--vision` at startup: `--vision` on a checkpoint without a vision tower is refused as "--vision given but this <model> checkpoint has no vision tower", on Qwen3.5 on HIP (which served text) and Flash Next on CUDA too; LFM2 on CUDA loads its tower only with `--vision`; a cluster model's `"vision"` that is not true or false is refused, and the System One picture refusal now says to start with `--vision` (#3456). Thanks to @jschmied.
+
 - Qwen 3.5 diagnostics: large output files are written in chunks of at most 256 MiB, with the same bytes in the same order (#4296).
 
 
