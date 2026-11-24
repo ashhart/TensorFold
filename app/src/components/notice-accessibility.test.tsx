@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import React from 'react'
 import ts from 'typescript'
-import { fixtureText } from './preferences/language-test-fixture'
+import { fixtureText, useAuthoredText } from './preferences/language-test-fixture'
 
 const source = ts.createSourceFile('App.tsx', readFileSync('src/App.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
 const declaration = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'NoticeToast')!
@@ -19,7 +19,7 @@ let dismissals = 0
 const useStore = (select: (state: unknown) => unknown) => select({ notice, dismissNotice: () => { dismissals++ } })
 const NoticeToast = new Function('require', 'exports', 'useAuthoredText', 'useStore', 'useEffect', 'OriginalDiagnostic', 'setTimeout', 'clearTimeout', code)(
   (id: string) => { assert.equal(id, 'react/jsx-runtime'); return jsx },
-  {}, fixtureText, useStore, (effect: () => void) => { effects.push(effect) }, (props: { children?: React.ReactNode }) => React.createElement('span', props),
+  {}, useAuthoredText, useStore, (effect: () => void) => { effects.push(effect) }, (props: { children?: React.ReactNode }) => React.createElement('span', props),
   (callback: () => void, delay: number) => { timers.push({ callback, delay, active: true }); return timers.length },
   (id: number) => { timers[id - 1].active = false },
 ) as () => React.ReactNode
