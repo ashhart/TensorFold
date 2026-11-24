@@ -31,9 +31,9 @@ pub fn spec(control: ?controls.Mutation) c.Spec {
         .out = .f32,
         .replaces = "tf_inkling2_loop_gates, on the same tables and rows",
         .nan = .{ .stated = "every output equals the scalar gates': a non-finite input has the same class" },
-        // Rows go 8 a threadgroup; 37 rows leave the last one part full.
+        // Rows go 8 a threadgroup; 37 rows leave the last one part full, and 200 are a prompt chunk's width.
         .tiles = .{ .{ .size = 8 }, .{}, .{} },
-        .served = &.{ .{ .rows = 8, .n = hidden, .k = rank }, .{ .rows = 37, .n = hidden, .k = rank } },
+        .served = &.{ .{ .rows = 8, .n = hidden, .k = rank }, .{ .rows = 37, .n = hidden, .k = rank }, .{ .rows = 200, .n = hidden, .k = rank } },
         .sums = .{ .f16 = 0, .bf16 = 0, .why = "the scalar gates' fp32 sums are the baseline, bit for bit" },
     };
 }
@@ -68,7 +68,7 @@ pub const Probe = struct {
     const vt = g.hooks(Probe);
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.rows > 64 or shape.n != hidden or shape.k != rank) return false;
+        if (shape.rows == 0 or shape.rows > 256 or shape.n != hidden or shape.k != rank) return false;
         p.rig.reset();
         p.shape = shape;
         const rows = shape.rows;
