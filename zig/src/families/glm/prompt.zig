@@ -284,29 +284,11 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         return;
     }
     const path = wide.routed(w.gate, w.up, w.down);
-    if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
-        wide.bySorted(
-            &p.mm.wide.?,
-            e,
-            .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit },
-            x_in,
-            p.offsets,
-            p.order,
-            p.act,
-            c.moe_inter,
-            n,
-        );
-        wide.bySorted(
-            &p.mm.wide.?,
-            e,
-            .{ .w = w.down, .experts = E, .repeat = 1 },
-            p.act,
-            p.offsets,
-            p.order,
-            p.yp,
-            D,
-            n,
-        );
+    if (w.tfq3) |*tl| {
+        if (s & Class.routed == 0) wide.tfq3.dispatch.moeSorted(&p.mm.wide.?.tfq3.?, e, tl, x_in, p.pick, p.offsets, p.order, p.act, p.yp, M, c.topk, E, c.swiglu_limit);
+    } else if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
+        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, p.offsets, p.order, p.act, c.moe_inter, n);
+        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D, n);
     } else if (s & Class.routed == 0 and path == .gather) {
         const g = wide.gather;
         g.encode(e, p.mm.wide.?.gather[0], w.gate, w.up, .{ .x = x_in, .offsets = p.offsets, .order = p.order, .out = p.act }, n, E, c.topk, c.moe_inter, c.swiglu_limit);

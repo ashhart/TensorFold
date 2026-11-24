@@ -209,3 +209,4 @@ template <int H, int D>
 
 template [[host_name("glm_kda_parts")]] [[kernel]] decltype(glm_kda_parts<64, 128, 4, 16, 4, 4, 8, 2>) glm_kda_parts<64, 128, 4, 16, 4, 4, 8, 2>;
 template [[host_name("glm_kda_norm")]] [[kernel]] decltype(glm_kda_norm<64, 128>) glm_kda_norm<64, 128>;
+template [[host_name("glm_kda_parts_q8")]] [[kernel]] decltype(glm_kda_parts<64, 128, 4, 16, 8, 8, 8, 2>) glm_kda_parts<64, 128, 4, 16, 8, 8, 8, 2>;
