@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on Metal: the rows-store staging permit is now sized from the model's whole image at the window, so deep saves past 1 GiB are kept and a restarted server resumes instead of prefilling again; `TF_GLM_STAGING_GIB` overrides it (#4216). Thanks @devopsfortunato.
+
 - Desktop: the app typecheck passes again after two engine types were restored (#4829).
 
 - GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
