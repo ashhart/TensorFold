@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true, .stage = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -263,6 +263,14 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TF_STAGE_RANK", .raw = "0", .n = 0 },
+    .{ .name = "TF_STAGE_RANK", .raw = "63", .n = 63 },
+    .{ .name = "TF_STAGE_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_STAGE_WORLD", .raw = "64", .n = 64 },
+    .{ .name = "TF_STAGE_PEERS", .raw = "127.0.0.1:7100,stage-b.example:65535", .n = 2 },
+    .{ .name = "TF_STAGE_SECRET_FILE", .raw = "/run/tf/stage-secret", .n = 0 },
+    .{ .name = "TF_STAGE_TIMEOUT_S", .raw = "600", .n = 600 },
+    .{ .name = "TF_STAGE_LAYOUT", .raw = "0:32,32:64", .n = 2 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -571,4 +579,28 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+
+test "environment: each stage ring setting is refused by name past its rank bounds, list form or path form" {
+    for ([_][2][]const u8{
+        .{ "TF_STAGE_RANK", "64" },                 .{ "TF_STAGE_RANK", "+1" },
+        .{ "TF_STAGE_WORLD", "1" },                 .{ "TF_STAGE_WORLD", "65" },
+        .{ "TF_STAGE_PEERS", "a:1,b:0" },           .{ "TF_STAGE_PEERS", "a:1,:2" },
+        .{ "TF_STAGE_PEERS", "a:1,b" },             .{ "TF_STAGE_PEERS", "a:1," },
+        .{ "TF_STAGE_PEERS", "a:65536" },           .{ "TF_STAGE_PEERS", "a:+7" },
+        .{ "TF_STAGE_SECRET_FILE", "/tmp/a\x7fb" }, .{ "TF_STAGE_SECRET_FILE", "/tmp/a\tb" },
+        .{ "TF_STAGE_TIMEOUT_S", "0" },             .{ "TF_STAGE_TIMEOUT_S", "+5" },
+        .{ "TF_STAGE_LAYOUT", "0:32;32:64" },       .{ "TF_STAGE_LAYOUT", "0:32,32:" },
+        .{ "TF_STAGE_LAYOUT", "0:-1" },             .{ "TF_STAGE_LAYOUT", "0:4294967296" },
+    }) |c| {
+        try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+        const why = (try e.refusal(a, Env{ .name = c[0], .raw = c[1] }, .{ .stage = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.startsWith(u8, why, c[0]));
+        try t.expect((try e.refusal(a, Env{ .name = c[0], .raw = c[1] }, .{ .cuda = true })) == null);
+    }
+    var peers: [65 * 4]u8 = undefined;
+    for (0..65) |i| @memcpy(peers[4 * i ..][0..4], "a:1,");
+    try t.expectEqual(@as(?u64, 64), try e.parse("TF_STAGE_PEERS", peers[0 .. 64 * 4 - 1]));
+    try t.expectError(error.InvalidEnvironment, e.parse("TF_STAGE_PEERS", peers[0 .. 65 * 4 - 1]));
 }

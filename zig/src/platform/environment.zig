@@ -3,8 +3,8 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub, stage };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names, peers, layout };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
 pub const Rule = struct {
@@ -189,6 +189,12 @@ pub const rules = [_]Rule{
     // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
     .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
     .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
+    .{ .name = "TF_STAGE_RANK", .scope = .stage, .kind = .u32, .first_digit = true, .max = 63, .forms = "this box's whole rank in the ring, from 0 to TF_STAGE_WORLD - 1" },
+    .{ .name = "TF_STAGE_WORLD", .scope = .stage, .kind = .u32, .first_digit = true, .min = 2, .max = 64, .forms = "the ring's whole rank count, from 2 to 64" },
+    .{ .name = "TF_STAGE_PEERS", .scope = .stage, .kind = .peers, .forms = "every rank's host:port in rank order, comma-separated, ports 1 to 65535, one per rank" },
+    .{ .name = "TF_STAGE_SECRET_FILE", .scope = .stage, .kind = .path, .forms = "the path of the ring's owner-only secret file, without control characters" },
+    .{ .name = "TF_STAGE_TIMEOUT_S", .scope = .stage, .kind = .positive, .first_digit = true, .forms = "whole seconds from 1 to 4294967295 a ring wait may take (default 60)" },
+    .{ .name = "TF_STAGE_LAYOUT", .scope = .stage, .kind = .layout, .forms = "every rank's first:end layer range in rank order, comma-separated, one per rank" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -369,6 +375,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .path) return if (for (text) |ch| {
         if (ch < 0x20 or ch == 0x7f) break true;
     } else false) error.InvalidEnvironment else 0;
+    if (r.kind == .peers or r.kind == .layout) return try listed(r.kind, text);
     // a real travels as its f64 bits and a range as lo above hi; `value` and `range` decode them
     if (isReal(r.kind)) return @bitCast(try real(r, text));
     if (r.kind == .range) {
@@ -407,6 +414,25 @@ fn nameCount(r: Rule, text: []const u8) Error!u64 {
     var it = std.mem.tokenizeScalar(u8, text, ',');
     while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
     return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
+}
+
+/// A list's entry count: `host:port` (port 1 to 65535) or `first:end` layers, at most 64 entries.
+fn listed(kind: Kind, text: []const u8) Error!u64 {
+    for (text) |c| if (c < 0x20 or c > 0x7e) return error.InvalidEnvironment;
+    var n: u64 = 0;
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |entry| : (n += 1) {
+        const colon = std.mem.lastIndexOfScalar(u8, entry, ':') orelse return error.InvalidEnvironment;
+        if (n == 64 or colon == 0) return error.InvalidEnvironment;
+        if (kind == .peers) {
+            const port = std.fmt.parseInt(u16, entry[colon + 1 ..], 10) catch return error.InvalidEnvironment;
+            if (port == 0 or entry[colon + 1] == '+') return error.InvalidEnvironment;
+        } else for ([_][]const u8{ entry[0..colon], entry[colon + 1 ..] }) |v| {
+            if (v.len == 0 or v[0] < '0' or v[0] > '9') return error.InvalidEnvironment;
+            _ = std.fmt.parseInt(u32, v, 10) catch return error.InvalidEnvironment;
+        }
+    }
+    return n;
 }
 
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
@@ -537,6 +563,7 @@ pub const Flags = struct {
     minimax_m3: bool = false,
     chat: bool = false,
     hub: bool = false,
+    stage: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -560,6 +587,7 @@ pub const Flags = struct {
             .minimax_m3 => f.minimax_m3,
             .chat => f.chat,
             .hub => f.hub,
+            .stage => f.stage,
         };
     }
 };
