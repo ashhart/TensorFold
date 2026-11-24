@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - MiniMax-H3-Image on Metal: `tf-h3-image-prompt` writes a whole text-to-image case from a size and a seed (the canvas, the size and the seed's starting rows), so text to image runs end to end with TensorFold's own tools, and `tf-h3-image ... free` exits 0 when there is no reference to gate against (#2781).
 
+
+
 - Flash Next on Metal: `TF_FN_GX_SHARED=1` (opt-in) routes eligible shared rounds through the existing bit-preserving grouped expert kernels; off keeps per-pair launches (#4834).
 
 - Metal: the two pairs of u32 copy kernels build from one source, with the kernels unchanged (#4740). Thanks @jschmied.
