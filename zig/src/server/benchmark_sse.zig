@@ -226,9 +226,12 @@ pub fn refusal(a: Allocator, status: u16, body: []const u8) ![]const u8 {
 /// Redact decoded JSON text or a plain body independently, before terminal truncation.
 pub fn refusalRedacted(a: Allocator, status: u16, body: []const u8, secrets: []const []const u8) ![]const u8 {
     const decoded = try errorText(a, body);
-    const text = try clean(a, try redact(a, decoded, secrets), line_limit);
-    if (text.len == 0) return std.fmt.allocPrint(a, "HTTP {d}", .{status});
-    return std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
+    const text = (try cleanContained(a, decoded, secrets, line_limit)) orelse "";
+    const candidate = if (text.len == 0)
+        try std.fmt.allocPrint(a, "HTTP {d}", .{status})
+    else
+        try std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
+    return suppress(a, candidate, secrets);
 }
 
 /// ``error.message``, ``error``, ``message`` or ``detail`` of a JSON body, else a plain body's first line; markup: "".
@@ -247,27 +250,83 @@ fn errorText(a: Allocator, body: []const u8) ![]const u8 {
     return text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
 }
 
-/// ``text`` without escape sequences, control characters or broken UTF-8, trimmed and cut to ``limit`` bytes.
+/// ``text`` without escape sequences, controls or broken UTF-8, then trimmed and cut to ``limit`` bytes.
 pub fn clean(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+    return limited(a, try sanitizeLine(a, text), limit);
+}
+
+pub const Sanitized = struct { text: []const u8, rest: []const u8 };
+
+/// One line of server text without transformations that could reconstruct a credential after matching.
+pub fn sanitizeLine(a: Allocator, text: []const u8) ![]const u8 {
+    return (try sanitizeInternal(a, text, false, false)).text;
+}
+
+/// One streamed delta; an incomplete UTF-8 or escape suffix stays pending in its original bytes.
+pub fn sanitizeStream(a: Allocator, text: []const u8) !Sanitized {
+    return sanitizeInternal(a, text, true, true);
+}
+
+fn sanitizeInternal(a: Allocator, text: []const u8, multiline: bool, streaming: bool) !Sanitized {
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) {
         if (text[i] == 0x1b) {
+            if (streaming and escapeIncomplete(text, i)) return .{ .text = out.items, .rest = text[i..] };
             i = afterEscape(text, i);
             continue;
         }
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        if (streaming and len > 0 and i + len > text.len) return .{ .text = out.items, .rest = text[i..] };
         const cp: u21 = if (len > 0 and i + len <= text.len) std.unicode.utf8Decode(text[i .. i + len]) catch 0 else 0;
         i += if (cp == 0) 1 else len;
-        if (cp == '\t' or cp == '\n' or cp == '\r') try out.append(a, ' ');
+        if (cp == '\t' or cp == '\n' or cp == '\r') {
+            if (multiline) {
+                if (cp != '\r') try out.appendSlice(a, text[i - len .. i]);
+            } else try out.append(a, ' ');
+            continue;
+        }
         if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) continue;
+        try out.appendSlice(a, text[i - len .. i]);
+    }
+    return .{ .text = out.items, .rest = "" };
+}
+
+/// A byte limit applied only after sanitization and credential removal.
+fn limited(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
         if (out.items.len + len > limit) {
             try out.appendSlice(a, "...");
             break;
         }
-        try out.appendSlice(a, text[i - len .. i]);
+        try out.appendSlice(a, text[i .. i + len]);
+        i += len;
     }
     return std.mem.trim(u8, out.items, " ");
+}
+
+/// Sanitize, replace, check before limiting, then limit and check the exact final candidate.
+pub fn cleanContained(a: Allocator, text: []const u8, secrets: []const []const u8, limit: usize) !?[]const u8 {
+    const replaced = try redact(a, try sanitizeLine(a, text), secrets);
+    if (try credential.contains(a, replaced, secrets)) return null;
+    const candidate = try limited(a, replaced, limit);
+    if (try credential.contains(a, candidate, secrets)) return null;
+    return candidate;
+}
+
+/// Sanitize and redact without truncating; null means consume and suppress the candidate.
+pub fn redactContained(a: Allocator, text: []const u8, secrets: []const []const u8) !?[]const u8 {
+    const candidate = try redact(a, try sanitizeLine(a, text), secrets);
+    if (try credential.contains(a, candidate, secrets)) return null;
+    return candidate;
+}
+
+/// A generated candidate only when containment proves it safe; otherwise the empty terminal value.
+pub fn suppress(a: Allocator, candidate: []const u8, secrets: []const []const u8) ![]const u8 {
+    return if (try credential.contains(a, candidate, secrets)) "" else candidate;
 }
 
 /// Terminal/error text with credentials replaced, longest original span first at any encoding depth.
@@ -321,10 +380,36 @@ pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) 
     return .{ .text = if (changed) out.items else text, .rest = "" };
 }
 
-/// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.
-fn afterEscape(text: []const u8, i: usize) usize {
-    if (i + 1 >= text.len or text[i + 1] != '[') return @min(i + 2, text.len);
+pub const ContainedPiece = struct { emit: ?[]const u8, rest: []const u8 };
+
+/// Transformed streamed output: suppress a complete key or hold a suffix that may become one later.
+pub fn containedPiece(a: Allocator, text: []const u8, secrets: []const []const u8) !ContainedPiece {
+    var matcher = credential.Matcher.init(a, text);
+    defer matcher.deinit();
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const found = try matcher.secretAt(i, secrets);
+        if (found.consumed > 0) return .{ .emit = null, .rest = "" };
+        if (found.hold) return .{ .emit = text[0..i], .rest = text[i..] };
+    }
+    return .{ .emit = text, .rest = "" };
+}
+
+/// Whether an ESC sequence needs another byte before it can be removed safely.
+fn escapeIncomplete(text: []const u8, i: usize) bool {
+    if (i + 1 >= text.len) return true;
+    if (text[i + 1] != '[') return false;
     var j = i + 2;
-    while (j < text.len and (text[j] < 0x40 or text[j] > 0x7e)) j += 1;
+    while (j < text.len and text[j] < 0x40) j += 1;
+    return j == text.len;
+}
+
+/// Past the escape at ``i``: CSI through its final byte; otherwise ESC plus one ASCII byte, preserving Unicode.
+fn afterEscape(text: []const u8, i: usize) usize {
+    if (i + 1 >= text.len) return text.len;
+    if (text[i + 1] != '[') return if (text[i + 1] < 0x80) i + 2 else i + 1;
+    var j = i + 2;
+    while (j < text.len and text[j] < 0x40) j += 1;
+    if (j < text.len and text[j] >= 0x80) return j;
     return @min(j + 1, text.len);
 }

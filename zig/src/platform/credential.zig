@@ -239,6 +239,17 @@ fn appendUnique(a: Allocator, ends: *std.ArrayList(usize), end: usize) Allocator
     try ends.append(a, end);
 }
 
+/// Whether any configured secret occurs literally or at any percent-encoding depth.
+pub fn contains(a: Allocator, text: []const u8, secrets: []const []const u8) Allocator.Error!bool {
+    var matcher = Matcher.init(a, text);
+    defer matcher.deinit();
+    for (secrets) |secret| {
+        if (secret.len == 0) continue;
+        if ((try matcher.spanFrom(0, secret)) != null) return true;
+    }
+    return false;
+}
+
 test "credential matcher: 1024 nested encodings use bounded call depth" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

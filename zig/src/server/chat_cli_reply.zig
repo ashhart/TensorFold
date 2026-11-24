@@ -37,21 +37,23 @@ pub const Reply = struct {
         try r.flush(.content);
     }
 
-    fn redacted(r: *Reply, kind: Kind, text: []const u8) ![]const u8 {
+    fn redacted(r: *Reply, kind: Kind, text: []const u8) !?[]const u8 {
         const state = streamFor(r, kind);
         const whole = if (state.pending.len > 0) try std.mem.concat(r.a, u8, &.{ state.pending, text }) else text;
-        const got = try sse.redactPiece(r.a, whole, r.secrets);
-        state.pending = got.rest;
-        return got.text;
+        const cleaned = try sse.sanitizeStream(r.a, whole);
+        const got = try sse.redactPiece(r.a, cleaned.text, r.secrets);
+        state.pending = if (got.rest.len == 0 and cleaned.rest.len == 0) "" else try std.mem.concat(r.a, u8, &.{ got.rest, cleaned.rest });
+        const candidate = if (state.transformed.len > 0) try std.mem.concat(r.a, u8, &.{ state.transformed, got.text }) else got.text;
+        const checked = try sse.containedPiece(r.a, candidate, r.secrets);
+        state.transformed = checked.rest;
+        return checked.emit;
     }
 
     fn flush(r: *Reply, kind: Kind) Failure!void {
         const state = streamFor(r, kind);
-        if (state.pending.len == 0) return;
-        const text = "[redacted]";
+        // Unresolved source or transformed suffixes are consumed, never replaced by an unchecked marker.
         state.pending = "";
-        if (kind == .content) try r.content.appendSlice(r.a, text);
-        try r.sink.piece(r.sink.ctx, kind, text);
+        state.transformed = "";
     }
 
     /// Bytes as they were read: whole lines are handled now, a cut line waits for the rest.
@@ -108,13 +110,13 @@ pub const Reply = struct {
             const thought = delta.strField("reasoning_content") orelse delta.strField("reasoning");
             if (thought) |t| if (t.len > 0) {
                 r.reasoned = true;
-                const safe = try r.redacted(.reasoning, t);
-                if (safe.len > 0) try r.sink.piece(r.sink.ctx, .reasoning, safe);
+                if (try r.redacted(.reasoning, t)) |safe| if (safe.len > 0) try r.sink.piece(r.sink.ctx, .reasoning, safe);
             };
             if (delta.strField("content")) |c| if (c.len > 0) {
-                const safe = try r.redacted(.content, c);
-                try r.content.appendSlice(r.a, safe);
-                if (safe.len > 0) try r.sink.piece(r.sink.ctx, .content, safe);
+                if (try r.redacted(.content, c)) |safe| {
+                    try r.content.appendSlice(r.a, safe);
+                    if (safe.len > 0) try r.sink.piece(r.sink.ctx, .content, safe);
+                }
             };
         }
         if (choice.field("finish_reason")) |f| if (f == .string) {
@@ -123,16 +125,16 @@ pub const Reply = struct {
     }
 };
 
-const Stream = struct { pending: []const u8 = "" };
+const Stream = struct { pending: []const u8 = "", transformed: []const u8 = "" };
 
 fn streamFor(r: *Reply, kind: Kind) *Stream {
     return if (kind == .content) &r.answer_stream else &r.reason_stream;
 }
 
-/// An error event's ``message`` with credentials removed before terminal cleaning and truncation.
+/// An error event's ``message`` sanitized before matching and contained after every transformation.
 fn errorText(a: Allocator, e: json.Value, secrets: []const []const u8) ![]const u8 {
     const text = e.strField("message") orelse e.str() orelse "the server reported an error without a message";
-    return sse.clean(a, try sse.redact(a, text, secrets), error_limit);
+    return (try sse.cleanContained(a, text, secrets, error_limit)) orelse "";
 }
 
 const Seen = struct {

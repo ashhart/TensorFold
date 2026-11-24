@@ -316,11 +316,16 @@ fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, 
     return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };
 }
 
-/// Server-controlled model text made safe for output, with its hub credential removed.
+/// Server-controlled model text made safe for output, with final containment after every candidate choice.
 fn safeModelType(a: Allocator, text: []const u8, auth: Auth) ![]const u8 {
     const out = try auth.redact(a, text);
-    for (out) |ch| if (ch <= 0x20 or ch >= 0x7f) return "[unprintable model_type]";
-    return out;
+    var printable = true;
+    for (out) |ch| if (ch <= 0x20 or ch >= 0x7f) {
+        printable = false;
+        break;
+    };
+    const candidate = if (printable) out else "[unprintable model_type]";
+    return if (auth.reflects(candidate)) "" else candidate;
 }
 
 /// Valid UTF-8 without terminal controls, for a path before it reaches a URL, log or local filename.
