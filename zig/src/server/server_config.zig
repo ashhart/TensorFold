@@ -54,6 +54,8 @@ pub const Config = struct {
     cache_salt_per_key: bool = false, // --cache-salt-per-key: the matched API key salts each request's prompt cache
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    /// TENSORFOLD_REQUEST_LOG_REPLIES=1: each finished reply is appended beside its request; default 0.
+    request_log_replies: bool = false,
     journal: ?*@import("request_journal.zig").Journal = null, // serve owns TENSORFOLD_REQUEST_JOURNAL
     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
     phase_metrics: bool = false,

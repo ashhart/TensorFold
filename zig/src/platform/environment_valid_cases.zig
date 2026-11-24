@@ -42,6 +42,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_SHARED_PRICE_LOG", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "1", .n = 1 },
+    .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .raw = "1", .n = 1 },
+    .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
