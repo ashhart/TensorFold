@@ -147,8 +147,9 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
 #else
     const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
 #endif
+    const float ma = sub_group_broadcast(mv, a);
     if (lane == 0) {
-      PM[base] = sub_group_broadcast(mv, a);
+      PM[base] = ma;
       PL[base] = l[a];
     }
     for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
