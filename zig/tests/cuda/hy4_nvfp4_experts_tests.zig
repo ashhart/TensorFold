@@ -72,6 +72,22 @@ fn weight(s: *const Source, e: usize, p: usize, n: usize, k: usize) f64 {
     return core.quant.nvfp4.e2m1(code) * core.quant.fp8.e4m3(scale) * global;
 }
 
+/// Fills the gate-up and down buffers with 0xFF (bf16 and fp32 NaN), so rows a run leaves unwritten fail every check.
+fn poison(gpu: check.Gpu, s: cuda.Stream, routed: *const hy4.Routed) !void {
+    for ([_]cuda.DeviceBuffer{ routed.act, routed.y }) |b| try gpu.d.check(gpu.d.api.cuMemsetD8Async(b.ptr, 0xFF, b.len, s.handle), "cuMemsetD8Async");
+}
+
+/// The first byte where a narrower run differs from the same rows of the widest run, or null.
+fn diffAt(got: []const u8, want: []const u8) ?usize {
+    if (got.len != want.len) return 0;
+    return std.mem.indexOfDiff(u8, got, want);
+}
+
+/// A narrower run's bytes against the same rows of the widest run, exactly.
+fn sameRows(what: []const u8, rows: usize, got: []const u8, want: []const u8) !void {
+    if (diffAt(got, want)) |at| try check.expect(false, "{s} at {d} rows: byte {d} of {d} differs from the widest run", .{ what, rows, at, got.len });
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
@@ -111,10 +127,21 @@ pub fn run(gpu: check.Gpu) !void {
     };
     const dp = try r.dev(std.mem.sliceAsBytes(picks));
     var clamped: usize = 0;
-    for ([_]usize{ 1, 5, 64, 255, 256, most }) |rows| {
+    // the widest run first; every narrower run's gate-up and down bytes must equal its rows in it
+    var wide_act: []const u16 = &.{};
+    var wide_out: []const f32 = &.{};
+    for ([_]usize{ most, 1, 5, 64, 255, 256 }) |rows| {
+        try poison(gpu, r.s, &routed);
         const y = try routed.run(&kernels, r.s, dx, dp, rows);
         const act = try r.back(u16, routed.act.ptr, rows * slots * inner);
         const out = try r.back(f32, y, rows * slots * latent);
+        if (rows == most) {
+            wide_act = act;
+            wide_out = out;
+        } else {
+            try sameRows("Hy4 NVFP4 gate-up", rows, std.mem.sliceAsBytes(act), std.mem.sliceAsBytes(wide_act[0..act.len]));
+            try sameRows("Hy4 NVFP4 fp32 down", rows, std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(wide_out[0..out.len]));
+        }
         for (0..rows) |row| for (0..slots) |slot| {
             const pair = row * slots + slot;
             const e: usize = @intCast(picks[pair]);
@@ -152,7 +179,12 @@ pub fn run(gpu: check.Gpu) !void {
         };
     }
     try check.expect(clamped > 0, "the clamp is crossed by some gate ({d} of {d} at {d} rows)", .{ clamped, most * slots * inner, most });
-    r.report("Hy4 NVFP4 routed experts: 8 experts, 4 picks a row, rows 1/5/64/255/256/300 (narrow and wide plans), gate-up and fp32 down FP64-bounded with the SwiGLU clamp crossed; a wider stored gate refused");
+    // a planted control: one flipped bit in a 5-row copy of the gate-up is found at its byte by the same comparison
+    const planted = try a.dupe(u16, wide_act[0 .. 5 * slots * inner]);
+    planted[3 * inner + 7] ^= 1;
+    const at = diffAt(std.mem.sliceAsBytes(planted), std.mem.sliceAsBytes(wide_act[0..planted.len]));
+    try check.expect(at != null and at.? == (3 * inner + 7) * 2, "the row comparison finds a planted flipped bit (at {?d})", .{at});
+    r.report("Hy4 NVFP4 routed experts: 8 experts, 4 picks a row, rows 1/5/64/255/256/300 (narrow and wide plans), gate-up and fp32 down FP64-bounded with the SwiGLU clamp crossed and byte-equal to the widest run (a planted flip found); a wider stored gate refused");
 }
 
 /// The published build's experts at one layer: 64 rows of 16 picks, the first 8 FP64-bounded and equal to an 8-row run.
@@ -192,9 +224,11 @@ pub fn runCheckpoint(gpu: check.Gpu, dir: []const u8, layer: usize) !void {
     }
     const dp = try r.dev(std.mem.sliceAsBytes(picks));
     const pairs = checked * picks_n;
+    try poison(gpu, r.s, &routed);
     _ = try routed.run(&kernels, r.s, dx, dp, checked);
     const act8 = try r.back(u16, routed.act.ptr, pairs * n_inner);
     const y8 = try r.back(f32, routed.y.ptr, pairs * n_latent);
+    try poison(gpu, r.s, &routed);
     _ = try routed.run(&kernels, r.s, dx, dp, rows);
     try check.sameBytes("the first 8 rows equal in a 64-row run (gate-up)", std.mem.sliceAsBytes(try r.back(u16, routed.act.ptr, pairs * n_inner)), std.mem.sliceAsBytes(act8));
     try check.sameBytes("the first 8 rows equal in a 64-row run (down)", std.mem.sliceAsBytes(try r.back(f32, routed.y.ptr, pairs * n_latent)), std.mem.sliceAsBytes(y8));
