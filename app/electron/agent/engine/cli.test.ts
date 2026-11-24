@@ -26,6 +26,22 @@ async function main() {
     'memory floor: 14.00 GiB (weights plus a 2.00 GiB runtime margin)',
   ].join('\n'))
   assert.deepEqual(info, { family: 'Qwen3.8 Flash Next', modelType: 'qwen4_exp', format: '6-bit, group 32', contextTokens: 65536, weightsBytes: 12884901888, memoryFloorBytes: 12884901888 + 2 * 1024 ** 3 })
+  const flashNextInfo = parseInfoOutput([
+    'family: Qwen3.8 Flash Next (qwen4_exp)',
+    'format: 6-bit, group 32',
+    'context: 65536',
+    'weights: 12.00 GiB (12884901888 bytes)',
+    'startup budget: 23.45 GiB (conservative raw/packed text weights, both prompt planes/selectors, KV/state, keepalive and 8 GiB runtime reserve; trained window)',
+    'cold pack budget: 31.20 GiB (source pages, one output phase and conversion scratch; skipped with a validated pack; vision and requested storage are additional at load)',
+  ].join('\n'))
+  assert.deepEqual(flashNextInfo, { family: 'Qwen3.8 Flash Next', modelType: 'qwen4_exp', format: '6-bit, group 32', contextTokens: 65536, weightsBytes: 12884901888, memoryFloorBytes: Math.round(23.45 * 1024 ** 3) })
+  assert.throws(() => parseInfoOutput([
+    'family: Qwen3.8 Flash Next (qwen4_exp)',
+    'format: 6-bit, group 32',
+    'context: 65536',
+    'weights: 12.00 GiB (12884901888 bytes)',
+    'startup budget: not priced (--context is past this checkpoint\'s max_position_embeddings)',
+  ].join('\n')), /family: Qwen3\.8 Flash Next/)
   assert.throws(() => parseInfoOutput('Org/X is not in the Hugging Face cache; run: tensorfold pull Org/X\n'), /not in the Hugging Face cache/)
 
   const caps = parseCapabilities('{"schema": 1, "engine": "zig", "version": "1.0.7", "chip": null, "backends": ["auto", "mlx"], "families": {"nemotron_h": ["mlx-q4g64"], "qwen3_5": ["mlx-q4g64"]}, "serve": {"flags": {"--host": {}, "--drafter": {}}}, "env": ["TENSORFOLD_API_KEY"]}\n')

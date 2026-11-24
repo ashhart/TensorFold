@@ -63,12 +63,22 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   checkDetails(value, expected)
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
+  const fixtureRoutes = new Map<string, string>()
+  let expectedHasRoute: boolean | null = null
   for (const sample of value.samples) {
     const hasFinishReason = sample != null && Object.hasOwn(sample, 'finish_reason')
     const hasRoute = sample != null && Object.hasOwn(sample, 'route')
     object(sample, [...SAMPLE_KEYS, ...(hasFinishReason ? ['finish_reason'] : []), ...(hasRoute ? ['route'] : [])])
     if (hasFinishReason && sample.finish_reason !== null && !['stop', 'length'].includes(sample.finish_reason) || hasRoute && !['/v1/chat/completions', '/v1/completions'].includes(sample.route)) invalid()
     if (!['code', 'chat'].includes(sample.fixture_id) || ![0, 1].includes(sample.temperature) || !Number.isInteger(sample.repeat) || sample.repeat < -1 || sample.repeat > 4 || sample.seed !== 1234 + Math.max(0, sample.repeat) || !['ok', 'early_eos', 'error', 'unmeasured'].includes(sample.status) || sample.repeat === -1 && sample.status !== 'error') invalid()
+    if (expectedHasRoute === null) expectedHasRoute = hasRoute
+    else if (hasRoute !== expectedHasRoute) invalid()
+    if (hasRoute) {
+      if (sample.fixture_id === 'chat' && sample.route !== '/v1/chat/completions') invalid()
+      const priorRoute = fixtureRoutes.get(sample.fixture_id)
+      if (priorRoute !== undefined && priorRoute !== sample.route) invalid()
+      fixtureRoutes.set(sample.fixture_id, sample.route)
+    }
     const key = `${sample.fixture_id}:${sample.temperature}:${sample.repeat}`
     if (seen.has(key)) invalid(); seen.add(key)
     for (const key of ['prompt_tokens', 'completion_tokens', 'cached_tokens']) number(sample[key], true, true, 10_000_000)
@@ -81,7 +91,8 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
       const rate = (sample.completion_tokens - 1) / sample.delivery_seconds
       if (Math.abs(sample.delivery_tps - rate) > Math.max(1e-6, rate * 1e-6)) invalid()
     }
-    if (sample.status === 'ok' && (sample.completion_tokens !== 256 || sample.delivery_tps === null || sample.error_code !== null)) invalid()
+    const naturalStop = hasFinishReason && sample.finish_reason === 'stop' && sample.completion_tokens !== null && sample.completion_tokens >= 128 && sample.completion_tokens < value.settings.tokens
+    if (sample.status === 'ok' && (sample.completion_tokens !== value.settings.tokens && !naturalStop || sample.delivery_tps === null || sample.error_code !== null)) invalid()
     if (sample.status === 'early_eos' && (sample.completion_tokens === null || sample.completion_tokens >= 256)) invalid()
   }
   return value as ParsedBenchmarkReceipt
