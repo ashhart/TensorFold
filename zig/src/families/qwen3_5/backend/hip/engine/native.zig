@@ -1,5 +1,4 @@
 //! Qwen3.5 / Qwen3.6 for the native server on HIP: the engine sized to GPU memory and the lane backend over it.
-
 const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
@@ -226,6 +225,7 @@ fn prepare(
             "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing HIP unified-memory admission",
             .{},
         ),
+        error.VisionWithoutTower => steps.refuseAll(a, problem, "{s}", .{@import("engine_api").visionWords("this Qwen3.5 checkpoint", err).?}),
         // the CUDA engine refuses these alike: --vision asks for images, so a tower it cannot read stops the start
         error.UnsupportedQwenVision => steps.refuseAll(
             a,
