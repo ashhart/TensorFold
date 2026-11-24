@@ -223,7 +223,10 @@ pub const Metal = struct {
             if (err == error.LaneMemory) std.log.warn("ricursive: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need + admit.growth()), gib(self.ledger.held), gib(self.ledger.limit) });
             return err; // LaneMemory: the lane host queues the stream until another finishes, or fails it alone
         };
-        errdefer self.ledger.give(need);
+        errdefer { // as releaseFn: the bytes back and the prompt cache's room fitted to them (admission trimmed it)
+            self.ledger.give(need);
+            if (self.room) |r| r.fit(r.ctx, self.ledger.left(), null, &.{});
+        }
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();

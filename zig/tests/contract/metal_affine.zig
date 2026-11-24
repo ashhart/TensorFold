@@ -79,7 +79,7 @@ const router_rows = [_]c.Shape{ .{ .rows = 1024, .n = 320, .k = 3072 }, .{ .rows
 fn laneBase(v: Variant) ?[]const u8 {
     if (v.kind != .lane_reg) return null;
     if (v.inline_sums) return "the reg kernel with its sums pass";
-    return if (v.bits == 4) "the cooperative lane kernel" else null;
+    return if (v.bits == 4) "the cooperative lane kernel" else if (v.bits == 5 or v.bits == 6) "the lane kernel" else null;
 }
 
 pub fn spec(v: Variant, name: []const u8) c.Spec {
@@ -151,7 +151,7 @@ pub const Proj = struct {
                 }
             },
             .lane => {},
-            .lane_reg => if (v.bits == 4) {
+            .lane_reg => if (v.bits == 4 or v.bits == 5 or v.bits == 6) {
                 p.order = try lane.RegOrder.init(device);
             },
         }
@@ -188,7 +188,7 @@ pub const Proj = struct {
     /// The kernel's layout, or with `base` the layout of the kernel it replaces.
     fn layout(p: *const Proj, shape: c.Shape, base: bool) lane.Layout {
         const reg = p.v.kind == .lane_reg and (!base or p.v.inline_sums);
-        const coop = base and !reg;
+        const coop = base and !reg and p.v.bits == 4;
         return .{ .n = shape.n, .k = shape.k, .format = .{ .bits = p.v.bits, .group = p.v.group }, .sk = p.v.sk, .output = if (p.v.f32_out) .f32 else .bf16, .precompute_sums = p.v.kind == .lane_reg or p.v.coop, .cooperative = coop or (p.v.coop and !reg), .reg = reg, .inline_sums = reg and p.v.inline_sums and !base };
     }
 
@@ -249,7 +249,9 @@ pub const Proj = struct {
                 p.s = try p.rig.input(std.mem.sliceAsBytes(psb));
                 if (p.v.kind == .lane_reg) {
                     p.tiled = try p.rig.input(std.mem.sliceAsBytes(pw));
-                    if (p.order) |o| try o.run(&.{.{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .n = shape.n, .k = shape.k }}) else {
+                    if (p.order) |o| {
+                        if (!p.v.control) try o.run(&.{.{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .n = shape.n, .k = shape.k, .bits = p.v.bits }});
+                    } else {
                         const reg_words = p.rig.bytes(p.w, pw.len * 4);
                         try lane.regOrder8(@alignCast(std.mem.bytesAsSlice(u32, reg_words)), shape.n, shape.k);
                     }

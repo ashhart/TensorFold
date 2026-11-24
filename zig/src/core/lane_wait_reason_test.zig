@@ -243,9 +243,9 @@ test "wait reason ledger: publishing the ledger reads stored reasons and never a
     try std.testing.expectEqual(@as(u32, 3), at(ledger.read().requests.?, .engine_busy));
     // an admission attempt decides the reason; the publishes after it only read it
     rig.host.lock();
-    rig.host.stale = true;
+    rig.host.stale.store(true, .release);
     try std.testing.expect(admit.pick(&rig.host) == null);
-    rig.host.stale = false;
+    rig.host.stale.store(false, .release);
     rig.host.unlock();
     for (0..8) |_| {
         rig.host.lock();
