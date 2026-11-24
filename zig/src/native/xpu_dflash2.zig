@@ -32,10 +32,13 @@ pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own
     for (out, parents[0..out.len], own[0..out.len]) |*o, parent, x| o.* = landing.chance(sampled, x) * (if (parent >= 0) out[@intCast(parent)] else 1);
 }
 
+/// Prompt rows from which a band's first request calibrates: the drafter's window plus one (xpu/drafter.zig WIN + 1).
+pub const cold_context = 2048;
+
 /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
 pub const Width = struct { nodes: u32, trial: ?u32 = null };
 
-/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a cold band's: all), or a trial.
+/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a short cold band: all).
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
@@ -43,7 +46,7 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
         s.prices_seeded = true;
         _ = try e.rule.rates(lanes.windows.who(s));
         const kept = lone_costs.slot(&e.lone_kept, s).*;
-        s.lone_cold = kept == null; // no trial or narrow tree in a band's first request: it files the cap's own times
+        s.lone_cold = kept == null and s.context.items.len < cold_context; // a short cold request files the cap's times
         try lone_costs.seed(e.gpa, kept, s);
     }
     if (s.lone_cold) return .{ .nodes = @intCast(chance.len) };

@@ -78,12 +78,10 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     const shallow: World = .{ .base = 30, .per = 1 };
     const deep: World = .{ .base = 70, .per = 21.5 };
     const long = 131072;
-    // a band's first stream draws the cap's tree throughout and files only that width; the next one adapts from it
-    for ([_]usize{ 100, long }) |context| {
-        const cold = try lone(&e, context, if (context == long) deep else shallow, 120, 15);
-        try std.testing.expectEqual(@as(u32, 15), cold.first);
-        try std.testing.expectEqual(@as(u32, 15), cold.last);
-    }
+    // a short first stream of a band draws the cap's tree throughout and files only that width; the next one adapts
+    const cold = try lone(&e, 100, shallow, 120, 15);
+    try std.testing.expectEqual(@as(u32, 15), cold.first);
+    try std.testing.expectEqual(@as(u32, 15), cold.last);
     const wide = try lone(&e, 100, shallow, 120, 15);
     const narrow = try lone(&e, long, deep, 120, 15);
     try std.testing.expectEqual(best(shallow, 15), wide.last);
@@ -91,6 +89,21 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     // each band's next stream starts on what its band measured: the deep one narrow, the short one still wide
     try std.testing.expectEqual(narrow.last, (try lone(&e, long + 9, deep, 1, 15)).first);
     try std.testing.expectEqual(wide.last, (try lone(&e, 120, shallow, 1, 15)).first);
+}
+
+test "draft sources: a cold band's first request is fixed only below cold_context" {
+    const world: World = .{ .base = 70, .per = 21.5 };
+    for ([_]usize{ ad.cold_context - 1, ad.cold_context }) |context| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const r = try lone(&e, context, world, 120, 15);
+        try std.testing.expectEqual(if (context < ad.cold_context) 15 else best(world, 15), r.last);
+    }
 }
 
 test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is priced" {
