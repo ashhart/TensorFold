@@ -32,6 +32,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: DSpark drafting uses the 1/sqrt(128) attention scale and reads the recurrent step's kappa as FP32, so one-stream draft acceptance on an M3 Ultra rises from 3% to 55% and drafted decode is about 56% faster; replies are unchanged (#4447). Thanks @sethforprivacy.
 
+- Inkling 2: required and named tool calls use the model's own message format, so a request that needs several calls ends after them instead of repeating until max_tokens; a required single call keeps its parsed tool_calls but its token ids change (#4898).
 - Hy4-flash: a host weight map for its ModelOpt NVFP4 build (groups of 16, no KV quantization), with the build's recipe and quality notes; serving it comes in later slices (#4110). Thanks @atakann.
 
 - OCR: `POST /ocr` takes docTR's request contract (step 5 of #2440), with each page's response naming its file (#2574). Thanks @laudney.
