@@ -230,6 +230,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
             @import("inkling2_metal").experts
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_ink2_dense"))
+            @import("inkling2_metal").dense_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_inkling2_loop"))
+            @import("inkling2_metal").loop_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma "))
+            @import("inkling2_metal").experts_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
