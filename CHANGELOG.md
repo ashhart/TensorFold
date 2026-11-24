@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-M3 on Metal: shared decode rounds of 12 to 32 rows are timed at load instead of priced at 2x and 4x the 8-row window, so window choice uses measured costs; tokens are unchanged, and a `--context` under 256 tokens leaves those rounds untimed instead of failing to open the model (#3120).
+
 - Tools: `tools/exact_restarts.py` checks the exact path end to end, comparing token ids across fresh restarts, `--parallel` levels, busy versus alone requests, and drafting on versus off (#4574).
 
 - Gemma 4 on CUDA (assistant and DFlash drafters) and one more MoE family's CUDA loader: loading now refuses a checkpoint with tensors the engine never binds, each scoped to its own directory or prefix (#4566).
