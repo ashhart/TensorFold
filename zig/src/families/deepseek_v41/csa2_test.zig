@@ -325,7 +325,7 @@ const nax_width: usize = 512;
 
 const NaxStats = struct { exact: usize, total: usize, worst: f32 };
 
-fn nax_case(p: *const csa2.Pipelines, device: mtl.Device, queue: mtl.Queue, random_keys: bool, label: []const u8) !NaxStats {
+fn nax_case(p: *const csa2.Pipelines, device: mtl.Device, queue: mtl.Queue, random_keys: bool, bias: i32, label: []const u8) !NaxStats {
     const q_stride = nax_heads * nax_width;
     const q = try device.buffer(nax_rows * q_stride * 2, mtl.ResourceOptions.shared);
     defer q.deinit();
@@ -351,18 +351,22 @@ fn nax_case(p: *const csa2.Pipelines, device: mtl.Device, queue: mtl.Queue, rand
             return @intCast(s.* >> 32);
         }
     }.draw;
+    // `bias` moves the window and chunk keys' scales: above 0 accumulators pass 2^60, below 0 they fall under 2^-60.
+    const scale0: u32 = @intCast(124 + bias);
     for (q.slice(u16, nax_rows * q_stride)) |*x| x.* = bf((@as(f32, @floatFromInt(next(&state) % 2000)) - 1000.0) / 995.0);
     for (0..128) |r| {
         @memset(ring.contents()[r * 528 .. r * 528 + 512], if (random_keys) @as(u8, @intCast(next(&state) & 0xff)) else 0x38);
-        @memset(ring.contents()[r * 528 + 512 .. (r + 1) * 528], if (random_keys) @as(u8, @intCast(124 + next(&state) % 4)) else 127);
+        @memset(ring.contents()[r * 528 + 512 .. (r + 1) * 528], if (random_keys) @as(u8, @intCast(scale0 + next(&state) % 4)) else 127);
     }
     for (0..nax_rows) |r| {
         @memset(chunk.contents()[r * 528 .. r * 528 + 512], if (random_keys) @as(u8, @intCast(next(&state) & 0xff)) else 0x40);
-        @memset(chunk.contents()[r * 528 + 512 .. (r + 1) * 528], if (random_keys) @as(u8, @intCast(124 + next(&state) % 4)) else 127);
+        @memset(chunk.contents()[r * 528 + 512 .. (r + 1) * 528], if (random_keys) @as(u8, @intCast(scale0 + next(&state) % 4)) else 127);
     }
     for (0..main_rows) |r| {
-        @memset(main.contents()[r * 288 .. r * 288 + 256], if (random_keys) @as(u8, @intCast(next(&state) & 0xff)) else 0x11);
-        @memset(main.contents()[r * 288 + 256 .. (r + 1) * 288], if (random_keys) @as(u8, @intCast(next(&state) & 0x7f)) else 0x38);
+        const nibbles: u8 = if (random_keys) @intCast(next(&state) & 0xff) else 0x11;
+        const scale: u8 = if (!random_keys) 0x38 else @intCast(next(&state) & 0x7f);
+        @memset(main.contents()[r * 288 .. r * 288 + 256], nibbles);
+        @memset(main.contents()[r * 288 + 256 .. (r + 1) * 288], if (bias < 0) 0 else scale);
     }
     const position = 300;
     for (0..nax_rows) |r| {
@@ -441,7 +445,7 @@ test "the tensor-unit prompt kernel matches the scalar kernel on constant keys" 
     defer p.deinit();
     if (!p.tensor_units) return error.SkipZigTest;
     // Every window key decodes to 1, every chunk key to 2 and every compressed key to 1.
-    const r = try nax_case(&p, device, queue, false, "constant");
+    const r = try nax_case(&p, device, queue, false, 0, "constant");
     try std.testing.expect(@as(f64, @floatFromInt(r.exact)) / @as(f64, @floatFromInt(r.total)) >= 0.98);
     try std.testing.expect(r.worst <= 0.02);
 }
@@ -456,9 +460,27 @@ test "the tensor-unit prompt kernel matches the scalar kernel on random packed k
     var p = try csa2.Pipelines.load(device);
     defer p.deinit();
     if (!p.tensor_units) return error.SkipZigTest;
-    const r = try nax_case(&p, device, queue, true, "random");
+    const r = try nax_case(&p, device, queue, true, 0, "random");
     try std.testing.expect(@as(f64, @floatFromInt(r.exact)) / @as(f64, @floatFromInt(r.total)) >= 0.999);
     try std.testing.expect(r.worst < 0.02);
+}
+
+// Past 2^60 and under 2^-60 the epilogue takes the plain division, which the scalar kernel's own quotient matches.
+test "the tensor-unit prompt kernel matches the scalar kernel with accumulators outside the epilogue's fast range" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var p = try csa2.Pipelines.load(device);
+    defer p.deinit();
+    if (!p.tensor_units) return error.SkipZigTest;
+    for ([_]i32{ 80, -80 }, [_][]const u8{ "huge", "tiny" }) |bias, label| {
+        const r = try nax_case(&p, device, queue, true, bias, label);
+        try std.testing.expect(@as(f64, @floatFromInt(r.exact)) / @as(f64, @floatFromInt(r.total)) >= 0.999);
+        try std.testing.expect(r.worst < 0.02);
+    }
 }
 
 const IndexProbeRef = struct {

@@ -1,5 +1,4 @@
 //! The core modules the DeepSeek V4.1 family names as `core`: the family is its own module, so it cannot climb out.
-pub const checkpoint_metal = @import("src/core/checkpoint_metal.zig");
 pub const contract = @import("src/core/contract.zig");
 pub const exl3_layout = @import("src/core/exl3_layout.zig");
 pub const exl3_load = @import("src/core/exl3_load.zig");

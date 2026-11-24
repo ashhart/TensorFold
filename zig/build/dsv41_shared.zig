@@ -12,6 +12,8 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const m = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "canon", .module = canon } } });
     // The hash tables' module, named so every family file reaches them without a path outside its module.
     m.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
+    // The number readers are a module: the family's config imports it by name, never by path.
+    m.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     return m;
 }
 pub fn steps(b: *std.Build) void {
@@ -35,7 +37,9 @@ pub fn steps(b: *std.Build) void {
     const cross = b.addTest(.{ .root_module = module(b, linux_target, "shared_test.zig") });
     _ = cross.getEmittedBin();
     b.step("compile-dsv41-shared", "Compile shared tests for Linux without executing").dependOn(&cross.step);
-    const builder = b.createModule(.{ .root_source_file = b.path("zig/dsv41_token_map.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
+    const builder = b.createModule(.{ .root_source_file = b.path("zig/dsv41_token_map.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{
+        .{ .name = "config_number", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }) },
+    } });
     const token_tests = b.addRunArtifact(b.addTest(.{ .root_module = builder }));
     b.step("test-dsv41-token-map", "PCG64 and Unicode normalization without Metal").dependOn(&token_tests.step);
     const tool = b.addExecutable(.{ .name = "tf-dsv41-token-map", .root_module = builder });
