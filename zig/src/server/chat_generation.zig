@@ -129,6 +129,9 @@ pub const Generation = struct {
             landed += 1;
             if (g.eos(t)) {
                 g.reason = "stop";
+            } else if (@import("chat_inkling2.zig").endsBare(g, t)) {
+                g.reason = "stop";
+                g.srv.engine.cancel(g.id); // an Inkling 2 grammar's call or text message ended: the turn ends there
             } else if (try g.stopHit()) {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
