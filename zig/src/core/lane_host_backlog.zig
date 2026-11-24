@@ -23,7 +23,7 @@ pub fn step(h: *LaneHost) void {
     h.lock();
     defer h.unlock();
     // an arrival or a cancel signals `wake`; a queued request that cannot be admitted no longer spins the loop
-    if (h.cancels.items.len == 0 and !h.closing) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(2), .clock = .awake } }) catch {};
+    if (h.cancels.items.len == 0 and !h.closing.load(.acquire)) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(2), .clock = .awake } }) catch {};
 }
 
 /// Holds and releases the admitted jobs' streams by their readers' unread tokens, at `at` (null: the clock's now).

@@ -300,6 +300,7 @@ test "a readout begins at row 0 with no cuts while the tree would resume a plain
 test "a test's cut rows fix every piece end, which the recorder lists" {
     var e: @import("engine.zig").Engine = undefined;
     e.o = .{ .cut_rows = 300 };
+    e.weights.embed = .{ .mlx = undefined }; // a quantized checkpoint: the chunk rule reads only the format
     var h: source.Hip = undefined;
     h.gpa = T.allocator;
     h.e = &e;
@@ -342,6 +343,50 @@ test "a readout's piece stays the chunk while another lane decodes; a plain prom
     try T.expectEqual(@as(usize, e.o.policy.fill_rows), try h.reach(&plain, 0, 5000));
     try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 5000));
     try T.expectEqual(2 * prefix.chunk, try h.reach(&reader, prefix.chunk, 5000));
+}
+
+test "alone a plain prompt takes the engine's prompt rows; a readout keeps the chunk, a decoder's neighbour the fill rows" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .prompt_rows = 4096, .policy = .{ .prefill_step = 4096 } }; // as a lone gfx1151 opens
+    e.weights.embed = .{ .mlx = undefined };
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.cuts = null;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var plain: source.Lane = undefined; // reach reads a lane's readout only
+    plain.readout = null;
+    var reader: source.Lane = undefined;
+    var state: u8 = 0;
+    reader.readout = @ptrCast(&state);
+    try T.expectEqual(@as(usize, 4096), try h.reach(&plain, 0, 9000));
+    try T.expectEqual(@as(usize, 8192), try h.reach(&plain, 4096, 9000));
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 9000));
+    var talking: source.Lane = undefined;
+    talking.fill = null; // past its prompt: it decodes
+    var key: lanes.Stream = undefined;
+    try h.streams.map.put(T.allocator, &key, &talking);
+    try T.expectEqual(@as(usize, e.o.policy.fill_rows), try h.reach(&plain, 0, 9000));
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 9000));
+}
+
+test "a bf16 checkpoint, and an engine opened for longer passes than its policy's rows, keep the chunk" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .prompt_rows = 4096, .policy = .{ .prefill_step = 4096 } };
+    e.weights.embed = .{ .bf16 = undefined }; // rocBLAS products: their bits follow the rows of a piece
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.cuts = null;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var plain: source.Lane = undefined;
+    plain.readout = null;
+    try T.expectEqual(prefix.chunk, try h.reach(&plain, 0, 9000));
+    e.o = .{ .prompt_rows = 9000 }; // a check's longest prompt under the plain policy
+    e.weights.embed = .{ .mlx = undefined };
+    try T.expectEqual(prefix.chunk, try h.reach(&plain, 0, 9000));
 }
 
 test "every piece of a readout, the last too, goes to its readout with no projection, draw or kept cut" {

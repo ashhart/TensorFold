@@ -94,3 +94,8 @@ test "FSR plan spends available slots and charges the full native storage path" 
     try std.testing.expectEqual(@as(u64, 152), try pleRows(1, 160, 6, 32));
     try std.testing.expectError(error.InvalidPleRecipe, pleRows(1, 160, 7, 32));
 }
+
+/// Forecast tickets are itemized within the caller's reserved owner allowance, outside the legacy plan receipt.
+pub fn forecastJobs(comptime count: usize, slots: usize) !u64 {
+    return std.math.mul(u64, slots, @sizeOf(arena.ArenaOf(void, count).Job));
+}

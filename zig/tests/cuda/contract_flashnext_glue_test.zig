@@ -26,6 +26,35 @@ test "the flashnext prompt specs serve the admitted row range with the dispatch 
     }
 }
 
+test "KR15 TPR contracts serve every short row on full heads and both TP=2 ranks" {
+    for ([_]usize{ 1, 4, 8, 16, 32 }) |rows| {
+        var full = false;
+        for (glue.spec(.chain).served) |x| if (x.rows == rows and x.n == lay.Heads.full.valueDim()) {
+            full = true;
+        };
+        try std.testing.expect(full);
+        for (0..2) |rank| {
+            var half = false;
+            for (heads.spec(.tpr, rank).served) |x| if (x.rows == rows and x.n == lay.Heads.half.valueDim()) {
+                half = true;
+            };
+            try std.testing.expect(half);
+        }
+    }
+}
+
+test "ordinary GDN dispatch opts into TPR only below 64 rows and keeps rollback selection" {
+    for ([_]usize{ 1, 4, 8, 16, 32, 63 }) |rows| {
+        try std.testing.expectEqual(flash.gdn.ChainForm.chain, flash.gdn.chainForm(rows, 0, false));
+        try std.testing.expectEqual(flash.gdn.ChainForm.chain_to, flash.gdn.chainForm(rows, 1, false));
+        try std.testing.expectEqual(flash.gdn.ChainForm.chain_tpr, flash.gdn.chainForm(rows, 0, true));
+        try std.testing.expectEqual(flash.gdn.ChainForm.chain_tpr, flash.gdn.chainForm(rows, 1, true));
+    }
+    for ([_]usize{ 64, 65, 1536 }) |rows| for ([_]u64{ 0, 1 }) |state_out| for ([_]bool{ false, true }) |enabled| {
+        try std.testing.expectEqual(flash.gdn.ChainForm.chain_tpr, flash.gdn.chainForm(rows, state_out, enabled));
+    };
+}
+
 test "the fused block declares the state alias and binds one buffer for it" {
     try std.testing.expect(glue.spec(.fused).in_place);
     try std.testing.expect(!glue.spec(.chain).in_place); // the chain's kernel marks its state input __restrict__

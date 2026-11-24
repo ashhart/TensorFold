@@ -14,6 +14,18 @@ current source and are awaiting a packaged Desktop release.
   [#3357](https://github.com/ashhart/TensorFold/pull/3357)
 - Rooms show completed tickets out of the total. An agent can release its own idle ticket claim
   so another seat can take it. [#3698](https://github.com/ashhart/TensorFold/pull/3698) · [#4081](https://github.com/ashhart/TensorFold/pull/4081)
+- Room health shows the Room's worktree path and Git branch.
+  [#3463](https://github.com/ashhart/TensorFold/pull/3463)
+- Room settings save when you select **Supervisor** or apply the **Supervised build** preset.
+  [#3472](https://github.com/ashhart/TensorFold/pull/3472)
+- Use **Details** to view and edit a Kanban ticket's title, description, type, priority and effort.
+  Archived tickets can be restored. [#3464](https://github.com/ashhart/TensorFold/pull/3464)
+- Moving a parked ticket to **Ready** clears its assignee so another Room seat can take it.
+  [#3469](https://github.com/ashhart/TensorFold/pull/3469)
+- New Solo and Room ticket worker chats appear in the sidebar as soon as they're created.
+  [#3461](https://github.com/ashhart/TensorFold/pull/3461)
+- Each saved bot can have its own reasoning effort. Bots without a saved effort use the app default.
+  [#3500](https://github.com/ashhart/TensorFold/pull/3500)
 - **Replay as new task** accepts one launch at a time, so a second click during a launch
   creates no duplicate task. [#3848](https://github.com/ashhart/TensorFold/pull/3848)
 - **Export Run** waits for a preview that matches the selected run, mode and redaction settings

@@ -111,8 +111,9 @@ fn WithTower(comptime R: type, comptime T: type) type {
             return C.loaded(Loaded, try C.open(gpa, io, ctx, dir, kernels, o));
         }
 
-        /// The tower's device bytes beside the text weights: its weights, its largest image's scratch, its workspace.
-        pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+        /// The tower's device bytes on rank 0, which holds it: its weights, its largest image's scratch, its workspace.
+        pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, rank: u32, _: u32) !u64 {
+            if (rank != 0) return 0;
             return try T.weightBytes(a, io, dir) + try T.openBytes(a, io, dir);
         }
 

@@ -51,7 +51,7 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
     try fits(cx, once);
     const text = if (!parallel) once else if (markup) try lfmBuild(cx, tools, true) else try build(cx.a, s, tools, true);
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
-    var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
+    var st = try srv.compiledToolStructure(cx, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
     st.field = "tool_choice";
     return st;

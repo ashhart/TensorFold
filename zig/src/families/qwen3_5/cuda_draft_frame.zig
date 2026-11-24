@@ -6,6 +6,7 @@ const draft = @import("cuda_draft.zig");
 const tree = @import("cuda_draft_tree.zig");
 const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
+pub const ql_span = @import("cuda_draft_ql_span.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
 const lp_words = 43;
@@ -89,6 +90,23 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     errdefer cuda.completion.drain(e.d, e.stream, "a failed DFlash frame did not drain before its pinned staging was reused");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, st.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.segments, st.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync");
+    const rows = items.len * (c.block - 1);
+    const spanned = try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
+    try e.stream.synchronize();
+    if (spanned != null) for (0..rows) |r| {
+        const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
+        for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
+    };
+    try publish(d, items, contexts);
+}
+
+/// A hold frame's kernels, from the embedding to the selector rows; the packed logits when spanned.
+fn kernels(d: anytype, streams: usize, contexts: []const *draft.Ctx) !?u64 {
+    const c = d.c;
+    const e = d.e;
+    const B = streams * c.block;
     try e.embed(d.ids, d.h, B, 0);
     for (d.w.layers, 0..) |l, i| {
         try d.norm(d.h, l.input_norm, d.x, B);
@@ -108,9 +126,9 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
     }
-    const rows = items.len * (c.block - 1);
+    const rows = streams * (c.block - 1);
     var masked = d.h + c.hidden * 2;
-    if (items.len > 1) {
+    if (streams > 1) {
         try e.run(d.fns.mask_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.h, d.h2, @as(c_int, @intCast(c.hidden)), @as(c_int, @intCast(c.block)) });
         masked = d.h2;
     }
@@ -118,14 +136,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     const spanned = try logitsOf(d, contexts, d.x, d.logits, rows);
     try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
-    try e.stream.synchronize();
-    if (spanned != null) for (0..rows) |r| {
-        const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
-        for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
-    };
-    try publish(d, items, contexts);
+    return spanned;
 }
 
 /// A lane stream's prompt and reply tokens since the last scan: one outside the spans marks the stream wide.
@@ -189,7 +200,12 @@ fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
             const v = try x3Views(q);
             break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
         },
-        .an, .ql, .bf => return full(d, x, logits, rows),
+        .ql => |w| blk: {
+            if (!ql_span.enabled()) return full(d, x, logits, rows);
+            const v = ql_span.views(w, spans[0][1], tail_tile, spans[1][1]) orelse return full(d, x, logits, rows);
+            break :blk .{ .{ .ql = v.first }, .{ .ql = v.tail }, tail_tile };
+        },
+        .an, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
     const a = logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592

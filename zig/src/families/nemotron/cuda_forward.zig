@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const glue = @import("cuda_glue.zig");
+const max_streams = @import("cuda_engine.zig").max_streams;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
@@ -160,6 +161,8 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
+        // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
+        if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
         var routed = f.routedWindow(segs);
         var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
         routed.flight = &flight;
@@ -194,7 +197,7 @@ pub const Forward = struct {
         const D: u64 = c.hidden;
         var rows: usize = 0;
         for (segs) |s| rows += s.rows;
-        if (rows > ms.rmax) return error.WindowTooWide;
+        if (!@import("cuda_wide.zig").windowFits(c, rows)) return error.WindowTooWide; // each stream keeps rmax rows
         for (segs) |s| try f.embed(s.b.ids, b.emb + s.row0 * D * 2, s.rows);
         try f.mark(.embed);
         var x = b.emb;
@@ -244,13 +247,9 @@ pub const Forward = struct {
                     const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
                     try f.mark(.qkv);
-                    var k0: usize = 0;
-                    while (k0 < segs.len) : (k0 += glue.max_segs) {
-                        const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
-                        var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
-                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
-                        try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
-                    }
+                    var at_segs: [max_streams]glue.AttnSeg = undefined; // attentionSegs launches them in parts it rebases
+                    for (segs, at_segs[0..segs.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
+                    try t.attentionSegs(at_segs[0..segs.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
@@ -431,8 +430,8 @@ pub const Forward = struct {
         try sd.s.wait(sd.fork);
         const sp = b.sharedPlan(rows);
         const pairs = rows * c.slots();
-        try g.decode(sd.s, .up, in[0], ex, sp, b.act, 2, pairs, 16, -1);
-        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, pairs, 16, -1);
+        try g.decode(sd.s, .up, in[0], ex, sp, b.act, if (rows > 16) 4 else 2, pairs, 16, -1);
+        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, if (rows > 16) 4 else 2, pairs, 16, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);

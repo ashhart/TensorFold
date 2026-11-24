@@ -6,6 +6,9 @@ test {
     _ = @import("lane_halt_test.zig");
     _ = @import("lane_host_end_test.zig");
     _ = @import("lane_host_score_test.zig");
+    _ = @import("lane_host_step_borrow_test.zig");
+    _ = @import("lane_host_admit_borrow_test.zig");
+    _ = @import("lane_host_lend_test.zig");
     _ = @import("lane_review_test.zig");
     _ = @import("lane_init_test.zig");
     _ = @import("lane_failure_review_test.zig");
@@ -45,6 +48,7 @@ test {
 }
 
 test {
+    _ = @import("lane_host_live_chunk_test.zig");
     _ = @import("lane_wait_reason_test.zig");
     _ = @import("wait_reason.zig");
 }

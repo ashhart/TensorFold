@@ -4,6 +4,7 @@ const Config = @import("config.zig").Config;
 const Kind = @import("config.zig").Kind;
 const ck = @import("checkpoint.zig");
 const Formats = @import("affine.zig").Formats;
+const tied_head = @import("tied_head.zig");
 pub const Tensor = ck.Tensor;
 pub const Linear = ck.Linear;
 pub const Mlp = struct { gate: Linear, up: Linear, down: Linear };
@@ -18,6 +19,8 @@ pub const Weights = struct {
     norm: Tensor,
     head: Linear,
     layers: []Layer,
+    /// `head` borrows the embedding's tensors, so their bytes count once.
+    tied: bool = false,
 
     pub fn deinit(w: *Weights) void {
         w.gpa.free(w.layers);
@@ -25,7 +28,7 @@ pub const Weights = struct {
     }
 
     pub fn tensorBytes(w: Weights) !usize {
-        var total = try std.math.add(usize, linearBytes(w.embed), linearBytes(w.head));
+        var total = try std.math.add(usize, linearBytes(w.embed), if (w.tied) 0 else linearBytes(w.head));
         total = try std.math.add(usize, total, w.norm.bytes.len);
         for (w.layers) |l| {
             total = try std.math.add(usize, total, l.input_norm.bytes.len + l.post_norm.bytes.len);
@@ -159,5 +162,7 @@ pub fn load(gpa: std.mem.Allocator, src: ck.Source, formats: *const Formats, c: 
     const layers = try gpa.alloc(Layer, c.layers);
     errdefer gpa.free(layers);
     for (layers, 0..) |*l, i| l.* = try b.layer(c, i);
-    return .{ .gpa = gpa, .prefix = b.prefix, .layers = layers, .embed = try b.linear("model.embed_tokens", c.vocab, c.hidden), .norm = try b.tensor("model.norm.weight", &.{c.hidden}), .head = try b.linear("lm_head", c.vocab, c.hidden) };
+    var stored: [96]u8 = undefined;
+    const head = try tied_head.module(c.tied_head, try present(src, try std.fmt.bufPrint(&stored, "{s}lm_head.weight", .{b.prefix})));
+    return .{ .gpa = gpa, .prefix = b.prefix, .layers = layers, .embed = try b.linear("model.embed_tokens", c.vocab, c.hidden), .norm = try b.tensor("model.norm.weight", &.{c.hidden}), .head = try b.linear(head, c.vocab, c.hidden), .tied = c.tied_head };
 }

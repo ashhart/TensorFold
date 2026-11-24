@@ -272,7 +272,19 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         l.post_feedforward = try x.vector(try name(&buf, i, "post_feedforward_layernorm.weight"), hid);
         l.scalar = try x.vector(try name(&buf, i, "layer_scalar"), 1);
     }
+    try refuseLeftovers(&ck, error.UnusedAssistantTensors); // the assistant's own directory is bound here alone
     return w;
+}
+
+/// `ck` names `get`/`expect` never took, refused with up to five named.
+pub fn refuseLeftovers(ck: *const core.checkpoint.Checkpoint, comptime err: anyerror) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return err;
 }
 
 const fixture = @embedFile("fixtures/assistant_config.json");
@@ -320,4 +332,26 @@ test "a group quantizes as MLX's affine 4-bit: every value within half a step" {
         const q: f32 = @floatFromInt((words[i / 8] >> @intCast((i % 8) * 4)) & 0xF);
         try std.testing.expect(@abs(q * bf(scale) + bf(bias) - bf(v)) <= @abs(bf(scale)) * 0.51);
     }
+}
+
+test "a stray assistant tensor refuses; a complete directory loads" {
+    const fix = core.checkpoint_fixture;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data: [4]u16 = @splat(0x3f80);
+    const entries = [_]fix.Entry{
+        .{ .name = "model.norm.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+        .{ .name = "model.stray.weight", .dtype = "BF16", .shape = &.{4}, .bytes = std.mem.sliceAsBytes(&data) },
+    };
+    try fix.write(a, io, tmp.dir, "model.safetensors", &entries);
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var ck = try core.checkpoint.Checkpoint.openModel(a, io, dir);
+    defer ck.close();
+    _ = try ck.expect("model.norm.weight", .bf16, &.{4});
+    try std.testing.expectError(error.UnusedAssistantTensors, refuseLeftovers(&ck, error.UnusedAssistantTensors));
+    _ = try ck.expect("model.stray.weight", .bf16, &.{4});
+    try refuseLeftovers(&ck, error.UnusedAssistantTensors);
 }
