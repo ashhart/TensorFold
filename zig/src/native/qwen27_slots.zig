@@ -59,6 +59,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
                 try clearContext(b, slot);
             }
         } else s.reuse_failed = true;
+        if (s.reuse_failed) try lanes.memory_restore.refuseFallback(s); // never a placeholder row as text
     };
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;

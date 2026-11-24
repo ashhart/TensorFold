@@ -141,3 +141,42 @@ test "folded memory: without a bank the in-flight answer takes no host lock betw
     thread.join();
     try t.expect(unblocked);
 }
+
+/// The fake as a family whose memory restore fails: it refuses, and notes a prompt reaching prefill zeros first.
+const Unrestorable = struct {
+    var base: *const lanes.backend.Backend.VTable = undefined;
+    var vt: lanes.backend.Backend.VTable = undefined;
+    var snap: u8 = 0;
+    var fed_placeholders = false;
+    fn prefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+        if (s.reuse.saved == @as(?*anyopaque, @ptrCast(&snap))) {
+            s.reuse_failed = true; // as a refused snapshot restore sets it
+            try lanes.memory_restore.refuseFallback(s);
+            s.reuse = .{};
+        }
+        if (s.prompt().len > 0 and s.prompt()[0] == 0) fed_placeholders = true;
+        return base.prefill(ptr, s);
+    }
+    fn install(core: *lanes.Engine) void {
+        base = core.backend.vtable;
+        vt = base.*;
+        vt.prefill = prefill;
+        core.backend.vtable = &vt;
+    }
+};
+
+test "folded memory: a prefix the backend cannot restore runs the request's own prompt, never placeholders as text" {
+    var plain: Box = .{};
+    defer plain.deinit();
+    try reply(null, false, &plain, null);
+    Unrestorable.fed_placeholders = false;
+    var c: Ctrl = .{ .handle = .{ .saved = @ptrCast(&Unrestorable.snap), .at = 4 } };
+    var got: Box = .{};
+    defer got.deinit();
+    try reply(&c, true, &got, Unrestorable.install);
+    try t.expect(!Unrestorable.fed_placeholders);
+    try t.expectEqual(@as(u32, 1), c.routed); // the retry runs without memory: routed once
+    try t.expectEqual(@as(u32, 1), c.dropped); // its snap given back once
+    try t.expectEqualSlices(u32, plain.tokens.items, got.tokens.items);
+    try t.expectEqual(plain.reason, got.reason);
+}

@@ -38,6 +38,7 @@ pub const row_cost = @import("row_cost.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
+pub const memory_restore = @import("memory_restore.zig");
 pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
 pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const invariance = @import("invariance.zig");
