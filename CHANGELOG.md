@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: the MTP draft rows' best value, first id and log-sum-exp run over 32 one-warp blocks a row in place of one 1024-thread block, with the same bytes (#4632).
+
 - Desktop: the app typecheck passes again after two engine types were restored (#4829).
 
 - GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
@@ -16,15 +18,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP Qwen: use the policy prompt step on lone RDNA 3.5 iGPUs while preserving admitted streams and requested prompt caches (#4207). Thanks to @AbrahamCete.
 
-
-
 - MOSS-Image contract: the reference for `tf_me_conv` now follows fp32 `expf` overflow, so its sums check no longer fails on inputs near -89 (#4794).
 
 - HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
 
 - H3 on Macs: long image renders give way to live speech on the GPU (#N).
-
-
 
 - GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#N).
 
@@ -137,7 +135,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
-- Flash Next on CUDA: the MTP draft rows' best value, first id and log-sum-exp run over 32 one-warp blocks a row in place of one 1024-thread block, with the same bytes (#4632).
 
 ## 1.3.4
 
