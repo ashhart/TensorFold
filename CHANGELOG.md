@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout`.
+
 - Inkling 2 Mini on Metal: the router's and loop gates' dots run a thread per output with main's serial arithmetic (one row keeps main's kernels), so prompts reach the first token about 42% sooner and four streams decode about 64% faster on an M5 Ultra, with identical tokens (#4912).
 
 - LFM3-VL on Metal: a text-only load leaves the vision tower and projector on disk, so it holds only the text weights; replies are unchanged (#3420).
