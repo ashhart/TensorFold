@@ -62,7 +62,7 @@ fn parseParts(a: Allocator, content_type: ?[]const u8, body: []const u8, fault: 
 
 /// The one ``file`` part as an image source; ``language`` and other parts are ignored (no reader takes a hint).
 pub fn decode(a: Allocator, parts: []const multipart.Part, fault: *Fault) Step!types.Source {
-    if (route.hasFiles(parts)) return fault.fail(a, .bad_input, "{s}", .{route.files_parts});
+    if (route.mixed(parts)) return fault.fail(a, .bad_input, "{s}", .{route.mixed_parts});
     var file: ?multipart.Part = null;
     for (parts) |p| if (std.mem.eql(u8, p.name, "file")) {
         if (file != null) return fault.fail(a, .bad_input, "a LiteParse request has exactly one file part", .{});
@@ -78,7 +78,7 @@ pub fn decode(a: Allocator, parts: []const multipart.Part, fault: *Fault) Step!t
             return fault.fail(a, .bad_input, "the file is not a PNG, JPEG or WebP image", .{});
         },
     }
-    return .{ .bytes = f.body, .kind = .image, .sel = .{ .all_within = 1 } };
+    return .{ .name = f.filename orelse "file", .bytes = f.body, .kind = .image, .sel = .{ .all_within = 1 } };
 }
 
 /// The page sink: each line of the page as one LiteParse result.
@@ -90,7 +90,7 @@ pub const Encoder = struct {
         return .{ .ctx = e, .page = onPage };
     }
 
-    fn onPage(ctx: *anyopaque, a: Allocator, page: *const types.OcrPage, _: picture.Rgb, _: *budget.Encodes, fault: *Fault) Step!void {
+    fn onPage(ctx: *anyopaque, a: Allocator, _: u32, page: *const types.OcrPage, _: picture.Rgb, _: *budget.Encodes, fault: *Fault) Step!void {
         const e: *Encoder = @ptrCast(@alignCast(ctx));
         const got = lines.fromBlocks(a, page, e.geometry) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
