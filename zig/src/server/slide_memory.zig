@@ -260,8 +260,7 @@ fn learnCore(
 
     const secs = slide.seconds(srv, began);
     const marker = [_]api.Neuron{.{ .layer = 0, .neuron = @intCast(id & 0xffff), .key = .reply }};
-    srv.slide.placed(id, &marker);
-    srv.slide.checked(id, true);
+    srv.slide.placed(id, &marker); // stored and compiled, not checked: no recall verdict is recorded without a check
     srv.slide.note(
         id,
         std.fmt.allocPrint(
@@ -321,7 +320,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator, text: []const u8, source: 
         return;
     };
 
-    out.event("learned", .{ .id = res.id, .recalled = true, .steps = @as(u32, @intCast(res.unit_count)) });
+    out.event("learned", .{ .id = res.id, .steps = @as(u32, @intCast(res.unit_count)) }); // no recall field: none ran
     out.event("saved", .{ .saved = true });
     out.done();
 }
@@ -396,7 +395,6 @@ pub fn consolidate(srv: *Server, conn: *Conn, a: Allocator) void {
                                         _ = srv.engine.memoryOp(&.{ .forget_parent = old_id });
                                         srv.slide.mark(old_id, .replaced);
                                     }
-                                    srv.slide.checked(new_id, true);
                                     srv.slide.mark(new_id, .learned);
                                     compacted = @intCast(small_ids.items.len);
                                     consolidated_id = new_id;
