@@ -50,8 +50,10 @@ const Fixture = struct {
 
 /// Answers `reply` in chunks of `stride` tokens.
 const Script = struct {
+    a: std.mem.Allocator,
     reply: []const u32,
     stride: usize,
+    lane: bool = false,
     eos_len: usize = 0, // the request's end ids, as the engine got them
 
     fn engine(s: *@This()) api.Engine {
@@ -64,13 +66,19 @@ const Script = struct {
         const s: *@This() = @ptrCast(@alignCast(ctx));
         s.eos_len = request.eos.len;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        if (s.lane) return @import("inkling2_lane_script.zig").submit(s.a, id, request, sink, s.reply, s.stride) catch return error.InvalidRequest;
+        var limit = s.reply.len;
+        for (s.reply, 0..) |token, i| if (std.mem.indexOfScalar(u32, request.eos, token) != null) {
+            limit = i + 1;
+            break;
+        };
         var start: usize = 0;
-        while (start < s.reply.len) {
-            const end = @min(start + s.stride, s.reply.len);
+        while (start < limit) {
+            const end = @min(start + s.stride, limit);
             sink.event(sink.ctx, id, &.{ .tokens = s.reply[start..end] });
             start = end;
         }
-        const ended = s.reply.len > 0 and std.mem.indexOfScalar(u32, request.eos, s.reply[s.reply.len - 1]) != null;
+        const ended = limit > 0 and std.mem.indexOfScalar(u32, request.eos, s.reply[limit - 1]) != null;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = if (ended) .stop else .length } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -185,12 +193,16 @@ fn appendCall(a: std.mem.Allocator, call: json.Value, ids: *std.ArrayList(u8), n
 }
 
 pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool) !Seen {
+    return runMode(a, kind, reply, extra, stream, stride, request, chat_route, false);
+}
+
+fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool, lane: bool) !Seen {
     var fx = try Fixture.init(a, kind);
     defer fx.deinit();
     var problem: []const u8 = "";
     const hf = try HfText.load(a, t.io, fx.path, null, a, &problem);
     defer hf.deinit();
-    var script: Script = .{ .reply = reply, .stride = stride };
+    var script: Script = .{ .a = a, .reply = reply, .stride = stride, .lane = lane };
     const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
     var grammars: Grammars = .{};
@@ -258,6 +270,11 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
 
 pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
     return run(a, kind, reply, extra, stream, stride, "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]", true);
+}
+
+/// The same route, whose scripted backend commits through the production lane Stream.
+pub fn askLane(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
+    return runMode(a, kind, reply, extra, stream, stride, "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]", true, true);
 }
 
 fn askRaw(a: std.mem.Allocator, reply: []const u32, stream: bool, stride: usize) !Seen {
