@@ -89,16 +89,23 @@ pub fn encodeIndex(x: *const [128]u16, row: *[g.cuda_index_fp8_bytes]u8) [128]u1
     return ref;
 }
 
+/// The E2M1 magnitudes, the finest grid both served-lane formats hold.
+const grid = [7]f32{ 0, 0.5, 1, 1.5, 2, 3, 4 };
+
+/// A bf16 row the served lanes hold exactly: 16-value blocks, one power of two each, a 6 at the peak.
 pub fn genRow(rng: *Rng, out: *[512]u16) void {
-    for (0..8) |t| {
+    for (0..32) |b| {
         const k: i32 = @as(i32, @intCast(rng.below(9))) - 4;
-        for (t * 64..t * 64 + 64) |d| out[d] = c.f32ToBf16(rng.norm() * std.math.pow(f32, 2, @floatFromInt(k)));
+        const scale = std.math.pow(f32, 2, @floatFromInt(k));
+        for (16 * b..16 * b + 16) |d| out[d] = c.f32ToBf16(std.math.copysign(grid[rng.below(grid.len)] * scale, if (rng.below(2) == 0) -1 else 1));
+        out[16 * b + rng.below(16)] = c.f32ToBf16(std.math.copysign(6 * scale, if (rng.below(2) == 0) -1 else 1));
     }
 }
 
 pub fn genIndex(rng: *Rng, out: *[128]u16) void {
     const k: i32 = @as(i32, @intCast(rng.below(7))) - 3;
-    for (out) |*v| v.* = c.f32ToBf16(rng.norm() * std.math.pow(f32, 2, @floatFromInt(k)));
+    const scale = std.math.pow(f32, 2, @floatFromInt(k));
+    for (out) |*v| v.* = c.f32ToBf16(std.math.copysign(grid[rng.below(grid.len)] * scale, if (rng.below(2) == 0) -1 else 1));
 }
 
 /// `rows` rows of `row_bytes` as pool pages, replicated (one rank) or split over `world` ranks; unwritten rows 0xA5.

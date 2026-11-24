@@ -4,7 +4,7 @@ const g = @import("geometry.zig");
 const c = @import("codec.zig");
 const fp4 = @import("fp4.zig");
 
-pub const Error = error{ TargetTooSmall, LayoutMismatch, NoDrafterRings };
+pub const Error = error{ TargetTooSmall, LayoutMismatch, NoDrafterRings, NotExact };
 
 pub const Release = struct {
     /// window + pipelines.max_rows: positions p live in slot p % window_slots and p % window_slots + window_slots
@@ -108,45 +108,45 @@ pub const Layout = union(enum) {
     }
 
     /// Position `pos`'s window key of a backbone layer.
-    pub fn setWindow(l: Layout, layer: u32, pos: u64, row: *const [512]u16) void {
+    pub fn setWindow(l: Layout, layer: u32, pos: u64, row: *const [512]u16) Error!void {
         switch (l) {
             .release => |r| {
                 const n: u64 = r.window_slots;
                 const w = r.layers[layer].window;
                 inline for (.{ pos % n, pos % n + n }) |slot| c.storeRow(512, row, w[@as(usize, @intCast(slot)) * 1024 ..]);
             },
-            .@"packed" => |p| ring(p, layer, pos, row),
+            .@"packed" => |p| try ring(p, layer, pos, row),
         }
     }
 
     /// Position `pos`'s key of DSpark stage `stage`.
-    pub fn setDrafter(l: Layout, stage: u32, pos: u64, row: *const [512]u16, layers: u32) void {
+    pub fn setDrafter(l: Layout, stage: u32, pos: u64, row: *const [512]u16, layers: u32) Error!void {
         switch (l) {
             .release => |r| c.storeRow(512, row, r.drafter[stage][@as(usize, @intCast(pos % r.ds_window)) * 1024 ..]),
-            .@"packed" => |p| ring(p, layers + stage, pos, row),
+            .@"packed" => |p| try ring(p, layers + stage, pos, row),
         }
     }
 
-    fn ring(p: Packed, layer: u32, pos: u64, row: *const [512]u16) void {
+    fn ring(p: Packed, layer: u32, pos: u64, row: *const [512]u16) Error!void {
         const at = (@as(usize, layer) * Packed.window + @as(usize, @intCast(pos % Packed.window))) * Packed.ring_stride;
-        fp4.window(row, p.live[at..][0..Packed.ring_stride]);
+        try fp4.window(row, p.live[at..][0..Packed.ring_stride]);
     }
 
     /// Compressed latent row `r` of source `src`.
-    pub fn setPool(l: Layout, geo: g.Geometry, src: u32, r: u64, row: *const [512]u16) void {
+    pub fn setPool(l: Layout, geo: g.Geometry, src: u32, r: u64, row: *const [512]u16) Error!void {
         switch (l) {
             .release => |rl| c.storeRow(512, row, rl.layers[geo.sources[src].layer].pool[@as(usize, @intCast(r)) * 1024 ..]),
-            .@"packed" => |p| fp4.mainRow(row, p.storage[p.mainOff(src) + @as(usize, @intCast(r)) * Packed.main_stride ..][0..Packed.main_stride]),
+            .@"packed" => |p| try fp4.mainRow(row, p.storage[p.mainOff(src) + @as(usize, @intCast(r)) * Packed.main_stride ..][0..Packed.main_stride]),
         }
     }
 
     /// Index key row `r` of source `src`.
-    pub fn setIndex(l: Layout, geo: g.Geometry, src: u32, r: u64, row: *const [128]u16) void {
+    pub fn setIndex(l: Layout, geo: g.Geometry, src: u32, r: u64, row: *const [128]u16) Error!void {
         switch (l) {
-            .release => |rl| fp4.releaseIndexKey(row, rl.layers[geo.sources[src].layer].keys[@as(usize, @intCast(r)) * 68 ..][0..68]),
+            .release => |rl| try fp4.releaseIndexKey(row, rl.layers[geo.sources[src].layer].keys[@as(usize, @intCast(r)) * 68 ..][0..68]),
             .@"packed" => |p| {
                 const rows: usize = p.capacity / Packed.ratios[src];
-                fp4.index(row, p.storage[p.mainOff(src) + rows * Packed.main_stride + @as(usize, @intCast(r)) * Packed.index_stride ..][0..Packed.index_stride]);
+                try fp4.index(row, p.storage[p.mainOff(src) + rows * Packed.main_stride + @as(usize, @intCast(r)) * Packed.index_stride ..][0..Packed.index_stride]);
             },
         }
     }
