@@ -7,6 +7,7 @@ const Model = @import("../families/inkling2/metal/model.zig").Model;
 const st = @import("../families/inkling2/metal/state.zig");
 const backend = @import("../families/inkling2/metal/backend.zig");
 const dspark = @import("../families/inkling2/metal/dspark.zig");
+const admit = @import("../families/inkling2/metal/admit.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -106,7 +107,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = why;
         return null;
     }
-    std.log.info("inkling2_loop: {d:.1} GiB for stream and prompt state, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
+    const demand = admit.demandAt(resident, @intCast(window), drafter != null);
+    std.log.info("inkling2_loop: {d:.1} GiB for stream and prompt state, context up to {d} tokens; {d} streams ask {d:.2} GiB ({d:.2} GiB weights, dense layers and scratch, {d} x {d:.2} GiB a stream, {d:.2} GiB shared)", .{ inGib(budget), window, streams, inGib(demand.of(streams)), inGib(demand.fixed), streams, inGib(demand.stream), inGib(demand.shared) });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
@@ -149,7 +151,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-fn cacheBudget(ram: u64, working_set: u64, text: ?[]const u8, resident: u64) error{BadLoadLimit}!u64 {
+fn inGib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
+
+pub fn cacheBudget(ram: u64, working_set: u64, text: ?[]const u8, resident: u64) error{BadLoadLimit}!u64 {
     var limit: u64 = @intFromFloat(@as(f64, @floatFromInt(ram)) * 0.75);
     const value = std.mem.trim(u8, text orelse "", " \t");
     if (value.len > 0) {
