@@ -17,7 +17,6 @@ pub const Peer = struct {
     drops: std.atomic.Value(u32) = .init(0),
     running: std.atomic.Value(u32) = .init(0),
     kept: std.ArrayList(u32) = .empty,
-
     fn wants(ptr: *anyopaque, _: u64, cached: u64) bool {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         return p.at > cached;
