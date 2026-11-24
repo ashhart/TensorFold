@@ -49,6 +49,14 @@ pub const ArchSpec = struct {
     /// Keep per-unit conv buffers (false omits conv on multi-chunk docs; short/standing units may keep if true).
     keep_conv: bool = false,
 
+    /// Every geometry field a saved unit depends on, as text: a bank loads only into the architecture that wrote it.
+    pub fn signature(arch: ArchSpec, a: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "{s};h{d};l{d};x{d};s{d};a{d};kv{d};hd{d};r{d};t{x};n{d};rh{d};rr{d};rc{d};c{d}", .{
+            arch.family.name(), arch.hidden,                         arch.num_layers, arch.layer_lex, arch.layer_sem, arch.num_attn, arch.kv_heads,   arch.head_dim,
+            arch.rotary_dim,    @as(u64, @bitCast(arch.rope_theta)), arch.num_rec,    arch.rec_heads, arch.rec_rows,  arch.rec_cols, arch.conv_elems,
+        });
+    }
+
     pub fn recStateElems(self: ArchSpec) usize {
         return self.rec_heads * self.rec_rows * self.rec_cols;
     }
