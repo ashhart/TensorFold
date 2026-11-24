@@ -9,7 +9,7 @@ const KvLayerData = types.KvLayerData;
 const RecLayerData = types.RecLayerData;
 const TeachChunkInput = types.TeachChunkInput;
 const Unit = types.Unit;
-const compressRecurrentLayers = @import("compress.zig").compressRecurrentLayers;
+const recurrentDeltas = @import("compress.zig").recurrentDeltas;
 
 /// Calibrates and compiles the shared prefix once; if loaded calibrated, keeps units and rebuilds `cal_prompts`.
 pub fn ensureCalibrated(
@@ -119,13 +119,11 @@ pub fn teachChunk(self: *Bank, inp: TeachChunkInput) !u32 {
         kv_made += 1;
     }
 
-    // 3. Recurrent delta rank: 0 for pure attention, svd_rank_short for small facts/policies, else svd_rank.
-    const target_rank: usize = if (arch.num_rec == 0) 0 else if (inp.is_small_fact or inp.is_standing) arch.svd_rank_short else arch.svd_rank;
-    const rank: usize = if (target_rank == 0) 0 else @min(b_len + 2, @min(target_rank, @min(arch.rec_rows, arch.rec_cols)));
-    const rec: []RecLayerData = if (rank == 0)
+    // 3. Each recurrent layer's change, whole in F32 as computed, with its conv state (none for pure attention)
+    const rec: []RecLayerData = if (arch.num_rec == 0)
         try self.gpa.alloc(RecLayerData, 0)
     else
-        try compressRecurrentLayers(self.gpa, arch, pref, &body_raw, rank);
+        try recurrentDeltas(self.gpa, arch, pref, &body_raw);
     errdefer {
         for (rec) |*r| r.deinit(self.gpa);
         self.gpa.free(rec);
@@ -300,7 +298,7 @@ pub fn teachChunk(self: *Bank, inp: TeachChunkInput) !u32 {
     if (self.trace) {
         std.debug.print(
             "lw6 teach: uid={d} pid={d} ep={d} tok={d} kv=q{d} rk={d} n_lex={d}(body={d}) n_sem={d} small={} standing={} digest={} neg_sem={d:.3}\n",
-            .{ uid, inp.parent_id, ug.epoch, b_len, @as(u8, 16), rank, ug.n_lex, ug.n_body_lex, ug.n_sem, ug.is_small_fact, ug.is_standing, ug.is_digest, ug.neg_sem_max },
+            .{ uid, inp.parent_id, ug.epoch, b_len, @as(u8, 16), rec.len, ug.n_lex, ug.n_body_lex, ug.n_sem, ug.is_small_fact, ug.is_standing, ug.is_digest, ug.neg_sem_max },
         );
     }
     const unit: Unit = .{ .unit_id = uid, .parent_id = inp.parent_id, .n_tokens = @intCast(b_len), .gate = ug, .kv = kv, .rec = rec };
