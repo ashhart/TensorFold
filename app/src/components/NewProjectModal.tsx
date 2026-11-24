@@ -337,8 +337,8 @@ export function NewProjectModal() {
 
           <Field label={tx("Folder")} hint={tx("optional")}>
             <div className="flex gap-2">
-              <Input readOnly value={cwd ? shortPath(cwd, 3) : ''} placeholder={executionTarget === 'orchestrator' ? tx("Choose a host folder") : tx("Start from scratch")} />
-              <Button variant="default" icon="folder" onClick={browse}>{tx("Browse")}</Button>
+              <Input readOnly className="min-w-0" value={cwd ? shortPath(cwd, 3) : ''} placeholder={executionTarget === 'orchestrator' ? tx("Choose a host folder") : tx("Start from scratch")} />
+              <Button variant="default" className="shrink-0 whitespace-nowrap" icon="folder" onClick={browse}>{tx("Browse")}</Button>
             </div>
             {executionTarget === 'orchestrator' && (
               <div className="mt-2 rounded-lg border border-line bg-card-2/60 px-2.5 py-2 text-[13px] leading-snug text-ink-3">
