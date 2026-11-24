@@ -1,4 +1,4 @@
-//! Independent byte identity receipt against the supplied main's assembled libraries.
+//! Pinned main library identities, plus the explicitly rebased DFlash2 libraries.
 const std = @import("std");
 const ink = @import("inkling2_metal");
 const ks = @import("kernel_sources");
@@ -8,7 +8,7 @@ fn equal(source: []const u8, bytes: usize, expected: []const u8) !void {
     try std.testing.expectEqual(bytes, source.len);
     try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(hash, .lower));
 }
-test "every current generated Inkling and LFM2 library is byte-identical to supplied main" {
+test "unmodified Inkling and LFM2 libraries retain main and rebased DFlash2 sources have pinned identities" {
     try equal(ink.attention, 25176, "446df33916bbd384fb2dec029d0dc2c34acd068047eb6a6b7dca778aaf41345a");
     try equal(ink.prompt_attention, 36507, "2e690463846a822b5c087139eaa3dfbc9a980caa7753e36cb3562afc88a17abd");
     try equal(ink.prompt_attention_pre_m5, 36531, "28b71a25e1aab7174cf121f3ae05f84afb165970443a91f6978c06628630935b");
@@ -24,7 +24,7 @@ test "every current generated Inkling and LFM2 library is byte-identical to supp
     try equal(ink.inkling2_dspark, 34958, "280e181c0ea975da90252417352bd2cbbde2a653951e4e12ecb3dc436b882cb9");
     try equal(ink.inkling2_dspark_pre_m5, 34982, "ed6e11de7d7f14e4821132f3598c7fee0c63f1b211682726911769b2cd042932");
     try equal(ink.vision, 40124, "f3bccee002e5b0d7572dc25316538b384e397a4f5dba3f4ac99839e434d848c6");
-    try equal(ink.inkling2_dflash2, 22370, "74a5e9a2324b5875a754e931243203bf19b426758fe6a2a524c62f6809f96dbd");
+    try equal(ink.inkling2_dflash2, 24617, "97ecd25c5c6cddb4434b5ee3659d7350b912a7c196eb3c3c15dbbd62aee53026");
     try equal(ink.sample, 10443, "747835e5a84d76d7d838958e2677aa5af62e4ebf2e612520bfc759e967d44c81");
     try equal(ks.inkling2_glue, 26246, "0d1f7bb8d2721671eb744a52a39e1e9c26dcb866a026ee1f9c5785ec7b8c1d06");
     try equal(ks.inkling2_sample, 10443, "747835e5a84d76d7d838958e2677aa5af62e4ebf2e612520bfc759e967d44c81");

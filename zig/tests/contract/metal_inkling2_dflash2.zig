@@ -47,6 +47,7 @@ pub const Probe = struct {
     refs: [6]rig_.Ref = undefined,
     outs: [3]rig_.Ref = undefined,
     attend_args: host.AttendArgs = undefined,
+    attend_stream: host.AttendStream = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: host.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.inkling2_dflash2);
@@ -101,7 +102,7 @@ pub const Probe = struct {
             .norm16, .conv => self.shape.rows * H,
             .ctx_kv => 2 * self.shape.rows * KV,
             .block_qkv => self.shape.rows * (Q + 2 * KV),
-            .attend => self.shape.rows * QH * self.attend_args.chunks * PART,
+            .attend => self.shape.rows * QH * self.attend_stream.chunks * PART,
             .attend_merge => self.shape.rows * Q,
             .silu_mul => self.shape.rows * INTER,
             .topk16 => 2 * self.shape.rows * host.top_k,
@@ -221,15 +222,19 @@ pub const Probe = struct {
                 const chunks = (keys + 127) / 128;
                 self.attend_args = .{
                     .rows = @intCast(rows),
+                    .block = BLOCK,
+                    .window = if (shape.k != 0) 64 else 2048,
+                    .ring = @intCast(ring),
+                    .max_chunks = @intCast(chunks),
+                    .scale = 1.0 / @sqrt(@as(f32, D)),
+                };
+                self.attend_stream = .{
                     .anchor = @intCast(retained + 20),
                     .from = 20,
                     .lo = 20,
                     .retained = @intCast(retained),
                     .keys = @intCast(keys),
-                    .window = if (shape.k != 0) 64 else 2048,
-                    .ring = @intCast(ring),
                     .chunks = @intCast(chunks),
-                    .scale = 1.0 / @sqrt(@as(f32, D)),
                 };
                 const sizes = [_]usize{ rows * Q, rows * KV, rows * KV, ring * KV, ring * KV };
                 for (sizes, 0..) |n, j| {
@@ -242,7 +247,8 @@ pub const Probe = struct {
             },
             .attend_merge => {
                 const chunks = shape.n;
-                self.attend_args = .{ .rows = @intCast(rows), .anchor = 0, .from = 0, .lo = 0, .retained = 0, .keys = @intCast(chunks * 128), .window = 2048, .ring = 1, .chunks = @intCast(chunks), .scale = 1.0 };
+                self.attend_args = .{ .rows = @intCast(rows), .block = BLOCK, .window = 2048, .ring = 1, .max_chunks = @intCast(chunks), .scale = 1.0 };
+                self.attend_stream = .{ .anchor = 0, .from = 0, .lo = 0, .retained = 0, .keys = @intCast(chunks * 128), .chunks = @intCast(chunks) };
                 self.f[0] = try self.floats(rows * QH * chunks * PART, rng);
                 for (0..rows) |r| for (0..KVH) |kh| for (0..chunks) |ch| for (0..G) |gg| {
                     const base = (((r * KVH + kh) * chunks + ch) * G + gg) * PART;
@@ -354,19 +360,31 @@ pub const Probe = struct {
             .norm => host.norm(p, e, hostRef(O[0]), hostRef(R[0]), hostRef(R[1]), hostRef(O[1]), .{ .rows = @intCast(self.shape.rows), .width = H, .eps = EPS, .add = @intCast(self.shape.k) }),
             .norm16 => host.norm16(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0]), .{ .rows = @intCast(self.shape.rows), .width = H, .eps = EPS, .add = 0 }),
             .conv => host.conv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), .{ .rows = @intCast(self.shape.rows), .width = H, .block = BLOCK, .groups = GROUPS, .side = @intCast(self.shape.k) }),
-            .ctx_kv => host.ctxKv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(O[0]), hostRef(O[1]), .{ .rows = @intCast(self.shape.rows), .pos0 = @intCast(self.shape.k), .ring = @intCast(self.shape.rows), .eps = EPS, .theta = THETA }),
-            .block_qkv => host.blockQkv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), .{ .rows = @intCast(self.shape.rows), .block = BLOCK, .pos0 = @intCast(self.shape.k), .eps = EPS, .theta = THETA }),
-            .attend => host.attendPart(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), self.attend_args),
-            .attend_merge => host.attendMerge(p, e, hostRef(R[0]), hostRef(O[0]), self.attend_args),
+            .ctx_kv => host.ctxKv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), &.{.{ .k = hostRef(O[0]), .v = hostRef(O[1]) }}, .{ .rows = @intCast(self.shape.rows), .segs = 1, .ring = @intCast(self.shape.rows), .eps = EPS, .theta = THETA }, &.{.{ .row0 = 0, .rows = @intCast(self.shape.rows), .pos0 = @intCast(self.shape.k) }}),
+            .block_qkv => host.blockQkv(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), hostRef(O[1]), hostRef(O[2]), .{ .rows = @intCast(self.shape.rows), .block = BLOCK, .eps = EPS, .theta = THETA, .pos0 = @splat(@intCast(self.shape.k)) }),
+            .attend => host.attendPart(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), &.{.{ .k = hostRef(R[3]), .v = hostRef(R[4]) }}, hostRef(O[0]), self.attend_args, &.{self.attend_stream}),
+            .attend_merge => host.attendMerge(p, e, hostRef(R[0]), hostRef(O[0]), self.attend_args, &.{self.attend_stream}),
             .silu_mul => host.siluMul(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(O[0]), @intCast(self.shape.rows * INTER)),
             .topk16 => host.topk16(p, e, hostRef(R[0]), hostRef(O[0]), hostRef(O[1]), .{ .rows = @intCast(self.shape.rows), .vocab = @intCast(self.shape.n), .k = host.top_k, .stride = @intCast(self.shape.n + 16) }),
-            .walk => host.walk(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), .{ .slots = @intCast(self.shape.rows), .rank = RANK, .top = host.top_k, .vocab = @intCast(self.shape.n), .softcap = if (self.shape.k != 0) 30.0 else 0.0 }),
+            .walk => host.walk(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(R[4]), hostRef(O[0]), .{ .slots = @intCast(self.shape.rows), .rank = RANK, .top = host.top_k, .vocab = @intCast(self.shape.n), .stride = @intCast(self.shape.rows), .row0 = 0, .softcap = if (self.shape.k != 0) 30.0 else 0.0 }, 1),
         }
         try self.rig.finish(pass);
     }
 
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
-        ref.computeReference(self.kind, self.shape, self.attend_args, self.f, self.u, want, mag);
+        const attend_ref = .{
+            .rows = self.attend_args.rows,
+            .anchor = self.attend_stream.anchor,
+            .from = self.attend_stream.from,
+            .lo = self.attend_stream.lo,
+            .retained = self.attend_stream.retained,
+            .keys = self.attend_stream.keys,
+            .window = self.attend_args.window,
+            .ring = self.attend_args.ring,
+            .chunks = self.attend_stream.chunks,
+            .scale = self.attend_args.scale,
+        };
+        ref.computeReference(self.kind, self.shape, attend_ref, self.f, self.u, want, mag);
     }
 
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
