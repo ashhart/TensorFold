@@ -178,7 +178,7 @@ pub fn saveFull(self: *Bank) !u64 {
     try unit_meta.append(a, '[');
     for (self.units.items, 0..) |*u, i| {
         if (i > 0) try unit_meta.append(a, ',');
-        const rank: u16 = if (u.rec.len > 0) u.rec[0].rank else 0;
+        const rank: u16 = @intFromBool(u.rec.len > 0); // 1: whole recurrent changes stored
         const has_conv: bool = u.rec.len > 0 and u.rec[0].conv.len == arch.conv_elems;
         const entry = try std.fmt.allocPrint(
             a,
@@ -205,7 +205,7 @@ pub fn saveFull(self: *Bank) !u64 {
     }
     try unit_meta.append(a, ']');
 
-    const skill_rk: u16 = if (self.skill_rec.len == arch.num_rec and arch.num_rec > 0) self.skill_rec[0].rank else 0;
+    const skill_rk: u16 = @intFromBool(self.skill_rec.len == arch.num_rec and arch.num_rec > 0); // 1: whole steering
     const meta = [_]store.MetaKV{
         .{ .key = "format", .value = store.format_tag },
         .{ .key = "family", .value = arch.family.name() },
@@ -243,11 +243,9 @@ pub fn saveFull(self: *Bank) !u64 {
 
     // Sleep-time consolidated spectral skill steering tensors (optional, pure weights!)
     if (skill_rk > 0) {
-        const rk_u: usize = skill_rk;
         for (0..arch.num_rec) |r| {
             const rl = &self.skill_rec[r];
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.u", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk_u }), .bytes = std.mem.sliceAsBytes(rl.u) });
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.v", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk_u, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.v) });
+            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.d", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.delta) });
         }
     }
 

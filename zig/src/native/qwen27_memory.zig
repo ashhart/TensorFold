@@ -59,9 +59,6 @@ pub const Adapter = struct {
             .rec_rows = c.dv, // 128
             .rec_cols = c.dk, // 128
             .conv_elems = r.gdn.budget.shape.conv,
-            .svd_rank = 0, // KV only on doc chunks (no GDN SVD)
-            .svd_rank_short = 4, // rank-4 GDN SVD on short facts & standing policies!
-            .keep_conv = false,
         };
     }
 

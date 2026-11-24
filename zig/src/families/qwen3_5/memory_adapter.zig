@@ -50,9 +50,6 @@ pub const Adapter = struct {
             .rec_rows = c.linear_dim, // 128
             .rec_cols = c.linear_dim, // 128
             .conv_elems = (c.conv_taps - 1) * c.conv_dim, // 3 * 6144
-            .svd_rank = 4, // spectral-denoised rank-4 beats rank-20 on 2B (3.3x smaller!)
-            .svd_rank_short = 4,
-            .keep_conv = false,
         };
     }
 
