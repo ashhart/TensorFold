@@ -37,9 +37,9 @@ kernel void tf_inkling2_loop_norm(
 kernel void tf_inkling2_loop_down(
     const device bfloat* normalized [[buffer(0)]], const device bfloat* down [[buffer(1)]],
     device float* zeta [[buffer(2)]],
-    constant InkLoopSplitArgs& a [[buffer(3)]], uint t [[thread_position_in_threadgroup]],
+    constant InkLoopSplitArgs& a [[buffer(3)]], uint2 tid [[thread_position_in_threadgroup]],
     uint2 group [[threadgroup_position_in_grid]]) {
-  const uint row = group.y, r = group.x * 32 + t;
+  const uint row = group.y, r = group.x * 32 + tid.x;
   if (row >= a.rows || r >= INKLING_LOOP_RANK) return;
   const device bfloat* x = normalized + size_t(row) * (2 * INKLING_LOOP_H);
   const device bfloat* w = down + size_t(r) * (2 * INKLING_LOOP_H);
