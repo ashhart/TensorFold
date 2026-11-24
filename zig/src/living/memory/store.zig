@@ -3,9 +3,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-/// v7: every value as computed (BF16 KV, F32 prototypes, factors and floats); older banks stored Q4/Q8.
-pub const format_tag = "tf-living-memory-v7";
-const inexact_tags = [_][]const u8{ "tf-living-memory-v6", "tf-living-memory-v4", "tf-living-memory-v3" };
+/// v8: every value whole as computed (BF16 KV, F32 recurrent changes, prototypes, floats); older banks were not.
+pub const format_tag = "tf-living-memory-v8";
+const inexact_tags = [_][]const u8{ "tf-living-memory-v7", "tf-living-memory-v6", "tf-living-memory-v4", "tf-living-memory-v3" };
 
 /// Whether `tag` names a format that stored quantized values: such a bank is refused, never read approximately.
 pub fn inexactFormat(tag: []const u8) bool {

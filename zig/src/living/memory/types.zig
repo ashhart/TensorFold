@@ -42,12 +42,6 @@ pub const ArchSpec = struct {
     rec_rows: usize, // 128 (Qwen dv), 64 (Nemotron head_dim)
     rec_cols: usize, // 128 (Qwen dk / Nemotron state)
     conv_elems: usize, // elements of bf16 per recurrent layer conv buffer
-    /// Empirical optimum for document chunks: 4 for 2B, 0 for 27B/30B (KV-only!).
-    svd_rank: usize = 4,
-    /// Empirical optimum for short facts & standing policies (steers Mamba-2/GDN layers on 15-token rules!).
-    svd_rank_short: usize = 4,
-    /// Keep per-unit conv buffers (false omits conv on multi-chunk docs; short/standing units may keep if true).
-    keep_conv: bool = false,
 
     /// Every geometry field a saved unit depends on, as text: a bank loads only into the architecture that wrote it.
     pub fn signature(arch: ArchSpec, a: std.mem.Allocator) ![]const u8 {
@@ -164,14 +158,11 @@ pub const KvLayerData = struct {
 };
 
 pub const RecLayerData = struct {
-    rank: u16,
-    u: []f32, // [rec_heads * rec_rows * rank], F32 as the SVD computed it
-    v: []f32, // [rec_heads * rank * rec_cols]
-    conv: []u16, // [conv_elems] bf16 OR empty when `keep_conv == false`
+    delta: []f32, // [rec_heads * rec_rows * rec_cols]: S_after - S_prefix, whole in F32 as computed
+    conv: []u16, // [conv_elems] bf16, the body's conv state as computed (empty in the consolidated steering)
 
     pub fn deinit(self: *RecLayerData, gpa: Allocator) void {
-        gpa.free(self.u);
-        gpa.free(self.v);
+        gpa.free(self.delta);
         gpa.free(self.conv);
     }
 };
@@ -182,7 +173,7 @@ pub const Unit = struct {
     n_tokens: u32,
     gate: gate.UnitGate,
     kv: []KvLayerData, // [num_attn]
-    rec: []RecLayerData, // [num_rec] OR empty when `svd_rank == 0`!
+    rec: []RecLayerData, // [num_rec], empty for a pure-attention model
 
     pub fn deinit(self: *Unit, gpa: Allocator) void {
         self.gate.deinit(gpa);
