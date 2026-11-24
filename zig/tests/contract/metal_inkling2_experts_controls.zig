@@ -46,8 +46,8 @@ pub const Mutation = enum {
             .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k));", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k));" },
             .mx_decode_scale => .{ .from = "S[row * (a.k / 32u) + col / 32u]", .to = "S[row * (a.k / 32u) + col / 16u]" },
             .combine_slot_order => .{
-                .from = "for (uint expert = 0; expert < a.experts; ++expert)\n    for (uint slot = 0; slot < a.topk; ++slot)\n      if (uint(ids[group * a.topk + slot]) == expert)\n        sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
-                .to = "for (uint slot = 0; slot < a.topk; ++slot)\n    sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
+                .from = "while (at > 0u && uint(ids[group * a.topk + slots[at - 1u]]) > id) {",
+                .to = "while (false) {",
             },
             // every output block past the first returns before writing: columns 32 on stay unwritten
             .grid_block_drop => .{ .from = "if (n >= a.n) return;", .to = "if (n >= a.n || tg.x > 0u) return;" },

@@ -168,11 +168,20 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
   // One thread an output: threadgroup x is 32 outputs, y the token.
   const uint n = tg.x * 32u + lane, group = tg.y;
   if (n >= a.n) return;
-  // Outer expert order, not route-slot order, fixes the reference's accumulation order.
+  // Outer expert order, not route-slot order, fixes the reference's accumulation order; equal ids keep slot order.
+  uint slots[8], used = 0u;
+  for (uint slot = 0; slot < a.topk; ++slot) {
+    const uint id = uint(ids[group * a.topk + slot]);
+    if (id >= a.experts) continue;
+    uint at = used++;
+    while (at > 0u && uint(ids[group * a.topk + slots[at - 1u]]) > id) {
+      slots[at] = slots[at - 1u];
+      --at;
+    }
+    slots[at] = slot;
+  }
   float sum = 0.0f;
-  for (uint expert = 0; expert < a.experts; ++expert)
-    for (uint slot = 0; slot < a.topk; ++slot)
-      if (uint(ids[group * a.topk + slot]) == expert)
-        sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);
+  for (uint i = 0; i < used; ++i)
+    sum += weights[group * a.topk + slots[i]] * float(down[(group * a.topk + slots[i]) * a.n + n]);
   Y[group * a.n + n] = bfloat(sum);
 }
