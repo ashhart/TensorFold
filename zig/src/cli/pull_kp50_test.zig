@@ -522,7 +522,7 @@ test "security KR67-2: raw percent and nested-encoded redaction markers are cont
     }
 }
 
-test "security KR69-4: a registered family and raw or nested model types contain the HF token" {
+test "security KR69-4: credential-bearing model types are contained and their config artifact is refused" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -536,7 +536,7 @@ test "security KR69-4: a registered family and raw or nested model types contain
     const env = try envWithToken(a, &fake, secret);
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
     try expectFinalContainment(a, out.written(), err_out.written(), secret);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "Qwen3.8 Flash Next ([redacted])") != null);
 

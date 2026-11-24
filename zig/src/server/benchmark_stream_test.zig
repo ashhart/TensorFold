@@ -330,7 +330,7 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserve
     defer f.stop();
     var h: history.History = .{ .a = a };
     var out: std.Io.Writer.Allocating = .init(a);
-    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    const ended = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{}, false);
     switch (ended) {
         .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
         else => return error.TestUnexpectedResult,
@@ -342,7 +342,7 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserve
     const unicode_body = try turn.body(a, .{ .model = "m" }, &h, unicode_secret);
     const escape_at = std.mem.indexOf(u8, unicode_body, "\\u00e9abc").?;
     unicode_body[escape_at + 4] = 'E';
-    const unicode_refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), null, unicode_credentials, unicode_body, &out.writer, .{});
+    const unicode_refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), null, unicode_credentials, unicode_body, &out.writer, .{}, false);
     switch (unicode_refused) {
         .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
         else => return error.TestUnexpectedResult,
@@ -357,7 +357,7 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserve
     const hostile_first = "{\"model\":\"\\u00E9abc\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
     const hostile_last = "{\"model\":\"safe\",\"model\":\"\\u00E9abc\",\"messages\":[],\"stream\":true}";
     for ([_][]const u8{ malformed, deep.items, hostile_first, hostile_last }) |request| {
-        const attack = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, request), &out.writer, .{});
+        const attack = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, request), &out.writer, .{}, false);
         switch (attack) {
             .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
             else => {},
@@ -365,14 +365,14 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and preserve
     }
     try std.testing.expectEqual(@as(usize, 1), f.count());
     const safe_duplicate = "{\"model\":\"first\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
-    const safe = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, safe_duplicate), &out.writer, .{});
+    const safe = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, safe_duplicate), &out.writer, .{}, false);
     switch (safe) {
         .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 2), f.count());
     try std.testing.expectEqualStrings(safe_duplicate, f.request(1).body);
-    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
+    const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{}, false);
     switch (refused) {
         .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
         else => return error.TestUnexpectedResult,

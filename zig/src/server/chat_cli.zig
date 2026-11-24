@@ -194,7 +194,7 @@ const Session = struct {
     /// One message and its streamed reply, in an arena of its own that lives until the turn is kept.
     fn ask(s: *Session, a: Allocator, message: []const u8) !turn.Ended {
         const request = try turn.checkedBody(a, s.settings, &s.history, message, s.target.credentials) orelse return .{ .failed = .{ .reason = "the serialized request contains configured credentials" } };
-        return turn.run(a, s.ctx.io, s.url, s.target.key, s.target.credentials, request, s.ctx.out, s.show);
+        return turn.run(a, s.ctx.io, s.url, s.target.key, s.target.credentials, request, s.ctx.out, s.show, s.target.own == null);
     }
 
     /// A finished reply's notes: cut at its token limit, or nothing but reasoning that was hidden.
@@ -325,7 +325,7 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
     defer client.deinit();
     const url = try std.mem.concat(ctx.a, u8, &.{ chat_url[0 .. chat_url.len - "/chat/completions".len], "/models" });
     if (try credential.contains(ctx.a, url, target.credentials.forms)) return .{ .problem = credential.withheld };
-    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key });
+    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key, .legacy_key = target.own == null });
     if (got.failed == .stopped) return .{ .stopped = stop.requested() orelse .INT };
     var doc: ?json.Value = null;
     if (got.failed == .none and got.status == 200) switch (try json.parse(ctx.a, got.body)) {

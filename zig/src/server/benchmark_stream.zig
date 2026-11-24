@@ -331,6 +331,7 @@ pub const Fetch = struct {
     url: []const u8,
     body: ?[]const u8 = null,
     token: ?[]const u8 = null,
+    legacy_key: bool = false,
     limit: usize,
     timeout_s: f64,
     agent: []const u8 = user_agent,
@@ -367,6 +368,11 @@ pub fn rawHeader(buf: []u8, token: []const u8) ?[]const u8 {
     return buf[0..n];
 }
 
+/// Legacy callers send the exact original key bytes, as main's Bearer concatenation did.
+pub fn legacyHeader(buf: []u8, token: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "Bearer {s}", .{token}) catch null;
+}
+
 const FetchTask = struct {
     a: Allocator,
     client: *std.http.Client,
@@ -378,7 +384,7 @@ const FetchTask = struct {
         x.out.failed = .network;
         const uri = std.Uri.parse(x.f.url) catch return;
         var auth_buf: [300]u8 = undefined;
-        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = rawHeader(&auth_buf, tok) orelse return } else .omit;
+        const auth: std.http.Client.Request.Headers.Value = if (x.f.token) |tok| .{ .override = (if (x.f.legacy_key) legacyHeader(&auth_buf, tok) else rawHeader(&auth_buf, tok)) orelse return } else .omit;
         var req = x.client.request(x.f.method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
