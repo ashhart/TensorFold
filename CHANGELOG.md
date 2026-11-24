@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview on Metal: `--drafter` takes the publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) beside either release, with drafted replies equal to plain ones; with the drafter the server opens two streams unless `--parallel` is named, and refuses a named `--parallel` above 2 (#2260, fixes #2259). Thanks to @BobClawblaw.
+
 - MiniMax-M3 on CUDA: `TF_MINIMAX_GRAPHS=1` (opt-in) runs the decode verify window from one CUDA graph, re-recorded with each round's arguments and updated in place, so every kernel sees the same arguments as the eager path and tokens are unchanged (#4610).
 
 - Server: `POST /v1/prompt_cache/flush` takes an optional `retain` count that keeps the most recently used prompt states in RAM and on disk; without it the flush is unchanged (#4856).
