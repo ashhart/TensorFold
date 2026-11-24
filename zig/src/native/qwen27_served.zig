@@ -22,6 +22,8 @@ const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
+const mem_ctrl = @import("memory_controller.zig");
+const qwen27_mem = @import("qwen27_memory.zig");
 const room = helpers.room;
 const drafterRefusal = helpers.drafterRefusal;
 const gibBytes = helpers.gibBytes;
@@ -44,6 +46,8 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
+    slide: bool = false, // --slide: Folded Memory Weights v3 live learning
+    dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
 };
 
 pub const Host = struct {
@@ -68,6 +72,7 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -262,6 +267,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     var with = o; // the tower before the slots: their room and the cache's budget count it as taken
     with.mtp_dir = dir;
+    with.dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
     const h = try attach(gpa, io, model, null, with, a, why);
@@ -430,6 +436,16 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
+    h.folded_mem = null;
+    if (o.dir.len > 0 and (o.slide or mem_ctrl.hasSavedFile(gpa, io, o.dir))) {
+        const adapter = try qwen27_mem.Adapter.init(gpa, h.back);
+        errdefer adapter.deinit(gpa);
+        const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, qwen27_mem.Adapter.deinitOpaque);
+        h.folded_mem = holder;
+        h.host.folded_memory = holder.controller();
+        if (o.slide) h.host.info_.folded_memory = true;
+    }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
@@ -522,6 +538,7 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
+    if (h.folded_mem) |fm| fm.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
