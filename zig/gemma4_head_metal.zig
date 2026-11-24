@@ -49,6 +49,9 @@ pub const Device = struct {
     pub fn generation(_: @This()) u32 {
         return 15;
     }
+    pub fn name(_: @This()) [*:0]const u8 {
+        return ""; // no chip the cutover table lists
+    }
     pub fn buffer(_: @This(), _: usize, _: usize) !Buffer {
         return error.UnexpectedAllocation;
     }

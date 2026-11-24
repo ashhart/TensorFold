@@ -209,15 +209,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
     }) });
     test_step.dependOn(&b.addRunArtifact(pack_cases).step);
-    const load_admission_cases = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    }) });
-    const load_admission_run = b.addRunArtifact(load_admission_cases);
-    b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&load_admission_run.step);
-    test_step.dependOn(&load_admission_run.step);
     const pack_cache_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_pack_cache_cases.zig"),
         .target = target,
@@ -456,6 +447,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
     });
     engine.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
+    engine.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 

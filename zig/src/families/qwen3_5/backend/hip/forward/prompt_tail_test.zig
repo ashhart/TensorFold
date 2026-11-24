@@ -142,6 +142,11 @@ fn full(i: usize, format: Format) view.Full {
 
 /// The launches of one span of `len` rows from `pos0` over two full layers, read as `reads`; the last's in `last`.
 fn record(len: usize, pos0: usize, reads: fwd.Reads, last: Format) !fwd.Final {
+    return recordIn(len, pos0, fwd.SPAN, reads, last);
+}
+
+/// `record` in steps of `step` rows a layer, as an engine opened with that many prompt rows runs a chunk.
+fn recordIn(len: usize, pos0: usize, step: usize, reads: fwd.Reads, last: Format) !fwd.Final {
     Mock.rt.api.hipModuleLaunchKernel = Mock.launch;
     Mock.rt.api.hipModuleGetFunction = Mock.function;
     Mock.count = 0;
@@ -180,7 +185,7 @@ fn record(len: usize, pos0: usize, reads: fwd.Reads, last: Format) !fwd.Final {
     var caches: state.Caches = .{ .layers = &cache_layers, .total = 4096, .desc = .{ .r = &Mock.rt, .ptr = @ptrFromInt(0x6_0000_0000), .len = 1 }, .pool = &pool };
     var arena = hip.Arena.counting();
     const o: hip.ops.Ops = .{ .l = &l, .bf16 = true, .stream = @ptrFromInt(0x10), .arena = &arena };
-    return fwd.spanFor(o, &m, &caches, 0x7_0000_0000, len, pos0, null, reads);
+    return fwd.spanFor(o, &m, &caches, 0x7_0000_0000, len, pos0, step, null, reads);
 }
 
 /// The recorded launches of kernel `kernel` ("product": any product's) and weight `weight` where nonzero, in order.
@@ -320,4 +325,28 @@ test "qwen3_5 hip prompt tail: across a step edge, the read row's step runs main
         try T.expectEqual(@as(i64, 2048), w[0].rows);
         try T.expect(!std.mem.eql(u8, w[0].name, got[0].name));
     }
+}
+
+test "qwen3_5 hip prompt tail: a 4,096-row chunk at the 4,096-row step is one step a layer, its tail the last tile" {
+    var buf: [16]Launch = undefined;
+    const kept = try recordIn(4096, 0, 4096, .{ .logits = true, .readers = false }, .mlx);
+    try T.expectEqual(@as(usize, 4096 - 128), kept.from);
+    // one launch a product over the whole chunk, where SPAN would cut it in two
+    try productRows(0, &all_slots, 4096);
+    try productRows(1, &.{ slot.k, slot.v }, 4096);
+    try productRows(1, &query_slots, 128);
+    const att = launches(&buf, "fa_paged", 0);
+    try T.expectEqual(@as(usize, 2), att.len);
+    try expectAttention(4096, 0, 4096, att[0]);
+    try expectAttention(128, 3968, 4096, att[1]);
+    try T.expectEqual(@as(i64, 128), launches(&buf, "rms_rows", final_norm)[0].rows);
+    // 4,200 rows: the tail from 4,072 is the first step's last 24 rows and all 104 of the second
+    _ = try recordIn(4200, 0, 4096, .{ .logits = true, .readers = false }, .mlx);
+    const two = launches(&buf, "fa_paged", 0);
+    try T.expectEqual(@as(usize, 4), two.len);
+    try expectAttention(24, 4072, 4096, two[2]);
+    try expectAttention(104, 4096, 4200, two[3]);
+    // the same chunk through `record` (SPAN) is two steps a layer: the step is the caller's
+    _ = try record(4096, 0, .{ .logits = true, .readers = false }, .mlx);
+    try T.expectEqual(@as(usize, 2), launches(&buf, "page_write", 0x4_1000_0000).len);
 }

@@ -5,7 +5,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 /// `LaneHost.halt`: the engine thread stops at the next round boundary; what is left fails with `reason`.
 pub fn halt(h: *LaneHost, reason: []const u8) void {
     h.mutex.lockUncancelable(h.io);
-    h.closing = true;
+    h.closing.store(true, .release);
     h.halt_reason = reason;
     h.wake.broadcast(h.io);
     h.unlock();
@@ -22,6 +22,7 @@ pub fn haltAll(h: *LaneHost, reason: []const u8) void {
     h.admitted = .empty;
     h.filling.clearRetainingCapacity(); // a job still filling is admitted: it fails below, its lane freed
     h.unlock();
+    @import("lane_host_status.zig").noteLive(h); // empty before any terminal job or stream is deinitialized
     if (queued.items.len + jobs.items.len > 0) std.log.warn("lane host: stopping at a round boundary: {d} running and {d} queued request(s) end ({s})", .{ jobs.items.len, queued.items.len, reason });
     for (jobs.items) |job| {
         if (job.started and !job.stream.finished) h.core.discard(&job.stream);

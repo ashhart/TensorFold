@@ -245,10 +245,12 @@ pub const Kernels = struct {
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
+    group: ?cuda.qmmf_group.Group = null, // TF_Q35_GROUP_PROJ: grouped same-input projections
 
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
         var lane = try cuda.qmmf.Lane.load(d, capability / 10);
+        lane.pdl = @import("cuda_pdl.zig").on(); // 1A: the qmmf image already prefetches weights before its wait
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
@@ -256,7 +258,8 @@ pub const Kernels = struct {
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
+        const group = try @import("cuda_group_proj.zig").load(&lane);
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .group = group };
     }
 
     pub fn unload(k: *Kernels) void {

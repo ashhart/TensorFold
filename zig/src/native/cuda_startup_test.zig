@@ -27,7 +27,7 @@ fn set(value: ?[:0]const u8) !void {
 fn line(comptime F: type, loaded: F.Loaded) ![]u8 {
     return std.fmt.allocPrint(std.testing.allocator, startup.format, .{
         @as(u32, 121),      @as(u32, 0),  "GPU",       "",                      @as(f64, 12.5), "", @as(u32, 1),        "",
-        "1.0 GiB a stream", @as(f64, 20), @as(f64, 2), startup.rows(F, loaded), "",             "", "own glue kernels",
+        "1.0 GiB a stream", @as(f64, 20), @as(f64, 2), startup.rows(F, loaded), "",             "", "own glue kernels", "",
     });
 }
 

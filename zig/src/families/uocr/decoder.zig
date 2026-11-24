@@ -1,6 +1,7 @@
 //! Unlimited-OCR-2's decoder on Metal: the prompt in chunks of rows, then a token a step, over exact bf16 caches.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
 const cfg = @import("config.zig");
 const ks = @import("kernels.zig");
 const wts = @import("weights.zig");
@@ -158,12 +159,13 @@ pub const Decoder = struct {
     }
 
     /// Prefill a prompt: `image_rows` (bf16 [image tokens, 1280]) at its image tokens, the token embeddings elsewhere.
-    pub fn prefill(d: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16) !void {
+    pub fn prefill(d: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16, stream: ?*const lanes.Stream) !void {
         const n = p.len();
         if (n == 0 or n > d.cap) return error.UocrPromptTooLong;
         var images: usize = 0;
         for (p.ids) |id| images += @intFromBool(id == cfg.image_token);
         if (image_rows.len != images * H) return error.UocrImageRows;
+        if (stream) |st| if (st.isCancelled()) return error.Cancelled;
         try d.upload(p);
         var tr: ?pass_mod.Trace = null;
         if (d.trace != null or d.trace_parts != null) tr = try pass_mod.Trace.init(d.device, n);
@@ -173,6 +175,7 @@ pub const Decoder = struct {
         var s0: usize = 0;
         const embed: [*]const u16 = @ptrCast(@alignCast(d.w.embed.addr()));
         while (s0 < n) {
+            if (stream) |st| if (st.isCancelled()) return error.Cancelled;
             const r = @min(d.rows, n - s0);
             const x = d.scratch.host(u16, .x, r * H);
             for (0..r) |i| {

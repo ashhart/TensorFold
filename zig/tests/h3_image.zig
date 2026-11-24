@@ -19,6 +19,8 @@ const usage =
     \\               timesteps, deltas and rotary_cos / rotary_sin for the exact checks
     \\  once         the first step alone, teacher-forced; free: the free run alone, a picture's generation
     \\Exit 0: every gate passed (or a free run had none); 1: a gate failed; 2: no reference to gate (inconclusive).
+    \\Between transformer blocks it waits while the speech server speaks. Exclude timing_valid=false steps
+    \\from benchmarks, even when their wait is 0: speech can start and finish between polls.
     \\
 ;
 
@@ -88,6 +90,8 @@ pub const Folder = struct {
     pdd: picture.Pdd,
     hidden: usize,
     layers: usize,
+    /// Every model bound from the folder gives way to live speech between blocks.
+    turn: h3.gpu_turn.Turn,
 
     pub fn open(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !Folder {
         // the folder: the image pipeline, an audio-free transformer, the distilled schedule and its heads
@@ -102,12 +106,12 @@ pub const Folder = struct {
         var name: [32]u8 = undefined;
         var layers: usize = 0;
         while (ck.entry(try std.fmt.bufPrint(&name, "blocks.{d}.norm1.weight", .{layers})) != null) layers += 1;
-        return .{ .dir = dir, .ck = ck, .heads = heads, .pdd = pdd, .hidden = hidden, .layers = layers };
+        return .{ .dir = dir, .ck = ck, .heads = heads, .pdd = pdd, .hidden = hidden, .layers = layers, .turn = .{ .io = init.io } };
     }
 
     /// A model for `case`'s rows over the folder's weights, its AdaLN tables for the distilled schedule.
     pub fn bind(f: *const Folder, gpa: std.mem.Allocator, a: std.mem.Allocator, case: *const Case) !*h3.Model {
-        const model = try h3.Model.bind(gpa, f.ck, case.file, .{});
+        const model = try h3.Model.bind(gpa, f.ck, case.file, .{ .give_way = f.turn });
         errdefer model.release();
         if (!model.base or model.step_heads != f.pdd.steps() or model.audio != 0) return error.H3NotPictureModel;
         model.dense = true;
@@ -223,7 +227,7 @@ pub fn free(a: std.mem.Allocator, model: *h3.Model, f: *const Folder, case: *con
     for (0..f.pdd.steps()) |k| {
         const took = try model.forward(x, &.{}, k, velocity, &.{});
         picture.euler(x, velocity, f.pdd.deltas[k]);
-        std.debug.print("step {d}/{d}: {d:.2} s wall, {d:.2} s GPU\n", .{ k + 1, f.pdd.steps(), took.wall, took.gpu });
+        std.debug.print("step {d}/{d}: {d:.2} s wall, {d:.2} s GPU, {d:.2} s waited for speech, timing_valid={}\n", .{ k + 1, f.pdd.steps(), took.wall, took.gpu, took.paused, took.timing_valid });
     }
     try write(a, prefix, ".rows.f32", x);
     const out = try a.alloc(f32, x.len);
@@ -315,7 +319,7 @@ pub fn main(init: std.process.Init) !void {
             const ok = picture.stepPasses(d);
             gate.gated = true;
             gate.failed = gate.failed or !ok;
-            std.debug.print("step {d}/{d} teacher-forced: cosine {d:.6}, relative error {d:.5}, worst row {d:.5} ({s}), {d:.2} s wall, {d:.2} s GPU\n", .{ k + 1, steps, d.cosine, d.relative, d.worst_row, if (ok) "pass" else "FAIL", took.wall, took.gpu });
+            std.debug.print("step {d}/{d} teacher-forced: cosine {d:.6}, relative error {d:.5}, worst row {d:.5} ({s}), {d:.2} s wall, {d:.2} s GPU, {d:.2} s waited for speech, timing_valid={}\n", .{ k + 1, steps, d.cosine, d.relative, d.worst_row, if (ok) "pass" else "FAIL", took.wall, took.gpu, took.paused, took.timing_valid });
             if (k == 0) try write(a, args[3], ".first-velocity.f32", velocity);
         }
     }

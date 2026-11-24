@@ -18,8 +18,8 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0", &hash(group));
     // #2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel.
     try std.testing.expectEqualStrings("e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6", &hash(@embedFile("kernels/cuda/qmm_prefill.cu")));
-    // the join variant's bytes: tf_q35_attn_rows_join for streams on shared pages; main's kernels' SASS unchanged
-    try std.testing.expectEqualStrings("77ac41e5764a79cca2313ecd09664479b8b4736747c79188e1ad5cae29fd03e4", &hash(@embedFile("kernels/cuda/qwen35.cu")));
+    // KIA14 adds all_rows (false keeps selection/arithmetic); #4706 adds default-off TF_QWEN_PDL prologues
+    try std.testing.expectEqualStrings("79e97b0992f82e891ff8a80cdad68b534e07606b98feef3dffe25101477c99e1", &hash(@embedFile("kernels/cuda/qwen35.cu")));
     // #1879's bytes: a comment names cuda_scratch.zig, where max_chunks moved; the code is unchanged
     try std.testing.expectEqualStrings("f9e4a040cf219aac8db211df25d264dba390fce4a7e8da45557652c6ff0f28ba", &hash(@embedFile("kernels/cuda/qwen35.cuh")));
     // 67711a6aa7's bytes: the opt-in DSpine draft kernels (#2633); default serving unchanged
@@ -51,6 +51,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // The launch sequence includes main's moved delta scan and MTP's retained-row tap argument.
-    try std.testing.expectEqualStrings("2099ef3b0a28d63d079b65d191a9c3be7e7c0ff93fb9b53ec9d6a6e61565220d", &hash(out.items));
+    // main's moved delta scan and MTP's retained-row tap argument stay; #4706 adds TF_QWEN_PDL glue (default off)
+    try std.testing.expectEqualStrings("2822d47ae041b6d7051e39209bd389cb5e4f01520efee64838c1c0e0e5428b75", &hash(out.items));
 }

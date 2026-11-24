@@ -73,7 +73,9 @@ pub fn exp(x: f64) f64 {
 
 /// z / (1 + exp(-z)) in float64: it falls to `knee + 1` at `knee`, then rises to 0 and above.
 pub fn silu(z: f64) f64 {
-    return z / (1 + @exp(-z));
+    const e = @exp(-z);
+    // expf overflows to inf past fp32's largest value (z below -88.72), so the kernel's silu is -0 there
+    return z / (1 + if (e > std.math.floatMax(f32)) std.math.inf(f64) else e);
 }
 
 /// silu's turning point, where its derivative's 1 + z (1 - sigmoid z) is zero: e^z = -z - 1.
@@ -161,4 +163,11 @@ pub fn invNorm(ss: f64, r: Range, n: f64) struct { inv: f64, r: Range } {
 
 pub fn input(rig: *rig_.Rig, x: anytype) !u64 {
     return rig.input(std.mem.sliceAsBytes(x));
+}
+
+test "silu: fp32 expf overflow at bf16 -89 gives -0, as the kernel stores (#4791)" {
+    const r = siluRange(Range.of(-89)).fp32(exp_ulps + 0.5 + div_ulps).bf16();
+    try std.testing.expect(silu(-89) == 0 and r.lo <= 0 and 0 <= r.hi);
+    // the largest bf16 below the overflow keeps its finite exp, and nonfinite inputs keep their NaN
+    try std.testing.expect(silu(-88.5) < 0 and std.math.isNan(silu(-std.math.inf(f64))));
 }

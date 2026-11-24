@@ -34,10 +34,8 @@ pub const most_verify = Round.most_verify;
 pub const argmaxSlices = scratch_memory.argmaxSlices;
 pub const most_window = Round.most_window; // Maximum rows a stream's log holds
 pub const aligned = scratch_memory.aligned; // Device allocations are 256-byte aligned
-
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-
 const layers = @import("cuda_layers.zig");
 pub const Proj = layers.Proj;
 pub const Delta = layers.Delta;
@@ -49,10 +47,8 @@ pub const Keeps = layers.Keeps;
 const Kv8 = layers.Kv8;
 /// A window: for a tree `parents` names each row's parent (-1: first row); `undo` keeps a one-row rollback copy.
 pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null, undo: bool = true };
-
 /// An image prompt's rows for its prompt chunks: the staged tables' rows.
 pub const Images = Round.Images;
-
 /// What a forward keeps: a prompt chunk its last row's logits or (`rows`) every final-norm row; a window its draws.
 pub const Keep = union(enum) {
     last,
@@ -61,16 +57,13 @@ pub const Keep = union(enum) {
     hidden,
     rows,
     none, // a prompt chunk nothing reads: its last layer stops at the state writes
-
     /// Whether the forward is a verify window (recorded, one-row bits); `last`, `rows` and `none` are prompt chunks.
     pub fn verifies(k: Keep) bool {
         return k != .last and k != .rows and k != .none;
     }
 };
-
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
-
 pub const Engine = struct {
     rec_scratch: recurrent.Pool,
     startup: profile.Times = .{},
@@ -86,6 +79,7 @@ pub const Engine = struct {
     stream: cuda.Stream,
     mods: [19]cuda.Module,
     kv8: bool, // attention caches as e4m3 rows with a scale each
+    attention_all_rows: bool = false, // exact opt-in all-length BF16 rows for multi-row decode windows
     rope_table: u64 = 0, // YaRN's attention factor and 32 frequencies on the device (cuda_rope.zig); 0: plain rope
     rope_buf: ?cuda.DeviceBuffer = null, // the table's buffer (cuda_rope_table.zig)
     fp8: Kv8,
@@ -174,7 +168,6 @@ pub const Engine = struct {
     hop: ?stage_fwd.Hop = null,
     boundary: ?cuda.HostBuffer = null,
     held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
-
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
     pub const rowseg_at = Round.rowseg_at;
@@ -187,11 +180,9 @@ pub const Engine = struct {
     pub const src_at = Round.src_at;
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize) !*Engine {
         return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null);
     }
-
     /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
     pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -215,6 +206,7 @@ pub const Engine = struct {
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
         e.verify_rows = most_verify;
         e.kv8 = kv8;
+        e.attention_all_rows = try @import("cuda_attention.zig").allRows();
         e.rope_table = 0; // plain rope until cuda_rope.zig uploads a YaRN table (the engine starts undefined)
         e.rope_buf = null;
         e.window_rows = most_window;
@@ -277,6 +269,7 @@ pub const Engine = struct {
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_rows_join = try e.mods[9].function("tf_q35_attn_rows8_join"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
+        try @import("cuda_pdl.zig").bind(ctx);
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
@@ -295,19 +288,16 @@ pub const Engine = struct {
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }
-
     pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
         const warm_start = profile.now(io);
         e.startup = .{ .load = warm_start - started };
         errdefer recurrent.shutdown(e);
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
-
     /// Reserve prompt INT8 workspace before serving; prompt forwards are not graph-captured.
     pub fn warmPromptInt8(e: *Engine) !void {
         try e.int8.ensureRows(e, e.scratch_rows);
     }
-
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
         // Commit the configured prompt and verify ceiling before admission; warmup then reuses it.
@@ -403,6 +393,16 @@ pub const Engine = struct {
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
 
+    /// A glue kernel with a qwen_pdl::enter() prologue: dependent under TF_QWEN_PDL, plain by default.
+    pub fn runPdl(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
+        if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });
+        var a: cuda.Args = .{};
+        inline for (args) |v| a.add(v);
+        const base: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
+        const cfg = @import("cuda_pdl.zig").config(base, @import("cuda_pdl.zig").on());
+        try cuda.launch.launch(f, cfg, e.stream, &a);
+    }
+
     pub fn promptAttention(e: *Engine, layer: usize, from: usize, end: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.attn);
         return @import("cuda_prompt.zig").runFrom(e, layer, from, end);
@@ -438,7 +438,7 @@ pub const Engine = struct {
 
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.norm);
-        try e.run(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
+        try e.runPdl(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
 
     /// Refuse the whole frame before settling any prior window or launching work.

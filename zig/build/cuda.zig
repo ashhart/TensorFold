@@ -78,8 +78,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // check-pdl-loads: no global read above a dependent launch's wait (tools/pdl_early_loads.py)
     if (nvcc) |tool| {
         const check = b.addSystemCommand(&.{ "python3", "tools/pdl_early_loads.py", b.pathJoin(&.{ std.fs.path.dirname(tool) orelse ".", "cuobjdump" }) });
-        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf")) check.addFileArg(file);
-        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images and qmmf (needs -Dnvcc)").dependOn(&check.step);
+        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf") or std.mem.eql(u8, k.name, "qwen35")) check.addFileArg(file);
+        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images, qwen35 glue and qmmf (needs -Dnvcc)").dependOn(&check.step);
     }
     // MiniMax H3's kernel image: its library and the contract's runner take it
     const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
@@ -92,10 +92,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const mods = family(b, target, optimize, cuda, draft_ids);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     const native = engines(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
-    for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda }, .{ "core", mods.core }, .{ "lanes", mods.lanes }, .{ "nemotron", mods.nemotron }, .{ "dory", native.engines.import_table.get("dory").? }, .{ "cluster", @import("cluster_cuda.zig").module(b, target, optimize, mods.lanes, mods.core, native.canon, native.verbs) } }) |m| cli.addImport(m[0], m[1]);
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda }, .{ "core", mods.core }, .{ "lanes", mods.lanes }, .{ "nemotron", mods.nemotron }, .{ "dory", native.engines.import_table.get("dory").? }, .{ "cluster", @import("cluster_cuda.zig").module(b, target, optimize, mods.lanes, mods.core, native.canon, native.verbs) }, .{ "ricursive_cuda", native.engines.import_table.get("ricursive_cuda").? } }) |m| cli.addImport(m[0], m[1]);
     cli.addOptions("build_options", build_options);
     cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
-    b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
+    const cli_exe = b.addExecutable(.{ .name = "tensorfold", .root_module = cli });
+    b.installArtifact(cli_exe);
+    b.step("compile-cuda-cli", "Compile the CUDA tensorfold CLI without executing a GPU").dependOn(&cli_exe.step);
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     const dump_options = b.addOptions();
     dump_options.addOption(bool, "enabled", opts.test_dump);
@@ -123,7 +125,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("minimax_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     @import("inkling2.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
     @import("idol_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, runner);
-    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "ricursive_cuda", @import("ricursive_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
     runner.addImport("gemma4_cuda", @import("gemma4_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     runner.addImport("spark25", @import("spark25.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     // the served family and its engine, for the dots runner
@@ -311,11 +313,15 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-qwen-grants-host", "Qwen MTP head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"shared head costs:"} })).step);
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);
     b.step("test-nemotron-cuda-steps-host", "Nemotron CUDA's stepped prompt pass on the lanes, stopped before GPU work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"nemotron cuda steps:"} })).step);
+    b.step("test-nemotron-wide-walk-host", "A 32-row Nemotron wide round through every row limit, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{ "wide round walk:", "wide rounds:" } })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
     const prompt_rows = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA startup:", "Qwen prompt rows:", "slide admission: cuda" } }));
     prompt_rows.has_side_effects = true;
     b.step("test-qwen35-prompt-rows-host", "Loaded Qwen prompt rows and unchanged planned cache behavior without devices").dependOn(&prompt_rows.step);
+    const pool_after_warmup = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA pool after warmup:"} }));
+    pool_after_warmup.has_side_effects = true;
+    b.step("test-cuda-pool-after-warmup-host", "CUDA pool sizing, empty arena ownership and calibration without devices").dependOn(&pool_after_warmup.step);
     b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);
