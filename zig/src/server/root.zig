@@ -391,6 +391,7 @@ test {
     _ = @import("ocr/run_pdf_test.zig");
     _ = @import("ocr/route_test.zig");
     _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/doctr_test.zig");
     _ = @import("ocr/liteparse_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");

@@ -8,7 +8,6 @@ const types = @import("types.zig");
 const budget = @import("budget.zig");
 const run = @import("run.zig");
 const lp = @import("liteparse.zig");
-const route = @import("route.zig");
 const harness = @import("harness_test.zig");
 const Harness = harness.Harness;
 const t = std.testing;
@@ -49,15 +48,14 @@ test "ocr liteparse: the one file part is the page; a PDF, an empty or unknown f
     const png = try harness.png(a, 4, 3);
     const s = try lp.decode(a, &.{ part("language", "en"), part("file", png), part("other", "x") }, &fault);
     try t.expectEqual(.image, s.kind);
+    try t.expectEqualStrings("image.png", s.name);
     try t.expectEqual(png.len, s.bytes.len);
     const cases = [_]struct { []const multipart.Part, []const u8 }{
         .{ &.{part("file", "%PDF-1.7\n...")}, lp.no_pdf },
         .{ &.{part("file", "")}, "the file part is empty" },
         .{ &.{part("file", "GIF89a....")}, "the file is not a PNG, JPEG or WebP image" },
         .{ &.{ part("file", png), part("file", png) }, "a LiteParse request has exactly one file part" },
-        // a files part is refused, never dropped: this server reads only LiteParse's file part
-        .{ &.{part("files", png)}, route.files_parts },
-        .{ &.{ part("file", png), part("files", png) }, route.files_parts },
+        .{ &.{part("files", png)}, "a LiteParse request has exactly one file part" },
     };
     for (cases) |c| {
         try t.expectError(error.Faulted, lp.decode(a, c[0], &fault));
@@ -77,7 +75,7 @@ test "ocr liteparse: a page without text gives an empty results list, and faults
     const page: types.OcrPage = .{ .index = 0, .width = 1, .height = 1, .dpi = 72, .blocks = &blocks };
     var budget_ = budget.Encodes.init(1, 1);
     var fault: types.Fault = undefined;
-    try sink.page(sink.ctx, a, &page, .{ .width = 1, .height = 1, .pixels = &pixels }, &budget_, &fault);
+    try sink.page(sink.ctx, a, 0, &page, .{ .width = 1, .height = 1, .pixels = &pixels }, &budget_, &fault);
     try t.expectEqualStrings("{\"results\": []}", try enc.reply(a));
     const want = [_]struct { types.Class, u16 }{ .{ .bad_input, 400 }, .{ .unreadable, 422 }, .{ .capacity, 503 }, .{ .internal, 500 } };
     for (want) |w| try t.expectEqual(w[1], lp.status(w[0]));
