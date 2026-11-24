@@ -199,6 +199,8 @@ pub const Pipelines = struct {
                 }
             }
             if (std.c.getenv("TF_DSV41_SKIP_SPARSE") != null) return;
+            // The scan reads the dense table the pass above wrote.
+            enc.barrier();
             enc.setPipeline(p.nax);
             for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
                 enc.setBuffer(v.buffer, v.offset, i);
@@ -220,8 +222,8 @@ pub const Pipelines = struct {
                 enc.setBuffer(partials.buffer, partials.offset, 9);
                 enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));
             }
-            // TF_DSV41_ATTN_SCAN_BARRIER -- the explicit barrier the csa2 NAX branch has no other place for.
-            if (std.c.getenv("TF_DSV41_ATTN_SCAN_BARRIER") != null) enc.barrier();
+            // The merge reads the split partials every scan above wrote.
+            enc.barrier();
             if (std.c.getenv("TF_DSV41_DOUBLE_SPARSE") != null) {
                 const dr: u32 = args.rows;
                 var a3 = args;
