@@ -12,7 +12,10 @@ const viewSource = ts.createSourceFile('ComposerView.tsx', readFileSync('src/com
 const view = viewSource.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'ComposerView')!
 const printer = ts.createPrinter()
 const workspaceSource = ts.createSourceFile('useComposerWorkspace.ts', readFileSync('src/components/composer/useComposerWorkspace.ts', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const chooseDirStatement = workspaceSource.statements.find((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === 'chooseDir'))!
+const workspace = workspaceSource.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'useComposerWorkspace')
+assert.ok(workspace?.body, 'The real useComposerWorkspace function has a body')
+const chooseDirStatement = workspace.body.statements.find((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === 'chooseDir'))
+assert.ok(chooseDirStatement, 'The workspace function declares chooseDir')
 const chooseDirCode = ts.transpileModule(`${printer.printNode(ts.EmitHint.Unspecified, chooseDirStatement, workspaceSource)}\nreturn chooseDir;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
 type Notice = { notice?: { kind?: string; persistent?: boolean; message?: string } | null }
 type ProductionHandlers = {

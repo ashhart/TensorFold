@@ -160,8 +160,8 @@ export async function handleRemoteMutation(context: RemoteMutationContext): Prom
   const threadStart = /^\/v1\/threads\/([^/]+)\/start$/.exec(url.pathname)
   if (threadStart) {
     const userText = String(body.userText || '').trim()
-    if (!userText) { writeJson(res, 400, { error: 'userText_required' }); return }
     const attachments = normalizeAttachments(body.attachments)
+    if (!userText && !attachments?.length) { writeJson(res, 400, { error: 'userText_required' }); return }
     writeJson(res, 202, await deps.startThread({
       threadId: decodeURIComponent(threadStart[1]),
       userText,

@@ -1,6 +1,7 @@
 import { reviewedLanguageImport } from '../preferences/language-test-fixture'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import React from 'react'
 import ts from 'typescript'
 import clsx from 'clsx'
@@ -23,8 +24,20 @@ import { find, harness, jsx, load as loadComponent, settle } from '../reading/re
 
 function load(file: string, overrides: Record<string, any>) {
   const source = readFileSync(file, 'utf8'), ast = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true), imports: Record<string, any> = {}
+  const wrapper = 'src/components/Composer.tsx'
+  const resolve = (from: string, name: string) => path.posix.normalize(path.posix.join(path.posix.dirname(from), name))
+  const supplied = new Map(Object.entries(overrides).map(([name, value]) => [name.startsWith('.') ? resolve(wrapper, name) : name, value]))
+  const extracted: Record<string, string> = {
+    'src/components/composer/useComposerState': 'src/components/composer/useComposerState.ts',
+    'src/components/composer/useComposerWorkspace': 'src/components/composer/useComposerWorkspace.ts',
+    'src/components/composer/useComposerSubmit': 'src/components/composer/useComposerSubmit.tsx',
+    'src/components/composer/ComposerView': 'src/components/composer/ComposerView.tsx',
+  }
   for (const node of ast.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-    const name = node.moduleSpecifier.text
+    const name = node.moduleSpecifier.text, resolved = name.startsWith('.') ? resolve(file, name) : name
+    if (supplied.has(resolved)) { imports[name] = supplied.get(resolved); continue }
+    const production = extracted[resolved]
+    if (production) { imports[name] = load(production, overrides); continue }
     const reviewed = reviewedLanguageImport(name)
     if (reviewed.matched) { imports[name] = reviewed.value; continue }
     imports[name] = new Proxy({ __esModule: true }, { get(object, key) { if (key in object) return (object as any)[key]; return () => { throw new Error(`Unexpected Composer adapter: ${name}.${String(key)}`) } } })
