@@ -54,23 +54,27 @@ export interface ModelInfo {
 }
 
 const GIB = 1024 ** 3
+const STARTUP_BUDGET_RE = /^(\d+(?:\.\d+)?) GiB \(conservative raw\/packed text weights, both prompt planes\/selectors, KV\/state, keepalive and \d+(?:\.\d+)? GiB runtime reserve; trained window\)$/
 
 export function parseInfoOutput(text: string): ModelInfo {
   const field = (name: string) => new RegExp(`^${name}: (.+)$`, 'm').exec(text)?.[1]?.trim() ?? null
   const family = /^(.+) \(([A-Za-z0-9_.-]+)\)$/.exec(field('family') ?? '')
   const weights = /\((\d+) bytes\)/.exec(field('weights') ?? '')
   const floor = /^([\d.]+) GiB \(weights plus a ([\d.]+) GiB runtime margin\)$/.exec(field('memory floor') ?? '')
-  if (!family || !weights || !floor) throw new Error(text.trim().split(/\r?\n/)[0] || 'tensorfold-native info printed nothing.')
+  const startup = STARTUP_BUDGET_RE.exec(field('startup budget') ?? '')
+  if (!family || !weights || (!floor && !startup)) throw new Error(text.trim().split(/\r?\n/)[0] || 'tensorfold-native info printed nothing.')
   const weightsBytes = Number(weights[1])
   const context = Number(field('context'))
+  const memoryFloorBytes = floor ? weightsBytes + Math.round(Number(floor[2]) * GIB) : Math.round(Number(startup![1]) * GIB)
+  if (!Number.isSafeInteger(memoryFloorBytes) || memoryFloorBytes <= 0) throw new Error(text.trim().split(/\r?\n/)[0] || 'tensorfold-native info printed nothing.')
   return {
     family: family[1],
     modelType: family[2],
     format: field('format'),
     contextTokens: Number.isFinite(context) && context > 0 ? context : null,
     weightsBytes,
-    // Recompute from exact bytes: weights plus the printed runtime margin.
-    memoryFloorBytes: weightsBytes + Math.round(Number(floor[2]) * GIB),
+    // Recompute legacy floor from exact bytes; startup budget already includes weights and runtime reserve.
+    memoryFloorBytes,
   }
 }
 
