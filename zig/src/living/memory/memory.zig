@@ -26,6 +26,7 @@ test {
     _ = @import("safety_test.zig");
     _ = @import("journal.zig");
     _ = @import("durable_test.zig");
+    _ = @import("exact_test.zig");
 }
 
 test "memory bank: end-to-end teach, route, compose, safetensors save/reload (zero plaintext), and forget" {
@@ -367,7 +368,6 @@ test "memory bank(v6): delta journal replay, temporal belief revision + undo res
             .conv_elems = 0,
             .svd_rank = 0,
             .svd_rank_short = 0,
-            .kv_bits = 4,
         };
         var mock_l = Mock{ .gpa = gpa, .arch = arch_llama };
         const backend_l = Backend{ .ctx = &mock_l, .arch = arch_llama, .extractHidden = Mock.extractHidden, .compileState = Mock.compileState, .buildSnap = Mock.buildSnap, .dropSnap = Mock.dropSnap };

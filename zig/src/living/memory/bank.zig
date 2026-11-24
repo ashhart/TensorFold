@@ -1,5 +1,5 @@
 //! Folded Memory Weights v6 Bank ("The Living Brain"): family-neutral weight compilation for both
-//! hybrid (Mamba-2/GDN + Attention) and pure-attention (`num_rec == 0`) models, Q4/Q8 KV, spectral
+//! hybrid (Mamba-2/GDN + Attention) and pure-attention (`num_rec == 0`) models, exact BF16 KV, spectral
 //! low-rank SVD, temporal belief revision with undoable supersession history, 2-level ClusterIndex,
 //! crash-safe CRC32 append-only delta journal (`living-weights.delta`), sleep-time spectral skill
 //! consolidation, and zero-plaintext persistence (`living-weights.safetensors`).
@@ -53,8 +53,6 @@ pub const ArchSpec = struct {
     svd_rank: usize = 4,
     /// Empirical optimum for short facts & standing policies (steers Mamba-2/GDN layers on 15-token rules!).
     svd_rank_short: usize = 4,
-    /// KV quantization bit-width: 4 (symmetric group-32 Q4, 0.5625 B/elem) or 8 (per-row Q8).
-    kv_bits: u8 = 4,
     /// Keep per-unit conv buffers (false omits conv on multi-chunk docs; short/standing units may keep if true).
     keep_conv: bool = false,
 
@@ -159,58 +157,26 @@ pub const Backend = struct {
     dropSnap: *const fn (ctx: *anyopaque, snap: *anyopaque) void,
 };
 
-pub const KvLayerData = union(enum) {
-    q8: struct {
-        kq: []i8, // [kv_heads * n_tokens * head_dim] (Pre-RoPE K_raw)
-        ks: []f32, // [kv_heads * n_tokens]
-        vq: []i8, // [kv_heads * n_tokens * head_dim]
-        vs: []f32, // [kv_heads * n_tokens]
-    },
-    q4: struct {
-        kq: []u8, // [kv_heads * n_tokens * (head_dim / 2)] packed nibbles
-        ks: []u16, // [kv_heads * n_tokens * (head_dim / 32)] BF16 group-32 scales
-        vq: []u8,
-        vs: []u16,
-    },
-
-    pub fn bits(self: *const KvLayerData) u8 {
-        return switch (self.*) {
-            .q8 => 8,
-            .q4 => 4,
-        };
-    }
+/// One attention layer's K and V as the model computed them: BF16, K rotated at rows `prefix_len + t`.
+pub const KvLayerData = struct {
+    k: []u16, // [kv_heads * n_tokens * head_dim]
+    v: []u16,
 
     pub fn deinit(self: *KvLayerData, gpa: Allocator) void {
-        switch (self.*) {
-            .q8 => |d| {
-                gpa.free(d.kq);
-                gpa.free(d.ks);
-                gpa.free(d.vq);
-                gpa.free(d.vs);
-            },
-            .q4 => |d| {
-                gpa.free(d.kq);
-                gpa.free(d.ks);
-                gpa.free(d.vq);
-                gpa.free(d.vs);
-            },
-        }
+        gpa.free(self.k);
+        gpa.free(self.v);
     }
 };
 
 pub const RecLayerData = struct {
     rank: u16,
-    uq: []i8, // [rec_heads * rec_rows * rank]
-    us: []f32, // [rec_heads * rec_rows]
-    vq: []i8, // [rec_heads * rank * rec_cols]
-    vs: []f32, // [rec_heads * rank]
+    u: []f32, // [rec_heads * rec_rows * rank], F32 as the SVD computed it
+    v: []f32, // [rec_heads * rank * rec_cols]
     conv: []u16, // [conv_elems] bf16 OR empty when `keep_conv == false`
 
     pub fn deinit(self: *RecLayerData, gpa: Allocator) void {
-        gpa.free(self.uq);
-        gpa.free(self.us);
-        gpa.free(self.vq);
-        gpa.free(self.vs);
+        gpa.free(self.u);
+        gpa.free(self.v);
         gpa.free(self.conv);
     }
 };
@@ -486,54 +452,17 @@ pub const Bank = struct {
         defer body_raw.deinit(self.gpa);
         try self.backend.compileState(self.backend.ctx, pref, inp.body_ids, &body_raw);
 
-        // 2. Inverse-RoPE K back to position-independent Pre-RoPE K_raw, then Q4 (group-32) or Q8 quantize
+        // 2. K and V kept exactly as computed (BF16, K at rows prefix_len + t): compose shifts K, never rounds twice
         const kv = try self.gpa.alloc(KvLayerData, arch.num_attn);
         var kv_made: usize = 0;
         errdefer {
             for (kv[0..kv_made]) |*k| k.deinit(self.gpa);
             self.gpa.free(kv);
         }
-        const rows_kv = arch.kv_heads * b_len;
-        const use_q4 = (arch.kv_bits == 4) and (arch.head_dim % quant.q4_group == 0);
         for (0..arch.num_attn) |a| {
-            quant.ropeRotateKvBf16(
-                body_raw.kv_k[a],
-                arch.kv_heads,
-                b_len,
-                arch.head_dim,
-                pref.len,
-                arch.rotary_dim,
-                arch.rope_theta,
-                true,
-            );
-            if (use_q4) {
-                const packed_elems = rows_kv * (arch.head_dim / 2);
-                const group_scales = rows_kv * (arch.head_dim / quant.q4_group);
-                const kq = try self.gpa.alloc(u8, packed_elems);
-                errdefer self.gpa.free(kq);
-                const ks = try self.gpa.alloc(u16, group_scales);
-                errdefer self.gpa.free(ks);
-                const vq = try self.gpa.alloc(u8, packed_elems);
-                errdefer self.gpa.free(vq);
-                const vs = try self.gpa.alloc(u16, group_scales);
-                errdefer self.gpa.free(vs);
-                quant.quantizeRowsBf16Q4(body_raw.kv_k[a], rows_kv, arch.head_dim, kq, ks);
-                quant.quantizeRowsBf16Q4(body_raw.kv_v[a], rows_kv, arch.head_dim, vq, vs);
-                kv[a] = .{ .q4 = .{ .kq = kq, .ks = ks, .vq = vq, .vs = vs } };
-            } else {
-                const elems_kv = rows_kv * arch.head_dim;
-                const kq = try self.gpa.alloc(i8, elems_kv);
-                errdefer self.gpa.free(kq);
-                const ks = try self.gpa.alloc(f32, rows_kv);
-                errdefer self.gpa.free(ks);
-                const vq = try self.gpa.alloc(i8, elems_kv);
-                errdefer self.gpa.free(vq);
-                const vs = try self.gpa.alloc(f32, rows_kv);
-                errdefer self.gpa.free(vs);
-                quant.quantizeRowsBf16(body_raw.kv_k[a], rows_kv, arch.head_dim, kq, ks);
-                quant.quantizeRowsBf16(body_raw.kv_v[a], rows_kv, arch.head_dim, vq, vs);
-                kv[a] = .{ .q8 = .{ .kq = kq, .ks = ks, .vq = vq, .vs = vs } };
-            }
+            const k = try self.gpa.dupe(u16, body_raw.kv_k[a]);
+            errdefer self.gpa.free(k);
+            kv[a] = .{ .k = k, .v = try self.gpa.dupe(u16, body_raw.kv_v[a]) };
             kv_made += 1;
         }
 
@@ -721,7 +650,7 @@ pub const Bank = struct {
         if (std.c.getenv("TF_SLIDE_TRACE") != null) {
             std.debug.print(
                 "lw6 teach: uid={d} pid={d} ep={d} tok={d} kv=q{d} rk={d} n_lex={d}(body={d}) n_sem={d} small={} standing={} digest={} neg_sem={d:.3}\n",
-                .{ uid, inp.parent_id, ug.epoch, b_len, if (use_q4) @as(u8, 4) else @as(u8, 8), rank, ug.n_lex, ug.n_body_lex, ug.n_sem, ug.is_small_fact, ug.is_standing, ug.is_digest, ug.neg_sem_max },
+                .{ uid, inp.parent_id, ug.epoch, b_len, @as(u8, 16), rank, ug.n_lex, ug.n_body_lex, ug.n_sem, ug.is_small_fact, ug.is_standing, ug.is_digest, ug.neg_sem_max },
             );
         }
         try self.units.append(self.gpa, .{
@@ -891,7 +820,7 @@ pub const Bank = struct {
         return try self.backend.buildSnap(self.backend.ctx, &composed, self.suffix_ids);
     }
 
-    /// Assembles `prefix + active units` KV (dequantized Q4/Q8 & re-RoPE'd at contiguous offsets) and
+    /// Assembles `prefix + active units` KV (as computed, K shifted to contiguous offsets) and
     /// parent-balanced spectral-denoised SVD recurrent states (or clean prefix recurrent state if `rank == 0`).
     pub fn composeRawState(self: *const Bank, active_indices: []const usize) !RawState {
         const arch = self.backend.arch;
@@ -903,7 +832,7 @@ pub const Bank = struct {
         var out = try RawState.init(self.gpa, arch, @intCast(total_len));
         errdefer out.deinit(self.gpa);
 
-        // 1. Assemble Attention KV caches: prefix at [0..p_len) + each active unit dequantized & RoPE'd at `cur`
+        // 1. Attention KV: the prefix at [0..p_len), then each active unit's own K and V, K shifted to `cur`
         var tmp_k: std.ArrayList(u16) = .empty;
         defer tmp_k.deinit(self.gpa);
         var tmp_v: std.ArrayList(u16) = .empty;
@@ -928,26 +857,9 @@ pub const Bank = struct {
                 try tmp_k.resize(self.gpa, elems);
                 try tmp_v.resize(self.gpa, elems);
 
-                switch (u.kv[a]) {
-                    .q8 => |d| {
-                        quant.dequantizeRowsBf16(d.kq, d.ks, rows, arch.head_dim, tmp_k.items);
-                        quant.dequantizeRowsBf16(d.vq, d.vs, rows, arch.head_dim, tmp_v.items);
-                    },
-                    .q4 => |d| {
-                        quant.dequantizeRowsBf16Q4(d.kq, d.ks, rows, arch.head_dim, tmp_k.items);
-                        quant.dequantizeRowsBf16Q4(d.vq, d.vs, rows, arch.head_dim, tmp_v.items);
-                    },
-                }
-                quant.ropeRotateKvBf16(
-                    tmp_k.items,
-                    arch.kv_heads,
-                    u_len,
-                    arch.head_dim,
-                    cur,
-                    arch.rotary_dim,
-                    arch.rope_theta,
-                    false,
-                );
+                @memcpy(tmp_k.items, u.kv[a].k);
+                @memcpy(tmp_v.items, u.kv[a].v);
+                quant.ropeShiftKvBf16(tmp_k.items, arch.kv_heads, u_len, arch.head_dim, cur - pref.len, arch.rotary_dim, arch.rope_theta);
 
                 for (0..arch.kv_heads) |h| {
                     const sk = tmp_k.items[h * u_len * arch.head_dim ..][0 .. u_len * arch.head_dim];
@@ -1025,8 +937,6 @@ pub const Bank = struct {
         }
         const skill_w: f32 = if (use_skill_rec) 1.0 / @as(f32, @floatFromInt(total_groups)) else 0.0;
 
-        const v_scratch = try self.gpa.alloc(f32, max_active_rank * arch.rec_cols);
-        defer self.gpa.free(v_scratch);
         const head_mat = arch.rec_rows * arch.rec_cols;
 
         for (0..arch.num_rec) |r| {
@@ -1035,12 +945,10 @@ pub const Bank = struct {
                 const rl = &self.skill_rec[r];
                 const rk: usize = rl.rank;
                 for (0..arch.rec_heads) |h| {
-                    const uq = rl.uq[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
-                    const us = rl.us[h * arch.rec_rows ..][0..arch.rec_rows];
-                    const vq = rl.vq[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
-                    const vs = rl.vs[h * rk ..][0..rk];
+                    const fu = rl.u[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
+                    const fv = rl.v[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
                     const dst = out.rec_state[r][h * head_mat ..][0..head_mat];
-                    quant.reconstructSvdAdd(uq, us, vq, vs, arch.rec_rows, rk, arch.rec_cols, skill_w, dst, v_scratch);
+                    quant.lowRankAdd(fu, fv, arch.rec_rows, rk, arch.rec_cols, skill_w, dst);
                 }
             }
             for (active_indices, weights) |idx, w| {
@@ -1051,12 +959,10 @@ pub const Bank = struct {
                 const rk: usize = rl.rank;
                 if (rk == 0) continue;
                 for (0..arch.rec_heads) |h| {
-                    const uq = rl.uq[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
-                    const us = rl.us[h * arch.rec_rows ..][0..arch.rec_rows];
-                    const vq = rl.vq[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
-                    const vs = rl.vs[h * rk ..][0..rk];
+                    const fu = rl.u[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
+                    const fv = rl.v[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
                     const dst = out.rec_state[r][h * head_mat ..][0..head_mat];
-                    quant.reconstructSvdAdd(uq, us, vq, vs, arch.rec_rows, rk, arch.rec_cols, w, dst, v_scratch);
+                    quant.lowRankAdd(fu, fv, arch.rec_rows, rk, arch.rec_cols, w, dst);
                 }
             }
             const use_unit_conv = active_indices.len == 1 and
@@ -1133,19 +1039,8 @@ pub const Bank = struct {
         // Energy-preserving 1/sqrt(N) scaling preserves individual policy steering strength in Mamba-2/GDN
         const w_each: f32 = 1.0 / @sqrt(n_pol_f);
 
-        var max_src_rk: usize = 0;
-        for (pol_indices) |idx| {
-            const rk = self.units.items[idx].rec[0].rank;
-            if (rk > max_src_rk) max_src_rk = rk;
-        }
-        const v_scratch = try self.gpa.alloc(f32, @max(max_src_rk, rank) * arch.rec_cols);
-        defer self.gpa.free(v_scratch);
         const acc = try self.gpa.alloc(f32, head_mat);
         defer self.gpa.free(acc);
-        const u_tmp = try self.gpa.alloc(f32, arch.rec_rows * rank);
-        defer self.gpa.free(u_tmp);
-        const v_tmp = try self.gpa.alloc(f32, rank * arch.rec_cols);
-        defer self.gpa.free(v_tmp);
 
         const rec = try self.gpa.alloc(RecLayerData, arch.num_rec);
         var made: usize = 0;
@@ -1157,14 +1052,10 @@ pub const Bank = struct {
         defer scratch_arena.deinit();
 
         for (0..arch.num_rec) |r| {
-            const uq = try self.gpa.alloc(i8, arch.rec_heads * arch.rec_rows * rank);
-            errdefer self.gpa.free(uq);
-            const us = try self.gpa.alloc(f32, arch.rec_heads * arch.rec_rows);
-            errdefer self.gpa.free(us);
-            const vq = try self.gpa.alloc(i8, arch.rec_heads * rank * arch.rec_cols);
-            errdefer self.gpa.free(vq);
-            const vs = try self.gpa.alloc(f32, arch.rec_heads * rank);
-            errdefer self.gpa.free(vs);
+            const fu = try self.gpa.alloc(f32, arch.rec_heads * arch.rec_rows * rank);
+            errdefer self.gpa.free(fu);
+            const fv = try self.gpa.alloc(f32, arch.rec_heads * rank * arch.rec_cols);
+            errdefer self.gpa.free(fv);
             const cv = try self.gpa.alloc(u16, 0);
             errdefer self.gpa.free(cv);
 
@@ -1175,24 +1066,27 @@ pub const Bank = struct {
                     const rl = &self.units.items[idx].rec[r];
                     const rk: usize = rl.rank;
                     if (rk == 0) continue;
-                    quant.reconstructSvdAdd(
-                        rl.uq[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk],
-                        rl.us[h * arch.rec_rows ..][0..arch.rec_rows],
-                        rl.vq[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols],
-                        rl.vs[h * rk ..][0..rk],
+                    quant.lowRankAdd(
+                        rl.u[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk],
+                        rl.v[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols],
                         arch.rec_rows,
                         rk,
                         arch.rec_cols,
                         w_each,
                         acc,
-                        v_scratch,
                     );
                 }
-                _ = try quant.randomizedSvdBalanced(scratch_arena.allocator(), acc, arch.rec_rows, arch.rec_cols, rank, u_tmp, v_tmp);
-                quant.quantizeRowsF32(u_tmp, arch.rec_rows, rank, uq[h * arch.rec_rows * rank ..][0 .. arch.rec_rows * rank], us[h * arch.rec_rows ..][0..arch.rec_rows]);
-                quant.quantizeRowsF32(v_tmp, rank, arch.rec_cols, vq[h * rank * arch.rec_cols ..][0 .. rank * arch.rec_cols], vs[h * rank ..][0..rank]);
+                _ = try quant.randomizedSvdBalanced(
+                    scratch_arena.allocator(),
+                    acc,
+                    arch.rec_rows,
+                    arch.rec_cols,
+                    rank,
+                    fu[h * arch.rec_rows * rank ..][0 .. arch.rec_rows * rank],
+                    fv[h * rank * arch.rec_cols ..][0 .. rank * arch.rec_cols],
+                );
             }
-            rec[r] = .{ .rank = @intCast(rank), .uq = uq, .us = us, .vq = vq, .vs = vs, .conv = cv };
+            rec[r] = .{ .rank = @intCast(rank), .u = fu, .v = fv, .conv = cv };
             made += 1;
         }
         self.skill_rec = rec;
@@ -1209,10 +1103,9 @@ pub const Bank = struct {
 
         const rank: u16 = if (u.rec.len > 0) u.rec[0].rank else 0;
         const has_conv: bool = u.rec.len > 0 and u.rec[0].conv.len == arch.conv_elems;
-        const kv_b: u8 = if (u.kv.len > 0) u.kv[0].bits() else arch.kv_bits;
         const ujson = try std.fmt.allocPrint(
             a,
-            "{{\"uid\":{d},\"pid\":{d},\"tok\":{d},\"nl\":{d},\"nbl\":{d},\"ns\":{d},\"rk\":{d},\"kb\":{d},\"cv\":{s},\"sm\":{s},\"st\":{s},\"dg\":{s},\"nsem\":{d:.6},\"ep\":{d},\"sup\":{d},\"rf\":{d}}}",
+            "{{\"uid\":{d},\"pid\":{d},\"tok\":{d},\"nl\":{d},\"nbl\":{d},\"ns\":{d},\"rk\":{d},\"cv\":{s},\"sm\":{s},\"st\":{s},\"dg\":{s},\"nsemb\":{d},\"ep\":{d},\"sup\":{d},\"rf\":{d}}}",
             .{
                 u.unit_id,
                 u.parent_id,
@@ -1221,12 +1114,11 @@ pub const Bank = struct {
                 u.gate.bodyLexCount(),
                 u.gate.n_sem,
                 rank,
-                kv_b,
                 if (has_conv) "true" else "false",
                 if (u.gate.is_small_fact) "true" else "false",
                 if (u.gate.is_standing) "true" else "false",
                 if (u.gate.is_digest) "true" else "false",
-                u.gate.neg_sem_max,
+                @as(u32, @bitCast(u.gate.neg_sem_max)), // its bits: the value routing compares, exactly
                 u.gate.epoch,
                 u.gate.superseded_by,
                 u.gate.reinforcements,
@@ -1414,10 +1306,9 @@ pub const Bank = struct {
             if (i > 0) try unit_meta.append(a, ',');
             const rank: u16 = if (u.rec.len > 0) u.rec[0].rank else 0;
             const has_conv: bool = u.rec.len > 0 and u.rec[0].conv.len == arch.conv_elems;
-            const kv_b: u8 = if (u.kv.len > 0) u.kv[0].bits() else arch.kv_bits;
             const entry = try std.fmt.allocPrint(
                 a,
-                "{{\"uid\":{d},\"pid\":{d},\"tok\":{d},\"nl\":{d},\"nbl\":{d},\"ns\":{d},\"rk\":{d},\"kb\":{d},\"cv\":{s},\"sm\":{s},\"st\":{s},\"dg\":{s},\"nsem\":{d:.6},\"ep\":{d},\"sup\":{d},\"rf\":{d}}}",
+                "{{\"uid\":{d},\"pid\":{d},\"tok\":{d},\"nl\":{d},\"nbl\":{d},\"ns\":{d},\"rk\":{d},\"cv\":{s},\"sm\":{s},\"st\":{s},\"dg\":{s},\"nsemb\":{d},\"ep\":{d},\"sup\":{d},\"rf\":{d}}}",
                 .{
                     u.unit_id,
                     u.parent_id,
@@ -1426,12 +1317,11 @@ pub const Bank = struct {
                     u.gate.bodyLexCount(),
                     u.gate.n_sem,
                     rank,
-                    kv_b,
                     if (has_conv) "true" else "false",
                     if (u.gate.is_small_fact) "true" else "false",
                     if (u.gate.is_standing) "true" else "false",
                     if (u.gate.is_digest) "true" else "false",
-                    u.gate.neg_sem_max,
+                    @as(u32, @bitCast(u.gate.neg_sem_max)),
                     u.gate.epoch,
                     u.gate.superseded_by,
                     u.gate.reinforcements,
@@ -1453,10 +1343,10 @@ pub const Bank = struct {
             .{ .key = "prefix_len", .value = try std.fmt.allocPrint(a, "{d}", .{pref.len}) },
             .{ .key = "lex_k", .value = try std.fmt.allocPrint(a, "{d}", .{wl.k_pcs}) },
             .{ .key = "lex_cal", .value = try std.fmt.allocPrint(a, "{d}", .{wl.n_cal}) },
-            .{ .key = "lex_floor", .value = try std.fmt.allocPrint(a, "{d:.8}", .{wl.norm_floor}) },
+            .{ .key = "lex_floor_bits", .value = try std.fmt.allocPrint(a, "{d}", .{@as(u32, @bitCast(wl.norm_floor))}) },
             .{ .key = "sem_k", .value = try std.fmt.allocPrint(a, "{d}", .{ws.k_pcs}) },
             .{ .key = "sem_cal", .value = try std.fmt.allocPrint(a, "{d}", .{ws.n_cal}) },
-            .{ .key = "sem_floor", .value = try std.fmt.allocPrint(a, "{d:.8}", .{ws.norm_floor}) },
+            .{ .key = "sem_floor_bits", .value = try std.fmt.allocPrint(a, "{d}", .{@as(u32, @bitCast(ws.norm_floor))}) },
             .{ .key = "next_uid", .value = try std.fmt.allocPrint(a, "{d}", .{self.next_unit_id}) },
             .{ .key = "next_epoch", .value = try std.fmt.allocPrint(a, "{d}", .{self.next_epoch}) },
             .{ .key = "journal_gen", .value = try std.fmt.allocPrint(a, "{d}", .{self.journal_gen + 1}) },
@@ -1469,24 +1359,11 @@ pub const Bank = struct {
         try tensors.append(a, .{ .name = "frame.prefix_ids", .dtype = .u32, .shape = try a.dupe(usize, &.{self.prefix_ids.len}), .bytes = std.mem.sliceAsBytes(self.prefix_ids) });
         try tensors.append(a, .{ .name = "frame.suffix_ids", .dtype = .u32, .shape = try a.dupe(usize, &.{self.suffix_ids.len}), .bytes = std.mem.sliceAsBytes(self.suffix_ids) });
 
-        // Whiteners: mean & basis in F32 (tiny), cal_tokens quantized to Q8 (4x smaller, <0.0004 cosine error!)
-        try tensors.append(a, .{ .name = "w.lex.mean", .dtype = .f32, .shape = try a.dupe(usize, &.{arch.hidden}), .bytes = std.mem.sliceAsBytes(wl.mean) });
-        try tensors.append(a, .{ .name = "w.lex.basis", .dtype = .f32, .shape = try a.dupe(usize, &.{ wl.k_pcs, arch.hidden }), .bytes = std.mem.sliceAsBytes(wl.basis) });
-        {
-            const cq = try a.alloc(i8, wl.n_cal * arch.hidden);
-            const cs = try a.alloc(f32, wl.n_cal);
-            quant.quantizeRowsF32(wl.cal_tokens, wl.n_cal, arch.hidden, cq, cs);
-            try tensors.append(a, .{ .name = "w.lex.cal.q", .dtype = .i8, .shape = try a.dupe(usize, &.{ wl.n_cal, arch.hidden }), .bytes = std.mem.sliceAsBytes(cq) });
-            try tensors.append(a, .{ .name = "w.lex.cal.s", .dtype = .f32, .shape = try a.dupe(usize, &.{wl.n_cal}), .bytes = std.mem.sliceAsBytes(cs) });
-        }
-        try tensors.append(a, .{ .name = "w.sem.mean", .dtype = .f32, .shape = try a.dupe(usize, &.{arch.hidden}), .bytes = std.mem.sliceAsBytes(ws.mean) });
-        try tensors.append(a, .{ .name = "w.sem.basis", .dtype = .f32, .shape = try a.dupe(usize, &.{ ws.k_pcs, arch.hidden }), .bytes = std.mem.sliceAsBytes(ws.basis) });
-        {
-            const cq = try a.alloc(i8, ws.n_cal * arch.hidden);
-            const cs = try a.alloc(f32, ws.n_cal);
-            quant.quantizeRowsF32(ws.cal_tokens, ws.n_cal, arch.hidden, cq, cs);
-            try tensors.append(a, .{ .name = "w.sem.cal.q", .dtype = .i8, .shape = try a.dupe(usize, &.{ ws.n_cal, arch.hidden }), .bytes = std.mem.sliceAsBytes(cq) });
-            try tensors.append(a, .{ .name = "w.sem.cal.s", .dtype = .f32, .shape = try a.dupe(usize, &.{ws.n_cal}), .bytes = std.mem.sliceAsBytes(cs) });
+        // Whiteners: mean, basis and calibration tokens, all F32 as computed
+        for ([_]struct { []const u8, *const whitener.LayerWhitener }{ .{ "w.lex", wl }, .{ "w.sem", ws } }) |w| {
+            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mean", .{w[0]}), .dtype = .f32, .shape = try a.dupe(usize, &.{arch.hidden}), .bytes = std.mem.sliceAsBytes(w[1].mean) });
+            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.basis", .{w[0]}), .dtype = .f32, .shape = try a.dupe(usize, &.{ w[1].k_pcs, arch.hidden }), .bytes = std.mem.sliceAsBytes(w[1].basis) });
+            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.cal", .{w[0]}), .dtype = .f32, .shape = try a.dupe(usize, &.{ w[1].n_cal, arch.hidden }), .bytes = std.mem.sliceAsBytes(w[1].cal_tokens) });
         }
 
         // Sleep-time consolidated spectral skill steering tensors (optional, pure weights!)
@@ -1494,10 +1371,8 @@ pub const Bank = struct {
             const rk_u: usize = skill_rk;
             for (0..arch.num_rec) |r| {
                 const rl = &self.skill_rec[r];
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.uq", .{r}), .dtype = .i8, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk_u }), .bytes = std.mem.sliceAsBytes(rl.uq) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.us", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows }), .bytes = std.mem.sliceAsBytes(rl.us) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.vq", .{r}), .dtype = .i8, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk_u, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.vq) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.vs", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk_u }), .bytes = std.mem.sliceAsBytes(rl.vs) });
+                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.u", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk_u }), .bytes = std.mem.sliceAsBytes(rl.u) });
+                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "sk.rc.{d}.v", .{r}), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk_u, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.v) });
             }
         }
 
@@ -1559,10 +1434,9 @@ pub const Bank = struct {
         defer lf.deinit();
 
         const fmt = lf.getMeta("format") orelse return error.BadLivingWeights;
-        const is_v6 = std.mem.eql(u8, fmt, store.format_tag);
-        const is_v4 = std.mem.eql(u8, fmt, store.format_tag_v4);
-        const is_v3 = std.mem.eql(u8, fmt, store.format_tag_v3);
-        if (!is_v6 and !is_v4 and !is_v3) return error.BadLivingWeights;
+        // v3, v4 and v6 banks stored Q4/Q8 KV and Q8 prototypes: not as computed, so refused by name
+        if (store.inexactFormat(fmt)) return error.LivingWeightsInexact;
+        if (!std.mem.eql(u8, fmt, store.format_tag)) return error.BadLivingWeights;
 
         const arch = self.backend.arch;
         const hidden = try parseUsizeMeta(&lf, "hidden");
@@ -1578,10 +1452,10 @@ pub const Bank = struct {
         const prefix_len = try parseUsizeMeta(&lf, "prefix_len");
         const lex_k = try parseUsizeMeta(&lf, "lex_k");
         const lex_cal = try parseUsizeMeta(&lf, "lex_cal");
-        const lex_floor = try parseF32Meta(&lf, "lex_floor");
+        const lex_floor = try parseBitsMeta(&lf, "lex_floor_bits");
         const sem_k = try parseUsizeMeta(&lf, "sem_k");
         const sem_cal = try parseUsizeMeta(&lf, "sem_cal");
-        const sem_floor = try parseF32Meta(&lf, "sem_floor");
+        const sem_floor = try parseBitsMeta(&lf, "sem_floor_bits");
         self.next_unit_id = @intCast(try parseUsizeMeta(&lf, "next_uid"));
         self.next_epoch = if (lf.getMeta("next_epoch")) |s| (std.fmt.parseInt(u64, s, 10) catch 1) else 1;
         self.journal_gen = if (lf.getMeta("journal_gen")) |s| std.fmt.parseInt(u64, s, 10) catch return error.BadLivingWeights else 0;
@@ -1609,16 +1483,12 @@ pub const Bank = struct {
             }
             const rk_u: usize = skill_rk;
             for (0..arch.num_rec) |r| {
-                const uq = try lf.copyI8(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.uq", .{r}), arch.rec_heads * arch.rec_rows * rk_u);
-                errdefer self.gpa.free(uq);
-                const us = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.us", .{r}), arch.rec_heads * arch.rec_rows);
-                errdefer self.gpa.free(us);
-                const vq = try lf.copyI8(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.vq", .{r}), arch.rec_heads * rk_u * arch.rec_cols);
-                errdefer self.gpa.free(vq);
-                const vs = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.vs", .{r}), arch.rec_heads * rk_u);
-                errdefer self.gpa.free(vs);
+                const fu = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.u", .{r}), arch.rec_heads * arch.rec_rows * rk_u);
+                errdefer self.gpa.free(fu);
+                const fv = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.v", .{r}), arch.rec_heads * rk_u * arch.rec_cols);
+                errdefer self.gpa.free(fv);
                 const cv = try self.gpa.alloc(u16, 0);
-                arr[r] = .{ .rank = skill_rk, .uq = uq, .us = us, .vq = vq, .vs = vs, .conv = cv };
+                arr[r] = .{ .rank = skill_rk, .u = fu, .v = fv, .conv = cv };
                 rc_done += 1;
             }
             self.skill_rec = arr;
@@ -1724,53 +1594,30 @@ pub const Bank = struct {
 };
 
 fn appendUnitTensors(a: Allocator, tensors: *std.ArrayList(store.TensorSpec), arch: ArchSpec, u: *const Unit, ui: usize) !void {
-    if (u.gate.n_lex > 0) {
-        const lq = try a.alloc(i8, u.gate.n_lex * arch.hidden);
-        const ls = try a.alloc(f32, u.gate.n_lex);
-        quant.quantizeRowsF32(u.gate.lex_protos, u.gate.n_lex, arch.hidden, lq, ls);
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gl.q", .{ui}), .dtype = .i8, .shape = try a.dupe(usize, &.{ u.gate.n_lex, arch.hidden }), .bytes = std.mem.sliceAsBytes(lq) });
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gl.s", .{ui}), .dtype = .f32, .shape = try a.dupe(usize, &.{u.gate.n_lex}), .bytes = std.mem.sliceAsBytes(ls) });
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gl.w", .{ui}), .dtype = .f32, .shape = try a.dupe(usize, &.{u.gate.n_lex}), .bytes = std.mem.sliceAsBytes(u.gate.lex_weights) });
+    // every tensor as computed: prototypes and weights F32, K and V BF16, recurrent factors F32
+    const f32s = [_]struct { []const u8, []const f32, usize }{
+        .{ "gl", u.gate.lex_protos, u.gate.n_lex },
+        .{ "gl.w", u.gate.lex_weights, 0 },
+        .{ "gs", u.gate.sem_protos, u.gate.n_sem },
+        .{ "gs.w", u.gate.sem_weights, 0 },
+    };
+    for (f32s) |t| if (t[1].len > 0) {
+        const shape = if (t[2] > 0) try a.dupe(usize, &.{ t[2], arch.hidden }) else try a.dupe(usize, &.{t[1].len});
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.{s}", .{ ui, t[0] }), .dtype = .f32, .shape = shape, .bytes = std.mem.sliceAsBytes(t[1]) });
+    };
+    for (u.kv, 0..) |kv, l| {
+        const sh = try a.dupe(usize, &.{ arch.kv_heads, u.n_tokens, arch.head_dim });
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.k", .{ ui, l }), .dtype = .bf16, .shape = sh, .bytes = std.mem.sliceAsBytes(kv.k) });
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.v", .{ ui, l }), .dtype = .bf16, .shape = sh, .bytes = std.mem.sliceAsBytes(kv.v) });
     }
-    if (u.gate.n_sem > 0) {
-        const sq = try a.alloc(i8, u.gate.n_sem * arch.hidden);
-        const ss = try a.alloc(f32, u.gate.n_sem);
-        quant.quantizeRowsF32(u.gate.sem_protos, u.gate.n_sem, arch.hidden, sq, ss);
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gs.q", .{ui}), .dtype = .i8, .shape = try a.dupe(usize, &.{ u.gate.n_sem, arch.hidden }), .bytes = std.mem.sliceAsBytes(sq) });
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gs.s", .{ui}), .dtype = .f32, .shape = try a.dupe(usize, &.{u.gate.n_sem}), .bytes = std.mem.sliceAsBytes(ss) });
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.gs.w", .{ui}), .dtype = .f32, .shape = try a.dupe(usize, &.{u.gate.n_sem}), .bytes = std.mem.sliceAsBytes(u.gate.sem_weights) });
-    }
-    for (0..arch.num_attn) |l| {
-        switch (u.kv[l]) {
-            .q4 => |d| {
-                const sh_q4 = try a.dupe(usize, &.{ arch.kv_heads, u.n_tokens, arch.head_dim / 2 });
-                const sh_s4 = try a.dupe(usize, &.{ arch.kv_heads, u.n_tokens, arch.head_dim / quant.q4_group });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.kq4", .{ ui, l }), .dtype = .u8, .shape = sh_q4, .bytes = d.kq });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.ks4", .{ ui, l }), .dtype = .bf16, .shape = sh_s4, .bytes = std.mem.sliceAsBytes(d.ks) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.vq4", .{ ui, l }), .dtype = .u8, .shape = sh_q4, .bytes = d.vq });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.vs4", .{ ui, l }), .dtype = .bf16, .shape = sh_s4, .bytes = std.mem.sliceAsBytes(d.vs) });
-            },
-            .q8 => |d| {
-                const sh_kv = try a.dupe(usize, &.{ arch.kv_heads, u.n_tokens, arch.head_dim });
-                const sh_s = try a.dupe(usize, &.{ arch.kv_heads, u.n_tokens });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.kq", .{ ui, l }), .dtype = .i8, .shape = sh_kv, .bytes = std.mem.sliceAsBytes(d.kq) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.ks", .{ ui, l }), .dtype = .f32, .shape = sh_s, .bytes = std.mem.sliceAsBytes(d.ks) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.vq", .{ ui, l }), .dtype = .i8, .shape = sh_kv, .bytes = std.mem.sliceAsBytes(d.vq) });
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.kv.{d}.vs", .{ ui, l }), .dtype = .f32, .shape = sh_s, .bytes = std.mem.sliceAsBytes(d.vs) });
-            },
-        }
-    }
-    if (u.rec.len == arch.num_rec) {
-        for (0..arch.num_rec) |r| {
-            const rk: usize = u.rec[r].rank;
-            if (rk == 0) continue;
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.uq", .{ ui, r }), .dtype = .i8, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk }), .bytes = std.mem.sliceAsBytes(u.rec[r].uq) });
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.us", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows }), .bytes = std.mem.sliceAsBytes(u.rec[r].us) });
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.vq", .{ ui, r }), .dtype = .i8, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(u.rec[r].vq) });
-            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.vs", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk }), .bytes = std.mem.sliceAsBytes(u.rec[r].vs) });
-            if (u.rec[r].conv.len == arch.conv_elems) {
-                try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.cv", .{ ui, r }), .dtype = .bf16, .shape = try a.dupe(usize, &.{arch.conv_elems}), .bytes = std.mem.sliceAsBytes(u.rec[r].conv) });
-            }
+    if (u.rec.len != arch.num_rec) return;
+    for (u.rec, 0..) |rl, r| {
+        const rk: usize = rl.rank;
+        if (rk == 0) continue;
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.u", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk }), .bytes = std.mem.sliceAsBytes(rl.u) });
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.v", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.v) });
+        if (rl.conv.len == arch.conv_elems) {
+            try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.cv", .{ ui, r }), .dtype = .bf16, .shape = try a.dupe(usize, &.{arch.conv_elems}), .bytes = std.mem.sliceAsBytes(rl.conv) });
         }
     }
 }
@@ -1785,7 +1632,6 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
     const n_body_lex: usize = if (o.get("nbl")) |v| @intCast(v.integer) else n_lex;
     const n_sem: usize = @intCast((o.get("ns") orelse return error.BadLivingWeights).integer);
     const rk: u16 = @intCast((o.get("rk") orelse return error.BadLivingWeights).integer);
-    const kv_b: u8 = if (o.get("kb")) |v| @intCast(v.integer) else 8;
     const has_conv: bool = if (o.get("cv")) |v| v.bool else (rk > 0);
     const is_sm = (o.get("sm") orelse return error.BadLivingWeights).bool;
     const is_st = if (o.get("st")) |v| v.bool else false;
@@ -1793,19 +1639,16 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
     const epoch: u64 = if (o.get("ep")) |v| @intCast(v.integer) else 0;
     const sup: u32 = if (o.get("sup")) |v| @intCast(v.integer) else 0;
     const rf: u16 = if (o.get("rf")) |v| @intCast(v.integer) else 1;
-    const nsem_val = o.get("nsem") orelse return error.BadLivingWeights;
-    const neg_sem: f32 = switch (nsem_val) {
-        .float => |fv| @floatCast(fv),
-        .integer => |iv| @floatFromInt(iv),
-        else => return error.BadLivingWeights,
-    };
+    const nsem_bits = o.get("nsemb") orelse return error.BadLivingWeights;
+    if (nsem_bits != .integer or nsem_bits.integer < 0 or nsem_bits.integer > std.math.maxInt(u32)) return error.BadLivingWeights;
+    const neg_sem: f32 = @bitCast(@as(u32, @intCast(nsem_bits.integer)));
 
     var name_buf: [96]u8 = undefined;
-    const gl_v = if (n_lex > 0) try loadUnitProtoMaybeQ8(lf, gpa, ui, "gl", n_lex, arch.hidden) else try gpa.alloc(f32, 0);
+    const gl_v = if (n_lex > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gl", .{ui}), n_lex * arch.hidden) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gl_v);
     const gl_w = if (n_lex > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gl.w", .{ui}), n_lex) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gl_w);
-    const gs_v = if (n_sem > 0) try loadUnitProtoMaybeQ8(lf, gpa, ui, "gs", n_sem, arch.hidden) else try gpa.alloc(f32, 0);
+    const gs_v = if (n_sem > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gs", .{ui}), n_sem * arch.hidden) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gs_v);
     const gs_w = if (n_sem > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gs.w", .{ui}), n_sem) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gs_w);
@@ -1818,30 +1661,9 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
     }
     const kv_rows = arch.kv_heads * n_tok;
     for (0..arch.num_attn) |l| {
-        if (kv_b == 4) {
-            const packed_elems = kv_rows * (arch.head_dim / 2);
-            const group_scales = kv_rows * (arch.head_dim / quant.q4_group);
-            const kq = try lf.copyU8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.kq4", .{ ui, l }), packed_elems);
-            errdefer gpa.free(kq);
-            const ks = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.ks4", .{ ui, l }), group_scales);
-            errdefer gpa.free(ks);
-            const vq = try lf.copyU8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.vq4", .{ ui, l }), packed_elems);
-            errdefer gpa.free(vq);
-            const vs = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.vs4", .{ ui, l }), group_scales);
-            errdefer gpa.free(vs);
-            kv[l] = .{ .q4 = .{ .kq = kq, .ks = ks, .vq = vq, .vs = vs } };
-        } else {
-            const kv_elems = kv_rows * arch.head_dim;
-            const kq = try lf.copyI8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.kq", .{ ui, l }), kv_elems);
-            errdefer gpa.free(kq);
-            const ks = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.ks", .{ ui, l }), kv_rows);
-            errdefer gpa.free(ks);
-            const vq = try lf.copyI8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.vq", .{ ui, l }), kv_elems);
-            errdefer gpa.free(vq);
-            const vs = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.vs", .{ ui, l }), kv_rows);
-            errdefer gpa.free(vs);
-            kv[l] = .{ .q8 = .{ .kq = kq, .ks = ks, .vq = vq, .vs = vs } };
-        }
+        const k = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.k", .{ ui, l }), kv_rows * arch.head_dim);
+        errdefer gpa.free(k);
+        kv[l] = .{ .k = k, .v = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.v", .{ ui, l }), kv_rows * arch.head_dim) };
         kv_done += 1;
     }
 
@@ -1856,20 +1678,16 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
         }
         const rk_u: usize = rk;
         for (0..arch.num_rec) |r| {
-            const uq = try lf.copyI8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.uq", .{ ui, r }), arch.rec_heads * arch.rec_rows * rk_u);
-            errdefer gpa.free(uq);
-            const us = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.us", .{ ui, r }), arch.rec_heads * arch.rec_rows);
-            errdefer gpa.free(us);
-            const vq = try lf.copyI8(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.vq", .{ ui, r }), arch.rec_heads * rk_u * arch.rec_cols);
-            errdefer gpa.free(vq);
-            const vs = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.vs", .{ ui, r }), arch.rec_heads * rk_u);
-            errdefer gpa.free(vs);
+            const fu = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.u", .{ ui, r }), arch.rec_heads * arch.rec_rows * rk_u);
+            errdefer gpa.free(fu);
+            const fv = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.v", .{ ui, r }), arch.rec_heads * rk_u * arch.rec_cols);
+            errdefer gpa.free(fv);
             const cv = if (has_conv)
                 try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.cv", .{ ui, r }), arch.conv_elems)
             else
                 try gpa.alloc(u16, 0);
             errdefer gpa.free(cv);
-            arr[r] = .{ .rank = rk, .uq = uq, .us = us, .vq = vq, .vs = vs, .conv = cv };
+            arr[r] = .{ .rank = rk, .u = fu, .v = fv, .conv = cv };
             rc_done += 1;
         }
         break :blk arr;
@@ -1920,7 +1738,7 @@ fn removeIfPresent(io: Io, path: []const u8) !void {
 
 /// A saved whitener read whole; on failure nothing it read is kept, on success the caller owns every array.
 fn loadWhitener(lf: *const store.LoadedFile, gpa: Allocator, comptime name: []const u8, k: usize, n_cal: usize, floor: f32, hidden: usize) !whitener.LayerWhitener {
-    const cal = try loadMatrixMaybeQ8(lf, gpa, name ++ ".cal", n_cal, hidden);
+    const cal = try lf.copyF32(gpa, name ++ ".cal", n_cal * hidden);
     errdefer gpa.free(cal);
     const mean = try lf.copyF32(gpa, name ++ ".mean", hidden);
     errdefer gpa.free(mean);
@@ -1928,46 +1746,7 @@ fn loadWhitener(lf: *const store.LoadedFile, gpa: Allocator, comptime name: []co
     return .{ .dim = hidden, .k_pcs = k, .n_cal = n_cal, .mean = mean, .basis = basis, .cal_tokens = cal, .norm_floor = floor };
 }
 
-fn loadMatrixMaybeQ8(lf: *const store.LoadedFile, gpa: Allocator, base: []const u8, rows: usize, cols: usize) ![]f32 {
-    var nb: [96]u8 = undefined;
-    const qname = try std.fmt.bufPrint(&nb, "{s}.q", .{base});
-    if (lf.getTensor(qname)) |tq| {
-        var sb: [96]u8 = undefined;
-        const ts = lf.getTensor(try std.fmt.bufPrint(&sb, "{s}.s", .{base})) orelse return error.MissingTensor;
-        if (tq.dtype != .i8 or tq.bytes.len != rows * cols or ts.dtype != .f32 or ts.bytes.len != rows * 4) return error.BadTensorShape;
-        const out = try gpa.alloc(f32, rows * cols);
-        errdefer gpa.free(out);
-        const q_slice: []const i8 = @ptrCast(tq.bytes);
-        const s_slice = try gpa.alloc(f32, rows);
-        defer gpa.free(s_slice);
-        @memcpy(std.mem.sliceAsBytes(s_slice), ts.bytes);
-        quant.dequantizeRowsF32(q_slice, s_slice, rows, cols, out);
-        return out;
-    }
-    return lf.copyF32(gpa, base, rows * cols);
-}
-
-fn loadUnitProtoMaybeQ8(lf: *const store.LoadedFile, gpa: Allocator, ui: usize, kind: []const u8, rows: usize, cols: usize) ![]f32 {
-    var qb: [96]u8 = undefined;
-    const qname = try std.fmt.bufPrint(&qb, "u.{d}.{s}.q", .{ ui, kind });
-    if (lf.getTensor(qname)) |tq| {
-        var sb: [96]u8 = undefined;
-        const ts = lf.getTensor(try std.fmt.bufPrint(&sb, "u.{d}.{s}.s", .{ ui, kind })) orelse return error.MissingTensor;
-        if (tq.dtype != .i8 or tq.bytes.len != rows * cols or ts.dtype != .f32 or ts.bytes.len != rows * 4) return error.BadTensorShape;
-        const out = try gpa.alloc(f32, rows * cols);
-        errdefer gpa.free(out);
-        const q_slice: []const i8 = @ptrCast(tq.bytes);
-        const s_slice = try gpa.alloc(f32, rows);
-        defer gpa.free(s_slice);
-        @memcpy(std.mem.sliceAsBytes(s_slice), ts.bytes);
-        quant.dequantizeRowsF32(q_slice, s_slice, rows, cols, out);
-        return out;
-    }
-    var vb: [96]u8 = undefined;
-    return lf.copyF32(gpa, try std.fmt.bufPrint(&vb, "u.{d}.{s}.v", .{ ui, kind }), rows * cols);
-}
-
-/// Parallelized per-layer SVD + Q8 compression of recurrent state deltas (`S_after - S_prefix`).
+/// Parallelized per-layer SVD of recurrent state deltas (`S_after - S_prefix`), its F32 factors kept as computed.
 fn compressRecurrentLayers(
     gpa: Allocator,
     arch: ArchSpec,
@@ -1981,23 +1760,14 @@ fn compressRecurrentLayers(
         for (rec[0..made]) |*r| r.deinit(gpa);
         gpa.free(rec);
     }
-    const u_elems = arch.rec_heads * arch.rec_rows * rank;
-    const u_scales = arch.rec_heads * arch.rec_rows;
-    const v_elems = arch.rec_heads * rank * arch.rec_cols;
-    const v_scales = arch.rec_heads * rank;
-
     for (0..arch.num_rec) |r| {
-        const uq = try gpa.alloc(i8, u_elems);
-        errdefer gpa.free(uq);
-        const us = try gpa.alloc(f32, u_scales);
-        errdefer gpa.free(us);
-        const vq = try gpa.alloc(i8, v_elems);
-        errdefer gpa.free(vq);
-        const vs = try gpa.alloc(f32, v_scales);
-        errdefer gpa.free(vs);
+        const fu = try gpa.alloc(f32, arch.rec_heads * arch.rec_rows * rank);
+        errdefer gpa.free(fu);
+        const fv = try gpa.alloc(f32, arch.rec_heads * rank * arch.rec_cols);
+        errdefer gpa.free(fv);
         const cv = if (arch.keep_conv) try gpa.dupe(u16, body.rec_conv[r]) else try gpa.alloc(u16, 0);
         errdefer gpa.free(cv);
-        rec[r] = .{ .rank = @intCast(rank), .uq = uq, .us = us, .vq = vq, .vs = vs, .conv = cv };
+        rec[r] = .{ .rank = @intCast(rank), .u = fu, .v = fv, .conv = cv };
         made += 1;
     }
     if (arch.num_rec == 0 or rank == 0) return rec;
@@ -2019,16 +1789,6 @@ fn compressRecurrentLayers(
                 return;
             };
             defer alloc.free(delta_buf);
-            const u_tmp = alloc.alloc(f32, ctx.arch.rec_rows * ctx.rank) catch {
-                ctx.failed.store(true, .release);
-                return;
-            };
-            defer alloc.free(u_tmp);
-            const v_tmp = alloc.alloc(f32, ctx.rank * ctx.arch.rec_cols) catch {
-                ctx.failed.store(true, .release);
-                return;
-            };
-            defer alloc.free(v_tmp);
 
             var scratch_arena = std.heap.ArenaAllocator.init(alloc);
             defer scratch_arena.deinit();
@@ -2048,26 +1808,12 @@ fn compressRecurrentLayers(
                         ctx.arch.rec_rows,
                         ctx.arch.rec_cols,
                         ctx.rank,
-                        u_tmp,
-                        v_tmp,
+                        rl.u[h * ctx.arch.rec_rows * ctx.rank ..][0 .. ctx.arch.rec_rows * ctx.rank],
+                        rl.v[h * ctx.rank * ctx.arch.rec_cols ..][0 .. ctx.rank * ctx.arch.rec_cols],
                     ) catch {
                         ctx.failed.store(true, .release);
                         return;
                     };
-                    quant.quantizeRowsF32(
-                        u_tmp,
-                        ctx.arch.rec_rows,
-                        ctx.rank,
-                        rl.uq[h * ctx.arch.rec_rows * ctx.rank ..][0 .. ctx.arch.rec_rows * ctx.rank],
-                        rl.us[h * ctx.arch.rec_rows ..][0..ctx.arch.rec_rows],
-                    );
-                    quant.quantizeRowsF32(
-                        v_tmp,
-                        ctx.rank,
-                        ctx.arch.rec_cols,
-                        rl.vq[h * ctx.rank * ctx.arch.rec_cols ..][0 .. ctx.rank * ctx.arch.rec_cols],
-                        rl.vs[h * ctx.rank ..][0..ctx.rank],
-                    );
                 }
             }
         }
@@ -2105,7 +1851,8 @@ fn parseUsizeMeta(lf: *const store.LoadedFile, key: []const u8) !usize {
     return std.fmt.parseInt(usize, s, 10) catch return error.BadLivingWeights;
 }
 
-fn parseF32Meta(lf: *const store.LoadedFile, key: []const u8) !f32 {
+/// An F32 saved as its bit pattern, so a reload reads back exactly the value the bank computed.
+fn parseBitsMeta(lf: *const store.LoadedFile, key: []const u8) !f32 {
     const s = lf.getMeta(key) orelse return error.MissingMetadata;
-    return std.fmt.parseFloat(f32, s) catch return error.BadLivingWeights;
+    return @bitCast(std.fmt.parseInt(u32, s, 10) catch return error.BadLivingWeights);
 }
