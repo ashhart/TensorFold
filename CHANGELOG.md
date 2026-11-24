@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on CUDA: `TF_GEMMA4_ARGMAX_GRAPH` is now on by default: greedy verify rounds take their argmax inside the target graph, with the same kernel over the same logits, so tokens are unchanged; `TF_GEMMA4_ARGMAX_GRAPH=0` restores the per-window launches (#4883).
+
 - Hy4-flash: host-side weight map, TP=1/2/4 partition and Engram FP8 row codec for the official W8A16 FP8 checkpoint, with refusal tests; serving follows in later PRs (#4827). Thanks @GrgaPalcic.
 
 - TP: the 4-rank RoCE ring relay forwards each half as soon as it arrives, lowering gather latency with the opt-in relay; bytes are unchanged (#4798). Thanks @GrgaPalcic.
