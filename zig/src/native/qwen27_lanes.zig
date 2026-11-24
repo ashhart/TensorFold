@@ -297,8 +297,7 @@ pub const Metal = struct {
     }
 
     fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
-        const b = self(ptr);
-        try b.encodeArgmaxRange(e, 0, b.rows);
+        try self(ptr).encodeArgmaxRange(e, 0, self(ptr).rows);
     }
 
     /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
@@ -506,11 +505,7 @@ pub const Metal = struct {
         for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
         const tail_argmax = r.model.config.looped and !fused and greedy and r.reduce == null;
         std.debug.assert(r.tail == null);
-        if (fused) {
-            r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
-        } else if (tail_argmax) {
-            r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
-        }
+        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
