@@ -22,7 +22,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     var effective_max_new: u32 = r.max_tokens;
     var memory_active = false;
     // the latest user turn's memory gate, only where the engine serves learning (Info.folded_memory, --slide)
-    if (h.folded_memory) |fm| if (h.info_.folded_memory and fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
+    if (h.folded_memory) |fm| if (h.info_.folded_memory and !job.memory_refused and fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
         if (fm.routeAndCompose(fm.ctx, r.memory_query)) |maybe_snap| {
             if (maybe_snap) |handle| {
                 const strip: usize = if (r.memory_strip < r.prompt.len) r.memory_strip else 0;
