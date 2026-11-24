@@ -77,6 +77,20 @@ pub fn trunkPlanes(s: Scope, leaf: []const u8, x: Tensor, eps: f32, consumer_pla
     return try rt.hold(try normalization.runPlanes(rt.gpu, x, weight, bias, width, eps, tiled));
 }
 
+/// Trunk block norm into a 2-plane pair buffer for a dense_pair consumer (tile order when `tiled`), else null.
+pub fn trunkPair(s: Scope, leaf: []const u8, x: Tensor, eps: f32, tiled: bool) !?Tensor {
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    if (shape.rank != 1) return error.SamNormShape;
+    const width = shape.dim(0);
+    if (x.dtype != .f32 or !planesRoute(s.rt.routes, width, eps, x.count, true)) return null;
+    const weight = try p.param("weight");
+    const bias = try p.param("bias");
+    if (weight.count != width or bias.count != width) return error.SamNormShape;
+    const rt = s.rt;
+    return try rt.hold(try normalization.runPair(rt.gpu, x, weight, bias, width, eps, tiled));
+}
+
 /// Group normalisation over all pixels and each group's channels, population statistics, ε = 1e-5 in the kernel.
 pub fn groupNorm(s: Scope, leaf: []const u8, x: FeatureMap, groups: usize) !FeatureMap {
     const channels = x.channels;

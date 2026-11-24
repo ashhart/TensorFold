@@ -10,6 +10,7 @@ pub const Suites = struct {
     gemm: @import("metal_sam3_gemm.zig").Suite,
     small: @import("metal_sam3_dense_small.zig").Suite,
     planes: @import("metal_sam3_planes.zig").Suite,
+    pair: @import("metal_sam3_pair.zig").Suite,
     attention: @import("metal_sam3_attention.zig").Suite,
     norm: @import("metal_sam3_norm.zig").Suite,
     resize: @import("metal_sam3_resize.zig").Suite,
@@ -32,6 +33,7 @@ pub const Suites = struct {
             .gemm = .{ .a = a },
             .small = .{ .allocator = a },
             .planes = .{ .a = a },
+            .pair = .{ .a = a },
             .attention = .{ .a = a },
             .norm = .{ .a = a },
             .resize = .{ .a = a },
@@ -47,14 +49,14 @@ pub const Suites = struct {
         };
         errdefer s.destroy();
         try s.mma.collect(only);
-        inline for (.{ "deconv", "gemm", "small", "planes", "attention", "norm", "resize", "sparse_mask", "layout", "arithmetic", "rotary", "rows", "flash", "trunk", "tensor_ops", "core_attention" }) |field|
+        inline for (.{ "deconv", "gemm", "small", "planes", "pair", "attention", "norm", "resize", "sparse_mask", "layout", "arithmetic", "rotary", "rows", "flash", "trunk", "tensor_ops", "core_attention" }) |field|
             try @field(s, field).collect(device, queue, kernels, only);
         return s;
     }
 
     pub fn destroy(s: *Suites) void {
         s.mma.deinit();
-        inline for (.{ "deconv", "gemm", "small", "planes", "attention", "norm", "resize", "sparse_mask", "layout", "arithmetic", "rotary", "rows", "flash", "trunk", "tensor_ops", "core_attention" }) |field|
+        inline for (.{ "deconv", "gemm", "small", "planes", "pair", "attention", "norm", "resize", "sparse_mask", "layout", "arithmetic", "rotary", "rows", "flash", "trunk", "tensor_ops", "core_attention" }) |field|
             @field(s, field).deinit();
         s.a.destroy(s);
     }

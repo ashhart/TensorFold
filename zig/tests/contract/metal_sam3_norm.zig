@@ -9,6 +9,7 @@ const name = "metal sam3 compensated normalization";
 const control_name = "control: sam3 compensated normalization half variance";
 const planes_name = "metal sam3 compensated normalization planes";
 const wide_name = "metal sam3 compensated normalization wide";
+const pair_name = "metal sam3 compensated normalization pair";
 
 pub fn text(a: std.mem.Allocator, control: bool) ![]u8 {
     const source = "#define TF_UNROLL _Pragma(\"clang loop unroll(full)\")\n" ++ sources.sam3_dense_small ++ sources.sam3_planes ++ sources.sam3_norm;
@@ -26,8 +27,9 @@ const Probe = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     control: bool,
-    // Planes output: clear, restore and copy pipelines read the planes back as FP32.
+    // Planes/pair output: clear, restore and copy pipelines read the buffer back as FP32.
     planes: ?[3]mtl.Pipeline = null,
+    is_pair: bool = false,
     // Wide output: clear pipeline resets the 1-word domain flag before norm.
     wide_clear: ?mtl.Pipeline = null,
     rows: ?contract.rows.Rows = null,
@@ -37,7 +39,7 @@ const Probe = struct {
 
     fn kernel(self: *Probe) g.Kernel {
         return .{ .ctx = self, .vt = &vt, .control = if (self.control) .sums else null, .spec = .{
-            .name = if (self.control) control_name else if (self.planes != null) planes_name else if (self.wide_clear != null) wide_name else name,
+            .name = if (self.control) control_name else if (self.is_pair) pair_name else if (self.planes != null) planes_name else if (self.wide_clear != null) wide_name else name,
             .accum = .f32,
             .out = .f32,
             .depth = depth,
@@ -72,7 +74,7 @@ const Probe = struct {
             input.* = try self.rig.input(std.mem.sliceAsBytes(floats));
         }
         self.out = try self.rig.output(rows.outputs() * 4);
-        if (self.planes != null) self.emitted = try self.rig.scratch(sources.sam3_dense_planes.planesCount(rows.outputs()) * 2);
+        if (self.is_pair) self.emitted = try self.rig.scratch(sources.sam3_dense_pair.pairCount(rows.outputs()) * 2) else if (self.planes != null) self.emitted = try self.rig.scratch(sources.sam3_dense_planes.planesCount(rows.outputs()) * 2);
         if (self.wide_clear != null) self.emitted = try self.rig.scratch(4);
         return true;
     }
@@ -112,11 +114,12 @@ const Probe = struct {
             pass.e.barrier();
             pass.e.setPipeline(pipes[1]);
             pass.e.setBuffer(target.buf, target.off, 0);
-            pass.e.setValue([3]u32{ n, 0, 1 }, 1);
+            if (self.is_pair) pass.e.setValue(n, 1) else pass.e.setValue([3]u32{ n, 0, 1 }, 1);
             pass.e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(128, 1, 1));
             pass.e.barrier();
             pass.e.setPipeline(pipes[2]);
-            pass.e.setBuffer(target.buf, target.off + sources.sam3_dense_planes.restoreOffset(n), 0);
+            const restore_off = if (self.is_pair) sources.sam3_dense_pair.restoreOffset(n) else sources.sam3_dense_planes.restoreOffset(n);
+            pass.e.setBuffer(target.buf, target.off + restore_off, 0);
             pass.e.setBuffer(self.out.buf, self.out.off, 1);
             pass.e.setValue(n, 2);
             pass.e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(128, 1, 1));
@@ -139,21 +142,23 @@ const Probe = struct {
 
 pub const Suite = struct {
     a: std.mem.Allocator,
-    probes: [4]?Probe = @splat(null),
+    probes: [5]?Probe = @splat(null),
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         for (&self.probes, 0..) |*entry, i| {
-            const label = if (i == 1) control_name else if (i == 2) planes_name else if (i == 3) wide_name else name;
+            const label = if (i == 1) control_name else if (i == 2) planes_name else if (i == 3) wide_name else if (i == 4) pair_name else name;
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
-            if (i == 2 and !device.tensorUnits()) continue;
+            if ((i == 2 or i == 4) and !device.tensorUnits()) continue;
             const source = try text(self.a, i == 1);
             defer self.a.free(source);
-            const fn_name = if (i == 2) "sam_norm_compensated_planes" else if (i == 3) "sam_norm_compensated_wide" else "sam_norm_compensated";
-            entry.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, fn_name), .control = i == 1 };
-            if (i == 2) {
+            const fn_name = if (i == 2) "sam_norm_compensated_planes" else if (i == 3) "sam_norm_compensated_wide" else if (i == 4) "sam_norm_compensated_pair" else "sam_norm_compensated";
+            entry.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, fn_name), .control = i == 1, .is_pair = i == 4 };
+            if (i == 2 or i == 4) {
                 const full = try sources.tensor_library.source(self.a, sources.sam3_source);
                 defer self.a.free(full);
-                entry.*.?.planes = .{ try rig_.pipeline(device, source, "sam_norm_planes_clear"), try rig_.pipeline(device, full, "sam_dense_planes_restore"), try rig_.pipeline(device, full, "sam3_copy") };
+                const clear_name = if (i == 4) "sam_norm_pair_clear" else "sam_norm_planes_clear";
+                const restore_name = if (i == 4) "sam_dense_pair_restore" else "sam_dense_planes_restore";
+                entry.*.?.planes = .{ try rig_.pipeline(device, source, clear_name), try rig_.pipeline(device, full, restore_name), try rig_.pipeline(device, full, "sam3_copy") };
             } else if (i == 3) {
                 entry.*.?.wide_clear = try rig_.pipeline(device, source, "sam_norm_wide_clear");
             }

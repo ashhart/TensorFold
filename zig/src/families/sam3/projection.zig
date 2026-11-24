@@ -4,6 +4,7 @@ const elementwise = @import("elementwise.zig");
 const dense_device = @import("dense_device.zig");
 const dense_expansion = @import("dense_expansion.zig");
 const dense_planes = @import("dense_planes.zig");
+const dense_pair = @import("dense_pair.zig");
 
 const Runtime = runtime.Runtime;
 const Scope = runtime.Scope;
@@ -117,6 +118,42 @@ pub fn takesWide(s: Scope, leaf: []const u8) !bool {
     const p = try s.sub(leaf);
     const shape = try p.info("weight");
     return s.rt.routes.exactDevice() and shape.dtype != .f16;
+}
+
+/// True when the trunk projection `leaf` under `s` uses the 3-pass FP16-plane NAX route for FP32 weights.
+pub fn takesPair(s: Scope, leaf: []const u8) !bool {
+    if (!s.rt.routes.exactDevice() or s.rt.observer != null) return false;
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    return shape.rank == 2 and shape.dtype != .f16 and shape.dim(0) <= 4736 and shape.dim(1) <= 4736;
+}
+
+fn pairWeight(p: Scope, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
+    const name = try p.rt.print("pair-weight.{s}", .{try p.key("weight")});
+    if (p.rt.constant(name)) |cached| return cached;
+    return p.rt.adoptConstant(name, try dense_pair.prepareWeight(p.rt.gpu, weight, bias, cols, depth));
+}
+
+/// 3-pass FP16-plane trunk projection on FP32 checkpoint weights (accepts FP32 or pair input).
+pub fn trunkPair(s: Scope, leaf: []const u8, x: Tensor, role: TrunkRole, residual: ?Tensor, tiled: bool) !Tensor {
+    const rt = s.rt;
+    if (!rt.routes.exactDevice()) return error.SamProjectionRoute;
+    const p = try s.sub(leaf);
+    const shape = try p.info("weight");
+    if (shape.rank != 2 or shape.dtype == .f16) return error.SamProjectionShape;
+    const cols = shape.dim(0);
+    const depth = shape.dim(1);
+    const rows = if (x.dtype == .f32) x.count / depth else (x.count - 16) / (4 * depth);
+    const weight = try p.param("weight");
+    const bias = try p.param("bias");
+    const w_pair = try pairWeight(p, weight, bias, cols, depth);
+    const epilogue: dense_pair.Epilogue = if (role == .expand)
+        .gelu_pair
+    else if (residual) |r|
+        (if (tiled) .{ .tile_residual = r } else .{ .residual = r })
+    else
+        .none;
+    return rt.hold(try dense_pair.run(rt.gpu, x, w_pair, weight, bias, rows, cols, depth, epilogue));
 }
 
 /// Fused FP32 wide trunk projection with optional precomputed input flag, residual/tile epilogue, and output flag.

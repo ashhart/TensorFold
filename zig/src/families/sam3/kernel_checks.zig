@@ -153,6 +153,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     try @import("wide_checks.zig").checkFlushedProducts(&g);
     try checkExpansionTinyInput(&g);
     try @import("planes_checks.zig").run(&g);
+    try @import("wide_checks.zig").checkPairProjections(&g);
     try checkExactWeightProducts(&g);
     for ([_]usize{ 32, 256, 4736 }) |depth| {
         const x = try g.alloc(64 * depth, .f16);

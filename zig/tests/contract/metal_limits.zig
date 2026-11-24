@@ -107,6 +107,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 device projection ")) {
         if (!assemble) return undefined;
+        if (std.mem.startsWith(u8, d.name, "sam3 device projection pair "))
+            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_pair.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         if (std.mem.startsWith(u8, d.name, "sam3 device projection planes "))
             return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_planes.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         if (std.mem.startsWith(u8, d.name, "sam3 device projection exact half weight "))

@@ -23,14 +23,15 @@ inline float sam_norm_apply(float x, float2 mean, float2 inv, float w, float b) 
     return delta.x + delta.y;
 }
 
-// PLANES writes dense_planes output; WIDE_FLAG emits the wide-domain flag; tiled reads each tile row's grid row.
-template<bool PLANES, bool WIDE_FLAG>
+// OUT_MODE: 0 plain FP32, 1 dense_planes, 2 FP32 + wide flag, 3 dense_pair; tiled reads each tile row's grid row.
+template<ushort OUT_MODE>
 inline void sam_norm_compensated_impl(const device float* x, const device float* weight, const device float* bias,
     device float* out, device atomic_uint* out_flag, constant uint2& shape, constant float& eps, bool tiled,
     uint group, uint sg, uint lane) {
     const uint row = group * 4 + sg, width = shape.y;
     if (row >= shape.x) return;
     const ulong target = ulong(row) * width, base = tiled ? ulong(sam_planes_tile_row(row)) * width : target;
+    const ulong total = ulong(shape.x) * width;
     uint invalid = 0;
     float vals[32];
     float2 sum(0);
@@ -78,25 +79,30 @@ inline void sam_norm_compensated_impl(const device float* x, const device float*
         for (ushort k = 0; k < 32; ++k) {
             const uint col = uint(k) * 32u + lane;
             const float value = sam_norm_apply(vals[k], mean, inv, weight[col], bias[col]);
-            if constexpr (PLANES) sam_planes_store((device half*)out, ulong(shape.x) * width, target + col, value, invalid);
+            if constexpr (OUT_MODE == 1) sam_planes_store((device half*)out, total, target + col, value, invalid);
+            else if constexpr (OUT_MODE == 3) sam_pair_store((device half*)out, total, target + col, value, invalid);
             else {
                 out[target + col] = value;
-                if constexpr (WIDE_FLAG) invalid |= uint((as_type<uint>(value) & 0x7fffffffu) > 0x51800000u);
+                if constexpr (OUT_MODE == 2) invalid |= uint((as_type<uint>(value) & 0x7fffffffu) > 0x51800000u);
             }
         }
     } else {
         for (uint col = lane; col < width; col += 32) {
             const float value = sam_norm_apply(x[base + col], mean, inv, weight[col], bias[col]);
-            if constexpr (PLANES) sam_planes_store((device half*)out, ulong(shape.x) * width, target + col, value, invalid);
+            if constexpr (OUT_MODE == 1) sam_planes_store((device half*)out, total, target + col, value, invalid);
+            else if constexpr (OUT_MODE == 3) sam_pair_store((device half*)out, total, target + col, value, invalid);
             else {
                 out[target + col] = value;
-                if constexpr (WIDE_FLAG) invalid |= uint((as_type<uint>(value) & 0x7fffffffu) > 0x51800000u);
+                if constexpr (OUT_MODE == 2) invalid |= uint((as_type<uint>(value) & 0x7fffffffu) > 0x51800000u);
             }
         }
     }
-    if constexpr (PLANES) {
-        if (invalid) atomic_fetch_or_explicit(sam_planes_flags((device half*)out, ulong(shape.x) * width), 1u, memory_order_relaxed);
-    } else if constexpr (WIDE_FLAG) {
+    if constexpr (OUT_MODE == 1) {
+        if (invalid) atomic_fetch_or_explicit(sam_planes_flags((device half*)out, total), 1u, memory_order_relaxed);
+    } else if constexpr (OUT_MODE == 3) {
+        invalid = simd_or(invalid);
+        if (invalid && lane == 0) atomic_fetch_or_explicit(sam_pair_flags((device half*)out, total), 1u, memory_order_relaxed);
+    } else if constexpr (OUT_MODE == 2) {
         invalid = simd_or(invalid);
         if (invalid && lane == 0) atomic_fetch_or_explicit(out_flag, 1u, memory_order_relaxed);
     }
@@ -107,7 +113,7 @@ void sam_norm_compensated(const device float* x, const device float* weight, con
     device float* out, constant uint2& shape, constant float& eps,
     uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    sam_norm_compensated_impl<false, false>(x, weight, bias, out, nullptr, shape, eps, false, group, sg, lane);
+    sam_norm_compensated_impl<0>(x, weight, bias, out, nullptr, shape, eps, false, group, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(128)]]
@@ -115,7 +121,7 @@ void sam_norm_compensated_wide(const device float* x, const device float* weight
     device float* out, device atomic_uint* out_flag, constant uint2& shape, constant float& eps, constant uint& tiled,
     uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    sam_norm_compensated_impl<false, true>(x, weight, bias, out, out_flag, shape, eps, tiled != 0, group, sg, lane);
+    sam_norm_compensated_impl<2>(x, weight, bias, out, out_flag, shape, eps, tiled != 0, group, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(128)]]
@@ -128,10 +134,23 @@ void sam_norm_compensated_planes(const device float* x, const device float* weig
     device float* out, constant uint2& shape, constant float& eps, constant uint& tiled,
     uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    sam_norm_compensated_impl<true, false>(x, weight, bias, out, nullptr, shape, eps, tiled != 0, group, sg, lane);
+    sam_norm_compensated_impl<1>(x, weight, bias, out, nullptr, shape, eps, tiled != 0, group, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(128)]]
 void sam_norm_planes_clear(device half* planes, constant uint& count, uint at [[thread_position_in_grid]]) {
     if (at < 8) atomic_store_explicit(sam_planes_flags(planes, count) + at, 0u, memory_order_relaxed);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_norm_compensated_pair(const device float* x, const device float* weight, const device float* bias,
+    device float* out, constant uint2& shape, constant float& eps, constant uint& tiled,
+    uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    sam_norm_compensated_impl<3>(x, weight, bias, out, nullptr, shape, eps, tiled != 0, group, sg, lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_norm_pair_clear(device half* pair, constant uint& count, uint at [[thread_position_in_grid]]) {
+    if (at < 8) atomic_store_explicit(sam_pair_flags(pair, count) + at, 0u, memory_order_relaxed);
 }

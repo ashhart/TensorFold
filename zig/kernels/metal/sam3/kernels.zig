@@ -4,5 +4,6 @@ pub const attention_split = @import("kernel_sources").sam3_attention_split;
 pub const dense_device = @import("kernel_sources").sam3_dense_device;
 pub const dense_expansion = @import("kernel_sources").sam3_dense_expansion;
 pub const dense_planes = @import("kernel_sources").sam3_dense_planes;
+pub const dense_pair = @import("kernel_sources").sam3_dense_pair;
 pub const attention_device = @import("kernel_sources").sam3_attention_device;
 pub const attention_split32 = @import("kernel_sources").sam3_attention_split32;

@@ -1,6 +1,10 @@
 const std = @import("std");
 const gpu = @import("tensor_metal");
 const dense_device = @import("dense_device.zig");
+const dense_pair = @import("dense_pair.zig");
+const normalization = @import("normalization.zig");
+const gridRow = @import("spatial.zig").gridRow;
+extern "c" fn erf(f64) f64;
 
 // Single products x * w through the wide layouts: correctly rounded when normal, else within 2^-126 of the product.
 pub fn checkFlushedProducts(g: *gpu.Gpu) !void {
@@ -46,6 +50,131 @@ pub fn checkFlushedProducts(g: *gpu.Gpu) !void {
         };
     }
     std.debug.print("SAM wide products: correctly rounded down to 2^-126, {d} subnormal products flushed within 2^-126\n", .{flushed});
+}
+
+// Verifies 3-pass FP16-plane dense_pair (plain, residual, tiled, GELU chained, >32768 fallback) against FP64.
+pub fn checkPairProjections(g: *gpu.Gpu) !void {
+    var prng = std.Random.DefaultPrng.init(19);
+    const rng = prng.random();
+    const rows: usize = 65;
+    const cols: usize = 129;
+    const depth: usize = 64;
+    const x = try g.alloc(rows * depth, .f32);
+    defer x.deinit();
+    const w = try g.alloc(cols * depth, .f32);
+    defer w.deinit();
+    const bias = try g.alloc(cols, .f32);
+    defer bias.deinit();
+    const res = try g.alloc(rows * cols, .f32);
+    defer res.deinit();
+    for (x.slice(f32, x.count)) |*v| v.* = rng.float(f32) * 4 - 2;
+    for (w.slice(f32, w.count)) |*v| v.* = rng.float(f32) * 2 - 1;
+    for (bias.slice(f32, cols)) |*v| v.* = rng.float(f32) - 0.5;
+    for (res.slice(f32, res.count)) |*v| v.* = rng.float(f32) * 4 - 2;
+
+    const wp = try dense_pair.prepareWeight(g, w, bias, cols, depth);
+    defer wp.deinit();
+    const plain = try dense_pair.run(g, x, wp, w, bias, rows, cols, depth, .none);
+    defer plain.deinit();
+    const with_res = try dense_pair.run(g, x, wp, w, bias, rows, cols, depth, .{ .residual = res });
+    defer with_res.deinit();
+    const gelu_p = try dense_pair.run(g, x, wp, w, bias, rows, cols, depth, .gelu_pair);
+    defer gelu_p.deinit();
+    const w2 = try g.alloc(depth * cols, .f32);
+    defer w2.deinit();
+    const b2 = try g.alloc(depth, .f32);
+    defer b2.deinit();
+    for (w2.slice(f32, w2.count)) |*v| v.* = rng.float(f32) * 2 - 1;
+    for (b2.slice(f32, depth)) |*v| v.* = rng.float(f32) - 0.5;
+    const wp2 = try dense_pair.prepareWeight(g, w2, b2, depth, cols);
+    defer wp2.deinit();
+    const chained = try dense_pair.run(g, gelu_p, wp2, w2, b2, rows, depth, cols, .none);
+    defer chained.deinit();
+
+    var worst_plain: f64 = 0;
+    var worst_chain: f64 = 0;
+    for (0..rows) |r| {
+        var gelu_ref: [cols]f64 = undefined;
+        for (0..cols) |c| {
+            var sum: f64 = bias.get(c);
+            var mag: f64 = @abs(sum);
+            for (0..depth) |k| {
+                const prod = @as(f64, x.get(r * depth + k)) * w.get(c * depth + k);
+                sum += prod;
+                mag += @abs(prod);
+            }
+            const bound = @as(f64, @floatFromInt(depth + 12)) * std.math.floatEps(f32) * mag;
+            worst_plain = @max(worst_plain, @abs(plain.get(r * cols + c) - sum) / bound);
+            const r_want = @as(f64, res.get(r * cols + c)) + sum;
+            const r_bound = @as(f64, @floatFromInt(depth + 12)) * std.math.floatEps(f32) * (mag + @abs(res.get(r * cols + c)));
+            if (@abs(with_res.get(r * cols + c) - r_want) > r_bound) return error.SamPairResidual;
+            gelu_ref[c] = 0.5 * sum * (1 + erf(sum * @sqrt(@as(f64, 0.5))));
+        }
+        for (0..depth) |c| {
+            var sum: f64 = b2.get(c);
+            var mag: f64 = @abs(sum);
+            for (0..cols) |k| {
+                const prod = gelu_ref[k] * w2.get(c * cols + k);
+                sum += prod;
+                mag += @abs(prod);
+            }
+            const bound = @as(f64, @floatFromInt(cols + 32)) * std.math.floatEps(f32) * mag;
+            worst_chain = @max(worst_chain, @abs(chained.get(r * depth + c) - sum) / bound);
+        }
+    }
+    // Verify >32768 sentinel fallback preserves exact FP32 value.
+    x.slice(f32, x.count)[0] = 32768.25;
+    const fb = try dense_pair.run(g, x, wp, w, bias, rows, cols, depth, .none);
+    defer fb.deinit();
+    var fb_ref: f64 = bias.get(0);
+    var fb_mag: f64 = @abs(fb_ref);
+    for (0..depth) |k| {
+        const prod = @as(f64, x.get(k)) * w.get(k);
+        fb_ref += prod;
+        fb_mag += @abs(prod);
+    }
+    if (@abs(fb.get(0) - fb_ref) > 8 * std.math.floatEps(f32) * fb_mag) return error.SamPairFallback;
+    // Verify tiled norm->pair + tiled residual scatter on the 5184-row trunk grid.
+    const t_rows: usize = 5184;
+    const t_w: usize = 64;
+    const tx = try g.alloc(t_rows * t_w, .f32);
+    defer tx.deinit();
+    const tw = try g.alloc(t_w * t_w, .f32);
+    defer tw.deinit();
+    const tb = try g.alloc(t_w, .f32);
+    defer tb.deinit();
+    const tres = try g.alloc(t_rows * t_w, .f32);
+    defer tres.deinit();
+    for (tx.slice(f32, tx.count), 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i % 257)) * 0.05);
+    for (tw.slice(f32, tw.count), 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i % 251)) * 0.04);
+    for (tb.slice(f32, t_w), 0..) |*v, i| v.* = @as(f32, @floatFromInt(i)) * 0.01;
+    for (tres.slice(f32, tres.count), 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i % 199)) * 0.03);
+    const twp = try dense_pair.prepareWeight(g, tw, tb, t_w, t_w);
+    defer twp.deinit();
+    const t_out = try dense_pair.run(g, tx, twp, tw, tb, t_rows, t_w, t_w, .{ .tile_residual = tres });
+    defer t_out.deinit();
+    for ([_]usize{ 0, 23, 576, 2000, 5183 }) |tr| {
+        const gr = gridRow(72, 24, tr);
+        var sum: f64 = tb.get(0);
+        var mag: f64 = @abs(sum);
+        for (0..t_w) |k| {
+            const prod = @as(f64, tx.get(tr * t_w + k)) * tw.get(k);
+            sum += prod;
+            mag += @abs(prod);
+        }
+        const want = @as(f64, tres.get(gr * t_w)) + sum;
+        if (@abs(t_out.get(gr * t_w) - want) > @as(f64, @floatFromInt(t_w + 12)) * std.math.floatEps(f32) * (mag + @abs(tres.get(gr * t_w))))
+            return error.SamPairTiled;
+    }
+    const nw = try g.alloc(t_w, .f32);
+    defer nw.deinit();
+    @memset(nw.slice(f32, t_w), 1);
+    const np = try normalization.runPair(g, tx, nw, tb, t_w, 1e-5, true);
+    defer np.deinit();
+    const n_plain = try dense_pair.run(g, np, twp, tw, tb, t_rows, t_w, t_w, .none);
+    defer n_plain.deinit();
+    if (!std.math.isFinite(n_plain.get(0)) or worst_plain > 1 or worst_chain > 1) return error.SamPairProjection;
+    std.debug.print("SAM pair projections: plain worst {d:.3} of bound, GELU-chained worst {d:.3}, tiled & >32768 fallback pass\n", .{ worst_plain, worst_chain });
 }
 
 const int8_probe_source =
