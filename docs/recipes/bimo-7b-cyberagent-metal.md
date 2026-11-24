@@ -20,7 +20,7 @@ and `tool_choice: required`. The release's `generation_config.json` names temper
 which the flags above give requests that set none; its `repetition_penalty` 1.1 is not applied (the family has no
 penalties). The template has no think block, so every reply is `content`; `--drafter` is refused by name, since no
 drafter has been checked with this checkpoint. The lane core's copy drafts landed 1.05 tokens a round on the
-harness's ruler and cost 6% (49 against 52 tokens/s on its drafts check, replies equal 12/12), so the family serves
+harness's ruler and cost 6% (49 against 52 tokens/s on its drafts check, replies equal 12/12, engine 7662e079), so the family serves
 this checkpoint without them (`copy_drafts` in its qualified entry; `--no-drafts` changes nothing).
 
 ## What the Qwen2 path adds to the family
@@ -55,7 +55,7 @@ over a 2,000-token prompt, 667,648,000 and 664,576,000 bytes equal).
 one rounding at the end); `tools/zig/llama_teacher_judge.py` judges each position by the repository's near-tie rule.
 Three chats through the release's template (a coding task, a security question, a tool-use task with the tools
 described in the system message), HF's own 64 greedy tokens each (transformers 5.22.2, bf16 on the CPU) forced
-through both:
+through both, the engine at 19382dafb:
 
 | 192 positions | equal | differ | verdict |
 |---|---:|---:|---|
@@ -68,9 +68,9 @@ parts at step 36, where the engine's two best logits are the same bf16 value (20
 One-row steps and 16-row windows give the same logits bit for bit over those 64 tokens (`tf-llama-run exact`).
 
 Served (`tensorfold-native serve`, two streams, 32,768-token window): sampled replies at the release's settings;
-structured output (`json_schema`) valid; two concurrent greedy replies equal to their solo runs; a 13,182-token
-second turn resumed from 13,147 kept tokens with the same reply as a fresh run (0.30 s against the cold pass); a
-27,633-token prompt served in 5.7 s. Tool calls: the published template renders no `tools` field, so a request
+structured output (`json_schema`) valid; two concurrent greedy replies equal to their solo runs; a 13,090-token
+second turn resumed from 13,062 kept tokens with the same reply as a freshly started server (the whole request,
+up to 64 tokens, 0.99 s against 3.11 s); a 27,633-token prompt served in 5.7 s. Tool calls: the published template renders no `tools` field, so a request
 whose system message describes the tools (the Hermes form the model was trained on) gets `<tool_call>` JSON that
 the server parses into `tool_calls`, with `tool_choice: required` honoured; `tools` alone, without that
 description, gets prose. A passphrase in filler comes back at 4k, 8k, 16k and 20k tokens and at 90% of a
@@ -94,24 +94,26 @@ SUMMARY 66 kernels: 66 pass gates 1-4, 0 fail, 0 known findings; 20 controls: 20
 
 ## Measured
 
-M5 Ultra (256 GB), the recipe harness's ruler, greedy 256-token replies, engine 7662e079, `--no-drafts`, no other
-model loaded (the recipe's `evidence/bf16-speed` and `evidence/bf16-prefill-32k`):
+M5 Ultra (256 GB), the recipe harness's ruler, greedy 256-token replies, engine 19382dafb, `--no-drafts`, no other
+model loaded (the harness's `speed` and `prefill-32k` plans):
 
 | streams | prose | code | structured | list | first token |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 55.7 | 44.4 | 55.6 | 55.9 | 0.07-0.10 s |
-| 2 | 88.6 | 103.8 | 113.3 | 113.4 | 0.11-0.14 s |
+| 1 | 55.9 | 55.3 | 55.6 | 55.0 | 0.07-0.08 s |
+| 2 | 111.3 | 103.1 | 111.1 | 114.1 | 0.11 s |
 
-Tokens a second, all streams together: one stream reads the 14.7 GiB of weights each step (19.0 ms a round), two
-streams read them once for both rows (19.2 ms). Cold prompts: 2,288 tokens at 5,974 tokens/s, 8,838 at 6,163,
-17,567 at 5,654 and 27,633 at 4,850 (5.7 s). A chat's third turn resumed from 5,493 of its 5,583 kept tokens starts
-in 0.13 s against 1.06 s cold, with the same reply. The harness's serving checks: structured 18/18 (drafted == plain
+Tokens a second, all streams together: one stream reads the 14.7 GiB of weights each step (18.1 ms a round), two
+streams read them once for both rows (18.3 ms). Cold prompts: 2,270 tokens at 5,821 tokens/s, 8,834 at 6,080 and
+17,587 at 5,619 (the plan's 30,720-token point records no result at this window, as on 7662e079); a 27,633-token
+prompt is served in 5.7 s (above). A chat's third turn resumed from 5,493 of its 5,583 kept tokens starts in 0.10 s against
+0.98 s cold, with the same reply. The harness's `quick` plan on the same build: structured 18/18 (drafted == plain
 12/12), soak 60/60, concurrent 12/12, streaming 4/4, multi-turn 8/8, stop 3/3, copy 2/2, sampling 9/9; its tool
-cases 4/5 (the `auto` case with two tools gets a fabricated `<tool_response>` instead of a call, with the published
-template and with the base model's tool-rendering template alike); its thinking cases do not apply, and its
-33-token max-tokens case ends in 14 tokens because the model refuses the essay prompt as off-topic.
+cases 4/5 (the `auto` case with two tools answers in prose with the published template, and writes a fabricated
+`<tool_response>` instead of a call with the base model's tool-rendering template); its thinking cases do not
+apply, and its max-tokens check is 2/3.
 
-The recipe harness's quality suite, thinking off (greedy, its own prompts and graders, the recipe's
+The recipe harness's quality suite, thinking off, on engine 7662e079 (before the rotation table; not rerun on this
+build), greedy, its own prompts and graders (the recipe's
 `evidence/bf16-quality-off` and `evidence/bf16-humaneval-long-32k-off`): GSM8K 180/250, MATH-500 207/500, GPQA
 diamond 47/198, MMLU 182/342 (57 subjects x 6), MGSM 96/240, HumanEval 79/164 pass@1, IFEval 61/150 loose and
 57/150 strict, JSON 25/30, tool calls 9/60 (the published template renders no `tools`), repetition 0/8 (repeated
