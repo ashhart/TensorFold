@@ -109,7 +109,10 @@ pub const Generation = struct {
     fn stopHit(g: *Generation) Allocator.Error!bool {
         if (g.stops.strings.len == 0) return false;
         const t = g.collected.items;
-        const tail = t[t.len -| g.stops.tail()..];
+        // Inkling 2's byte tokens can spell one character in several: its window counts the stop's bytes
+        const inkling = @import("chat_inkling2.zig");
+        const window = if (inkling.enabled(g.srv)) inkling.stopWindow(g.stops.strings) else g.stops.tail();
+        const tail = t[t.len -| window..];
         const text = try g.srv.text.decode(g.a, tail);
         for (g.stops.strings) |s| if (std.mem.indexOf(u8, text, s) != null) return true;
         return false;
@@ -388,6 +391,12 @@ pub const Generation = struct {
             log.line("warning: dropped {d} malformed, unoffered or unfinished Inkling 2 tool calls", .{n.rejected_calls});
             try runtime.put(a, "rejected_tool_calls", try json.intValue(a, n.rejected_calls));
         };
+        // a bare Inkling 2 reply's envelopes kept as content, reported and counted as the shared route reports them
+        if (inkling) if (native) |n| if (n.kept) |kept| {
+            log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{kept.rejected_envelopes});
+            g.srv.metrics.keptToolCalls(g.srv.io, kept.kept_unoffered, kept.kept_malformed);
+            try runtime.put(a, "kept_tool_calls", try @import("openai_calls.zig").keptBlock(a, kept));
+        };
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);
@@ -437,6 +446,7 @@ pub const Generation = struct {
             .tool_calls_streamed = g.calls != null and g.calls.?.streamed,
             .native_tool_format = native != null,
             .native_calls = if (native) |n| n.calls else null,
+            .native_cut_calls = if (native) |n| n.cut_calls else false,
             .finish_reason = reason,
             .prompt_tokens = prompt_len,
             .cached_tokens = cached_tokens.within(m.cached, prompt_len),

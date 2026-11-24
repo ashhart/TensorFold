@@ -58,14 +58,26 @@ fn controlKind(text: model_text.Text, ids: Resolved, id: u32) ?Kind {
 
 const replacement = "\u{fffd}";
 
-/// A channel's text in whole UTF-8 characters; an incomplete tail waits for its next bytes, past any dropped token.
+/// How many of `b`'s bytes, from a lead byte, are a valid start of one UTF-8 character (at least the lead).
+fn validStart(b: []const u8) usize {
+    const n = std.unicode.utf8ByteSequenceLength(b[0]) catch return 0;
+    var k: usize = 1;
+    while (k < @min(n, b.len)) : (k += 1) {
+        // the second byte's narrower ranges rule out overlong forms, surrogates and code points past U+10FFFF
+        const lo: u8 = if (k == 1 and b[0] == 0xE0) 0xA0 else if (k == 1 and b[0] == 0xF0) 0x90 else 0x80;
+        const hi: u8 = if (k == 1 and b[0] == 0xED) 0x9F else if (k == 1 and b[0] == 0xF4) 0x8F else 0xBF;
+        if (b[k] < lo or b[k] > hi) break;
+    }
+    return k;
+}
+
+/// A channel's whole UTF-8 characters, a tail waiting past dropped tokens; one U+FFFD per maximal invalid subpart.
 const Channel = struct {
     text: std.ArrayList(u8) = .empty,
     tail: std.ArrayList(u8) = .empty,
 
-    fn add(c: *Channel, a: Allocator, bytes: []const u8) Allocator.Error!void {
-        try c.tail.appendSlice(a, bytes);
-        const b = c.tail.items;
+    /// Settle `b` into whole characters; with `done` false an unfinished character at its end waits.
+    fn settle(c: *Channel, a: Allocator, b: []const u8, done: bool) Allocator.Error!usize {
         var i: usize = 0;
         while (i < b.len) {
             const n = std.unicode.utf8ByteSequenceLength(b[i]) catch {
@@ -73,26 +85,35 @@ const Channel = struct {
                 i += 1;
                 continue;
             };
-            if (i + n > b.len) break;
-            if (std.unicode.utf8ValidateSlice(b[i..][0..n])) {
+            const k = validStart(b[i..]);
+            if (k == n) {
                 try c.text.appendSlice(a, b[i..][0..n]);
                 i += n;
+            } else if (i + k == b.len and !done) {
+                break; // a character still arriving
             } else {
                 try c.text.appendSlice(a, replacement);
-                i += 1;
+                i += k;
             }
         }
+        return i;
+    }
+
+    fn add(c: *Channel, a: Allocator, bytes: []const u8) Allocator.Error!void {
+        try c.tail.appendSlice(a, bytes);
+        const b = c.tail.items;
+        const i = try c.settle(a, b, false);
         std.mem.copyForwards(u8, b[0 .. b.len - i], b[i..]);
         c.tail.shrinkRetainingCapacity(b.len - i);
     }
 
-    /// Whole characters while the reply grows; once it is done, an unfinished character reads as replacements.
+    /// Whole characters while the reply grows; once it is done, an unfinished character reads as one replacement.
     fn view(c: *const Channel, a: Allocator, done: bool) Allocator.Error![]const u8 {
         if (!done or c.tail.items.len == 0) return c.text.items;
-        var out = try std.ArrayList(u8).initCapacity(a, c.text.items.len + 3 * c.tail.items.len);
-        out.appendSliceAssumeCapacity(c.text.items);
-        for (c.tail.items) |_| out.appendSliceAssumeCapacity(replacement);
-        return out.items;
+        var out: Channel = .{};
+        try out.text.appendSlice(a, c.text.items);
+        _ = try out.settle(a, c.tail.items, true);
+        return out.text.items;
     }
 
     fn clear(c: *Channel) void {
@@ -164,6 +185,9 @@ pub const Stream = struct {
     foreign: bool = false, // the newest header is a user, system or tool turn
     rejected: usize = 0, // tool calls refused: malformed, unoffered, or left open by a new header
     next: usize = 0,
+    raw: std.ArrayList(u8) = .empty, // the reply's exact token bytes, controls spelled, kept for stop strings
+    track_raw: bool = false,
+    raw_ok: bool = true, // every token has token-local bytes; false: the raw text cannot place a stop
 
     pub fn init(a: Allocator, text: model_text.Text) Allocator.Error!Stream {
         return .{ .a = a, .text = text, .resolved = try resolve(a, text) };
@@ -224,9 +248,18 @@ pub const Stream = struct {
         if (s.channel()) |ch| try ch.add(s.a, bytes);
     }
 
+    /// Append `ids`' exact bytes to the raw text; a token without token-local bytes ends it.
+    fn keepRaw(s: *Stream, ids: []const u32) Allocator.Error!void {
+        for (ids) |id| {
+            if (!s.raw_ok) return;
+            if (try s.text.tokenBytes(s.a, id)) |bytes| try s.raw.appendSlice(s.a, bytes) else s.raw_ok = false;
+        }
+    }
+
     /// Consume only the new suffix; ids is a monotonically growing full prefix, and EOS stripping must never shrink it.
     pub fn extend(s: *Stream, ids: []const u32, tools: []const Value) Allocator.Error!Result {
         std.debug.assert(ids.len >= s.next);
+        const from = s.next;
         while (s.next < ids.len) {
             const id = ids[s.next];
             const kind = controlKind(s.text, s.resolved, id);
@@ -283,6 +316,7 @@ pub const Stream = struct {
             if (s.state == .thinking) s.reasoning_tokens += s.next - start - 1;
             try s.add(ch, ids[start..s.next]);
         }
+        if (s.track_raw) try s.keepRaw(ids[from..s.next]);
         return s.result(false);
     }
 };
