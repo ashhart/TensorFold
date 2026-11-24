@@ -104,7 +104,7 @@ const Got = struct {
 };
 
 /// What a client receives, joined across whole replies or stream deltas.
-const Seen = struct {
+pub const Seen = struct {
     reasoning: []const u8,
     content: []const u8,
     ids: []const u8,
@@ -210,7 +210,7 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
     return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept };
 }
 
-fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
+pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
     return run(a, kind, reply, extra, stream, stride, "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]", true);
 }
 
@@ -218,7 +218,7 @@ fn askRaw(a: std.mem.Allocator, reply: []const u32, stream: bool, stride: usize)
     return run(a, "inkling2", reply, "", stream, stride, "\"prompt\":\"Hi\"", false);
 }
 
-fn encodeReply(a: std.mem.Allocator, raw: []const u8) ![]const u32 {
+pub fn encodeReply(a: std.mem.Allocator, raw: []const u8) ![]const u32 {
     var fx = try Fixture.init(a, "inkling2");
     defer fx.deinit();
     var problem: []const u8 = "";
@@ -232,7 +232,7 @@ fn probe(a: std.mem.Allocator, raw: []const u8, extra: []const u8) !Seen {
     return probeIds(a, "inkling2", try encodeReply(a, raw), extra);
 }
 
-fn probeIds(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8) !Seen {
+pub fn probeIds(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8) !Seen {
     const whole = try ask(a, kind, reply, extra, false, 1);
     for ([_]usize{ 1, 2, 3, 256 }) |stride| {
         const s = try ask(a, kind, reply, extra, true, stride);
@@ -327,7 +327,7 @@ test "Inkling 2 reply: a refused call is counted for the client, whole and strea
     try t.expectEqual(@as(i64, 1), streamed.rejected);
 }
 
-const lookup = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
+pub const lookup = ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
 
 test "Inkling 2 reply: the Mini checkpoint's own files (model_type inkling2_loop) route chat through the split" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -397,14 +397,14 @@ test "Inkling 2 reply: a special token between a character's byte tokens leaves 
 }
 
 /// The release fixture tokenizer's id for a control spelling: KS50's fixtures name the full tokenizer's 2000xx ids.
-fn control(a: std.mem.Allocator, spelling: []const u8) !u32 {
+pub fn control(a: std.mem.Allocator, spelling: []const u8) !u32 {
     const ids = try encodeReply(a, spelling);
     try t.expectEqual(@as(usize, 1), ids.len);
     return ids[0];
 }
 
 /// A KS50 fixture: its control spellings as the fixture tokenizer's ids, its byte and word ids exactly.
-fn fixture(a: std.mem.Allocator, opener: []const u8, ids: []const u32) ![]const u32 {
+pub fn fixture(a: std.mem.Allocator, opener: []const u8, ids: []const u32) ![]const u32 {
     return std.mem.concat(a, u32, &.{ &.{ try control(a, "<|message_model|>"), try control(a, opener) }, ids });
 }
 

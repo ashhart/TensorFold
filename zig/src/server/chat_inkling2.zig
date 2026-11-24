@@ -18,6 +18,25 @@ pub fn stopWindow(strings: []const []const u8) usize {
     return longest + 8;
 }
 
+/// Whether the newest tokens hold a stop in the reply's lossy decode; the window's leading continuations are skipped.
+pub fn stopIn(a: Allocator, text: anytype, tail: []const u32, strings: []const []const u8) Allocator.Error!bool {
+    var bytes: std.ArrayList(u8) = .empty;
+    for (tail) |id| {
+        const b = (try text.tokenBytes(a, id)) orelse return generic(a, text, tail, strings);
+        try bytes.appendSlice(a, b);
+    }
+    var skip: usize = 0;
+    while (skip < @min(3, bytes.items.len) and bytes.items[skip] & 0xC0 == 0x80) skip += 1;
+    const empty: parser.RawText = .{};
+    const view = try empty.view(a, bytes.items[skip..], true);
+    return firstStop(strings, view.text.items) != null;
+}
+
+fn generic(a: Allocator, text: anytype, tail: []const u32, strings: []const []const u8) Allocator.Error!bool {
+    const decoded = try text.decode(a, tail);
+    return firstStop(strings, decoded) != null;
+}
+
 /// Where the first stop string starts in the raw text: the generation stops there and reports it.
 fn firstStop(strings: []const []const u8, raw: []const u8) ?usize {
     var first: ?usize = null;
@@ -68,19 +87,26 @@ fn atLength(g: anytype) bool {
     }
 }
 
-/// A bare reply's generic-envelope calls, their cut recovery and kept envelopes, as the shared route reads them.
+/// The request's parallel_tool_calls: false; a test's stand-in generation has none.
+fn single(g: anytype) bool {
+    return if (comptime @hasField(@TypeOf(g.*), "single")) g.single else false;
+}
+
+/// A bare reply's calls in the shared route's order: parsed calls, cut recovery at the cap, then the one-call filter.
 fn bareCalls(g: anytype, result: *native_reply.Result) Allocator.Error!void {
-    const parsed = try @import("tool_parse.zig").parse(g.a, result.content, g.tools, null);
+    const policy: @import("tool_policy.zig").Policy = .{ .single = single(g) };
+    const parsed = try @import("tool_parse.zig").parse(g.a, result.content, g.tools, policy.maxCalls());
     if (parsed.rejected_envelopes > 0) result.kept = parsed;
-    var calls = parsed.calls;
-    if (calls != null) {
-        result.content = parsed.content;
-    } else if (atLength(g)) if (try @import("tool_stream.zig").cutCalls(g.a, result.content, g.tools)) |cut_calls| {
-        calls = cut_calls;
+    const cut_calls = if (!policy.single and atLength(g)) try @import("tool_stream.zig").cutCalls(g.a, result.content, g.tools) else null;
+    if (cut_calls != null) {
         result.content = try reply_text.cutProse(g.a, result.content);
         result.cut_calls = true;
+    }
+    const found = cut_calls orelse parsed.calls orelse {
+        if (policy.single or parsed.calls != null) result.content = try policy.parsedContent(g.a, parsed.content);
+        return;
     };
-    const found = calls orelse return;
+    if (cut_calls == null) result.content = try policy.parsedContent(g.a, parsed.content);
     // numbered as the native calls are, so the whole reply and its stream give the same ids
     for (found, 0..) |call, i| if (call == .object) try call.object.put(g.a, "id", .{ .string = try std.fmt.allocPrint(g.a, "call_{d}", .{i}) });
     result.calls = found;
@@ -102,11 +128,13 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) Allocator.Error!native
     var result = try s.extend(ids, g.tools);
     if (finished) result = try s.done();
     if (stopping and s.raw_ok) {
-        // a stop is found in the reply's exact bytes, where the generation stopped, and so is what may begin one
+        // one coordinate: a stop is found in the lossy decode the generation checks, then placed in the exact bytes
         const raw = s.raw.items;
-        const stop = firstStop(g.stops.strings, raw);
-        if (stop orelse (if (finished) null else held(g.stops.strings, raw))) |at| if (at < raw.len) {
-            var part = (try cut(g, ids, at)).?;
+        const decoded = try s.decoded.view(g.a, raw, finished);
+        const text = decoded.text.items;
+        const stop = firstStop(g.stops.strings, text);
+        if (stop orelse (if (finished) null else held(g.stops.strings, text))) |found| if (found < text.len) {
+            var part = (try cut(g, ids, decoded.exact(raw.len, found))).?;
             // usage counts every generated id: a stop cuts what is shown, never what was made
             const tokens = result.reasoning_tokens;
             result = try part.result(finished);

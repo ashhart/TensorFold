@@ -57,18 +57,21 @@ fn controlKind(text: model_text.Text, ids: Resolved, id: u32) ?Kind {
 }
 
 const replacement = "\u{fffd}";
+const unicode = @import("tokenizer").unicode;
 
-/// How many of `b`'s bytes, from a lead byte, are a valid start of one UTF-8 character (at least the lead).
-fn validStart(b: []const u8) usize {
-    const n = std.unicode.utf8ByteSequenceLength(b[0]) catch return 0;
-    var k: usize = 1;
-    while (k < @min(n, b.len)) : (k += 1) {
-        // the second byte's narrower ranges rule out overlong forms, surrogates and code points past U+10FFFF
-        const lo: u8 = if (k == 1 and b[0] == 0xE0) 0xA0 else if (k == 1 and b[0] == 0xF0) 0x90 else 0x80;
-        const hi: u8 = if (k == 1 and b[0] == 0xED) 0x9F else if (k == 1 and b[0] == 0xF4) 0x8F else 0xBF;
-        if (b[k] < lo or b[k] > hi) break;
+/// `b` as the tokenizer's lossy decode reads it (`unicode.scan`), each piece and its offset into `sink`; returns used.
+fn lossy(b: []const u8, done: bool, sink: anytype) Allocator.Error!usize {
+    var i: usize = 0;
+    while (i < b.len) {
+        const step = unicode.scan(b, i);
+        if (step.cp != null) {
+            try sink.emit(i, b[i..][0..step.len]);
+        } else if (!done and i + step.len == b.len and b[i] >= 0xC2 and b[i] <= 0xF4) {
+            break; // a character still arriving
+        } else try sink.emit(i, replacement);
+        i += step.len;
     }
-    return k;
+    return i;
 }
 
 /// A channel's whole UTF-8 characters, a tail waiting past dropped tokens; one U+FFFD per maximal invalid subpart.
@@ -76,27 +79,16 @@ const Channel = struct {
     text: std.ArrayList(u8) = .empty,
     tail: std.ArrayList(u8) = .empty,
 
-    /// Settle `b` into whole characters; with `done` false an unfinished character at its end waits.
-    fn settle(c: *Channel, a: Allocator, b: []const u8, done: bool) Allocator.Error!usize {
-        var i: usize = 0;
-        while (i < b.len) {
-            const n = std.unicode.utf8ByteSequenceLength(b[i]) catch {
-                try c.text.appendSlice(a, replacement);
-                i += 1;
-                continue;
-            };
-            const k = validStart(b[i..]);
-            if (k == n) {
-                try c.text.appendSlice(a, b[i..][0..n]);
-                i += n;
-            } else if (i + k == b.len and !done) {
-                break; // a character still arriving
-            } else {
-                try c.text.appendSlice(a, replacement);
-                i += k;
-            }
+    const Sink = struct {
+        a: Allocator,
+        out: *std.ArrayList(u8),
+        fn emit(k: @This(), _: usize, piece: []const u8) Allocator.Error!void {
+            try k.out.appendSlice(k.a, piece);
         }
-        return i;
+    };
+
+    fn settle(c: *Channel, a: Allocator, b: []const u8, done: bool) Allocator.Error!usize {
+        return lossy(b, done, Sink{ .a = a, .out = &c.text });
     }
 
     fn add(c: *Channel, a: Allocator, bytes: []const u8) Allocator.Error!void {
@@ -169,6 +161,52 @@ fn finishTool(a: Allocator, payload: []const u8, tools: []const Value, calls: *s
     try calls.append(a, .{ .object = call });
 }
 
+/// The reply's raw text as its lossy decode reads it, controls spelled, and where each piece's exact bytes begin.
+pub const RawText = struct {
+    text: std.ArrayList(u8) = .empty,
+    dec: std.ArrayList(usize) = .empty, // each piece's offset in `text`
+    src: std.ArrayList(usize) = .empty, // and its exact bytes' offset in the raw bytes
+    settled: usize = 0,
+
+    const Sink = struct {
+        a: Allocator,
+        r: *RawText,
+        base: usize,
+        fn emit(k: @This(), at: usize, piece: []const u8) Allocator.Error!void {
+            try k.r.dec.append(k.a, k.r.text.items.len);
+            try k.r.src.append(k.a, k.base + at);
+            try k.r.text.appendSlice(k.a, piece);
+        }
+    };
+
+    fn add(r: *RawText, a: Allocator, raw: []const u8) Allocator.Error!void {
+        r.settled += try lossy(raw[r.settled..], false, Sink{ .a = a, .r = r, .base = r.settled });
+    }
+
+    /// The decoded text; once the reply is done, an unfinished character at its end reads as replacements.
+    pub fn view(r: *const RawText, a: Allocator, raw: []const u8, done: bool) Allocator.Error!RawText {
+        if (!done or r.settled == raw.len) return r.*;
+        var out: RawText = .{ .settled = r.settled };
+        try out.text.appendSlice(a, r.text.items);
+        try out.dec.appendSlice(a, r.dec.items);
+        try out.src.appendSlice(a, r.src.items);
+        _ = try lossy(raw[r.settled..], true, Sink{ .a = a, .r = &out, .base = r.settled });
+        return out;
+    }
+
+    /// The exact-byte offset of decoded offset `at`, which starts a piece: a stop and its prefixes start on one.
+    pub fn exact(r: *const RawText, raw_len: usize, at: usize) usize {
+        if (at >= r.text.items.len) return raw_len;
+        var lo: usize = 0;
+        var hi: usize = r.dec.items.len;
+        while (hi - lo > 1) {
+            const mid = (lo + hi) / 2;
+            if (r.dec.items[mid] <= at) lo = mid else hi = mid;
+        }
+        return r.src.items[lo];
+    }
+};
+
 /// Owns the reply parser between growing token prefixes; results borrow its arena-backed lists.
 pub const Stream = struct {
     a: Allocator,
@@ -188,6 +226,7 @@ pub const Stream = struct {
     raw: std.ArrayList(u8) = .empty, // the reply's exact token bytes, controls spelled, kept for stop strings
     track_raw: bool = false,
     raw_ok: bool = true, // every token has token-local bytes; false: the raw text cannot place a stop
+    decoded: RawText = .{}, // `raw` as the lossy decode reads it: stops are found there, then placed in `raw`
 
     pub fn init(a: Allocator, text: model_text.Text) Allocator.Error!Stream {
         return .{ .a = a, .text = text, .resolved = try resolve(a, text) };
@@ -254,6 +293,7 @@ pub const Stream = struct {
             if (!s.raw_ok) return;
             if (try s.text.tokenBytes(s.a, id)) |bytes| try s.raw.appendSlice(s.a, bytes) else s.raw_ok = false;
         }
+        if (s.raw_ok) try s.decoded.add(s.a, s.raw.items);
     }
 
     /// Consume only the new suffix; ids is a monotonically growing full prefix, and EOS stripping must never shrink it.
