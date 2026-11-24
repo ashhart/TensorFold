@@ -107,6 +107,8 @@ pub const Query = struct {
         return q;
     }
 };
+/// What a `clear` dropped: the states and the bytes of their pages and snapshots.
+pub const Cleared = struct { states: usize, bytes: u64 };
 /// A paged store's `keep`: whether the mark holds a state, and how many leading ids the stream swaps for the store's.
 pub const Kept = struct { held: bool, shared: usize };
 
@@ -196,6 +198,14 @@ pub const Store = struct {
     pub fn deinit(s: *Store) void {
         s.shared_keys.deinit(s.tree.gpa);
         s.tree.deinit();
+    }
+
+    /// Every kept state and page dropped (a flush, or weights that moved): what it held, as `report` counts it.
+    pub fn clear(s: *Store) Cleared {
+        const out: Cleared = .{ .states = s.tree.snaps, .bytes = s.tree.held() };
+        s.tree.clear();
+        s.shared_keys.clearRetainingCapacity();
+        return out;
     }
 
     /// The tree may hold `limits` from now on: what passes them goes first.

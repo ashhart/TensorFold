@@ -28,7 +28,8 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     h.lock();
     defer h.unlock();
-    if (h.closing.load(.acquire) or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
+    const none = h.cache == null and h.disk.shared == null;
+    if (h.closing.load(.acquire) or (a.op == .flush and none) or !h.disk.push(h.gpa, a)) return false; // no store: 501
     h.wake.signal(h.io);
     return true;
 }
@@ -45,12 +46,18 @@ pub fn answer(h: *LaneHost) void {
     h.unlock();
     defer h.gpa.free(list);
     defer flushes.deinit(h.gpa);
-    for (list) |a| a.answer(h.cache, .{ .spans = h.decoded_rows }); // keyed as its lookups are
-    for (flushes.items) |a| a.answer(h.cache, .{});
+    for (list) |a| reply(h, a, .{ .spans = h.decoded_rows }); // keyed as its lookups are
+    for (flushes.items) |a| reply(h, a, .{});
     if (flushes.items.len > 0) published(h);
 }
 
 const Flushes = std.ArrayList(*api.ImprintAsk);
+
+/// One ask answered from the host's store, or from TF_KV_SHARE's store over pool pages when that is the one.
+fn reply(h: *LaneHost, a: *api.ImprintAsk, keys: @import("rows_ask.zig").Keys) void {
+    if (h.cache == null) if (h.disk.shared) |s| return a.answerShared(s);
+    a.answer(h.cache, keys);
+}
 
 /// The status copies after a flush, whole at once: an idle planner publishes none until its next round.
 fn published(h: *LaneHost) void {

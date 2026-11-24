@@ -145,6 +145,20 @@ pub const Tree = struct {
         t.holds.deinit(t.gpa);
     }
 
+    /// Every state and page the tree holds dropped, as on a new tree (between passes: nothing pinned).
+    pub fn clear(t: *Tree) void {
+        const r = t.root;
+        std.debug.assert(r.pins == 0);
+        for (r.kids.items) |k| t.drop(k);
+        r.kids.clearRetainingCapacity();
+        if (r.entry) |e| t.dropEntry(e);
+        for (r.tails.items) |e| t.dropEntry(e);
+        r.tails.clearRetainingCapacity();
+        r.entry = null;
+        t.counts.evicted += t.snaps;
+        t.snaps = 0;
+    }
+
     /// Distinct pages the tree holds: what its page limit counts.
     pub fn heldPages(t: *const Tree) usize {
         return t.holds.count();

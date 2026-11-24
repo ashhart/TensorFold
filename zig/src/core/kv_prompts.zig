@@ -148,6 +148,14 @@ pub fn sharing() error{BadKvShare}!usize {
     return std.fmt.parseInt(usize, v, 10) catch error.BadKvShare;
 }
 
+/// Why TF_KV_SHARE refuses a learn option: both write the host prompt cache, which keeps no pool pages; null: none.
+pub fn learnRefusal(learn: bool, conversations: bool) ?[]const u8 {
+    const instead = "keeps prompts as pool pages instead: serve with one of the two";
+    if (conversations) return "--learn-conversations writes the host prompt cache's states, and TF_KV_SHARE " ++ instead;
+    if (learn) return "--learn keeps learned prompt states on the host prompt cache, and TF_KV_SHARE " ++ instead;
+    return null;
+}
+
 const testing = std.testing;
 
 test "TF_KV_SHARE: unset, empty or whitespace-only text keeps copies, a count keeps its meaning, other text is refused" {
@@ -175,6 +183,14 @@ test "TF_KV_SHARE: unset, empty or whitespace-only text keeps copies, a count ke
         try testing.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
         try testing.expectError(error.BadKvShare, sharing());
     }
+}
+
+test "TF_KV_SHARE: --learn and --learn-conversations are refused by name, and serving without either is not" {
+    try testing.expectStringStartsWith(learnRefusal(true, false).?, "--learn keeps learned prompt states");
+    try testing.expectStringStartsWith(learnRefusal(true, true).?, "--learn-conversations writes");
+    try testing.expectStringStartsWith(learnRefusal(false, true).?, "--learn-conversations writes");
+    try testing.expect(std.mem.endsWith(u8, learnRefusal(true, false).?, "serve with one of the two"));
+    try testing.expectEqual(@as(?[]const u8, null), learnRefusal(false, false));
 }
 
 const Pieces = struct {

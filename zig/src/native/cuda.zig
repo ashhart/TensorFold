@@ -339,10 +339,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         return null;
     }
     const share = try prompt_pages.wanted(F, loaded); // TF_KV_SHARE: the cache is pool pages, kept by the family's store
-    if (o.learn_conversations and share) {
-        problem.* = "--learn-conversations writes the host prompt cache's states, and TF_KV_SHARE keeps prompts as pool pages instead: serve with one of the two";
+    if (share) if (@import("core").kv_prompts.learnRefusal(false, o.learn_conversations)) |why| { // CUDA's --learn keeps no imprint
+        problem.* = why;
         return null;
-    }
+    };
     const taps = record.taps(loaded); // --record is refused before the host is made, so a refusal holds nothing
     if (o.record) |dir| if (try record.refusal(a, io, o.model_type, dir, taps)) |why| {
         problem.* = why;

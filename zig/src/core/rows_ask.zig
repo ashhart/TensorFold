@@ -3,6 +3,7 @@ const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const rows = pc.rows;
 const modes = @import("cache_modes.zig");
+const radix = @import("prompt_radix.zig");
 
 /// flush: every kept state dropped, in RAM and on disk, once no request is in flight (a waiting one holds admissions).
 pub const Op = enum { where, load, forget, flush };
@@ -55,6 +56,20 @@ pub const Ask = struct {
             .flush => return flush(a, s),
         }
         a.out = rows.read.resumable(s, a.prompt, starts, spans);
+    }
+
+    /// The answer from TF_KV_SHARE's store over pool pages: no disk; a flush drops every state, its pages back.
+    pub fn answerShared(a: *Ask, s: *radix.Store) void {
+        if (a.op == .flush and a.claim.cmpxchgStrong(.queued, .taken, .acq_rel, .acquire) != null) return; // withdrawn
+        defer a.done.store(true, .release);
+        if (a.op == .flush) {
+            const c = s.clear();
+            a.dropped = @intCast(c.states);
+            a.ram_freed = c.bytes;
+            return;
+        }
+        const ram: u32 = if (s.find(.of(a.prompt))) |f| f.at() else 0; // keyed as a TF_KV_SHARE pass begins
+        a.out = .{ .tokens = @intCast(a.prompt.len), .ram = ram, .from = if (ram > 0) .ram else .none };
     }
 
     /// A flush's caller stops waiting: true when the engine had not taken it, so nothing is dropped and nothing holds.
@@ -137,6 +152,7 @@ pub const Disk = struct {
     flushes: std.ArrayList(*Ask) = .empty, // while one waits unwithdrawn, the host admits nothing new
     seen: u64 = 0, // the host's admissions when the writer last looked: a new one restarts the quiet
     since: ?i96 = null,
+    shared: ?*radix.Store = null, // TF_KV_SHARE's store (no host cache then): asks, flushes and moved weights reach it
 
     /// The quiet after the last admission before the first write: a client's next turn often comes sooner.
     pub const quiet_ns: i96 = 150 * std.time.ns_per_ms;

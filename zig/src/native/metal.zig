@@ -187,6 +187,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     };
+    if (nemotron.kv_pages.on() and try tf.kv_prompts.sharing() > 0) if (tf.kv_prompts.learnRefusal(o.learn != null, o.learn_conversations)) |why| {
+        problem.* = why;
+        return null;
+    };
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -249,13 +253,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     h.host.info_.prompt_cache_plan = plan;
     const share = paged != null and try tf.kv_prompts.sharing() > 0; // TF_KV_SHARE: prompts kept as pool pages
-    if (share and o.learn_conversations) {
-        problem.* = "--learn-conversations writes the host prompt cache's states, and TF_KV_SHARE keeps prompts as pool pages instead: serve with one of the two";
-        return error.KvShareLearns;
-    }
     h.prompts = null;
     if (share and plan.budget_bytes > 0) {
         h.prompts = try prompt_pages.Adapter.openOnGrid(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), @intCast(h.metal.o.chunk), a, problem);
+        h.host.disk.shared = &h.prompts.?.store; // flushes, imprint asks and moved weights reach its states
         h.host.info_.prompt_cache = true;
     } else if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
