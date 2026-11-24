@@ -1300,6 +1300,88 @@ pub const Bank = struct {
         return self.saveFull();
     }
 
+    /// Forgets `parent_id` on disk before in memory: on a failed write the bank is exactly as it was, and errs.
+    pub fn forgetDurable(self: *Bank, parent_id: u32) !u32 {
+        var taken_n: usize = 0;
+        var revived_n: usize = 0;
+        for (self.units.items) |u| {
+            if (u.parent_id == parent_id) taken_n += 1 else if (u.gate.superseded_by == parent_id) revived_n += 1;
+        }
+        if (taken_n == 0 and revived_n == 0) return 0;
+        // persistTombstone's own journal test: under it the tombstone is appended, never a base of the unchanged bank
+        if (self.calibrated and self.base_saved and self.pending_deltas < 16 and self.unflushed_from == self.units.items.len and self.skill_rec.len == 0) {
+            _ = try self.persistTombstone(.forget_parent, parent_id, 0); // the journal path: durable, then applied
+            return self.forgetParent(parent_id);
+        }
+        // the compacted path: the units set aside (room taken first), the base written, then kept out or put back
+        const Taken = struct { at: usize, unit: Unit };
+        const taken = try self.gpa.alloc(Taken, taken_n);
+        defer self.gpa.free(taken);
+        const revived = try self.gpa.alloc(u32, revived_n);
+        defer self.gpa.free(revived);
+        const unflushed = self.unflushed_from;
+        var t_n: usize = 0;
+        var r_n: usize = 0;
+        var at: usize = 0;
+        var i: usize = 0;
+        var standing = false;
+        while (i < self.units.items.len) : (at += 1) {
+            const u = &self.units.items[i];
+            if (u.parent_id == parent_id) {
+                standing = standing or u.gate.is_standing;
+                taken[t_n] = .{ .at = at, .unit = self.units.orderedRemove(i) };
+                t_n += 1;
+                if (i < self.unflushed_from) self.unflushed_from -= 1;
+                continue;
+            }
+            if (u.gate.superseded_by == parent_id) {
+                standing = standing or u.gate.is_standing;
+                u.gate.superseded_by = 0;
+                revived[r_n] = u.unit_id;
+                r_n += 1;
+            }
+            i += 1;
+        }
+        const skill = self.skill_rec;
+        if (standing) self.skill_rec = &.{}; // a standing change voids the consolidated steering, as forgetParent does
+        _ = self.saveFull() catch |e| {
+            for (taken) |x| self.units.insertAssumeCapacity(x.at, x.unit); // ascending: each lands where it was
+            for (self.units.items) |*u| if (std.mem.indexOfScalar(u32, revived, u.unit_id) != null) {
+                u.gate.superseded_by = parent_id;
+            };
+            self.skill_rec = skill;
+            self.unflushed_from = unflushed;
+            return e;
+        };
+        for (taken) |*x| x.unit.deinit(self.gpa);
+        if (standing) {
+            for (skill) |*r| r.deinit(self.gpa);
+            if (skill.len > 0) self.gpa.free(skill);
+        }
+        self.rebuildBridges() catch {};
+        return @intCast(taken_n);
+    }
+
+    /// Removes the bank's files, then its units: when a file cannot go, the bank keeps every unit and says why.
+    pub fn clearDurable(self: *Bank) !u32 {
+        const path = try self.filePath(self.gpa);
+        defer self.gpa.free(path);
+        const dpath = try self.deltaPath(self.gpa);
+        defer self.gpa.free(dpath);
+        try removeIfPresent(self.io, path);
+        try removeIfPresent(self.io, dpath);
+        const removed: u32 = @intCast(self.units.items.len);
+        for (self.units.items) |*u| u.deinit(self.gpa);
+        self.units.clearRetainingCapacity();
+        self.freeSkillRec();
+        self.last_bytes = 0;
+        self.base_saved = false;
+        self.pending_deltas = 0;
+        self.unflushed_from = 0;
+        self.rebuildBridges() catch {};
+        return removed;
+    }
+
     /// Atomically compacts the entire bank into `living-weights.safetensors` (`tf-living-memory-v6`)
     /// and removes any pending `living-weights.delta` journal.
     pub fn saveFull(self: *Bank) !u64 {
@@ -1308,8 +1390,8 @@ pub const Bank = struct {
         const dpath = try self.deltaPath(self.gpa);
         defer self.gpa.free(dpath);
         if (!self.calibrated or self.units.items.len == 0) {
-            Io.Dir.cwd().deleteFile(self.io, path) catch {};
-            Io.Dir.cwd().deleteFile(self.io, dpath) catch {};
+            try removeIfPresent(self.io, path); // emptied on disk too, or an error: never success with files left
+            try removeIfPresent(self.io, dpath);
             self.last_bytes = 0;
             self.base_saved = false;
             self.pending_deltas = 0;
@@ -1829,6 +1911,11 @@ fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpe
         .kv = kv,
         .rec = rec,
     };
+}
+
+/// Deletes `path`; already absent is done, any other failure is the caller's error.
+fn removeIfPresent(io: Io, path: []const u8) !void {
+    Io.Dir.cwd().deleteFile(io, path) catch |e| if (e != error.FileNotFound) return e;
 }
 
 /// A saved whitener read whole; on failure nothing it read is kept, on success the caller owns every array.
