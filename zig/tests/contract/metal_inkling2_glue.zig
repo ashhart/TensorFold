@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const controls = @import("metal_inkling2_glue_controls.zig");
+const split_controls = @import("metal_inkling2_split_controls.zig");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
@@ -18,6 +19,17 @@ fn value(rng: std.Random) f32 {
 }
 fn fromBf(v: u16) f32 {
     return c.fromBf16(v);
+}
+
+const split_label = "metal inkling2 glue router split tf_inkling2_route_scores and tf_inkling2_route_select";
+
+/// Each dot opens with +B x0 - B x0 = 0 (B = 2^18, exact): any other summation order loses the low terms' bits.
+fn orderProbe(x: []f32, weight: []f32) void {
+    for (0..x.len / p.hidden) |row| x[row * p.hidden + 1] = x[row * p.hidden];
+    for (0..p.expert_count) |e| {
+        weight[e * p.hidden] = 0x1p18;
+        weight[e * p.hidden + 1] = -0x1p18;
+    }
 }
 
 fn round(values: []f32) void {
@@ -38,6 +50,9 @@ pub const Probe = struct {
     refs: [5]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     nonfinite: bool = false,
+    /// The split router against main's tf_inkling2_router: 1, 33 and 64 rows, two select blocks at 64.
+    split: bool = false,
+    scores: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.glue);
@@ -55,6 +70,12 @@ pub const Probe = struct {
             .expert_pick => .{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => .{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
         };
+        return self;
+    }
+    pub fn initSplit(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, text: []const u8) !Probe {
+        var self = try initSource(a, device, queue, .router, text);
+        self.split = true;
+        self.served = .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 33, .n = 8, .k = p.hidden }, .{ .rows = 64, .n = 8, .k = p.hidden } };
         return self;
     }
     pub fn deinit(self: *Probe) void {
@@ -77,7 +98,8 @@ pub const Probe = struct {
             .ctx = self,
             .vt = if (self.kind == .router) &vt_checked else &vt_plain,
             .spec = .{
-                .name = self.kind.label(),
+                .name = if (self.split) split_label else self.kind.label(),
+                .replaces = if (self.split) "tf_inkling2_router" else null,
                 .accum = .f32,
                 .depth = depth,
                 .ops = 96,
@@ -174,10 +196,12 @@ pub const Probe = struct {
                 self.f[1] = try self.floats(p.expert_count * p.hidden, rng);
                 self.f[2] = try self.floats(p.expert_count, rng);
                 if (nf) self.f[0][0] = std.math.nan(f32);
+                if (self.split and fill == .random) orderProbe(self.f[0], self.f[1]);
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], true);
                 self.refs[2] = try self.input(self.f[2], false);
                 self.route_ids = try self.rig.scratch(r * 8 * 4);
+                if (self.split) self.scores = try self.rig.scratch(r * p.expert_count * 4);
             },
             .swiglu => {
                 self.f[0] = try self.floats(r * n * 2, rng);
@@ -234,7 +258,10 @@ pub const Probe = struct {
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
-            .router => host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
+            .router => if (self.split)
+                host.routerSplit(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.scores), at(self.route_ids), y, r)
+            else
+                host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
             .swiglu => host.swiglu(pl, e, at(R[0]), y, r, n),
             .logits => host.logits(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
@@ -305,6 +332,19 @@ pub const Probe = struct {
         defer self.a.free(mag);
         return self.reference(out, mag);
     }
+    /// Main's router on the same inputs; IDs that differ append main's, so no byte comparison can pass.
+    pub fn replaced(self: *Probe) ![]const u8 {
+        const r: u32 = @intCast(self.shape.rows);
+        const ids = try self.rig.scratch(r * 8 * 4);
+        const weights = try self.rig.scratch(r * 8 * 4);
+        const pass = self.rig.begin();
+        host.router(&self.pipes, pass.e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(ids), at(weights), r);
+        try self.rig.finish(pass);
+        const want = self.rig.bytes(weights, r * 8 * 4);
+        const main_ids = self.rig.bytes(ids, r * 8 * 4);
+        if (std.mem.eql(u8, main_ids, self.rig.bytes(self.route_ids, r * 8 * 4))) return want;
+        return std.mem.concat(self.arena.allocator(), u8, &.{ want, main_ids });
+    }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
         if (self.kind != .router) return "numeric hooks must be used";
         const bytes = try self.rig.outputBytes();
@@ -359,11 +399,32 @@ pub const Suite = struct {
         try s.kernels.append(s.a, k);
     }
 
+    fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
+        const name = if (control) |x| split_controls.name(x) else split_label;
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const probe = try s.a.create(Probe);
+        errdefer s.a.destroy(probe);
+        const text = if (control) |x| try split_controls.source(s.a, sources.glue, x) else try s.a.dupe(u8, sources.glue);
+        defer s.a.free(text);
+        probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
+        errdefer probe.deinit();
+        try s.probes.append(s.a, probe);
+        var k = probe.kernel();
+        if (control != null) {
+            k.spec.name = name;
+            k.control = .shapes;
+        }
+        try s.kernels.append(s.a, k);
+    }
+
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(p.Kind)) |kind| {
             try s.add(kind, false, only);
             try s.add(kind, true, only);
         }
+        try s.addSplit(null, only);
+        try s.addSplit(.route_strided, only);
+        try s.addSplit(.route_index, only);
     }
 
     pub fn deinit(s: *Suite) void {
