@@ -32,7 +32,6 @@ pub const Mock = struct {
         .rec_rows = 16,
         .rec_cols = 16,
         .conv_elems = 12,
-        .svd_rank = 6,
     };
 
     pub fn backend(m: *Mock) bank_mod.Backend {

@@ -19,7 +19,7 @@ pub fn serializeSingleUnit(self: *const Bank, gpa: Allocator, u: *const Unit) ![
     defer arena.deinit();
     const a = arena.allocator();
 
-    const rank: u16 = if (u.rec.len > 0) u.rec[0].rank else 0;
+    const rank: u16 = @intFromBool(u.rec.len > 0); // 1: whole recurrent changes stored
     const has_conv: bool = u.rec.len > 0 and u.rec[0].conv.len == arch.conv_elems;
     const ujson = try std.fmt.allocPrint(
         a,
@@ -70,10 +70,7 @@ pub fn appendUnitTensors(a: Allocator, tensors: *std.ArrayList(store.TensorSpec)
     }
     if (u.rec.len != arch.num_rec) return;
     for (u.rec, 0..) |rl, r| {
-        const rk: usize = rl.rank;
-        if (rk == 0) continue;
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.u", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, rk }), .bytes = std.mem.sliceAsBytes(rl.u) });
-        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.v", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, rk, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.v) });
+        try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.d", .{ ui, r }), .dtype = .f32, .shape = try a.dupe(usize, &.{ arch.rec_heads, arch.rec_rows, arch.rec_cols }), .bytes = std.mem.sliceAsBytes(rl.delta) });
         if (rl.conv.len == arch.conv_elems) {
             try tensors.append(a, .{ .name = try std.fmt.allocPrint(a, "u.{d}.rc.{d}.cv", .{ ui, r }), .dtype = .bf16, .shape = try a.dupe(usize, &.{arch.conv_elems}), .bytes = std.mem.sliceAsBytes(rl.conv) });
         }
@@ -97,7 +94,7 @@ pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: Arc
     const epoch = try field(u64, o, "ep", 0);
     const sup = try field(u32, o, "sup", 0);
     const rf = try field(u16, o, "rf", 1);
-    if (n_tok == 0 or n_body_lex > n_lex or rk > arch.rec_rows or rk > arch.rec_cols) return error.BadLivingWeights;
+    if (n_tok == 0 or n_body_lex > n_lex or rk > 1) return error.BadLivingWeights; // rk: 1 whole changes, 0 none
     const nsem_bits = o.get("nsemb") orelse return error.BadLivingWeights;
     if (nsem_bits != .integer or nsem_bits.integer < 0 or nsem_bits.integer > std.math.maxInt(u32)) return error.BadLivingWeights;
     const neg_sem: f32 = @bitCast(@as(u32, @intCast(nsem_bits.integer)));
@@ -135,18 +132,15 @@ pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: Arc
             for (arr[0..rc_done]) |*r| r.deinit(gpa);
             gpa.free(arr);
         }
-        const rk_u: usize = rk;
         for (0..arch.num_rec) |r| {
-            const fu = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.u", .{ ui, r }), arch.rec_heads * arch.rec_rows * rk_u);
-            errdefer gpa.free(fu);
-            const fv = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.v", .{ ui, r }), arch.rec_heads * rk_u * arch.rec_cols);
-            errdefer gpa.free(fv);
+            const d = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.d", .{ ui, r }), arch.rec_heads * arch.rec_rows * arch.rec_cols);
+            errdefer gpa.free(d);
             const cv = if (has_conv)
                 try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.cv", .{ ui, r }), arch.conv_elems)
             else
                 try gpa.alloc(u16, 0);
             errdefer gpa.free(cv);
-            arr[r] = .{ .rank = rk, .u = fu, .v = fv, .conv = cv };
+            arr[r] = .{ .delta = d, .conv = cv };
             rc_done += 1;
         }
         break :blk arr;
