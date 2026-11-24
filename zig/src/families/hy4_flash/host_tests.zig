@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const engram = @import("engram.zig");
 const engram_rows = @import("engram_rows.zig");
+const loader = @import("loader.zig");
 
 test {
     _ = @import("config.zig");
@@ -56,6 +57,90 @@ test "Engram gathers the selected affine rows in token and head order" {
         try std.testing.expectEqual(@as(u16, if (on) 0x4150 else 0), word); // BF16 13.0 or 0.0
     }
     try std.testing.expectError(error.BadEngramOutput, table.gather(a, &.{window0}, out[1..]));
+}
+
+const auxiliary_data = [2]u8{ 0, 0 };
+const auxiliary_entries = [_]core.checkpoint_fixture.Entry{
+    .{ .name = "model.norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.token_key_projection.weight", .dtype = "U32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.token_key_projection.scales", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.token_key_projection.biases", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.query_projection.weight", .dtype = "U32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.query_projection.scales", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.query_projection.biases", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.head_weight_projection.weight", .dtype = "U32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.head_weight_projection.scales", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.head_weight_projection.biases", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.key_value_projection.weight", .dtype = "F32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.key_gate_projection.weight", .dtype = "F32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.intra_group_ape", .dtype = "F32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.key_norm.weight", .dtype = "F32", .shape = &.{1}, .bytes = &auxiliary_wide_data },
+    .{ .name = "model.layers.0.self_attn.compressed_indexer.token_key_norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.final_norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.confidence_head.proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.confidence_head.proj.bias", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.mtp_fusion.enorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.mtp_fusion.hnorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.mtp_fusion.gate", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.mtp_fusion.eh_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.hidden_correction.embed_norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.hidden_correction.hidden_norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.hidden_correction.gate_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.hidden_correction.up_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.hidden_correction.down_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.input_layernorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.post_attention_layernorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.post_proj_norm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.q_a_layernorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.kv_a_layernorm.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.q_a_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.q_b_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.kv_a_proj_with_mqa.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.kv_b_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.linear_gate.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.o_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.self_attn.learnable_sink_param", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.mlp.gate_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.mlp.up_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "model.dfly_layers.0.mlp.down_proj.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+    .{ .name = "vit.embeddings.patch_embedding.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data },
+};
+
+const auxiliary_wide_data = [4]u8{ 0, 0, 0, 0 };
+
+test "the CUDA loader owns complete auxiliary tensors but refuses a stray" {
+    const fixture = core.checkpoint_fixture;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const parsed = try @import("config.zig").parse(a, @embedFile("config_fixture.json"));
+    defer parsed.deinit();
+    var model = parsed.value;
+    model.text_config.num_hidden_layers = 1;
+    model.text_config.layer_types = &.{.deepseek_sparse_attention};
+    model.text_config.mlp_layer_types = &.{.dense};
+    model.text_config.engram_layer_ids = &.{};
+    model.dfly_num_hidden_layers = 1;
+    model.dfly_target_index_layer = &.{0};
+    model.dfly_target_kv_layers = &.{0};
+    for ([_]bool{ false, true }) |with_stray| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var entries: std.ArrayList(fixture.Entry) = .empty;
+        defer entries.deinit(a);
+        try entries.appendSlice(a, &auxiliary_entries);
+        if (with_stray) try entries.append(a, .{ .name = "model.dfly_layers.stray.weight", .dtype = "BF16", .shape = &.{1}, .bytes = &auxiliary_data });
+        try fixture.write(a, io, tmp.dir, "model.safetensors", entries.items);
+        const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer a.free(dir);
+        var ck = try core.Checkpoint.openModel(a, io, dir);
+        defer ck.close();
+        _ = try ck.expect("model.norm.weight", .bf16, &.{1});
+        if (with_stray) {
+            try std.testing.expectError(error.UnusedHy4Tensors, loader.finishCuda(&ck, model));
+        } else {
+            try loader.finishCuda(&ck, model);
+        }
+    }
 }
 
 test "a direct Engram table loads, while a stray hy4 tensor refuses at the checkpoint's last read site" {

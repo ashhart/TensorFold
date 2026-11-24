@@ -237,7 +237,7 @@ pub const Model = struct {
             ck.release();
         }
         // the checkpoint's last read: `ck` is this open's own — a name never taken is a stray tensor
-        try @import("loader.zig").refuseLeftovers(ck, error.UnusedHy4Tensors);
+        try @import("loader.zig").finishCuda(ck, cfg.value);
         std.debug.print("all layers: device {d:.2} GiB, MemAvailable {d:.2} GiB\n", .{ gib(self.own.bytes), gib(memAvailable()) });
         self.weight_bytes = self.own.bytes;
         self.scratch = try self.allocScratch();
