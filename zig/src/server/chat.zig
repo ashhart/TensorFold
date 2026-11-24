@@ -226,6 +226,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     request.cache_salt = salt;
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
+    if (request.structure != null) request.eos = try @import("chat_inkling2.zig").grammarEnds(srv, a, request.eos);
     errdefer srv.release(false, request);
     if (reasoning) {
         const budget_field = f.get("thinking_budget");

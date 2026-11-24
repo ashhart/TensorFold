@@ -336,7 +336,8 @@ pub const Server = struct {
             const vocab = grammar.vocabSize(cfg) orelse break :blk "structured output needs the checkpoint's config.json vocab_size";
             var err: [512]u8 = undefined;
             const c = a.create(api.grammar.Compiler) catch break :blk "out of memory";
-            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab, srv.eos, &err) catch |e| break :blk switch (e) {
+            const ends = @import("chat_inkling2.zig").grammarEnds(srv, a, srv.eos) catch break :blk "out of memory";
+            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab, ends, &err) catch |e| break :blk switch (e) {
                 error.NoGrammarLibrary => @import("sys").optional_libraries.spec(.grammar).message,
                 else => a.dupe(u8, std.mem.sliceTo(&err, 0)) catch "out of memory",
             };
