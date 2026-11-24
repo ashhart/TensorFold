@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Automatic serving can admit up to 64 parallel streams when each backend's measured cache and drafter budgets allow, with complete fixed-lane and drafted-stream memory accounting (#4821).
+
 - Flash Next on CUDA: `TF_FLASHNEXT_GRAPH_TAIL=1` runs a lone verify's tail copies and greedy best-row pick inside its captured window graph, with the same copies, kernel, arguments and order; off by default (#4544).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_WINDOW_GRAPH_PARITY=1` keys the verify-window CUDA graph on which of the two swapped state buffers a round uses, so full-accept rounds replay a resident graph instead of refreshing it; a counter reports graph updates and replays; off by default (#4492).
