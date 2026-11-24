@@ -41,9 +41,16 @@ fn lastTapped(e: anytype) bool {
     return false;
 }
 
+/// Whether this prompt chunk writes its taps: not when it ends before the MTP tap boundary (cuda_engine's taps_active).
+fn tapsWritten(e: anytype) bool {
+    const T = @TypeOf(e);
+    const E = if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T;
+    return if (@hasField(E, "mtp_prompt")) e.mtp_prompt.mode != .none else true;
+}
+
 /// True when nothing reads this prompt chunk's rows: its last layer stops at the state writes.
 pub fn unread(e: anytype, images: bool) bool {
-    return !lastTapped(e) and e.learning == null and e.mlp == null and !e.pockets.any() and !e.int8.on and !images;
+    return !(tapsWritten(e) and lastTapped(e)) and e.learning == null and e.mlp == null and !e.pockets.any() and !e.int8.on and !images;
 }
 
 /// The tail's first row for engine `e`'s prompt chunk of `total` rows in `nseg` parts, or null.
@@ -120,4 +127,37 @@ test "qwen3_5 prompt tail: each planted reader of the other rows refuses it" {
     f.last_attention = false;
     if (tail.start(f.of(4096, 1)) == null) refused += 1;
     try std.testing.expectEqual(@as(usize, 7), refused);
+}
+
+test "qwen3_5 prompt tail: a chunk before the MTP tap boundary writes no taps, so a tapped last layer is unread" {
+    const Fake = struct {
+        layers: [2]void = .{ {}, {} },
+        taps: [4]u32 = .{ 1, 0, 0, 0 },
+        n_taps: usize = 1,
+        mtp_prompt: @import("cuda_mtp_prompt.zig").State = .{},
+        learning: ?*const anyopaque = null,
+        mlp: ?*const anyopaque = null,
+        pockets: struct {
+            pub fn any(_: @This()) bool {
+                return false;
+            }
+        } = .{},
+        int8: struct { on: bool = false } = .{},
+    };
+    var e: Fake = .{};
+    for ([_]@import("cuda_mtp_prompt.zig").Mode{ .normal, .mtp, .mtp_direct }) |mode| {
+        e.mtp_prompt.mode = mode;
+        try std.testing.expect(!unread(&e, false));
+    }
+    const previous = e.mtp_prompt.setForPrompt(8192, 4096, false, true); // the chunk ends before the boundary
+    try std.testing.expectEqual(@import("cuda_mtp_prompt.zig").Mode.none, e.mtp_prompt.mode);
+    try std.testing.expect(unread(&e, false));
+    try std.testing.expect(!unread(&e, true)); // images still read every row
+    e.learning = @ptrCast(&e);
+    try std.testing.expect(!unread(&e, false));
+    e.learning = null;
+    e.mtp_prompt.restoreTapConfig(previous);
+    try std.testing.expect(!unread(&e, false));
+    _ = e.mtp_prompt.setForPrompt(4096, 8192, false, true); // a chunk past the boundary writes its taps
+    try std.testing.expect(!unread(&e, false));
 }
