@@ -73,10 +73,20 @@ pub const Bufs = struct {
         return .{ .pools = b.pools, .keys = b.keys };
     }
 
+    /// Live runs copied down in order, overlapping or not.
+    pub fn applyMoves(b: *const Bufs, c: *const Config, moves: []const pool.Move) void {
+        for (moves) |m| b.each(c, m.from, m.blocks, m.to, move);
+    }
+
+    /// Dirty blocks of a new run zeroed before its request reads them.
+    pub fn applyZero(b: *const Bufs, c: *const Config, zeros: []const pool.Run) void {
+        for (zeros) |z| b.each(c, z.start, z.blocks, 0, zero);
+    }
+
     /// A placement on the host, with no GPU work in flight: live runs copied down in order, then the new run zeroed.
     pub fn apply(b: *const Bufs, c: *const Config, plan: pool.Plan) void {
-        for (plan.moves) |m| b.each(c, m.from, m.blocks, m.to, move);
-        for (plan.zero) |z| b.each(c, z.start, z.blocks, 0, zero);
+        b.applyMoves(c, plan.moves);
+        b.applyZero(c, plan.zero);
     }
 
     /// One buffer's span copied to a lower one, overlapping or not (a move never goes up).
