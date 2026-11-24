@@ -11,7 +11,7 @@ const log = std.log.scoped(.dsv41);
 const stage_bytes: usize = 2 * plan.chunk_bytes;
 
 /// One finished segment: the fence after its writes, the position the prompt stands at, and the slot's physical pages.
-const Job = struct { fence: u64, pos: u64, pages: []u32 };
+pub const Job = struct { fence: u64, pos: u64, pages: []u32 };
 
 pub const Stream = struct {
     gpa: std.mem.Allocator,
@@ -19,11 +19,12 @@ pub const Stream = struct {
     built: *cx.Built,
     kx: *kvs.Kv,
     thread: ?std.Thread = null,
-    lock: std.atomic.Mutex = .unlocked, // `jobs`: the engine thread queues, the worker takes
+    lock: std.atomic.Mutex = .unlocked, // `jobs` and `terminal`: the engine thread queues, the worker takes and ends
     jobs: std.ArrayList(Job) = .empty,
     queued: std.atomic.Value(u32) = .init(0), // jobs queued or under way
     closing: std.atomic.Value(bool) = .init(false),
     broken: std.atomic.Value(bool) = .init(false),
+    terminal: bool = false, // the worker has ended: a job queued now would never be taken (`lock`'s)
     slot: usize = 0, // the slot the engine fed `progress` from (its address; the engine thread's)
     converted: []bool,
 
@@ -67,9 +68,15 @@ pub const Stream = struct {
         const fence = try kx.dev.store().fence();
         const pages = try s.gpa.dupe(u32, kx.slot.pages[0..npages]);
         errdefer s.gpa.free(pages);
+        try s.enqueue(.{ .fence = fence, .pos = pos, .pages = pages });
+    }
+
+    /// Appends a segment for the worker; once the worker has ended it is refused, so `queued` counts no stranded job.
+    pub fn enqueue(s: *Stream, job: Job) !void {
         while (!s.lock.tryLock()) std.atomic.spinLoopHint();
         defer s.lock.unlock();
-        try s.jobs.append(s.gpa, .{ .fence = fence, .pos = pos, .pages = pages });
+        if (s.terminal) return error.StreamStopped;
+        try s.jobs.append(s.gpa, job);
         _ = s.queued.fetchAdd(1, .acq_rel);
     }
 
@@ -101,11 +108,17 @@ pub const Stream = struct {
             log.warn("handoff stream: stopped ({t}); the cut reads the pages left", .{err});
             s.broken.store(true, .release);
         };
-        // jobs queued after a stop or a failure are dropped, so a drain does not wait on them
-        while (s.take()) |j| {
-            s.gpa.free(j.pages);
-            _ = s.queued.fetchSub(1, .acq_rel);
-        }
+        s.retire();
+    }
+
+    /// The worker's end, under the queue lock: a job offered after it is refused and the jobs it left are dropped.
+    pub fn retire(s: *Stream) void {
+        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+        defer s.lock.unlock();
+        s.terminal = true;
+        for (s.jobs.items) |j| s.gpa.free(j.pages);
+        _ = s.queued.fetchSub(@intCast(s.jobs.items.len), .acq_rel);
+        s.jobs.clearRetainingCapacity();
     }
 
     fn work(s: *Stream) !void {
