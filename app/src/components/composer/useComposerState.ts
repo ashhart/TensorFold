@@ -502,7 +502,7 @@ export function useComposerState({ mode, thread, seed }: ComposerProps) {
     setRecentModels(pushRecentModel({ providerId: p.id, accountId, model: m }))
   }
   return {
-    tx, settings, status, launch, send, cancel,
+    mode, thread, tx, settings, status, launch, send, cancel,
     saveSettings, setThreadProvider, noteModelChange, compactThread, patchThread, projects,
     terminals, activeTerminalId, readiness, setReadiness, authBusy, setAuthBusy,
     setThreadProject, addProject, pendingMention, composerSeed, sshHosts, sshStatus,
