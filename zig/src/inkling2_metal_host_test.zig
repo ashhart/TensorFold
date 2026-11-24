@@ -4,5 +4,6 @@ const serving = if (@import("builtin").os.tag.isDarwin()) @import("native/inklin
 test {
     _ = @import("families/inkling2/metal/host_test.zig");
     _ = @import("inkling2_native.zig");
+    _ = @import("native/inkling2_admit_test.zig");
     _ = serving;
 }

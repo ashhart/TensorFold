@@ -1,9 +1,9 @@
 //! Inkling 2 Mini's demand on the host: the 48 visits' state and what four RAM classes leave beside the weights.
 const std = @import("std");
-const st = @import("state.zig");
-const dspark = @import("dspark.zig");
-const admit = @import("admit.zig");
-const native = @import("../../../native/inkling2.zig");
+const st = @import("../families/inkling2/metal/state.zig");
+const dspark = @import("../families/inkling2/metal/dspark.zig");
+const admit = @import("../families/inkling2/metal/admit.zig");
+const native = @import("inkling2.zig");
 
 const GiB: u64 = 1 << 30;
 /// The release's weights file and the two scratch sets: what a Mini serve holds whatever the stream count.
