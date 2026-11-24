@@ -191,9 +191,19 @@ pub fn alpha(a: Allocator, logits: []const f32, w: usize, h: usize, out: []u8) !
     }
 }
 
+/// The crop's largest side: 16,384 (1 GiB of RGBA); a margin past it is refused, not allocated.
+pub const max_crop_side = 16384;
+
+/// A crop margin finish can take: finite and above 0 (its crop's size is bounded there too).
+pub fn checkMargin(m: f64) error{BadCropMargin}!f64 {
+    if (!(std.math.isFinite(m) and m > 0)) return error.BadCropMargin;
+    return m;
+}
+
 /// The steps after the alpha: erode, crop, resize and paste on black, into the 1024 x 1024 RGB the encoders see.
 pub fn finish(a: Allocator, im: Image, given: ?[]const u8, crop_margin: f64, out: []u8) !void {
     std.debug.assert(out.len == size * size * 3);
+    _ = try checkMargin(crop_margin);
     const w = im.width;
     const h = im.height;
     const al = try a.alloc(u8, w * h);
@@ -223,6 +233,8 @@ pub fn finish(a: Allocator, im: Image, given: ?[]const u8, crop_margin: f64, out
     const cx = @as(f64, @floatFromInt(left + right)) / 2;
     const cy = @as(f64, @floatFromInt(top + bottom)) / 2;
     const half = @as(f64, @floatFromInt(@max(right - left, bottom - top))) / 2 * crop_margin;
+    // the box's sides are at most 2 half + 1: bound them before any integer conversion
+    if (!(2 * half + 1 <= max_crop_side)) return error.CropTooLarge;
     // Python's int() truncates toward zero; Pillow's crop fills outside the picture with zeros
     const box = [4]i64{ @intFromFloat(cx - half), @intFromFloat(cy - half), @intFromFloat(cx + half), @intFromFloat(cy + half) };
     if (box[2] <= box[0] or box[3] <= box[1]) return error.NoObject;
@@ -290,4 +302,34 @@ test "an RGBA photo's resize gives Pillow 13's Image.resize(LANCZOS) bytes, shri
         for (out.pixels) |b| f = (f ^ b) *% 0x100000001b3;
         try std.testing.expectEqual(want, f);
     }
+}
+
+fn objectPicture(a: Allocator, w: usize, h: usize) !Image {
+    const px = try a.alloc(u8, w * h * 4);
+    @memset(px, 0);
+    // an opaque 6 x 4 block of colour at (5, 3)
+    for (3..7) |y| for (5..11) |x| {
+        @memcpy(px[(y * w + x) * 4 ..][0..4], &[4]u8{ 200, 120, 40, 255 });
+    };
+    return .{ .width = w, .height = h, .channels = 4, .pixels = px };
+}
+
+test "a crop margin that is not finite or overflows the crop is refused, and one past the picture pads with black" {
+    const a = std.testing.allocator;
+    var im = try objectPicture(a, 16, 12);
+    defer im.deinit(a);
+    const out = try a.alloc(u8, size * size * 3);
+    defer a.free(out);
+    for ([_]f64{ 1e300, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |m| {
+        const want: anyerror = if (std.math.isFinite(m) and m > 0) error.CropTooLarge else error.BadCropMargin;
+        try std.testing.expectError(want, finish(a, im, null, m, out));
+    }
+    // the box's side past 16,384 (the object is 6 wide, eroded to 4): refused before allocating
+    try std.testing.expectError(error.CropTooLarge, finish(a, im, null, 6000, out));
+    // a crop past the picture's edges (margin 6: 24 x 24 around a 16 x 12 picture) fills the outside with black
+    try finish(a, im, null, 6, out);
+    try std.testing.expectEqual(@as(u8, 0), out[0]);
+    var lit: usize = 0;
+    for (out) |v| lit += @intFromBool(v != 0);
+    try std.testing.expect(lit > 0);
 }
