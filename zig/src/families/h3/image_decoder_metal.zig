@@ -102,7 +102,7 @@ pub const Decoder = struct {
         return @as([*]u16, @ptrCast(@alignCast(d.weights.contents())))[0..d.plan.total()];
     }
 
-    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, read ahead, each F32 value rounded to bf16.
+    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, read ahead, F32 rounded to bf16.
     pub fn load(d: *Decoder, io: std.Io, path: [*:0]const u8) !void {
         const map = try mtl.MappedFile.open(path);
         defer map.deinit();
