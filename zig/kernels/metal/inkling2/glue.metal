@@ -68,6 +68,52 @@ kernel void tf_inkling2_embed_norm(
 }
 
 struct InkARArgs { uint sources, queries, rows, blocks_stride, partial_stride, out_stride; };
+struct InkCachedARArgs { uint sources, queries; };
+struct InkBlockInvRmsArgs { uint rows, slot; };
+inline float ink_partial_inv_rms(float ss, uint t, uint lane, threadgroup float* red) {
+  const float reduced = simd_sum(ss);
+  if (lane == 0) red[t / 32] = reduced;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t != 0) return 0.0f;
+  float total = 0.0f;
+  for (uint j = 0; j < 8; ++j) total += red[j];
+  return precise::rsqrt(precise::divide(total, 2304.0f) + INKLING_EPS);
+}
+inline void ink_ar_finish(
+    const device bfloat* blocks, const device float* partial,
+    const device float* queries, device float* out,
+    uint sources, uint q, uint t, uint lane,
+    threadgroup float* dots, threadgroup float* means, threadgroup float* weights) {
+  for (uint s = 0; s < sources; ++s) {
+    float dot = 0.0f;
+    for (uint d = t; d < 2304; d += 256) {
+      const float z = ink_value(blocks, partial, s, sources, d) * means[s];
+      dot += queries[size_t(q) * 2304 + d] * z;
+    }
+    const float reduced = simd_sum(dot);
+    if (lane == 0) dots[s * 8 + t / 32] = reduced;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) {
+    float peak = -INFINITY;
+    for (uint s = 0; s < sources; ++s) {
+      float dot = 0.0f;
+      for (uint j = 0; j < 8; ++j) dot += dots[s * 8 + j];
+      weights[s] = dot * INKLING_AR_SCALE;
+      peak = max(peak, weights[s]);
+    }
+    float den = 0.0f;
+    for (uint s = 0; s < sources; ++s) { weights[s] = precise::exp(weights[s] - peak); den += weights[s]; }
+    for (uint s = 0; s < sources; ++s) weights[s] = precise::divide(weights[s], den);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint d = t; d < 2304; d += 256) {
+    float acc = 0.0f;
+    for (uint s = 0; s < sources; ++s)
+      acc += weights[s] * (ink_value(blocks, partial, s, sources, d) * means[s]);
+    out[size_t(q) * 2304 + d] = acc;
+  }
+}
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_ar(
     const device bfloat* blocks_base [[buffer(0)]], const device float* partial_base [[buffer(1)]],
@@ -97,36 +143,43 @@ kernel void tf_inkling2_ar(
     means[s] = precise::rsqrt(precise::divide(ss, 2304.0f) + INKLING_EPS);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  threadgroup float* dots = red + 40;
-  for (uint s = 0; s < a.sources; ++s) {
-    float dot = 0.0f;
-    for (uint d = t; d < 2304; d += 256) {
-      const float z = ink_value(blocks, partial, s, a.sources, d) * means[s];
-      dot += queries[size_t(q) * 2304 + d] * z;
-    }
-    const float reduced = simd_sum(dot);
-    if (lane == 0) dots[s * 8 + t / 32] = reduced;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t == 0) {
-    float peak = -INFINITY;
-    for (uint s = 0; s < a.sources; ++s) {
-      float dot = 0.0f;
-      for (uint j = 0; j < 8; ++j) dot += dots[s * 8 + j];
-      weights[s] = dot * INKLING_AR_SCALE;
-      peak = max(peak, weights[s]);
-    }
-    float den = 0.0f;
-    for (uint s = 0; s < a.sources; ++s) { weights[s] = precise::exp(weights[s] - peak); den += weights[s]; }
-    for (uint s = 0; s < a.sources; ++s) weights[s] = precise::divide(weights[s], den);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  ink_ar_finish(blocks, partial, queries, out, a.sources, q, t, lane, red + 40, means, weights);
+}
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_block_inv_rms(
+    const device bfloat* blocks [[buffer(0)]], device float* inv_rms [[buffer(1)]],
+    constant InkBlockInvRmsArgs& a [[buffer(2)]], uint t [[thread_position_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  if (row >= a.rows || a.slot >= 4) return;
+  const device bfloat* x = blocks + (size_t(row) * 4 + a.slot) * 2304;
+  float ss = 0.0f;
   for (uint d = t; d < 2304; d += 256) {
-    float acc = 0.0f;
-    for (uint s = 0; s < a.sources; ++s)
-      acc += weights[s] * (ink_value(blocks, partial, s, a.sources, d) * means[s]);
-    out[size_t(q) * 2304 + d] = acc;
+    const float v = float(x[d]);
+    ss += v * v;
   }
+  threadgroup float red[8];
+  const float inv = ink_partial_inv_rms(ss, t, lane, red);
+  if (t == 0) inv_rms[size_t(row) * 4 + a.slot] = inv;
+}
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_cached_ar(
+    const device bfloat* blocks [[buffer(0)]], const device float* partial [[buffer(1)]],
+    const device float* block_inv_rms [[buffer(2)]], const device float* queries [[buffer(3)]],
+    device float* out [[buffer(4)]], constant InkCachedARArgs& a [[buffer(5)]],
+    uint t [[thread_position_in_threadgroup]], uint q [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  if (q >= a.queries || a.sources == 0 || a.sources > 5) return;
+  threadgroup float red[8], dots[5 * 8], means[5], weights[5];
+  if (t + 1 < a.sources) means[t] = block_inv_rms[t];
+  float ss = 0.0f;
+  for (uint d = t; d < 2304; d += 256) {
+    const float x = partial[d];
+    ss += x * x;
+  }
+  const float inv = ink_partial_inv_rms(ss, t, lane, red);
+  if (t == 0) means[a.sources - 1] = inv;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  ink_ar_finish(blocks, partial, queries, out, a.sources, q, t, lane, dots, means, weights);
 }
 
 struct InkConvArgs { uint rows, channels; };

@@ -14,6 +14,8 @@ const unit = mtl.Size.of(32, 1, 1);
 pub const Pipelines = struct {
     embed_norm: mtl.Pipeline,
     ar: mtl.Pipeline,
+    cached_ar: mtl.Pipeline,
+    block_inv_rms: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
@@ -30,12 +32,14 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [11]mtl.Pipeline = undefined;
+        var pipes: [13]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
             "tf_inkling2_embed_norm",
             "tf_inkling2_ar",
+            "tf_inkling2_cached_ar",
+            "tf_inkling2_block_inv_rms",
             "tf_inkling2_conv_static",
             "tf_inkling2_conv_dynamic",
             "tf_inkling2_router",
@@ -45,7 +49,7 @@ pub const Pipelines = struct {
             "tf_inkling2_expert_combine",
             "tf_inkling2_route_scores",
             "tf_inkling2_route_select",
-        }, [_]usize{ 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
+        }, [_]usize{ 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -53,15 +57,17 @@ pub const Pipelines = struct {
         return .{
             .embed_norm = pipes[0],
             .ar = pipes[1],
-            .conv_static = pipes[2],
-            .conv_dynamic = pipes[3],
-            .router = pipes[4],
-            .swiglu = pipes[5],
-            .logits = pipes[6],
-            .expert_pick = pipes[7],
-            .expert_combine = pipes[8],
-            .route_scores = pipes[9],
-            .route_select = pipes[10],
+            .cached_ar = pipes[2],
+            .block_inv_rms = pipes[3],
+            .conv_static = pipes[4],
+            .conv_dynamic = pipes[5],
+            .router = pipes[6],
+            .swiglu = pipes[7],
+            .logits = pipes[8],
+            .expert_pick = pipes[9],
+            .expert_combine = pipes[10],
+            .route_scores = pipes[11],
+            .route_select = pipes[12],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -88,6 +94,25 @@ pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref,
     inline for (.{ blocks, partial, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = batch.rows, .blocks_stride = batch.blocks_stride, .partial_stride = batch.partial_stride, .out_stride = batch.out_stride }, 4);
     e.dispatchGroups(mtl.Size.of(queries_, batch.rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+const BlockInvRmsArgs = extern struct { rows: u32, slot: u32 };
+pub fn blockInvRms(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, inv_rms: Ref, rows: u32, slot: u32) void {
+    std.debug.assert(rows > 0 and rows <= 64 and slot < 4);
+    e.setPipeline(p.block_inv_rms);
+    inline for (.{ blocks, inv_rms }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(BlockInvRmsArgs{ .rows = rows, .slot = slot }, 2);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const CachedARArgs = extern struct { sources: u32, queries: u32 };
+/// AR with precomputed FP32 inv_rms for completed BF16 blocks[0..sources-2] and live reduction on partial.
+pub fn cachedAr(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, block_inv_rms: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32) void {
+    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+    e.setPipeline(p.cached_ar);
+    inline for (.{ blocks, partial, block_inv_rms, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(CachedARArgs{ .sources = sources_, .queries = queries_ }, 5);
+    e.dispatchGroups(mtl.Size.of(queries_, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ConvArgs = extern struct { rows: u32, channels: u32 };

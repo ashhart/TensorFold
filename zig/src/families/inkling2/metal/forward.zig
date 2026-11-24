@@ -155,7 +155,7 @@ fn arBatch(rows: usize) glue.ARRows {
 }
 
 fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: ck.Tensor, sources: usize, rows: usize) void {
-    glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(queries), at(s.mlp_ar, 0), @intCast(sources), 1, arBatch(rows));
+    for (0..rows) |i| glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), r(queries), row(s.mlp_ar, i, state.hidden * 4), @intCast(sources), 1);
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -178,7 +178,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
-            glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), query, arRow(s, role, rows, 0, false), lp.attn_sources, 1, arBatch(rows));
+            for (0..rows) |i| glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), query, arRow(s, role, rows, i, false), lp.attn_sources, 1);
         }
     }
     if (v.hasMessages()) {
@@ -331,6 +331,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         base += seg.rows;
     }
     runtime(m, e, .attention_partial, &.{ at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.partial, 0) }, rows * state.hidden, if (lp.boundary) lp.blocks_in + 1 else 0);
+    if (lp.boundary) glue.blockInvRms(&m.glue, e, at(s.blocks, 0), at(s.block_inv_rms, 0), @intCast(rows), lp.blocks_in);
     residual(m, e, s, m.weights.mlp_queries[v.layer], lp.mlp_sources, rows);
     if (gated) {
         const c = w.controllers.?[3];
@@ -406,8 +407,10 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);
-    const first: usize = if (final.work_rows == rows) 0 else rows - 1;
-    glue.ar(&m.glue, e, at(s.blocks, first * state.block_slots * state.hidden * 2), row(s.partial, first, state.hidden * 4), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, arBatch(final.work_rows));
+    for (0..final.work_rows) |j| {
+        const i = if (final.work_rows == rows) j else rows - 1;
+        glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), r(m.weights.output_query), row(s.mlp_ar, j, state.hidden * 4), m.weight_plan.final_sources, 1);
+    }
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);

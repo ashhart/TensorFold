@@ -8,6 +8,7 @@ const state = @import("state.zig");
 const snapshot = @import("snapshot.zig");
 const model = @import("model.zig");
 const fwd = @import("forward.zig");
+const glue = @import("glue.zig");
 const backend = @import("backend.zig");
 
 fn mini() cfg.Config {
@@ -223,4 +224,57 @@ test "A snapshot restores each head's live rows into a cache of another capacity
     try std.testing.expectEqual(@as(usize, rows), to.len);
     try moveLive(queue, &to, got, rows, false);
     try std.testing.expect(std.mem.eql(u8, want.slice(u8, size), got.slice(u8, size)));
+}
+
+test "Scratch holds 4 FP32 block_inv_rms scalars per row and cachedAr matches ar bit-for-bit across rows" {
+    comptime std.debug.assert(@hasField(state.Scratch, "block_inv_rms"));
+    var has_field = false;
+    for (state.fields) |f| if (std.mem.eql(u8, f, "block_inv_rms")) {
+        has_field = true;
+    };
+    try std.testing.expect(has_field);
+    try std.testing.expect(state.scratchBytes(2) - state.scratchBytes(1) > state.block_slots * 4);
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipes = try glue.Pipelines.load(device);
+    defer pipes.deinit();
+    const rows: usize = 3;
+    var s = try state.Scratch.init(device, rows);
+    defer s.deinit();
+    const q_buf = try device.buffer(3 * state.hidden * 4, mtl.ResourceOptions.shared);
+    defer q_buf.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    const rng = prng.random();
+    const blocks_u16 = s.blocks.slice(u16, rows * state.block_slots * state.hidden);
+    for (blocks_u16) |*v| v.* = @truncate((@as(u32, @bitCast(rng.float(f32) * 2 - 1)) + 0x7fff) >> 16);
+    for (s.partial.slice(f32, rows * state.hidden)) |*v| v.* = rng.float(f32) * 2 - 1;
+    for (q_buf.slice(f32, 3 * state.hidden)) |*v| v.* = rng.float(f32) * 2 - 1;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    for (0..state.block_slots) |slot| glue.blockInvRms(&pipes, e, .{ .buf = s.blocks }, .{ .buf = s.block_inv_rms }, rows, @intCast(slot));
+    e.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+    for ([_]u32{ 1, 2, 3, 4, 5 }) |sources| for ([_]u32{ 1, 3 }) |queries| for (0..rows) |r| {
+        const cb2 = queue.commandBuffer();
+        const e2 = cb2.compute(.serial);
+        const b_ref = glue.Ref{ .buf = s.blocks, .off = r * state.block_slots * state.hidden * 2 };
+        const p_ref = glue.Ref{ .buf = s.partial, .off = r * state.hidden * 4 };
+        const inv_ref = glue.Ref{ .buf = s.block_inv_rms, .off = r * state.block_slots * 4 };
+        const q_ref = glue.Ref{ .buf = q_buf };
+        const ref_out = glue.Ref{ .buf = s.ar };
+        const cached_out = glue.Ref{ .buf = s.gated };
+        glue.ar(&pipes, e2, b_ref, p_ref, q_ref, ref_out, sources, queries);
+        glue.cachedAr(&pipes, e2, b_ref, p_ref, inv_ref, q_ref, cached_out, sources, queries);
+        e2.end();
+        cb2.commit();
+        cb2.wait();
+        try std.testing.expect(cb2.failure() == null);
+        const len = queries * state.hidden * 4;
+        try std.testing.expectEqualSlices(u8, s.ar.contents()[0..len], s.gated.contents()[0..len]);
+    };
 }
