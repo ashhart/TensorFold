@@ -63,6 +63,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: an `sm_110` product target serves Qwen3.8-27B text on one Thor GPU (MLX 4-bit and NVFP4, with DFlash2) and refuses any other geometry (#4796). Thanks @IF-YFXJ.
 
 - OCR: `POST /ocr` now answers LiteParse's OCR server contract, with one text item per line and its box in page pixels (#2573). Thanks @laudney.
+- Inkling 2 Mini on Metal: the routed experts and the combine run one thread per output with the same serial arithmetic, so one-stream decode is about 16x faster on an M5 Ultra and 17x on an M3 Ultra, with identical tokens (#4894). Thanks @sethforprivacy for the grid idea.
 
 - H3 on Metal: transformer products run on the `h3_gemm_32x64` kernel in 64-row bands and the decoder decodes 64 tiles a pass, with sums unchanged (#4641).
 
