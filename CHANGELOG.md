@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal on M5: 5-bit and 6-bit group-64 checkpoints get split-plane storage and register-direct lane kernels (#4419). Thanks @gilby.
+
 - Inkling 2 on HIP: attention kernels under the kernel contract (#N).
 
 - Qwen3.6-35B-A3B on Metal: the text-only checkpoint serves on the routed expert path, `--vision` refuses it by name, and `tf-qwen27-run --stages DIR` writes each layer's stream for a float64 comparison (#3239). Thanks to @cshintov.
