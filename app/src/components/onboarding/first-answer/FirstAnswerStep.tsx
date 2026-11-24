@@ -20,10 +20,10 @@ export function FirstAnswerStep({ starter, onStarter, model, readiness, disabled
     </div>
     <fieldset disabled={disabled} className="min-w-0 space-y-2">
       <legend className="mb-2 text-[14px] font-medium text-ink">{t("first.task")}</legend>
-      {FIRST_ANSWER_STARTERS.map((item) => <label key={item.id} className="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-card px-3 py-2.5 text-[13px] text-ink-2">
-        <input type="radio" name="first-answer-starter" value={item.id} checked={starter === item.id} onChange={() => onStarter(item.id)} className="mt-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" />
+      {/* Optional starters: the draft begins empty, a starter inserts its prompt and pressing it again clears it. */}
+      {FIRST_ANSWER_STARTERS.filter((item) => item.id !== 'blank').map((item) => <button key={item.id} type="button" aria-pressed={starter === item.id} data-testid={`first-answer-starter-${item.id}`} onClick={() => onStarter(starter === item.id ? 'blank' : item.id)} className={`flex w-full items-start gap-3 rounded-lg border ${starter === item.id ? 'border-accent' : 'border-line'} bg-card px-3 py-2.5 text-left text-[13px] text-ink-2 transition-colors hover:border-line-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent`}>
         <span className="min-w-0"><span className="block font-medium text-ink">{authored(item.label)}</span><span className="mt-0.5 block leading-relaxed">{authored(item.description)}</span></span>
-      </label>)}
+      </button>)}
     </fieldset>
     {selected.prompt && <div className="rounded-lg bg-card-2 p-3"><p className="text-[12px] font-medium text-ink-2">{t("first.draft")}</p><p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink">{authored(selected.prompt)}</p></div>}
     <p className="text-[13px] leading-relaxed text-ink-2">{readiness.providerKind === 'cloud' ? t("first.cloudPrivacy") : readiness.builtIn ? t("first.localPrivacy") : t("first.runtimePrivacy")}</p>
