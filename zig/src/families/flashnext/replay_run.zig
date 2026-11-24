@@ -137,6 +137,9 @@ pub const Run = struct {
     objects: @import("owned.zig").Owner(mtl) = .{},
     files: std.ArrayList(c_int) = .empty,
     maps: std.ArrayList(mtl.MappedFile) = .empty,
+    tfq3: ?*@import("tfq3.zig").Pipes = null,
+    tfq3_tables: ?mtl.Buffer = null,
+    tfq3_maps: std.ArrayList(@import("tfq3.zig").MappedShard) = .empty,
     rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     closed: bool = false,
 
