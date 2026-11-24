@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { attentionNotice, badgeText, createRunAttention, nextNeedsYou, shouldNotify, type AttentionNotice } from './run-attention'
 import { pairedSettingsDefaults } from '../../../src/lib/paired-settings'
 import type { AgentEvent } from '../../agent/types'
+import { store } from '../state'
 
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
@@ -109,6 +110,35 @@ console.log('run-attention tests:')
   assert.equal(sounds.length, 2, 'disabled, unknown and incognito threads never play a sound')
   assert.equal(notices.length, 3)
   ok('completion sound is opt-in, deduplicated and independent of notifications, with foreground and privacy gates unchanged')
+}
+
+{
+  const previous = store.settings
+  const notices: AttentionNotice[] = [], badges: string[] = [], sounds: string[] = []
+  let focused = false
+  const attention = createRunAttention({
+    enabled: () => true,
+    focused: () => focused,
+    supported: () => true,
+    threadTitle: () => 'Ordinary chat',
+    playCompletionSound: () => sounds.push('beep'),
+    notify: (notice) => notices.push(notice),
+    setBadge: (text) => badges.push(text),
+  })
+  try {
+    store.settings = {} as typeof store.settings
+    attention.observe({ threadId: 'ordinary', runId: 'background', type: 'done' })
+    focused = true
+    attention.observe({ threadId: 'ordinary', runId: 'absent-setting', type: 'done' })
+    assert.equal(sounds.length, 0, 'a legacy fixture and absent preference stay silent without a callback')
+    assert.deepEqual(notices.map((notice) => notice.kind), ['finished'], 'the ordinary background done path still notifies')
+    store.settings = { completionSound: true } as typeof store.settings
+    attention.observe({ threadId: 'ordinary', runId: 'opted-in', type: 'done' })
+    assert.equal(sounds.length, 1, 'the compliant composition boundary reads an explicit opt-in')
+    ok('legacy consumers need no sound callback; live settings remain off when absent and honor opt-in')
+  } finally {
+    store.settings = previous
+  }
 }
 
 {

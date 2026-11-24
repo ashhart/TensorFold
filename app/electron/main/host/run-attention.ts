@@ -1,5 +1,6 @@
 import { shell } from 'electron'
 import type { AgentEvent } from '../../agent/types'
+import { store } from '../state'
 
 // Native attention for thread runs: a notification when a run finishes, fails or needs approval
 // while the window is in the background, and a dock badge counting threads that need the user.
@@ -37,7 +38,7 @@ export function badgeText(count: number): string {
 export interface RunAttentionDeps {
   isIncognito?(threadId: string): boolean
   enabled(): boolean
-  completionSoundEnabled(): boolean
+  completionSoundEnabled?(): boolean
   focused(): boolean
   supported(): boolean
   threadTitle(threadId: string): string | null | undefined
@@ -96,7 +97,7 @@ export function createRunAttention(deps: RunAttentionDeps) {
         notifiedRuns.add(key)
         if (notifiedRuns.size > 500) notifiedRuns.delete(notifiedRuns.values().next().value as string)
         const title = deps.threadTitle(event.threadId)
-        if (event.type === 'done' && deps.completionSoundEnabled() && deps.focused() && title !== undefined) {
+        if (event.type === 'done' && deps.focused() && title !== undefined && (deps.completionSoundEnabled?.() ?? store.settings?.completionSound === true)) {
           try { if (deps.playCompletionSound) deps.playCompletionSound(); else shell.beep() } catch { /* system sounds are best effort */ }
         }
         maybeNotify(event.type === 'done'
