@@ -25,10 +25,15 @@ pub fn fastest(ctx: anytype, i: usize) !f64 {
 
 /// Retime both entries around a dip up to twice, retaining their faster values.
 pub fn smoothSerial(ctx: anytype, ms: []f64) !void {
+    return smoothSerialSynced(ctx, ms, Local{}, true);
+}
+
+/// Both ranks repair the leader's dips in serial order, regardless of their own clocks.
+fn smoothSerialSynced(ctx: anytype, ms: []f64, agree: anytype, lead: bool) !void {
     for (0..2) |_| {
         var dipped = false;
         for (1..ms.len) |i| {
-            if (ms[i] >= ms[i - 1] * (1 - dip)) continue;
+            if (!try agree.decide(lead and !(ms[i] >= ms[i - 1] * (1 - dip)))) continue;
             ms[i - 1] = @min(ms[i - 1], try fastest(ctx, i - 1));
             ms[i] = @min(ms[i], try fastest(ctx, i));
             dipped = true;
@@ -64,8 +69,13 @@ pub fn measureWindows(windows: anytype, ms: []f64, keep: bool) !void {
 
 /// Time each width to completion, then repair dips serially; a stateful scratch timer keeps its original order.
 pub fn serialWindows(windows: anytype, ms: []f64) !void {
+    return serialWindowsSynced(windows, ms, Local{}, true);
+}
+
+/// Paired serial timing: both ranks complete each width and take only the leader's dip repairs.
+pub fn serialWindowsSynced(windows: anytype, ms: []f64, agree: anytype, lead: bool) !void {
     for (ms, 0..) |*m, i| m.* = try fastest(windows, i);
-    try smoothSerial(windows, ms);
+    try smoothSerialSynced(windows, ms, agree, lead);
 }
 
 /// Retime a high local outlier or both sides of a dip, never changing a real step to an interpolated value.
