@@ -29,6 +29,7 @@ pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 pub const Input = struct {
     /// The client itself asked for thinking off (no server, template or route default counts): it must be honored.
     explicit_off: bool = false,
+    learns: bool = false, // automatic learning may take this turn (auth_scope.learnsFrom): set by the route
     trace: ?*@import("request_trace.zig").Trace = null, // the request's journal records; null when the journal is off
     /// The server's own request (a compaction summary, a lesson's wordings): it never takes --instruct-sampling's set.
     own: bool = false,
@@ -411,7 +412,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (input.trace) |trace| trace.timed(reply);
     if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
     // In-flight memory: queue learnable user statements and corrections for background learning.
-    if (srv.inflight.enabled and input.prompt == null and !request.background and !input.own and !request.untaught) {
+    if (srv.inflight.enabled and input.learns and input.prompt == null and !request.background and !input.own and !request.untaught) {
         if (lastExchange(a, input.messages)) |ex| {
             srv.inflight.maybeEnqueueExchange(ex.prev_assistant, ex.user, input.fields);
         }

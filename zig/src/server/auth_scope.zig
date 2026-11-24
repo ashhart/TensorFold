@@ -16,6 +16,11 @@ pub const Scopes = packed struct(u8) {
 
 /// Every key without a scope list, from a flag, the environment or a plain file line.
 pub const full: Scopes = .{ .admin = true };
+
+/// Automatic learning takes an admin key's turns (no keys: every turn), any key's only with TF_SLIDE_AUTO_ALL.
+pub fn learnsFrom(scopes: Scopes) bool {
+    return scopes.admin or (@import("sys").environment.read(bool, "TF_SLIDE_AUTO_ALL", false) catch false);
+}
 pub const Label = struct { name: []const u8, scopes: Scopes };
 pub const ParseError = error{ InvalidLabel, InvalidScopes };
 
