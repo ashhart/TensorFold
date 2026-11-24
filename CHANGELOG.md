@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_VISION_FUSED=1` (off by default) runs the image tower's attention on the shared full-attention vision kernel instead of two cuBLASLt products around a softmax; its sums run in another order, so replies to prompts with images can differ from the default path, which is unchanged (#3790, refs #3614). Thanks to @ultradaoto.
+
 - Flash Next on CUDA: the pass scratch now has room for the MTP head's own rows, so a 128 to 1,023-token prompt with drafts on no longer writes past it (#4801). Thanks @BadAd84.
 
 - Core KV pool: a host tier keeps logical pages in host RAM behind device frames, with leases, pins and per-page dirty tracking; it refuses empty or partial geometry before it allocates, and the ranks' lockstep check covers dirty pages (#1501, refs #1113). Thanks @BlivionIaG.
