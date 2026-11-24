@@ -197,6 +197,18 @@ template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, false, false>
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// TF_QMMF_HALF_BN: FP4, FP8 and FP8G half tiles, their n8 tiles 0-3 or 4-7 and those columns' scales.
+#define HALF_N(MODE, F32, CLUSTER) \
+    template __global__ void qmmf_kernel<MODE, 16, 32, 1, 4, 4, F32, CLUSTER, false>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+#define HALF_N_ALL(MODE) \
+    HALF_N(MODE, false, false) HALF_N(MODE, false, true) HALF_N(MODE, true, false) HALF_N(MODE, true, true)
+HALF_N_ALL(FP4)
+HALF_N_ALL(FP8)
+HALF_N_ALL(FP8G)
+#undef HALF_N_ALL
+#undef HALF_N
 
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);

@@ -104,6 +104,12 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++
     @import("qwen27_prompt_records.zig").records ++
     @import("affine_gather_records.zig").records ++
+    @import("inkling2_attention_metal_records.zig").records ++
+    @import("inkling2_glue_metal_records.zig").records ++
+    @import("inkling2_experts_metal_records.zig").records ++
+    @import("inkling2_loop_metal_records.zig").records ++
+    @import("inkling2_runtime_metal_records.zig").records ++
+    @import("inkling2_dspark_metal_records.zig").records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
@@ -149,4 +155,10 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 test {
     _ = @import("mla_cuda_records.zig");
     _ = @import("inkling2_cuda_records.zig");
+    _ = @import("inkling2_attention_metal_records.zig");
+    _ = @import("inkling2_glue_metal_records.zig");
+    _ = @import("inkling2_experts_metal_records.zig");
+    _ = @import("inkling2_loop_metal_records.zig");
+    _ = @import("inkling2_runtime_metal_records.zig");
+    _ = @import("inkling2_dspark_metal_records.zig");
 }

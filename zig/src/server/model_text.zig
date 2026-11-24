@@ -144,6 +144,8 @@ pub const Rendered = struct {
 };
 
 pub const Text = struct {
+    /// The release Inkling 2 reply controls; set only from config.json's model_type.
+    native_inkling2: bool = false,
     native_deepseek: bool = false,
     /// The chat template renders ``defer_loading`` and ``tool_reference`` itself (deferred_tools.zig).
     deferred_native: bool = false,

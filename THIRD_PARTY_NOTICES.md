@@ -555,6 +555,30 @@ those files. `tiny_config.json` and the tensor tables
 `0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
 model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
 
+## Inkling 2 Mini fixtures and loop references
+
+`mini_config.json`, `mini_model_header.txt` and `mini_mtp_header.txt` in
+`zig/src/families/inkling2/fixtures/` come from the 2026-11-20 published snapshot of
+[thinkingmachines/Inkling-2-Mini at `ed40e7da625f594fc9c4990f5f66be24873c22d7`](https://huggingface.co/thinkingmachines/Inkling-2-Mini), under the Apache License 2.0
+stated on its model card (see [the license text](LICENSES/Apache-2.0.txt)). The public model API supplied that full revision and last-modified time 2026-11-20T22:55:20Z. The fixture config differs from the supplied published `config.json` only by its explicit `_fixture_provenance` annotation; after excluding that annotation, every checkpoint config field matches. The folded tables contain only metadata from the model and MTP safetensors
+headers, no tensor data or weights. `tools/zig/inkling2_fixtures.py` rebuilds all three from the Mini release, or from its
+extracted headers, with the same revision annotation. No revision was derived from fixture digests.
+
+`release_chat_template.jinja` and `release_tokenizer_config.json` in the same folder are byte-identical copies of that
+revision's `chat_template.jinja` and `tokenizer_config.json`, under the same license.
+
+The Mini loop host/reference implementations in `zig/src/families/inkling2/loop.zig`, `loop_model.zig`, `loop_engine.zig`,
+`loop_math_cuda.zig`, the CUDA and Metal loop kernels and the stored-expert implementations in `modelopt.zig` and
+`zig/kernels/cuda/inkling2/modelopt.cu` are independent TensorFold implementations of the supplied math-only Mini
+specification. Its primary reference is huggingface/transformers PR #51050 at head `6173a2f6`: the Mini configuration and
+forward pass in `models/inkling2_loop/modular_inkling2_loop.py` and `modeling_inkling2_loop.py`, with the temporary
+NVFP4/MXFP8 expert dequantization in `core_model_loading.py` and the checkpoint mappings in `conversion_mapping.py`.
+ModelOpt here names the checkpoint format and that Transformers arithmetic; no NVIDIA Model Optimizer source was used or
+vendored. The specification also records Neywa-Labs/mlx-vlm at `fd6404fb` as its second reading of the loop and DSpark
+implementation (`mlx_vlm/models/inkling2/` and `mlx_vlm/speculative/drafters/inkling2_dspark/`). Transformers is Apache-2.0;
+mlx-vlm is MIT (see [`LICENSES/MIT.txt`](LICENSES/MIT.txt)). No reference source code is vendored. The supplied materials
+give only these two abbreviated reference heads, not their full commit SHAs.
+
 ## Inkling 2 attention kernels
 
 `zig/kernels/cuda/inkling2/attention.cu`, `zig/kernels/cuda/inkling2/prompt_attention.cu` and
@@ -573,3 +597,13 @@ these layers of Hugging Face transformers' `src/transformers/models/inkling2/mod
 `Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
 `Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
 are TensorFold's own.
+
+## Inkling 2 expert and vision kernels
+
+`zig/kernels/cuda/inkling2/experts.cu` and `zig/src/families/inkling2/experts.zig` run `Inkling2Experts` from Hugging
+Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0) on main's EXL3 grouped-expert
+arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2/vision.zig` compute the same file's
+vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
+`Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
+in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
