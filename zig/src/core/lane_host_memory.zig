@@ -44,6 +44,7 @@ pub fn ready(h: *const LaneHost) bool {
 /// - GPU compile ops (`init`, `teach_chunk`) run whenever the engine is idle OR at least one spare
 ///   lane is free (`admitted < lanes`), letting live streaming traffic keep flowing with minimal pause!
 pub fn answerOneInFlight(h: *LaneHost) void {
+    if (h.folded_memory == null) return; // set before the host starts: without a bank, no lock between rounds
     h.lock();
     if (h.folded_memory == null or h.mem_ops.asks.items.len == 0) {
         h.unlock();

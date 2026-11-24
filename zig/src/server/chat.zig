@@ -303,7 +303,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .audios = rendered.audios,
         .cache_key = rendered.cache_key,
     };
-    if (input.prompt == null and !background and !input.own) {
+    // the latest user turn as a memory query, only for an engine serving learning: off, no extra encode
+    if (srv.info.folded_memory and input.prompt == null and !background and !input.own) {
         if (lastUserText(a, input.messages)) |q_text| {
             if (srv.text.encode(a, q_text, false)) |q_ids| {
                 request.memory_query = q_ids;
