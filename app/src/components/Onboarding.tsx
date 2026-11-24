@@ -62,6 +62,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [finishing, setFinishing] = useState(false)
   const finishLock = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
+  const inlineContinueFocused = useRef(false)
   const { snapshot: engine } = useEngine()
   const [starter, setStarter] = useState<FirstAnswerStarterId>(() => readFirstAnswerStarter(previouslyCompleted))
 
@@ -95,6 +96,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const connectedLabel = activeProvider && readiness?.ready && onboardingProviderVisible(desktopMode, activeProvider.id)
     ? `${activeProvider.name}${activeModel ? ` / ${engine?.installed.find((model) => model.repo === activeModel)?.title ?? (/^local\//.test(activeModel) ? t("setup.localCheckpoint") : activeModel)}` : ''}`
     : null
+  useEffect(() => {
+    const wasFocused = inlineContinueFocused.current
+    inlineContinueFocused.current = false
+    if (!connectedLabel || tourStep !== 'connect' || !wasFocused) return
+    document.querySelector<HTMLButtonElement>('[data-testid="onboarding-next"]')?.focus()
+  }, [connectedLabel, tourStep])
   const statusText = connectedLabel
     ?? (!activeProvider ? t("setup.noModel") : !readiness ? t("setup.checking", { provider: activeProvider.name }) : `${activeProvider.name}: ${readiness.message ? `${known(readiness.message) ? '' : `${t("common.diagnostic")}: `}${authored(readiness.message)}` : t("common.notReady")}`)
   const currentStep = ONBOARDING_STEPS[onboardingStepIndex(tourStep)]
@@ -332,7 +339,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           {tourStep === 'connect' && <>
             {engine?.status.hardware && <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-surface px-3 py-2 text-[12px] text-ink-2"><Icon name="monitor" size={14} /><span>{engine.status.hardware.chip || t("setup.thisMac")}</span><span>{t("setup.memory", { size: formatBytes(engine.status.totalMemoryBytes) })}</span><span>{t("setup.modelChecks")}</span></div>}
             {desktopMode === 'full' && <p role="status" data-testid="onboarding-model-status" className="mb-3 break-words text-[12px] text-ink-2">{statusText}</p>}
-            <fieldset disabled={busy} className="min-w-0"><ConnectStep providerStep={providerStep} setProviderStep={setProviderStep} mode={mode} preset={preset} apiKey={apiKey} localPath={localPath} busy={busy} error={error} foundModels={foundModels} cliAuth={cliAuth} connectedLabel={connectedLabel} desktopMode={desktopMode} onPickCloud={pickCloud} onPickLocal={pickLocal} onDetect={detect} onConnect={() => void connect()} onApiKeyChange={setApiKey} onLocalPathChange={setLocalPath} onOpenModels={() => openSettings('models')} onOpenEngineModels={openModels} onUseEngineModel={(repo) => void chooseEngineModel(repo)} onContinue={goNext} /></fieldset>
+            <fieldset disabled={busy} className="min-w-0"><ConnectStep providerStep={providerStep} setProviderStep={setProviderStep} mode={mode} preset={preset} apiKey={apiKey} localPath={localPath} busy={busy} error={error} foundModels={foundModels} cliAuth={cliAuth} connectedLabel={connectedLabel} desktopMode={desktopMode} onPickCloud={pickCloud} onPickLocal={pickLocal} onDetect={detect} onConnect={() => void connect()} onApiKeyChange={setApiKey} onLocalPathChange={setLocalPath} onOpenModels={() => openSettings('models')} onOpenEngineModels={openModels} onUseEngineModel={(repo) => void chooseEngineModel(repo)} onContinue={goNext} onInlineContinueFocus={(focused) => { inlineContinueFocused.current = focused }} /></fieldset>
             <div className="mt-4 rounded-xl border border-line px-4 py-3 text-[13px] leading-relaxed text-ink-2"><span className="font-medium text-ink">{t("setup.downloaded")}</span>{' '}{t("setup.scanFolders")}{' '}<button type="button" disabled={busy} className="text-accent underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40" onClick={() => openSettings('library')}>{t("setup.modelFolders")}</button>. {t("setup.originalFiles")}</div>
           </>}
 
@@ -392,6 +399,7 @@ function ConnectStep({
   onOpenEngineModels,
   onUseEngineModel,
   onContinue,
+  onInlineContinueFocus,
 }: {
   providerStep: ProviderSetupStep
   setProviderStep: (step: ProviderSetupStep) => void
@@ -415,6 +423,7 @@ function ConnectStep({
   onOpenEngineModels: () => void
   onUseEngineModel: (repo: string) => void
   onContinue: () => void
+  onInlineContinueFocus: (focused: boolean) => void
 }) {
   const tx = useAuthoredText()
   const { t, authored, known, locale } = useFlowText()
@@ -528,7 +537,7 @@ function ConnectStep({
       </div></details>}
       <div className="flex flex-wrap items-center gap-3">
         {desktopMode === 'full' && <Button variant="default" icon="settings" onClick={onOpenModels}>{t("setup.providerSettings")}</Button>}
-        {!connectedLabel && <button type="button" onClick={onContinue} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
+        {!connectedLabel && <button type="button" onClick={onContinue} onFocus={() => onInlineContinueFocus(true)} onBlur={() => onInlineContinueFocus(false)} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
           {t("setup.withoutModel")}
         </button>}
       </div>
