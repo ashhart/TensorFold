@@ -400,9 +400,9 @@ pub const Pass = struct {
         return l;
     }
 
-    pub fn rowsOf(x: *const Pass) st.Rows {
+    pub fn rowsOf(x: *const Pass, l: *const Launch) st.Rows {
         const refs = x.plan.refs();
-        return .{ .pos = refs.pos, .dest = refs.dest, .meta = refs.meta, .sel = refs.sel };
+        return .{ .pos = refs.pos, .dest = refs.dest, .meta = refs.meta, .sel = refs.sel, .asks = refs.asks, .n_asks = l.rows / l.n, .block = l.n };
     }
 
     /// The stage's input and output streams: stage i reads streams[i % 2], writes the other.
@@ -418,7 +418,7 @@ pub const Pass = struct {
 
     pub fn encodeStage(x: *const Pass, e: mtl.ComputeEncoder, l: *const Launch, i: usize) !void {
         const cx = x.ctx(l.rows);
-        try st.stage(&cx, e, &x.w.stages[i], x.io(i), x.rings[i], x.rowsOf());
+        try st.stage(&cx, e, &x.w.stages[i], x.io(i), x.rings[i], x.rowsOf(l));
     }
 
     pub fn encodeHead(x: *const Pass, e: mtl.ComputeEncoder, l: *const Launch) !void {

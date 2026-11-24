@@ -205,15 +205,18 @@ pub fn encodeIngestCb(cb: mtl.CommandBuffer, x: *const Ctx, d: *const dw.Weights
     e.end();
 }
 
-/// A draft launch's rows: their positions, and where their keys, attention records and selected keys are.
+/// A draft launch's rows: positions, key destinations, CSA2 meta/sel, and compact DSpark ask records.
 pub const Rows = struct {
     pos: Ref,
     dest: Ref,
     meta: Ref,
     sel: Ref,
+    asks: Ref,
+    n_asks: u32,
+    block: u32,
 };
 
-/// A stage's attention: q and the block's keys, then each row over its context and the block, barriers between.
+/// A stage's attention: q and the block's keys, then bidirectional DSpark block attention (or decode fallback).
 fn attention(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, ring: mtl.Buffer, rows: Rows) !void {
     const c = x.c;
     const s = x.s;
@@ -232,17 +235,21 @@ fn attention(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, ring
     e.barrier();
     try g.rope(gp, e, s.q, s.qrope, rows.pos, table, R, c.heads, D, @intCast(x.tables.positions));
     e.barrier();
-    const b: attn.Bind = .{
-        .q = ctx_.cv(attn.Ref, s.qrope),
-        .w = .{ .buf = ring },
-        .c = .{ .buf = ring },
-        .i = ctx_.cv(attn.Ref, rows.sel),
-        .m = ctx_.cv(attn.Ref, rows.meta),
-        .sk = ctx_.cv(attn.Ref, w.sink),
-        .cs = ctx_.cv(attn.Ref, table),
-        .o = ctx_.cv(attn.Ref, s.o),
-    };
-    try attn.encodeDecode(&x.p.attn, e, b, .{ .rows = R, .heads = c.heads, .out = .bf16 });
+    if (x.p.attn.dspark != null) {
+        try attn.encodeDspark(&x.p.attn, e, ctx_.cv(attn.Ref, s.qrope), .{ .buf = ring }, ctx_.cv(attn.Ref, rows.asks), ctx_.cv(attn.Ref, w.sink), ctx_.cv(attn.Ref, table), ctx_.cv(attn.Ref, s.o), rows.n_asks, rows.block, c.heads, c.window);
+    } else {
+        const b: attn.Bind = .{
+            .q = ctx_.cv(attn.Ref, s.qrope),
+            .w = .{ .buf = ring },
+            .c = .{ .buf = ring },
+            .i = ctx_.cv(attn.Ref, rows.sel),
+            .m = ctx_.cv(attn.Ref, rows.meta),
+            .sk = ctx_.cv(attn.Ref, w.sink),
+            .cs = ctx_.cv(attn.Ref, table),
+            .o = ctx_.cv(attn.Ref, s.o),
+        };
+        try attn.encodeDecode(&x.p.attn, e, b, .{ .rows = R, .heads = c.heads, .out = .bf16 });
+    }
     e.barrier();
     try layer_attn.output(x, e, w);
 }

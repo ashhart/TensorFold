@@ -77,7 +77,7 @@ pub const Pipelines = struct {
         errdefer p.tile.deinit();
         p.mma = try fp8_mma.Pipelines.load(device);
         errdefer p.mma.deinit();
-        p.attn = try attn.Pipelines.load(device);
+        p.attn = if (c.mtp_layers > 0) try attn.Pipelines.loadWithDspark(device) else try attn.Pipelines.load(device);
         errdefer p.attn.deinit();
         p.index = try index.Pipelines.load(device);
         errdefer p.index.deinit();

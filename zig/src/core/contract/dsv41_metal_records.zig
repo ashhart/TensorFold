@@ -13,4 +13,5 @@ const head = @import("dsv41_fp8_records.zig").records ++ @import("dsv41_fp8_mma_
 
 pub const records = head ++ @import("dsv41_fold_records.zig").records ++ @import("dsv41_glue_tmp_records.zig").records ++
     @import("dsv41_fused_records.zig").records ++ @import("dsv41_route_records.zig").records ++
+    @import("dsv41_dspark_records.zig").records ++
     @import("dsv41_vision_records.zig").records;
