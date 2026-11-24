@@ -109,8 +109,14 @@ pub const Pipelines = struct {
             if (loaded > i) @field(out, name).deinit();
         };
         inline for (@typeInfo(Pipelines).@"struct".field_names, 0..) |name, i| {
-            @field(out, name) = try mtl.Pipeline.init(device, lib, @as(Kind, @fromBackingInt(@intCast(i))).symbol(), false);
+            const kind: Kind = @fromBackingInt(@intCast(i));
+            const req_threads: usize = switch (kind) {
+                .block_qkv, .context_kv, .attention => 128,
+                else => 256,
+            };
+            @field(out, name) = try mtl.Pipeline.init(device, lib, kind.symbol(), false);
             loaded += 1;
+            if (@field(out, name).maxThreads() < req_threads) return error.DsparkThreads;
         }
         return out;
     }

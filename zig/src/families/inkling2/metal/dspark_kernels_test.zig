@@ -29,6 +29,9 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
         };
         try t.expectEqual(width, record.threads);
         try t.expectEqual(record.threads, record.reserved);
+        var hdr: [96]u8 = undefined;
+        const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
         const threadgroup: u32 = switch (kind) {
             .fuse_taps => 32,
             .block_qkv, .context_kv, .attention, .residual_norm => 16,

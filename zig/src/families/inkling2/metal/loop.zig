@@ -23,16 +23,15 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var messages = try mtl.Pipeline.init(device, lib, plan.Kind.messages.symbol(), false);
-        errdefer messages.deinit();
-        const gate_pipeline = try mtl.Pipeline.init(device, lib, plan.Kind.gates.symbol(), false);
-        errdefer gate_pipeline.deinit();
-        const norm = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_norm", false);
-        errdefer norm.deinit();
-        const down = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_down", false);
-        errdefer down.deinit();
-        const apply = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_apply", false);
-        return .{ .messages = messages, .gates = gate_pipeline, .norm = norm, .down = down, .apply = apply };
+        var pipes: [5]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |pipe| pipe.deinit();
+        for ([_][]const u8{ plan.Kind.messages.symbol(), plan.Kind.gates.symbol(), "tf_inkling2_loop_norm", "tf_inkling2_loop_down", "tf_inkling2_loop_apply" }, [_]usize{ 256, 256, 256, 32, 256 }, &pipes) |name, req_threads, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+            made += 1;
+            if (pipe.maxThreads() < req_threads) return error.LoopThreads;
+        }
+        return .{ .messages = pipes[0], .gates = pipes[1], .norm = pipes[2], .down = pipes[3], .apply = pipes[4] };
     }
     pub fn deinit(p: *Pipelines) void {
         p.apply.deinit();
