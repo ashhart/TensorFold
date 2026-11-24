@@ -284,7 +284,8 @@ test "lane allocator: priced copies preserve serial tokens and the same control 
     }
     try std.testing.expect(on.passes < off.passes); // root copies did not run and discard DSpark proposals
     try std.testing.expect(on.rows < off.rows); // learned copy rates trimmed verified copy rows
-    try std.testing.expectEqual(on.window_hash, replay.window_hash); // rank 0's control replay, never independent clocks
+    // rank 0's control replay, never independent clocks
+    try std.testing.expectEqual(on.window_hash, replay.window_hash);
     try std.testing.expectEqual(on.rows, replay.rows);
     try std.testing.expectEqual(on.passes, replay.passes);
 }
