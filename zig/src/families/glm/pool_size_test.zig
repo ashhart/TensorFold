@@ -66,3 +66,58 @@ test "glm pool tokens: the startup line states the window and the pool, and is t
         pool_size.contextWords(&buf, window, 2_000_000, 1_999_868),
     );
 }
+
+test "glm pool tokens: explicit pool preserves named refusal when MTP puts load over limit; unset drops MTP" {
+    const gpa = std.testing.allocator;
+    const cap = pool_size.cacheTokens(window, 65_536);
+    var lean_c: cfg.Config = .{ .mtp = 0 };
+    var mtp_c: cfg.Config = .{ .mtp = 1 };
+    const lean_arena = try load_plan.leastArena(gpa, &lean_c, cap, true);
+    const full_arena = try load_plan.leastArena(gpa, &mtp_c, cap, true);
+    const full_weights: usize = 180_000_000_000;
+    const lean_weights: usize = 175_000_000_000;
+    // Budget fits after dropping MTP (lean_weights + lean_arena <= limit), fails with MTP enabled.
+    const limit = full_weights + full_arena - 1;
+    try std.testing.expect(lean_weights + lean_arena <= limit);
+
+    const LeanPlan = struct {
+        bytes: usize,
+        pub fn planBytes(self: @This(), _: *const cfg.Config) !usize {
+            return self.bytes;
+        }
+    };
+    const lean_ctx: LeanPlan = .{ .bytes = lean_weights };
+    var buf: [400]u8 = undefined;
+
+    // Explicit GLM_POOL_TOKENS keeps MTP enabled and returns the named refusal instead of starting without MTP.
+    var explicit_bytes = full_weights;
+    var explicit_c = mtp_c;
+    const out_explicit = try pool_size.planFit(&buf, gpa, &explicit_c, 65_536, cap, true, false, 0, limit, "70% of RAM", &explicit_bytes, lean_ctx);
+    switch (out_explicit) {
+        .refused => |why| try std.testing.expect(std.mem.startsWith(u8, why, "GLM_POOL_TOKENS=65536 needs ")),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u32, 1), explicit_c.mtp);
+    try std.testing.expectEqual(full_weights, explicit_bytes);
+
+    // Unset GLM_POOL_TOKENS keeps the existing MTP-drop fallback.
+    var unset_bytes = full_weights;
+    var unset_c = mtp_c;
+    const out_unset = try pool_size.planFit(&buf, gpa, &unset_c, null, cap, true, false, 0, limit, "70% of RAM", &unset_bytes, lean_ctx);
+    try std.testing.expectEqual(pool_size.StartupOutcome.dropped_mtp, out_unset);
+    try std.testing.expectEqual(@as(u32, 0), unset_c.mtp);
+    try std.testing.expectEqual(lean_weights, unset_bytes);
+}
+
+test "glm pool tokens: fixed stream refusal blames GLM_POOL_TOKENS instead of --context when pool is set" {
+    var buf: [320]u8 = undefined;
+    const set_msg = pool_size.fitProblem(&buf, 4, 2_000_064, 200_000_000_000, "70% of RAM", 2, 2_000_000);
+    try std.testing.expect(std.mem.indexOf(u8, set_msg, "GLM_POOL_TOKENS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, set_msg, "--parallel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, set_msg, "--context") == null);
+
+    var unset_buf: [320]u8 = undefined;
+    const unset_msg = pool_size.fitProblem(&unset_buf, 4, 1_048_640, 200_000_000_000, "70% of RAM", 2, null);
+    try std.testing.expect(std.mem.indexOf(u8, unset_msg, "--context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unset_msg, "--parallel") != null);
+}
