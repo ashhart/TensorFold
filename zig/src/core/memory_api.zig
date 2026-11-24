@@ -23,7 +23,10 @@ pub const MemoryOp = union(enum) {
         is_small_fact: bool = false,
         is_standing: bool = false,
         is_digest: bool = false,
+        staged: bool = false, // unseen by requests until its lesson's publish_parent
     },
+    /// The staged units of `parent_id`'s lesson go live together as one new memory version.
+    publish_parent: u32,
     /// Pure-vector (< 1 ms) search for active small-fact parent IDs overlapping `gate_ids` (belief revision).
     find_conflicts: struct {
         gate_ids: []const u32,
@@ -58,6 +61,7 @@ pub const MemoryResult = struct {
     deltas: u32 = 0,
     conflict_ids: [4]u32 = .{ 0, 0, 0, 0 },
     conflict_count: u8 = 0,
+    version: u64 = 0, // the published memory version after the op
     err: ?[]const u8 = null,
 };
 
@@ -68,4 +72,5 @@ pub const MemoryController = struct {
     routeAndCompose: *const fn (ctx: *anyopaque, query_ids: []const u32) anyerror!?SnapHandle,
     dropSnap: *const fn (ctx: *anyopaque, snap: *anyopaque) void,
     exec: *const fn (ctx: *anyopaque, op: *const MemoryOp) MemoryResult,
+    version: ?*const fn (ctx: *anyopaque) u64 = null, // the published memory version a request routes against
 };

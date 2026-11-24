@@ -8,6 +8,7 @@ const RawState = types.RawState;
 const KvLayerData = types.KvLayerData;
 const RecLayerData = types.RecLayerData;
 const TeachChunkInput = types.TeachChunkInput;
+const Unit = types.Unit;
 const compressRecurrentLayers = @import("compress.zig").compressRecurrentLayers;
 
 /// Calibrates and compiles the shared prefix once; if loaded calibrated, keeps units and rebuilds `cal_prompts`.
@@ -302,19 +303,18 @@ pub fn teachChunk(self: *Bank, inp: TeachChunkInput) !u32 {
             .{ uid, inp.parent_id, ug.epoch, b_len, @as(u8, 16), rank, ug.n_lex, ug.n_body_lex, ug.n_sem, ug.is_small_fact, ug.is_standing, ug.is_digest, ug.neg_sem_max },
         );
     }
-    try self.units.append(self.gpa, .{
-        .unit_id = uid,
-        .parent_id = inp.parent_id,
-        .n_tokens = @intCast(b_len),
-        .gate = ug,
-        .kv = kv,
-        .rec = rec,
-    });
+    const unit: Unit = .{ .unit_id = uid, .parent_id = inp.parent_id, .n_tokens = @intCast(b_len), .gate = ug, .kv = kv, .rec = rec };
+    if (inp.staged) { // unseen until its lesson is published: no index change either
+        try self.staged.append(self.gpa, unit);
+        return uid;
+    }
+    try self.units.append(self.gpa, unit);
     // the unit's parts stay this function's until the index takes it: a failed rebuild gives it back, freed once
     self.rebuildBridges() catch |e| {
         _ = self.units.pop();
         self.rebuildBridges() catch {}; // the index of the units before this one, as it was
         return e;
     };
+    self.version += 1;
     return uid;
 }

@@ -39,6 +39,8 @@ pub const Bank = struct {
     suffix_ids: []u32 = &.{},
     prefix_state: ?RawState = null,
     units: std.ArrayList(Unit) = .empty,
+    staged: std.ArrayList(Unit) = .empty, // a lesson's units until publishParent: no route, index or save sees them
+    version: u64 = 0, // published changes since start: a request routes against one version, its response names it
     bridges: []gate.BridgeEdge = &.{},
     cluster_index: gate.ClusterIndex = .{},
     /// Sleep-time spectral-consolidated recurrent steering delta across active standing policies.
@@ -87,6 +89,10 @@ pub const Bank = struct {
         for (self.units.items) |*u| u.deinit(self.gpa);
         self.units.deinit(self.gpa);
         self.units = .empty;
+        for (self.staged.items) |*u| u.deinit(self.gpa);
+        self.staged.deinit(self.gpa);
+        self.staged = .empty;
+        self.version += 1;
         for (self.cal_prompts.items) |*c| c.deinit(self.gpa);
         self.cal_prompts.deinit(self.gpa);
         self.cal_prompts = .empty;
@@ -187,6 +193,7 @@ pub const Bank = struct {
         }
         if (touched_standing) self.freeSkillRec();
         if (changed > 0) self.rebuildBridges() catch {};
+        if (changed > 0) self.version += 1;
         return changed;
     }
 
@@ -199,6 +206,7 @@ pub const Bank = struct {
                 changed += 1;
             }
         }
+        if (changed > 0) self.version += 1;
         return changed;
     }
 
@@ -226,7 +234,38 @@ pub const Bank = struct {
         }
         if (touched_standing) self.freeSkillRec();
         if (removed > 0 or restored > 0) self.rebuildBridges() catch {};
+        var s: usize = 0; // a lesson still staged goes with it, unseen
+        while (s < self.staged.items.len) {
+            if (self.staged.items[s].parent_id != parent_id) {
+                s += 1;
+                continue;
+            }
+            var u = self.staged.orderedRemove(s);
+            u.deinit(self.gpa);
+            removed += 1;
+        }
+        if (removed > 0 or restored > 0) self.version += 1;
         return removed;
+    }
+
+    /// A staged lesson goes live at once: its units join the routed set together and the version moves by one.
+    pub fn publishParent(self: *Bank, parent_id: u32) !u32 {
+        var n: usize = 0;
+        for (self.staged.items) |u| n += @intFromBool(u.parent_id == parent_id);
+        if (n == 0) return 0;
+        try self.units.ensureUnusedCapacity(self.gpa, n);
+        const before = self.units.items.len;
+        var s: usize = 0;
+        while (s < self.staged.items.len) {
+            if (self.staged.items[s].parent_id == parent_id) self.units.appendAssumeCapacity(self.staged.orderedRemove(s)) else s += 1;
+        }
+        self.rebuildBridges() catch |e| { // back to staged, the index of the units before it as it was
+            while (self.units.items.len > before) self.staged.appendAssumeCapacity(self.units.orderedRemove(before));
+            self.rebuildBridges() catch {};
+            return e;
+        };
+        self.version += 1;
+        return @intCast(n);
     }
 
     /// Runs the gate (ClusterIndex, token guard, coverage, 2-hop bridges, policies) on `query_ids`; null on miss.
