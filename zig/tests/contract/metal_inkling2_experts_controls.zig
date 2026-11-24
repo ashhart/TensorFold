@@ -99,7 +99,8 @@ test "inkling2 experts: one thread an output, and each dot stays the serial chai
     try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "const uint n = tg.x * 32u + lane"));
     try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "if (n >= a.n) return;"));
     // the two dots: one FP32 chain from column 0 up, products rounded before each add, no lane reduction
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "for (uint c = 0; c < k; ++c)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 16u; ++b)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 32u; ++b)"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "#pragma METAL fp contract(off)"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "simd_sum"));
 }
