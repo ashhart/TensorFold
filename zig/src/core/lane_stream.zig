@@ -21,8 +21,8 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     var effective_prompt: []const u32 = r.prompt;
     var effective_max_new: u32 = r.max_tokens;
     var memory_active = false;
-    // Folded Memory Weights v3: dual-layer neural gate on the latest user turn; zero drift on miss!
-    if (h.folded_memory) |fm| if (fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
+    // the latest user turn's memory gate, only where the engine serves learning (Info.folded_memory, --slide)
+    if (h.folded_memory) |fm| if (h.info_.folded_memory and fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
         if (fm.routeAndCompose(fm.ctx, r.memory_query)) |maybe_snap| {
             if (maybe_snap) |handle| {
                 const strip: usize = if (r.memory_strip < r.prompt.len) r.memory_strip else 0;
