@@ -110,6 +110,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_attention_metal_records.zig").records ++
     @import("inkling2_glue_metal_records.zig").records ++
     @import("inkling2_experts_metal_records.zig").records ++
+    @import("inkling2_mma_metal_records.zig").records ++
     @import("inkling2_loop_metal_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
@@ -161,6 +162,7 @@ test {
     _ = @import("inkling2_attention_metal_records.zig");
     _ = @import("inkling2_glue_metal_records.zig");
     _ = @import("inkling2_experts_metal_records.zig");
+    _ = @import("inkling2_mma_metal_records.zig");
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
