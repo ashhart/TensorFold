@@ -1,6 +1,6 @@
 //! Cross-platform CUDA / HIP Device Bridge for Folded Memory Weights v6.
 //! Allows any CUDA or HIP engine (Nemotron-H CUDA, Qwen3.5 CUDA, Qwen3/Llama CUDA) to attach the
-//! full v6 Folded Memory Weights engine (Q4/Q8 KV, spectral SVD, temporal belief revision,
+//! full v6 Folded Memory Weights engine (exact BF16 KV, spectral SVD, temporal belief revision,
 //! ClusterIndex, CRC delta journal, in-flight learning, sleep-time consolidation) by supplying
 //! ONLY device-side launch + DtoH/HtoD copy callbacks — zero duplicated compression or routing logic!
 const std = @import("std");
@@ -323,7 +323,6 @@ test "cuda_bridge(v6): token-major CUDA/HIP bridge round-trips end-to-end with B
         .conv_elems = 0,
         .svd_rank = 0,
         .svd_rank_short = 0,
-        .kv_bits = 4,
     };
 
     var dev = FakeCuda{ .gpa = gpa, .arch = arch };
