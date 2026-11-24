@@ -4,20 +4,19 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on Metal: `--ssd-experts GIB` now fits an oversized SSD expert pool to the load ceiling instead of refusing the load; nothing changes without the flag (#4811).
+
 - MOSS-Image contract: the reference for `tf_me_conv` now follows fp32 `expf` overflow, so its sums check no longer fails on inputs near -89 (#4794).
 
 - HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
 
 - H3 on Macs: long image renders give way to live speech on the GPU (#N).
 
-
-
 - GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#N).
 
 - Qwen 3.5 on Metal: `TF_QWEN35_CHUNK` sets the prefill chunk size for measurement; the default stays 128 rows (#N).
 
 - CUDA: Ripple-65B-Preview (ricursive) serves on the native engine from the publisher's NVFP4 release as published, with prompt chunks and decode, lane rounds as CUDA graphs, greedy and sampled draws, kept states and the prompt cache; the bf16 release is refused by name, and structured output and forced tool calls are refused until masked sampling lands (#2302, fixes #2300). Thanks to @jrb-ai.
-- Flash Next on Metal: `--ssd-experts GIB` now fits an oversized SSD expert pool to the load ceiling instead of refusing the load; nothing changes without the flag (#N).
 
 - GLM-5.3-Flash on CUDA: with `--learn-conversations`, conversation states are kept on disk through the rows store, so after an eviction or a restart the next turn reads its state back instead of prefilling the whole conversation; at TP>1 every rank's part goes to rank 0's disk, so a state is read back on every rank or none (#1411, fixes #1312). Thanks to @wojo.
 
