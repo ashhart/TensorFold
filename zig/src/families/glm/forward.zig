@@ -261,7 +261,7 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
         gb = .{ g, g, g };
     }
     // An Ultra's GPU, 2+ rows: each head on two threadgroups (raw outputs, gates in gu), then each row's head normed
-    const sel = x.k.kdaSelect(gate, w.f_b, w.g_b, c.tp, rows);
+    const sel = x.k.kdaSelect(gate, wide.tfq3.q8Kda(w.in_proj, w.f_b, w.g_b), c.tp, rows);
     const parts = sel.parts;
     e.setPipeline(sel.pipe);
     bind(e, 0, .{proj});
