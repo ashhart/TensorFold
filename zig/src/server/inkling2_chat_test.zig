@@ -52,6 +52,7 @@ const Fixture = struct {
 const Script = struct {
     reply: []const u32,
     stride: usize,
+    eos_len: usize = 0, // the request's end ids, as the engine got them
 
     fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -61,6 +62,7 @@ const Script = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *@This() = @ptrCast(@alignCast(ctx));
+        s.eos_len = request.eos.len;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         var start: usize = 0;
         while (start < s.reply.len) {
@@ -114,6 +116,24 @@ pub const Seen = struct {
     usage: Usage = .{},
     kept: []const u8 = "", // the tensorfold block's kept_tool_calls, as JSON
     finish: []const u8 = "",
+    eos_len: usize = 0, // the engine's request's end ids
+};
+
+/// Grammars accepted as compiled, with no grammar library: the route attaches them, the script ignores them.
+const Grammars = struct {
+    fn compiler(g: *Grammars) api.grammar.Compiler {
+        var out: api.grammar.Compiler = undefined;
+        out.h = g;
+        out.words = 4;
+        out.f.compile = compile;
+        out.f.free = free;
+        out.f.close = free;
+        return out;
+    }
+    fn compile(ptr: *anyopaque, _: c_int, _: [*]const u8, _: usize, _: [*]u8, _: usize) callconv(.c) ?*anyopaque {
+        return ptr;
+    }
+    fn free(_: *anyopaque) callconv(.c) void {}
 };
 
 const Usage = struct { completion: i64 = -1, reasoning: i64 = -1 };
@@ -161,6 +181,15 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     var script: Script = .{ .reply = reply, .stride = stride };
     const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
+    var grammars: Grammars = .{};
+    var compiler = grammars.compiler();
+    srv.info.structures = true;
+    srv.grammars = &compiler;
+    if (comptime @hasField(Server, "tool_grammars")) srv.tool_grammars = &compiler;
+    defer srv.grammars = null;
+    defer if (comptime @hasField(Server, "tool_grammars")) {
+        srv.tool_grammars = null;
+    };
     const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":256,{s},\"stream\":{s}{s}}}", .{ request, if (stream) "true" else "false", extra });
     var got: Got = .{ .a = a };
     var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
@@ -207,7 +236,7 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept, .eos_len = script.eos_len };
 }
 
 pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
