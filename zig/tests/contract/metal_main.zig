@@ -496,8 +496,6 @@ pub fn main(init: std.process.Init) !u8 {
     var mma_operand: @import("metal_mma_operand.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer mma_operand.deinit();
     try mma_operand.collect(o.only);
-    const sam3 = try @import("metal_sam3_main.zig").Suites.create(a, device, queue, &kernels, o.only);
-    defer sam3.destroy();
     var nemotron_ssd: @import("metal_nemotron_ssd_gemm.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_ssd.deinit();
     try nemotron_ssd.collect(o.only);
@@ -586,6 +584,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
+        try @import("metal_sam3_main.zig").Suites.run(a, device, queue, o.only, o.seed, &t);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

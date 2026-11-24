@@ -54,6 +54,14 @@ pub const Suites = struct {
         return s;
     }
 
+    pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, only: ?[]const u8, seed: u64, tally: *g.Tally) !void {
+        var kernels: std.ArrayList(g.Kernel) = .empty;
+        defer kernels.deinit(a);
+        const s = try create(a, device, queue, &kernels, only);
+        defer s.destroy();
+        try g.runAll(a, kernels.items, seed, tally);
+    }
+
     pub fn destroy(s: *Suites) void {
         s.mma.deinit();
         inline for (.{ "deconv", "gemm", "small", "planes", "pair", "attention", "norm", "resize", "sparse_mask", "layout", "arithmetic", "rotary", "rows", "flash", "trunk", "tensor_ops", "core_attention" }) |field|

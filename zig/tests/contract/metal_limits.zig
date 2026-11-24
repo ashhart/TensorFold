@@ -100,70 +100,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (sam3_launch.owns(d.name)) {
         if (!assemble) return undefined;
-        const t = try sam3_launch.text(a, d.name);
+        const t = try sam3_launch.text(a, device, d.name, fun);
         return .{ .decl = d, .function = fun, .here = t[0], .pre_m5 = t[1] };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
-        if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device, std.mem.indexOf(u8, fun, "_exact_") != null, std.mem.indexOf(u8, fun, "_compact_") != null), .pre_m5 = "" };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 device projection ")) {
-        if (!assemble) return undefined;
-        if (std.mem.startsWith(u8, d.name, "sam3 device projection pair "))
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_pair.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        if (std.mem.startsWith(u8, d.name, "sam3 device projection planes "))
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_planes.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        if (std.mem.startsWith(u8, d.name, "sam3 device projection exact half weight "))
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").halfText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").deviceText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 activation ")) {
-        if (!assemble) return undefined;
-        const source = try std.mem.concat(a, u8, &.{ "#define TF_UNROLL _Pragma(\"clang loop unroll(full)\")\n", sources.sam3_dense_small, sources.sam3_activation });
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 resize ")) {
-        if (!assemble) return undefined;
-        const source = if (std.mem.indexOf(u8, d.name, " nonfinite-control ") != null) try @import("metal_sam3_resize.zig").nonfiniteText(a) else try @import("metal_sam3_resize.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 sparse mask ")) {
-        if (!assemble) return undefined;
-        const source = try @import("metal_sam3_sparse_mask.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 compensated normalization ")) {
-        if (!assemble) return undefined;
-        const source = try @import("metal_sam3_norm.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 small compensated projection ")) {
-        if (!assemble) return undefined;
-        const source = try a.dupe(u8, if (std.mem.indexOf(u8, d.name, " baseline ") != null) sources.sam3_dense_small_baseline else sources.sam3_dense_small);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
-        if (!assemble) return undefined;
-        if (std.mem.indexOf(u8, d.name, " matrix ") != null)
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_deconv.zig").matrixText(a), .pre_m5 = "" };
-        const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 attention ")) {
-        if (!assemble) return undefined;
-        if (std.mem.startsWith(u8, d.name, "sam3 attention D32 split ") or std.mem.startsWith(u8, d.name, "sam3 attention D64 split "))
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").split32Text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        if (std.mem.indexOf(u8, d.name, " device ") != null)
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").text(a, false), .pre_m5 = "" };
-        if (std.mem.indexOf(u8, d.name, " split ") != null)
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").splitText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        if (std.mem.indexOf(u8, d.name, " two-pass ") != null)
-            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").twoPassText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {
-        if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_mma.zig").text(a, device), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
         if (!assemble) return undefined;
@@ -566,13 +504,7 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
-    if (std.mem.indexOf(u8, l.decl.name, "exact expansion ") != null or std.mem.indexOf(u8, l.decl.name, " planes ") != null) {
-        std.debug.print("PRECISION limits {s}: exact FP16 components, FP32 accumulation\n", .{l.decl.name});
-    } else if (std.mem.indexOf(u8, l.decl.name, "exact half weight ") != null) {
-        std.debug.print("PRECISION limits {s}: FP32 activations and accumulation, exact FP16 weights\n", .{l.decl.name});
-    } else if (std.mem.startsWith(u8, l.decl.name, "sam3 attention ") or std.mem.startsWith(u8, l.decl.name, "sam3 device projection ")) {
-        std.debug.print("PRECISION limits {s}: strict FP32 tensor library\n", .{l.decl.name});
-    } else if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
+    if (!sam3_launch.printPrecision(l.decl.name) and std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
     }
@@ -600,8 +532,7 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     for (registry.all_metal) |d| {
         if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
         try requireMapped(d);
-        const sam3_tensor = std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ") or std.mem.startsWith(u8, d.name, "sam3 device projection ") or std.mem.startsWith(u8, d.name, "sam3 deconvolution matrix ") or sam3_launch.tensorOnly(d.name);
-        if (sam3_tensor and !@import("metal_support.zig").tensor(device.tensorUnits(), d.name)) continue;
+        if (sam3_launch.tensorOnly(d.name) and !@import("metal_support.zig").tensor(device.tensorUnits(), d.name)) continue;
         if (!supported(device, d)) continue;
         try list.append(a, d);
     }
