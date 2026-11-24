@@ -76,7 +76,7 @@ pub const Cache = struct {
     /// Latest captured rows; generic capture alone copies the prompt anchor into `last_tap`.
     tap: ?TapRows = null,
     last_tap: ?mtl.Buffer = null,
-    /// A stepped prompt pass's latest chunk's tapped rows in the scratch (#3021): featuresFn serves them while current.
+    /// A stepped prompt pass's latest chunk's tapped rows, in the scratch or the lane's stage (#3021).
     chunk_tap: ?TapRows = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, capacity: usize) !Cache {

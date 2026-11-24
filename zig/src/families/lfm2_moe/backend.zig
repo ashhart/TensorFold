@@ -236,7 +236,8 @@ pub const Metal = struct {
                 const f = try featuresFn(self, stream, self.scratch.taps.?.layers[0..self.scratch.taps.?.count], at, @intCast(end - at));
                 try k.take(k.ptr, stream, f, at);
             }
-            if (r.later and tap != .stage) r.cache.chunk_tap = .{ .start = at, .row = 0, .rows = end - at, .gen = self.gen };
+            // a stepped pass's wrapper absorbs this chunk after the call: keep all its rows
+            if (r.later) r.cache.chunk_tap = .{ .start = at, .row = 0, .rows = end - at, .gen = self.gen, .stage = if (tap == .stage) tap.stage.off else null };
             if ((r.sink != null or r.later) and end == ids.len) {
                 if (tap == .stage) {
                     // The lane owns this anchor across other streams' forwards; no scratch copy.
