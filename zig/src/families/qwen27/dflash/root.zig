@@ -22,4 +22,5 @@ test {
     _ = @import("execution_test.zig");
     _ = @import("absorb_batch.zig");
     _ = @import("absorb_batch_test.zig");
+    _ = @import("execution_v1_test.zig");
 }

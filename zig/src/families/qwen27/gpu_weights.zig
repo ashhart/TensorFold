@@ -397,7 +397,11 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
+    const stored_head = try std.mem.concat(allocator, u8, &.{ prefix, "lm_head.weight" });
+    defer allocator.free(stored_head);
+    // a tied head repacks the embedding's bytes into its own lane buffers; the embedding keeps its file layout
+    const head_module = try @import("tied_head.zig").module(g.tied_head, checkpoint.has(stored_head));
+    const head = try b.linear(&.{.{ .module = head_module, .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }
@@ -406,6 +410,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
 pub fn loadMtp(w: *Weights, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard) !void {
     if (s.ranks != 1) return error.MtpNeedsOneRank;
     if (s.local.moe()) return error.MtpNeedsDenseModel;
+    if (s.global.tied_head) return error.MtpNeedsUntiedHead;
     const c = s.local;
     const prefix: []const u8 = if (checkpoint.has("language_model.mtp.norm.weight")) "language_model." else if (checkpoint.has("mtp.norm.weight")) "" else return error.MissingMtpHead;
     var stage = cp.Stage{ .device = device };
@@ -446,10 +451,11 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
     try lane.regOrder(device, jobs.items);
 }
 
-/// Only 4-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
+/// 4-, 5-, and 6-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
-    if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
+    const reg_bits = p.bits == 4 or p.bits == 5 or p.bits == 6;
+    if (p.runs.len == 0 and reg_bits and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k, .bits = p.bits });
 }
 
 /// A borrowed quantized tensor as the row kernels' matrix.

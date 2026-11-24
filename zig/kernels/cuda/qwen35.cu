@@ -554,18 +554,18 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial(Geo geo, c
 extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                      const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                      const int* __restrict__ P, float scale, int total,
-                                                                     float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+                                                                     float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO, bool all_rows) {
     extern __shared__ __align__(16) uint4 attn_tiles[];
-    tf_q35_tc::attn_rows<4, tf_q35_tc::Bf16Tiles<256>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
+    tf_q35_tc::attn_rows<4, tf_q35_tc::Bf16Tiles<256>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO, all_rows);
 }
 
 // tf_q35_attn_rows for a forward whose streams share pages (cuda_cache.anyShares): rows on one page run join.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows_join(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                           const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                           const int* __restrict__ P, float scale, int total,
-                                                                          float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+                                                                          float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO, bool all_rows) {
     extern __shared__ __align__(16) uint4 attn_tiles[];
-    tf_q35_tc::attn_rows<4, tf_q35_tc::Bf16Tiles<256>, true>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
+    tf_q35_tc::attn_rows<4, tf_q35_tc::Bf16Tiles<256>, true>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO, all_rows);
 }
 
 extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial_whole(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
@@ -579,7 +579,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_attn_partial_whole(Geo 
 extern "C" __global__ void __launch_bounds__(256) tf_q35_attn_rows_whole(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                      const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                      const int* __restrict__ P, float scale, int total,
-                                                                     float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+                                                                     float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO, bool all_rows) {
     extern __shared__ __align__(16) uint4 attn_tiles[];
-    tf_q35_tc::attn_rows<4, tf_q35_tc::WholeBf16Tiles<256>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO);
+    tf_q35_tc::attn_rows<4, tf_q35_tc::WholeBf16Tiles<256>>({attn_tiles, nullptr, nullptr, nullptr}, geo, Q, segs, rowseg, rowanc, layer, P, scale, total, PM, PL, PO, all_rows);
 }

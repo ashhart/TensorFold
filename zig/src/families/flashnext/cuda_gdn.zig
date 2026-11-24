@@ -16,6 +16,18 @@ pub const proj_width: usize = conv_dim + nv * dv + 2 * nv;
 pub const value_dim: usize = nv * dv;
 pub const groups: usize = value_dim / qmm.group;
 
+pub const ChainForm = enum { chain, chain_to, chain_tpr };
+
+/// The ordinary recurrence kernel for these rows, rollback destination and TF_FLASHNEXT_GDN_CHAIN_TPR setting.
+pub fn chainForm(rows: usize, state_out: u64, chain_tpr: bool) ChainForm {
+    return if (rows >= 64 or chain_tpr) .chain_tpr else if (state_out != 0) .chain_to else .chain;
+}
+
+/// Whether ordinary recurrence rows below 64 opt into fn_gdn_chain_tpr; default off.
+pub fn chainTpr() bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_GDN_CHAIN_TPR", false) catch false;
+}
+
 const symbol: [:0]const u8 = "flashnext_gdn_chain";
 
 const toBf16 = @import("core").bf16_round.bits;

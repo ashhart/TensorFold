@@ -27,12 +27,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught) if (@import("lane_cache_queue.zig").lookup(h, job)) |l| {
-        job.entry = l.entry;
-        job.kept0 = store.counts.kept;
-        job.marks = l.marks;
-        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .snap_at = l.snap_at, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
-    } else |_| {};
+    if (h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught) reuse = kept(h, job);
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");
     } else job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return !h.drop(job, "the drafter could not start");
@@ -85,4 +80,27 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     @import("lane_host_load.zig").began(h, job); // the fill shows here
     job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();
     return true;
+}
+
+/// The job's kept state looked up: its entry borrowed, its marks and promise planned from what it resumes.
+fn kept(h: *LaneHost, job: *Job) lanes.stream.Reuse {
+    const store = h.cache.?;
+    const l = @import("lane_cache_queue.zig").lookup(h, job) catch return .{};
+    job.entry = l.entry;
+    job.kept0 = store.counts.kept;
+    job.marks = l.marks;
+    return .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .snap_at = l.snap_at, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
+}
+
+/// A lent state gone at the job's first call: looked up again as at admission, with its fill and load hint.
+pub fn lookAgain(h: *LaneHost, job: *Job) void {
+    h.gpa.free(job.marks);
+    job.marks = &.{};
+    job.cache_promise = .{};
+    job.stream.reuse = kept(h, job);
+    job.stream.fill_at.store(job.stream.reuse.at, .monotonic);
+    h.lock();
+    defer h.unlock();
+    job.load.hint = job.stream.reuse.at;
+    job.load.sure = job.load.hint == 0;
 }

@@ -21,7 +21,7 @@ fn embedDepth(s: c.Shape) usize {
 
 /// Rows x hidden x hidden: a prompt chunk, a verify window, one decode row (the drafter's anchor embeds one too).
 pub fn embedSpec(shifted: bool) c.Spec {
-    const served = &[_]c.Shape{ .{ .rows = 16, .n = C, .k = C }, .{ .rows = 1, .n = C, .k = C }, .{ .rows = 128, .n = C, .k = C }, .{ .rows = 2048, .n = C, .k = C } };
+    const served = &[_]c.Shape{ .{ .rows = 16, .n = C, .k = C }, .{ .rows = 1, .n = C, .k = C }, .{ .rows = 128, .n = C, .k = C }, .{ .rows = 2048, .n = C, .k = C }, .{ .rows = 16, .n = 2304, .k = 2304 }, .{ .rows = 1, .n = 2304, .k = 2304 }, .{ .rows = 128, .n = 2304, .k = 2304 }, .{ .rows = 2048, .n = 2304, .k = 2304 } };
     if (shifted) return .{ .name = "control: inkling2 ops tf_ink2_embed gathering the next row", .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served[0..2] };
     return .{ .name = "inkling2 ops tf_ink2_embed (embed_norm, rounded once)", .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served };
 }
@@ -114,14 +114,14 @@ fn dotDepth(s: c.Shape) usize {
 /// Rows x outputs x hidden; tiles: calls of 32 rows or more with fp32 out (router, taps), bit-equal to tf_ink2_rowdot.
 pub fn dotSpec(d: Dot, tiles: bool, short: bool) c.Spec {
     const plain: []const c.Shape = switch (d) { // comptime arrays: a spec outlives this call
-        .router => &.{ .{ .rows = 16, .n = 384, .k = C }, .{ .rows = 1, .n = 384, .k = C }, .{ .rows = 31, .n = 384, .k = C }, .{ .rows = 7, .n = 384, .k = C } },
-        .sink => &.{ .{ .rows = 16, .n = 24, .k = C }, .{ .rows = 1, .n = 24, .k = C }, .{ .rows = 128, .n = 24, .k = C }, .{ .rows = 2048, .n = 24, .k = C } },
-        .taps => &.{ .{ .rows = 16, .n = 16, .k = C }, .{ .rows = 1, .n = 16, .k = C }, .{ .rows = 31, .n = 16, .k = C } },
+        .router => &.{ .{ .rows = 16, .n = 384, .k = C }, .{ .rows = 1, .n = 384, .k = C }, .{ .rows = 31, .n = 384, .k = C }, .{ .rows = 7, .n = 384, .k = C }, .{ .rows = 16, .n = 128, .k = 2304 }, .{ .rows = 1, .n = 128, .k = 2304 }, .{ .rows = 31, .n = 128, .k = 2304 }, .{ .rows = 7, .n = 128, .k = 2304 } },
+        .sink => &.{ .{ .rows = 16, .n = 24, .k = C }, .{ .rows = 1, .n = 24, .k = C }, .{ .rows = 128, .n = 24, .k = C }, .{ .rows = 2048, .n = 24, .k = C }, .{ .rows = 16, .n = 24, .k = 2304 }, .{ .rows = 1, .n = 24, .k = 2304 }, .{ .rows = 128, .n = 24, .k = 2304 }, .{ .rows = 2048, .n = 24, .k = 2304 } },
+        .taps => &.{ .{ .rows = 16, .n = 16, .k = C }, .{ .rows = 1, .n = 16, .k = C }, .{ .rows = 31, .n = 16, .k = C }, .{ .rows = 16, .n = 16, .k = 2304 }, .{ .rows = 1, .n = 16, .k = 2304 }, .{ .rows = 31, .n = 16, .k = 2304 } },
     };
     const wide: []const c.Shape = if (d == .router)
-        &.{ .{ .rows = 64, .n = 384, .k = C }, .{ .rows = 32, .n = 384, .k = C }, .{ .rows = 100, .n = 384, .k = C }, .{ .rows = 2048, .n = 384, .k = C } }
+        &.{ .{ .rows = 64, .n = 384, .k = C }, .{ .rows = 32, .n = 384, .k = C }, .{ .rows = 100, .n = 384, .k = C }, .{ .rows = 2048, .n = 384, .k = C }, .{ .rows = 64, .n = 128, .k = 2304 }, .{ .rows = 32, .n = 128, .k = 2304 }, .{ .rows = 100, .n = 128, .k = 2304 }, .{ .rows = 2048, .n = 128, .k = 2304 } }
     else
-        &.{ .{ .rows = 64, .n = 16, .k = C }, .{ .rows = 32, .n = 16, .k = C }, .{ .rows = 100, .n = 16, .k = C }, .{ .rows = 2048, .n = 16, .k = C } };
+        &.{ .{ .rows = 64, .n = 16, .k = C }, .{ .rows = 32, .n = 16, .k = C }, .{ .rows = 100, .n = 16, .k = C }, .{ .rows = 2048, .n = 16, .k = C }, .{ .rows = 64, .n = 16, .k = 2304 }, .{ .rows = 32, .n = 16, .k = 2304 }, .{ .rows = 100, .n = 16, .k = 2304 }, .{ .rows = 2048, .n = 16, .k = 2304 } };
     const names = [3][2][]const u8{
         .{ "inkling2 ops tf_ink2_rowdot router (fp32 sigmoid scores)", "inkling2 ops tf_ink2_rowdot_tiles router (fp32 sigmoid scores)" },
         .{ "inkling2 ops tf_ink2_rowdot attention sinks (bf16 sigmoid)", "" },

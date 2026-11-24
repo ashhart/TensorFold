@@ -4,6 +4,7 @@ const E = @import("cuda_engine.zig");
 const tap_window = @import("cuda_cache.zig").tap_window;
 const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
+const attention = @import("cuda_attention.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
 const modelopt = @import("cuda_modelopt.zig");
@@ -129,8 +130,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                         const rows_fn = if (shape.mt2) (if (shape.paged) e.mt2.paged else e.mt2.whole) else (if (shape.join) e.fp8.attn_rows_join else if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole);
                         try launch(e, rows_fn, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ if (shape.mt2) @as(usize, 128) else 256, 1, 1 }, rows_args);
                     } else {
-                        try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
-                        try shared(e, if (shape.join) e.fns.attn_rows_join else if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, rows_args);
+                        const rows_only = attention.rowsOnly(e.attention_all_rows, prompt, total);
+                        const bf16_rows_args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(total)), e.pm, e.pl, e.po, rows_only };
+                        if (!rows_only) try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
+                        try shared(e, if (shape.join) e.fns.attn_rows_join else if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, bf16_rows_args);
                     }
                     try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                 }
@@ -160,7 +163,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
-                } else {
+                } else if (try @import("cuda_group_proj.zig").run(e, &.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt)) {} else {
                     try e.projAgain(m.gate, x0, e.gate, rows, prompt);
                     try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }

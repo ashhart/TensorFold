@@ -210,6 +210,30 @@ enabled on RDNA3.5 for single-round `K <= 1024` plans), whose rows past an item'
 `item_rows = 0` byte for byte when the largest item holds 3 or 4 rows. Its controls run over items one row short and go
 red at gate 3.
 
+HIP's shared-row decode score (`plan_rows.hip`: q fp32, d = 256, spans of 16,384 keys or more, launches of more than
+one row) replaces `tf_plan_score256_*` byte for byte with two launches on its grid, a block a plan row. First
+`tf_plan_lone_score256_*` scores the rows of one-row slots as `tf_plan_score256_*` does, at its occupancy, and its other
+blocks leave. Then `tf_plan_rows_score256_*`, counted from each multi-row slot's `first`, has the block of every second
+row score that row and the next of the same slot from one read of the keys; the other blocks leave, so a chunk never
+crosses a slot. Its registrations run both head groups (16 over 2, 24 over 4) and both cache kinds as one operator, on
+launches of 1 to 64 rows: slots of 3, 1, 4 and 2 rows one position apart (at the span's end, mid-span, across a block's
+first key, at the span's start), and 5 and 7 slots of one row each, over spans of 16,384 to 262,144 keys with NaN and
+infinite keys that some rows of a chunk see and others do not. Its controls go red at gate 3: one leads the chunks over
+the whole launch (every slot's `first` 0 and its count every row), so a chunk crosses a slot, and one launches the
+chunks alone, so no launch scores the rows of one-row slots. A row scored by both launches gets the same bits from
+each, so no control can show it; each kernel's own exit test keeps the two sets apart.
+
+HIP's shared-row decode values (`plan_rows.hip`, under the same conditions with at most 8 query heads a block) replace
+`tf_plan_apply_*` byte for byte with two launches on its grid. `tf_plan_lone_apply_*` weighs the rows of one-row slots
+as `tf_plan_apply_*` does, and `tf_plan_rows_apply_*` has the block of every fourth row of a multi-row slot, counted
+from its `first`, weigh up to four rows of that slot from one read of each 128-key tile's values. Each row sums only
+its own keys in key order; a key past them is left out, not weighed 0, so a NaN or infinite value there cannot reach
+the row. Its registrations take fp32 scores and stats as inputs and run both head groups and both cache kinds on the
+score's launches (slots of 3, 1, 4, 2 and 6 rows, and 5 and 7 one-row slots), with NaN and infinite values at the key
+only a slot's last row weighs, at the key past all its rows and at scattered keys, and NaN and infinite scores and a
+NaN max at gate 1. Gate 4 weighs every key 1, 1/2 or 1/4 and sums integer values. Its controls go red at gate 3: one
+leads the chunks over the whole launch, and one launches the chunks alone.
+
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
@@ -416,17 +440,14 @@ HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
 
-Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
-`id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
-angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
-Its decoders' own kernels (`metal_idol_decoder*.zig`) are checked too: the point embedding, the stem's fp16 cast,
-`to_kv`, the heads' RMS norm, the attention's four forms (P V as fp16 P hi + lo) and its fp32 short form. Each is checked
-at idol-sdk's fp32 and fp16 points, with 15 controls. One drops P's lo half and must go red on heads built so that O is
-P's fp16 remainder alone.
-Its image encoder (`metal_idol_vae*.zig`, FLUX.2's VAE encoder in fp32) registers its convolutions (direct, implicit
-GEMM and Winograd), GroupNorm's passes, the 512-wide attention and the condition rows against float64 (12 controls).
-Metal also checks Idol's DINOv3 encoder (`metal_idol_dino*.zig`): its bf16 projections, LayerNorm and final F.layer_norm,
-the RoPE heads, LayerScale with the residual, SwiGLU and the attention, each at transformers' bf16 points (11 controls).
+Metal also checks Idol (`metal_idol*.zig`, each part's controls in [its recipe](recipes/idol.md)): the denoiser's fp16
+projections and GELU form, split-K fp32 rows, LayerNorms, RePo's angles, heads, elementwise steps and four attention
+forms at idol-sdk's fp16 points, and `id_gemm32`'s true fp32 sums, where the NAX fp32 path is a gate-4 control (19
+controls); the decoders' point embedding, fp16 stem cast, `to_kv`, RMS-normed heads and attention, P V as fp16 P hi +
+lo, which a control without the lo half must fail on heads whose O is that remainder alone (15); the FLUX.2 VAE
+encoder's convolutions (direct, implicit GEMM, Winograd), GroupNorm, 512-wide attention and condition rows in fp32
+against float64 (12); and DINOv3's bf16 projections, LayerNorms, RoPE heads, LayerScale, SwiGLU and attention at
+transformers' bf16 points (11).
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
@@ -445,6 +466,26 @@ and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (a
 8-wave edge. The linear's gate 4 is exact: all-ones trellis states give one weight (-0.651 at every width), so 6144
 terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
 and the linear reading its input rows one row late.
+
+HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads (`inkling2/attention.hip`,
+`contract_inkling2*.zig`, records in `hip_records_inkling2.zig`; `tf-hip-kernel-contract image inkling2`). It does not
+match #4125's CUDA bits; it keeps CUDA's rounding points and is held to the same float64 reference
+(`core.contract.inkling2_attn_ref`, with HIP's scalar fp32 chains): `tf_ink2_prep` (sliding and global, tau at n_floor
+8,192), `tf_ink2_rel_table`, and the chunked attention and its merge on sliding layers (`tf_ink2_attn`) and global ones
+(`tf_ink2_attn_fold`) to 1M keys on a ring that wraps. Every P is rounded to bf16 before its sum and P V, the sink enters
+last as a raw logit and the merge takes the raw gate's sigmoid, rounding once. The split launch (a block a 1,024-key
+sub-chunk) and the prompt launch (`tf_ink2_attn_prompt`: 8 pairs a block share one LDS stage while the next tile loads
+into registers, 37,120 bytes or 36.25 KiB) are bit-equal to the fold, and three streams in one launch are bit-equal to
+each stream alone, at its row and cache offsets (prep, sliding, fold and split). The float64 bound allows P's bf16
+rounding either way, so two exact cases pin it (sliding and fold): rows below position 64 with q 0, no sink, a gate
+whose sigmoid is 1 and integer values, and biases drawn so each bf16(exp2f) is certain, where every sum is exact in
+fp32 and each output must equal bf16(fp32(sum P v / sum P)) bit for bit. Eight controls go red at `shapes`: a bias one
+distance late, no sink, one q a bf16 step up (prompt), a window one key long, the sink and gate given after their
+sigmoid (as #4387's glue did), tau off, a table read one column late, and a prep writing one stream's keys into
+another's slots. `attend()` refuses a ring that is not whole 64-key tiles or is shorter than the window plus the
+call's rows less one, a call with no streams (only one stream takes the prompt kernel), and partial buffers holding
+fewer than rows x heads x stride partials. It does not refuse a global position past the ring, since the contract's
+4,096-slot ring over 1M keys wraps on purpose: the engine glue keeps a global layer's positions inside its ring.
 
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
@@ -487,6 +528,15 @@ Ornith-1.5-122B's routed block on Metal registers the experts' decode rows with 
 (`q27_rows_extra`, 4 and 8 bits), the router's softmax and top-k with renormalized bf16 weights (`q27_route`: picks
 equal to the host's, each weight within float64's range at its bf16 points), the tensor units' expert sort and gather
 (bit for bit), the experts' SwiGLU, and the weighted combine with the gated shared expert (in place and from its slot).
+The same kernels register at Qwen3.6-35B-A3B's served widths (experts of 512 over 2,048).
+qwen27's attention registers at the 27B's 24 query heads over 4 and the 35B-A3B's 16 over 2: a round's rows through the
+engine's own plan and launcher against float64 attention, prompt rows through the prompt kernel on every chip that
+builds it (`attention_prompt_sg` before the M5), and attention_io's packing, append and keep checked bit for bit (keep
+a second time on the caches the first left). A plan check shows the decode shapes plan prefix_1 to _6 for chains and
+_2 to _6 for trees, and a tree over two tail chunks. Its known finding: before the M5 a masked key's zero probability
+times an infinite value gives NaN in P V. Its controls: a row seeing one key past its own, the one-Mac merge dropping
+a round's later tail chunks, the prompt kernel losing its bounded last step, and an append one row late. prefix_5 and
+_6 have no launch record yet: past 256 threads they need a reserved thread count before M1 and M2 can admit them.
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.

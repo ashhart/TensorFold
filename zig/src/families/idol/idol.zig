@@ -19,6 +19,10 @@ pub const vae_kernels = @import("vae_kernels.zig");
 pub const vae_weights = @import("vae_weights.zig");
 /// Its DINOv3 ViT-H+/16 image encoder: an image to feature1.
 pub const dino = @import("dino.zig");
+/// The picture tf-idol-generate reads, in both encoders' layouts.
+pub const picture = @import("picture.zig");
+/// torch's CPU generator, for the starting noise.
+pub const torch_rng = @import("torch_rng.zig");
 pub const Model = model.Model;
 pub const Condition = model.Condition;
 pub const Timing = model.Timing;
@@ -42,4 +46,6 @@ test {
     _ = vae_kernels;
     _ = vae_weights;
     _ = dino;
+    _ = picture;
+    _ = torch_rng;
 }

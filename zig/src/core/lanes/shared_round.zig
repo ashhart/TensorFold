@@ -98,11 +98,12 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
         for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
         const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
+        // the log covers both grant paths; only the plain guard's price observes them
+        const head_ms = e.rule.pricedHeadMs(budgets);
+        if (try price_log.enabled(e)) try price_log.round(e, plans, windows, .{ .trial = calibration, .sampled = sampled, .ms = ms, .head_ms = head_ms, .heads = heads.items, .depths = budgets });
         if (independent) {
             var plain = total == plans.len;
             for (budgets) |d| plain = plain and d == 0;
-            const head_ms = e.rule.pricedHeadMs(budgets);
-            if (try price_log.enabled(e)) try price_log.round(e, plans, windows, .{ .trial = calibration, .sampled = sampled, .ms = ms, .head_ms = head_ms, .heads = heads.items, .depths = budgets });
             try e.rule.observeSharedPrice(@intCast(plans.len), total, ms, sampled, head_ms, plain, calibration);
         }
         try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));

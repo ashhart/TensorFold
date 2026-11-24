@@ -59,6 +59,62 @@ fn ulp16(x: f64) f64 {
     return std.math.pow(f64, 2, @floor(std.math.log2(a)) - 10);
 }
 
+/// A query's float64 sum P V, allowance terms and l; P fp32 (tile 0) or fp16 at each `tile` keys' running max.
+fn weigh(s: []const f64, ds: []const f64, v: []const f16, stride: usize, tile: usize, sums: f64, out: []f64, tol: []f64, flip: []f64) f64 {
+    var m: f64 = -std.math.inf(f64);
+    var top: usize = 0;
+    var nan = false;
+    for (s, 0..) |x, j| {
+        nan = nan or std.math.isNan(x);
+        if (x > m) {
+            m = x;
+            top = j;
+        }
+    }
+    if (nan) m = std.math.nan(f64);
+    @memset(out, 0);
+    @memset(tol, 0);
+    @memset(flip, 0);
+    var l: f64 = 0;
+    var mt: f64 = -std.math.inf(f64);
+    var at: usize = 0;
+    const step = if (tile == 0) s.len else tile;
+    var lo: usize = 0;
+    while (lo < s.len) : (lo += step) {
+        const hi = @min(lo + step, s.len);
+        for (s[lo..hi], lo..) |x, j| if (x > mt) {
+            mt = x;
+            at = j;
+        };
+        if (nan) mt = m;
+        // the tile's fp32 rescales to the final max (exact here: their rounding is in `sums`)
+        const a = @exp(mt - m);
+        for (s[lo..hi], ds[lo..hi], lo..) |sj, dj, j| {
+            const pj = @exp(sj - m);
+            l += pj;
+            // P's relative error: its score's and the top score's sums, exp2's approximation
+            const rel = dj + ds[top] + 0x1p-21;
+            var used = pj;
+            var turn: f64 = 0;
+            if (tile != 0) {
+                const pt = if (sj == -std.math.inf(f64)) 0 else @exp(sj - mt);
+                used = @as(f64, half(pt)) * a;
+                const u = ulp16(pt);
+                const mid = (@floor(pt / u) + 0.5) * u;
+                // where P rounds hangs on its score's and the running max's sums
+                if (@abs(pt - mid) <= pt * (dj + ds[at] + 0x1p-21) + 0x1p-60) turn = u * a;
+            }
+            for (out, tol, flip, 0..) |*o, *tl, *fl, e| {
+                const vv: f64 = v[j * stride + e];
+                o.* += used * vv;
+                tl.* += pj * @abs(vv) * (rel + sums);
+                fl.* += turn * @abs(vv);
+            }
+        }
+    }
+    return l;
+}
+
 pub const Attention = struct {
     rig: rig_.Rig,
     k: *const dk.Kernels,
@@ -184,7 +240,7 @@ pub const Attention = struct {
         return t.lq * H;
     }
 
-    /// Float64 O at the kernel's P; `mag` the allowance: fp32 steps, P's rounding near a midpoint, O's own rounding.
+    /// Float64 O at the kernel's P (see `weigh`); `mag` the allowance: fp32 steps, P near a midpoint, O's own rounding.
     pub fn reference(t: *Attention, want: []f64, mag: []f64) !void {
         const a = t.rig.gpu.gpa;
         const L = t.lk;
@@ -195,6 +251,7 @@ pub const Attention = struct {
         const kf = try a.alloc(f64, L * D);
         defer a.free(kf);
         const sums = c.gamma(@floatFromInt(depths[t.which](.{ .rows = heads, .n = t.lq, .k = L })), c.unit(.f32));
+        const tile: usize = if (t.rounded()) forms[t.which].tiles[2].size else 0;
         var qf: [D]f64 = undefined;
         var out: [D]f64 = undefined;
         var tol: [D]f64 = undefined;
@@ -206,9 +263,6 @@ pub const Attention = struct {
             };
             for (0..p) |i| {
                 for (&qf, t.qAt(i, hd)) |*x, b| x.* = b;
-                var m: f64 = -std.math.inf(f64);
-                var top: usize = 0;
-                var nan = false;
                 for (s, ds, 0..) |*sj, *dj, j| {
                     const Vec = @Vector(8, f64);
                     var acc: Vec = @splat(0);
@@ -221,37 +275,8 @@ pub const Attention = struct {
                     }
                     sj.* = @reduce(.Add, acc) * scale;
                     dj.* = c.gamma(D, c.unit(.f32)) * @reduce(.Add, mag_acc) * scale;
-                    nan = nan or std.math.isNan(sj.*);
-                    if (sj.* > m) {
-                        m = sj.*;
-                        top = j;
-                    }
                 }
-                if (nan) m = std.math.nan(f64);
-                var l: f64 = 0;
-                @memset(&out, 0);
-                @memset(&tol, 0);
-                @memset(&flip, 0);
-                for (s, ds, 0..) |sj, dj, j| {
-                    const pj = @exp(sj - m);
-                    l += pj;
-                    // P's relative error: its score's and the top score's sums, exp2's approximation
-                    const rel = dj + ds[top] + 0x1p-21;
-                    var used = pj;
-                    var turn: f64 = 0;
-                    if (t.rounded()) {
-                        used = half(pj);
-                        const u = ulp16(pj);
-                        const mid = (@floor(pj / u) + 0.5) * u;
-                        if (@abs(pj - mid) <= pj * rel + 0x1p-60) turn = u;
-                    }
-                    for (&out, &tol, &flip, t.vAt(j, hd)) |*o, *tl, *fl, vh| {
-                        const vv: f64 = vh;
-                        o.* += used * vv;
-                        tl.* += pj * @abs(vv) * (rel + sums);
-                        fl.* += turn * @abs(vv);
-                    }
-                }
+                const l = weigh(s, ds, t.kv.items[H + hd * D ..], 2 * H, tile, sums, &out, &tol, &flip);
                 var row = i;
                 while (row < t.lq) : (row += p) {
                     const at = row * H + hd * D;
@@ -308,4 +333,53 @@ test "an exact head's fp32 remainder lies past the short form's allowance, and i
     try std.testing.expect(@abs(remainder) > (1 * p_hi + p) * (rel + tiled) / l);
     const u = ulp16(p);
     try std.testing.expect(@abs(p - (@floor(p / u) + 0.5) * u) > p * 2 * rel);
+}
+
+/// The kernel's online softmax in fp32 over one value column: P to fp16 at the running max, o and l rescaled.
+fn online(s: []const f64, v: []const f16, tile: usize) f64 {
+    var m: f32 = -std.math.inf(f32);
+    var l: f32 = 0;
+    var o: f32 = 0;
+    var lo: usize = 0;
+    while (lo < s.len) : (lo += tile) {
+        const keys = s[lo..@min(lo + tile, s.len)];
+        var n = m;
+        for (keys) |x| n = @max(n, @as(f32, @floatCast(x)));
+        const a: f32 = if (m == -std.math.inf(f32)) 0 else @exp(m - n);
+        l *= a;
+        o *= a;
+        for (keys, v[lo..][0..keys.len]) |x, vh| {
+            const p = @exp(@as(f32, @floatCast(x)) - n);
+            l += p;
+            o += @as(f32, @as(f16, @floatCast(p))) * @as(f32, vh);
+        }
+        m = n;
+    }
+    return o / l;
+}
+
+test "a later tile's larger score moves where P rounds: the reference follows the tile maxima, not the final max" {
+    // tile 0's P V cancels at its own max (3 x 1 vs 4 x 0.75), not at tile 2's 0.2 higher; tile 1 far below
+    var s: [129]f64 = undefined;
+    var v: [129]f16 = undefined;
+    for (&s, &v, 0..) |*x, *y, j| {
+        x.* = if (j < 32) 0 else if (j < 64) @log(0.75) else if (j < 128) -30 else 0.2;
+        y.* = if (j < 32) 3 else if (j < 64) -4 else 0;
+    }
+    const ds: [129]f64 = @splat(c.gamma(D, c.unit(.f32)) * 4 * scale);
+    const sums = c.gamma(@floatFromInt(depthTiled(.{ .rows = heads, .n = 1, .k = s.len })), c.unit(.f32));
+    var o: [2][1]f64 = undefined;
+    var tol: [2][1]f64 = undefined;
+    var flip: [2][1]f64 = undefined;
+    var want: [2]f64 = undefined;
+    var mag: [2]f64 = undefined;
+    // 0: the kernel's 64-key tiles; 1: one tile over every key, P rounded at the final max
+    for ([_]usize{ 64, s.len }, 0..) |tile, i| {
+        const l = weigh(&s, &ds, &v, 1, tile, sums, &o[i], &tol[i], &flip[i]);
+        want[i] = o[i][0] / l;
+        mag[i] = (tol[i][0] + flip[i][0]) / l + @abs(want[i]) * 0x1p-10 + 0x1p-24;
+    }
+    const got = online(&s, &v, 64);
+    try std.testing.expect(@abs(got - want[0]) <= mag[0]);
+    try std.testing.expect(@abs(got - want[1]) > 4 * mag[1]);
 }
