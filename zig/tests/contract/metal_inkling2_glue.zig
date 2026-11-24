@@ -36,6 +36,16 @@ fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
 
+// The attention-residual probe runs a batch of rows, each with its own blocks, partial sums and two output queries.
+const ar_batch = 2;
+const ar_blocks = 4 * p.hidden;
+fn arBlocks(f: []f32, row: usize) []f32 {
+    return f[row * ar_blocks ..][0..ar_blocks];
+}
+fn arPartial(f: []f32, row: usize) []f32 {
+    return f[row * p.hidden ..][0..p.hidden];
+}
+
 pub const Probe = struct {
     a: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -113,7 +123,7 @@ pub const Probe = struct {
         };
     }
     pub fn count(self: *Probe) usize {
-        return if (self.kind == .ar) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
+        return if (self.kind == .ar) ar_batch * 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const out = try self.arena.allocator().alloc(f32, n);
@@ -151,15 +161,15 @@ pub const Probe = struct {
                 self.refs[2] = try self.input(self.f[1], true);
             },
             .ar => {
-                self.f[0] = try self.floats((r - 1) * p.hidden, rng);
-                self.f[1] = try self.floats(p.hidden, rng);
+                self.f[0] = try self.floats(ar_batch * ar_blocks, rng);
+                self.f[1] = try self.floats(ar_batch * p.hidden, rng);
                 self.f[2] = try self.floats(2 * p.hidden, rng);
                 if (fill == .stress) {
                     // Each 2304-term square sum is exactly 9 * 2^24 in FP32 under every order.
-                    for (0..r) |s| {
-                        const values = if (s + 1 == r) self.f[1] else self.f[0][s * p.hidden ..][0..p.hidden];
+                    for (0..ar_batch) |b| for (0..r) |s| {
+                        const values = if (s + 1 == r) arPartial(self.f[1], b) else arBlocks(self.f[0], b)[s * p.hidden ..][0..p.hidden];
                         @memset(values, if (s % 2 == 0) 256 else -256);
-                    }
+                    };
                     // Normalized mirrored queries leave +/-8; partial sums stay exact integers in FP32.
                     for (0..2) |query_row| {
                         const row = self.f[2][query_row * p.hidden ..][0..p.hidden];
@@ -255,7 +265,7 @@ pub const Probe = struct {
         const n: u32 = @intCast(self.shape.n);
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
-            .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
+            .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .router => if (self.split)
@@ -278,9 +288,7 @@ pub const Probe = struct {
                 for (0..p.hidden) |d| want[row * p.hidden + d] = p.embedValue(x, self.f[1], d);
             },
             .ar => {
-                var qout: [2 * p.hidden]f64 = undefined;
-                for (0..2) |q| p.blockResidual(self.f[0], self.f[1], self.f[2], r, q, qout[q * p.hidden ..][0..p.hidden]);
-                @memcpy(want, &qout);
+                for (0..ar_batch) |b| for (0..2) |q| p.blockResidual(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], r, q, want[(b * 2 + q) * p.hidden ..][0..p.hidden]);
                 break;
             },
             .conv_static => {
@@ -325,7 +333,7 @@ pub const Probe = struct {
                     .strided => .strided,
                 },
             };
-            for (0..2) |q| p.blockResidualIn(self.f[0], self.f[1], self.f[2], self.shape.rows, q, sim, out[q * p.hidden ..][0..p.hidden]);
+            for (0..ar_batch) |b| for (0..2) |q| p.blockResidualIn(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], self.shape.rows, q, sim, out[(b * 2 + q) * p.hidden ..][0..p.hidden]);
             return;
         }
         const mag = try self.a.alloc(f64, out.len);

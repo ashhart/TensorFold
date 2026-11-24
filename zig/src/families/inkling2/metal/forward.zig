@@ -144,9 +144,13 @@ fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref
     dense(m, e, weight, input, out, rows);
 }
 
-/// One row because M2's AR ABI is [sources,H] -> [queries,H]. Batch composition never mixes rows.
+/// A batch row's blocks, partial sums and output are a row apart; rows never mix.
+fn arBatch(rows: usize) glue.ARRows {
+    return .{ .rows = @intCast(rows), .blocks_stride = state.block_slots * state.hidden, .partial_stride = state.hidden, .out_stride = state.hidden };
+}
+
 fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: ck.Tensor, sources: usize, rows: usize) void {
-    for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(queries), row(s.mlp_ar, i, state.hidden * 4), @intCast(sources), 1);
+    glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(queries), at(s.mlp_ar, 0), @intCast(sources), 1, arBatch(rows));
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -169,7 +173,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
-            for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), query, arRow(s, role, rows, i, false), lp.attn_sources, 1);
+            glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), query, arRow(s, role, rows, 0, false), lp.attn_sources, 1, arBatch(rows));
         }
     }
     if (v.hasMessages()) {
@@ -378,10 +382,8 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);
-    for (0..final.work_rows) |j| {
-        const i = if (final.work_rows == rows) j else rows - 1;
-        glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(m.weights.output_query), row(s.mlp_ar, j, state.hidden * 4), m.weight_plan.final_sources, 1);
-    }
+    const first: usize = if (final.work_rows == rows) 0 else rows - 1;
+    glue.ar(&m.glue, e, at(s.blocks, first * state.block_slots * state.hidden * 2), row(s.partial, first, state.hidden * 4), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, arBatch(final.work_rows));
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
