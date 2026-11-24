@@ -12,6 +12,9 @@ pub const Mutation = enum {
     nv_decode_nibble,
     mx_decode_scale,
     combine_slot_order,
+    /// Grid faults, each in all five grid kernels; a grid cell's control runs one of them against main's bytes.
+    grid_block_drop,
+    grid_pair_index,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -23,6 +26,8 @@ pub const Mutation = enum {
             .nv_decode_nibble => "control: metal inkling2 experts tf_ink2_nvfp4_quantize nibble",
             .mx_decode_scale => "control: metal inkling2 experts tf_ink2_mxfp8_quantize scale",
             .combine_slot_order => "control: metal inkling2 experts tf_ink2_combine route-slot order",
+            .grid_block_drop => "control: metal inkling2 experts output block dropped",
+            .grid_pair_index => "control: metal inkling2 experts pair index halved",
         };
     }
 
@@ -44,6 +49,10 @@ pub const Mutation = enum {
                 .from = "for (uint expert = 0; expert < a.experts; ++expert)\n    for (uint slot = 0; slot < a.topk; ++slot)\n      if (uint(ids[group * a.topk + slot]) == expert)\n        sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
                 .to = "for (uint slot = 0; slot < a.topk; ++slot)\n    sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
             },
+            // every output block past the first returns before writing: columns 32 on stay unwritten
+            .grid_block_drop => .{ .from = "if (n >= a.n) return;", .to = "if (n >= a.n || tg.x > 0u) return;" },
+            // two route pairs (tokens) write one row, and the other stays unwritten
+            .grid_pair_index => .{ .from = "const uint n = tg.x * 32u + lane, group = tg.y;", .to = "const uint n = tg.x * 32u + lane, group = tg.y / 2u;" },
         };
     }
 };
@@ -53,6 +62,7 @@ pub fn apply(a: std.mem.Allocator, m: Mutation) ![]u8 {
     const change = m.edit();
     const expected: usize = switch (m) {
         .nv_gu_up, .mx_gu_up, .nv_down_phi => 2,
+        .grid_block_drop, .grid_pair_index => 5,
         else => 1,
     };
     if (std.mem.count(u8, src.experts, change.from) != expected) return error.ControlEditCount;
