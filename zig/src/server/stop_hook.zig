@@ -15,7 +15,7 @@ pub const StopHook = struct {
         const inkling = @import("chat_inkling2.zig");
         const window = if (inkling.enabled(h.srv)) inkling.stopWindow(h.stops.strings) else h.stops.tail();
         const tail = emitted[emitted.len -| window..];
-        if (inkling.enabled(h.srv)) return inkling.stopIn(arena.allocator(), h.srv.text, tail, h.stops.strings) catch false;
+        if (inkling.enabled(h.srv)) return inkling.stopIn(arena.allocator(), h.srv.text, emitted, window, h.stops.strings) catch false;
         const text = h.srv.text.decode(arena.allocator(), tail) catch return false;
         for (h.stops.strings) |stop| if (std.mem.indexOf(u8, text, stop) != null) return true;
         return false;
