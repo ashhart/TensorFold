@@ -176,15 +176,25 @@ pub const Refiner = struct {
     }
 };
 
-const FrontNames = struct {
-    pub fn accepts(_: FrontNames, name: []const u8) bool {
-        return std.mem.startsWith(u8, name, "condition_proj.") or std.mem.startsWith(u8, name, "token_refiner.");
+/// The names the refiner takes: condition_proj, its `blocks` blocks' tensors and its final norm.
+pub const FrontNames = struct {
+    blocks: usize,
+
+    pub fn accepts(n: FrontNames, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "condition_proj.weight") or std.mem.eql(u8, name, "condition_proj.bias")) return true;
+        if (!std.mem.startsWith(u8, name, "token_refiner.")) return false;
+        const rest = name["token_refiner.".len..];
+        if (std.mem.eql(u8, rest, "final_norm.weight")) return true;
+        if (!std.mem.startsWith(u8, rest, "blocks.")) return false;
+        const dot = std.mem.indexOfScalar(u8, rest["blocks.".len..], '.') orelse return false;
+        const i = std.fmt.parseInt(usize, rest["blocks.".len..][0..dot], 10) catch return false;
+        return i < n.blocks;
     }
 };
 
 /// A MiniMax-H3 transformer folder's text front end at `g`.
 pub fn loadRefiner(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, g: rules.Refiner) !Refiner {
-    var r: Refiner = .{ .g = g, .shards = try open(gpa, io, device, dir, FrontNames{}), .cond_w = undefined, .cond_b = undefined, .final_norm = undefined, .blocks = &.{} };
+    var r: Refiner = .{ .g = g, .shards = try open(gpa, io, device, dir, FrontNames{ .blocks = g.blocks }), .cond_w = undefined, .cond_b = undefined, .final_norm = undefined, .blocks = &.{} };
     errdefer r.shards.deinit(gpa);
     inline for (.{ "cond_w", "cond_b", "final_norm" }, rules.frontTensors(g)) |field, s| {
         std.debug.assert(std.mem.eql(u8, field, s[0]));
@@ -203,4 +213,3 @@ pub fn loadRefiner(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: 
     }
     return r;
 }
-

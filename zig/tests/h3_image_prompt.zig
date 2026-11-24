@@ -417,3 +417,42 @@ test "h3 prompt weights: only the accepted tensors' bytes are read ahead, prefet
     try testing.expectEqual(@as(usize, 1), shards.files.len);
     try testing.expectEqualSlices(u8, file.items[8 + json.items.len ..][0..16], weights.Shards.bytes(try shards.take("model.embed_tokens.weight", .{ 2, 4 }), 16));
 }
+
+test "h3 prompt weights: an extra refiner block's bytes are not read ahead, prefetch on and off" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // shard a holds the front tensors and blocks 0-1 beside an extra block 2's tensor; shard b only block 2's
+    const header =
+        \\{"condition_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[0,16]}
+        \\,"condition_proj.bias":{"dtype":"BF16","shape":[2],"data_offsets":[16,20]}
+        \\,"token_refiner.final_norm.weight":{"dtype":"BF16","shape":[4],"data_offsets":[24,32]}
+        \\,"token_refiner.blocks.0.norm1.weight":{"dtype":"BF16","shape":[4],"data_offsets":[32,40]}
+        \\,"token_refiner.blocks.1.attn.qkv_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[40,56]}
+        \\,"token_refiner.blocks.2.norm1.weight":{"dtype":"BF16","shape":[4],"data_offsets":[56,64]}
+    ;
+    var json: std.ArrayList(u8) = .empty;
+    try json.appendSlice(a, header);
+    while ((8 + json.items.len + 1) % 8 != 0) try json.append(a, ' ');
+    try json.append(a, '}');
+    var file: std.ArrayList(u8) = .empty;
+    try file.appendSlice(a, &std.mem.toBytes(std.mem.nativeToLittle(u64, json.items.len)));
+    try file.appendSlice(a, json.items);
+    for (0..64) |i| try file.append(a, @truncate(i));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a.safetensors", .data = file.items });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b.safetensors", .data = file.items });
+    const index = try std.fmt.allocPrint(a,
+        \\{{"weight_map":{{"condition_proj.weight":"a.safetensors","condition_proj.bias":"a.safetensors","token_refiner.final_norm.weight":"a.safetensors","token_refiner.blocks.0.norm1.weight":"a.safetensors","token_refiner.blocks.1.attn.qkv_proj.weight":"a.safetensors","token_refiner.blocks.2.norm1.weight":"a.safetensors","token_refiner.blocks.2.attn.out_proj.weight":"b.safetensors"}}}}
+    , .{});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors.index.json", .data = index });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var shards = try weights.open(testing.allocator, testing.io, try mtl.Device.init(), dir, weights.FrontNames{ .blocks = 2 });
+    defer shards.deinit(testing.allocator);
+    const readers = try @import("core").checkpoint_read_ahead.readers();
+    try testing.expectEqual(if (readers == 0) @as(u64, 0) else 52, shards.ahead);
+    try testing.expectEqual(@as(usize, 1), shards.files.len);
+    try testing.expectEqualSlices(u8, file.items[8 + json.items.len ..][40..56], weights.Shards.bytes(try shards.take("token_refiner.blocks.1.attn.qkv_proj.weight", .{ 2, 4 }), 16));
+}
