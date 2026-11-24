@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/prompt_cache/flush` takes an optional `retain` count that keeps the most recently used prompt states in RAM and on disk; without it the flush is unchanged (#4856).
+
 - Flash Next on CUDA: the pass scratch now has room for the MTP head's own rows, so a 128 to 1,023-token prompt with drafts on no longer writes past it (#4801). Thanks @BadAd84.
 
 - Core KV pool: a host tier keeps logical pages in host RAM behind device frames, with leases, pins and per-page dirty tracking; it refuses empty or partial geometry before it allocates, and the ranks' lockstep check covers dirty pages (#1501, refs #1113). Thanks @BlivionIaG.
