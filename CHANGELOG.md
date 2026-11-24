@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol: octree and decode-trace allocation failures now unwind cleanly and free what they hold, with successful output unchanged (#4304).
+
 - MOSS-Image contract: the reference for `tf_me_conv` now follows fp32 `expf` overflow, so its sums check no longer fails on inputs near -89 (#4794).
 
 - HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
