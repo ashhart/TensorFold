@@ -209,6 +209,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
+- KV pool: a host tier keeps logical pages in host RAM behind device frames, with leases, pins and per-page dirty tracking, and the ranks' lockstep open check hashes dirty pages, so two ranks that cannot evict the same page refuse to open together (#1501).
 
 ## 1.3.4
 
