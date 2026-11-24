@@ -16,7 +16,7 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         const found = reply.native_calls;
         const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse return null;
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
-        reply.finish_reason = "tool_calls";
+        if (!reply.native_cut_calls) reply.finish_reason = "tool_calls";
         reply.tool_calls_streamed = false;
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
     }
@@ -59,7 +59,7 @@ pub fn streamed(r: anytype, delta: Value) Allocator.Error!void {
 }
 
 /// The reply's `tensorfold.kept_tool_calls`: both counts, and the unoffered names the model wrote.
-fn keptBlock(a: Allocator, parsed: tool_parse.Parsed) Allocator.Error!Value {
+pub fn keptBlock(a: Allocator, parsed: tool_parse.Parsed) Allocator.Error!Value {
     const o = try json.newObject(a);
     try o.put(a, "unoffered", try json.intValue(a, parsed.kept_unoffered));
     try o.put(a, "malformed", try json.intValue(a, parsed.kept_malformed));

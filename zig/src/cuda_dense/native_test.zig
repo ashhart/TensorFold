@@ -55,7 +55,7 @@ test "a recipe with a tower adds exactly the vision decls and fields the host re
     inline for (.{ "precision", "kv8", "prompt_int8", "loops", "rank", "drafter" }) |f| try std.testing.expect(!@hasField(V.Options, f));
     inline for (.{ "layout", "engine_paged", "free_streams", "target" }) |f| try std.testing.expect(@hasField(V.Loaded, f));
     try std.testing.expect(!@hasDecl(N, "default_image_tokens") and !@hasDecl(N, "visionBytes") and !@hasField(N.Loaded, "vision"));
-    try std.testing.expectEqual(@as(u64, (5 << 20) + (3 << 16)), try V.visionBytes(std.testing.allocator, std.testing.io, ""));
+    try std.testing.expectEqual(@as(u64, (5 << 20) + (3 << 16)), try V.visionBytes(std.testing.allocator, std.testing.io, "", 0, 1));
     try std.testing.expectEqual(@as(?u64, 1 << 20), try V.textWeightBytes(std.testing.allocator, std.testing.io, ""));
 }
 

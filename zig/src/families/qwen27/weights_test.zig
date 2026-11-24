@@ -4,6 +4,7 @@ const Config = @import("config.zig");
 const ck = @import("checkpoint.zig");
 const Formats = @import("affine.zig").Formats;
 const weights = @import("weights.zig");
+const widths = @import("widths.zig");
 const gpa = std.testing.allocator;
 const json = "{\"model_type\":\"qwen3_5\",\"hidden_size\":64,\"intermediate_size\":128,\"num_hidden_layers\":4,\"num_attention_heads\":4,\"num_key_value_heads\":2,\"head_dim\":16,\"vocab_size\":96,\"linear_num_key_heads\":2,\"linear_num_value_heads\":4,\"linear_key_head_dim\":16,\"linear_value_head_dim\":16,\"linear_conv_kernel_dim\":4,\"eos_token_id\":[2,11],\"quantization\":{\"bits\":4,\"group_size\":32,\"layers.0.linear_attn.in_proj_a\":false}}";
 const Fake = struct {
@@ -168,4 +169,48 @@ test "wrong layer schedule cannot reuse an attention matrix as recurrent weights
     var c = try Config.parse(gpa, json, null);
     c.kinds[3] = .linear;
     try std.testing.expectError(error.MissingTensor, weights.load(gpa, src.source(), &fmt, c));
+}
+
+test "a tied head binds the embedding's own bytes, counts them once and refuses a stored head" {
+    var src = try Fake.init("");
+    defer src.deinit();
+    var fmt = try Formats.init(gpa, json);
+    defer fmt.deinit();
+    var c = try Config.parse(gpa, json, null);
+    var untied = try weights.load(gpa, src.source(), &fmt, c);
+    defer untied.deinit();
+    const untied_bytes = try untied.tensorBytes();
+    c.tied_head = true;
+    try std.testing.expectError(error.TiedHeadInCheckpoint, weights.load(gpa, src.source(), &fmt, c));
+    for ([_][]const u8{ "weight", "scales", "biases" }) |leaf| {
+        var name: [32]u8 = undefined;
+        const removed = src.tensors.fetchRemove(try std.fmt.bufPrint(&name, "lm_head.{s}", .{leaf})).?;
+        gpa.free(removed.key);
+        gpa.free(removed.value.bytes);
+    }
+    var w = try weights.load(gpa, src.source(), &fmt, c);
+    defer w.deinit();
+    const e = w.embed.quantized;
+    const h = w.head.quantized;
+    try std.testing.expectEqual(e.weight.bytes.ptr, h.weight.bytes.ptr);
+    try std.testing.expectEqual(e.scales.bytes.ptr, h.scales.bytes.ptr);
+    try std.testing.expectEqual(e.biases.bytes.ptr, h.biases.bytes.ptr);
+    try std.testing.expectEqualSlices(u8, e.weight.bytes, h.weight.bytes);
+    const head_bytes = e.weight.bytes.len + e.scales.bytes.len + e.biases.bytes.len;
+    try std.testing.expectEqual(untied_bytes - head_bytes, try w.tensorBytes());
+}
+
+test "a tied head takes the embedding's width, not the format an lm_head key would name" {
+    const text = "{\"quantization\":{\"group_size\":32,\"bits\":4,\"model.embed_tokens\":{\"group_size\":32,\"bits\":8},\"lm_head\":{\"group_size\":32,\"bits\":4}}}";
+    var fmt = try Formats.init(gpa, text);
+    defer fmt.deinit();
+    var c = try Config.parse(gpa, json, null);
+    var untied = try widths.Widths.resolve(gpa, &fmt, c);
+    defer untied.deinit();
+    try std.testing.expectEqual(@as(u8, 4), untied.head.bits);
+    c.tied_head = true;
+    var tied = try widths.Widths.resolve(gpa, &fmt, c);
+    defer tied.deinit();
+    try std.testing.expectEqual(tied.embed, tied.head);
+    try std.testing.expectEqual(@as(u8, 8), tied.head.bits);
 }

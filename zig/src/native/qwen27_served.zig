@@ -11,6 +11,7 @@ const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const share_fit = @import("qwen27_share_fit.zig");
 const slot_state = @import("qwen27_slots.zig");
+const standing = @import("qwen27_standing.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
@@ -23,6 +24,10 @@ const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
 const keepEnd = @import("qwen27_keep_end.zig").keepEnd;
 const Allocator = std.mem.Allocator;
+const helpers = @import("qwen27_served_helpers.zig");
+const room = helpers.room;
+const drafterRefusal = helpers.drafterRefusal;
+const gibBytes = helpers.gibBytes;
 
 pub const Options = struct {
     context: u32,
@@ -181,12 +186,6 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
     return share_fit.room(cache_fit.ram(), cache_fit.footprint(), try laterFootprint(h), guards);
 }
 
-/// Room left beside the weights and an 8 GiB margin.
-fn room(model: *const q.model.Model) usize {
-    const dev = model.device;
-    return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), cap()) catch 0;
-}
-
 /// TF_QWEN27_WORKING_SET_BYTES: a development cap on the device's reported working set.
 const cap = reserve.cap;
 
@@ -293,12 +292,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     return h;
 }
 
-/// Why --drafter is refused before the target or the drafter loads.
-fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyerror) ![]const u8 {
-    if (err == error.DraftForAnotherTarget) return std.fmt.allocPrint(a, "--drafter {s} drafts for another target: its width, vocabulary or tapped layers do not fit {s} (DraftForAnotherTarget)", .{ drafter, dir });
-    return std.fmt.allocPrint(a, "--drafter {s} is not a drafter the native Qwen engine serves for {s} ({s}): it takes z-lab/Qwen3.8-27B-DFlash2 as released, for Qwen3.8-27B", .{ drafter, dir, @errorName(err) });
-}
-
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
 pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const setup = tf.startup_receipt.span(.runtime_setup);
@@ -330,7 +323,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const gpa = if (profiling) h.counted.allocator() else parent;
     var draft_model = drafter;
     const owns_draft = drafter == null and o.drafter != null;
-    if (owns_draft) draft_model = q.dflash.runtime_model.Model.load(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
+    if (owns_draft) draft_model = q.dflash.runtime_model.Model.loadSpan(gpa, io, model, o.drafter.?, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference, capacity + window) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
     };
@@ -341,7 +334,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const shared = try q.simd_attention.sharedPrefix(model.device.tensorUnits());
     // the MTP head's keys and values: one more attention layer a slot, beside the drafter's ring when there is one
     const head_kv: usize = if (mtp_on) @as(usize, capacity + window) * model.config.kvDim() * 2 * 2 else 0;
-    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
+    var fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, head_kv + if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
+    if (draft_model) |d| fit_prompt.tap_row = memory.tapRowBytes(model.config.hidden, d.graph.config.tap_count, d.graph.config.variant == .v1);
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
@@ -355,7 +349,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         model.frame.deinit();
         model.frame = next;
     }
-    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytes(model.config, capacity + window, slots, rows, shared, fit_prompt.ring, fit_prompt.planes) });
+    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytesTaps(model.config, capacity + window, slots, rows, shared, fit_prompt.ring, if (fit_prompt.tap_row > 0) fit_prompt.tap_row else memory.tapRowBytes(model.config.hidden, fit_prompt.planes, false)) });
     h.gpa = gpa;
     h.model = model;
     h.owns_model = false;
@@ -365,8 +359,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null; // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in pages; Fit charged each its window
-    h.runner = try if (try q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
+    h.trace = null;
+    const paged = try q.decode_round.pagesOn();
+    const kv_step = if (paged) null else q.kv_grow.step(@import("sys").environment.rawText("TF_Q27_KV_GROW")) catch |err| {
+        why.* = "TF_Q27_KV_GROW must be 0 (off) or a row count that is a multiple of 16";
+        return err;
+    };
+    h.runner = try if (paged) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initGrow(gpa, model, slots, capacity + window, 1, kv_step);
+    if (kv_step) |s| std.log.info("qwen27: K/V grows as used: a slot starts at {d} rows and grows by {d} or a quarter, up to {d}", .{ q.kv_grow.first(s, capacity + window), s, capacity + window });
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -380,6 +380,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
     h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
+    h.runner.grown = .{ .ctx = h, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null or mtp_on) try h.back.measure(io);
     h.mtp = null;
@@ -398,7 +399,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .image_share = if (o.vision) |x| x.image_share else .request, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft) |d| .{ .kind = d.model.graph.config.kind(), .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .penalties = true, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -431,15 +432,14 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
-    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = slot_state.resumeAt }, why); // --prefill-from
+    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
     errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
-    std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
+    std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
     return h;
 }
-
 test "qwen27 startup: draft stream count, singular text and optional suffixes" {
     const limit = try lb.draftSlots();
     const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
@@ -491,11 +491,6 @@ fn profileEvery() ?u64 {
 fn laterRoom(h: *const Host) u64 {
     const guards = share_fit.Guards.read() catch return 0;
     return share_fit.room(cache_fit.ram(), cache_fit.footprint(), laterFootprint(h) catch return 0, guards);
-}
-
-/// --prompt-cache-gib's bytes (0 or less: none).
-fn gibBytes(gib: f64) u64 {
-    return if (gib > 0) std.math.lossyCast(u64, gib * cache_fit.GiB) else 0;
 }
 
 /// Reserve later buffers and the loaded share's priced bytes that its construction left outside the footprint.

@@ -46,6 +46,18 @@ pub fn steps(b: *std.Build, o: Options) void {
     }) }));
     b.step("test-lighton-hip-contract-host", "Independent LightOn HIP contract references without a device").dependOn(&lighton_ref.step);
     o.test_step.dependOn(&lighton_ref.step);
+    const ink_plan = b.addRunArtifact(b.addTest(.{ .root_module = inkling2(b, b.graph.host, .Debug, o.host) }));
+    const ink_layout = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_inkling2_fill.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "core", .module = o.host.import_table.get("core").? }, .{ .name = "inkling2_hip", .module = inkling2(b, b.graph.host, .Debug, o.host) } },
+    }) }));
+    const ink_step = b.step("test-inkling2-hip-host", "Inkling 2's HIP attention plan and contract layouts without a device");
+    for ([_]*std.Build.Step{ &ink_plan.step, &ink_layout.step }) |st| {
+        ink_step.dependOn(st);
+        o.test_step.dependOn(st);
+    }
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, o.lighton_gpu, controls(b, o.arch, own));
@@ -79,6 +91,12 @@ pub fn steps(b: *std.Build, o: Options) void {
     const host_runner = runner(b, b.graph.host, .Debug, o.host, o.lighton_host, controls(b, "", null));
     o.test_step.dependOn(&host_runner.step);
     b.step("check-hip-kernel-contract-host", "Compile the complete HIP contract registry with inert kernels").dependOn(&host_runner.step);
+}
+
+/// Inkling 2's HIP attention launches over the HIP backend `hip_mod`.
+fn inkling2(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, hip_mod: *std.Build.Module) *std.Build.Module {
+    const root = b.path("zig/src/families/inkling2/hip_attention.zig");
+    return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
 }
 
 /// The controls' code object as the `hip_controls` module (empty without hipcc).
@@ -119,6 +137,7 @@ fn runner(
             .{ .name = "hip_controls", .module = ctl },
             .{ .name = "glm_ocr_ops", .module = ocr_ops },
             .{ .name = "lighton_ocr", .module = lighton_mod },
+            .{ .name = "inkling2_hip", .module = inkling2(b, target, optimize, hip_mod) },
             .{ .name = "qwen_hip_vision", .module = @import("lighton_hip.zig").vision(b, target, optimize, hip_mod, hip_mod.import_table.get("core").?, lighton_mod.import_table.get("lanes").?, lighton_mod.import_table.get("hip_serve").?) },
         },
     }) });

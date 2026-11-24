@@ -39,6 +39,24 @@ const Box = struct {
     }
 };
 
+const FakeSnaps = struct {
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return 64 + 4 * @as(u64, at);
+    }
+    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!prompt_cache.Saved {
+        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+        return f.save(@ptrCast(@alignCast(owner.?)), at);
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: prompt_cache.Saved) anyerror!void {
+        return error.BackendRestores;
+    }
+    fn drop(ptr: *anyopaque, saved: prompt_cache.Saved) void {
+        const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+        f.drop(saved);
+    }
+};
+const fake_snap_vtable: prompt_cache.Snapshots.VTable = .{ .bytes = FakeSnaps.bytes, .save = FakeSnaps.save, .restore = FakeSnaps.restore, .drop = FakeSnaps.drop };
+
 /// Chunks the fake ran for prompt-only streams.
 const WarmChunks = struct {
     n: std.atomic.Value(usize) = .init(0),
@@ -190,23 +208,6 @@ test "a warm pass its cache keeps nothing of runs no chunk: no planned mark, and
 
 test "a warm_usable store keeps a warm pass's grid mark but not its end off the grid; without it, the end too" {
     const gpa = std.testing.allocator;
-    const pc = api.prompt_cache;
-    const Snaps = struct {
-        fn bytes(_: *anyopaque, at: u32) u64 {
-            return 64 + 4 * @as(u64, at);
-        }
-        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            return f.save(@ptrCast(@alignCast(owner.?)), at);
-        }
-        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
-            return error.BackendRestores;
-        }
-        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            f.drop(saved);
-        }
-    };
     for ([_]bool{ true, false }) |usable| {
         var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         defer cfg.deinit(gpa);
@@ -216,7 +217,7 @@ test "a warm_usable store keeps a warm pass's grid mark but not its end off the 
         var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
         defer core.deinit();
         // dots.mocr's rules, scaled down: a grid of 4 and no request starts, so only multiples of 4 resume
-        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 400);
+        var store = prompt_cache.Store.init(gpa, .{ .ptr = &target, .vtable = &fake_snap_vtable }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 400);
         defer store.deinit();
         var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
         host.cache = &store;
@@ -241,23 +242,6 @@ test "a warm_usable store keeps a warm pass's grid mark but not its end off the 
 
 test "a one-snapshot store keeps the warm pass's usable mark over an unusable end; the next request resumes the mark" {
     const gpa = std.testing.allocator;
-    const pc = api.prompt_cache;
-    const Snaps = struct {
-        fn bytes(_: *anyopaque, at: u32) u64 {
-            return 64 + 4 * @as(u64, at);
-        }
-        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            return f.save(@ptrCast(@alignCast(owner.?)), at);
-        }
-        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
-            return error.BackendRestores;
-        }
-        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-            f.drop(saved);
-        }
-    };
     for ([_]bool{ true, false }) |usable| {
         var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         defer cfg.deinit(gpa);
@@ -270,7 +254,7 @@ test "a one-snapshot store keeps the warm pass's usable mark over an unusable en
         // The 128-row cut and 192-row warm end, scaled to a grid of 4: the end at 6 is off it.
 
         // A budget of one snapshot (88 B) fits either state, never both.
-        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 100);
+        var store = prompt_cache.Store.init(gpa, .{ .ptr = &target, .vtable = &fake_snap_vtable }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 100);
         defer store.deinit();
         var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
         host.cache = &store;
@@ -485,4 +469,72 @@ test "a warm pass gives way to a request still filling its prompt: no quiet wait
         // without the wait, the pass asked before its next chunk; with it, the GPU never ran one of it
         try std.testing.expectEqual(@as(usize, @intFromBool(quiet == 0)), behind.chunks.load(.monotonic));
     }
+}
+
+test "a re-rendered tool history restores its rewind row and matches a fresh reply" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var store = prompt_cache.Store.init(gpa, .{ .ptr = &target, .vtable = &fake_snap_vtable }, .{ .chunk = 1, .min_prompt = 0, .warm = .waits }, 8192);
+    defer store.deinit();
+
+    const Reply = struct {
+        box: Box = .{},
+        ids: [4]u32 = undefined,
+        cached: u32 = 0,
+
+        fn event(ctx: *anyopaque, id: Id, e: *const Event) void {
+            const reply: *@This() = @ptrCast(@alignCast(ctx));
+            switch (e.*) {
+                .prefilled => |count| reply.cached = count,
+                .tokens => |ids| @memcpy(reply.ids[reply.box.tokens..][0..ids.len], ids),
+                else => {},
+            }
+            Box.event(&reply.box, id, e);
+        }
+    };
+
+    // The follow-up omits the assistant's reasoning, retaining the tool call and adding its result.
+    const predicted = [_]u32{ 1, 2, 3, 4, 70, 71, 80, 81, 9 };
+    const rendered = [_]u32{ 1, 2, 3, 4, 80, 81, 9, 90, 91, 10 };
+    const diff: u32 = @intCast(std.mem.indexOfDiff(u32, &predicted, &rendered).?);
+    const warm: Request = .{
+        .prompt = &predicted,
+        .max_tokens = 0,
+        .background = true,
+        .history_len = predicted.len,
+        .rewind_len = diff,
+        .born = 2,
+        .decode_spans = &.{.{ 2, 8 }},
+    };
+    const next: Request = .{ .prompt = &rendered, .max_tokens = 4, .decode_spans = &.{.{ 2, 6 }} };
+    var warm_reply: Reply = .{};
+    var fresh_reply: Reply = .{};
+    for ([_]?*prompt_cache.Store{ &store, null }, [_]*Reply{ &warm_reply, &fresh_reply }) |cache, reply| {
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+        host.decoded_rows = true;
+        host.cache = cache;
+        host.advertiseCache(cache);
+        try host.start();
+        defer host.stop();
+        if (cache != null) {
+            var box: Box = .{};
+            try host.engine().submit(1, &warm, .{ .ctx = &box, .event = Box.event });
+            try std.testing.expectEqual(Reason.length, box.wait());
+            const continued = predicted ++ [_]u32{90};
+            const kept = store.find(&continued, &.{}, warm.decode_spans) orelse return error.WarmEndMissing;
+            try std.testing.expectEqual(@as(u32, predicted.len), kept.at);
+        }
+        try host.engine().submit(2, &next, .{ .ctx = reply, .event = Reply.event });
+        try std.testing.expectEqual(Reason.length, reply.box.wait());
+        try std.testing.expectEqual(reply.ids.len, reply.box.tokens);
+    }
+    try std.testing.expectEqual(diff, warm_reply.cached);
+    try std.testing.expectEqual(@as(u32, 0), fresh_reply.cached);
+    try std.testing.expectEqualSlices(u32, &fresh_reply.ids, &warm_reply.ids);
 }

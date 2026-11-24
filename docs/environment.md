@@ -34,9 +34,12 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |
 | `TF_TIMING` | Exactly `0` or `1`; default off (each call's wall time on stderr while set) |
 | `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
+| `TF_DFLASH_QL_SPAN` | Exactly `0` or `1`; default off. `1` drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 vocabulary spans; other head formats stay whole |
+| `TF_DFLASH_GRAPH` | Exactly `0` or `1`; default off. `1` replays DFlash2 holds and live absorbs from CUDA graphs, with the same kernels and arguments in the same order |
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |
 | `TF_MTP_BATCH` | Exactly `0` or `1`; default on. `0` keeps one stream at a time |
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
+| `TF_Q35_GROUP_PROJ` | Exactly `0` or `1`, read when a ModelOpt checkpoint loads on CUDA (sm_90 or newer); default off. `1` runs Qwen 3.5 same-input decode projections (MLP gate and up, GDN `in_proj_qkv` and `in_proj_z`, `in_proj_a` and `in_proj_b`, attention q, k and v) as one launch per group, each projection with its own tile and K slices, so outputs keep their bits |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |
@@ -47,7 +50,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
-| `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+| `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96, or two blocks per SM with `TF_QMMF_HALF_BN=1` |
+| `TF_QMMF_HALF_BN` | Exactly `0` or `1`, read when a CUDA lane loads; default off. `1` also gives FP4, FP8 and FP8G decode calls of 16 rows or fewer the 32-column half tile, below `TF_QMMF_HALF_BELOW` blocks (default two per SM, so 340 on 170 SMs and 96 on 48). Columns split, never K, so every output keeps its bits |
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
@@ -56,6 +60,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_UNIFIED_HOST_COUNTS` | Exactly `0` or `1`, checked when the CUDA backend starts. An integrated GPU on Linux admits against `/proc/meminfo` with `1` and against the CUDA pool with `0`; unset, it reads the pool under WSL2 (`WSL_DISTRO_NAME` set) and `/proc/meminfo` otherwise ([Windows](WINDOWS.md)) |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+| `TF_QWEN35_ATTN_ALL_ROWS` | Qwen3.8 on CUDA: exactly `0` or `1`; unset, empty or `0` keeps the current BF16 decode attention launches. `1` uses the existing rows kernel at every context length and skips the separate partial launch for decode windows wider than one row. The kernel contract compares output bytes against the original dual-launch path |
 | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_GEMMA4_ARGMAX_GRAPH` | Gemma 4 on CUDA: exactly `0` or `1`; default off. `1` captures a greedy verify round's argmax (the same `tf_round_bf16_argmax` over the same logits) in the target forward's graph, skips the drawn-token download no greedy entry reads, and stages each forward's ids, positions and slots in pinned memory; target tokens keep their bits |
@@ -83,10 +88,12 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
 | `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
 | `TF_NEMOTRON_WORLD` | Nemotron 3.5 Super on CUDA: a whole rank count from 1 through 4294967295, set with `TF_NEMOTRON_RANK`; unset with it gives one rank |
+| `TF_NEMOTRON_WIDE_ROUNDS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` lets Nemotron's shared rounds hold 16 streams and 32 rows on GB10 (one rank, non-latent, not Bolt, no `--precision checkpoint`, no bf16 experts, no Sliding Weights or saved lessons; refused with a log line naming why), each row's bits as in two 16-row rounds; a lone stream's window is unchanged |
 | `TF_MINIMAX_RANK` | MiniMax-M3.1-Flash on CUDA: a whole rank index, 0 or 1 at two ranks, set with `TF_MINIMAX_WORLD`; unset with it gives one rank |
 | `TF_MINIMAX_WORLD` | MiniMax-M3.1-Flash on CUDA: a whole rank count, 2 at CUDA, set with `TF_MINIMAX_RANK`; unset with it gives one rank |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
+| `TF_LFM3_METAL_WARM_TURNS` | Exactly `0` or `1`; default off. Uses one-row LFM3 Metal prefill even with caching disabled. A prompt cache enables background warm turns. |
 | `TF_METAL4` | Metal: exactly `0` or `1`; `1` sends a family's GPU work through Metal 4 (macOS 26 and later) where the family supports it: the same kernels in the same order, with Metal 4's command queue, allocators, argument tables and barriers, and bit-identical outputs; `0` keeps Metal 3. DeepSeek-V4.1 defaults to `1` where the Mac has Metal 4 (its device test rigs to `0`); Macs without it stay on Metal 3 |
 | `TF_DSV41_ROUND_PROF` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` logs decode rounds' host milliseconds (first encode to last wait) and GPU milliseconds by rows, every 1,024 rounds; default 0 |
 | `TF_METAL4_TIMELINE` | Metal 4: a whole round count, default 0; `n` puts a GPU timestamp at every stage (between barriers) of `n` rounds of each kind a family names, after 8 warm ones, and logs their time by kernel and the longest stages. DeepSeek-V4.1 names its decode rounds by rows. Stamps cost GPU time, so stamped rounds read a little long |
@@ -96,7 +103,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_QWEN27_SHARED_PREFIX` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `0` keeps cached keys on the tail attention kernel; unset or blank is `1` |
 | `TF_QWEN27_SLOT_RESUME` | Qwen3.8-27B on Metal: exactly `0` or `1`; `0` stops slot 0 resuming a later prompt; unset or blank keeps it on |
 | `TF_QWEN27_METAL_KV_PAGES` | Qwen3.8-27B on Metal: exactly `0` or `1`; `1` puts keys and values in core-pool pages (refused on Macs with tensor units); unset or blank is `0` |
+| `TF_Q27_MTP_GPU_PICK` | Qwen3.8-27B with `--mtp-drafts` on Metal: exactly `0` or `1`; `1` runs each MTP absorb on one command buffer and picks drafts on the GPU; unset or blank is `0` |
 | `TF_QWEN27_JOIN` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `1` runs a window's rows in pairs over the keys below it in the decode tail attention (same replies); unset or blank is `1` |
+| `TF_QWEN27_TIED_HEAD` | Dense Qwen on Metal: exactly `0` or `1`; `1` lets a checkpoint with a tied head load on the 27B engine, its head read from the embedding (one Mac, no draft head, qualified shapes only); unset or blank is `0` |
 | `TF_QWEN35_METAL_KV_PAGES` | Qwen 3.5 on Metal: exactly `0` or `1`; `1` puts the streams' keys and values in core-pool pages; unset or blank is `0` |
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
 | `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
@@ -175,7 +184,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 37 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 39 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -186,7 +195,9 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_KEEP_INPASS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_FIRST_EARLY` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_GPU_TOPK` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_BATCH_GDN_WIDE` | Exactly `0` or `1`; default off. Metal batch segments of 8 or 16 rows use non-replay GDN when enabled |
 | `TF_FLASHNEXT_GDN_FUSED` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_GDN_CHAIN_TPR` | Exactly `0` or `1`; default off: opt into the two-thread reduction for ordinary recurrence rows below 64 |
 | `TF_FLASHNEXT_GDN_LANES` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |

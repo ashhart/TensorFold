@@ -266,10 +266,11 @@ pub const Lanes = struct {
         const self = of(ptr);
         const l = self.lanes.getPtr(s) orelse return;
         const at = l.fill orelse return;
-        if (at <= s.cached or s.reuse.hook == null) return;
-        try self.x.bind(l.slot);
+        if (at <= s.cached) return;
         var keeps: share_mod.Keeps = undefined;
-        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
+        const marks = self.marksOf(s, &keeps) orelse return;
+        try self.x.bind(l.slot);
+        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, marks) catch |err| {
             if (err == error.Cancelled) return;
             return err;
         };
