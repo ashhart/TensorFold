@@ -179,6 +179,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_TRACE", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 logs folded-memory routes, taught text and cues)" },
     .{ .name = "TF_SLIDE_LEGACY", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 serves --slide with the pocket learner, not folded memory)" },
     .{ .name = "TF_SLIDE_FAST_CUES", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 skips the model-written concept cues of a lesson)" },
+    .{ .name = "TF_SLIDE_AUTO_ALL", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 learns from every key's chat turns, not only admin keys')" },
     .{ .name = "TF_SLIDE_AUTO", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (0 turns off learning from chat turns; default on)" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
     .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
