@@ -20,5 +20,5 @@ test "EXL3 prompt: unmeasured compiler usage stays pending" {
     for (records) |r| for ([_]?limits.Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |version| {
         try std.testing.expectEqualDeep(registry.none, registry.usageFor(r, version));
     };
-    try std.testing.expectEqual(@as(usize, 20), try registry.checkCuda(std.testing.allocator, &records, true));
+    try std.testing.expectEqual(@as(usize, 30), try registry.checkCuda(std.testing.allocator, &records, true)); // 6 records, 5 versions
 }
