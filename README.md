@@ -84,6 +84,7 @@ See [the chat command](docs/chat.md) for its flags and the serve flags it passes
 - [Installation runbook](RUNBOOK.md): macOS and CUDA installation, paired Metal serving and troubleshooting.
 - [Windows](docs/WINDOWS.md), [TensorFold Web](docs/web.md) and [the Mac app](app/README.md).
 - [API](docs/api.md), [Cortheon mode](docs/cortheon.md) and [known issues](docs/known-issues.md).
+- [Claude Code](docs/claude-code.md): point it at a local server, name its model, and keep its prompt prefix cacheable.
 - [Evaluating TensorFold](docs/evaluating.md) and [community benchmarks](docs/community-benchmarks.md).
 - [Usable memory profiles](docs/memory-profiling.md): how to record applied budgets, context, cache state and process peaks.
 - [Contributing](CONTRIBUTING.md): ATC and agents, builds, tests and the exactness and performance gates.

@@ -152,6 +152,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - MiniMax-H3-Image on CUDA: `tf-h3-image-prompt-cuda` runs the prompt path (Qwen3-VL to layer 50 and the token refiner) and `tf-h3-image-decoder-cuda` the image decoder, each writing the file its Metal sibling writes and carrying a self-test against the host's float64 reference (#3733). Thanks to @plotarmordev.
 
+- Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
+
 - Flash Next on CUDA: the fused read-out is now the default, making prompt processing about 3-5% faster on GB10 with identical tokens; `TF_FLASHNEXT_READOUT_FUSED=0` keeps the old path (#4799). Thanks @BadAd84.
 
 - Ripple-65B-Preview on Metal: `--drafter` takes the publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) beside either release, with drafted replies equal to plain ones; with the drafter the server opens two streams unless `--parallel` is named, and refuses a named `--parallel` above 2 (#2260, fixes #2259). Thanks to @BobClawblaw.
