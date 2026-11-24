@@ -5,3 +5,4 @@ pub const moe_mv = @embedFile("moe_mv.metal");
 pub const moe_decode = @embedFile("moe_decode.metal");
 pub const dense_decode = @embedFile("dense_decode.metal");
 pub const prefill = @embedFile("prefill.metal");
+pub const kda_q8 = @embedFile("kda_q8.metal");

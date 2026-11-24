@@ -198,4 +198,3 @@ template <int H, int D, int TAPS, int TY, int FB, int GB, int RB>
 }
 template [[host_name("glm_kda_window")]] [[kernel]] decltype(glm_kda_window<64, 128, 4, 32, 4, 4, 8>) glm_kda_window<64, 128, 4, 32, 4, 4, 8>;
 template [[host_name("glm_kda_window_tp")]] [[kernel]] decltype(glm_kda_window<32, 128, 4, 32, 4, 4, 8>) glm_kda_window<32, 128, 4, 32, 4, 4, 8>;
-template [[host_name("glm_kda_window_q8")]] [[kernel]] decltype(glm_kda_window<64, 128, 4, 32, 8, 8, 8>) glm_kda_window<64, 128, 4, 32, 8, 8, 8>;
