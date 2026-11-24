@@ -112,6 +112,31 @@ test "GLM disk image: the lease bytes the image counts are the snapshot plan's, 
     }
 }
 
+test "GLM disk image: full GLM-5.3's lease bytes are the plan's too: 576-wide rows, pools of 1, shared layers keyless" {
+    var layers: [78]weights.Layer = undefined;
+    for (&layers) |*l| l.mixer = .{ .mla = undefined };
+    var w: weights.Weights = undefined;
+    w.config = .{ .rope = 64, .kpool = 1, .dsa = true };
+    for (3..78) |i| if (i < 6 or (i - 6) % 4 != 0) w.config.shared.set(i); // 0-2 and 6, 10, .., 74 index
+    w.share = try shard.Share.of(&w.config, 0, 1);
+    w.layers = &layers;
+    var d = H.driver();
+    var st = try State.initFormat(std.testing.allocator, &d, &w, capacity, false);
+    defer st.deinit();
+    const sh = try image.Shape.of(&st, &w.config, capacity, true);
+    try expect(sh.pool == 1 and sh.latent == 576 * 2 and sh.keyless.count() == 57);
+    for ([_]u32{ 1, 2048, 4097, 6144 }) |at| for ([_]u64{ at - 1, at, sh.headRows(at) }) |mtp| {
+        const plan = try Plan.init(&st, &w.config, at, mtp, 0);
+        try expectEqual(@as(u64, plan.len), image.leaseBytes(sh, at, mtp));
+    };
+    var parts: std.ArrayList(image.Part) = .empty;
+    defer parts.deinit(std.testing.allocator);
+    try image.storeParts(sh, &.{ sh.prefix, sh.prefix, sh.prefix }, 4097, &parts, std.testing.allocator); // any row: pools of 1
+    var rows: u64 = 0;
+    for (parts.items) |x| rows += @intFromBool(x.row != 0);
+    try expectEqual(@as(u64, 78 + 21), rows); // every layer's latent rows, the 21 indexed layers' pooled keys
+}
+
 test "GLM disk image: the longest state is a position the store's parts take, so the staging floor prices it" {
     var m: Model = undefined;
     try m.init();

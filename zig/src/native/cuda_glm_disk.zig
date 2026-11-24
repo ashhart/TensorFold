@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's CUDA kept states on disk (--learn-conversations): every rank's part in rank 0's files.
+//! GLM's CUDA kept states on disk (--learn-conversations), Flash's and full GLM-5.3's: every rank's part on rank 0.
 const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");
@@ -11,6 +11,11 @@ const rows = api.prompt_cache.rows;
 const Engine = glm.engine.Engine;
 const Kept = glm.engine.Kept;
 const Allocator = std.mem.Allocator;
+
+/// The entries whose kept states this store holds: GLM-5.3-Flash's and full GLM-5.3's, one engine.
+pub fn serves(comptime F: type) bool {
+    return F == glm.native or F == glm.native_dsa;
+}
 
 pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
 

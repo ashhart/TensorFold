@@ -2,8 +2,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const st_mod = @import("cuda_state.zig");
-const sparse = @import("cuda_sparse.zig");
-const Config = @import("config.zig").Config;
+const config = @import("config.zig");
+const Config = config.Config;
 const pages = @import("cuda_snapshot_pages.zig");
 const State = st_mod.State;
 const window_rows = st_mod.window_rows;
@@ -53,6 +53,8 @@ pub const Shape = struct {
     prefix: u64, // the sequence's own fields before its caches: KDA conv and states, a window's saved rows
     tail: u64, // its fields after them: the head's position and first-draft row
     layers: u32, // DSA layers, whose rows are shared by position
+    keyless: std.StaticBitSet(config.max_layers) = .empty, // layers that keep latent rows alone (full GLM-5.3's shared)
+    pool: u32, // rows a pooled key sums (GLM-5.3-Flash's 4, full GLM-5.3's 1)
     latent: u32, // a latent row's bytes
     scales: bool, // fp8 latent rows: a 4-byte scale each
     ring_rows: u32,
@@ -72,17 +74,21 @@ pub const Shape = struct {
         if (first < base or st.mtp_pos_dev < first or end < st.mtp_pos_dev) return error.SnapshotShape;
         if (st.proj < base or first < st.proj or st.prompt_hidden < st.mtp_pos_dev or end < st.prompt_hidden) return error.SnapshotShape;
         const fp8 = st.mtp_caches.ls != 0;
+        var keyless: std.StaticBitSet(config.max_layers) = .empty;
+        for (st.caches, 0..) |x, j| if (x.pk_rows == 0) keyless.set(j);
         return .{
+            .keyless = keyless,
+            .pool = c.kpool,
             .window = st.proj - base,
             .draft = st.prompt_hidden - st.mtp_pos_dev,
             .prefix = first - base,
             .tail = end - st.mtp_pos_dev,
             .layers = @intCast(st.caches.len),
-            .latent = c.kv_lora * @as(u32, if (fp8) 1 else 2),
+            .latent = c.latentRow() * @as(u32, if (fp8) 1 else 2),
             .scales = fp8,
             .ring_rows = @intCast(st.ring_rows),
             .ring_row = @intCast(st.ring_row),
-            .pk_rows = @intCast(capacity / sparse.pool + 2),
+            .pk_rows = @intCast(capacity / c.kpool + 2),
             .pooled_row = c.i_dim * 2,
             .capacity = @intCast(capacity),
             .head = head,
@@ -96,35 +102,42 @@ pub const Shape = struct {
 };
 
 /// One cache's parts in the lease's order, for `n` rows: latent, scales, the two index rings, the pooled keys.
-fn cache(sh: Shape, n: u64) [5]u64 {
+fn cache(sh: Shape, n: u64, keyed: bool) [5]u64 {
+    const k: u64 = @intFromBool(keyed); // a keyless layer's rings and pooled keys take no bytes
     return .{
         n * sh.latent,
         if (sh.scales) n * 4 else 0,
-        @min(n, sh.ring_rows) * sh.ring_row,
-        @min(n, sh.ring_rows) * sh.ring_row,
-        @min(n / sparse.pool + 2, sh.pk_rows) * sh.pooled_row,
+        k * @min(n, sh.ring_rows) * sh.ring_row,
+        k * @min(n, sh.ring_rows) * sh.ring_row,
+        k * @min(n / sh.pool + 2, sh.pk_rows) * sh.pooled_row,
     };
+}
+
+/// Layer `j`'s cache keeps index keys (the MTP head's always does).
+fn keeps(sh: Shape, j: usize) bool {
+    return !sh.keyless.isSet(j);
 }
 
 /// The longest state an image holds: the capacity's whole pools (`parts` takes no other position).
 pub fn longest(sh: Shape) u32 {
-    return sh.capacity - sh.capacity % sparse.pool;
+    return sh.capacity - sh.capacity % sh.pool;
 }
 
 /// The image at `at` (a chunk start): the words, the prefix, each DSA layer's rows, the head's caches, the tail.
 pub fn parts(sh: Shape, at: u32, out: *std.ArrayList(Part), a: std.mem.Allocator) !void {
-    if (at == 0 or at % sparse.pool != 0 or at > sh.capacity) return error.SnapshotShape;
+    if (at == 0 or at % sh.pool != 0 or at > sh.capacity) return error.SnapshotShape;
     try out.appendSlice(a, &.{ .{ .bytes = Words.bytes }, .{ .bytes = sh.prefix } });
-    const pooled: u64 = at / sparse.pool;
-    for (0..sh.layers) |_| {
-        const c = cache(sh, at);
+    const pooled: u64 = at / sh.pool;
+    for (0..sh.layers) |j| {
+        const c = cache(sh, at, keeps(sh, j));
         try out.append(a, .{ .bytes = c[0], .row = sh.latent });
         if (sh.scales) try out.append(a, .{ .bytes = c[1], .row = 4 });
+        if (!keeps(sh, j)) continue;
         try out.appendSlice(a, &.{ .{ .bytes = c[2] }, .{ .bytes = c[3] } });
         // whole pools are rows by position; the pool past them and the spare row stay the state's own
-        try out.appendSlice(a, &.{ .{ .bytes = pooled * sh.pooled_row, .row = sh.pooled_row, .per = sparse.pool }, .{ .bytes = c[4] - pooled * sh.pooled_row } });
+        try out.appendSlice(a, &.{ .{ .bytes = pooled * sh.pooled_row, .row = sh.pooled_row, .per = sh.pool }, .{ .bytes = c[4] - pooled * sh.pooled_row } });
     }
-    if (sh.head) for (cache(sh, sh.headRows(at))) |n| if (n > 0) try out.append(a, .{ .bytes = n });
+    if (sh.head) for (cache(sh, sh.headRows(at), true)) |n| if (n > 0) try out.append(a, .{ .bytes = n });
     try out.append(a, .{ .bytes = sh.tail });
 }
 
@@ -138,7 +151,7 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
     try out.append(a, .{ .img = img, .len = f, .from = .{ .lease = 0 } });
     img += f;
     lease += f;
-    if (sh.head) for (cache(sh, sh.headRows(at)), cache(sh, mtp_len)) |full, held| {
+    if (sh.head) for (cache(sh, sh.headRows(at), true), cache(sh, mtp_len, true)) |full, held| {
         if (held > 0) try out.append(a, .{ .img = img, .len = held, .from = .{ .lease = lease } });
         if (full > held) try out.append(a, .{ .img = img + held, .len = full - held, .from = .zeros });
         img += full;
@@ -150,7 +163,7 @@ pub fn segments(sh: Shape, at: u32, mtp_len: u64, out: *std.ArrayList(Seg), a: s
 /// The image bytes after the words that sit in the lease as in the image: the prefix and every DSA layer's parts.
 pub fn front(sh: Shape, at: u32) u64 {
     var n: u64 = sh.prefix;
-    for (0..sh.layers) |_| for (cache(sh, at)) |x| {
+    for (0..sh.layers) |j| for (cache(sh, at, keeps(sh, j))) |x| {
         n += x;
     };
     return n;
@@ -159,10 +172,10 @@ pub fn front(sh: Shape, at: u32) u64 {
 /// The lease bytes of a state at `at` whose head holds `mtp_len` rows (layout.Plan's length for it).
 pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
     var n: u64 = sh.prefix + sh.tail;
-    for (0..sh.layers) |_| for (cache(sh, at)) |x| {
+    for (0..sh.layers) |j| for (cache(sh, at, keeps(sh, j))) |x| {
         n += x;
     };
-    if (sh.head) for (cache(sh, mtp_len)) |x| {
+    if (sh.head) for (cache(sh, mtp_len, true)) |x| {
         n += x;
     };
     return n;
@@ -171,7 +184,7 @@ pub fn leaseBytes(sh: Shape, at: u32, mtp_len: u64) u64 {
 /// Rank 0's image bytes at `at` (its head counted at a verify window past `at`).
 pub fn imageBytes(sh: Shape, at: u32) u64 {
     var n: u64 = Words.bytes + front(sh, at) + sh.tail;
-    if (sh.head) for (cache(sh, sh.headRows(at))) |x| {
+    if (sh.head) for (cache(sh, sh.headRows(at), true)) |x| {
         n += x;
     };
     return n;
@@ -215,17 +228,17 @@ pub fn unwritten(sh: Shape, prefixes: []const u64, windows: []const u64, at: u32
     if (sh.head and mtp_len > sh.headRows(at)) return error.SnapshotShape;
     var img: u64 = Words.bytes + sh.prefix;
     try out.append(a, .{ .off = Words.bytes + sh.window, .len = sh.prefix - sh.window });
-    for (0..sh.layers) |_| {
-        const c = cache(sh, at);
-        const whole = at / sparse.pool * sh.pooled_row;
+    for (0..sh.layers) |j| {
+        const c = cache(sh, at, keeps(sh, j));
+        const whole = at / sh.pool * sh.pooled_row;
         img += c[0] + c[1] + c[2] + c[3];
-        try out.append(a, .{ .off = img + whole, .len = c[4] - whole });
+        if (keeps(sh, j)) try out.append(a, .{ .off = img + whole, .len = c[4] - whole });
         img += c[4];
     }
     if (sh.head) {
-        const full = cache(sh, sh.headRows(at));
-        const held = cache(sh, mtp_len)[4];
-        const whole = mtp_len / sparse.pool * sh.pooled_row;
+        const full = cache(sh, sh.headRows(at), true);
+        const held = cache(sh, mtp_len, true)[4];
+        const whole = mtp_len / sh.pool * sh.pooled_row;
         img += full[0] + full[1] + full[2] + full[3];
         try out.append(a, .{ .off = img + whole, .len = held - whole }); // past `held`, the image's zeros
         img += full[4];
