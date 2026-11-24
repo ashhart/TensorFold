@@ -18,7 +18,7 @@ const Shape = struct {
     unit: bool = true,
     /// Every component's value, when a test needs one that is not finite.
     value: ?f32 = null,
-    digest: enum { correct, wrong, absent } = .correct,
+    digest: enum { correct, wrong, absent, numeric } = .correct,
     base_model: ?[]const u8 = "Qwen/Qwen3.8-27B",
     layer_ids_key: bool = true,
     layer_ids: ?[]const u8 = null,
@@ -115,6 +115,7 @@ fn writeFixture(shape: Shape) ![]u8 {
         .correct => try kv.text("glp.content_sha256", &hex),
         .wrong => try kv.text("glp.content_sha256", "0000000000000000000000000000000000000000000000000000000000000000"),
         .absent => {},
+        .numeric => try kv.number("glp.content_sha256", 1),
     }
 
     var out: std.ArrayList(u8) = .empty;
@@ -522,4 +523,46 @@ test "a file that names one layer twice is refused" {
     const why = try reason(bytes);
     defer std.testing.allocator.free(why);
     try std.testing.expect(std.mem.indexOf(u8, why, "two directions for layer 5") != null);
+}
+
+/// One array nesting `depth` levels around a number: its element type and count, as a recursing writer lays it out.
+fn nestedArray(a: std.mem.Allocator, out: *std.ArrayList(u8), depth: u8) !void {
+    const elem: u32 = if (depth == 1) 4 else 9; // a number at the innermost level, another array above it
+    try out.appendSlice(a, &std.mem.toBytes(elem));
+    try out.appendSlice(a, &std.mem.toBytes(@as(u64, 1)));
+    if (depth == 1) try out.appendSlice(a, &std.mem.toBytes(@as(u32, 0))) else try nestedArray(a, out, depth - 1);
+}
+
+test "metadata arrays nest four levels and the fifth is refused" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    for ([_]u8{ 4, 5 }) |depth| {
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(a);
+        try body.appendSlice(a, "GGUF");
+        try body.appendSlice(a, &std.mem.toBytes(@as(u32, 3)));
+        try body.appendSlice(a, &std.mem.toBytes(@as(u64, 0))); // no tensors
+        try body.appendSlice(a, &std.mem.toBytes(@as(u64, 1))); // one key
+        try body.appendSlice(a, &std.mem.toBytes(@as(u64, 1)));
+        try body.append(a, 'x');
+        try body.appendSlice(a, &std.mem.toBytes(@as(u32, 9))); // the value is an array
+        try nestedArray(a, &body, depth);
+        var problem: gguf.Problem = .{};
+        if (depth == gguf.max_array_depth) {
+            _ = try gguf.parse(arena.allocator(), body.items, &problem);
+        } else {
+            try std.testing.expectError(error.BadGguf, gguf.parse(arena.allocator(), body.items, &problem));
+            try std.testing.expectEqualStrings("the container's metadata arrays nest deeper than 4", problem.text());
+        }
+    }
+}
+
+test "a content digest key that is not text is refused, so a malformed claim is not silently unchecked" {
+    const bytes = try writeFixture(.{ .digest = .numeric });
+    defer std.testing.allocator.free(bytes);
+    try refused(bytes);
+    const why = try reason(bytes);
+    defer std.testing.allocator.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "glp.content_sha256 is not text") != null);
 }
