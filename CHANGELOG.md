@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8 on CUDA: `TF_QWEN_PDL` is now on by default on sm_12x GPUs (GB10, RTX 50 series), so the ModelOpt NVFP4 lanes and the qwen35 glue kernels use programmatic dependent launch with tokens unchanged; other GPUs keep plain launches, `TF_QWEN_PDL=1` still turns it on from sm_90 and `TF_QWEN_PDL=0` turns it off (#4881).
+
 - Tests: the prose benchmark's two concurrency cases hold their mock streams long enough that a busy CI host can no longer fail them (#4930).
 
 - Lanes: the shared host sampler behind Flint, Llama, Kimi K3 and MiniMax-M3's draws (`gpu_rule`, `gpu_full`) keeps a draw's best 1,024 candidates in one bounded heap pass instead of sorting every logit of the row, so a draw over a 201,058-token vocabulary takes 0.11 ms where the sort alone took 15 ms; the kept candidates, the row maximum and every drawn token are the full sort's bit for bit (a test compares them with a full-sort reference on tied, NaN, infinite and zero rows), and 160 seeded requests give the same token ids. On an M4 Pro a sampled stream of a model with that vocabulary decodes at 29.2 tokens a second where it did 21.2, and four streams at 56.1 where 33.5; greedy is unchanged, and the four families' own timings were not measured (#4744).
@@ -53,7 +55,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - OCR: `POST /ocr` now answers LiteParse's OCR server contract, with one text item per line and its box in page pixels (#2573). Thanks @laudney.
 
 - H3 on Metal: transformer products run on the `h3_gemm_32x64` kernel in 64-row bands and the decoder decodes 64 tiles a pass, with sums unchanged (#4641).
-- Qwen3.8 on CUDA: `TF_QWEN_PDL` is now on by default on sm_12x GPUs (GB10, RTX 50 series), so the ModelOpt NVFP4 lanes and the qwen35 glue kernels use programmatic dependent launch with tokens unchanged; other GPUs keep plain launches, `TF_QWEN_PDL=1` still turns it on from sm_90 and `TF_QWEN_PDL=0` turns it off (#4881).
 
 - Hy4-flash: host-side weight map, TP=1/2/4 partition and Engram FP8 row codec for the official W8A16 FP8 checkpoint, with refusal tests; serving follows in later PRs (#4827). Thanks @GrgaPalcic.
 
