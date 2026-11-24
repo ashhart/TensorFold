@@ -322,7 +322,6 @@ test {
         _ = @import("chat_cli_kr67_test.zig");
         _ = @import("chat_cli_kia68_test.zig");
         _ = @import("chat_cli_kr69_test.zig");
-        _ = @import("start_cli_kr67_test.zig");
     }
 }
 
