@@ -50,6 +50,7 @@ pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
 pub const grammar_time = @import("grammar_time.zig");
 pub const grammar_fake = @import("grammar_fake.zig"); // a stand-in libtfgrammar for tests
+pub const drafted_fixture = @import("drafted_test.zig"); // its fake drafter and prompts, for a family's wrapper tests
 
 pub const Engine = engine.Engine;
 pub const Config = config.Config;

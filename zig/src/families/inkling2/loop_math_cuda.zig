@@ -24,7 +24,8 @@ pub const Kernels = struct {
     mod: cuda.Module,
     ar_fn: cuda.Function,
     messages_fn: cuda.Function,
-    gate_fn: cuda.Function,
+    gate_down_fn: cuda.Function,
+    gate_up_fn: cuda.Function,
     project_qkv_fn: cuda.Function,
     round_bf16_fn: cuda.Function,
 
@@ -36,7 +37,8 @@ pub const Kernels = struct {
             .mod = mod,
             .ar_fn = try mod.function("tf_ink2_loop_ar"),
             .messages_fn = try mod.function("tf_ink2_loop_messages"),
-            .gate_fn = try mod.function("tf_ink2_loop_gate"),
+            .gate_down_fn = try mod.function("tf_ink2_loop_gate_down"),
+            .gate_up_fn = try mod.function("tf_ink2_loop_gate_up"),
             .project_qkv_fn = try mod.function("tf_ink2_loop_project_qkv"),
             .round_bf16_fn = try mod.function("tf_ink2_loop_round_bf16"),
         };
@@ -87,7 +89,7 @@ pub fn messages(
     try go(k.messages_fn, s, .{ .x = @intCast(rows), .y = 4 }, 256, &a);
 }
 
-/// Controller: BF16 D[64][2c]/F/G[c][64] and down I/O; FP32 F/G dots/tanh/four-step output; pre-offset msg, no scratch.
+/// Controller: BF16 D/F/G, FP32 F/G dots/tanh/four-step output; zeta [rows][64] BF16 scratch; out may alias state.
 pub fn gate(
     k: *const Kernels,
     s: cuda.Stream,
@@ -96,17 +98,33 @@ pub fn gate(
     down_bf16: u64,
     forget_bf16: u64,
     gain_bf16: u64,
+    zeta_bf16: u64,
     out_f32: u64,
     rows: usize,
     c: usize,
     eps: f32,
 ) !void {
+    try gateDown(k, s, state_f32, message_f32, down_bf16, zeta_bf16, rows, rank / 2, c, eps);
+    try gateUp(k, s, state_f32, message_f32, zeta_bf16, forget_bf16, gain_bf16, out_f32, rows, c);
+}
+
+/// The down half alone: `pairs` rank pairs from the first (all 32 in `gate`; fewer only for a contract control).
+pub fn gateDown(k: *const Kernels, s: cuda.Stream, state_f32: u64, message_f32: u64, down_bf16: u64, zeta_bf16: u64, rows: usize, pairs: usize, c: usize, eps: f32) !void {
+    if (rows == 0 or c == 0 or pairs == 0 or pairs > rank / 2) return error.Inkling2LoopGateShape;
+    var a: cuda.Args = .{};
+    for ([_]u64{ state_f32, message_f32, down_bf16, zeta_bf16 }) |v| a.add(v);
+    a.add(int(c));
+    a.add(eps);
+    try go(k.gate_down_fn, s, .{ .x = @intCast(rows), .y = @intCast(pairs) }, 256, &a);
+}
+
+/// The up half: forget/gain from zeta and the four-step output, 64 columns a block.
+pub fn gateUp(k: *const Kernels, s: cuda.Stream, state_f32: u64, message_f32: u64, zeta_bf16: u64, forget_bf16: u64, gain_bf16: u64, out_f32: u64, rows: usize, c: usize) !void {
     if (rows == 0 or c == 0) return error.Inkling2LoopGateShape;
     var a: cuda.Args = .{};
-    for ([_]u64{ state_f32, message_f32, down_bf16, forget_bf16, gain_bf16, out_f32 }) |v| a.add(v);
-    for ([_]i32{ int(rows), int(c) }) |v| a.add(v);
-    a.add(eps);
-    try go(k.gate_fn, s, .{ .x = @intCast(rows) }, 256, &a);
+    for ([_]u64{ state_f32, message_f32, zeta_bf16, forget_bf16, gain_bf16, out_f32 }) |v| a.add(v);
+    a.add(int(c));
+    try go(k.gate_up_fn, s, .{ .x = @intCast(rows), .y = @intCast((c + 63) / 64) }, 64, &a);
 }
 
 /// Mini QKV: normalized BF16 uq/uk/uv, query-side u_q; per-visit K/V conv/cache, then wo/post-conv; no history.

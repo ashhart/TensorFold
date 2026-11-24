@@ -78,6 +78,7 @@ fn needsDevice(modes: Modes) bool {
 
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.Sm110ProductDrafter => "sm_110 product: --drafter must point to a DFlash2 checkpoint",
         error.QwenSm110SlideUnqualified => "--slide is not qualified for Qwen on sm_110; omit it",
         error.QwenSm110DspineUnqualified => "DSpine --drafter is not qualified for Qwen on sm_110; use DFlash2",
         error.QwenSm110DspineWindowUnqualified => "TF_DSPINE_WINDOW is not qualified for Qwen on sm_110; unset it",

@@ -53,6 +53,16 @@ pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     });
 }
 
+pub fn startModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, checkpoint: *std.Build.Module, api: *std.Build.Module, core: *std.Build.Module, j: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "checkpoint_cli", .module = checkpoint }, .{ .name = "engine_api", .module = api }, .{ .name = "core", .module = core }, .{ .name = "json", .module = j } },
+    });
+}
+
 /// Attach a server's shared JSON module (tests run apart), and Living Weights' families where the build gave none.
 pub fn addTo(
     b: *std.Build,
@@ -116,8 +126,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
-    b.step("test-logprob-offers-host", "Logprob refusals before submission, and entries with tools, stops, reasoning and Responses").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:", "completions echo:" } }));
+    b.step("test-logprob-offers-host", "Logprob refusals before submission, entries with tools, stops, reasoning and Responses, and echo").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));

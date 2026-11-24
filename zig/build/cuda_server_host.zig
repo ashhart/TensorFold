@@ -27,6 +27,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-wait-reasons-server-host", "The ledger's wait, refusal and failure labels in /metrics and /v1/load").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"wait reason ledger:"} })).step);
     // the open-connection limit, one address's share under pressure and its flags (#3048), on Linux hosts too
     b.step("test-connection-admission-host", "Connection limit, per-address share, trusted proxies and idle shedding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "security: ", "connection CLI:" } })).step);
+    b.step("test-managed-log-host", "A managed child's log without keys in the file, its readiness and its startup tail").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "benchmark log:", "benchmark_server_test.", "benchmark_server_log_test." } })).step);
     b.step("test-admission-http-host", "Admission places over HTTP: n choices, refusals and walk-aways return every place").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"admission HTTP:"} })).step);
     const flush = b.step("test-prompt-cache-flush-host", "The prompt cache flush: its hold, a cold next turn, withdrawal and who may call it");
     flush.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"prompt cache flush:"} })).step);
@@ -96,6 +97,34 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-benchmark-routing-host", "Benchmark command routing from explicit model capabilities").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark routing:"} })).step);
     b.step("test-benchmark-cancel-host", "A cancelled local benchmark saves its receipt, exits 130 and never publishes").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a cancelled local run"} })).step);
     b.step("test-chat-cli-host", "tensorfold chat's flags, stream, history, Ctrl-C and serve child against a fake server").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"chat CLI:"} })).step);
+    const start_tests = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli_test.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "engine_api", .module = native_modules.api },
+            .{ .name = "core", .module = mods.core },
+            .{ .name = "json", .module = server_json },
+            .{ .name = "checkpoint_cli", .module = @import("cuda.zig").checkpointCli(b, host, .debug, false, native_modules.engines, mods.core) },
+        },
+    });
+    const start_run = b.addRunArtifact(b.addTest(.{ .root_module = start_tests, .filters = &.{"start CLI:"} }));
+    start_run.has_side_effects = true;
+    const start_step = b.step("test-start-cli-host", "Automatic model choice, download consent, first reply and serve-child cleanup without devices");
+    if (host.result.os.tag != .windows) {
+        start_step.dependOn(&start_run.step);
+        step.dependOn(&start_run.step);
+    }
+    const windows_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });
+    const windows_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = windows_target, .optimize = .debug, .link_libc = true });
+    const windows_start = @import("server.zig").plain(b, "zig/src/server/start_cli.zig", windows_target, .debug, windows_lanes);
+    const windows_api = windows_start.import_table.get("engine_api").?;
+    const windows_core = windows_start.import_table.get("core").?;
+    const windows_none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = windows_target, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = windows_api }} });
+    windows_start.addImport("checkpoint_cli", @import("cuda.zig").checkpointCli(b, windows_target, .debug, false, windows_none, windows_core));
+    const windows_check = b.addTest(.{ .root_module = windows_start, .filters = &.{"start CLI: Windows refusal"} });
+    start_step.dependOn(&windows_check.step); // compile only: a Windows test binary is never executed
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",
