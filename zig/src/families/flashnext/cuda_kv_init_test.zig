@@ -3,6 +3,9 @@ const std = @import("std");
 const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
 const pages = @import("cuda_kv_lanes.zig");
+const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
+const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
+const wt = @import("cuda_prompt_wt.zig");
 const E = @import("cuda_prompt.zig").Engine;
 const gpa = std.testing.allocator;
 const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
@@ -61,6 +64,10 @@ const Device = struct {
         host_live -= 1;
         return 0;
     }
+    fn hostPtr(out: *u64, _: ?*anyopaque, _: c_uint) callconv(.c) c_int {
+        out.* = 0x3000_0000; // a mapped host store's device address; the fake never reads it
+        return 0;
+    }
     fn fill(_: u64, _: u8, _: usize, s: cuda.abi.Stream) callconv(.c) c_int {
         wrong_stream += @intFromBool(s != stream);
         fills += 1;
@@ -103,6 +110,7 @@ const Device = struct {
         d.api.cuCtxSynchronize = context;
         d.api.cuMemHostAlloc = hostAlloc;
         d.api.cuMemFreeHost = hostFree;
+        d.api.cuMemHostGetDevicePointer_v2 = hostPtr;
         return d;
     }
     fn released() !void {
@@ -209,6 +217,44 @@ test "kv safety: Flash Next host store is released when tier kernels fail to loa
     try expectPoolError(error.BuiltWithoutKernels, pages.Pool.init(gpa, &e, layout, 64, null, 1, 8), &d, e.stream.*);
     try std.testing.expectEqual(@as(usize, 0), Device.host_live);
     try Device.released();
+}
+
+test "kv safety: a failed host-tier lane build frees the failing lane and every lane before it" {
+    const kv_page = layout.token_bytes * layout.page_tokens;
+    const logical = 8;
+    const frames = 4;
+    const slots = 1;
+    var d = Device.driver();
+    var e = engine(&d);
+    defer finish(&d, e.stream.*);
+    const host = try host_tier.Host.create(gpa, &d, logical, frames, kv_page);
+    defer host.destroy(gpa);
+    var arena = try @import("cuda_kv_arena.zig").Arena.alloc(gpa, &d, (frames + logical) * kv_page, null, null);
+    defer arena.free();
+    const lanes = try gpa.alloc(pages.Lane, 3);
+    defer gpa.free(lanes);
+    const kern: kvt.Kernels = undefined;
+    var pool: pages.Pool = .{ .gpa = gpa, .e = &e, .layout = layout, .capacity = 64, .head = null, .plain = undefined, .pool = &host.tier.pool, .host = host, .kern = kern, .slot_frames = slots, .planes = true, .arena = arena, .ibase = arena.buf.ptr + frames * kv_page, .lanes = lanes };
+    const dev0 = Device.live;
+    const host0 = Device.host_live;
+    var attempt: usize = 1;
+    var built = false;
+    while (attempt <= 64) : (attempt += 1) {
+        Device.allocs = 0; // `fail_alloc` counts from this build
+        Device.fail_alloc = attempt;
+        pool.buildLanes(&e, 64, slots, wt.attn_n) catch {
+            try std.testing.expectEqual(dev0, Device.live);
+            try std.testing.expectEqual(host0, Device.host_live);
+            continue;
+        };
+        built = true;
+        break;
+    }
+    try std.testing.expect(built and attempt > 1); // every earlier allocation was refused, and each refusal was clean
+    try std.testing.expect(Device.live > dev0); // the build that succeeded holds its lanes' tables and selections
+    for (lanes) |*x| pool.freeLane(x);
+    try std.testing.expectEqual(dev0, Device.live);
+    try std.testing.expectEqual(host0, Device.host_live);
 }
 
 test "exl3: blank host-tier settings preserve the unset mode and budgets" {

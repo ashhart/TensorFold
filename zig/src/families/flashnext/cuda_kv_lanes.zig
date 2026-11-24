@@ -62,10 +62,8 @@ pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) !kv.Lay
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
     const page = pages.pageBytesOf(tokens, layers);
     var run_bytes = run;
-    if (try host_tier.tiered()) {
-        const run_page = pages.kvPageBytes(tokens, layers);
-        run_bytes = (run + run_page - 1) / run_page * page;
-    }
+    const run_page = pages.kvPageBytes(tokens, layers);
+    if (try host_tier.tiered()) run_bytes = (run + run_page - 1) / run_page * page;
     return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = page / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run_bytes };
 }
 
@@ -137,7 +135,7 @@ pub const State = struct {
 };
 
 /// One pool lane: its cache's views (its run's states, its stream's pages), that stream's lease and its run.
-const Lane = struct {
+pub const Lane = struct {
     seq: prompt.Seq,
     tl: kv.tier.Lease = .{}, // the stream's reservation: its pages (and, on a host tier, frames)
     used: bool = false,
@@ -214,18 +212,8 @@ pub const Pool = struct {
         if (p.host) |h| try h.lockstep(e, slot_frames);
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
-        var made: usize = 0;
-        errdefer for (p.lanes[0..made]) |*x| x.seq.deinit(gpa);
-        for (p.lanes) |*x| {
-            x.* = .{ .seq = try p.laneSeq() };
-            made += 1;
-            if (p.host != null) {
-                x.itable = try cuda.DeviceBuffer.alloc(e.driver, mostPages(capacity, l.page_tokens) * 4);
-                x.seq.paged.?.itable = x.itable.ptr;
-                x.sel = try kvt.LaneSel.init(gpa, e.driver, &p.kern.?, capacity + window_rows, mostPages(capacity, l.page_tokens), slot_frames, layers, p.own(x));
-                x.seq.sel = x.sel;
-            }
-        }
+        try p.buildLanes(e, capacity, slot_frames, layers);
+        errdefer for (p.lanes) |*x| p.freeLane(x); // every lane is built; a later refusal frees them with the rest
         errdefer cuda.completion.drain(e.driver, e.stream.*, "flashnext: failed pool initialization did not drain");
         if (!arena.lazy()) try arena.buf.fill8(0, e.stream.handle); // pieces are zeroed as they map
         for (p.lanes) |x| try x.seq.paged.?.table.fill8(0, e.stream.handle);
@@ -233,6 +221,29 @@ pub const Pool = struct {
         if (p.host == null) p.mapAhead(true);
         try e.stream.synchronize();
         return p;
+    }
+
+    /// A lane's cache, then its index table and selection; a failure frees that lane and every lane before it.
+    pub fn buildLanes(p: *Pool, e: *prompt.Engine, cap: usize, slot_frames: usize, layers: usize) !void {
+        const none: cuda.DeviceBuffer = .{ .d = e.driver, .ptr = 0, .len = 0, .borrowed = true };
+        var made: usize = 0;
+        errdefer for (p.lanes[0..made]) |*x| p.freeLane(x);
+        for (p.lanes) |*x| {
+            x.* = .{ .seq = try p.laneSeq(), .itable = none };
+            made += 1; // its cache is the pool's to free from here on
+            if (p.host != null) {
+                x.itable = try cuda.DeviceBuffer.alloc(e.driver, mostPages(cap, p.layout.page_tokens) * 4);
+                x.seq.paged.?.itable = x.itable.ptr;
+                x.sel = try kvt.LaneSel.init(p.gpa, e.driver, &p.kern.?, p.capacity + window_rows, mostPages(cap, p.layout.page_tokens), slot_frames, layers, p.own(x));
+                x.seq.sel = x.sel;
+            }
+        }
+    }
+    /// What one lane owns: its selection, its index table when one was allocated, and its cache.
+    pub fn freeLane(p: *Pool, x: *Lane) void {
+        if (x.sel) |sel| sel.deinit();
+        if (p.host != null and x.itable.ptr != 0) x.itable.free();
+        x.seq.deinit(p.gpa);
     }
 
     /// A lane's cache: views only (states mapped from its run at open, attention caches on the arena) and a table.
@@ -264,10 +275,8 @@ pub const Pool = struct {
         cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: the pool did not drain at close");
         for (p.lanes) |*x| {
             if (x.used) p.giveBack(x);
-            if (x.sel) |sel| sel.deinit();
-            if (p.host != null) x.itable.free();
+            p.freeLane(x);
             x.fids.deinit(p.gpa);
-            x.seq.deinit(p.gpa);
         }
         p.gpa.free(p.lanes);
         p.arena.free();
