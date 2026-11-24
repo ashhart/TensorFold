@@ -10,6 +10,7 @@ const blobName = single.blobName;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
 const revisionOk = hub.revisionOk;
+const credential = @import("sys").credential;
 const route = @import("pull_route.zig");
 
 pub const GiB: u64 = 1 << 30;
@@ -105,7 +106,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     if (kind.drafter) {
         try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
     } else if (hub.family(model_type)) |family| {
-        try out.print("{s}: {s} ({s})\n", .{ repo, family.title, try safeModelType(a, family.model_type, auth) });
+        try out.print("{s}: {s} ({s})\n", .{ repo, if (auth.reflects(family.title)) credential.withheld else family.title, try safeModelType(a, family.model_type, auth) });
     } else {
         try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
         return 1;
@@ -325,7 +326,7 @@ fn safeModelType(a: Allocator, text: []const u8, auth: Auth) ![]const u8 {
         break;
     };
     const candidate = if (printable) out else "[unprintable model_type]";
-    return if (auth.reflects(candidate)) "" else candidate;
+    return if (auth.reflects(candidate)) credential.withheld else candidate;
 }
 
 /// Valid UTF-8 without terminal controls, for a path before it reaches a URL, log or local filename.

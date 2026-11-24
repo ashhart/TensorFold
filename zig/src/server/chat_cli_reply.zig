@@ -1,6 +1,7 @@
 //! One streamed chat reply as its bytes arrive, however reads cut them: answer and reasoning pieces, finish, error.
 const std = @import("std");
 const json = @import("json");
+const credential = @import("sys").credential;
 const sse = @import("benchmark_sse.zig");
 const Allocator = std.mem.Allocator;
 
@@ -134,7 +135,7 @@ fn streamFor(r: *Reply, kind: Kind) *Stream {
 /// An error event's ``message`` sanitized before matching and contained after every transformation.
 fn errorText(a: Allocator, e: json.Value, secrets: []const []const u8) ![]const u8 {
     const text = e.strField("message") orelse e.str() orelse "the server reported an error without a message";
-    return (try sse.cleanContained(a, text, secrets, error_limit)) orelse "";
+    return (try sse.cleanContained(a, text, secrets, error_limit)) orelse credential.withheld;
 }
 
 const Seen = struct {

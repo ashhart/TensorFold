@@ -11,6 +11,7 @@ const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");
 const stop = @import("benchmark_stop.zig");
 const environment = @import("sys").environment;
+const credential = @import("sys").credential;
 const Allocator = std.mem.Allocator;
 const Sig = std.posix.SIG;
 
@@ -142,7 +143,7 @@ fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
     try say(ctx.err, "Loading {s}; Ctrl-C cancels.", .{args.model.?});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, (try credentials.safe(ctx.a, problem)) orelse "");
+        const code = try fail(ctx, (try credentials.safe(ctx.a, problem)) orelse credential.withheld);
         try lastLines(ctx, tail);
         return code;
     };
@@ -225,7 +226,7 @@ const Session = struct {
 /// Finds the model and its thinking switch, then holds one exchange (a piped message) or a conversation.
 fn session(ctx: *const Context, args: args_mod.Args, target: Target, message: ?[]const u8) !u8 {
     var problem: []const u8 = "";
-    const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, problem);
+    const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, try target.credentials.check(ctx.a, problem));
     const found = try discover(ctx, url, target);
     if (found.stopped) |sig| return stop.exitCode(sig);
     const model = found.model orelse return fail(ctx, try target.credentials.check(ctx.a, found.problem));
@@ -308,6 +309,7 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = ctx.io };
     defer client.deinit();
     const url = try std.mem.concat(ctx.a, u8, &.{ chat_url[0 .. chat_url.len - "/chat/completions".len], "/models" });
+    if (try credential.contains(ctx.a, url, target.credentials.forms)) return .{ .problem = credential.withheld };
     const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key });
     if (got.failed == .stopped) return .{ .stopped = stop.requested() orelse .INT };
     var doc: ?json.Value = null;
@@ -327,7 +329,7 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
         };
         return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} {s}; name one after the URL", .{ url, why }) };
     };
-    const name: ?[]const u8 = if (target.model == null) try target.credentials.clean(ctx.a, raw_name, sse.line_limit) else raw_name;
+    const name: ?[]const u8 = try target.credentials.clean(ctx.a, raw_name, sse.line_limit);
     return .{ .model = name orelse return .{ .problem = try target.credentials.check(ctx.a, "the server supplied an unsafe model name") }, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, raw_name) else null };
 }
 
