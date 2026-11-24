@@ -117,10 +117,14 @@ pub const Seen = struct {
     kept: []const u8 = "", // the tensorfold block's kept_tool_calls, as JSON
     finish: []const u8 = "",
     eos_len: usize = 0, // the engine's request's end ids
+    grammars: usize = 0, // grammars the shared compiler compiled (ends: the eos ids)
+    tool_grammars: usize = 0, // grammars the required-call compiler compiled (ends: eos and the end of message)
+    token_ids: []const u8 = "", // the tensorfold block's token_ids, as JSON, when the request asked for them
 };
 
 /// Grammars accepted as compiled, with no grammar library: the route attaches them, the script ignores them.
 const Grammars = struct {
+    compiled: usize = 0,
     fn compiler(g: *Grammars) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = g;
@@ -131,6 +135,8 @@ const Grammars = struct {
         return out;
     }
     fn compile(ptr: *anyopaque, _: c_int, _: [*]const u8, _: usize, _: [*]u8, _: usize) callconv(.c) ?*anyopaque {
+        const g: *Grammars = @ptrCast(@alignCast(ptr));
+        g.compiled += 1;
         return ptr;
     }
     fn free(_: *anyopaque) callconv(.c) void {}
@@ -151,6 +157,12 @@ fn usageOf(v: json.Value, into: *Usage) void {
     if (u.get("completion_tokens_details")) |d| if (d == .object) {
         into.reasoning = intOf(d.get("reasoning_tokens"));
     };
+}
+
+fn idsOf(a: std.mem.Allocator, v: json.Value, into: *[]const u8) !void {
+    const tf = v.get("tensorfold") orelse return;
+    const ids = tf.get("token_ids") orelse return;
+    into.* = try json.stringify(a, ids, .{ .ascii = false, .compact = true });
 }
 
 fn keptOf(a: std.mem.Allocator, v: json.Value, into: *[]const u8) !void {
@@ -182,10 +194,12 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
     var grammars: Grammars = .{};
+    var tool_grammars: Grammars = .{};
     var compiler = grammars.compiler();
+    var tool_compiler = tool_grammars.compiler();
     srv.info.structures = true;
     srv.grammars = &compiler;
-    if (comptime @hasField(Server, "tool_grammars")) srv.tool_grammars = &compiler;
+    if (comptime @hasField(Server, "tool_grammars")) srv.tool_grammars = &tool_compiler;
     defer srv.grammars = null;
     defer if (comptime @hasField(Server, "tool_grammars")) {
         srv.tool_grammars = null;
@@ -203,6 +217,7 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     var rejected: i64 = 0;
     var usage: Usage = .{};
     var kept: []const u8 = "";
+    var token_ids: []const u8 = "";
     var finish: []const u8 = "";
     if (!stream) {
         try t.expectEqual(@as(u16, 200), got.status);
@@ -210,6 +225,7 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
         rejected = rejectedOf(v);
         usageOf(v, &usage);
         try keptOf(a, v, &kept);
+        try idsOf(a, v, &token_ids);
         const first = v.get("choices").?.array[0];
         if (first.get("finish_reason")) |f| if (f == .string) {
             finish = f.string;
@@ -224,6 +240,7 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
         rejected += rejectedOf(v);
         usageOf(v, &usage);
         try keptOf(a, v, &kept);
+        try idsOf(a, v, &token_ids);
         const choices = v.get("choices") orelse continue;
         if (choices != .array or choices.array.len == 0) continue;
         const first = choices.array[0];
@@ -236,7 +253,7 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept, .eos_len = script.eos_len };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept, .eos_len = script.eos_len, .grammars = grammars.compiled, .tool_grammars = tool_grammars.compiled, .token_ids = token_ids };
 }
 
 pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
