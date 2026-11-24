@@ -340,7 +340,7 @@ pub const Model = struct {
         m.rows_v = try m.gpa.alloc(u64, c.layers);
         for (0..c.layers) |i| {
             var read = false; // a later layer reads this one's rows: they keep their own buffers
-            for (c.kv_from[i + 1 .. c.layers]) |f| read = read or f == i;
+            for (c.kv_from[i + 1 .. c.layers]) |f| read = read or (f != null and f.? == i);
             m.rows_k[i] = if (c.kv_from[i]) |src| m.rows_k[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.kn;
             m.rows_v[i] = if (c.kv_from[i]) |src| m.rows_v[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.vn;
         }
