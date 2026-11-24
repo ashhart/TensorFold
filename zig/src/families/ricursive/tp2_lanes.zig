@@ -77,14 +77,30 @@ pub const Ripple = struct {
         var k = try Draw.load(d);
         errdefer for (&k.mods) |*x| x.unload();
         const free = try gpa.alloc(bool, m.slots);
+        errdefer gpa.free(free);
         @memset(free, true);
         const written = try gpa.alloc(std.ArrayList(u32), m.slots);
+        errdefer gpa.free(written);
         @memset(written, .empty);
         const used = try gpa.alloc(u64, m.slots);
+        errdefer gpa.free(used);
         @memset(used, 0);
         const bufs = try gpa.alloc(cuda.DeviceBuffer, 2 * m.slots);
-        for (bufs, 0..) |*b, i| b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) v * 4 else @sizeOf(cuda.sample.Rule));
-        return .{ .gpa = gpa, .m = m, .k = k, .free = free, .written = written, .used = used, .logits = try cuda.DeviceBuffer.alloc(d, round_rows * v * 4), .logits16 = try cuda.DeviceBuffer.alloc(d, round_rows * v * 2), .tok = try cuda.DeviceBuffer.alloc(d, (ring + round_rows) * 4), .meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16), .slot_bufs = bufs };
+        errdefer gpa.free(bufs);
+        var made: usize = 0;
+        errdefer for (bufs[0..made]) |*b| b.free();
+        for (bufs, 0..) |*b, i| {
+            b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) v * 4 else @sizeOf(cuda.sample.Rule));
+            made += 1;
+        }
+        var logits = try cuda.DeviceBuffer.alloc(d, round_rows * v * 4);
+        errdefer logits.free();
+        var logits16 = try cuda.DeviceBuffer.alloc(d, round_rows * v * 2);
+        errdefer logits16.free();
+        var tok = try cuda.DeviceBuffer.alloc(d, (ring + round_rows) * 4);
+        errdefer tok.free();
+        const meta = try cuda.DeviceBuffer.alloc(d, round_rows * 16);
+        return .{ .gpa = gpa, .m = m, .k = k, .free = free, .written = written, .used = used, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs };
     }
 
     pub fn deinit(x: *Ripple) void {
