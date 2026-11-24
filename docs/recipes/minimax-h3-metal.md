@@ -149,7 +149,8 @@ Video and audio outputs are byte-identical between main and the branch in every 
 first-step page faults into the load; it shows no net cold-start win here. The second 2048 warm pair is not run.
 
 `zig build test-h3-read-ahead` checks multi-piece, multi-file byte counts, truncated and missing files, and disabled
-read-ahead. The nightly macOS host checks run this target.
+read-ahead. The nightly macOS host checks run this target. `zig build test-h3-image-decoder-load` loads a one-block
+decoder fixture beside the mask and an encoder tensor and checks that only the converted tensors' bytes are read ahead.
 
 ## Not done
 

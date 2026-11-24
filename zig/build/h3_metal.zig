@@ -6,6 +6,6 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const h3_kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
     @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
     @import("h3_image_prompt.zig").install(b, target, optimize, metal);
-    @import("h3_image_decoder.zig").tool(b, target, optimize, metal);
+    @import("h3_image_decoder.zig").tool(b, target, optimize, metal, test_step);
     @import("h3_image_server.zig").tool(b, target, optimize, metal, h3_kernels, sources, test_step);
 }
