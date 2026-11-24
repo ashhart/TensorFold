@@ -21,9 +21,37 @@ pub const down_32_below = 64;
 
 /// core/affine_mm.metal at 4/64, bf16 out, the column-group kernels after it: affine_mm.names, then ours.
 pub fn source(device: mtl.Device, a: std.mem.Allocator) ![]u8 {
-    const core = try affine_mm.source(device, a, .{ .exact_nonfinite = true });
+    return sourceBits(device, a, 4, true);
+}
+
+pub fn sourceBits(device: mtl.Device, a: std.mem.Allocator, bits: u8, exact_nonfinite: bool) ![]u8 {
+    const core = try affine_mm.source(device, a, .{ .bits = bits, .exact_nonfinite = exact_nonfinite });
     defer a.free(core);
     return std.mem.concat(a, u8, &.{ core, sources.glm_mm_groups });
+}
+
+pub fn buildWide(gpa: std.mem.Allocator, device: mtl.Device, h: anytype, made: anytype, out_grp: *[2]Pipes, comptime lib_fn: anytype) !void {
+    for ([_]u8{ 6, 8 }, out_grp) |bits, *out| {
+        const src = try sourceBits(device, gpa, bits, false);
+        defer gpa.free(src);
+        h.update(src);
+        try lib_fn(made, device, src, &names, out);
+    }
+}
+
+pub fn forRouted(path: anytype, mm4: Pipes, wide_opt: anytype) ?Pipes {
+    return switch (path) {
+        .mm4 => mm4,
+        .mm6 => wide_opt.?.mm_grp[0],
+        .mm8 => wide_opt.?.mm_grp[1],
+        else => null,
+    };
+}
+
+pub fn denseOrAffine(e: mtl.ComputeEncoder, grp: [2]Pipes, pipes: affine_mm.Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, k: u32, strides: affine_mm.Strides, bm: u32) void {
+    if ((q.bits == 6 or q.bits == 8) and k >= dense_from and bm == 64) {
+        dense(e, grp[if (q.bits == 6) 0 else 1], x, sums, q, y, rows, strides);
+    } else affine_mm.denseBatchBm(e, pipes, x, sums, q, y, rows, 1, strides, bm);
 }
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
