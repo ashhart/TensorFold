@@ -177,7 +177,7 @@ const Session = struct {
 
     /// One message and its streamed reply, in an arena of its own that lives until the turn is kept.
     fn ask(s: *Session, a: Allocator, message: []const u8) !turn.Ended {
-        const request = try turn.body(a, s.settings, &s.history, message);
+        const request = try turn.checkedBody(a, s.settings, &s.history, message, s.target.credentials) orelse return .{ .failed = .{ .reason = "the serialized request contains configured credentials" } };
         return turn.run(a, s.ctx.io, s.url, s.target.key, s.target.credentials, request, s.ctx.out, s.show);
     }
 
@@ -228,9 +228,9 @@ fn session(ctx: *const Context, args: args_mod.Args, target: Target, message: ?[
     const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, problem);
     const found = try discover(ctx, url, target);
     if (found.stopped) |sig| return stop.exitCode(sig);
-    const model = found.model orelse return fail(ctx, found.problem);
+    const model = found.model orelse return fail(ctx, try target.credentials.check(ctx.a, found.problem));
     if (args.no_thinking and found.thinking_switch == false)
-        return fail(ctx, "--no-thinking: this model's chat template cannot turn thinking off (its /v1/models thinking_switch is false)");
+        return fail(ctx, try target.credentials.check(ctx.a, "--no-thinking: this model's chat template cannot turn thinking off (its /v1/models thinking_switch is false)"));
     var s: Session = .{
         .ctx = ctx,
         .url = url,

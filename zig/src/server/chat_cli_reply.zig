@@ -221,3 +221,75 @@ test "chat CLI: a stream that ends early, an event that is not JSON and an endle
     try long.feed("data: ");
     try std.testing.expectError(error.InvalidStream, long.feed(filler));
 }
+
+fn contentDelta(a: Allocator, content: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "data: {{\"choices\": [{{\"index\": 0, \"delta\": {{\"content\": \"{s}\"}}, \"finish_reason\": null}}]}}\n\n", .{content});
+}
+
+const finishing_events = "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\n" ++
+    "data: [DONE]\n\n";
+
+test "chat CLI: KR69 source prefixes stay out of terminal and history across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { held: []const u8, continuation: []const u8 }{
+        .{ .held = "abcd", .continuation = "X" },
+        .{ .held = "abc%64", .continuation = "X" },
+        .{ .held = "abc%2564", .continuation = "X" },
+        .{ .held = "abc%6", .continuation = "X" },
+    };
+    for (cases) |case| {
+        var seen: Seen = .{ .a = a };
+        var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+        try r.feed(try contentDelta(a, case.held));
+        try std.testing.expectEqualStrings("", seen.text.items);
+        try std.testing.expectEqualStrings("", r.content.items);
+        try r.feed(try contentDelta(a, case.continuation));
+        try r.feed(finishing_events);
+        try r.end();
+        try std.testing.expectEqualStrings("<c>X", seen.text.items);
+        try std.testing.expectEqualStrings("X", r.content.items);
+        try std.testing.expect(r.complete());
+    }
+}
+
+test "chat CLI: KR69 transformed prefixes stay out of terminal and history across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{ "token", "[redacted]-suffix" } };
+    try r.feed(try contentDelta(a, "token"));
+    try std.testing.expectEqualStrings("", seen.text.items);
+    try std.testing.expectEqualStrings("", r.content.items);
+    try r.feed(try contentDelta(a, "X"));
+    try r.feed(finishing_events);
+    try r.end();
+    try std.testing.expectEqualStrings("<c>X", seen.text.items);
+    try std.testing.expectEqualStrings("X", r.content.items);
+    try std.testing.expect(r.complete());
+}
+
+test "chat CLI: KR69 bytewise JSON reads cannot release a prefix and safe replies commit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var cut: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+    const bytes = try std.mem.concat(a, u8, &.{ try contentDelta(a, "abcdX"), finishing_events });
+    for (0..bytes.len) |i| try cut.feed(bytes[i .. i + 1]);
+    try cut.end();
+    try std.testing.expectEqualStrings("<c>X", seen.text.items);
+    try std.testing.expectEqualStrings("X", cut.content.items);
+    try std.testing.expect(cut.complete());
+
+    var safe_seen: Seen = .{ .a = a };
+    var safe: Reply = .{ .a = a, .sink = safe_seen.sink(), .secrets = &.{"abcde"} };
+    try safe.feed(try contentDelta(a, "whole response"));
+    try safe.feed(finishing_events);
+    try safe.end();
+    try std.testing.expectEqualStrings("<c>whole response", safe_seen.text.items);
+    try std.testing.expectEqualStrings("whole response", safe.content.items);
+    try std.testing.expect(safe.complete());
+}
