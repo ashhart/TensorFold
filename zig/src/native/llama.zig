@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const fl = tf.llama;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
+const mem_ctrl = @import("memory_controller.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -21,10 +22,12 @@ const Host = struct {
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states, in what the streams' caches leave of the budget
     cache_cap: u64 = 0, // --prompt-cache-gib's bytes (the budget when unset)
+    folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v6 (pure-attention KV-only!)
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.folded_mem) |fm| fm.deinit();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.config.deinit(h.gpa);
@@ -155,6 +158,16 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.host.info_.draft_sources.drafter = .{ .kind = "Llama drafter", .name = o.drafter_name orelse o.drafter.? };
     }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    h.folded_mem = null;
+    if ((o.slide or mem_ctrl.hasSavedFile(a, io, o.dir)) and !mem_ctrl.useLegacyPocket()) {
+        const adapter = try fl.memory_adapter.Adapter.init(gpa, h.metal);
+        errdefer adapter.deinit(gpa);
+        const fm = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, fl.memory_adapter.Adapter.deinitOpaque);
+        h.folded_mem = fm;
+        h.host.folded_memory = fm.controller();
+        h.host.info_.folded_memory = true;
+    }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
