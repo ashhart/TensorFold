@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-M3 on Metal: shared decode rounds of 12 to 32 rows are timed at load instead of priced at 2x and 4x the 8-row window, so window choice uses measured costs; tokens are unchanged, and a `--context` under 256 tokens leaves those rounds untimed instead of failing to open the model (#3120).
+
 - CUDA qmmf: `TF_QMMF_HALF_BN=1` uses half-column (32-wide) tiles for FP4, FP8 and FP8-group GEMVs on GPUs with many SMs, splitting only along output columns so each output keeps its accumulation; GB10 behaviour is unchanged when off (#4533).
 
 - Inkling 2 Mini: native serving on CUDA (one rank, NVFP4 and MXFP8 experts) and Metal, with kernel contracts on both (#4387).
