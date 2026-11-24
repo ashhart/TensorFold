@@ -131,6 +131,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 4194304)" },
     .{ .name = "TF_DSV41_MARKOV_GPU", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 draws DSpark drafts on the host from each row's 64 best logits; default 1)" },
+    .{ .name = "TF_DSV41_MARKOV_TOPK", .scope = .metal, .kind = .u32, .max = 256, .forms = "0 (full-vocab GPU chain only) or 1 to 256 top-K candidates for filtered GPU Markov sampling (default 64)" },
     .{ .name = "TF_DSV41_DSPARK_BLOCK", .scope = .metal, .kind = .u32, .forms = "a whole DSpark block of 1 to 15 drafts, 0 for the checkpoint's (default 7)" },
     .{ .name = "TF_DSV41_CALIB", .scope = .metal, .kind = .word, .trim = " \t\r\n", .ignore_case = true, .words = &.{ "cached", "default", "real", "measure", "zig" }, .forms = "cached, default, real, measure or zig, in any case (unset or blank: default on Metal)" },
     .{ .name = "TF_DSV41_CALIB_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding stored cost tables" },
