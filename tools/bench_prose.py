@@ -1,35 +1,23 @@
 #!/usr/bin/env python3
-"""Realistic natural-prose benchmark for OpenAI-compatible LLM servers:
-1. 8-stream distinct literary/prose generation (drafted vs plain, zero shared prefixes, cached_tokens=0).
-2. BF16 vs FP8 KV cache loss on genuine classic prose (1K..32K chapters + 48-step teacher-forced Moby-Dick NLL/KL).
-3. Nx >500,000-token (4.0M+ total) completely distinct uncached classic novels (cached_tokens=0 on all streams, 3 unique markers per stream).
-"""
-import argparse, concurrent.futures, json, math, os, re, statistics, time, urllib.request
+"""Model-agnostic natural-prose benchmark client with verified cold-cache, equality, logprob and long-context checks."""
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import math
+import os
+import re
+import statistics
+import sys
+import time
+import urllib.request
+from pathlib import Path
 
-def strip_gutenberg(raw: str) -> str:
-    # Strip Project Gutenberg header and footer so zero boilerplate is shared across books!
-    m_start = re.search(r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", raw, flags=re.I | re.S)
-    if m_start:
-        raw = raw[m_start.end():]
-    else:
-        raw = raw[4000:]
-    m_end = re.search(r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG", raw, flags=re.I)
-    if m_end:
-        raw = raw[:m_end.start()]
-    return raw.strip()
-
-def load_book(prose_dir: str, name: str) -> str:
-    with open(os.path.join(prose_dir, f"{name}.txt"), "r", encoding="utf-8", errors="ignore") as f:
-        return strip_gutenberg(f.read())
-
-def post_json(url: str, payload: dict, timeout: int = 3600) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_prose_loss
+import bench_stream
+from bench_evidence import count as valid_count, token_equal
+from bench_prose_loss import CLEAN_FINISH, LOSS_CASES, compare_prose_loss, sha256_token_ids, valid_token_ids
 
 DISTINCT_PROSE_8 = [
     ("war_and_peace", 12000, 9500, "Analyze how Tolstoy contrasts salon artifice with genuine human emotion in this opening scene, then continue the narrative tone for two paragraphs."),
@@ -42,206 +30,6 @@ DISTINCT_PROSE_8 = [
     ("ulysses", 14000, 9500, "Analyze Joyce's shifts between external action and interior monologue on the Martello tower in this opening passage."),
 ]
 
-def stream_chat(url: str, body: dict, timeout: int = 600):
-    body = dict(body, stream=True, stream_options={"include_usage": True})
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
-    t0 = time.time()
-    t_first = None
-    t_last = None
-    usage = {}
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        for raw in resp:
-            ln = raw.decode("utf-8", errors="ignore").strip()
-            if not ln.startswith("data: "):
-                continue
-            payload = ln[6:]
-            if payload == "[DONE]":
-                break
-            obj = json.loads(payload)
-            if obj.get("usage"):
-                usage = obj["usage"]
-            ch = obj.get("choices") or []
-            if ch and (ch[0].get("delta", {}).get("content") or ""):
-                now = time.time()
-                if t_first is None:
-                    t_first = now
-                t_last = now
-    t_end = time.time()
-    if t_first is None:
-        t_first = t_end
-    if t_last is None or t_last <= t_first:
-        t_last = t_end
-    return usage, t0, t_first, t_last
-
-def run_prose_decode(base_url: str, prose_dir: str, model: str = "model", levels=(1, 4, 8), gen_tokens: int = 256):
-    print("\n=== REALISTIC DISTINCT-PROSE MULTI-STREAM DECODE BENCHMARK (SSE TTFT + PURE DECODE) ===", flush=True)
-    for tag, excerpt_chars in [("350tok_prose", 1400), ("2.5Ktok_chapter", 9500)]:
-        prompts = []
-        for i, (book, off, _, question) in enumerate(DISTINCT_PROSE_8):
-            txt = load_book(prose_dir, book)[off : off + excerpt_chars]
-            prompts.append((book, f"[Excerpt {i+1} — {book}]\n\n{txt}\n\nTask: {question}"))
-        print(f"  --- Workload: {tag} (8 distinct classic novels, cached=0) ---", flush=True)
-        for n in levels:
-            for draft_on in (True, False):
-                nonce = f"[Run {tag} n={n} draft={'on' if draft_on else 'plain'} ts={time.time():.3f}]\n"
-                def one(idx):
-                    book, p = prompts[idx]
-                    body = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": nonce + p}],
-                        "chat_template_kwargs": {"enable_thinking": False},
-                        "temperature": 0,
-                        "max_tokens": gen_tokens,
-                    }
-                    if not draft_on:
-                        body["draft"] = False
-                    u, t0, t_first, t_last = stream_chat(f"{base_url}/v1/chat/completions", body)
-                    cached = u.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                    return book, u["prompt_tokens"], cached, u["completion_tokens"], t0, t_first, t_last
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
-                    futs = [ex.submit(one, i) for i in range(n)]
-                    rows = [f.result() for f in futs]
-                tot_prompt = sum(r[1] for r in rows)
-                tot_cached = sum(r[2] for r in rows)
-                tot_gen = sum(r[3] for r in rows)
-                first_tok_t = min(r[5] for r in rows)
-                last_tok_t = max(r[6] for r in rows)
-                start_t = min(r[4] for r in rows)
-                dec_tps = sum((r[3] - 1) / max(r[6] - r[5], 1e-3) for r in rows)
-                ttft_med = statistics.median(r[5] - r[4] for r in rows)
-                mode_s = "DFly2" if draft_on else "Plain"
-                print(
-                    f"    [{n}s {mode_s:5s}] prompt={tot_prompt:,} (cached={tot_cached}) | "
-                    f"decode={dec_tps:6.2f} tok/s | e2e={tot_gen/(last_tok_t - start_t):6.2f} tok/s | "
-                    f"median_TTFT={ttft_med:.2f}s",
-                    flush=True,
-                )
-def dump_prose_loss(base_url: str, prose_dir: str, out_json: str, model: str = "model"):
-    print("\n=== REAL-PROSE KV LOSS PROBE (1K..32K NOVEL CHAPTERS + 48-STEP MOBY-DICK NLL) ===")
-    cases = [
-        ("war_peace_2k", "war_and_peace", 25000, 10500, "Provide a concise literary analysis of the character dynamics in this scene."),
-        ("monte_cristo_4k", "monte_cristo", 30000, 21000, "Trace the chain of events and motives revealed in this chapter."),
-        ("les_mis_8k", "les_miserables", 40000, 44000, "Examine how Hugo develops the tension between law and mercy across these chapters."),
-        ("don_quixote_16k", "don_quixote", 35000, 88000, "Synthesize the major episodes in this section and how Sancho Panza's perspective evolves."),
-        ("anna_karenina_24k", "anna_karenina", 30000, 132000, "Analyze the parallel narrative threads in these chapters and their emotional turning points."),
-        ("david_copperfield_32k", "david_copperfield", 25000, 174000, "Summarize the key characters introduced across these chapters and Dickens' narrative voice."),
-    ]
-    records = {}
-    for label, book, off, chars, q in cases:
-        excerpt = load_book(prose_dir, book)[off : off + chars]
-        t0 = time.time()
-        res = post_json(f"{base_url}/v1/chat/completions", {
-            "model": model,
-            "messages": [{"role": "user", "content": f"{excerpt}\n\nQuestion: {q}"}],
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0,
-            "max_tokens": 64,
-            "logprobs": True,
-            "top_logprobs": 20,
-        })
-        dt = time.time() - t0
-        ch = res["choices"][0]
-        steps = [
-            {"token": it["token"], "logprob": it["logprob"], "top": {e["token"]: e["logprob"] for e in it["top_logprobs"]}}
-            for it in ch["logprobs"]["content"]
-        ]
-        records[label] = {
-            "prompt_tokens": res["usage"]["prompt_tokens"],
-            "steps": steps,
-            "text": ch["message"]["content"],
-        }
-        print(f"  [{label:22s}] prompt={res['usage']['prompt_tokens']:6,d} tok ({dt:.2f}s) -> {ch['message']['content'][:85]!r}")
-
-    # 48-step teacher-forced natural prose continuation on 16K-token Moby-Dick chapter!
-    md_full = load_book(prose_dir, "moby_dick")
-    md_prefix = "Continue the following Melville passage verbatim:\n\n" + md_full[50000:136000]
-    md_cont_words = md_full[136000:136450].split()[:48]
-    tf_steps = []
-    cur = md_prefix
-    t_tf = time.time()
-    for w in md_cont_words:
-        res = post_json(f"{base_url}/v1/chat/completions", {
-            "model": model,
-            "messages": [{"role": "user", "content": cur}],
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0,
-            "max_tokens": 1,
-            "logprobs": True,
-            "top_logprobs": 20,
-        })
-        it = res["choices"][0]["logprobs"]["content"][0]
-        tf_steps.append({
-            "gt_word": w,
-            "pred": it["token"],
-            "pred_lp": it["logprob"],
-            "top": {e["token"]: e["logprob"] for e in it["top_logprobs"]},
-        })
-        cur = cur + " " + w
-    print(f"  [moby_dick_16k_tf48    ] {len(tf_steps)} teacher-forced natural prose steps in {time.time()-t_tf:.2f}s")
-    records["_tf_moby_dick_16k"] = tf_steps
-    json.dump(records, open(out_json, "w"))
-    print(f"Saved real-prose KV probe to {out_json}")
-
-def compare_prose_loss(bf16_json: str, fp8_json: str):
-    b16 = json.load(open(bf16_json))
-    f8 = json.load(open(fp8_json))
-    print("\n=== REAL-PROSE BF16 vs FP8 KV CACHE LOSS REPORT ===")
-    kls, tvds, dlps = [], [], []
-    matched, agree = 0, 0
-    for name, r16 in b16.items():
-        if name.startswith("_"):
-            continue
-        s16, s8 = r16["steps"], f8[name]["steps"]
-        step0_kl = 0.0
-        for i in range(min(len(s16), len(s8))):
-            if not all(s16[j]["token"] == s8[j]["token"] for j in range(i)):
-                break
-            matched += 1
-            if s16[i]["token"] == s8[i]["token"]:
-                agree += 1
-            t16, t8 = s16[i]["top"], s8[i]["top"]
-            common = set(t16) & set(t8)
-            z16 = sum(math.exp(t16[k]) for k in common)
-            z8 = sum(math.exp(t8[k]) for k in common)
-            if z16 > 0.5 and z8 > 0.5:
-                kl = max(0.0, sum((math.exp(t16[k])/z16) * math.log((math.exp(t16[k])/z16) / (math.exp(t8[k])/z8)) for k in common))
-                tvd = 0.5 * sum(abs(math.exp(t16[k])/z16 - math.exp(t8[k])/z8) for k in common)
-                kls.append(kl)
-                tvds.append(tvd)
-                if i == 0:
-                    step0_kl = kl
-            if s16[i]["token"] in t8:
-                dlps.append(abs(s16[i]["logprob"] - t8[s16[i]["token"]]))
-        div = next((i for i in range(min(len(s16), len(s8))) if s16[i]["token"] != s8[i]["token"]), "IDENTICAL")
-        print(f"  {name:22s} ({r16['prompt_tokens']:6,d} tok): step0_KL={step0_kl:.6f} nats, first_diff_step={div}")
-
-    print(f"  OVERALL MATCHED-PREFIX PROSE ({matched} steps across 6 chapters, 2K..32K):")
-    print(f"    Top-1 Greedy Agreement : {agree}/{matched} ({100*agree/max(matched,1):.2f}%)")
-    print(f"    Mean KL(BF16 || FP8)   : {statistics.mean(kls):.6f} nats (PPL mult: {math.exp(statistics.mean(kls)):.5f}x = +{(math.exp(statistics.mean(kls))-1)*100:.3f}%), median={statistics.median(kls):.6f}")
-    print(f"    Mean Total Variation   : {100*statistics.mean(tvds):.3f}% (median={100*statistics.median(tvds):.3f}%)")
-    print(f"    Mean Top-1 |Δlogprob|  : {statistics.mean(dlps):.5f} (median={statistics.median(dlps):.5f}, max={max(dlps):.5f})")
-
-    tf16, tf8 = b16["_tf_moby_dick_16k"], f8["_tf_moby_dick_16k"]
-    tkls, ttvds, tdlps, tagree = [], [], [], 0
-    for x16, x8 in zip(tf16, tf8):
-        if x16["pred"] == x8["pred"]:
-            tagree += 1
-        t16, t8 = x16["top"], x8["top"]
-        common = set(t16) & set(t8)
-        z16 = sum(math.exp(t16[k]) for k in common)
-        z8 = sum(math.exp(t8[k]) for k in common)
-        if z16 > 0.5 and z8 > 0.5:
-            tkls.append(max(0.0, sum((math.exp(t16[k])/z16) * math.log((math.exp(t16[k])/z16) / (math.exp(t8[k])/z8)) for k in common)))
-            ttvds.append(0.5 * sum(abs(math.exp(t16[k])/z16 - math.exp(t8[k])/z8) for k in common))
-        if x16["pred"] in t8:
-            tdlps.append(abs(x16["pred_lp"] - t8[x16["pred"]]))
-    print(f"\n  16K MOBY-DICK TEACHER-FORCED CONTINUATION ({len(tf16)} steps, zero trajectory drift):")
-    print(f"    Top-1 Greedy Agreement : {tagree}/{len(tf16)} ({100*tagree/len(tf16):.2f}%)")
-    print(f"    Mean KL(BF16 || FP8)   : {statistics.mean(tkls):.6f} nats (PPL mult: {math.exp(statistics.mean(tkls)):.5f}x = +{(math.exp(statistics.mean(tkls))-1)*100:.3f}%), median={statistics.median(tkls):.6f}")
-    print(f"    Mean Total Variation   : {100*statistics.mean(ttvds):.3f}%")
-    print(f"    Mean Top-1 |Δlogprob|  : {statistics.mean(tdlps):.5f} (max={max(tdlps):.5f})")
-
 STREAM_SOURCES_500K = [
     ("Stream0_WarAndPeace", ["war_and_peace"], ("FOLIO-WP-1812", "FOLIO-WP-4409", "FOLIO-WP-8831"), "Summarize the closing philosophical reflections in the manuscript"),
     ("Stream1_LesMiserables", ["les_miserables"], ("FOLIO-LM-1832", "FOLIO-LM-5510", "FOLIO-LM-9047"), "Describe how the narrative resolves Jean Valjean's journey"),
@@ -253,121 +41,437 @@ STREAM_SOURCES_500K = [
     ("Stream7_Dickens_Trilogy", ["our_mutual_friend", "nicholas_nickleby", "martin_chuzzlewit"], ("FOLIO-MF-1865", "FOLIO-MF-4073", "FOLIO-MF-7295"), "Summarize the social critique running through the closing chapters"),
 ]
 
-def build_stream_manuscript(prose_dir: str, idx: int, target_tokens: int, chars_per_tok: float) -> tuple[str, tuple[str, str, str], str]:
-    name, books, codes, lit_q = STREAM_SOURCES_500K[idx]
+
+def strip_gutenberg(raw: str) -> str:
+    """Strip Project Gutenberg header and footer so books share no boilerplate prefix."""
+    m_start = re.search(r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", raw, flags=re.I | re.S)
+    if m_start:
+        raw = raw[m_start.end():]
+    elif "PROJECT GUTENBERG" in raw[:4000].upper():
+        raw = raw[4000:]
+    m_end = re.search(r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG", raw, flags=re.I)
+    if m_end:
+        raw = raw[:m_end.start()]
+    return raw.strip()
+
+
+def load_book(prose_dir: str, name: str) -> str:
+    """Read one plain-text book from prose_dir and strip any Gutenberg wrapper."""
+    with open(os.path.join(prose_dir, f"{name}.txt"), "r", encoding="utf-8", errors="ignore") as f:
+        return strip_gutenberg(f.read())
+
+
+def post_json(url: str, payload: dict, timeout: int = 3600) -> dict:
+    """POST JSON payload and return the decoded JSON object."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def sha256_text(text: str) -> str:
+    """Return lowercase 64-hex SHA-256 of UTF-8 text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def parse_usage(usage, complete: bool) -> dict:
+    """Validate usage counters; only explicit cached_tokens == 0 <= prompt_tokens qualifies as cold."""
+    u = usage if isinstance(usage, dict) else {}
+    details = u.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    prompt = valid_count(u.get("prompt_tokens"))
+    cached = valid_count(details.get("cached_tokens"))
+    tokens = valid_count(u.get("completion_tokens"))
+    valid_cache = prompt is not None and cached is not None and cached <= prompt
+    if not complete or not valid_cache:
+        state = "unverified"
+    elif cached == 0:
+        state = "cold"
+    else:
+        state = "reused"
+    return {"prompt_tokens": prompt, "cached_tokens": cached, "tokens": tokens, "cache_state": state}
+
+
+def pair_token_equal(left: dict, right: dict) -> bool | None:
+    """Compare complete token IDs when both sides have them, else full 64-hex token_sha256."""
+    if not left.get("accepted") or not right.get("accepted"):
+        return None
+    l_ids, r_ids = left.get("token_ids"), right.get("token_ids")
+    if isinstance(l_ids, list) and isinstance(r_ids, list):
+        return l_ids == r_ids
+    return token_equal(left, right)
+
+
+def pair_output_equal(left: dict, right: dict) -> bool | None:
+    """Compare full 64-hex output_sha256 across two accepted replies."""
+    if not left.get("accepted") or not right.get("accepted"):
+        return None
+    a, b = left.get("output_sha256"), right.get("output_sha256")
+    return None if not a or not b else (a == b)
+
+
+def stream_chat(url: str, body: dict, timeout: int = 600) -> dict:
+    """Stream one SSE chat completion using monotonic timing and strict completion/output validation."""
+    payload = dict(body, stream=True, stream_options={"include_usage": True})
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}
+    )
+    sent = time.perf_counter()
+    reply = bench_stream.Collector(sent)
+    chunk_token_ids: list[int] = []
+    error = None
+
+    def tap_lines(resp):
+        for raw in resp:
+            if b"token_ids" in raw:
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if line.startswith("data:"):
+                    try:
+                        chunk = json.loads(line[5:])
+                    except ValueError:
+                        chunk = None
+                    if isinstance(chunk, dict):
+                        for ch in chunk.get("choices") or []:
+                            ids = ch.get("token_ids") or (ch.get("delta") or {}).get("token_ids")
+                            if isinstance(ids, list) and all(type(x) is int and x >= 0 for x in ids):
+                                chunk_token_ids.extend(ids)
+            yield raw
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            reply.read(tap_lines(resp))
+    except Exception as exc:  # noqa: BLE001 - stream failures are reported in the receipt, not hidden
+        error = type(exc).__name__
+
+    if error is None and reply.end == "error":
+        error = "server_stream_error"
+    complete = error is None and reply.end == "done"
+    if error is None and not complete:
+        error = "incomplete_stream"
+    observed = reply.evidence.finish(reply.usage, reply.runtime, complete)
+    has_output = reply.evidence.observed_output and bool(reply.pieces)
+    tokens, prompt_tokens = observed["tokens"], observed["prompt_tokens"]
+    accepted = complete and has_output and prompt_tokens is not None and tokens is not None and tokens > 0
+    if error is None and not has_output:
+        error = "no_output"
+    elif error is None and not accepted:
+        error = "invalid_usage"
+
+    raw_ids = reply.runtime.get("token_ids") if isinstance(reply.runtime, dict) else None
+    if raw_ids is None and chunk_token_ids:
+        raw_ids = chunk_token_ids
+    token_ids = valid_token_ids(raw_ids, tokens) if accepted else None
+    token_sha256 = observed["token_sha256"] or (sha256_token_ids(token_ids) if token_ids is not None else None)
+    first = reply.pieces[0][0] if (accepted and reply.pieces) else None
+    last = reply.pieces[-1][0] if (accepted and reply.pieces) else None
+    ttft_s = (first - sent) if first is not None else None
+    decode_tps = ((tokens - 1) / (last - first)) if (accepted and tokens > 1 and last > first) else None
+
+    return {
+        "accepted": accepted, "complete": complete, "completion": reply.completion(), "error": error,
+        "prompt_tokens": prompt_tokens, "cached_tokens": observed["cached_tokens"],
+        "cache_state": observed["cache_state"], "tokens": tokens, "sent": sent, "first": first, "last": last,
+        "ttft_s": ttft_s, "decode_tps": decode_tps, "token_ids": token_ids,
+        "token_sha256": token_sha256 if accepted else None,
+        "output_sha256": observed["output_sha256"] if accepted else None,
+    }
+
+
+def run_prose_decode(
+    base_url: str,
+    prose_dir: str,
+    model: str = "model",
+    levels=(1, 4, 8),
+    gen_tokens: int = 256,
+    seed: int = 1234,
+    excerpt_specs=(("350tok_prose", 1400), ("2.5Ktok_chapter", 9500)),
+    sources=None,
+) -> dict:
+    """Run paired drafted/plain distinct-prose decode with identical prompts, seeds, and cold-cache verification."""
+    pool = sources if sources is not None else DISTINCT_PROSE_8
+    print("\n=== REALISTIC DISTINCT-PROSE MULTI-STREAM DECODE BENCHMARK (SSE TTFT + PURE DECODE) ===", flush=True)
+    report = {"mode": "prose-decode", "seed": seed, "gen_tokens": gen_tokens, "pairs": [], "qualified": True}
+
+    for tag, excerpt_chars in excerpt_specs:
+        prompts = []
+        for i, (book, off, _, question) in enumerate(pool):
+            raw_book = load_book(prose_dir, book)
+            txt = raw_book[off : off + excerpt_chars] if len(raw_book) > off else raw_book[:excerpt_chars]
+            prompt_text = f"[Excerpt {i + 1} — {book}]\n\n{txt}\n\nTask: {question}"
+            prompts.append((book, prompt_text, seed + i, sha256_text(prompt_text)))
+        print(f"  --- Workload: {tag} ({len(prompts)} distinct novels) ---", flush=True)
+
+        for n in levels:
+            arms = {}
+            for draft_on in (True, False):
+                def one(idx, _draft=draft_on):
+                    book, prompt_text, req_seed, prompt_sha = prompts[idx]
+                    body = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt_text}],
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "temperature": 0,
+                        "seed": req_seed,
+                        "max_tokens": gen_tokens,
+                    }
+                    if not _draft:
+                        body["draft"] = False
+                    row = stream_chat(f"{base_url}/v1/chat/completions", body)
+                    row.update(book=book, seed=req_seed, prompt_sha256=prompt_sha)
+                    return row
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+                    rows = [f.result() for f in [ex.submit(one, i) for i in range(n)]]
+
+                all_accepted = all(r["accepted"] for r in rows)
+                all_cold = all(r["cache_state"] == "cold" for r in rows)
+                all_timed = all_accepted and all(r["decode_tps"] is not None for r in rows)
+                timing_row = None
+                if all_accepted and all_cold:
+                    tot_prompt = sum(r["prompt_tokens"] for r in rows)
+                    tot_gen = sum(r["tokens"] for r in rows)
+                    start_t, last_tok_t = min(r["sent"] for r in rows), max(r["last"] for r in rows)
+                    timing_row = {
+                        "prompt_tokens": tot_prompt, "cached_tokens": 0, "completion_tokens": tot_gen,
+                        "decode_tps": sum(r["decode_tps"] for r in rows) if all_timed else None,
+                        "e2e_tps": (tot_gen / (last_tok_t - start_t)) if last_tok_t > start_t else None,
+                        "median_ttft_s": statistics.median(r["ttft_s"] for r in rows),
+                    }
+                mode_key, mode_s = ("draft", "DFly2") if draft_on else ("plain", "Plain")
+                arms[mode_key] = {"rows": rows, "all_accepted": all_accepted,
+                                  "cold_verified": all_accepted and all_cold, "timing": timing_row}
+                if timing_row is not None:
+                    dec_s = f"{timing_row['decode_tps']:6.2f}" if timing_row["decode_tps"] is not None else "  n/a "
+                    e2e_s = f"{timing_row['e2e_tps']:6.2f}" if timing_row["e2e_tps"] is not None else "  n/a "
+                    print(f"    [{n}s {mode_s:5s}] prompt={timing_row['prompt_tokens']:,} (cached=0, cold) | "
+                          f"decode={dec_s} tok/s | e2e={e2e_s} tok/s | median_TTFT={timing_row['median_ttft_s']:.2f}s", flush=True)
+                else:
+                    reasons = sorted({r["error"] or f"cache_{r['cache_state']}" for r in rows if not r["accepted"] or r["cache_state"] != "cold"})
+                    print(f"    [{n}s {mode_s:5s}] REJECTED (no timing row): {', '.join(reasons)}", flush=True)
+
+            d_rows, p_rows = arms["draft"]["rows"], arms["plain"]["rows"]
+            prompts_identical = all(d["prompt_sha256"] == p["prompt_sha256"] for d, p in zip(d_rows, p_rows))
+            seeds_identical = all(d["seed"] == p["seed"] for d, p in zip(d_rows, p_rows))
+            tok_eq = [pair_token_equal(d, p) for d, p in zip(d_rows, p_rows)]
+            out_eq = [pair_output_equal(d, p) for d, p in zip(d_rows, p_rows)]
+            pair_qualified = (arms["draft"]["cold_verified"] and arms["plain"]["cold_verified"]
+                              and prompts_identical and seeds_identical and False not in tok_eq and False not in out_eq)
+            if not pair_qualified:
+                report["qualified"] = False
+            report["pairs"].append({
+                "workload": tag, "streams": n, "prompts_identical": prompts_identical,
+                "seeds_identical": seeds_identical, "token_equal": tok_eq, "output_equal": out_eq,
+                "draft": arms["draft"], "plain": arms["plain"], "qualified": pair_qualified,
+            })
+    return report
+
+
+def dump_prose_loss(base_url: str, prose_dir: str, out_json: str, model: str = "model",
+                    cases=None, tf_tokens: int = 48, tf_file: str = "") -> dict:
+    """Delegate prose KV loss dumping to bench_prose_loss."""
+    return bench_prose_loss.dump_prose_loss(
+        post_json, load_book, parse_usage, base_url, prose_dir, out_json,
+        model=model, cases=cases, tf_tokens=tf_tokens, tf_file=tf_file,
+    )
+
+
+def build_stream_manuscript(prose_dir: str, idx: int, target_tokens: int, chars_per_tok: float, sources=None) -> tuple[str, tuple[str, str, str], str, bool]:
+    """Assemble one distinct archival manuscript and flag whether source text fell short of target_chars."""
+    pool = sources if sources is not None else STREAM_SOURCES_500K
+    name, books, codes, lit_q = pool[idx]
     joined = "\n\n".join(load_book(prose_dir, b) for b in books)
-    # Distinct opening header so token 0 is unique on every stream (cached_tokens == 0 guaranteed!)
     target_chars = int(target_tokens * chars_per_tok)
+    source_undersized = len(joined) < target_chars
     body = joined[:target_chars]
-    p10 = int(len(body) * 0.10)
-    p50 = int(len(body) * 0.50)
-    p90 = int(len(body) * 0.90)
+    p10, p50, p90 = int(len(body) * 0.10), int(len(body) * 0.50), int(len(body) * 0.90)
     manuscript = (
-        f"Archival Volume #{idx + 1} ({name}):\n\n"
-        + body[:p10]
-        + f"\n\n[Archival Margin Note Alpha for {name}: Early catalog marker is {codes[0]}.]\n\n"
-        + body[p10:p50]
-        + f"\n\n[Archival Margin Note Beta for {name}: Mid-volume catalog marker is {codes[1]}.]\n\n"
-        + body[p50:p90]
-        + f"\n\n[Archival Margin Note Gamma for {name}: Late catalog marker is {codes[2]}.]\n\n"
-        + body[p90:]
+        f"Archival Volume #{idx + 1} ({name}):\n\n" + body[:p10]
+        + f"\n\n[Archival Margin Note Alpha for {name}: Early catalog marker is {codes[0]}.]\n\n" + body[p10:p50]
+        + f"\n\n[Archival Margin Note Beta for {name}: Mid-volume catalog marker is {codes[1]}.]\n\n" + body[p50:p90]
+        + f"\n\n[Archival Margin Note Gamma for {name}: Late catalog marker is {codes[2]}.]\n\n" + body[p90:]
         + f"\n\nFinal Instructions for {name}: First list the three exact catalog markers (Alpha, Beta, Gamma) recorded in this volume, then in two sentences: {lit_q}."
     )
-    return name, codes, manuscript
+    return name, codes, manuscript, source_undersized
 
-def calibrate_stream_cpts(base_url: str, prose_dir: str, n_streams: int, model: str = "model") -> list[float]:
+
+def calibrate_stream_cpts(base_url: str, prose_dir: str, n_streams: int, model: str = "model", sources=None) -> list[float]:
+    """Estimate characters per token for each stream's source corpus."""
+    pool = sources if sources is not None else STREAM_SOURCES_500K
     cpts = []
     for idx in range(n_streams):
-        name, books, _, _ = STREAM_SOURCES_500K[idx]
+        name, books, _, _ = pool[idx]
         joined = "\n\n".join(load_book(prose_dir, b) for b in books)
         n = min(len(joined), 2_300_000)
-        sample = joined[n // 6 : n // 6 + 20000] + "\n" + joined[n // 2 : n // 2 + 20000] + "\n" + joined[(5 * n) // 6 : (5 * n) // 6 + 20000]
+        if n > 60000:
+            sample = joined[n // 6 : n // 6 + 20000] + "\n" + joined[n // 2 : n // 2 + 20000] + "\n" + joined[(5 * n) // 6 : (5 * n) // 6 + 20000]
+        else:
+            sample = joined[: max(1, min(n, 4000))]
         res = post_json(f"{base_url}/v1/chat/completions", {
-            "model": model,
-            "messages": [{"role": "user", "content": sample}],
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0,
-            "max_tokens": 1,
+            "model": model, "messages": [{"role": "user", "content": sample}],
+            "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0, "max_tokens": 1,
         })
-        ptok = res["usage"]["prompt_tokens"]
+        ptok = valid_count((res.get("usage") or {}).get("prompt_tokens"))
+        if not ptok:
+            raise ValueError(f"calibration failed for {name}: invalid prompt_tokens")
         cpt = len(sample) / ptok
         cpts.append(cpt)
-        print(f"  Calibrated {name:24s}: {cpt:.4f} chars/tok (available={int(len(joined)/cpt):,} tok)", flush=True)
+        print(f"  Calibrated {name:24s}: {cpt:.4f} chars/tok (available={int(len(joined) / cpt):,} tok)", flush=True)
     return cpts
 
-def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_streams: int, model: str = "model"):
-    print(f"\n=== {n_streams}x ~{target_tokens:,}-TOKEN 100% DISTINCT REAL-PROSE CONCURRENT BENCHMARK ===", flush=True)
-    cpts = calibrate_stream_cpts(base_url, prose_dir, n_streams, model=model)
+
+def _observed_kv_residency(health: dict) -> int | None:
+    """Return observed engine KV token residency from /health only when explicitly reported."""
+    if not isinstance(health, dict):
+        return None
+    kv = health.get("kv_cache") if isinstance(health.get("kv_cache"), dict) else {}
+    for candidate in (health.get("kv_resident_tokens"), kv.get("used_tokens"), kv.get("resident_tokens")):
+        val = valid_count(candidate)
+        if val is not None:
+            return val
+    return None
+
+
+def run_distinct_long(base_url: str, prose_dir: str, target_tokens: int, n_streams: int, model: str = "model",
+                      min_prompt_ratio: float = 0.95, sources=None) -> dict:
+    """Run N distinct long-context prose streams with separate submitted/completed totals and undersized-cell checks."""
+    print(f"\n=== {n_streams}x TARGET {target_tokens:,}-TOKEN DISTINCT REAL-PROSE CONCURRENT BENCHMARK ===", flush=True)
+    cpts = calibrate_stream_cpts(base_url, prose_dir, n_streams, model=model, sources=sources)
+    min_prompt_tokens = math.ceil(target_tokens * min_prompt_ratio)
+    payloads = [build_stream_manuscript(prose_dir, i, target_tokens, cpts[i], sources=sources) for i in range(n_streams)]
+    est_tokens = [int(len(ms) / cpts[i]) for i, (_, _, ms, _) in enumerate(payloads)]
+
+    for i, (name, codes, ms, src_short) in enumerate(payloads):
+        tag = " [UNDERSIZED SOURCE]" if src_short else ""
+        print(f"  Prepared {name:24s}: {len(ms):,} chars (~{est_tokens[i]:,} est tok), markers={codes}{tag}", flush=True)
+
+    def run_one(i):
+        name, codes, ms, src_short = payloads[i]
+        t0 = time.perf_counter()
+        try:
+            res = post_json(f"{base_url}/v1/chat/completions", {
+                "model": model, "messages": [{"role": "user", "content": ms}],
+                "chat_template_kwargs": {"enable_thinking": False}, "temperature": 0, "seed": 1234 + i, "max_tokens": 96,
+            }, timeout=7200)
+        except Exception as exc:  # noqa: BLE001 - capture per-stream failures without losing submitted totals
+            return {"name": name, "accepted": False, "error": type(exc).__name__, "est_prompt_tokens": est_tokens[i],
+                    "prompt_tokens": None, "cached_tokens": None, "cache_state": "unverified", "tokens": None,
+                    "elapsed_s": time.perf_counter() - t0, "hits": 0, "undersized": True, "source_undersized": src_short}
+        el = time.perf_counter() - t0
+        if res.get("error"):
+            return {"name": name, "accepted": False, "error": "server_error", "est_prompt_tokens": est_tokens[i],
+                    "prompt_tokens": None, "cached_tokens": None, "cache_state": "unverified", "tokens": None,
+                    "elapsed_s": el, "hits": 0, "undersized": True, "source_undersized": src_short}
+        choices = res.get("choices") or []
+        ch = choices[0] if choices else {}
+        msg = ch.get("message") or {}
+        txt, reasoning = msg.get("content") or "", msg.get("reasoning_content") or ""
+        complete = ch.get("finish_reason") in CLEAN_FINISH and bool(txt or reasoning)
+        usage = parse_usage(res.get("usage"), complete=complete)
+        accepted = complete and usage["prompt_tokens"] is not None and usage["tokens"] is not None and usage["tokens"] > 0
+        ptok = usage["prompt_tokens"]
+        undersized = src_short or ptok is None or ptok < min_prompt_tokens
+        hits = sum(1 for c in codes if c in txt or c in reasoning) if accepted else 0
+        status = "OK" if accepted else f"FAILED({ch.get('finish_reason') or 'no_output'})"
+        print(f"  [{status:12s} {name:24s}] prompt={ptok} (cached={usage['cached_tokens']}, {usage['cache_state']}), gen={usage['tokens']}, {el:.1f}s, markers={hits}/3", flush=True)
+        return {
+            "name": name, "accepted": accepted, "error": None if accepted else (ch.get("finish_reason") or "incomplete_or_empty"),
+            "est_prompt_tokens": est_tokens[i], "prompt_tokens": ptok, "cached_tokens": usage["cached_tokens"],
+            "cache_state": usage["cache_state"], "tokens": usage["tokens"], "elapsed_s": el,
+            "hits": hits, "undersized": undersized, "source_undersized": src_short,
+        }
+
+    t_all = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_streams) as ex:
+        results = [f.result() for f in [ex.submit(run_one, i) for i in range(n_streams)]]
+    wall = time.perf_counter() - t_all
+
+    completed = [r for r in results if r["accepted"]]
+    cold_completed = [r for r in completed if r["cache_state"] == "cold"]
+    undersized_names = [r["name"] for r in results if r["undersized"]]
+    submitted_est = sum(r["est_prompt_tokens"] for r in results)
+    reported_prompt = sum(r["prompt_tokens"] for r in results if r["prompt_tokens"] is not None)
+    completed_prompt = sum(r["prompt_tokens"] for r in completed)
+    completed_gen = sum(r["tokens"] for r in completed)
+    cold_prompt = sum(r["prompt_tokens"] for r in cold_completed)
+    tot_hits = sum(r["hits"] for r in completed)
+
+    observed_kv = None
     try:
-        urllib.request.urlopen(f"{base_url}/health?reset_peak=1", timeout=10).read()
+        health = json.loads(urllib.request.urlopen(f"{base_url}/health", timeout=10).read().decode("utf-8"))
+        observed_kv = _observed_kv_residency(health)
     except Exception:
         pass
 
-    payloads = [build_stream_manuscript(prose_dir, i, target_tokens, cpts[i]) for i in range(n_streams)]
-    for i, (name, codes, ms) in enumerate(payloads):
-        print(f"  Prepared {name:24s}: {len(ms):,} chars (~{int(len(ms)/cpts[i]):,} est tokens), unique markers={codes}", flush=True)
-    def run_one(i):
-        name, codes, ms = payloads[i]
-        t0 = time.time()
-        res = post_json(f"{base_url}/v1/chat/completions", {
-            "model": model,
-            "messages": [{"role": "user", "content": ms}],
-            "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0,
-            "max_tokens": 96,
-        }, timeout=7200)
-        el = time.time() - t0
-        u = res["usage"]
-        ptok = u["prompt_tokens"]
-        cached = u.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-        gtok = u["completion_tokens"]
-        txt = res["choices"][0]["message"]["content"]
-        hits = sum(1 for c in codes if c in txt)
-        print(f"  [Done {name:24s}] prompt={ptok:,} (cached={cached}), gen={gtok}, {el:.1f}s, markers={hits}/3 -> {txt[:105]!r}", flush=True)
-        return name, ptok, cached, gtok, el, hits, txt
+    cell_status = "ok"
+    if undersized_names:
+        cell_status = "undersized"
+    elif len(completed) != n_streams:
+        cell_status = "incomplete"
+    elif len(cold_completed) != n_streams:
+        cell_status = "cache_not_cold"
+    qualified = cell_status == "ok"
 
-    print(f"\nLaunching all {n_streams} distinct real-prose streams concurrently (`cached_tokens == 0` on all {n_streams})...", flush=True)
-    t_all = time.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_streams) as ex:
-        futs = [ex.submit(run_one, i) for i in range(n_streams)]
-        results = [f.result() for f in futs]
-    wall = time.time() - t_all
+    print(f"\n=== {n_streams}x DISTINCT REAL-PROSE SUMMARY (status={cell_status}) ===")
+    print(f"  Submitted streams            : {n_streams} (est_prompt={submitted_est:,}, reported_prompt={reported_prompt:,})")
+    print(f"  Completed streams            : {len(completed)}/{n_streams} (prompt={completed_prompt:,}, completion={completed_gen:,})")
+    print(f"  Verified cold streams        : {len(cold_completed)}/{n_streams} (cold_completed_prompt={cold_prompt:,})")
+    if undersized_names:
+        print(f"  Undersized cells (<{min_prompt_tokens:,} tok): {', '.join(undersized_names)}")
+    if observed_kv is not None:
+        print(f"  Observed engine KV residency : {observed_kv:,} tokens")
+    print(f"  Wall clock                   : {wall:.1f}s")
+    print(f"  Unique marker recall         : {tot_hits}/{3 * n_streams}")
 
-    tot_prompt = sum(r[1] for r in results)
-    tot_cached = sum(r[2] for r in results)
-    tot_gen = sum(r[3] for r in results)
-    tot_kv = tot_prompt + tot_gen
-    tot_hits = sum(r[5] for r in results)
-    print(f"\n=== {n_streams}x DISTINCT REAL-PROSE SUMMARY ===")
-    print(f"  Streams completed            : {len(results)}/{n_streams} (total cached_tokens = {tot_cached})")
-    print(f"  Distinct cold prompt tokens  : {tot_prompt:,} tokens ({tot_prompt/1e6:.3f}M)")
-    print(f"  Total simultaneous KV tokens : {tot_kv:,} tokens ({tot_kv/1e6:.3f}M)")
-    print(f"  Wall clock (prefill+decode)  : {wall:.1f}s (effective cold throughput: {(tot_prompt+tot_gen)/wall:.1f} tok/s)")
-    print(f"  Unique marker recall (24)    : {tot_hits}/{3 * n_streams} ({sum(1 for r in results if r[5]==3)}/{n_streams} streams 3/3)")
-    try:
-        h = json.loads(urllib.request.urlopen(f"{base_url}/health", timeout=10).read().decode("utf-8"))
-        mem = h.get("memory", {})
-        print(f"  GPU Memory (rank 0)          : active={mem.get('active',0)/(1024**3):.2f} GiB, peak={mem.get('peak',0)/(1024**3):.2f} GiB, cache={mem.get('cache',0)/(1024**3):.2f} GiB")
-    except Exception as e:
-        print(f"  Health note: {e}")
+    return {
+        "mode": "distinct-long", "target_tokens": target_tokens, "min_prompt_tokens": min_prompt_tokens,
+        "cell_status": cell_status, "qualified": qualified, "submitted_streams": n_streams,
+        "completed_streams": len(completed), "cold_verified_streams": len(cold_completed),
+        "submitted_est_prompt_tokens": submitted_est, "reported_prompt_tokens": reported_prompt,
+        "completed_prompt_tokens": completed_prompt, "completed_completion_tokens": completed_gen,
+        "cold_completed_prompt_tokens": cold_prompt, "undersized_streams": undersized_names,
+        "observed_kv_resident_tokens": observed_kv, "wall_s": wall, "marker_hits": tot_hits, "streams": results,
+    }
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
+
+def main(argv=None) -> int:
+    """CLI entry point returning 0 on qualified/valid runs and 1 when verification fails."""
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", default="http://127.0.0.1:8888")
     ap.add_argument("--model", default="model")
     ap.add_argument("--prose-dir", default="/tmp/prose_8")
     ap.add_argument("--mode", choices=["prose-decode", "prose-loss-dump", "prose-loss-compare", "distinct-long"], required=True)
     ap.add_argument("--out", default="")
+    ap.add_argument("--output", default="")
     ap.add_argument("--bf16", default="")
     ap.add_argument("--fp8", default="")
     ap.add_argument("--tokens", type=int, default=502000)
     ap.add_argument("--streams", type=int, default=8)
-    a = ap.parse_args()
+    ap.add_argument("--levels", default="1,4,8")
+    ap.add_argument("--gen-tokens", type=int, default=256)
+    ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--tf-tokens", type=int, default=48)
+    ap.add_argument("--tf-file", default="")
+    ap.add_argument("--min-prompt-ratio", type=float, default=0.95)
+    a = ap.parse_args(argv)
+
     if a.mode == "prose-decode":
-        run_prose_decode(a.url, a.prose_dir, model=a.model)
+        levels = tuple(int(x) for x in a.levels.split(","))
+        report = run_prose_decode(a.url, a.prose_dir, model=a.model, levels=levels, gen_tokens=a.gen_tokens, seed=a.seed)
     elif a.mode == "prose-loss-dump":
-        dump_prose_loss(a.url, a.prose_dir, a.out, model=a.model)
+        report = dump_prose_loss(a.url, a.prose_dir, a.out, model=a.model, tf_tokens=a.tf_tokens, tf_file=a.tf_file)
     elif a.mode == "prose-loss-compare":
-        compare_prose_loss(a.bf16, a.fp8)
-    elif a.mode == "distinct-long":
-        run_distinct_long(a.url, a.prose_dir, a.tokens, a.streams, model=a.model)
+        report = compare_prose_loss(a.bf16, a.fp8)
+    else:
+        report = run_distinct_long(a.url, a.prose_dir, a.tokens, a.streams, model=a.model, min_prompt_ratio=a.min_prompt_ratio)
+
+    if a.output:
+        with open(a.output, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+    return 0 if report.get("qualified", True) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
