@@ -92,6 +92,12 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     prompt_stats_run.has_side_effects = true;
     test_step.dependOn(&prompt_stats_run.step);
     b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
+    const idle_extents = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/idle_release_test.zig"), .target = b.graph.host, .link_libc = true });
+    const idle_step = b.step("test-qwen27-idle-release-host", "Exact serialized extents, quiet release, restore failures and pre-admission hooks without a GPU");
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = idle_extents })).step);
+
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_api, .filters = &.{"weight release:"} })).step);
+    test_step.dependOn(idle_step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
