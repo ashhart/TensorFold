@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP decode: multi-row rounds score each slot's rows from one read of their keys (#N).
+
 - H3 on Metal: transformer products run on the `h3_gemm_32x64` kernel in 64-row bands and the decoder decodes 64 tiles a pass, with sums unchanged (#N).
 
 - GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
