@@ -236,6 +236,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
             @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
+            @import("inkling2_metal").inkling2_dflash2
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))

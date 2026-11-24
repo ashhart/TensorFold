@@ -18,6 +18,7 @@ pub const Suites = struct {
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     vision: @import("metal_inkling2_vision.zig").Suite,
     tree: @import("metal_inkling2_tree.zig").Suite,
+    dflash2: @import("metal_inkling2_dflash2.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
     pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
@@ -36,6 +37,7 @@ pub const Suites = struct {
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
@@ -52,6 +54,7 @@ pub const Suites = struct {
         try s.dspark.collect(only);
         try s.vision.collect(only);
         try s.tree.collect(only);
+        try s.dflash2.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
@@ -69,5 +72,6 @@ pub const Suites = struct {
         s.dspark.deinit();
         s.vision.deinit();
         s.tree.deinit();
+        s.dflash2.deinit();
     }
 };
