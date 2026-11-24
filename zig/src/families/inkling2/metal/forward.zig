@@ -65,6 +65,11 @@ fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
 
 /// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
 fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) void {
+    // under two rows (decode's one), main's call: one launch a row
+    if (!loop.plan.splitRows(rows)) {
+        for (0..rows) |_| loop.gates(&m.loop, e, l(h), l(msg), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), 1);
+        return;
+    }
     const stride: u32 = state.message_entries * state.hidden;
     loop.gatesSplit(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), l(at(s.gate_norm, 0)), l(at(s.gate_zeta, 0)), @intCast(rows));
 }
@@ -279,7 +284,10 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
-    glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    if (loop.plan.splitRows(rows))
+        glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows))
+    else
+        glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
     base = 0;
     for (segments) |seg| {
