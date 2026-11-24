@@ -109,7 +109,7 @@ pub fn widthsOf(text: std.json.ObjectMap) widths.Selected {
 fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
     const learned = int(text, learned_key) orelse 0;
-    if (learned < 0 or learned > 128 or @mod(learned, 32) != 0) return learned_key;
+    if (!widths.learnedOk(learned)) return learned_key;
     for (shapes) |w| if (int(text, w.name) != w.value) return w.name;
     switch (widthsOf(text)) {
         .field => |field| return field,
@@ -163,8 +163,8 @@ fn declared(entries: std.json.ObjectMap, layer: usize, prefix: []const u8, parts
     return if (listed == 0) .bf16 else if (listed == parts.len) .mxfp8 else null;
 }
 
-/// The neurons a Living Weights pocket adds to each shared expert (living's Keys.pocket).
-const learned_key = "tensorfold_learned_neurons";
+/// The neurons a Living Weights pocket adds to each shared expert: cuda_widths.zig owns the limits and the name.
+const learned_key = widths.learned_key;
 
 /// The first semantic setting the kernels would ignore: eps, RoPE, gates, activations, layer roles, the head's layer.
 pub fn semantics(text: std.json.ObjectMap) ?[]const u8 {
@@ -354,6 +354,27 @@ test "a taught folder's wider shared expert passes with its pocket's count, and 
     try std.testing.expectEqual(@as(?[]const u8, null), mismatch(text, quant));
     try text.put(gpa, learned_key, .{ .integer = 40 });
     try std.testing.expectEqualStrings(learned_key, mismatch(text, quant).?);
+}
+
+test "the standalone width read takes a taught pocket count and its selection refuses the signed maximum" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // a folder taught 64 neurons: 704 shared rows, read from config.json as the standalone engine reads it
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const taught =
+        \\{"text_config": {"num_experts_per_tok": 10, "shared_expert_intermediate_size": 704, "tensorfold_learned_neurons": 64}}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = taught });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    try std.testing.expectEqual(widths.default, try widthsIn(gpa, io, dir));
+    // the same fields with the signed maximum: the selection names the field rather than summing it into the width
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"num_experts_per_tok": 10, "shared_expert_intermediate_size": 640, "tensorfold_learned_neurons": 9223372036854775807}
+    , .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(learned_key, widthsOf(parsed.value.object).field);
 }
 
 test "a changed epsilon, RoPE, gate, activation or layer role is refused by name" {
