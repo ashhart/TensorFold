@@ -111,8 +111,33 @@ const Seen = struct {
     names: []const u8,
     arguments: []const u8,
     rejected: i64 = 0, // the tensorfold block's rejected_tool_calls
+    usage: Usage = .{},
+    kept: []const u8 = "", // the tensorfold block's kept_tool_calls, as JSON
     finish: []const u8 = "",
 };
+
+const Usage = struct { completion: i64 = -1, reasoning: i64 = -1 };
+
+fn intOf(v: ?json.Value) i64 {
+    const n = v orelse return -1;
+    return if (n == .int) std.fmt.parseInt(i64, n.int, 10) catch -1 else -1;
+}
+
+/// The reply's usage, when this body or event carries it.
+fn usageOf(v: json.Value, into: *Usage) void {
+    const u = v.get("usage") orelse return;
+    if (u != .object) return;
+    into.completion = intOf(u.get("completion_tokens"));
+    if (u.get("completion_tokens_details")) |d| if (d == .object) {
+        into.reasoning = intOf(d.get("reasoning_tokens"));
+    };
+}
+
+fn keptOf(a: std.mem.Allocator, v: json.Value, into: *[]const u8) !void {
+    const tf = v.get("tensorfold") orelse return;
+    const kept = tf.get("kept_tool_calls") orelse return;
+    into.* = try json.stringify(a, kept, .{ .ascii = false, .compact = true });
+}
 
 fn rejectedOf(v: json.Value) i64 {
     const tf = v.get("tensorfold") orelse return 0;
@@ -147,11 +172,15 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
     var names: std.ArrayList(u8) = .empty;
     var arguments: std.ArrayList(u8) = .empty;
     var rejected: i64 = 0;
+    var usage: Usage = .{};
+    var kept: []const u8 = "";
     var finish: []const u8 = "";
     if (!stream) {
         try t.expectEqual(@as(u16, 200), got.status);
         const v = (try json.parseText(a, got.body)).ok;
         rejected = rejectedOf(v);
+        usageOf(v, &usage);
+        try keptOf(a, v, &kept);
         const first = v.get("choices").?.array[0];
         if (first.get("finish_reason")) |f| if (f == .string) {
             finish = f.string;
@@ -164,6 +193,8 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
     } else for (got.events.items) |e| {
         const v = (try json.parseText(a, e)).ok;
         rejected += rejectedOf(v);
+        usageOf(v, &usage);
+        try keptOf(a, v, &kept);
         const choices = v.get("choices") orelse continue;
         if (choices != .array or choices.array.len == 0) continue;
         const first = choices.array[0];
@@ -176,7 +207,7 @@ fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []cons
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept };
 }
 
 fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
@@ -363,4 +394,94 @@ test "Inkling 2 reply: a special token between a character's byte tokens leaves 
         const got = try probeIds(a, "release", reply, "");
         try t.expectEqualStrings("\u{3b2}", if (i == 0) got.content else got.reasoning);
     }
+}
+
+/// The release fixture tokenizer's id for a control spelling: KS50's fixtures name the full tokenizer's 2000xx ids.
+fn control(a: std.mem.Allocator, spelling: []const u8) !u32 {
+    const ids = try encodeReply(a, spelling);
+    try t.expectEqual(@as(usize, 1), ids.len);
+    return ids[0];
+}
+
+/// A KS50 fixture: its control spellings as the fixture tokenizer's ids, its byte and word ids exactly.
+fn fixture(a: std.mem.Allocator, opener: []const u8, ids: []const u32) ![]const u32 {
+    return std.mem.concat(a, u32, &.{ &.{ try control(a, "<|message_model|>"), try control(a, opener) }, ids });
+}
+
+test "Inkling 2 reply: KS50 1, a bare grammar reply cut by the token cap returns its call cut, no markup" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try probeIds(a, "release", try encodeReply(a, "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"x"), lookup);
+    try t.expectEqualStrings("lookup", got.names);
+    try t.expectEqualStrings("{\"q\":\"x", got.arguments);
+    try t.expectEqualStrings("", got.content);
+    try t.expectEqualStrings("length", got.finish);
+}
+
+test "Inkling 2 reply: KS50 2, a stop spelled across a removed special shows nothing of it, streamed one token a time" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = try fixture(a, "<|content_text|>", &.{ 64, try control(a, "<|unused_200030|>"), 65, 66 });
+    const got = try probeIds(a, "release", reply, ",\"stop\":\"a<|unused_200030|>bc\"");
+    try t.expectEqualStrings("", got.content);
+    try t.expectEqualStrings("stop", got.finish);
+}
+
+test "Inkling 2 reply: KS50 3, a stop after an invalid byte is placed in the exact bytes, not the lossy text" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try probeIds(a, "release", try fixture(a, "<|content_text|>", &.{ 138, 50, 51, 46, 47 }), ",\"stop\":\"STOP\"");
+    try t.expectEqualStrings("\u{fffd}", got.content);
+}
+
+test "Inkling 2 reply: KS50 4, an unfinished character at the cap reads as one replacement" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try probeIds(a, "release", try fixture(a, "<|content_text|>", &.{ 156, 254 }), "");
+    try t.expectEqualStrings("\u{fffd}", got.content);
+    try t.expectEqualStrings("length", got.finish);
+}
+
+test "Inkling 2 reply: KS50 5, a stop inside thinking cuts what is shown, never the usage" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try probeIds(a, "release", try fixture(a, "<|content_thinking|>", &.{268}), ",\"stop\":\"he\"");
+    try t.expectEqualStrings("t", got.reasoning);
+    try t.expectEqual(@as(i64, 3), got.usage.completion);
+    try t.expectEqual(@as(i64, 3), got.usage.reasoning);
+}
+
+test "Inkling 2 reply: KS50 6, a bare reply's unoffered envelope is reported as the shared route reports it" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const envelope = "<tool_call>{\"name\":\"other\",\"arguments\":{}}</tool_call>";
+    const reply = try encodeReply(a, envelope ++ "<|content_model_end_sampling|>");
+    for ([_]bool{ false, true }) |stream| {
+        const got = try ask(a, "release", reply, lookup, stream, 1);
+        try t.expectEqualStrings(envelope, got.content);
+        try t.expectEqualStrings("{\"unoffered\":1,\"malformed\":0,\"unoffered_names\":[\"other\"]}", got.kept);
+    }
+}
+
+test "Inkling 2 reply: KS50 7, a stop of ten two-byte characters ends the reply at its last byte token" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body: [21]u32 = undefined;
+    body[0] = 32;
+    for (0..10) |i| {
+        body[1 + 2 * i] = 127;
+        body[2 + 2 * i] = 102;
+    }
+    const reply = try std.mem.concat(a, u32, &.{ try fixture(a, "<|content_text|>", &body), &.{89} });
+    const got = try probeIds(a, "release", reply, ",\"stop\":\"\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\",\"ignore_eos\":true");
+    try t.expectEqualStrings("A", got.content);
+    try t.expectEqualStrings("stop", got.finish);
+    try t.expectEqual(@as(i64, 23), got.usage.completion);
 }

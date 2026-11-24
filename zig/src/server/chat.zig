@@ -78,6 +78,7 @@ pub const Reply = struct {
     tool_calls_streamed: bool,
     native_tool_format: bool = false,
     native_calls: ?[]Value = null,
+    native_cut_calls: bool = false, // a native parser's calls were cut by the token cap: finish_reason stays length
     finish_reason: []const u8,
     prompt_tokens: usize,
     cached_tokens: usize,

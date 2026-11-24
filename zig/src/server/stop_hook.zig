@@ -11,7 +11,10 @@ pub const StopHook = struct {
         const h: *StopHook = @ptrCast(@alignCast(ctx));
         var arena: std.heap.ArenaAllocator = .init(h.srv.gpa);
         defer arena.deinit();
-        const tail = emitted[emitted.len -| h.stops.tail()..];
+        // Inkling 2's byte tokens can spell one character in several: its window counts the stop's bytes
+        const inkling = @import("chat_inkling2.zig");
+        const window = if (inkling.enabled(h.srv)) inkling.stopWindow(h.stops.strings) else h.stops.tail();
+        const tail = emitted[emitted.len -| window..];
         const text = h.srv.text.decode(arena.allocator(), tail) catch return false;
         for (h.stops.strings) |stop| if (std.mem.indexOf(u8, text, stop) != null) return true;
         return false;
