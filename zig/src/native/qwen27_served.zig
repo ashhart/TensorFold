@@ -437,7 +437,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     h.folded_mem = null;
-    if (o.dir.len > 0 and o.slide) { // a saved bank alone never attaches it: --slide asks for learning
+    if (api.memoryWanted(o.dir, o.slide)) { // a saved bank alone never attaches it: --slide asks for learning
         const adapter = try qwen27_mem.Adapter.init(gpa, h.back);
         errdefer adapter.deinit(gpa);
         const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, qwen27_mem.Adapter.deinitOpaque);

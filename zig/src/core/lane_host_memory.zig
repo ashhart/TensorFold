@@ -14,6 +14,11 @@ pub const Queue = struct {
     answered: std.Io.Condition = .init,
 };
 
+/// Whether a server builds a memory holder at all: only `--slide` with a checkpoint folder (a saved bank alone never).
+pub fn wanted(dir: []const u8, slide: bool) bool {
+    return slide and dir.len > 0;
+}
+
 fn isCpuOnly(op: api.MemoryOp) bool {
     return switch (op) {
         .save, .forget_parent, .supersede_parent, .consolidate, .clear_all, .stats, .publish_parent => true,

@@ -51,6 +51,7 @@ const Box = struct {
 const Ctrl = struct {
     routed: u32 = 0,
     dropped: u32 = 0,
+    execs: u32 = 0,
     handle: ?api.MemorySnapHandle = null,
     version: u64 = 7,
     fn of(ctx: *anyopaque) *Ctrl {
@@ -72,7 +73,8 @@ const Ctrl = struct {
     fn drop(ctx: *anyopaque, _: *anyopaque) void {
         of(ctx).dropped += 1;
     }
-    fn exec(_: *anyopaque, _: *const api.MemoryOp) api.MemoryResult {
+    fn exec(ctx: *anyopaque, _: *const api.MemoryOp) api.MemoryResult {
+        of(ctx).execs += 1;
         return .{};
     }
 };
@@ -229,4 +231,56 @@ test "folded memory: a reply reports the memory version its routing saw, and non
     defer off.deinit();
     try reply(&c, false, &off, null);
     try t.expectEqual(@as(?u64, null), off.memory_version);
+}
+
+test "folded memory: without --slide no holder is built, and the engine thread never polls a memory op" {
+    const memory = @import("lane_host_memory.zig");
+    try t.expect(!memory.wanted("/models/qwen27", false)); // a saved bank alone
+    try t.expect(!memory.wanted("", true));
+    try t.expect(memory.wanted("/models/qwen27", true));
+    // the loop is chosen when the host starts: a bank attached later, with an op waiting, is never asked off
+    for ([_]bool{ false, true }) |slide| {
+        const gpa = t.allocator;
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer core.deinit();
+        var ctrl: Ctrl = .{};
+        var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
+        if (slide) host.folded_memory = ctrl.controller();
+        try host.start();
+        defer host.stop();
+        // a whole request first: the engine thread has chosen its loop by the time it replies
+        var box: Box = .{};
+        defer box.deinit();
+        try host.engine().submit(1, &.{ .prompt = &prompt, .max_tokens = 12 }, .{ .ctx = &box, .event = Box.event });
+        try box.wait();
+        const op: api.MemoryOp = .stats;
+        var ask: memory.Ask = .{ .op = &op };
+        host.lock();
+        host.folded_memory = ctrl.controller();
+        try host.mem_ops.asks.append(gpa, &ask);
+        host.wake.broadcast(t.io);
+        host.unlock();
+        var again: Box = .{};
+        defer again.deinit();
+        try host.engine().submit(2, &.{ .prompt = &prompt, .max_tokens = 12 }, .{ .ctx = &again, .event = Box.event });
+        try again.wait();
+        for (0..300) |_| { // idle turns too (the loop waits up to 100 ms between them)
+            host.lock();
+            const done = ask.done;
+            host.unlock();
+            if (done) break;
+            std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        host.lock();
+        const done = ask.done;
+        if (!done) _ = host.mem_ops.asks.orderedRemove(0); // the plain loop never took it
+        host.unlock();
+        try t.expectEqual(slide, done);
+        try t.expectEqual(@as(u32, @intFromBool(slide)), ctrl.execs);
+    }
 }
