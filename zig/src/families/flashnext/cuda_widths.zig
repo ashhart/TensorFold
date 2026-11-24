@@ -26,8 +26,17 @@ pub const supported = [_]Widths{ default, .{ .top_k = 5, .shared = 2 * wt.moe_w 
 /// A selection's result: the supported shape, or the name of the config field that has no supported value.
 pub const Selected = union(enum) { widths: Widths, field: []const u8 };
 
+/// config.json's Living Weights pocket: the neurons a taught folder adds to each shared expert's rows.
+pub const learned_key = "tensorfold_learned_neurons";
+/// The pocket counts a taught shared expert takes: whole 32-neuron groups, 128 at most.
+pub fn learnedOk(learned: i64) bool {
+    return learned >= 0 and learned <= 128 and @mod(learned, 32) == 0;
+}
+
 /// The supported shape of `num_experts_per_tok` and `shared_expert_intermediate_size` (less `learned` pocket neurons).
 pub fn select(top_k: ?i64, shared: ?i64, learned: i64) Selected {
+    // a pocket outside the rule is refused before the sum, which then cannot overflow
+    if (!learnedOk(learned)) return .{ .field = learned_key };
     for (supported) |w| {
         if (top_k != @as(i64, @intCast(w.top_k))) continue;
         if (shared != @as(i64, @intCast(w.shared)) + learned) return .{ .field = "shared_expert_intermediate_size" };
@@ -76,6 +85,18 @@ test "a width outside the supported list is refused by its field's name" {
     try std.testing.expect(!sharedSupported(960) and !sharedSupported(704));
 }
 
+test "a learned count outside the pocket's rule is refused by its field, never summed with a width" {
+    try std.testing.expect(learnedOk(0) and learnedOk(32) and learnedOk(128));
+    try std.testing.expect(!learnedOk(-32) and !learnedOk(40) and !learnedOk(160));
+    for ([_]i64{ std.math.maxInt(i64), std.math.minInt(i64), 129, 40 }) |learned| {
+        try std.testing.expect(!learnedOk(learned));
+        try std.testing.expectEqualStrings(learned_key, select(10, 640, learned).field);
+        try std.testing.expectEqualStrings(learned_key, select(5, 1280, learned).field);
+    }
+    // a count inside the rule still selects the taught width it describes
+    try std.testing.expectEqual(default, select(10, 704, 64).widths);
+}
+
 test "the MTP layer routes at the main layers' top-k with its own shared width, and another width is refused" {
     const five: Widths = .{ .top_k = 5, .shared = 1280 };
     try std.testing.expectEqual(Widths{ .top_k = 5, .shared = 640 }, mtp(five, 640).?);
@@ -106,4 +127,7 @@ test "the MTP head takes the widths the engine read, so config.json has one read
     try std.testing.expect(std.mem.indexOf(u8, head, "widthsIn") == null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_lanes_load.zig"), "Head.init(gpa, io, driver, &own.stream, dir, e.widths)") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_mtp_check.zig"), "Head.init(gpa, io, driver, stream, model_dir, e.widths)") != null);
+    // the standalone engine's reader asks the same selection, so its pocket rule holds there too
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_config.zig"), "switch (widthsOf(textOf(parsed.value.object)))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_prompt.zig"), "widthsIn(gpa, io, e.model_dir)") != null);
 }
