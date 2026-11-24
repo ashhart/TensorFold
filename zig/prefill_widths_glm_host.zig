@@ -11,7 +11,7 @@ const Leader = struct {
     fail: bool = false,
     rows: usize = glm.engine.prompt_rows,
     pub fn bind(_: @This(), _: u32) !void {}
-    pub fn chunk(x: @This(), ids: []const u32, at: usize, _: bool, _: anytype, _: anytype, _: anytype) !glm.follow.Chunk {
+    pub fn chunkCapped(x: @This(), ids: []const u32, at: usize, _: bool, _: anytype, _: anytype, _: anytype, _: u32) !glm.follow.Chunk {
         if (x.fail) return error.PlantedForward;
         const rows = @min(x.rows, ids.len - at);
         const last = at + rows == ids.len;
@@ -58,7 +58,7 @@ test "CUDA prefill widths: GLM stepped cold, solo, one-pass and resumed real cut
         var b: Backend = .{ .x = .{ .e = &e, .rows = if (case == 3) glm.engine.solo_rows else cap }, .from = from };
         defer b.lanes.deinit(t.allocator);
         try b.lanes.put(t.allocator, &s, .{});
-        while (!try glm.lanes.Lanes.prefillStep(&b, &s)) {}
+        while (!try glm.lanes.Lanes.prefillStep(&b, &s, 0)) {}
         const expected: []const u32 = if (case == 2) &.{7} else if (case == 3) &.{ glm.engine.solo_rows, 17 } else if (from == 0) &.{ cap, cap, 17 } else &.{ cap, 17 };
         try t.expectEqualSlices(u32, expected, s.prefill_widths.items);
         try t.expectEqual(expected.len, Driver.calls);
@@ -75,11 +75,11 @@ test "CUDA prefill widths: GLM skips unsettled intermediate chunks" {
     defer b.lanes.deinit(t.allocator);
     try b.lanes.put(t.allocator, &s, .{});
     for (0..2) |_| {
-        try t.expect(!try glm.lanes.Lanes.prefillStep(&b, &s));
+        try t.expect(!try glm.lanes.Lanes.prefillStep(&b, &s, 0));
         try t.expectEqual(@as(usize, 0), s.prefill_widths.items.len);
         try t.expectEqual(@as(usize, 0), Driver.calls);
     }
-    try t.expect(try glm.lanes.Lanes.prefillStep(&b, &s));
+    try t.expect(try glm.lanes.Lanes.prefillStep(&b, &s, 0));
     try t.expectEqualSlices(u32, &.{17}, s.prefill_widths.items);
     try t.expectEqual(@as(usize, 1), Driver.calls);
 }
@@ -95,7 +95,7 @@ test "CUDA prefill widths: GLM failed launch, final readback and intermediate wa
         defer b.lanes.deinit(t.allocator);
         try b.lanes.put(t.allocator, &s, .{});
         Driver.fail = case > 0;
-        const result = glm.lanes.Lanes.prefillStep(&b, &s);
+        const result = glm.lanes.Lanes.prefillStep(&b, &s, 0);
         if (case == 0) try t.expectError(error.PlantedForward, result) else try t.expectError(error.NotReady, result);
         try t.expectEqual(@as(usize, 0), s.prefill_widths.items.len);
     }
