@@ -423,10 +423,11 @@ test "h3 prompt weights: an extra refiner block's bytes are not read ahead, pref
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // shard a holds the front tensors and blocks 0-1 beside an extra block 2's tensor; shard b only block 2's
+    // shard a holds the front tensors, blocks 0-1 and a block 0 tensor no block takes, beside an extra block 2's tensor
     const header =
         \\{"condition_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[0,16]}
         \\,"condition_proj.bias":{"dtype":"BF16","shape":[2],"data_offsets":[16,20]}
+        \\,"token_refiner.blocks.0.norm1.bias":{"dtype":"BF16","shape":[2],"data_offsets":[20,24]}
         \\,"token_refiner.final_norm.weight":{"dtype":"BF16","shape":[4],"data_offsets":[24,32]}
         \\,"token_refiner.blocks.0.norm1.weight":{"dtype":"BF16","shape":[4],"data_offsets":[32,40]}
         \\,"token_refiner.blocks.1.attn.qkv_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[40,56]}
@@ -445,7 +446,7 @@ test "h3 prompt weights: an extra refiner block's bytes are not read ahead, pref
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "a.safetensors", .data = file.items });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "b.safetensors", .data = file.items });
     const index = try std.fmt.allocPrint(a,
-        \\{{"weight_map":{{"condition_proj.weight":"a.safetensors","condition_proj.bias":"a.safetensors","token_refiner.final_norm.weight":"a.safetensors","token_refiner.blocks.0.norm1.weight":"a.safetensors","token_refiner.blocks.1.attn.qkv_proj.weight":"a.safetensors","token_refiner.blocks.2.norm1.weight":"a.safetensors","token_refiner.blocks.2.attn.out_proj.weight":"b.safetensors"}}}}
+        \\{{"weight_map":{{"condition_proj.weight":"a.safetensors","condition_proj.bias":"a.safetensors","token_refiner.blocks.0.norm1.bias":"a.safetensors","token_refiner.final_norm.weight":"a.safetensors","token_refiner.blocks.0.norm1.weight":"a.safetensors","token_refiner.blocks.1.attn.qkv_proj.weight":"a.safetensors","token_refiner.blocks.2.norm1.weight":"a.safetensors","token_refiner.blocks.2.attn.out_proj.weight":"b.safetensors"}}}}
     , .{});
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors.index.json", .data = index });
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});

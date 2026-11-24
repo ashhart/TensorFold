@@ -188,7 +188,11 @@ pub const FrontNames = struct {
         if (!std.mem.startsWith(u8, rest, "blocks.")) return false;
         const dot = std.mem.indexOfScalar(u8, rest["blocks.".len..], '.') orelse return false;
         const i = std.fmt.parseInt(usize, rest["blocks.".len..][0..dot], 10) catch return false;
-        return i < n.blocks;
+        if (i >= n.blocks) return false;
+        // blockTensors' names are the same at every geometry
+        const field = rest["blocks.".len + dot + 1 ..];
+        for (rules.blockTensors(rules.released_refiner)) |s| if (std.mem.eql(u8, field, s[1])) return true;
+        return false;
     }
 };
 
