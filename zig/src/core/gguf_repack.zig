@@ -1,6 +1,7 @@
 //! Compact affine codes with FP32 metadata, written from the GGUF block-layout definitions for the ten plain quants.
 const std = @import("std");
 const blocks = @import("gguf_repack_blocks.zig");
+pub const validate = blocks.validate;
 pub const Kind = @import("gguf_tensor.zig").Kind;
 pub const Format = struct { bits: u8, group: usize };
 pub fn format(kind: Kind) !Format {

@@ -17,6 +17,7 @@ interface ModelHubOptions {
   installed: () => Promise<EngineInstalledModel[]>
   installedRevision: (repo: string) => Promise<string | null>
   cacheDir: () => string
+  memory: () => { limit: number; budget: number; limitFor?: (modelType: string | null) => { bytes: number; basis: string } }
 }
 
 const OFFLINE = /^(1|true|yes|on)$/i

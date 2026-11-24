@@ -19,7 +19,7 @@ const usage =
 ;
 
 /// The transformer bound to one picture layout, its host copies in its own arena.
-const Binding = struct {
+pub const Binding = struct {
     arena: *std.heap.ArenaAllocator,
     model: *h3.Model,
     canvas: h3.picture.Size,
@@ -27,7 +27,7 @@ const Binding = struct {
     references: usize,
     tags: []const i32,
 
-    fn init(gpa: std.mem.Allocator, folder: *const image_tool.Folder, case: *const image_tool.Case, tags: []const i32, weights: ?mtl.ResidencySet) !Binding {
+    pub fn init(gpa: std.mem.Allocator, folder: *const image_tool.Folder, case: *const image_tool.Case, tags: []const i32, weights: ?mtl.ResidencySet) !Binding {
         const arena = try gpa.create(std.heap.ArenaAllocator);
         errdefer gpa.destroy(arena);
         arena.* = .init(gpa);
@@ -43,7 +43,7 @@ const Binding = struct {
         return std.meta.eql(b.canvas, case.canvas) and b.rows == case.rows and b.references == case.layout.references.len and std.mem.eql(i32, b.tags, tags);
     }
 
-    fn release(b: *Binding) void {
+    pub fn release(b: *Binding) void {
         b.model.release();
         const gpa = b.arena.child_allocator;
         b.arena.deinit();
@@ -185,6 +185,11 @@ fn serve(init: std.process.Init, a: std.mem.Allocator, encoder: *prompt_tool.Enc
 
 const testing = std.testing;
 const fixture = @import("core").checkpoint_fixture;
+
+test {
+    _ = @import("h3_image_server_speech.zig");
+}
+
 /// A safetensors image whose data starts on 16 bytes: the header padded with spaces.
 fn image(a: std.mem.Allocator, entries: []const fixture.Entry) ![]u8 {
     const plain = try fixture.image(a, entries);
@@ -335,7 +340,7 @@ fn expectSameLatent(want: []const f32, got: []const f32) !void {
 }
 
 /// The folder and the four cases the resident tests share; the caller frees the checkpoint's shards.
-fn residentFixture(init: std.process.Init, a: std.mem.Allocator, dir: std.Io.Dir, dir_path: []const u8, device: mtl.Device) !struct { folder: image_tool.Folder, cases: [4]Built } {
+pub fn residentFixture(init: std.process.Init, a: std.mem.Allocator, dir: std.Io.Dir, dir_path: []const u8, device: mtl.Device) !struct { folder: image_tool.Folder, cases: [4]Built } {
     try syntheticFolder(a, init.io, dir);
     var folder = try image_tool.Folder.open(init, a, dir_path);
     errdefer {

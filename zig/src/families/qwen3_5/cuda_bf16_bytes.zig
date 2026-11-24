@@ -21,8 +21,9 @@ pub fn textWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 
     return total;
 }
 
-/// A BF16 chat tower's weights and one call's scratch; 0 for other formats (files count it) and for Clef.
-pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+/// A BF16 chat tower's weights and one call's scratch on rank 0, which holds it; 0 for other formats and for Clef.
+pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, rank: u32, _: u32) !u64 {
+    if (rank != 0) return 0;
     const g = geometry.Geometry.read(a, io, dir) catch return 0;
     if (!g.bf16 or @import("cuda_decide.zig").present(a, io, dir)) return 0;
     const v = @import("qwen_vision");
@@ -114,19 +115,19 @@ test "BF16 chat preflight: the tower's weights and scratch, none for a decision 
     defer a.free(dir);
     const v = @import("qwen_vision");
     const c = (try v.Settings.read(a, io, dir)).?.tower;
-    try std.testing.expectEqual(@as(u64, v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches)), try visionBytes(a, io, dir));
+    try std.testing.expectEqual(@as(u64, v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches)), try visionBytes(a, io, dir, 0, 1));
     // with a joint head beside it, --vision is the decision backbone's refusal (cuda_decide), not a tower budget
     try tmp.dir.writeFile(io, .{ .sub_path = @import("cuda_decide.zig").head_file, .data = "{}" });
-    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir, 0, 1));
     try tmp.dir.deleteFile(io, @import("cuda_decide.zig").head_file);
     // an unreadable tower (14-pixel patches) counts nothing, so preflight leaves its refusal to the family's open
     const patch14 = try std.mem.replaceOwned(u8, a, lighton, "\"patch_size\": 16", "\"patch_size\": 14");
     defer a.free(patch14);
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = patch14 });
-    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir, 0, 1));
     // an MLX checkpoint's files count its tower already
     const mlx = try std.mem.replaceOwned(u8, a, config_text, "\"tie_word_embeddings\":false,", "\"tie_word_embeddings\":false,\"quantization\":{\"group_size\":64,\"bits\":4},");
     defer a.free(mlx);
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
-    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir, 0, 1));
 }

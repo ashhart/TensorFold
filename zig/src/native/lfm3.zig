@@ -41,6 +41,7 @@ fn cacheRules() api.prompt_cache.Rules {
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const warm_turns = try @import("sys").environment.read(bool, "TF_LFM3_METAL_WARM_TURNS", false);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var config = q.config.Config.read(gpa, io, o.dir) catch |err| {
@@ -76,7 +77,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
-    const chunk = prompt_chunk;
+    // Every prompt row, including decoded history, uses the one-row forward in warm mode.
+    const chunk: u32 = if (warm_turns) 1 else prompt_chunk;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
@@ -92,7 +94,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true, .vision = null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = prompt_chunk, .structures = true, .vision = null });
+    h.host.decoded_rows = warm_turns;
+    if (warm_turns) h.host.info_.prefill_min_chunk = 1;
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;
@@ -110,12 +114,18 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host.info_.prompt_cache_plan = plan;
     if (plan.budget_bytes > 0) {
         const S = q.backend.Snaps;
+        const rules: api.prompt_cache.Rules = if (warm_turns)
+            .{ .chunk = 1, .min_prompt = 0, .warm = .waits }
+        else
+            cacheRules();
         h.cache = api.prompt_cache.Store.init(gpa, .{
             .ptr = h.metal,
             .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
-        }, cacheRules(), plan.budget_bytes);
+        }, rules, plan.budget_bytes);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
+        h.host.info_.warm_turns = warm_turns;
+        if (warm_turns) h.host.warm_quiet = 150 * std.time.ns_per_ms;
     }
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "lfm3");

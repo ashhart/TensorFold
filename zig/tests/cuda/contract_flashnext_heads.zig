@@ -26,6 +26,15 @@ const half_served = [_]c.Shape{
     .{ .rows = parts.max_chunk, .n = Heads.half.nv * dv, .k = dk },
 };
 
+/// KR15's rank-local TPR cells mirror every full-head short-row shape at TP=2.
+const tpr_served = half_served ++ [_]c.Shape{
+    .{ .rows = 1, .n = Heads.half.nv * dv, .k = dk },
+    .{ .rows = 4, .n = Heads.half.nv * dv, .k = dk },
+    .{ .rows = 8, .n = Heads.half.nv * dv, .k = dk },
+    .{ .rows = 16, .n = Heads.half.nv * dv, .k = dk },
+    .{ .rows = 32, .n = Heads.half.nv * dv, .k = dk },
+};
+
 const ranks = 2;
 
 const names = blk: {
@@ -44,7 +53,7 @@ const originals = blk: {
 
 /// rows = token rows; n = the candidate's value heads x dv; k = dk.
 pub fn spec(kind: Kind, rank: usize) c.Spec {
-    return .{ .name = names[@backingInt(kind)][rank], .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every output byte, the state's included, equal to the full kernel's on these heads, non-finite inputs included" }, .replaces = originals[@backingInt(kind)], .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = kind == .rows or kind == .fused, .served = &half_served };
+    return .{ .name = names[@backingInt(kind)][rank], .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every output byte, the state's included, equal to the full kernel's on these heads, non-finite inputs included" }, .replaces = originals[@backingInt(kind)], .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = kind == .rows or kind == .fused, .served = if (kind == .tpr) &tpr_served else &half_served };
 }
 
 /// A buffer the kernel reads: what its rows hold (null: not cut, the norm weight), its element bytes and its values.

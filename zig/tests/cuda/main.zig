@@ -28,6 +28,7 @@ const affine8_tests = @import("affine8_tests.zig");
 const native_fp_tests = @import("native_fp_tests.zig");
 const affine4_decode_tests = @import("affine4_decode_tests.zig");
 const absorb_batch_tests = @import("absorb_batch_tests.zig");
+const wide_rounds_tests = @import("wide_rounds_tests.zig");
 const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
@@ -109,6 +110,7 @@ const dory_tests = @import("dory_tests.zig");
 const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
 const aot_fallback_tests = @import("aot_fallback_tests.zig");
 const qwen_draft_frames = @import("qwen_draft_frames.zig");
+const ripple = @import("ripple_commands.zig");
 
 const usage = @import("main_usage.zig").usage;
 
@@ -145,6 +147,33 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     return rest[i];
 }
 
+fn compileInkling2Contracts() !void {
+    const shape: @import("core").contract.spec.Shape = .{ .rows = 1, .n = 2304, .k = 2 };
+    const a: std.mem.Allocator = undefined;
+    const gpu: check.Gpu = undefined;
+    const stream: cuda.Stream = undefined;
+    var list: std.ArrayList(@import("core").contract.gates.Kernel) = .empty;
+    const set = try @import("contract_inkling2.zig").Set.init(gpu, stream, a, &list);
+    set.deinit();
+    var rig: @import("contract_rig.zig").Rig = undefined;
+    const rng: std.Random = undefined;
+    var mix: @import("contract_inkling2_ops_mix.zig").Mix = undefined;
+    _ = try mix.prepare(a, &rig, shape, .random, rng);
+    try mix.run(&rig);
+    _ = try mix.replaced(&rig);
+    const sums: @import("contract_inkling2_ops_ref.zig").Sums = undefined;
+    const solved: []@import("contract_inkling2_ops_ref.zig").Iv = undefined;
+    try mix.solve(a, sums, solved);
+    var modelopt: @import("contract_inkling2_modelopt.zig").ModelOpt = undefined;
+    _ = try modelopt.prepare(shape, .random, 0);
+    try modelopt.run();
+    _ = modelopt.kernel();
+    _ = modelopt.count();
+    const want: []f64 = undefined;
+    const mag: []f64 = undefined;
+    try modelopt.reference(want, mag);
+}
+
 fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
@@ -152,6 +181,7 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
     g.kind = .chain;
     const kernels = [_]@import("core").contract.gates.Kernel{g.kernel()};
     for (kernels) |k| _ = try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 0, .k = 0 }, .random, 0);
+    try compileInkling2Contracts();
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
@@ -190,6 +220,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qmmf-prompt-repro")) return @import("qmmf_prompt_tests.zig").repro(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt-bench")) return @import("qmmf_prompt_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "group-proj")) return @import("group_proj_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "lane-half-n")) return @import("lane_half_n_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
@@ -240,6 +272,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "absorb-batch")) return absorb_batch_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "wide-rounds")) return wide_rounds_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3") or std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_tests.runCmd(gpu, cmd);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
@@ -330,11 +363,13 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qwen-shared-prefix")) return @import("contract_qwen_shared_prefix.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-prefill-cap")) return @import("qwen_prefill_cap_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
     if (std.mem.startsWith(u8, cmd, "dots-")) return @import("dots_tests.zig").run(gpu, cmd, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
+    if (try ripple.run(gpu, cmd)) return;
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return @import("contract_limits.zig").fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
@@ -374,6 +409,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kolibri-reference")) return kolibri_layer_tests.reference(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-layers")) return kolibri_layer_tests.layers(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-full")) return kolibri_tests.full(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "inkling2-serving")) return @import("inkling2_serving_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-pages")) return @import("kolibri_pages_tests.zig").pages(gpu, rest);
     if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);

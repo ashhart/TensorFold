@@ -7,6 +7,7 @@ const Span = cfg.Span;
 const Mode = cfg.Mode;
 const split = cfg.split;
 const object = cfg.object;
+const eos_ids = @import("checkpoint_eos");
 
 const fixture =
     \\{"model_type":"qwen3_5","hidden_size":64,"intermediate_size":128,"num_hidden_layers":4,
@@ -101,13 +102,7 @@ test "a scaled rope (rope_type or type yarn, a rope_scaling block) is refused; a
 
 test "a routed config reads its experts, the shared expert's width as the layer's and the routing flag" {
     const a = std.testing.allocator;
-    const json =
-        \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,"intermediate_size":1024,
-        \\"moe_intermediate_size":1024,"shared_expert_intermediate_size":1024,"num_experts":256,"num_experts_per_tok":8,
-        \\"num_hidden_layers":48,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
-        \\"linear_num_key_heads":16,"linear_num_value_heads":64,"linear_key_head_dim":128,"linear_value_head_dim":128,
-        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
-    ;
+    const json = hf_fixture;
     const c = try parse(a, json, null);
     try std.testing.expect(c.moe());
     try std.testing.expectEqual(@as(usize, 256), c.experts);
@@ -121,6 +116,56 @@ test "a routed config reads its experts, the shared expert's width as the layer'
     const dense_typed = try std.mem.replaceOwned(u8, a, json, "\"num_experts\":256", "\"num_experts\":0");
     defer a.free(dense_typed);
     try std.testing.expectError(error.NotQwenDense, parse(a, dense_typed, null));
+}
+
+/// An HF-layout checkpoint: its ids sit in text_config and its vocabulary is the real 27B's.
+const hf_fixture =
+    \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,"intermediate_size":1024,
+    \\"moe_intermediate_size":1024,"shared_expert_intermediate_size":1024,"num_experts":256,"num_experts_per_tok":8,
+    \\"num_hidden_layers":48,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+    \\"linear_num_key_heads":16,"linear_num_value_heads":64,"linear_key_head_dim":128,"linear_value_head_dim":128,
+    \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
+;
+
+test "qwen27: generation_config.json adds <|im_end|> to an HF-layout config's end ids" {
+    const a = std.testing.allocator;
+    const generation = "{\"eos_token_id\":[248046,248044]}";
+    const merged = try parse(a, hf_fixture, generation);
+    // the tower's own id first, then generation_config.json's new one, each kept once
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, merged.eos[0..merged.eos_count]);
+    // main's behaviour: without the file text_config's id stands alone, which is why the loader passes it
+    const alone = try parse(a, hf_fixture, null);
+    try std.testing.expectEqualSlices(u32, &.{248044}, alone.eos[0..alone.eos_count]);
+    // core's shared reader gives the same ids for the same two documents
+    const model = try std.json.parseFromSlice(std.json.Value, a, hf_fixture, .{});
+    defer model.deinit();
+    const gen = try std.json.parseFromSlice(std.json.Value, a, generation, .{});
+    defer gen.deinit();
+    const shared = try eos_ids.resolve(a, model.value, gen.value, 248320);
+    defer a.free(shared);
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, shared);
+}
+
+/// mlx-community/Qwen3.6-35B-A3B-4bit's text_config (its MTP and vision fields left out): no intermediate_size.
+pub const a3b_json =
+    \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":2048,
+    \\"moe_intermediate_size":512,"shared_expert_intermediate_size":512,"num_experts":256,"num_experts_per_tok":8,
+    \\"num_hidden_layers":40,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+    \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,"linear_value_head_dim":128,
+    \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"attn_output_gate":true,"eos_token_id":248044}}
+;
+
+test "Qwen3.6-35B-A3B's config reads as routed experts of 512 over 2,048, the shared expert's width as the layer's" {
+    const c = try parse(std.testing.allocator, a3b_json, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 2048), c.hidden);
+    try std.testing.expectEqual(@as(usize, 512), c.intermediate);
+    try std.testing.expectEqual(@as(usize, 512), c.moe_intermediate);
+    try std.testing.expectEqual(@as(usize, 8), c.top_k);
+    try std.testing.expectEqual(@as(usize, 32), c.v_heads);
+    try std.testing.expect(c.renorm); // absent: renormalized
+    try std.testing.expectEqual(Kind.attention, c.kind(39));
+    try std.testing.expectEqual(Kind.linear, c.kind(38));
 }
 
 test "a routed config refuses a rank split" {
@@ -140,6 +185,18 @@ test "dense config refuses MoE and tied embedding heads" {
     const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
     defer a.free(tied);
     try std.testing.expectError(error.TiedEmbeddingHead, parse(a, tied, null));
+}
+
+test "a tied head parses only with its switch, dense, and marks the config" {
+    const a = std.testing.allocator;
+    const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
+    defer a.free(tied);
+    var p: cfg.Problem = .{};
+    try std.testing.expectError(error.TiedEmbeddingHead, cfg.parseTied(a, tied, null, &p, false));
+    try std.testing.expect((try cfg.parseTied(a, tied, null, &p, true)).tied_head);
+    const untied = try edit(a, "tie_word_embeddings", .{ .bool = false });
+    defer a.free(untied);
+    try std.testing.expect(!(try cfg.parseTied(a, untied, null, &p, true)).tied_head);
 }
 
 test "invalid scalar shapes and types fail without a cast trap" {

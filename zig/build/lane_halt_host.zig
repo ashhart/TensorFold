@@ -14,6 +14,7 @@ pub fn steps(b: *std.Build) void {
     const explore = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_explore_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     explore.addOptions("explore_options", seeds);
     b.step("test-lane-explore-host", "Lane host invariants under seeded arrivals, cancels, room and pressure, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = explore, .filters = &.{"explore:"} })).step);
+    b.step("test-lanes-sampler-launch-host", "A Metal sampler launch of many rows binds each row's one-row bytes, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"sampler launch:"} })).step);
     b.step("test-lane-invariance-host", "Batch-composition token, stop and RNG-position invariance with a fake target").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"lane invariance:"} })).step);
     const safe_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true });
     const strand = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_strand_test.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = safe_lanes }} });

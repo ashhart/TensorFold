@@ -186,6 +186,7 @@ pub fn headIds(d: *cuda.Driver, ids: []const u32) !mtp.Head {
     h.service = try @import("lanes").proposal_head.Service.legacy(gpa, &h.artifact);
     h.draw_batch = .{ .scores = .{ .d = d, .ptr = 0xA000, .len = @import("cuda_draft_draw.zig").scoreBytes(ids.len) }, .device = .{ .d = d, .ptr = 0x9000, .len = @import("cuda_draw_batch.zig").bytes }, .host = &Device.batch_host, .on = true };
     h.best_fn = .{ .d = d, .handle = @ptrFromInt(1) };
+    h.split = null;
     h.topk_fn = .{ .d = d, .handle = @ptrFromInt(2) };
     return h;
 }

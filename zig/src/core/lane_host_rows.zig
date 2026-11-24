@@ -16,7 +16,7 @@ pub fn drain(ctx: *anyopaque) void {
 
 pub fn drainThread(h: *LaneHost) void {
     h.lock();
-    h.closing = true;
+    h.closing.store(true, .release);
     h.wake.broadcast(h.io);
     h.unlock();
     if (h.thread) |t| t.join();
@@ -28,7 +28,7 @@ pub fn ask(ctx: *anyopaque, a: *api.ImprintAsk) bool {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     h.lock();
     defer h.unlock();
-    if (h.closing or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
+    if (h.closing.load(.acquire) or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
     h.wake.signal(h.io);
     return true;
 }
@@ -70,7 +70,7 @@ pub fn ready(h: *LaneHost) bool {
     const store = h.cache orelse return false;
     const r = store.disk orelse return false;
     if (!rows.write.ready(r)) return false;
-    if (h.queued.items.len > 0 or h.admitted.items.len > 0 or h.cancels.items.len > 0 or h.closing) return false;
+    if (h.queued.items.len > 0 or h.admitted.items.len > 0 or h.cancels.items.len > 0 or h.closing.load(.acquire)) return false;
     return !r.sync_writes or h.disk.quiet(h.admissions, std.Io.Clock.awake.now(h.io).toNanoseconds());
 }
 

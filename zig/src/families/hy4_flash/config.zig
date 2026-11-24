@@ -1,4 +1,5 @@
 const std = @import("std");
+const number = @import("config_number");
 const rope = @import("rope.zig");
 
 pub const Attention = enum { sliding_attention, deepseek_sparse_attention };
@@ -185,14 +186,106 @@ pub const Model = struct {
     }
 };
 
+const EngramVocab = @FieldType(Text, "engram_layer_head_vocab_sizes");
+
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(Model) {
-    const parsed = try std.json.parseFromSlice(Model, allocator, bytes, .{
-        .ignore_unknown_fields = true,
+    const doc = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
         .allocate = .alloc_always,
+        .parse_numbers = false,
     });
-    errdefer parsed.deinit();
-    try parsed.value.validate();
-    return parsed;
+    errdefer doc.deinit();
+    const model = try readField(Model, doc.arena.allocator(), doc.value);
+    try model.validate();
+    return .{ .arena = doc.arena, .value = model };
+}
+
+// Decode the checkpoint schema from the JSON tree without going through a floating-point integer.
+fn readField(comptime T: type, a: std.mem.Allocator, v: std.json.Value) std.json.ParseFromValueError!T {
+    if (T == EngramVocab) {
+        if (v != .object) return error.UnexpectedToken;
+        var vocab: EngramVocab = .{};
+        try vocab.map.ensureTotalCapacity(a, v.object.count());
+        for (v.object.keys(), v.object.values()) |key, value| {
+            vocab.map.putAssumeCapacityNoClobber(key, try readField([]const []const u32, a, value));
+        }
+        return vocab;
+    }
+    switch (@typeInfo(T)) {
+        .int => {
+            if (v != .number_string and v != .string) return error.UnexpectedToken;
+            return number.unsigned(T, v) catch |err| switch (err) {
+                error.BadConfig => error.UnexpectedToken,
+                else => |numeric_error| numeric_error,
+            };
+        },
+        .bool => return if (v == .bool) v.bool else error.UnexpectedToken,
+        .float => return std.fmt.parseFloat(T, try numericText(v)),
+        .@"enum" => |e| {
+            const text = try numericText(v);
+            if (std.meta.stringToEnum(T, text)) |tag| return tag;
+            if (!std.json.isNumberFormattedLikeAnInteger(text)) return error.InvalidEnumTag;
+            const n = std.fmt.parseInt(e.tag_type, text, 10) catch return error.InvalidEnumTag;
+            return std.enums.fromInt(T, n) orelse error.InvalidEnumTag;
+        },
+        .optional => |o| return if (v == .null) null else try readField(o.child, a, v),
+        .array => |array| {
+            if (v != .array) return error.UnexpectedToken;
+            if (v.array.items.len != array.len) return error.LengthMismatch;
+            var items: T = undefined;
+            for (&items, v.array.items) |*item, value| item.* = try readField(array.child, a, value);
+            return items;
+        },
+        .pointer => |ptr| {
+            if (T == []const u8 and v == .string) return v.string;
+            if (v != .array) return error.UnexpectedToken;
+            const items = try a.alloc(ptr.child, v.array.items.len);
+            for (items, v.array.items) |*item, value| item.* = try readField(ptr.child, a, value);
+            return items;
+        },
+        .@"struct" => |info| {
+            if (v != .object) return error.UnexpectedToken;
+            var result: T = undefined;
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, field_type, attrs| {
+                @field(result, name) = if (v.object.get(name)) |field|
+                    try readField(field_type, a, field)
+                else
+                    attrs.defaultValue(field_type) orelse return error.MissingField;
+            }
+            return result;
+        },
+        else => @compileError("unsupported Hy4 config field type: " ++ @typeName(T)),
+    }
+}
+
+fn numericText(v: std.json.Value) error{UnexpectedToken}![]const u8 {
+    return number.numberText(v) catch error.UnexpectedToken;
+}
+
+fn expectLegacyModel(bytes: []const u8) !void {
+    const a = std.testing.allocator;
+    const legacy = try std.json.parseFromSlice(Model, a, bytes, .{ .ignore_unknown_fields = true });
+    defer legacy.deinit();
+    const parsed = try parse(a, bytes);
+    defer parsed.deinit();
+    const expected = try std.json.Stringify.valueAlloc(a, legacy.value, .{});
+    defer a.free(expected);
+    const actual = try std.json.Stringify.valueAlloc(a, parsed.value, .{});
+    defer a.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "Hy4 config matches the previous decoder for the checkpoint and numeric variants" {
+    const fixture = @embedFile("config_fixture.json");
+    try expectLegacyModel(fixture);
+    const a = std.testing.allocator;
+    const modified = try std.mem.replaceOwned(u8, a, fixture, "\"compressed_indexer_candidate_topk\": 2048", "\"compressed_indexer_candidate_topk\": \"2.048e3\"");
+    defer a.free(modified);
+    try expectLegacyModel(modified);
+    const seeded = try std.mem.replaceOwned(u8, a, modified, "\"engram_seed\": 0", "\"engram_seed\": 18446744073709551615.0");
+    defer a.free(seeded);
+    const quantized = try std.fmt.allocPrint(a, "{{\"quantization\": {{\"bits\": 4, \"group_size\": 64}}, \"dfly_intermediate_size\": 8192,{s}", .{seeded[1..]});
+    defer a.free(quantized);
+    try expectLegacyModel(quantized);
 }
 
 test "released Hy4-flash geometry" {
