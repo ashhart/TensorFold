@@ -121,6 +121,22 @@ test "shard options: words, flags and their refusals by name" {
     for (bad) |case| try t.expectError(case[1], shard.parse(a, case[0]));
 }
 
+test "shard options: --jobs and --parent name the child processes a target without POSIX refuses; --shard runs alone" {
+    const a = t.allocator;
+    const cases = [_]struct { []const [:0]const u8, ?[]const u8 }{
+        .{ args(&.{ "--jobs", "2" }), "--jobs" },
+        .{ args(&.{ "--shard", "0/2", "--parent", "4242" }), "--parent" },
+        .{ args(&.{ "--shard", "1/2", "--device", "1" }), null },
+        .{ args(&.{"lane"}), null },
+    };
+    for (cases) |case| {
+        const o = try shard.parse(a, case[0]);
+        defer o.deinit(a);
+        if (case[1]) |name| try t.expectEqualStrings(name, o.processOption().?) else try t.expect(o.processOption() == null);
+    }
+    try t.expectEqual(@import("builtin").os.tag != .windows, shard.posix_processes);
+}
+
 test "shard options: a refusal names the option and value, and what it needs" {
     const a = t.allocator;
     const cases = [_]struct { []const [:0]const u8, anyerror, []const u8, []const u8 }{
