@@ -87,11 +87,13 @@ fn fits(h: *const LaneHost, job: *const Job) bool {
     return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
 }
 
-/// The oldest eligible background job past the opt-in age, else the ordinary head.
+/// The oldest eligible background job past the opt-in age that came before the ordinary head, else that head.
 fn promoted(h: *LaneHost, now: i96, ordinary: usize) usize {
     if (h.priority_age_ns <= 0) return ordinary;
+    // only one submitted before the head may pass it: later arrivals never do, so every request is reached in time
+    const head = h.queued.items[ordinary].submitted;
     for (h.queued.items[ordinary..], ordinary..) |j, i| {
-        if (!j.request.background or now - j.submitted < h.priority_age_ns) continue;
+        if (!j.request.background or now - j.submitted < h.priority_age_ns or j.submitted >= head) continue;
         j.wait_reason = passedFor(h, j) orelse return i;
     }
     return ordinary;
@@ -214,4 +216,39 @@ test "priority aging: default FIFO, threshold, prefix holds and pool room" {
     h.queued.clearRetainingCapacity();
     try h.queued.append(a, &aged);
     try std.testing.expectEqual(@as(?usize, null), chooseAt(&h, now));
+}
+
+test "priority aging: a foreground head behind a steady stream of aged backgrounds is admitted within a bound" {
+    const a = std.testing.allocator;
+    var cfg = try lanes.Config.init(a, .{}, 1, 0);
+    defer cfg.deinit(a);
+    var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
+    core.live = .empty;
+    defer core.live.deinit(a);
+    var h = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2 });
+    defer h.queued.deinit(a);
+    defer h.admitted.deinit(a);
+    h.priority_age_ns = 30 * std.time.ns_per_s;
+    const foreground: @import("engine_api.zig").Request = .{ .prompt = &.{ 1, 2, 3 }, .max_tokens = 1 };
+    const background: @import("engine_api.zig").Request = .{ .prompt = &.{ 4, 5, 6 }, .max_tokens = 1, .background = true };
+    // the head arrives at 100 s; two backgrounds were already waiting, and more keep arriving after it
+    var head = testJob(&h, &foreground, 100 * std.time.ns_per_s);
+    var jobs: [64]Job = undefined;
+    for (&jobs, 0..) |*j, i| j.* = testJob(&h, &background, if (i < 2) (90 + @as(i96, @intCast(i))) * std.time.ns_per_s else (100 + @as(i96, @intCast(i))) * std.time.ns_per_s);
+    try h.queued.append(a, &head);
+    var next: usize = 0;
+    while (next < 4) : (next += 1) try h.queued.append(a, &jobs[next]);
+    var picks: usize = 0;
+    const admitted = while (picks < 32) : (picks += 1) {
+        // every queued background is past the threshold by now; a fresh aged one replaces each one admitted
+        const now = (200 + @as(i96, @intCast(picks))) * std.time.ns_per_s;
+        const at = chooseAt(&h, now).?;
+        if (h.queued.items[at] == &head) break picks + 1;
+        _ = h.queued.orderedRemove(at);
+        try h.queued.append(a, &jobs[next]);
+        next += 1;
+    } else 0;
+    // the two that came before it, then the head itself: never any of those that came after
+    try std.testing.expectEqual(@as(usize, 3), admitted);
 }
