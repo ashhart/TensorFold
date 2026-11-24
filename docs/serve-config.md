@@ -125,3 +125,5 @@ The startup log names the file and how many options it gave, never a value.
 - `tensorfold benchmark` and `tensorfold service install` do not read the file. TensorFold Web refuses
   `--config` as an extra flag, because a file could set the flags that Settings manages.
 - Prefer `api-key-file` to `api-key` in a file that is checked in, so that no key is stored with it.
+- A [router config](router.md#the-config-file) is a different file: one `[[models]]` table a model, whose serve keys
+  follow these rules.

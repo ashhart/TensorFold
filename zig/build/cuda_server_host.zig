@@ -41,6 +41,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), .filters = &.{"EOS policy:"} })).step);
     b.step("test-serve-flags-host", "Serve flag parsing, the flat TOML reader and --config expansion, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "--compact-at:", "flat TOML:", "serve --config:" } })).step);
     b.step("test-request-deadline-host", "deadline_s: the server ends a reply at its deadline with usage and ids").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request deadline:"} })).step);
+    const router = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"serve --router:"} }));
+    router.has_side_effects = true; // its children are /bin/sh processes and its fakes loopback sockets
+    b.step("test-router-host", "serve --router: config, routing, child lifecycle and byte-for-byte relay with fake children").dependOn(&router.step);
     b.step("test-dory-cli-host", "Dory CUDA loop option forwarding and invalid-value refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"--device and --segments:"} })).step);
     b.step("test-dory-chat-host", "Dory chat template, EOS, reasoning split and qwen3_coder call on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Dory chat:"} })).step);
     b.step("test-embeddings-protocol-host", "Embedding request and response contracts without an admitted model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings protocol:"} })).step);
@@ -122,5 +125,6 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
             b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&pdf_worker_run.step);
         }
     }
+    @import("mcp_host.zig").add(b, server_tests, native_modules.engines, @import("cuda.zig").checkpointCli(b, host, .debug, false, native_modules.engines, mods.core), step);
     return .{ template, server_tests };
 }

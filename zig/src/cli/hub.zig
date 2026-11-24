@@ -255,6 +255,26 @@ pub fn isDir(io: std.Io, path: []const u8) bool {
     return true;
 }
 
+/// The cache's repos whose snapshot a Zig family serves, by id, as `tensorfold models` lists them; none without one.
+pub fn cachedRepos(a: Allocator, io: std.Io, env: ?*const std.process.Environ.Map) ![]const []const u8 {
+    const root = try cacheDir(a, env, null);
+    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return &.{};
+    defer dir.close(io);
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        // models--Org--Name: the first double dash after the prefix separates the owner from the name
+        if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, "models--")) continue;
+        const rest = entry.name["models--".len..];
+        const sep = std.mem.indexOf(u8, rest, "--") orelse continue;
+        if (sep == 0 or sep + 2 >= rest.len) continue;
+        const repo = try std.fmt.allocPrint(a, "{s}/{s}", .{ rest[0..sep], rest[sep + 2 ..] });
+        const snapshot = (try cachedSnapshot(a, io, root, repo)) orelse continue;
+        if (family(modelType(a, io, snapshot)) != null) try out.append(a, repo);
+    }
+    return out.items;
+}
+
 fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch null;
 }
@@ -338,4 +358,26 @@ test "a checkpoint's size counts shards in a folder inside it" {
     var buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try std.testing.expectEqual(@as(u64, 9), try sizeOf(gpa, io, dir));
+}
+
+test "hub: the cache's repos are the ones a Zig family serves, as models lists them, and none without a cache" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    const root = try std.fmt.allocPrint(a, ".tf-hub-repos-test-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const w = std.Io.Dir.cwd();
+    for ([_][2][]const u8{ .{ "models--Org--Flash", "qwen4_exp" }, .{ "models--Org--Draft", "gemma3n" } }) |repo| {
+        try w.createDirPath(io, try std.fs.path.join(a, &.{ root, repo[0], "snapshots/rev1" }));
+        try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, repo[0], "snapshots/rev1/config.json" }), .data = try std.fmt.allocPrint(a, "{{\"model_type\": \"{s}\"}}", .{repo[1]}) });
+    }
+    try w.createDirPath(io, try std.fs.path.join(a, &.{ root, "datasets--Org--Data/snapshots/rev1" }));
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("HF_HUB_CACHE", root);
+    const got = try cachedRepos(a, io, &env);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("Org/Flash", got[0]);
+    try env.put("HF_HUB_CACHE", try std.fs.path.join(a, &.{ root, "missing" }));
+    try std.testing.expectEqual(@as(usize, 0), (try cachedRepos(a, io, &env)).len);
 }

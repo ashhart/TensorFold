@@ -1,8 +1,10 @@
 //! The tensorfold checkpoint subcommands (`models`, `info`, `pull`, `rm`, `plan`, `merge`) and `log`.
 const std = @import("std");
 const models = @import("models.zig");
-const info = @import("info.zig");
-const pull = @import("pull.zig");
+/// The commands `tensorfold mcp` answers its tools with, and the cache helpers they share.
+pub const info = @import("info.zig");
+pub const pull = @import("pull.zig");
+pub const hub = @import("hub.zig");
 const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const rm = @import("rm.zig");
@@ -24,6 +26,11 @@ const usage =
     \\       tensorfold log [list|show ID|follow] [PATH] [--json]   (the request journal, read-only)
     \\
 ;
+
+/// The cached checkpoints `models` lists, by repo id: a router's models when it has no config.
+pub const cachedRepos = @import("hub.zig").cachedRepos;
+/// One checkpoint's memory floor and weights as `info` computes them: a router's memory check.
+pub const memory = info.memory;
 
 /// True when argv starts with a checkpoint subcommand.
 pub fn wants(args: []const []const u8) bool {
