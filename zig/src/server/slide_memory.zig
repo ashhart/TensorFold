@@ -1,5 +1,4 @@
-//! Folded Memory Weights v5 HTTP & In-Flight handlers for /v1/slide/learn, /v1/slide/consolidate,
-//! /v1/slide/inflight, /v1/slide/fact/{id}, /v1/slide/facts, /v1/slide/graph.
+//! HTTP and in-flight handlers for /v1/slide/{learn,consolidate,inflight,fact/{id},facts,graph}.
 const std = @import("std");
 const api = @import("engine_api");
 const living = @import("living");
@@ -15,6 +14,13 @@ const slide_graph = @import("slide_graph.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
+const cues = @import("slide_memory_cues.zig");
+const containsCI = cues.containsCI;
+const deterministicSynonymCues = cues.deterministicSynonymCues;
+const generateConceptCues = cues.generateConceptCues;
+const startsWithCI = cues.startsWithCI;
+const verifyContradictionWithMemory = cues.verifyContradictionWithMemory;
+const traced = cues.traced;
 
 pub const LearnOpts = struct {
     replace_id: ?u32 = null,
@@ -41,8 +47,7 @@ const TokenCountCtx = struct {
     }
 };
 
-/// Ensures the engine's Folded Memory Weights bank is calibrated and has its shared prefix compiled.
-/// Returns the next safe unused parent ID (`max_existing_parent_id + 1`).
+/// Calibrates the memory bank and compiles its shared prefix; returns the next unused parent ID.
 fn ensureInit(srv: *Server, a: Allocator) !u32 {
     const cal_texts = mem.whitener.calibration_texts;
     var cal_ids = try a.alloc([]const u32, cal_texts.len);
@@ -63,128 +68,6 @@ fn ensureInit(srv: *Server, a: Allocator) !u32 {
     return @max(res.affected, 1);
 }
 
-fn containsCI(hay: []const u8, needle: []const u8) bool {
-    if (needle.len == 0 or needle.len > hay.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= hay.len) : (i += 1) {
-        var ok = true;
-        for (0..needle.len) |j| {
-            if (std.ascii.toLower(hay[i + j]) != std.ascii.toLower(needle[j])) {
-                ok = false;
-                break;
-            }
-        }
-        if (ok) return true;
-    }
-    return false;
-}
-
-/// Zero-latency (< 0.01 ms) deterministic concept-cluster synonym anchors for everyday short facts.
-/// Avoids brittle LLM cue-word clipping (e.g. "colour" <-> "shade/hue/tint", "dog" <-> "pet/puppy")
-/// and cuts small-fact learn time by 3-5x (~100-250 ms/fact)!
-fn deterministicSynonymCues(a: Allocator, fact_text: []const u8) ?[]const u8 {
-    const Cluster = struct { triggers: []const []const u8, anchors: []const u8 };
-    const clusters = [_]Cluster{
-        .{ .triggers = &.{ "colour", "color", "shade", "hue", "tint" }, .anchors = "colour color shade hue tint tone prefer" },
-        .{ .triggers = &.{ "dog", "puppy", "hound", "canine" }, .anchors = "dog pet puppy hound canine" },
-        .{ .triggers = &.{ "cat", "kitten", "feline" }, .anchors = "cat pet kitten feline" },
-        .{ .triggers = &.{ "sister", "brother", "sibling" }, .anchors = "sister brother sibling city town live lives moved" },
-        .{ .triggers = &.{ "robot", "droid" }, .anchors = "robot bot droid warehouse machine" },
-        .{ .triggers = &.{ "deploy", "release", "rollout" }, .anchors = "deploy deployment deployments release rollout schedule" },
-        .{ .triggers = &.{ "password", "passcode" }, .anchors = "password passcode credential secret" },
-        .{ .triggers = &.{ "sailboat", "yacht", "marina", "berth", "moored" }, .anchors = "sailboat boat vessel yacht moored marina berth dock" },
-        .{ .triggers = &.{ "database", "postgres", "duckdb", "sqlite", "mysql" }, .anchors = "database db datastore sql storage backend" },
-        .{ .triggers = &.{ "capital", "france", "paris", "lyon" }, .anchors = "capital city country nation" },
-    };
-
-    var buf: std.ArrayList(u8) = .empty;
-    for (clusters) |c| {
-        var hit = false;
-        for (c.triggers) |tr| {
-            if (containsCI(fact_text, tr)) {
-                hit = true;
-                break;
-            }
-        }
-        if (hit) {
-            if (buf.items.len > 0) buf.append(a, ' ') catch return null;
-            buf.appendSlice(a, c.anchors) catch return null;
-        }
-    }
-    if (buf.items.len == 0) return null;
-    return buf.items;
-}
-
-/// Fast concept cue builder for short facts: uses < 0.01 ms deterministic synonym clusters first,
-/// falling back to a single-line LLM cue pass ONLY for novel/unfamiliar domain jargon!
-fn generateConceptCues(srv: *Server, cx: *errors.Cx, fact_text: []const u8, gone: anytype) []const u32 {
-    const a = cx.a;
-    if (deterministicSynonymCues(a, fact_text)) |anchors| {
-        return srv.text.encode(a, anchors, false) catch return &.{};
-    }
-    if (std.c.getenv("TF_SLIDE_FAST_CUES")) |v| {
-        const s = std.mem.span(v);
-        if (std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "true")) return &.{};
-    }
-    const prompt = std.fmt.allocPrint(
-        a,
-        "List 8 single-word topic synonyms or related nouns on ONE line (comma-separated, no numbering, no questions, " ++
-            "no pronouns) someone might use to ask about this fact.\nFact: {s}\nKeywords:",
-        .{std.mem.trim(u8, fact_text, " \t\r\n")},
-    ) catch return &.{};
-    const reply = slide_ask.askIn(srv, cx, &.{}, prompt, 36, true, gone) catch return &.{};
-    var trimmed = std.mem.trim(u8, reply.content, " \t\r\n");
-    if (std.mem.indexOfScalar(u8, trimmed, '\n')) |nl| {
-        trimmed = std.mem.trim(u8, trimmed[0..nl], " \t\r\n");
-    }
-    if (std.c.getenv("TF_SLIDE_TRACE") != null) {
-        log.line("slide(v6) trace: cues for '{s}' -> '{s}'", .{ std.mem.trim(u8, fact_text, " \t\r\n"), trimmed });
-    }
-    if (trimmed.len == 0) return &.{};
-    return srv.text.encode(a, trimmed, false) catch return &.{};
-}
-
-fn startsWithCI(hay: []const u8, prefix: []const u8) bool {
-    if (prefix.len > hay.len) return false;
-    for (0..prefix.len) |i| {
-        if (std.ascii.toLower(hay[i]) != std.ascii.toLower(prefix[i])) return false;
-    }
-    return true;
-}
-
-/// Pure-weight contradiction verifier (ZERO plaintext on disk!):
-/// Queries the model WITH its currently stored folded memory weights active (`shipped = false`)
-/// to decide whether `new_text` contradicts/replaces an existing recorded value vs merely
-/// adding a compatible extra detail. Uses strict prefix matching and puts COMPATIBLE first to
-/// eliminate small-model first-option bias.
-fn verifyContradictionWithMemory(srv: *Server, cx: *errors.Cx, new_text: []const u8, gone: anytype) bool {
-    const a = cx.a;
-    const prompt = std.fmt.allocPrint(
-        a,
-        "Compare the new statement against your stored notes.\n" ++
-            "New statement: {s}\n" ++
-            "Write ONE short sentence comparing what attribute each states, then on a new line write ONLY:\n" ++
-            "VERDICT: COMPATIBLE (if both can be true at the same time, such as adding a hobby, activity, breed, or extra detail)\n" ++
-            "or\n" ++
-            "VERDICT: CONTRADICT (ONLY if the new statement replaces the exact same attribute with a different conflicting value, making the old value false).\n" ++
-            "Comparison:",
-        .{std.mem.trim(u8, new_text, " \t\r\n")},
-    ) catch return false;
-    const reply = slide_ask.askIn(srv, cx, &.{}, prompt, 40, false, gone) catch return false;
-    const ans = std.mem.trim(u8, reply.content, " \t\r\n");
-    if (std.c.getenv("TF_SLIDE_TRACE") != null) {
-        log.line("slide(v6) revision probe: '{s}' -> '{s}'", .{ std.mem.trim(u8, new_text, " \t\r\n"), ans });
-    }
-    if (containsCI(ans, "verdict: contradict")) return true;
-    if (containsCI(ans, "verdict: compatible")) return false;
-    // Fallback if model omitted the "VERDICT:" prefix on the final line
-    if (std.mem.lastIndexOfScalar(u8, ans, '\n')) |nl| {
-        const last = std.mem.trim(u8, ans[nl + 1 ..], " \t\r\n.*:-");
-        return startsWithCI(last, "contradict");
-    }
-    return startsWithCI(ans, "contradict");
-}
-
 const CoreResult = struct {
     id: u32,
     unit_count: usize,
@@ -195,8 +78,7 @@ const CoreResult = struct {
     is_standing: bool,
 };
 
-/// Shared ultra-fast Folded Memory Weights v5 compiler used by BOTH `POST /v1/slide/learn`
-/// and the non-blocking background in-flight chat learner!
+/// Shared memory compiler behind `POST /v1/slide/learn` and the background in-flight chat learner.
 fn learnCore(
     srv: *Server,
     a: Allocator,
@@ -284,8 +166,7 @@ fn learnCore(
             else
                 &.{};
 
-            // Temporal Belief Revision (v6): before adding a new small fact, check pure-vector entity
-            // conflicts against active facts; verify contradiction via the model's OWN folded weights!
+            // Belief revision: for a new small fact, check entity conflicts and verify contradiction with the model.
             if (chunks.len == 1 and chunk.is_small_fact and opts.auto_revise and opts.replace_id == null) {
                 const cres = srv.engine.memoryOp(&.{ .find_conflicts = .{ .gate_ids = gate_ids } });
                 if (cres.err == null and cres.conflict_count > 0) {
@@ -326,7 +207,7 @@ fn learnCore(
 
             const digest_txt = mem.chunker.buildExtractiveDigest(a, chunks, 540, tc) catch &.{};
             if (digest_txt.len > 24) {
-                if (std.c.getenv("TF_SLIDE_TRACE") != null) {
+                if (traced()) {
                     log.line("slide(v5) trace: verbatim extractive index ({d} bytes)", .{digest_txt.len});
                 }
                 const d_entry = try std.fmt.allocPrint(a, "\n---\n[Cross-Section Verbatim Index]\n{s}---\n", .{digest_txt});

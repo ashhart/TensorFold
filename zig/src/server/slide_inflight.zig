@@ -1,11 +1,4 @@
-//! Non-blocking In-Flight Conversational Learning for Folded Memory Weights v6.
-//! Supports:
-//!   1. Zero-latency (< 0.05 ms) explicit facts, pasted reference documents, standing policies,
-//!      and self-disclosed personal/org statements directly from `/v1/chat/completions`.
-//!   2. Implicit multi-turn conversational corrections & preferences (inspecting `(prev_assistant, user)`
-//!      on a background worker thread with 0 ms TTFT overhead, distilling standalone canonical facts/updates).
-//!   3. Strict ephemeral filter (rejects "for this message only", "pretend", "roleplay", and all questions
-//!      with 0/150 false positives on TensorFold's drift panel!).
+//! In-flight learning from chat: explicit facts, documents, policies and corrections; ephemeral turns skipped.
 const std = @import("std");
 const json = @import("json");
 const log = @import("log.zig");
@@ -180,9 +173,7 @@ pub fn detect(raw_text: []const u8, force_learn: bool) ?Detected {
     return detectExchange(null, raw_text, force_learn);
 }
 
-/// Pure-Zig zero-latency detector for learnable user facts, documents, standing policies, and
-/// implicit multi-turn conversational corrections.
-/// Guarantees zero false positives on questions, commands, ephemeral turns, and the 150-prompt drift panel.
+/// Detects learnable user facts, documents, standing policies and multi-turn corrections; skips questions.
 pub fn detectExchange(prev_assistant: ?[]const u8, raw_text: []const u8, force_learn: bool) ?Detected {
     const t = std.mem.trim(u8, raw_text, " \t\r\n");
     if (t.len < 8 or t.len > 64_000) return null;
@@ -343,10 +334,7 @@ pub const Worker = struct {
 
     pub fn start(self: *Worker, gpa: Allocator, io: std.Io, srv: *Server) void {
         if (!srv.info.folded_memory) return;
-        if (std.c.getenv("TF_SLIDE_AUTO")) |v| {
-            const s = std.mem.span(v);
-            if (std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "false")) return;
-        }
+        if (!(@import("sys").environment.read(bool, "TF_SLIDE_AUTO", true) catch true)) return; // 0 or false: no learning from chat
         self.gpa = gpa;
         self.io = io;
         self.srv = srv;
@@ -381,8 +369,7 @@ pub const Worker = struct {
         self.maybeEnqueueExchange(null, user_text, fields);
     }
 
-    /// Inspects a completed chat turn's `(prev_assistant, user_text)` & optional `living_learn` field,
-    /// enqueuing asynchronously in < 5 microseconds (ZERO latency impact on `/v1/chat/completions`!).
+    /// Inspects a finished turn `(prev_assistant, user_text)` and optional `living_learn`; enqueues without blocking.
     pub fn maybeEnqueueExchange(self: *Worker, prev_assistant: ?[]const u8, user_text: []const u8, fields: json.Value) void {
         if (!self.enabled or self.stopping.load(.acquire)) return;
         var force = false;
@@ -452,8 +439,7 @@ pub const Worker = struct {
         );
     }
 
-    /// Background async distiller: turns a messy multi-turn `(prev_assistant, user_correction)` exchange
-    /// into a single standalone canonical statement (`FACT:`, `UPDATE:`, `POLICY:`, or `NONE`).
+    /// Background distiller: rewrites a `(prev_assistant, user_correction)` exchange as one FACT/UPDATE/POLICY/NONE.
     fn distillExchange(srv: *Server, a: Allocator, prev_asst: []const u8, user_turn: []const u8) ?Detected {
         var cx: errors.Cx = .{ .a = a };
         const prompt = std.fmt.allocPrint(
