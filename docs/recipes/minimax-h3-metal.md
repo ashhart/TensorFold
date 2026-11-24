@@ -151,6 +151,8 @@ first-step page faults into the load; it shows no net cold-start win here. The s
 `zig build test-h3-read-ahead` checks multi-piece, multi-file byte counts, truncated and missing files, and disabled
 read-ahead. The nightly macOS host checks run this target. `zig build test-h3-image-decoder-load` loads a one-block
 decoder fixture beside the mask and an encoder tensor and checks that only the converted tensors' bytes are read ahead.
+`zig build test-h3-image-prompt-weights` opens an index fixture beside a vision tensor, an unused layer's and a second
+shard and checks that only the accepted tensors' bytes are read ahead.
 
 ## Not done
 

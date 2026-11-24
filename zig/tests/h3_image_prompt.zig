@@ -10,6 +10,7 @@ const check = @import("h3_image_prompt_check.zig");
 
 const rules = hp.rules;
 const ref = hp.reference;
+const weights = hp.weights; // its fixture test runs here
 
 const usage =
     \\usage: tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out.safetensors [WIDTHxHEIGHT [SEED [MIN_AREA]]]
@@ -360,4 +361,59 @@ fn withPicture(runner: *hp.Runner, w: *const hp.weights.Text, a: std.mem.Allocat
     const sum32 = try a.alloc(f32, T * H);
     try ref.encode(f32, a, g, host, p.ids, cos, sin, vision, sum32);
     return whole(a, "text encoder rows, a reference's vision and DeepStack rows at M-RoPE positions", enc, sum32, exact, H);
+}
+
+/// `TextNames`' rule, for the read-ahead fixture: `prefix`'s embedding and its layers below `n`.
+const wanted = struct {
+    prefix: []const u8,
+    layers: usize,
+
+    pub fn accepts(w: @This(), name: []const u8) bool {
+        if (!std.mem.startsWith(u8, name, w.prefix)) return false;
+        const rest = name[w.prefix.len..];
+        if (std.mem.eql(u8, rest, "embed_tokens.weight")) return true;
+        if (!std.mem.startsWith(u8, rest, "layers.")) return false;
+        const dot = std.mem.indexOfScalar(u8, rest["layers.".len..], '.') orelse return false;
+        const i = std.fmt.parseInt(usize, rest["layers.".len..][0..dot], 10) catch return false;
+        return i < w.layers;
+    }
+};
+
+test "h3 prompt weights: only the accepted tensors' bytes are read ahead, prefetch on and off" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // one shard with accepted tensors beside a vision tensor and an unused layer's, one rejected shard
+    const header =
+        \\{"model.embed_tokens.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[0,16]}
+        \\,"model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[4],"data_offsets":[16,24]}
+        \\,"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[24,40]}
+        \\,"model.layers.0.mlp.gate_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[40,56]}
+        \\,"model.vision_tower.patch_embed.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[56,72]}
+        \\,"model.layers.10.self_attn.q_proj.weight":{"dtype":"BF16","shape":[2,4],"data_offsets":[72,88]}
+    ;
+    var json: std.ArrayList(u8) = .empty;
+    try json.appendSlice(a, header);
+    while ((8 + json.items.len + 1) % 8 != 0) try json.append(a, ' ');
+    try json.append(a, '}');
+    var file: std.ArrayList(u8) = .empty;
+    try file.appendSlice(a, &std.mem.toBytes(std.mem.nativeToLittle(u64, json.items.len)));
+    try file.appendSlice(a, json.items);
+    for (0..88) |i| try file.append(a, @truncate(i));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a.safetensors", .data = file.items });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "b.safetensors", .data = file.items });
+    const index = try std.fmt.allocPrint(a,
+        \\{{"weight_map":{{"model.embed_tokens.weight":"a.safetensors","model.layers.0.input_layernorm.weight":"a.safetensors","model.layers.0.self_attn.q_proj.weight":"a.safetensors","model.layers.0.mlp.gate_proj.weight":"a.safetensors","model.vision_tower.patch_embed.weight":"a.safetensors","model.layers.10.self_attn.q_proj.weight":"a.safetensors","model.vision_tower.blocks.0.weight":"b.safetensors","model.layers.10.mlp.gate_proj.weight":"b.safetensors"}}}}
+    , .{});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors.index.json", .data = index });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var shards = try weights.open(testing.allocator, testing.io, try mtl.Device.init(), dir, wanted{ .prefix = "model.", .layers = 2 });
+    defer shards.deinit(testing.allocator);
+    const readers = try @import("core").checkpoint_read_ahead.readers();
+    try testing.expectEqual(if (readers == 0) @as(u64, 0) else 56, shards.ahead);
+    try testing.expectEqual(@as(usize, 1), shards.files.len);
+    try testing.expectEqualSlices(u8, file.items[8 + json.items.len ..][0..16], weights.Shards.bytes(try shards.take("model.embed_tokens.weight", .{ 2, 4 }), 16));
 }
