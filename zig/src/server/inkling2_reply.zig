@@ -241,6 +241,7 @@ pub const Stream = struct {
             .rejected = s.rejected > 0 or s.state == .tool_json,
             .rejected_calls = s.rejected + @intFromBool(s.state == .tool_json),
             .open_think = s.state == .thinking,
+            .bare = s.bare(),
         };
     }
 
