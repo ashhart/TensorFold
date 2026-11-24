@@ -280,8 +280,7 @@ pub const Forward = struct {
         }
     }
 
-    /// Partial forward (0 .. layer_sem + 1) capturing exact post-layer residual hidden states
-    /// at `layer_lex` into `tap_lex` and at `layer_sem` in `scratch.h` (`[rows, hidden]` bf16).
+    /// Partial forward to `layer_sem`; residuals at `layer_lex` -> `tap_lex`, `layer_sem` -> `scratch.h` (bf16).
     pub fn bodyPartial(
         forward: Forward,
         e: *Enc,

@@ -1,6 +1,4 @@
-//! Heading- and paragraph-aware document chunker for Folded Memory Weights.
-//! Returns (full_text, unique_body, title_line, is_small_fact) so multi-chunk documents
-//! keep title context in their KV weights while building gate prototypes from unique section text.
+//! Heading- and paragraph-aware chunker for Folded Memory Weights; keeps title context, gates on section text.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -47,8 +45,7 @@ fn isHeadingLine(line: []const u8) bool {
     return hashes >= 1 and hashes <= 3 and hashes < t.len and (t[hashes] == ' ' or t[hashes] == '\t');
 }
 
-/// Splits `text` into 1 chunk (small fact or short doc) or multiple heading/paragraph chunks
-/// bounded by `max_chunk_tokens` (recommended ~750-900).
+/// Splits `text` into one chunk or several heading/paragraph chunks bounded by `max_chunk_tokens` (~750-900).
 pub fn chunkDocument(
     gpa: Allocator,
     text: []const u8,
@@ -189,9 +186,7 @@ pub fn formatEntryText(gpa: Allocator, full_text: []const u8, is_small_fact: boo
         try std.fmt.allocPrint(gpa, "\n---\n{s}\n---\n", .{trimmed});
 }
 
-/// Scores a sentence/line for domain-independent factual density (numbers, alphanumeric codes,
-/// uppercase acronyms/proper nouns, key-value bullets, and section lead-sentence bonus).
-/// Pure deterministic Zig (< 0.2 ms for an entire manual) -> ZERO LLM hallucination and 50,000x faster!
+/// Scores a line's factual density: numbers, codes, acronyms/proper nouns, key-value bullets, section-lead bonus.
 fn factualSalienceScore(s: []const u8, is_section_lead: bool) f32 {
     const t = std.mem.trim(u8, s, " \t\r\n");
     if (t.len < 12) return 0.0;
@@ -237,10 +232,7 @@ fn factualSalienceScore(s: []const u8, is_section_lead: bool) f32 {
     return score / denom;
 }
 
-/// Builds a compact, 100% verbatim Section-Aware Cross-Section Index from a multi-chunk document
-/// in < 0.2 ms. Groups sentences by section heading (falling back to chunk index for headingless
-/// text), selects round-robin across EVERY section so short sections are never starved, and emits
-/// chosen verbatim sentences under their original headings in document order.
+/// Builds a verbatim cross-section index: round-robin sentence picks per section, emitted under headings in order.
 pub fn buildExtractiveDigest(
     gpa: Allocator,
     chunks: []const Chunk,
@@ -362,8 +354,7 @@ pub fn buildExtractiveDigest(
     var chosen_idx: std.ArrayList(usize) = .empty;
     defer chosen_idx.deinit(gpa);
 
-    // Serpentine (snake) round-robin across EVERY section: odd rounds run back-to-front so
-    // concluding sections (summaries, roadmaps, appendices) are never starved!
+    // Serpentine round-robin over every section: odd rounds run back-to-front so late sections are not starved
     var round: usize = 0;
     while (used_toks < max_tokens and round < 8) : (round += 1) {
         var added_any = false;
