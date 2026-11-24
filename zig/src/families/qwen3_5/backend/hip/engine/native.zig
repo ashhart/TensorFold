@@ -7,7 +7,7 @@ const engine = @import("engine.zig");
 const Engine = engine.Engine;
 const memory = @import("memory.zig");
 const mtp = @import("mtp.zig");
-const prefix = @import("prefix.zig");
+const prompt_rows = @import("prompt_rows.zig");
 const pages = @import("../forward/pages.zig");
 const state = @import("../forward/state.zig");
 const worker = @import("worker.zig");
@@ -160,6 +160,20 @@ fn openDraft(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, st
 
 const Readouts = struct { cfg: @import("core").joint_schema.Config, bounds: hip.joint_schema.plan.Bounds };
 
+/// The admitted streams' plan at some prompt rows, by `served`: the drafter's contexts and tap rings count in it.
+const Plans = struct {
+    e: *Engine,
+    d: ?*Draft,
+    streams: usize,
+    capacity: usize,
+    readouts: ?Readouts,
+
+    pub fn at(p: Plans, rows: usize) !prompt_rows.Plan {
+        p.e.o.prompt_rows = rows;
+        return .{ .whole = try served(p.e, p.d, p.streams, p.capacity, p.readouts), .prompt = try p.e.promptBytes(p.capacity) };
+    }
+};
+
 /// Loads this rank's share of the model, admits the streams its memory holds (with the other ranks) and sizes them.
 fn prepare(
     a: std.mem.Allocator,
@@ -231,6 +245,10 @@ fn prepare(
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({s})", .{ dir, @errorName(err) }),
     };
     errdefer e.deinit();
+    // admission starts from the fallback's rows where a lone rank has them: the policy's must not cost a stream
+    const want = prompt_rows.opening(dev.policy, e.plain());
+    const small = prompt_rows.fallback(dev.policy, dev.fallback_step, want);
+    e.o.prompt_rows = small orelse want;
     // a Clef head's weights go up beside the model's and count with them
     var head = try loadJoint(a, gpa, io, e, dir, problem);
     errdefer if (head) |*h| h.deinit();
@@ -281,6 +299,19 @@ fn prepare(
             .{ o.streams, gibs(asked), window, gibs(room), streams },
         );
     }
+    // a prompt cache a flag asked for claims its bytes beside the streams, unless it may pass the cap
+    const flag: ?usize = if (o.cache_gib) |g| @intFromFloat(g * (1 << 30)) else null;
+    const claim = prompt_rows.claim(flag, o.cache_over_cap);
+    // the policy's rows come back when their larger plan holds that claim and the streams the fallback admitted
+    var opened: prompt_rows.Opened = .{ .rows = want };
+    const plans: Plans = .{ .e = e, .d = d, .streams = streams, .capacity = capacity, .readouts = readouts };
+    if (small) |s| opened = prompt_rows.settled(plans, want, s, room, claim) catch |err| return steps.refuseAll(
+        a,
+        problem,
+        "the native HIP engine cannot count its scratch ({s})",
+        .{@errorName(err)},
+    );
+    e.o.prompt_rows = opened.rows;
     const need = served(e, d, streams, capacity, readouts) catch |err| return steps.refuseAll(
         a,
         problem,
@@ -291,7 +322,7 @@ fn prepare(
     const left = room - need;
     const policy = dev.policy;
     const keep: usize = policy.slots;
-    var budget: usize = if (o.cache_gib) |g| @intFromFloat(g * (1 << 30)) else left;
+    var budget: usize = flag orelse left;
     if (budget > left and !o.cache_over_cap) {
         return steps.refuseAll(
             a,
@@ -322,8 +353,9 @@ fn prepare(
     );
     const own_bytes = if (d) |x| x.streamBytes() else 0;
     const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()) + own_bytes);
-    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
-        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), if (d != null) " with its DFlash2 drafter" else "", streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
+    var why: [96]u8 = undefined;
+    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks{s}", .{
+        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), if (d != null) " with its DFlash2 drafter" else "", streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, opened.rows, opened.note(&why),
     });
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup, .joint = head, .bounds = if (readouts) |r| r.bounds else undefined, .draft = d };
 }

@@ -46,22 +46,17 @@ pub const LaneHost = struct {
     admitted: std.ArrayList(*Job) = .empty,
     filling: std.ArrayList(*Job) = .empty, // admitted jobs whose prompt is still going in, a chunk a round, oldest first
     cancels: std.ArrayList(Id) = .empty,
-    closing: bool = false,
-    stale: bool = false, // the learner's last step: a put-back has not reached the device, so replies are refused
+    closing: std.atomic.Value(bool) = .init(false),
+    stale: std.atomic.Value(bool) = .init(false), // the learner's last step: a put-back has not reached the device, so replies are refused
+    st: @import("lane_host_status.zig").State = .{},
     /// `halt`'s reason: what is left finishes failed with it (null: a stop cancels what is left)
     halt_reason: ?[]const u8 = null,
     thread: ?std.Thread = null,
     decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
-    prefill_rate: f64 = 0,
-    prefill_at: i96 = 0,
-    live_tokens: std.ArrayList(u32) = .empty,
     /// A Metal engine's keepalive target, set by the family that owns the queue; null keeps the ticker off.
     keepalive_target: ?api.keepalive.Target = null,
-    live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
-    cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
-    disk_status: ?api.Status.DiskCache = null, // published under mutex beside it
     cache_at: i64 = 0, // wall-clock ms of the last full cache and disk copy (republished at 1 Hz at most)
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
@@ -87,6 +82,7 @@ pub const LaneHost = struct {
     srpt: @import("lane_host_srpt.zig").Srpt = .{}, // TENSORFOLD_PREFILL_ORDER=srpt: less work left goes first
     decode_cap: bool = false, // --decode-share given by flag (the env never opts in): a chunk-invariant family may cap
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
+    priority_age_ns: i96 = 0, // a background request older than this may precede foreground work (0: FIFO)
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // OS memory pressure (lane_host_pressure.zig); null: off
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
@@ -106,7 +102,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = fill.decodeShare.resolved(info_.decode_share, info_.default_decode_share), .decode_cap = fill.decodeShare.capped(info_.decode_share, info_.default_decode_share), .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = fill.decodeShare.resolved(info_.decode_share, info_.default_decode_share), .decode_cap = fill.decodeShare.capped(info_.decode_share, info_.default_decode_share), .prefix = .fromEnv(), .priority_age_ns = @import("lane_host_admit.zig").ageFromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
@@ -144,7 +140,7 @@ pub const LaneHost = struct {
         h.filling.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
-        h.live_tokens.deinit(h.gpa);
+        @import("lane_host_status.zig").freeSlots(h);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
         lane_trace.drop(&h.trace);
@@ -214,11 +210,12 @@ pub const LaneHost = struct {
         // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
         if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
+        defer @import("lane_host_status.zig").publish(h); // a reader sees the queue at once, after the unlock below
         defer h.unlock();
-        const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale or pressure.refuses(h)) {
+        const unavailable = h.closing.load(.acquire) or (if (h.health) |source| !source.read(source.ctx) else false);
+        if (unavailable or h.stale.load(.acquire) or pressure.refuses(h)) {
             h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
+            return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
@@ -253,7 +250,7 @@ pub const LaneHost = struct {
         const job: *Job = @ptrCast(@alignCast(ctx));
         job.host.lock();
         defer job.host.unlock();
-        return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
+        return job.host.closing.load(.acquire) or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
     /// A background pass's yield hook: a foreground request waits, a prompt fills or a stream decodes (under the lock).
@@ -274,10 +271,10 @@ pub const LaneHost = struct {
         const until: std.Io.Timeout = .{ .deadline = .fromNow(h.io, .{ .raw = .fromNanoseconds(h.warm_quiet), .clock = .awake }) };
         h.lock();
         defer h.unlock();
-        while (!h.closing and !@import("lane_host_warm.zig").otherWork(h, job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
+        while (!h.closing.load(.acquire) and !@import("lane_host_warm.zig").otherWork(h, job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
             h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
         }
-        h.load.yields += @intFromBool(!h.closing and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
+        h.load.yields += @intFromBool(!h.closing.load(.acquire) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came
         return false;
     }
 
@@ -297,6 +294,7 @@ pub const LaneHost = struct {
         h.send(job);
         if (!job.stream.finished) return false;
         h.remove(job);
+        @import("lane_host_status.zig").publish(h); // the job left the list before the event
         const reason: Reason = switch (job.stream.reason) {
             .length => .length,
             .cancelled => .cancelled,
@@ -334,6 +332,7 @@ pub const LaneHost = struct {
     }
 
     pub fn lock(h: *LaneHost) void {
+        if (@import("lane_host_status.zig").takeEngineLock(h)) return;
         h.mutex.lockUncancelable(h.io);
     }
 
@@ -413,7 +412,7 @@ pub const LaneHost = struct {
         if (!r.promptOnly() and r.max_tokens == 0 and h.info_.warm_turns) return @import("lane_host_warm.zig").pass(h, job, began);
         if (!r.promptOnly() and lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
-            h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
+            h.filling.append(h.gpa, job.lending()) catch return h.drop(job, "out of memory"); // its kept state lent until its first call
             return true;
         }
         load.calling(h, job);
@@ -455,11 +454,12 @@ pub const LaneHost = struct {
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
         h.lock();
-        if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
-        h.prefill_at = done;
+        if (done > began) h.st.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
+        h.st.prefill_at = done;
         job.prefilled = done;
         load.credit(h, job);
         h.unlock();
+        @import("lane_host_status.zig").publish(h); // the fill ends here
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
         if (h.cache) |store| {
@@ -537,7 +537,7 @@ pub const LaneHost = struct {
             ends.deliverPending(h);
             status.noteLive(h);
             h.lock();
-            if (h.closing) {
+            if (h.closing.load(.acquire)) {
                 const left = h.queued.items.len + h.admitted.items.len;
                 h.unlock();
                 if (h.lesson_open) {

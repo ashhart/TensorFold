@@ -18,8 +18,14 @@
 #else
     const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
 #endif
+#ifdef TF_QMMF_GROUP
+    // a grouped launch's block: its projection's tile and K slice, as that projection's own launch numbers them
+    const int2 at = tile_of(tile, M, N, BM, BN, group);
+    const int m0 = at.x, n0 = at.y, g0 = slice * per;
+#else
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
+#endif
 
 #ifndef TF_QMMF_STRIDED
     [[maybe_unused]] uint64_t* ready = reinterpret_cast<uint64_t*>(buf + STAGES * T::STAGE); // K32 has no barriers
@@ -282,7 +288,12 @@
         cluster.sync();
         if (slice == 0) {
             for (int peer = 1; peer < SK; ++peer) {
+#ifdef TF_QMMF_GROUP
+                // the tile's slices sit side by side in the cluster, slice 0 first
+                const float* theirs = cluster.map_shared_rank(mine, cluster.block_rank() - slice + peer);
+#else
                 const float* theirs = cluster.map_shared_rank(mine, peer);
+#endif
 #pragma unroll
                 for (int i = 0; i < T::MT; ++i)
 #pragma unroll

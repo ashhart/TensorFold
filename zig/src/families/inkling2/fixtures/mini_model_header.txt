@@ -1,0 +1,86 @@
+inkling2-mini-model 1244 dfcec4225659aceabe432e4daadb4e6291f3718e2015d412f97f60200de32141 release=thinkingmachines/Inkling-2-Mini revision=ed40e7da625f594fc9c4990f5f66be24873c22d7 published=2026-11-20 license=apache-2.0
+model.llm.attn_res.attn_queries.{L} F32 2304 0-3,5-9,11-15,17-21
+model.llm.attn_res.attn_queries.{L} F32 3x2304 4,10,16,22
+model.llm.attn_res.mlp_queries.{L} F32 2304 0-23
+model.llm.attn_res.output_query F32 2304
+model.llm.embed.weight BF16 201024x2304
+model.llm.embed_norm.weight BF16 2304
+model.llm.layers.{L}.attn.attn_sink_proj.weight BF16 24x2304 0-23
+model.llm.layers.{L}.attn.gate_attn.weight BF16 3072x2304 0-23
+model.llm.layers.{L}.attn.k_sconv.static_w BF16 4x1024 5,11,17,23
+model.llm.layers.{L}.attn.k_sconv.weight BF16 1024x1x4 0-4,6-10,12-16,18-22
+model.llm.layers.{L}.attn.k_sconv.weight_proj BF16 32x2304 5,11,17,23
+model.llm.layers.{L}.attn.q_l2_clip.scale BF16 24x128 0-23
+model.llm.layers.{L}.attn.rel_l2_clip.scale BF16 24x16 0-23
+model.llm.layers.{L}.attn.rel_logits_proj.proj BF16 16x1024 0-23
+model.llm.layers.{L}.attn.v_sconv.static_w BF16 4x1024 5,11,17,23
+model.llm.layers.{L}.attn.v_sconv.weight BF16 1024x1x4 0-4,6-10,12-16,18-22
+model.llm.layers.{L}.attn.v_sconv.weight_proj BF16 32x2304 5,11,17,23
+model.llm.layers.{L}.attn.wk_dv.weight BF16 1024x2304 0-23
+model.llm.layers.{L}.attn.wo_ud.weight BF16 2304x3072 0-23
+model.llm.layers.{L}.attn.wq_du.weight BF16 3072x2304 0-23
+model.llm.layers.{L}.attn.wr_du.weight BF16 384x2304 0-23
+model.llm.layers.{L}.attn.wv_dv.weight BF16 1024x2304 0-23
+model.llm.layers.{L}.attn_norm.weight BF16 2304 0-4,6-10,12-16,18-22
+model.llm.layers.{L}.attn_sconv.weight BF16 2304x1x4 0-23
+model.llm.layers.{L}.controllers.attn.down_weight BF16 64x4608 6-17
+model.llm.layers.{L}.controllers.attn.forget_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.attn.gain_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.k.down_weight BF16 64x4608 6-17
+model.llm.layers.{L}.controllers.k.forget_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.k.gain_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.mlp.down_weight BF16 64x4608 6-17
+model.llm.layers.{L}.controllers.mlp.forget_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.mlp.gain_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.v.down_weight BF16 64x4608 6-17
+model.llm.layers.{L}.controllers.v.forget_weight BF16 2304x64 6-17
+model.llm.layers.{L}.controllers.v.gain_weight BF16 2304x64 6-17
+model.llm.layers.{L}.k_input_norm.weight BF16 2304 5,11,17,23
+model.llm.layers.{L}.mlp.experts.w13_weight F8_E4M3 128x2304x2304 20-23
+model.llm.layers.{L}.mlp.experts.w13_weight U8 128x2304x1152 0-19
+model.llm.layers.{L}.mlp.experts.w13_weight_amax F32 128 0-19
+model.llm.layers.{L}.mlp.experts.w13_weight_outer_scale_denominator F32 1 0-19
+model.llm.layers.{L}.mlp.experts.w13_weight_scale F8_E4M3 128x2304x144 0-19
+model.llm.layers.{L}.mlp.experts.w13_weight_scale U8 128x2304x72 20-23
+model.llm.layers.{L}.mlp.experts.w2_weight F8_E4M3 128x2304x1152 20-23
+model.llm.layers.{L}.mlp.experts.w2_weight U8 128x2304x576 0-19
+model.llm.layers.{L}.mlp.experts.w2_weight_amax F32 128 0-19
+model.llm.layers.{L}.mlp.experts.w2_weight_outer_scale_denominator F32 1 0-19
+model.llm.layers.{L}.mlp.experts.w2_weight_scale F8_E4M3 128x2304x72 0-19
+model.llm.layers.{L}.mlp.experts.w2_weight_scale U8 128x2304x36 20-23
+model.llm.layers.{L}.mlp.gate.bias F32 128 0-23
+model.llm.layers.{L}.mlp.gate.weight BF16 128x2304 0-23
+model.llm.layers.{L}.mlp_norm.weight BF16 2304 0-23
+model.llm.layers.{L}.mlp_sconv.weight BF16 2304x1x4 0-23
+model.llm.layers.{L}.q_input_norm.weight BF16 2304 5,11,17,23
+model.llm.layers.{L}.v_input_norm.weight BF16 2304 5,11,17,23
+model.llm.middle_cycle_cross_pass_kv_queries F32 24x2304
+model.llm.middle_cycle_cross_pass_queries F32 24x2304
+model.llm.norm.weight BF16 2304
+model.llm.unembed.weight BF16 201024x2304
+model.visual.backbone.embeddings.class_embedding BF16 1024
+model.visual.backbone.embeddings.cls_position_embedding BF16 1024
+model.visual.backbone.embeddings.patch_embedding.weight BF16 1024x1200
+model.visual.backbone.embeddings.position_embedding BF16 1024x1024
+model.visual.backbone.layers.{L}.ln_1.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.ln_1.weight BF16 1024 0-22
+model.visual.backbone.layers.{L}.ln_2.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.ln_2.weight BF16 1024 0-22
+model.visual.backbone.layers.{L}.ls_1.gamma BF16 1024 0-22
+model.visual.backbone.layers.{L}.ls_2.gamma BF16 1024 0-22
+model.visual.backbone.layers.{L}.mlp.c_fc.bias BF16 4096 0-22
+model.visual.backbone.layers.{L}.mlp.c_fc.weight BF16 4096x1024 0-22
+model.visual.backbone.layers.{L}.mlp.c_proj.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.mlp.c_proj.weight BF16 1024x4096 0-22
+model.visual.backbone.layers.{L}.self_attn.k_proj.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.self_attn.k_proj.weight BF16 1024x1024 0-22
+model.visual.backbone.layers.{L}.self_attn.out_proj.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.self_attn.out_proj.weight BF16 1024x1024 0-22
+model.visual.backbone.layers.{L}.self_attn.q_proj.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.self_attn.q_proj.weight BF16 1024x1024 0-22
+model.visual.backbone.layers.{L}.self_attn.v_proj.bias BF16 1024 0-22
+model.visual.backbone.layers.{L}.self_attn.v_proj.weight BF16 1024x1024 0-22
+model.visual.backbone.ln_pre.bias BF16 1024
+model.visual.backbone.ln_pre.weight BF16 1024
+model.visual.proj_in.weight BF16 4096x4096
+model.visual.proj_out.weight BF16 2304x4096

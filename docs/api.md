@@ -647,6 +647,8 @@ whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
+`TENSORFOLD_PRIORITY_AGE_MS` above 0 lets a background request queued for at least that many milliseconds go before
+foreground work. Prefix, disk-read, lane and memory admission checks are unchanged.
 Session-title requests are also treated as background work.
 
 The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same
@@ -1453,7 +1455,9 @@ store for each model and build. That store takes the place of `--learn`'s store 
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
 cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
-one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
+one Mac, and Nemotron, the Qwen3.5 hybrids, Flash Next and GLM-5.3-Flash on CUDA keep them; other engines refuse the
+flag at startup. GLM-5.3-Flash on CUDA across ranks writes every rank's part to rank 0's disk, so a state is read back
+on every rank or on none; it takes neither `--spill-gib` nor `--checkpoint-slots`.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
 and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on

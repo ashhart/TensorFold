@@ -17,6 +17,77 @@ pub const refusal = flags.refusal;
 const logit_rows = 32;
 /// Hazard-tracked: a pass's staged rows and each stream's saved row move between blits and kernels.
 const opts = mtl.ResourceOptions.shared;
+const topk = tf.bf16_topk_gpu;
+
+/// TF_Q27_MTP_GPU_PICK: the pick's kernel, its rows, the rows a fused save reads, and the chance's terms.
+const Fast = struct {
+    ops: topk.Ops,
+    rows: mtl.Buffer,
+    saved: mtl.Buffer,
+    memo: q.mtp_pick.Memo,
+    held: u32 = 0, // logits rows of the last pass with a GPU pick (0: the CPU picks)
+
+    fn init(gpa: std.mem.Allocator, device: mtl.Device) !Fast {
+        const ops = try topk.Ops.init(device);
+        errdefer ops.deinit();
+        const rows = try device.buffer(q.mtp_pick.max_rows * @sizeOf(topk.contract.Row), opts);
+        errdefer rows.deinit();
+        const saved = try device.buffer(lb.max_streams * 4, opts);
+        errdefer saved.deinit();
+        return .{ .ops = ops, .rows = rows, .saved = saved, .memo = try q.mtp_pick.Memo.init(gpa) };
+    }
+
+    fn deinit(f: *Fast, gpa: std.mem.Allocator) void {
+        f.ops.deinit();
+        f.rows.deinit();
+        f.saved.deinit();
+        f.memo.deinit(gpa);
+    }
+
+    /// The top-1 of each logits row when one launch holds them; a wider pass keeps the CPU pick.
+    fn encode(f: *Fast, e: mtl.ComputeEncoder, logits: mtl.Buffer, rows: u32, vocab: u32) !void {
+        f.held = 0;
+        if (rows == 0 or rows > q.mtp_pick.max_rows) return;
+        try f.ops.encode(e, .{ .buf = logits }, .{ .buf = f.rows }, q.mtp_pick.params(rows, vocab));
+        f.held = rows;
+    }
+};
+
+/// Picks on the head's command buffer, for a chained step.
+const PickOnly = struct {
+    x: *Mtp,
+    rows: u32,
+    pub fn before(_: PickOnly, _: mtl.ComputeEncoder) !void {}
+    pub fn after(p: PickOnly, e: mtl.ComputeEncoder, _: Ref) !void {
+        try p.x.fast.?.encode(e, p.x.scratch.logits, p.rows, @intCast(p.x.back.runner.model.config.vocab));
+    }
+};
+
+/// One absorb on one command buffer: the kept rows, the head, its picks, each stream's newest row.
+const Fused = struct {
+    x: *Mtp,
+    items: []const dr.Absorb,
+    firsts: []const u32,
+    lasts: []const usize,
+    ctxs: []const *Ctx,
+    total: usize,
+    picks: u32,
+    pub fn before(a: Fused, e: mtl.ComputeEncoder) !void {
+        try a.x.gatherRows(e, a.items, a.firsts, a.total);
+        e.barrier();
+    }
+    pub fn after(a: Fused, e: mtl.ComputeEncoder, out: Ref) !void {
+        const x = a.x;
+        const m = x.back.runner.model;
+        const f = &x.fast.?;
+        try f.encode(e, x.scratch.logits, a.picks, @intCast(m.config.vocab));
+        const at = f.saved.slice(u32, a.lasts.len);
+        for (a.lasts, at, a.ctxs, 0..) |last, *v, c, i| {
+            v.* = @intCast(last);
+            try m.glue.tapRows(e, out, .{ .buffer = f.saved, .offset = i * 4 }, .{ .buffer = c.out }, .{ .rows = 1, .width = @intCast(m.config.hidden), .capacity = @intCast(a.total), .planes = 1 });
+        }
+    }
+};
 
 /// A stream's head: its rows, its newest row's normed output, and the chain it holds.
 const Ctx = struct {
@@ -37,6 +108,7 @@ pub const Mtp = struct {
     controls: lanes.mtp_policy.Controls,
     tap: [1]u32,
     step_ms: f64 = 0, // one chained step, timed at load
+    fast: ?Fast = null, // TF_Q27_MTP_GPU_PICK=1
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
 
     /// The head of the target's model, its taps the last layer's rows (the residual the final norm reads).
@@ -52,6 +124,9 @@ pub const Mtp = struct {
         errdefer index.deinit();
         const x = try gpa.create(Mtp);
         x.* = .{ .gpa = gpa, .back = back, .scratch = scratch, .stage = stage, .index = index, .controls = controls, .tap = .{@intCast(m.config.layers - 1)} };
+        errdefer gpa.destroy(x);
+        if (try @import("sys").environment.read(bool, "TF_Q27_MTP_GPU_PICK", false)) x.fast = try Fast.init(gpa, m.device);
+        errdefer if (x.fast) |*f| f.deinit(gpa);
         x.step_ms = try x.time();
         return x;
     }
@@ -63,6 +138,7 @@ pub const Mtp = struct {
         x.scratch.deinit();
         x.stage.deinit();
         x.index.deinit();
+        if (x.fast) |*f| f.deinit(x.gpa);
         x.gpa.destroy(x);
     }
 
@@ -84,7 +160,7 @@ pub const Mtp = struct {
             var round = try x.plan(&.{.{ .slot = 0, .start = 0, .capacity = r.capacity, .ids = &.{0} }});
             defer round.deinit();
             const t0 = mtl.clock.seconds();
-            _ = try r.headPass(&round, &x.scratch, .{ .buffer = x.stage }, .last);
+            _ = try x.chainPass(&round, .{ .buffer = x.stage }, .last, 1);
             _ = try x.pickRow(0);
             best = @min(best, (mtl.clock.seconds() - t0) * 1000);
         }
@@ -98,7 +174,30 @@ pub const Mtp = struct {
 
     fn pickRow(x: *Mtp, row: usize) !q.mtp.Pick {
         const vocab = x.back.runner.model.config.vocab;
-        return q.mtp.pick(x.scratch.logits.slice(u16, row * vocab + vocab)[row * vocab ..]);
+        const values = x.scratch.logits.slice(u16, row * vocab + vocab)[row * vocab ..];
+        if (x.fast) |*f| if (row < f.held) return q.mtp_pick.fromRow(&f.rows.slice(topk.contract.Row, f.held)[row], values, &f.memo);
+        return q.mtp.pick(values);
+    }
+
+    /// A chained head pass, its picks on the same command buffer when the GPU pick is on.
+    fn chainPass(x: *Mtp, round: *const Round, hidden: Ref, head: q.forward.Head, rows: u32) !Ref {
+        const r = x.back.runner;
+        if (x.fast == null) return r.headPass(round, &x.scratch, hidden, head);
+        return q.mtp.passAround(r, round, &x.scratch, hidden, head, PickOnly{ .x = x, .rows = rows });
+    }
+
+    /// Encodes each item's kept rows into the stage, at its first row in the pass.
+    fn gatherRows(x: *Mtp, e: mtl.ComputeEncoder, items: []const dr.Absorb, firsts: []const u32, total: usize) !void {
+        const m = x.back.runner.model;
+        const row = m.config.hidden * 2;
+        const index = x.index.slice(u32, total);
+        for (items, firsts) |it, first| {
+            const n = count(it);
+            for (index[first..][0..n], 0..) |*v, j| v.* = if (it.rows) |rs| rs[j] else @intCast(j);
+            const f = it.features;
+            const src = Ref{ .buffer = .{ .id = @ptrFromInt(f.buffer) }, .offset = f.offset };
+            try m.glue.tapRows(e, src, .{ .buffer = x.index, .offset = first * 4 }, .{ .buffer = x.stage, .offset = first * row }, .{ .rows = @intCast(n), .width = @intCast(m.config.hidden), .capacity = f.rows, .planes = 1 });
+        }
     }
 
     fn ctxOf(x: *Mtp, s: *Stream) !*Ctx {
@@ -198,29 +297,31 @@ pub const Mtp = struct {
         const lone_last = picks == 1 and wants[items.len - 1] and rd.firsts[items.len - 1] + count(items[items.len - 1]) == total;
         const head: q.forward.Head = if (picks == 0) .none else if (lone_last) .last else .all;
         if (head == .all and total > logit_rows) return error.BadMtpRows;
-        {
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            const cb = m.queue.commandBuffer();
-            const e = cb.compute(.serial);
-            errdefer e.end(); // an encoder left open aborts the process when it is released
-            const index = x.index.slice(u32, total);
-            for (items, rd.firsts) |it, first| {
-                const n = count(it);
-                for (index[first..][0..n], 0..) |*v, j| v.* = if (it.rows) |rs| rs[j] else @intCast(j);
-                const f = it.features;
-                const src = Ref{ .buffer = .{ .id = @ptrFromInt(f.buffer) }, .offset = f.offset };
-                try m.glue.tapRows(e, src, .{ .buffer = x.index, .offset = first * 4 }, .{ .buffer = x.stage, .offset = first * row }, .{ .rows = @intCast(n), .width = @intCast(m.config.hidden), .capacity = f.rows, .planes = 1 });
-            }
-            e.end();
-            cb.commit();
-            cb.wait();
-            if (q.decode_round.gpuFailed(cb, "the MTP head's rows")) return error.RoundGpuFailure;
-        }
-        const out = try r.headPass(&rd, &x.scratch, .{ .buffer = x.stage }, head);
         var lasts: [lb.max_streams]usize = undefined;
         for (items, rd.firsts, lasts[0..items.len]) |it, first, *last| last.* = first + count(it) - 1;
-        try x.save(out, lasts[0..items.len], ctxs[0..items.len]);
+        if (x.fast != null) {
+            const logits: u32 = switch (head) {
+                .none => 0,
+                .last => 1,
+                .all => @intCast(total),
+            };
+            _ = try q.mtp.passAround(r, &rd, &x.scratch, .{ .buffer = x.stage }, head, Fused{ .x = x, .items = items, .firsts = rd.firsts, .lasts = lasts[0..items.len], .ctxs = ctxs[0..items.len], .total = total, .picks = logits });
+        } else {
+            {
+                const pool = mtl.objc.Pool.push();
+                defer pool.pop();
+                const cb = m.queue.commandBuffer();
+                const e = cb.compute(.serial);
+                errdefer e.end(); // an encoder left open aborts the process when it is released
+                try x.gatherRows(e, items, rd.firsts, total);
+                e.end();
+                cb.commit();
+                cb.wait();
+                if (q.decode_round.gpuFailed(cb, "the MTP head's rows")) return error.RoundGpuFailure;
+            }
+            const out = try r.headPass(&rd, &x.scratch, .{ .buffer = x.stage }, head);
+            try x.save(out, lasts[0..items.len], ctxs[0..items.len]);
+        }
         for (items, ctxs[0..items.len], wants[0..items.len], lasts[0..items.len]) |it, c, want, last| {
             // from the target's start: a state the head did not follow (a resumed prompt) has the target's rows below
             c.len = it.start + count(it);
@@ -283,7 +384,7 @@ pub const Mtp = struct {
             var rd = try x.plan(inputs[0..n]);
             defer rd.deinit();
             const hidden = if (n == 1) src[who[0]] else try x.stageRows(src[0..items.len], who[0..n], rd.firsts);
-            const out = try r.headPass(&rd, &x.scratch, hidden, if (n == 1) .last else .all);
+            const out = try x.chainPass(&rd, hidden, if (n == 1) .last else .all, @intCast(if (n == 1) 1 else rd.ids.len));
             for (who[0..n], rd.firsts) |i, first| {
                 const c = ctxs[i];
                 const pick = try x.pickRow(if (n == 1) 0 else first);
