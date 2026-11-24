@@ -226,7 +226,7 @@ pub fn refusal(a: Allocator, status: u16, body: []const u8) ![]const u8 {
 /// Redact decoded JSON text or a plain body independently, before terminal truncation.
 pub fn refusalRedacted(a: Allocator, status: u16, body: []const u8, secrets: []const []const u8) ![]const u8 {
     const decoded = try errorText(a, body);
-    const text = (try cleanContained(a, decoded, secrets, line_limit)) orelse "";
+    const text = (try cleanContained(a, decoded, secrets, line_limit)) orelse credential.withheld;
     const candidate = if (text.len == 0)
         try std.fmt.allocPrint(a, "HTTP {d}", .{status})
     else
@@ -311,22 +311,22 @@ fn limited(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
 /// Sanitize, replace, check before limiting, then limit and check the exact final candidate.
 pub fn cleanContained(a: Allocator, text: []const u8, secrets: []const []const u8, limit: usize) !?[]const u8 {
     const replaced = try redact(a, try sanitizeLine(a, text), secrets);
-    if (try containsSensitive(a, replaced, secrets)) return null;
+    if (try credential.contains(a, replaced, secrets)) return null;
     const candidate = try limited(a, replaced, limit);
-    if (try containsSensitive(a, candidate, secrets)) return null;
+    if (try credential.contains(a, candidate, secrets)) return null;
     return candidate;
 }
 
 /// Sanitize and redact without truncating; null means consume and suppress the candidate.
 pub fn redactContained(a: Allocator, text: []const u8, secrets: []const []const u8) !?[]const u8 {
     const candidate = try redact(a, try sanitizeLine(a, text), secrets);
-    if (try containsSensitive(a, candidate, secrets)) return null;
+    if (try credential.contains(a, candidate, secrets)) return null;
     return candidate;
 }
 
-/// A generated candidate only when containment proves it safe; otherwise the empty terminal value.
+/// A generated candidate only when containment proves it safe; otherwise fixed non-derived withholding text.
 pub fn suppress(a: Allocator, candidate: []const u8, secrets: []const []const u8) ![]const u8 {
-    return if (try containsSensitive(a, candidate, secrets)) "" else candidate;
+    return if (try credential.contains(a, candidate, secrets)) credential.withheld else candidate;
 }
 
 /// Terminal/error text with credentials replaced, longest original span first at any encoding depth.
@@ -374,7 +374,7 @@ pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) 
             i += found.consumed;
             continue;
         }
-        const prefix = try sensitivePrefix(a, rest, secrets);
+        const prefix = try credential.sensitivePrefix(a, rest, secrets);
         if (prefix > 0) {
             if (!changed) {
                 try out.appendSlice(a, text[0..i]);
@@ -389,41 +389,7 @@ pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) 
     return .{ .text = if (changed) out.items else text, .rest = "" };
 }
 
-/// A possible first matcher byte; percent can begin any literal or nested encoding.
-fn prefixStart(text: []const u8, secrets: []const []const u8) bool {
-    if (text.len == 0) return false;
-    if (text[0] == '%') return secrets.len > 0;
-    for (secrets) |secret| if (secret.len > 0 and secret[0] == text[0]) return true;
-    return false;
-}
-
-/// The longest matched fragment exceeding two thirds of a credential before it is ruled out.
-fn sensitivePrefix(a: Allocator, text: []const u8, secrets: []const []const u8) !usize {
-    if (!prefixStart(text, secrets)) return 0;
-    var sensitive: usize = 0;
-    for (1..text.len + 1) |end| {
-        var matcher = credential.Matcher.init(a, text[0..end]);
-        defer matcher.deinit();
-        if (!(try matcher.secretAt(0, secrets)).hold) break;
-        sensitive = end;
-    }
-    for (secrets) |secret| if (secret.len > 1 and sensitive > (secret.len * 2) / 3) return sensitive;
-    return 0;
-}
-
-/// Whether any complete credential or a disambiguated or unfinished credential prefix occurs.
-fn containsSensitive(a: Allocator, text: []const u8, secrets: []const []const u8) !bool {
-    var matcher = credential.Matcher.init(a, text);
-    defer matcher.deinit();
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        const found = try matcher.secretAt(i, secrets);
-        if (found.consumed > 0) return true;
-        if (try sensitivePrefix(a, text[i..], secrets) > 0) return true;
-    }
-    return false;
-}
-
+/// The transformed stream's emit/rest result; unresolved bytes are never released.
 pub const ContainedPiece = struct { emit: ?[]const u8, rest: []const u8 };
 
 /// Transformed streamed output: suppress complete keys and truncated prefixes, or hold a possible suffix.
@@ -437,7 +403,7 @@ pub fn containedPiece(a: Allocator, text: []const u8, secrets: []const []const u
         const found = try matcher.secretAt(i, secrets);
         if (found.consumed > 0) return .{ .emit = null, .rest = "" };
         if (found.hold) return .{ .emit = if (changed) out.items else text[0..i], .rest = text[i..] };
-        const prefix = try sensitivePrefix(a, text[i..], secrets);
+        const prefix = try credential.sensitivePrefix(a, text[i..], secrets);
         if (prefix > 0) {
             if (!changed) {
                 try out.appendSlice(a, text[0..i]);
@@ -504,11 +470,55 @@ test "chat CLI: KR69 whole raw, nested and mid-escape credential prefixes are su
     const a = arena.allocator();
     const secrets = [_][]const u8{"abcde"};
     for ([_][]const u8{ "abcd", "pre abcdX post", "abc%64", "abc%2564X", "abc%6X" }) |text| {
-        try std.testing.expectEqualStrings("", try suppress(a, text, &secrets));
+        try std.testing.expectEqualStrings(credential.withheld, try suppress(a, text, &secrets));
         try std.testing.expect((try redactContained(a, text, &secrets)) == null);
         try std.testing.expect((try cleanContained(a, text, &secrets, 2000)) == null);
     }
     try std.testing.expectEqualStrings("safe continuation", try suppress(a, "safe continuation", &secrets));
+}
+
+test "chat CLI: KR71 raw and decoded prefixes fail closed at every terminal boundary" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secrets = [_][]const u8{"abcdefghi"};
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "abcdefX", .expected = "X" },
+        .{ .input = "%61%62%63%64%65%66X", .expected = "X" },
+        .{ .input = "%2561%2562%2563%2564%2565%2566X", .expected = "X" },
+        .{ .input = "abcde%6X", .expected = "X" },
+        .{ .input = "pre abcdefX post", .expected = "pre X post" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(credential.withheld, try suppress(a, case.input, &secrets));
+        try std.testing.expect((try redactContained(a, case.input, &secrets)) == null);
+        try std.testing.expect((try cleanContained(a, case.input, &secrets, 2000)) == null);
+        const streamed = try redactPiece(a, case.input, &secrets);
+        try std.testing.expectEqualStrings(case.expected, streamed.text);
+        try std.testing.expectEqualStrings("", streamed.rest);
+        const checked = try containedPiece(a, case.input, &secrets);
+        try std.testing.expectEqualStrings(case.expected, checked.emit.?);
+        try std.testing.expectEqualStrings("", checked.rest);
+    }
+    try std.testing.expectEqualStrings("abcX", try suppress(a, "abcX", &secrets));
+    try std.testing.expectEqualStrings("abcX", (try redactContained(a, "abcX", &secrets)).?);
+    try std.testing.expectEqualStrings("abcX", (try containedPiece(a, "abcX", &secrets)).emit.?);
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "abc", &.{"abc"}));
+    const mixed = [_][]const u8{ "%25abcde", "%aXcdef" };
+    const mixed_input = "%25%61XY";
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, mixed_input, &mixed));
+    const mixed_raw = try redactPiece(a, mixed_input, &mixed);
+    try std.testing.expectEqualStrings("XY", mixed_raw.text);
+    try std.testing.expectEqualStrings("", mixed_raw.rest);
+    const mixed_transformed = try containedPiece(a, mixed_input, &mixed);
+    try std.testing.expectEqualStrings("XY", mixed_transformed.emit.?);
+    try std.testing.expectEqualStrings("", mixed_transformed.rest);
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "example-model", &.{"example-key-1"}));
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "%2561%2562%2563", &.{"abc"}));
+    try std.testing.expectEqualStrings("%61%62%63X", try suppress(a, "%61%62%63X", &secrets));
+    const below_encoded = try containedPiece(a, "%61%62%63X", &secrets);
+    try std.testing.expectEqualStrings("%61%62%63X", below_encoded.emit.?);
+    try std.testing.expectEqualStrings("", below_encoded.rest);
 }
 
 test "chat CLI: KR69 short coincidental credential openers leave safe text byte-identical" {
@@ -519,5 +529,4 @@ test "chat CLI: KR69 short coincidental credential openers leave safe text byte-
     const streamed = try redactPiece(a, "Hello there!", &secrets);
     try std.testing.expectEqualStrings("Hello there!", streamed.text);
     try std.testing.expectEqualStrings("", streamed.rest);
-    try std.testing.expectEqualStrings("example-model", try suppress(a, "example-model", &secrets));
 }

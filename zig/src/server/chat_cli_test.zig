@@ -189,7 +189,7 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     try std.testing.expectEqual(@as(usize, 5), f.refusals());
     try std.testing.expectEqual(@as(usize, 0), f.count());
     try r.env.put("TENSORFOLD_API_KEY", " ,example-key-1, example-key-2");
-    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", url }));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", url, "other-model" }));
     try std.testing.expectEqualStrings("Hello there!\n", r.out.written());
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
     for (0..f.count()) |i| try std.testing.expectEqualStrings("Bearer example-key-1", f.header(i, "authorization").?);
@@ -489,7 +489,7 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
-    try r.env.put("TENSORFOLD_API_KEY", "example-user-key");
+    try r.env.put("TENSORFOLD_API_KEY", "caller-user-key");
     var gate: std.Io.Event = .unset;
     const held = try a.dupe(fake.Write, try streamed(a));
     held[0].after = &gate;
@@ -526,7 +526,7 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     try std.testing.expectEqualStrings(want, args);
     // the child's key came in its environment alone, fresh, never the user's, and the chat printed it nowhere
     const key = try std.Io.Dir.cwd().readFileAlloc(io, try r.path("key"), a, .limited(256));
-    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "example-user-key"));
+    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "caller-user-key"));
     for ([_][]const u8{ r.out.written(), r.err.written(), args }) |text| try std.testing.expect(std.mem.indexOf(u8, text, key) == null);
     const bearer = try std.mem.concat(a, u8, &.{ "Bearer ", key });
     try std.testing.expect(f.refusals() == 0 and f.count() >= 4);

@@ -176,3 +176,35 @@ test "start CLI: KR69 managed logs contain raw and nested already-truncated cred
     const log = try std.mem.concat(a, u8, &.{ key[0..255], "\n%66ixture-secre" });
     try managedRun(a, &tmp, keys, key, log, &.{ key[0..255], "fixture-secre", "%66ixture-secre" });
 }
+
+test "start CLI: KR71 managed logs contain raw and decoded exact two-thirds prefixes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const hostile = "abcdef\n%61%62%63%64%65%66\n%2561%2562%2563%2564%2565%2566";
+    try managedRun(a, &tmp, "abcdefghi", "abcdefghi", hostile, &.{ "abcdef", "%61%62%63%64%65%66", "%2561%2562%2563%2564%2565%2566" });
+}
+
+test "start CLI: KR71 a short readiness credential prevents every first-reply POST" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    try r.env.put("TENSORFOLD_API_KEY", "short");
+    try r.env.put("START_TEST_LOG_ENCODED", "");
+    try r.cache();
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try r.path("credential"), .data = "short" });
+    const f = try world(&r);
+    defer f.stop();
+    try r.standIn(f.port);
+    try std.testing.expectEqual(@as(u8, 1), try r.command());
+    try std.testing.expect(r.childGone());
+    var posts: usize = 0;
+    for (0..f.count()) |i| posts += @intFromBool(std.mem.eql(u8, f.request(i).method, "POST"));
+    try std.testing.expectEqual(@as(usize, 0), posts);
+    for ([_][]const u8{ r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, "short") == null);
+}

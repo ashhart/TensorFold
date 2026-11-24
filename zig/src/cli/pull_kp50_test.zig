@@ -218,6 +218,8 @@ fn noteAttack(head: []const u8) void {
 }
 
 fn reflectedRedirectFixture(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) ?bool {
+    if (std.mem.eql(u8, target(head), "/head") and std.mem.eql(u8, method(head), "HEAD"))
+        return redirect(fake, conn, std.fmt.allocPrint(fake.allocator, "/collect?credential={s}", .{attack_payload}) catch return false);
     if (std.mem.eql(u8, target(head), "/reflect")) {
         return redirect(fake, conn, std.fmt.allocPrint(fake.allocator, "/collect?credential={s}", .{attack_payload}) catch return false);
     }
@@ -543,4 +545,56 @@ test "security KR69-4: a registered family and raw or nested model types contain
     for ([_][]const u8{ once, twice }) |model_type| {
         try markerModelType(a, io, &fake, root, secret, model_type);
     }
+}
+
+test "security KR71: exact two-thirds prefixes fail closed at every hub boundary" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = reflectedRedirectFixture;
+    fake.start();
+    defer fake.stopServer();
+    var client = @import("pull_http.zig").client(a, io);
+    defer client.deinit();
+    const raw = "abcdef";
+    const once = try encoded(a, raw);
+    const twice = try encoded(a, once);
+    const attacks = [_]Attack{
+        .{ .secret = "abcdefghi", .payload = raw, .variants = .{ raw, once, twice, raw } },
+        .{ .secret = "abcdefghi", .payload = once, .variants = .{ raw, once, twice, raw } },
+        .{ .secret = "abcdefghi", .payload = twice, .variants = .{ raw, once, twice, raw } },
+        .{ .secret = "prefix-[redacted]-suffix", .payload = "prefix-prefix-[redacted]-suffix", .variants = .{ "prefix-prefix-[redacted]-suffix", "prefix-[redacted]", "prefix-[redacted]-suffix", "prefix-[redacted]" } },
+    };
+    for (attacks, 0..) |attack, index| {
+        const hub: Auth = .{ .endpoint = try fake.endpoint(a), .bearer = try std.fmt.allocPrint(a, "Bearer {s}", .{attack.secret}), .source = "HF_TOKEN" };
+        try redirectAttack(a, &client, hub, attack);
+        resetAttack(attack.payload);
+        const result = runs.resolve(a, &client, hub, try std.fmt.allocPrint(a, "{s}/head", .{hub.endpoint}));
+        try std.testing.expectError(error.HubCredentialRedirect, result);
+        try std.testing.expectEqual(@as(u32, 0), attack_requests.load(.monotonic));
+        try expectAttackAbsent(attack, request_log[0..request_log_len], "");
+        const root = try std.fmt.allocPrint(a, ".tf-pull-kr71-{d}", .{index});
+        defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+        fake.route = reflectedTreeFixture;
+        try treeAttack(a, io, &fake, root, attack);
+        fake.route = reflectedRedirectFixture;
+        resetAttack(attack.payload);
+        const env = try envWithToken(a, &fake, attack.secret);
+        fake.config = try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\"}}", .{attack.payload});
+        var out: std.Io.Writer.Allocating = .init(a);
+        var err_out: std.Io.Writer.Allocating = .init(a);
+        try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+        try expectAttackAbsent(attack, out.written(), err_out.written());
+        try std.testing.expect(std.mem.indexOf(u8, err_out.written(), credential.withheld) != null);
+    }
+    fake.config = FakeHub.config_body;
+    const env = try envWithToken(a, &fake, "qwen4_expX");
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, ".tf-pull-kr71-registered", "Org/Flash"));
+    defer std.Io.Dir.cwd().deleteTree(io, ".tf-pull-kr71-registered") catch {};
+    for ([_][]const u8{ out.written(), err_out.written() }) |text| try expectAbsent(text, "qwen4_exp");
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Qwen3.8 Flash Next ([withheld])") != null);
 }

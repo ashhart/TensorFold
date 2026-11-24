@@ -2,8 +2,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const Match = struct { secret_len: usize = 0, consumed: usize = 0, hold: bool = false };
+pub const Match = struct { secret_len: usize = 0, prefix_len: usize = 0, consumed: usize = 0, hold: bool = false };
 pub const Span = struct { start: usize, end: usize };
+/// A complete key of any length, or this many decoded prefix bytes, fails containment.
+pub const min_prefix = 4;
+/// Fixed non-derived outward text for a withheld candidate; not the redaction marker, which may itself be configured.
+pub const withheld = "[withheld]";
 
 /// A reusable matcher; memo entries retain every endpoint so nested escapes and literal bytes stay alternatives.
 pub const Matcher = struct {
@@ -62,7 +66,7 @@ pub const Matcher = struct {
         m.next.deinit(m.a);
     }
 
-    /// The longest full key match at an original start; an unfinished later encoding holds the suffix.
+    /// The longest full key or decoded-prefix match; an unfinished later encoding holds the suffix.
     pub fn secretAt(m: *Matcher, start: usize, secrets: anytype) Allocator.Error!Match {
         var found: Match = .{};
         var hold = false;
@@ -70,8 +74,9 @@ pub const Matcher = struct {
             if (secret.len == 0) continue;
             const matched = try m.matchSecret(start, secret);
             hold = hold or matched.hold;
-            // Longest original span, then longest key, regardless of which key completes first.
-            if (matched.consumed > found.consumed or (matched.consumed == found.consumed and matched.secret_len > found.secret_len)) found = matched;
+            // Longest original span, then decoded prefix and key, regardless of which key completes first.
+            if (matched.consumed > found.consumed or (matched.consumed == found.consumed and
+                (matched.prefix_len > found.prefix_len or (matched.prefix_len == found.prefix_len and matched.secret_len > found.secret_len)))) found = matched;
         }
         found.hold = found.hold or hold;
         return found;
@@ -96,7 +101,7 @@ pub const Matcher = struct {
         var states = &m.states;
         var next = &m.next;
         var hold = false;
-        for (secret) |wanted| {
+        for (secret, 0..) |wanted, matched_len| {
             next.clearRetainingCapacity();
             for (states.items) |at| {
                 if (at == m.text.len) {
@@ -111,14 +116,22 @@ pub const Matcher = struct {
                 hold = hold or decoded.partial;
                 for (0..decoded.len()) |index| try appendUnique(m.a, next, decoded.at(index));
             }
-            if (next.items.len == 0) return .{ .secret_len = secret.len, .hold = hold };
+            if (next.items.len == 0) {
+                // An original '%' is a partial representation of the current decoded byte, even when its escape is cut.
+                var partial_byte = false;
+                for (states.items) |at| if (at < m.text.len and m.text[at] == '%') {
+                    partial_byte = true;
+                    break;
+                };
+                return .{ .secret_len = secret.len, .prefix_len = matched_len + @intFromBool(partial_byte), .hold = hold };
+            }
             const swap = states;
             states = next;
             next = swap;
         }
         var consumed: usize = 0;
         for (states.items) |end| consumed = @max(consumed, end - start);
-        return .{ .secret_len = secret.len, .consumed = consumed, .hold = hold };
+        return .{ .secret_len = secret.len, .prefix_len = secret.len, .consumed = consumed, .hold = hold };
     }
 
     /// One byte's literal or `%XX` representations; nested dependencies use heap frames, not call recursion.
@@ -239,13 +252,40 @@ fn appendUnique(a: Allocator, ends: *std.ArrayList(usize), end: usize) Allocator
     try ends.append(a, end);
 }
 
-/// Whether any configured secret occurs literally or at any percent-encoding depth.
+/// A possible first matcher byte; percent can begin any literal or nested encoding.
+fn prefixStart(text: []const u8, secrets: []const []const u8) bool {
+    if (text.len == 0) return false;
+    if (text[0] == '%') return secrets.len > 0;
+    for (secrets) |secret| if (secret.len > 0 and secret[0] == text[0]) return true;
+    return false;
+}
+
+/// Original bytes forming a decoded credential prefix of at least ``min_prefix`` bytes before a disambiguating suffix.
+pub fn sensitivePrefix(a: Allocator, text: []const u8, secrets: []const []const u8) Allocator.Error!usize {
+    if (!prefixStart(text, secrets)) return 0;
+    var sensitive: usize = 0;
+    // Hold and prefix length belong to one secret; combining them across secrets can consume a safe suffix.
+    for (secrets) |secret| {
+        if (secret.len == 0) continue;
+        for (1..text.len + 1) |end| {
+            var matcher = Matcher.init(a, text[0..end]);
+            defer matcher.deinit();
+            const found = try matcher.matchSecret(0, secret);
+            if (found.prefix_len >= min_prefix) sensitive = @max(sensitive, if (found.hold) end else end - 1);
+            if (!found.hold) break;
+        }
+    }
+    return sensitive;
+}
+
+/// Whether any complete credential or decoded prefix of at least ``min_prefix`` bytes occurs at any encoding depth.
 pub fn contains(a: Allocator, text: []const u8, secrets: []const []const u8) Allocator.Error!bool {
     var matcher = Matcher.init(a, text);
     defer matcher.deinit();
-    for (secrets) |secret| {
-        if (secret.len == 0) continue;
-        if ((try matcher.spanFrom(0, secret)) != null) return true;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if ((try matcher.secretAt(i, secrets)).consumed > 0) return true;
+        if (try sensitivePrefix(a, text[i..], secrets) > 0) return true;
     }
     return false;
 }

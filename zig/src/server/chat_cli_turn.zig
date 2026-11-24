@@ -87,6 +87,8 @@ pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []c
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
 pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
+    if ((try credential.contains(a, url, credentials.forms)) or (try credential.contains(a, request, credentials.forms)))
+        return .{ .failed = .{ .reason = credential.withheld } };
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
@@ -191,7 +193,7 @@ const Exchange = struct {
             .lost => "the connection to the server broke during the reply",
             .http => try sse.refusalRedacted(x.a, x.status, x.refused, x.credentials.forms),
             .not_events => blk: {
-                const text = (try x.credentials.clean(x.a, x.content_type, sse.line_limit)) orelse "";
+                const text = (try x.credentials.clean(x.a, x.content_type, sse.line_limit)) orelse credential.withheld;
                 break :blk if (text.len == 0)
                     "the server did not answer with an event stream"
                 else

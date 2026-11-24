@@ -337,3 +337,66 @@ test "chat CLI: KR69 a stopped Unicode reply cannot synthesize a key in the foll
     try std.testing.expectEqual(@as(usize, 1), postCount(f));
     for (0..f.count()) |i| try absent(f.request(i).body, &.{"\\u00e9"});
 }
+
+test "chat CLI: KR71 same-delta and cross-delta prefixes stay out of output, history and every following POST" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const hostile = [_][]const u8{ "abcdef", "%61%62%63%64%65%66", "%2561%2562%2563%2564%2565%2566" };
+    for ([_]bool{ false, true }) |same_delta| for (hostile) |attack| {
+        var r = try fixtures.Run.init(a, &tmp);
+        const first_delta = if (same_delta)
+            try delta(a, try std.fmt.allocPrint(a, "{s}X", .{attack}))
+        else
+            try delta(a, attack);
+        const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{
+            try stream(a, try a.dupe([]const u8, &.{
+                first_delta,
+                try delta(a, "X"),
+                try fake.event(a, "{\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}"),
+                try fake.event(a, "[DONE]"),
+            })),
+            try successful(a, "done"),
+        }));
+        defer f.stop();
+        try r.env.put("TENSORFOLD_API_KEY", "abcdefghi");
+        r.interactive = true;
+        r.input = "one\ntwo\n/bye\n";
+        try std.testing.expectEqual(@as(u8, 0), try terminalCommand(&r, &.{ "--url", try f.url(a, "") }));
+        try absent(r.out.written(), &hostile);
+        try absent(r.err.written(), &hostile);
+        try std.testing.expectEqual(@as(usize, 2), postCount(f));
+        for (0..f.count()) |i| try absent(f.request(i).body, &hostile);
+    };
+}
+
+test "chat CLI: KR71 one hostile table covers discovery and HTTP or SSE errors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const hostile = [_][]const u8{ "abcdef", "%61%62%63%64%65%66", "%2561%2562%2563%2564%2565%2566" };
+    for (hostile) |attack| {
+        var r = try fixtures.Run.init(a, &tmp);
+        try r.env.put("TENSORFOLD_API_KEY", "abcdefghi");
+        r.input = "hi";
+        const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{attack});
+        const discovered = try fixtures.world(a, models, try a.dupe([]const fake.Write, &.{try successful(a, "unused")}));
+        defer discovered.stop();
+        try std.testing.expectEqual(@as(u8, 1), try terminalCommand(&r, &.{ "--url", try discovered.url(a, "") }));
+        try absent(r.out.written(), &hostile);
+        try absent(r.err.written(), &hostile);
+        try std.testing.expectEqual(@as(usize, 0), postCount(discovered));
+        const f = try fixtures.world(a, fixtures.models_doc, try a.dupe([]const fake.Write, &.{ try httpError(a, attack), try sseError(a, attack) }));
+        defer f.stop();
+        for (0..2) |_| {
+            try std.testing.expectEqual(@as(u8, 1), try terminalCommand(&r, &.{ "--url", try f.url(a, ""), "safe-model" }));
+            try absent(r.out.written(), &hostile);
+            try absent(r.err.written(), &hostile);
+        }
+        for (0..f.count()) |i| try absent(f.request(i).body, &hostile);
+    }
+}
