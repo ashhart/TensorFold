@@ -35,15 +35,18 @@ pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own
 /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
 pub const Width = struct { nodes: u32, trial: ?u32 = null };
 
-/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds, or a width to measure.
+/// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a cold band's: all), or a trial.
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
     if (!s.prices_seeded) {
         s.prices_seeded = true;
         _ = try e.rule.rates(lanes.windows.who(s));
-        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
+        const kept = lone_costs.slot(&e.lone_kept, s).*;
+        s.lone_cold = kept == null; // no trial or narrow tree in a band's first request: it files the cap's own times
+        try lone_costs.seed(e.gpa, kept, s);
     }
+    if (s.lone_cold) return .{ .nodes = @intCast(chance.len) };
     // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
     var buf: [2048]u8 align(16) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&buf);

@@ -78,6 +78,12 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     const shallow: World = .{ .base = 30, .per = 1 };
     const deep: World = .{ .base = 70, .per = 21.5 };
     const long = 131072;
+    // a band's first stream draws the cap's tree throughout and files only that width; the next one adapts from it
+    for ([_]usize{ 100, long }) |context| {
+        const cold = try lone(&e, context, if (context == long) deep else shallow, 120, 15);
+        try std.testing.expectEqual(@as(u32, 15), cold.first);
+        try std.testing.expectEqual(@as(u32, 15), cold.last);
+    }
     const wide = try lone(&e, 100, shallow, 120, 15);
     const narrow = try lone(&e, long, deep, 120, 15);
     try std.testing.expectEqual(best(shallow, 15), wide.last);
