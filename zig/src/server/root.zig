@@ -294,6 +294,7 @@ test {
         _ = @import("benchmark_stream_test.zig");
         _ = @import("chat_cli_key_test.zig");
         _ = @import("benchmark_server_test.zig");
+        _ = @import("benchmark_log.zig");
         _ = @import("benchmark_facts_test.zig");
         _ = @import("benchmark_rocm_test.zig");
         _ = @import("benchmark_manifest.zig");

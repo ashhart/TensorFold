@@ -7,6 +7,7 @@ const cli = @import("cli.zig");
 const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");
 const stop_flag = @import("benchmark_stop.zig");
+const Sink = @import("benchmark_log.zig").Sink;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -145,6 +146,8 @@ pub const Managed = struct {
     stuck: []const u8 = (Words{}).stuck,
     key: ?[]const u8 = null,
     secrets: []const []const u8 = &.{},
+    /// The child's output, redacted before it is written to ``log``.
+    sink: ?*Sink = null,
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
@@ -169,7 +172,17 @@ pub const Managed = struct {
             return null;
         };
         const group: ?posix.pid_t = if (o.own_group) 0 else null;
-        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = .{ .file = log }, .stderr = .{ .file = log }, .pgid = group }) catch {
+        // the child writes into a pipe: keys are replaced before any byte reaches the log file
+        const sink: ?*Sink = Sink.open(std.heap.page_allocator, io, log, try sinkSecrets(a, o)) catch {
+            cwd.deleteFile(io, log_path) catch {};
+            log.close(io);
+            if (lock) |l| l.close(io);
+            problem.* = o.words.spawn;
+            return null;
+        };
+        const out: std.process.SpawnOptions.StdIo = .{ .file = sink.?.child };
+        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = out, .stderr = out, .pgid = group }) catch {
+            if (sink) |k| k.close(std.heap.page_allocator);
             cwd.deleteFile(io, log_path) catch {};
             log.close(io);
             if (lock) |l| l.close(io);
@@ -178,7 +191,12 @@ pub const Managed = struct {
         };
         stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
-        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key, .secrets = o.secrets };
+        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key, .secrets = o.secrets, .sink = sink };
+        if (sink) |k| k.started() catch {
+            _ = m.stop();
+            problem.* = o.words.spawn;
+            return null;
+        };
         const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
             _ = m.stop();
             return e;
@@ -202,6 +220,7 @@ pub const Managed = struct {
             }
             if (m.exited()) {
                 problem.* = words.exited;
+                if (m.sink) |k| k.settle(1000);
                 if (tail) |t| t.* = try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
                 return false;
             }
@@ -237,6 +256,7 @@ pub const Managed = struct {
     /// The child's last log lines once it has exited on its own, else null.
     pub fn exitedTail(m: *Managed, a: Allocator) !?[]const []const u8 {
         if (m.closed or !m.exited()) return null;
+        if (m.sink) |k| k.settle(1000);
         var buf: [64 << 10]u8 = undefined;
         return try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
     }
@@ -246,6 +266,8 @@ pub const Managed = struct {
         if (m.closed) return null;
         m.closed = true;
         defer {
+            if (m.sink) |k| k.close(std.heap.page_allocator);
+            m.sink = null;
             m.log.close(m.io);
             if (m.lock) |l| l.close(m.io);
         }
@@ -296,6 +318,13 @@ pub fn ended(pid: posix.pid_t) bool {
     if (rc < 0) return posix.errno(rc) == .CHILD;
     const got = if (builtin.os.tag == .linux) info.fields.common.first.piduid.pid else info.pid;
     return got == pid;
+}
+
+/// The forms the log sink replaces: every configured credential, and the probes' key when it is not among them.
+fn sinkSecrets(a: Allocator, o: Options) ![]const []const u8 {
+    const key = o.key orelse return o.secrets;
+    for (o.secrets) |secret| if (std.mem.eql(u8, secret, key)) return o.secrets;
+    return std.mem.concat(a, []const u8, &.{ o.secrets, &.{key} });
 }
 
 /// Up to three last ``tensorfold:`` or ``error:`` lines in order (an earlier variable hint first), else the last line.
