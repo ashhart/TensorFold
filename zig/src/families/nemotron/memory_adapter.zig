@@ -63,7 +63,6 @@ pub const Adapter = struct {
             .conv_elems = (c.conv_kernel - 1) * c.convDim(), // 3 * 6144
             .svd_rank = 0, // KV-only on doc chunks (zero Mamba SVD!)
             .svd_rank_short = 4, // rank-4 Mamba SVD on tiny facts & standing policies so 15-token rules steer all 23 Mamba layers!
-            .kv_bits = 8, // Q8 KV across only 6+1 attention layers (+3.7 MiB vs Q4) -> zero decimal quantization drift!
             .keep_conv = false,
         };
     }

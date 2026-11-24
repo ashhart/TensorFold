@@ -4,9 +4,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const format_tag = "tf-living-memory-v6";
-pub const format_tag_v4 = "tf-living-memory-v4";
-pub const format_tag_v3 = "tf-living-memory-v3";
+/// v7: every value as computed (BF16 KV, F32 prototypes, factors and floats); older banks stored Q4/Q8.
+pub const format_tag = "tf-living-memory-v7";
+const inexact_tags = [_][]const u8{ "tf-living-memory-v6", "tf-living-memory-v4", "tf-living-memory-v3" };
+
+/// Whether `tag` names a format that stored quantized values: such a bank is refused, never read approximately.
+pub fn inexactFormat(tag: []const u8) bool {
+    for (inexact_tags) |t| if (std.mem.eql(u8, tag, t)) return true;
+    return false;
+}
 pub const file_name = "living-weights.safetensors";
 pub const delta_file_name = "living-weights.delta";
 const journal = @import("journal.zig");
@@ -310,9 +316,9 @@ pub fn probeFoldedMemoryFile(gpa: Allocator, io: Io, path: []const u8) !bool {
     const hdr = try gpa.alloc(u8, @intCast(hlen));
     defer gpa.free(hdr);
     if (try f.readPositionalAll(io, hdr, 8) != hdr.len) return false;
-    return std.mem.indexOf(u8, hdr, format_tag) != null or
-        std.mem.indexOf(u8, hdr, format_tag_v4) != null or
-        std.mem.indexOf(u8, hdr, format_tag_v3) != null;
+    if (std.mem.indexOf(u8, hdr, format_tag) != null) return true;
+    for (inexact_tags) |t| if (std.mem.indexOf(u8, hdr, t) != null) return true; // found, so its load refuses it
+    return false;
 }
 
 /// Reads and validates a `living-weights.safetensors` file.
