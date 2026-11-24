@@ -136,19 +136,24 @@ pub const Rule = struct {
         try table.put(r.gpa, drafts, if (before) |b| b + r.k.cost_rate * (ms - b) else ms);
     }
 
+    fn draftHeadMs(r: *const Rule, drafts: i64) f64 {
+        const steps: f64 = if (r.k.fixed_draft_block) @floatFromInt(if (drafts > 0) r.most_drafts else 0) else @floatFromInt(drafts);
+        return r.mtp_step_ms * steps;
+    }
+
     /// Measured round time when there is one, else the load-time forward cost plus head steps.
     pub fn roundCost(r: *Rule, drafts: i64, who: ?Who) !?f64 {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
-        var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
+        var modeled = forward + r.draftHeadMs(drafts);
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
             for (table.slots, 0..) |slot, d| {
                 const ms = slot orelse continue;
                 const fc = r.family_costs.get(@intCast(d + 1)) orelse continue;
-                const beyond = (ms - fc - r.mtp_step_ms * @as(f64, @floatFromInt(d))) / @as(f64, @floatFromInt(d + 1));
+                const beyond = (ms - fc - r.draftHeadMs(@intCast(d))) / @as(f64, @floatFromInt(d + 1));
                 least = if (least) |l| (if (beyond < l) beyond else l) else beyond;
             }
             const floor = least orelse 0.0;

@@ -161,6 +161,12 @@ pub const Level = struct {
     counts: []const u32,
 };
 
+pub fn root(gpa: std.mem.Allocator, points: usize) !Level {
+    const coords = try gpa.dupe([3]u32, &.{.{ 0, 0, 0 }});
+    errdefer gpa.free(coords);
+    return .{ .coords = coords, .counts = try gpa.dupe(u32, &.{@intCast(points)}) };
+}
+
 /// The 8 children of every parent, split by probs and draws, kept where they got points (parent-major, i + 2j + 4k).
 pub fn descend(gpa: std.mem.Allocator, parents: Level, probs: []const f32, level: u5, draws: *Draws, splits: ?[]u32) !Level {
     std.debug.assert(probs.len == parents.coords.len * P);
@@ -180,7 +186,10 @@ pub fn descend(gpa: std.mem.Allocator, parents: Level, probs: []const f32, level
             try counts.append(gpa, m);
         }
     }
-    return .{ .coords = try coords.toOwnedSlice(gpa), .counts = try counts.toOwnedSlice(gpa) };
+    const owned_coords = try coords.toOwnedSlice(gpa);
+    errdefer gpa.free(owned_coords);
+    const owned_counts = try counts.toOwnedSlice(gpa);
+    return .{ .coords = owned_coords, .counts = owned_counts };
 }
 
 /// The anchors: each leaf repeated by its count, (coords + jitter) / 2^level, fp32 [points, 3].
@@ -253,4 +262,20 @@ test "descend packs children parent-major in i + 2j + 4k order; anchors land ins
         const c: f32 = @floatFromInt(next.coords[if (p < 2) 0 else 1][ax]);
         try std.testing.expect(pts[p * 3 + ax] >= c / 4 and pts[p * 3 + ax] < (c + 1) / 4);
     };
+}
+
+test "descend frees finalized coordinates when count finalization fails" {
+    const parents: Level = .{ .coords = &.{.{ 0, 0, 0 }}, .counts = &.{1} };
+    var probs: [P]f32 = @splat(0);
+    probs[0] = 1;
+    var d: Draws = .{ .native = std.Random.DefaultPrng.init(1) };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3, .resize_fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, descend(failing.allocator(), parents, &probs, 2, &d, null));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "root releases coordinates when counts allocation fails" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, root(failing.allocator(), 1));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

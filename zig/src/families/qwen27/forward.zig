@@ -17,6 +17,8 @@ pub const Mixer = struct {
     /// A pass that keeps no row and has no other reader of the last layer: that layer writes keys and values only.
     keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
 };
+/// Staged references (tf-qwen27-run only): the stream after each stage, the final norm and the head's rows.
+const stage_planes = @import("stage_planes.zig");
 
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
@@ -84,6 +86,8 @@ pub const Stages = struct {
     norm: ?wts.Tensor = null,
     /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
     logits: ?Ref = null,
+    /// Whether the target's control-vector plan applies at the block norms; the MTP head's own block sets this false.
+    steer: bool = true,
     /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
     fn rowsAt(s: *const Stages, index: usize) Span {
         const f = &s.model.frame;
@@ -101,6 +105,7 @@ pub const Stages = struct {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
             lane.enc.barrier();
         }
+        if (stage_planes.on) try stage_planes.record(s.model.glue, lane.enc, .embed, s.hidden, s.rows);
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;
@@ -124,6 +129,7 @@ pub const Stages = struct {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             // The residual now holds the output of the block before this one, which is layer `index - 1`.
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
+            if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
     }
     /// The last layer of a pass whose other rows nothing reads: q, attention, o and the MLP have no reader.
@@ -180,6 +186,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, t.at(s.hidden, h), t.at(f.get(.output), h), wts.ref(layer.post_norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .mixer = index }, s.hidden, s.rows);
         if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, m.kernels.prompt)) {
             // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
@@ -278,6 +285,11 @@ pub const Stages = struct {
         std.mem.swap(Ref, &s.hidden, &s.residual);
         // The residual now holds the output of the last block, which is layer `layers - 1`.
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
+        if (stage_planes.on) {
+            // the last block is the residual stream; final is the normed rows the head reads (f.input)
+            try stage_planes.record(m.glue, e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
+            try stage_planes.record(m.glue, e, .final, f.get(.input), s.rows);
+        }
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
             var input = f.get(.input);
@@ -287,6 +299,10 @@ pub const Stages = struct {
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), s.logits orelse f.get(.logits), if (s.head == .last) 1 else s.rows);
+            if (stage_planes.on) if (stage_planes.active != null) {
+                e.barrier();
+                try stage_planes.record(m.glue, e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
+            };
         }
         e.barrier();
         if (s.reduce) |r| {
@@ -303,15 +319,16 @@ pub const Stages = struct {
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
 
-    /// The direction that steers the layer whose residual just landed; none in force means nothing done.
-    fn direction(s: *Stages, layer: usize) ?Direction {
+    /// The direction that steers the layer whose residual just landed; none in force (or off) means nothing done.
+    pub fn direction(s: *const Stages, layer: usize) ?Direction {
+        if (!s.steer) return null;
         const plan = s.model.steer orelse return null;
         const buffer = plan.dir(@intCast(layer)) orelse return null;
         return .{ .buffer = buffer, .alpha = plan.alpha };
     }
 
     /// A direction on the device with the strength it is added at.
-    const Direction = struct {
+    pub const Direction = struct {
         buffer: mtl.Buffer,
         alpha: f32,
     };

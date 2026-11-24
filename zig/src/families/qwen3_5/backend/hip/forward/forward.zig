@@ -1,4 +1,4 @@
-//! A prompt span through every layer in steps of SPAN rows, on the prefill formulas.
+//! A prompt span through every layer in steps of SPAN rows or the rows a caller names, on the prefill formulas.
 
 const std = @import("std");
 const hip = @import("hip");
@@ -56,11 +56,11 @@ pub const Final = struct {
 
 /// The span's final-normed rows (len, hidden) in the activation dtype; `ids` are int32 token ids on the device.
 pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len: usize, pos0: usize, trace: ?Trace) Error!Tensor {
-    return (try spanFor(ops, m, caches, ids, len, pos0, trace, .{ .logits = true, .readers = true })).rows;
+    return (try spanFor(ops, m, caches, ids, len, pos0, SPAN, trace, .{ .logits = true, .readers = true })).rows;
 }
 
-/// `span` for a caller reading `reads`: past its keys and values, the last layer runs only rows a reader reaches.
-pub fn spanFor(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len: usize, pos0: usize, trace: ?Trace, reads: Reads) Error!Final {
+/// `span` in steps of `step` rows read as `reads`: past its keys and values, the last layer runs only the rows read.
+pub fn spanFor(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len: usize, pos0: usize, step: usize, trace: ?Trace, reads: Reads) Error!Final {
     // prefill's kernels at any row count: a prompt's rows have the same bits fresh, resumed or in steps
     var o = ops;
     o.prefill = true;
@@ -69,8 +69,8 @@ pub fn spanFor(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, 
     const from = prompt_tail.of(m, o, traced).first(reads, len);
     const x = try take(o, m.act, len * s.hidden);
     var start: usize = 0;
-    while (start < len) : (start += SPAN) {
-        const rows = @min(SPAN, len - start);
+    while (start < len) : (start += step) {
+        const rows = @min(step, len - start);
         try o.embedRows(m.embed, ids + start * 4, rows, at(x, start * s.hidden));
     }
     if (m.frame) |frame| {
@@ -82,8 +82,8 @@ pub fn spanFor(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, 
         // rows before `kept` reach no reader past the last layer's keys and values
         const kept = if (index + 1 == m.layers.len) from else 0;
         start = 0;
-        while (start < len) : (start += SPAN) {
-            const rows = @min(SPAN, len - start);
+        while (start < len) : (start += step) {
+            const rows = @min(step, len - start);
             const mark = o.arena.mark();
             defer o.arena.release(mark);
             const xs = at(x, start * s.hidden);

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def load_reference(reference: Path):
     """weightless's container module, read from the checkout; torch is stubbed when it is absent."""
-    path = reference / "vllm-plugin" / "weightless_steer" / "container.py"
+    path = reference / "plugins" / "vllm" / "weightless_steer" / "container.py"
     if not path.is_file():
         raise SystemExit(f"{path} is not there: point --reference at a weightless checkout")
     try:

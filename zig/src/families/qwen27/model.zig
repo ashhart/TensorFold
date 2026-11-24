@@ -95,11 +95,20 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
+        const gen_path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
+        defer a.free(gen_path);
+        // generation_config.json beside config.json: a missing file is none, any other read failure is the loader's
+        const generation = std.Io.Dir.cwd().readFileAlloc(io, gen_path, a, .limited(1 << 20)) catch |e| switch (e) {
+            error.FileNotFound => null,
+            else => return e,
+        };
+        defer if (generation) |g| a.free(g);
         var problem: cfg.Problem = .{};
-        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+        const c = parseServed(a, text, generation, &problem) catch |e| {
             if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
             return e;
         };
+        if (c.tied_head and ranks != 1) return error.TiedHeadNeedsOneRank;
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
@@ -242,6 +251,11 @@ const sizes = [_]Size{
     .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
 };
 
+/// The served config: a dense tied head is admitted only under TF_QWEN27_TIED_HEAD=1.
+pub fn parseServed(a: std.mem.Allocator, text: []const u8, generation: ?[]const u8, problem: *cfg.Problem) !cfg.Config {
+    return cfg.parseTied(a, text, generation, problem, try platform.environment.read(bool, @import("tied_head.zig").flag, false));
+}
+
 fn qualifiedSize(c: cfg.Config) bool {
     for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and c.layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
     return false;
@@ -252,12 +266,29 @@ pub fn supported(c: cfg.Config) !void {
     const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
-    if (!(dense or routed) or c.vocab != 248320) return error.UnqualifiedQwenShape;
+    if (!(dense or routed or a3b(c)) or c.vocab != 248320) return error.UnqualifiedQwenShape;
     try @import("geometry.zig").supported(c);
+}
+
+/// Qwen3.6-35B-A3B: 256 experts of 512 and a shared expert of 512 over 2,048, 16 heads over 2 of 256 (text only).
+pub fn a3b(c: cfg.Config) bool {
+    return c.hidden == 2048 and c.intermediate == 512 and c.layers == 40 and c.heads == 16 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 32 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 512;
 }
 
 fn qualifiedGeneration(generation: u32) bool {
     return generation >= 13 and generation <= 18;
+}
+
+test "the qualified shapes: the dense 27B, Ornith-1.5-122B and Qwen3.6-35B-A3B; a 35B of other widths is refused" {
+    var c = try cfg.parse(std.testing.allocator, @import("config_test.zig").a3b_json, null);
+    try supported(c);
+    try std.testing.expect(a3b(c)); // --vision refuses it by this
+    c.moe_intermediate = 1024;
+    try std.testing.expect(!a3b(c));
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
+    c.moe_intermediate = 512;
+    c.top_k = 10;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
 }
 
 test "unknown and older GPU generations refuse before any weight load" {

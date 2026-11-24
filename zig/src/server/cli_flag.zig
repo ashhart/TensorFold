@@ -13,6 +13,8 @@ pub const Flag = struct {
     choices: []const []const u8 = &.{},
     /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
     native: bool = false,
+    /// Listed in ``capabilities``: a flag a build parses only to refuse it by name sets false.
+    advertised: bool = true,
     /// The values it honours when only some of the choices.
     native_values: ?[]const []const u8 = null,
     /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).

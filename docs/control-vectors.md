@@ -75,6 +75,9 @@ The reader fails closed rather than guessing.
 | `glp.alpha_default` is not a floating-point value | A malformed strength is not silently replaced with 1. |
 | A direction holds a NaN or an infinity | The direction is added as it stands, so every value has to be finite. |
 | The digest does not match the bytes | The file says one thing and holds another. |
+| `glp.content_sha256` is not text | A digest that cannot be read is not reported as verified, so the file is refused instead. |
+| A tensor's offset or byte count runs past the file | The bounds are checked before the bytes are read, and a value that would wrap is refused, not wrapped. |
+| A metadata array nests deeper than four | The reader bounds its own recursion; no control vector names an array inside an array this deep. |
 | One layer is named twice | `direction.5` and `direction.05` both parse as layer 5; a file has one direction per layer. |
 | A layer id is past the checkpoint's depth | The checkpoint's `num_hidden_layers` is read at startup, so the file is refused before the model loads. |
 | The width does not match the checkpoint | The vector is for another model. |
@@ -179,9 +182,12 @@ for a checkpoint that holds the same weights.
 ## The integration test
 
 A file that one implementation accepts has to mean the same thing to another.
-The reference implementation for this format is the `weightless` plugin's
-container reader, and this repository does not vendor it: the test takes a
-checkout and reads it as a package.
+The GLP format is defined by the `weightless` project (@msuiche); its
+`docs/spec/GLP.md` at commit `b181a07d` is the specification this reader
+implements, and `plugins/vllm/weightless_steer/container.py` at the same commit
+is the container reader the parity test compares against. This repository does
+not vendor either: the test takes a checkout of that commit and reads the
+reader as a package.
 
 ```
 zig build tf-glp-check
@@ -202,6 +208,6 @@ The reader that does the Zig half is `tf-glp-check`, which prints the reader's
 view of a file and writes its directions out as bytes, so the two sides can be
 compared exactly rather than approximately.
 
-The test needs `numpy` for the reference reader, and a `weightless` checkout.
-Nothing of the reference is committed here, and no vector is either: the file
-is supplied when the test runs.
+The test needs `numpy` for the reference reader, and a `weightless` checkout at
+commit `b181a07d`. Nothing of the reference is committed here, and no vector is
+either: the file is supplied when the test runs.

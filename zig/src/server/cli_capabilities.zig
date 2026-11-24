@@ -19,6 +19,11 @@ pub const Engines = struct {
 
 /// Native flags and selected supported variables; env is non-exhaustive, profiles lists registered switches.
 pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
+    return capabilitiesFor(w, e, @import("glp_startup.zig").steers);
+}
+
+/// As `capabilities`, with `steers` naming whether this build serves the flags only a steering build accepts.
+pub fn capabilitiesFor(w: *std.Io.Writer, e: Engines, steers: bool) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
     if (e.chip) |c| try w.print("\"{s}\"", .{c}) else try w.writeAll("null");
     try w.writeAll(", \"backends\": [");
@@ -40,7 +45,7 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.writeAll("}, \"serve\": {\"flags\": {");
     var first = true;
     for (cli.flags) |f| {
-        if (!f.native) continue;
+        if (!f.native or (!f.advertised and !steers)) continue;
         try w.print("{s}\"{s}\": {{", .{ if (first) "" else ", ", f.name });
         first = false;
         const values = f.native_values orelse f.choices;
@@ -94,6 +99,22 @@ test "capability audit: environment list is a subset beside the complete profile
     try std.testing.expect(additional > 0);
 }
 
+fn declaredEnv(name: []const u8) bool {
+    for (cli.env) |listed| if (std.mem.eql(u8, listed, name)) return true;
+    return false;
+}
+
+test "capability audit: environment declares every variable serve reads" {
+    // The app's variables page accepts only this list (#3684): common rules plus serve's direct reads.
+    const e = @import("sys").environment;
+    for (e.rules) |r| {
+        if (r.scope != .common) continue;
+        try std.testing.expect(declaredEnv(r.name));
+    }
+    const direct = [_][]const u8{ "TENSORFOLD_LOG_TIME", "TENSORFOLD_TOOL_GRAMMAR", "TF_DSV41_TOOL_GRAMMAR", "TF_GLM_WORLD", "TF_GLM_CLEAR_THINKING", "TF_DSV41_SCHEMA_PROMPT", "TF_SLIDE_TAKE_OUT_CHECK" };
+    for (direct) |name| try std.testing.expect(declaredEnv(name));
+}
+
 test "capability audit: decision-only formats are listed apart from the formats a family chats in" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
@@ -140,4 +161,22 @@ test "capability audit: environment table omits dead readers and slide metadata 
         try std.testing.expect(row.object.get("stable").? == .null);
     }
     try std.testing.expectEqual(@as(usize, 1), groups);
+}
+
+test "capability audit: a flag a build only refuses is not advertised" {
+    // --glp is parsed on every platform so its refusal names the engine; only a steering build lists it.
+    const steers = @import("glp_startup.zig").steers;
+    var without: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer without.deinit();
+    try capabilitiesFor(&without.writer, .{ .version = "test" }, false);
+    // A build that refuses the flags lists none, but a steering host's own advertised bit still wins.
+    try std.testing.expectEqual(steers, std.mem.indexOf(u8, without.written(), "\"--glp\":") != null);
+    var serving: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer serving.deinit();
+    try capabilitiesFor(&serving.writer, .{ .version = "test" }, true);
+    try std.testing.expect(std.mem.indexOf(u8, serving.written(), "\"--glp\":") != null);
+    var real: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer real.deinit();
+    try capabilities(&real.writer, .{ .version = "test" });
+    try std.testing.expectEqual(steers, std.mem.indexOf(u8, real.written(), "\"--glp\":") != null);
 }

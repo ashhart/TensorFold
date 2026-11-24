@@ -91,6 +91,7 @@ The read-only [`/memory` diagnostics](memory-diagnostics.md) report process foot
 available backend allocation counters, and the applied retained-prefix plan without changing memory policy.
 
 The binary's `capabilities --json` response lists its supported flags and platform-specific values.
+The GLP flags are left out where the build cannot serve them (everything but Metal on macOS), though they still parse there so their refusal names the engine.
 `serve MODEL --help` prints usage without loading a model.
 
 | Flag | Meaning |

@@ -32,10 +32,10 @@ pub fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
 }
 
 /// An error reply when synthesis ends before any audio; else the chunks, and the terminator only after a complete one.
-pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult, metadata: Metadata, lane_released: *bool) void {
-    const sent = streamAudio(srv, c, sp, box, engine_id, pcm, metadata, lane_released) orelse return left(srv, c, id, plan.prompt.len, received);
+pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult, metadata: Metadata, lane: *speech.Lane) void {
+    const sent = streamAudio(srv, c, sp, box, engine_id, pcm, metadata, lane) orelse return left(srv, c, id, plan.prompt.len, received);
     // streamAudio releases on observed completion before further head/audio writes; keep this exactly-once safety net.
-    speech.releaseLane(srv, lane_released);
+    speech.releaseLane(srv, lane);
     const mismatch: ?[]const u8 = if (result.samples != sent.samples) "the finished synthesis does not match the audio it published" else null;
     const problem = why(box, result.samples, pcm.len) orelse mismatch;
     if (sent.samples == 0) {
@@ -72,12 +72,12 @@ pub fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.Spee
 const Sent = struct { samples: usize = 0, first_ready: i96 = 0, first_written: i96 = 0 };
 
 /// Sends everything published since the last send as one chunk, converted in place; null: the client left.
-fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32, metadata: Metadata, lane_released: *bool) ?Sent {
+fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32, metadata: Metadata, lane: *speech.Lane) ?Sent {
     var sent: Sent = .{};
     var size: [20]u8 = undefined;
     while (true) {
         const seen = settle(srv, c, box, engine_id, sent.samples) orelse return null;
-        if (seen.finished) speech.releaseLane(srv, lane_released);
+        if (seen.finished) speech.releaseLane(srv, lane);
         const now = seen.published;
         if (now == sent.samples) return sent; // finished, and everything published is sent
         const first = sent.samples == 0;

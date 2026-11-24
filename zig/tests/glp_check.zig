@@ -14,6 +14,26 @@ const help =
     \\stands in the file, so another reader's numbers can be compared byte for byte.
 ;
 
+/// Why these arguments cannot run, in the words the tool prints; null when they can.
+pub fn usageProblem(args: []const []const u8) ?[]const u8 {
+    if (args.len < 2) return "one of read or rewrite is required";
+    const command = args[1];
+    if (std.mem.eql(u8, command, "--help")) return null;
+    if (std.mem.eql(u8, command, "read")) {
+        return if (args.len == 5) null else "read takes FILE OUT.json OUT.bin";
+    }
+    if (!std.mem.eql(u8, command, "rewrite")) return "the command is read or rewrite";
+    if (args.len < 4) return "rewrite takes FILE OUT.gguf";
+    var i: usize = 4;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--repo") or std.mem.eql(u8, args[i], "--revision")) {
+            i += 1;
+            if (i >= args.len) return "the option needs a value";
+        } else return "the option is --repo or --revision";
+    }
+    return null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
@@ -21,6 +41,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2 or std.mem.eql(u8, args[1], "--help")) {
         try std.Io.File.stdout().writeStreamingAll(io, help ++ "\n");
         return;
+    }
+    if (usageProblem(args)) |problem| {
+        const line = try std.fmt.allocPrint(a, "tf-glp-check: {s}\n{s}\n", .{ problem, help });
+        try std.Io.File.stdout().writeStreamingAll(io, line);
+        std.process.exit(2);
     }
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[2], a, .limited(64 << 20));
     var why: glp.Why = .{};
@@ -93,4 +118,18 @@ pub fn main(init: std.process.Init) !void {
     }, .{});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = receipt });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[4], .data = blob.items });
+}
+
+test "the checker refuses missing output arguments before reading a file" {
+    try std.testing.expect(usageProblem(&.{"tf-glp-check"}) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "read" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "read", "f" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "rewrite", "f" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "bogus", "f", "o" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "read", "f", "o.json", "o.bin" }) == null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "rewrite", "f", "o.gguf" }) == null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "rewrite", "f", "o.gguf", "--repo", "id", "--revision", "rev" }) == null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "rewrite", "f", "o.gguf", "--repo" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "rewrite", "f", "o.gguf", "--bogus" }) != null);
+    try std.testing.expect(usageProblem(&.{ "tf-glp-check", "--help" }) == null);
 }

@@ -60,6 +60,8 @@ pub const Vector = struct {
     width: usize,
     layers: []const Layer,
     sha256: [32]u8,
+    /// Whether the file's own content digest key was parsed and checked against its tensors.
+    claims_digest: bool,
     /// The SHA-256 of the file's exact bytes, as the reader was handed them.
     file_sha256: [32]u8,
     transferred: bool,
@@ -184,7 +186,9 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         for (l.dir) |v| if (!std.math.isFinite(v)) return refuse(why, "layer {d}'s direction holds a value that is not finite", .{l.id});
     }
 
+    // The digest a file reports as verified is the one its parsed key holds, never a string that merely reads like it.
     var sha: [32]u8 = undefined;
+    var claims_digest = false;
     if (file.str("glp.content_sha256")) |claimed| {
         const all = digest(file, false) orelse return refuse(why, "the file's tensors point past its end", .{});
         const dirs = digest(file, true) orelse return refuse(why, "the file's tensors point past its end", .{});
@@ -198,7 +202,11 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         } else {
             return refuse(why, "the file's content digest does not match its vectors", .{});
         }
-    } else sha = digest(file, true) orelse std.mem.zeroes([32]u8);
+        claims_digest = true;
+    } else {
+        if (file.find("glp.content_sha256") != null) return refuse(why, "glp.content_sha256 is not text", .{});
+        sha = digest(file, true) orelse std.mem.zeroes([32]u8);
+    }
 
     const hook = file.str("glp.hook_point") orelse residual_site;
     const derived = file.str("glp.derived_at") orelse hook;
@@ -222,6 +230,7 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         .width = width,
         .layers = layers.items,
         .sha256 = sha,
+        .claims_digest = claims_digest,
         .transferred = !std.mem.eql(u8, derived, hook),
         .publication = .{
             .name = file.str("general.name"),
@@ -260,9 +269,23 @@ fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!gguf
     var problem: gguf.Problem = .{};
     const file = gguf.parse(a, bytes, &problem) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        // A cursor that runs out of bytes names no rule: say so rather than print an empty reason.
+        if (problem.text().len == 0) problem.set("the file ends before its metadata is complete", .{});
         return refuse(why, "{s}", .{problem.text()});
     };
     return file;
+}
+
+/// The checkpoint a vector names, escaped, with its revision when it names one; never raw log text.
+pub fn baseLine(v: Vector, buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    if (v.base_model.len == 0) {
+        w.writeAll("an unnamed checkpoint") catch {};
+    } else {
+        w.print("{f}", .{std.zig.fmtString(v.base_model)}) catch {};
+        if (v.base_revision.len > 0) w.print(" @ {f}", .{std.zig.fmtString(v.base_revision)}) catch {};
+    }
+    return buf[0..w.end];
 }
 
 /// What a producer writes: the vector's fields and one direction per layer.
@@ -414,6 +437,7 @@ pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
 }
 
 test {
+    _ = @import("glp_container_test.zig");
     _ = @import("glp_test.zig");
     _ = @import("glp_publication_test.zig");
 }

@@ -58,6 +58,65 @@ test "shared price log: a round line has its trial, rows, time, each stream's dr
     try t.expectEqualStrings("shared price: round streams=2 sampled=0 trial=1 rows=3 ms=15.000 head=0.000 forward=13.000 plain=3.000 row=1.000 drafts=1,0 depths=0,- accept=0.625/0.500,-", out.written());
 }
 
+test "shared price log: a shared-drafts round line carries every stream's depth and acceptance" {
+    var table = try costs();
+    defer table.deinit(a);
+    var r = rule(&table);
+    defer r.deinit();
+    var rates = [_]f64{ 0.625, 0.5 };
+    const streams = [_]Stream{ .{ .depth = .{ .p = &rates } }, .{ .depth = .{ .p = &rates } } };
+    const plans = [_]Plan{ .{ .stream = &streams[0] }, .{ .stream = &streams[1] } };
+    const windows = [_]Window{ .{ .n = 2 }, .{ .n = 2 } };
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try log.line(&out.writer, &r, &plans, &windows, .{ .trial = false, .sampled = false, .ms = 15.25, .head_ms = 0.5, .heads = &.{ 0, 1 }, .depths = &.{ 1, 1 } });
+    try t.expectEqualStrings("shared price: round streams=2 sampled=0 trial=0 rows=4 ms=15.250 head=0.500 forward=14.000 plain=- row=- drafts=1,1 depths=1,1 accept=0.625/0.500,0.625/0.500", out.written());
+}
+
+test "shared price log: the shared-drafts path reads the flag and leaves the plain price unobserved" {
+    const Cfg = @import("config.zig");
+    const Engine = @import("engine.zig").Engine;
+    const S = @import("stream.zig").Stream;
+    const fake = @import("fake.zig");
+    const Drafted = @import("drafted.zig").Drafted;
+    const fixtures = @import("drafted_test.zig");
+    const Suffix = @import("proposer.zig").SuffixLookup;
+    defer _ = sys.env.unsetenv(log.name);
+    for ([_]?[:0]const u8{ null, "1" }) |raw| {
+        if (raw) |v| try t.expectEqual(@as(c_int, 0), sys.env.setenv(log.name, v, 1)) else _ = sys.env.unsetenv(log.name);
+        var target: fake.Fake = .{ .gpa = a };
+        defer target.deinit();
+        var head: fixtures.FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .plain_guard = false, .batched = true, .prior = &.{ 0.9, 0.8, 0.7 } } };
+        defer head.deinit();
+        var strict: fixtures.Strict = .{ .inner = target.backend() };
+        defer strict.deinit();
+        var wrapped = try Drafted.init(a, strict.backend(), head.drafter());
+        defer wrapped.deinit();
+        var conf = try Cfg.Config.init(a, wrapped.facts(fixtures.base()), 16, 15);
+        defer conf.deinit(a);
+        var clock: fake.FixedClock = .{};
+        var core = Engine.init(a, &conf, wrapped.backend(), clock.clock());
+        defer core.deinit();
+        var streams: [2]S = undefined;
+        var proposers: [2]Suffix = undefined;
+        for (&streams, &proposers) |*s, *p| {
+            p.* = try Suffix.init(a, .{ .min_match = 4 });
+            s.* = try S.init(a, .{ .id = "log", .prompt = &fixtures.p1, .max_new = 80, .eos = &.{96}, .proposer = p.proposer() });
+            try core.addStream(s);
+        }
+        defer for (&streams, &proposers) |*s, *p| {
+            s.deinit(a);
+            p.deinit();
+        };
+        try t.expectEqual(@as(?bool, null), core.price_log);
+        try core.step();
+        try t.expect(core.shared_rounds > 0);
+        try t.expect(head.holds > 0);
+        try t.expectEqual(@as(?bool, raw != null), core.price_log);
+        try t.expectEqual(@as(usize, 0), core.rule.shared_price.buckets.items.len);
+    }
+}
+
 const Env = struct {
     raw: []const u8,
     pub fn get(v: Env, name: []const u8) ?[]const u8 {

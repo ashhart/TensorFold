@@ -8,10 +8,13 @@ const log = @import("log.zig");
 const cfg = @import("checkpoint_config");
 const cli_flag = @import("cli_flag.zig");
 
-/// The flags the control vector adds to the server's own.
+/// Whether this platform's engine steers: only the Metal engine is built with steering.
+pub const steers = builtin.os.tag == .macos;
+
+/// The flags the control vector adds to the server's own; a platform without steering refuses them by name.
 pub const flags = [_]cli_flag.Flag{
-    .{ .name = "--glp", .native = true },
-    .{ .name = "--glp-alpha", .native = true },
+    .{ .name = "--glp", .path = true, .native = true, .advertised = steers },
+    .{ .name = "--glp-alpha", .native = true, .advertised = steers },
 };
 
 /// The model type of the family that takes a control vector: Qwen3.8-27B.
@@ -23,9 +26,6 @@ const steer_hidden: usize = 5120;
 /// The bytes a control vector file may hold; a 64-layer 5120-wide vector is about 1.3 MiB.
 const file_limit: usize = 64 << 20;
 
-/// The key a file that claims its own content digest carries.
-const digest_key = "glp.content_sha256";
-
 /// What the --glp flags hold: the file the operator named, the strength and the vector the file carries.
 pub const Vec = struct {
     /// The file's path, as the operator wrote it (null: no file named).
@@ -34,8 +34,6 @@ pub const Vec = struct {
     alpha: ?f64 = null,
     /// The vector the file carries, read once at startup (null: the file was not read).
     vector: ?glp.Vector = null,
-    /// Whether the file claims a content digest the reader checks.
-    claimed: bool = false,
 };
 
 /// The --glp file with the path the operator gave; null when the operator named none.
@@ -65,14 +63,11 @@ pub fn read(a: std.mem.Allocator, g: *?Vec) error{OutOfMemory}!?[]const u8 {
         if (e == error.OutOfMemory) return error.OutOfMemory;
         return try std.fmt.allocPrint(a, "argument --glp: {s}", .{why.text()});
     };
-    g.* = .{ .path = path, .alpha = v.alpha, .vector = loaded.vector, .claimed = loaded.claimed };
+    g.* = .{ .path = path, .alpha = v.alpha, .vector = loaded };
     return null;
 }
 
-/// The file read whole: its vector and whether it claims a digest.
-const Loaded = struct { vector: glp.Vector, claimed: bool };
-
-fn load(a: std.mem.Allocator, path: []const u8, alpha: ?f64, why: *glp.Why) error{ BadGlpFile, OutOfMemory }!Loaded {
+fn load(a: std.mem.Allocator, path: []const u8, alpha: ?f64, why: *glp.Why) error{ BadGlpFile, OutOfMemory }!glp.Vector {
     // The strings the reader hands back borrow the file's bytes, so those bytes stay as long as the vector.
     const bytes = std.Io.Dir.cwd().readFileAlloc(startupIo(), path, a, .limited(file_limit)) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
@@ -87,7 +82,7 @@ fn load(a: std.mem.Allocator, path: []const u8, alpha: ?f64, why: *glp.Why) erro
         why.set("the file's own alpha_default is {d}; the strength must be above 0: pass --glp-alpha", .{vector.alpha});
         return error.BadGlpFile;
     }
-    return .{ .vector = vector, .claimed = std.mem.indexOf(u8, bytes, digest_key) != null };
+    return vector;
 }
 
 /// Why a file could not be read, in words the operator reads.
@@ -123,6 +118,8 @@ pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, bac
 /// Why this checkpoint cannot take the vector, as the operator reads it; null: it can.
 pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, v: Vec) error{OutOfMemory}!?[]const u8 {
     const vector = v.vector orelse return null;
+    // The family's own refusal comes first: a Gemma checkpoint is never steered, whatever the vector's shape.
+    if (isGemma(model_type)) return "--glp: Gemma checkpoints are never steered: serve it without --glp";
     const model = modelOf(a, dir);
     var why: glp.Why = .{};
     if (model.hidden) |hidden| glp.checkModel(vector, hidden, model.repo, &why) catch {
@@ -133,7 +130,6 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
             if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });
         }
     }
-    if (isGemma(model_type)) return "--glp: Gemma checkpoints are never steered: serve it without --glp";
     if (!std.mem.eql(u8, model_type, steer_type)) return try std.fmt.allocPrint(a, "--glp: {s} checkpoints are not steered: only Qwen3.8-27B takes a control vector", .{model_type});
     if (model.hidden) |hidden| if (hidden != steer_hidden) return "--glp: this checkpoint is not Qwen3.8-27B: only the 5120-wide one takes a control vector";
     if (!metal(backend)) return try std.fmt.allocPrint(a, "--glp: only the Metal engine steers: this server runs the {s} engine", .{backendName(backend)});
@@ -183,7 +179,7 @@ fn isGemma(model_type: []const u8) bool {
 
 /// The backend that steers: the Metal engine; the CUDA engines carry no control vector.
 fn metal(backend: []const u8) bool {
-    if (builtin.os.tag != .macos) return false;
+    if (!steers) return false;
     return std.mem.eql(u8, backend, "auto") or std.mem.eql(u8, backend, "mlx");
 }
 
@@ -214,7 +210,7 @@ pub fn report(a: std.mem.Allocator, v: Vec) void {
         vector.layers.len,
         layerIds(a, vector.layers),
         base(a, vector),
-        fmt(a, "{s} ({s})", .{ sha[0..12], if (v.claimed) "verified" else "the file claims none" }),
+        fmt(a, "{s} ({s})", .{ sha[0..12], if (vector.claims_digest) "verified" else "the file claims none" }),
     });
     if (vector.transferred) log.line("warning: this vector was derived at {f}, not at {f}: it is applied at the residual stream", .{ std.zig.fmtString(vector.derived_at), std.zig.fmtString(vector.hook_point) });
 }

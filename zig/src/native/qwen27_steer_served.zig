@@ -37,13 +37,13 @@ pub fn report(g: api.glp.Glp) void {
         if (i == 0) first = l.id;
         last = l.id;
     }
-    var base: [192]u8 = undefined;
+    var base: [320]u8 = undefined;
     std.log.info("Qwen3.8-27B: control vector in force, replies are steered: alpha {d:.3}, {d} layers ({d}-{d}), base {s}, file sha256 {s}", .{
         g.alpha,
         v.layers.len,
         first,
         last,
-        baseOf(v, base[0..]),
+        api.glp.baseLine(v, base[0..]),
         file_sha[0..],
     });
     if (v.transferred) std.log.warn("Qwen3.8-27B: the control vector was derived at {f}, not at {f}: it is applied at the residual stream", .{ std.zig.fmtString(v.derived_at), std.zig.fmtString(v.hook_point) });
@@ -67,19 +67,4 @@ fn steerProblem(err: anyerror) []const u8 {
         error.BadSteerShape => "it holds no direction",
         else => "its directions cannot be prepared",
     };
-}
-
-/// The checkpoint the vector came from, with its revision when it names one.
-fn baseOf(v: api.glp.Vector, buf: []u8) []const u8 {
-    var w: std.Io.Writer = .fixed(buf);
-    if (v.base_model.len == 0) {
-        w.writeAll("an unnamed checkpoint") catch {};
-    } else {
-        w.writeAll(v.base_model) catch {};
-        if (v.base_revision.len > 0) {
-            w.writeAll(" @ ") catch {};
-            w.writeAll(v.base_revision) catch {};
-        }
-    }
-    return buf[0..w.end];
 }

@@ -41,6 +41,7 @@ pub const Vae = struct {
         const d = try dec.Decoder.init(init.gpa, device, vae.layers, config.rope_theta);
         errdefer d.deinit();
         try d.load(try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
+        d.give_way = .{ .io = init.io };
         std.debug.print("{s}: decoder weights in bf16 in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
         return .{ .config = config, .d = d };
     }
@@ -61,7 +62,7 @@ pub const Vae = struct {
         const picture = if (size.width == width and size.height == height) rgb else try resample.resizeWith(a, .pillow, .lanczos, resample.View.of(rgb, width, height), size.width, size.height);
         const file = try png_file.encode(a, picture, size.width, size.height);
         try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = file });
-        std.debug.print("{d}x{d} canvas: decoded {d} tiles in {d:.2} s ({d:.2} s on the GPU), {d:.2} s in all; wrote {s} at {d}x{d}\n", .{ width, height, tiles.total(), took.wall, took.gpu, mtl.clock.seconds() - started, path, size.width, size.height });
+        std.debug.print("{d}x{d} canvas: decoded {d} tiles in {d:.2} s ({d:.2} s on the GPU, {d:.2} s waited for speech), {d:.2} s in all; wrote {s} at {d}x{d}\n", .{ width, height, tiles.total(), took.wall, took.gpu, took.paused, mtl.clock.seconds() - started, path, size.width, size.height });
     }
 };
 
