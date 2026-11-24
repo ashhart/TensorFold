@@ -28,7 +28,7 @@ pub fn Owner(comptime Metal: type) type {
         allocator: std.mem.Allocator,
         io: std.Io,
         quiet_ns: i64,
-        last_work_ns: i64 = 0,
+        last_work_ns: i96 = 0, // std.Io clock nanoseconds, as the clock returns them
         idle_started: bool = false,
         buffers: []Buffer,
         extents: []Extent,
@@ -109,7 +109,7 @@ pub fn Owner(comptime Metal: type) type {
             self.events = events;
         }
 
-        pub fn idle(self: *Self, now_ns: i64) void {
+        pub fn idle(self: *Self, now_ns: i96) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             if (self.released or now_ns < self.last_work_ns) return;
@@ -128,7 +128,7 @@ pub fn Owner(comptime Metal: type) type {
             self.released = true;
         }
 
-        pub fn restore(self: *Self, now_ns: i64) !void {
+        pub fn restore(self: *Self, now_ns: i96) !void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             defer {
