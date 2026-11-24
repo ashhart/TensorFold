@@ -57,8 +57,7 @@ pub const Pool = struct {
         var buffers: [9]fz.Buf = undefined;
         for (&buffers, &slabs, experts.strides) |*buffer, *slab, stride| {
             const n = try std.math.mul(usize, p.slots, stride);
-            buffer.* = .{ .b = try r.allocate(n) };
-            try r.keep(buffer.b);
+            buffer.* = .{ .b = try @import("fsr_buffer.zig").allocate(r, n) };
             slab.* = buffer.b.contents()[0..n];
         }
         const map: fz.Buf = .{ .b = try r.buffer(experts.spans.len * 4) };
@@ -88,8 +87,7 @@ pub const Ple = struct {
         var slabs: [3][]u8 = undefined;
         for (&buffers, &slabs, 0..) |*buffer, *slab, i| {
             const n = try std.math.mul(usize, maximum, shards[0].parts[i].length / shards[0].rows);
-            buffer.* = .{ .b = try r.allocate(n) };
-            try r.keep(buffer.b);
+            buffer.* = .{ .b = try @import("fsr_buffer.zig").allocate(r, n) };
             slab.* = buffer.b.contents()[0..n];
         }
         return .{

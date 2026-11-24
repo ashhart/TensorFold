@@ -18,6 +18,7 @@ pub const Kernels = struct {
     nvfp4: cuda.experts.Nvfp4Experts,
     b32: ?cuda.experts32.Nvfp4b32Experts, // loaded for a csf0_v1 checkpoint alone (wantsBlock32)
     router: cuda.grouped.Router,
+    wide_tile: bool = false, // TF_GLM_WIDE_EXPERT_TILE: matching 64-pair down on factored decode windows
     fact: u64 = 0, // bit r - 1: a decode window of r rows on NVFP4's factored tiles (the same bits); load timing picks them by width (cuda_lane_costs)
 
     /// Whether a decode window of `rows` runs on the factored tiles; past 64 rows, as 64 do.
@@ -28,11 +29,12 @@ pub const Kernels = struct {
 
     /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too, for these values.
     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: ?cuda.experts32.Values) !Kernels {
+        const wide_tile = try wideExpertTile();
         var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
         errdefer nvfp4.unload();
         var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) |v| try cuda.experts32.Nvfp4b32Experts.load(d, sms, v) else null;
         errdefer if (b32) |*x| x.unload();
-        return .{ .nvfp4 = nvfp4, .b32 = b32, .router = try cuda.grouped.Router.resolve(plans) };
+        return .{ .nvfp4 = nvfp4, .b32 = b32, .router = try cuda.grouped.Router.resolve(plans), .wide_tile = wide_tile };
     }
 
     pub fn unload(k: *Kernels) void {
@@ -71,7 +73,9 @@ pub fn run(ks: *const Kernels, stream: cuda.Stream, which: Which, l: cuda.expert
     const pairs = rows * plan.slots;
     if (plan.prompt) return g.prompt(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), pairs, staged_tile, skip);
     if (plan.fact) {
-        // gate-up reads two matrices a K tile and gains from the factored tiles; down is short and keeps the waves
+        if (ks.wide_tile and rows > tile and epi == .down_f32 and l.format == .nvfp4)
+            return cuda.experts.Nvfp4Experts.runFact(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
+        // Gate-up keeps its factored tile; other down calls retain the original waves.
         if (epi == .up and !l.relu2) return cuda.experts.Nvfp4Experts.runFact(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
         return cuda.experts_waves.run(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
     }
@@ -133,4 +137,9 @@ test "plan sizes as the Python family's" {
     try std.testing.expectEqual(@as(usize, 9 + 2), maxItems(45, 9, tile)); // 9 experts used, 45 pairs: two more items of 16
     try std.testing.expectEqual(@as(usize, staged_tile), cuda.experts.promptTile(.nvfp4));
     try std.testing.expectEqual(@as(usize, 128), pair_tile);
+}
+
+/// Read once before expert modules load; every rank's startup also validates the shared GLM scope.
+pub fn wideExpertTile() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_WIDE_EXPERT_TILE", false);
 }

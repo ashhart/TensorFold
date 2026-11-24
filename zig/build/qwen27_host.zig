@@ -14,7 +14,12 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const mtp_flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_mtp_flags.zig"), .target = b.graph.host }) }));
     test_step.dependOn(&mtp_flags.step);
-    b.step("test-qwen27-mtp-flags-host", "--mtp-drafts and --mtp-confidence refusals on a Mac without a GPU").dependOn(&mtp_flags.step);
+    const mtp_topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_topk.zig"), .target = b.graph.host });
+    const mtp_pick = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/mtp_pick.zig"), .target = b.graph.host, .imports = &.{.{ .name = "bf16_topk", .module = mtp_topk }} }) }));
+    test_step.dependOn(&mtp_pick.step);
+    const mtp_host = b.step("test-qwen27-mtp-flags-host", "--mtp-drafts refusals, the GPU pick's tie rule and the fused absorb's order without a GPU");
+    mtp_host.dependOn(&mtp_flags.step);
+    mtp_host.dependOn(&mtp_pick.step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
     const taps = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tap_gather.zig"), .target = b.graph.host });
     const pricing_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });

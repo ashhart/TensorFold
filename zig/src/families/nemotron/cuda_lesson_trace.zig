@@ -8,7 +8,12 @@ const lesson_route = @import("living").lesson_route;
 
 /// Any block's change, for the buffers every block shares (null: no lesson is attached).
 pub fn lessons(e: *const Engine) ?weights.Adapter {
-    for (e.w.blocks) |blk| switch (blk.kind) {
+    return adapterOf(&e.w);
+}
+
+/// The first block's change in `w` (null: no lesson is attached, by Sliding Weights or saved lessons).
+pub fn adapterOf(w: *const weights.Weights) ?weights.Adapter {
+    for (w.blocks) |blk| switch (blk.kind) {
         .mamba => if (blk.mamba.adapter) |ad| return ad,
         .attention => if (blk.attn.adapter) |ad| return ad,
         .moe => if (blk.moe.adapter) |ad| return ad,

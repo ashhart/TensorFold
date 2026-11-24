@@ -67,14 +67,44 @@ test "CT admission: small real index config and safetensors preserve mixed store
 const cuda = @import("cuda");
 const Engine = @import("src/families/qwen3_5/cuda_engine.zig").Engine;
 const Recorded = struct {
+    const Call = struct {
+        id: usize,
+        grid: u32,
+        input: u64,
+        rows: c_int,
+        k: c_int,
+        segs: cuda.qmmf_group.Segs,
+    };
     var count: usize = 0;
     var id: usize = 0;
     var input: u64 = 0;
-    fn launch(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+    var calls: [8]Call = undefined;
+    fn record(f: cuda.abi.Function, grid: c_uint, args: ?[*]?*anyopaque) cuda.abi.Result {
+        const call_id = @intFromPtr(f);
+        const call_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
+        calls[count] = .{
+            .id = call_id,
+            .grid = grid,
+            .input = call_input,
+            .rows = 0,
+            .k = 0,
+            .segs = std.mem.zeroes(cuda.qmmf_group.Segs),
+        };
+        if (call_id == 10 or call_id == 11) {
+            calls[count].segs = @as(*const cuda.qmmf_group.Segs, @ptrCast(@alignCast(args.?[1].?))).*;
+            calls[count].rows = @as(*const c_int, @ptrCast(@alignCast(args.?[2].?))).*;
+            calls[count].k = @as(*const c_int, @ptrCast(@alignCast(args.?[3].?))).*;
+        }
         count += 1;
-        id = @intFromPtr(f);
-        input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
+        id = call_id;
+        input = call_input;
         return 0;
+    }
+    fn launch(f: cuda.abi.Function, gx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        return record(f, gx, args);
+    }
+    fn launchEx(c: *const cuda.abi.LaunchConfig, f: cuda.abi.Function, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        return record(f, c.grid_x, args);
     }
     fn copy(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) cuda.abi.Result {
         return 0;
@@ -88,6 +118,7 @@ fn function(d: *const cuda.Driver, id: usize) cuda.Function {
 }
 fn fullKernels(d: *cuda.Driver) modelopt.Kernels {
     d.api.cuLaunchKernel = Recorded.launch;
+    d.api.cuLaunchKernelEx = Recorded.launchEx;
     d.api.cuMemcpyHtoD_v2 = Recorded.copy;
     d.api.cuStreamSynchronize = Recorded.sync;
     var out: modelopt.Kernels = .{ .lane = undefined, .prompt = undefined, .pack = undefined, .embed = undefined };
@@ -199,6 +230,86 @@ fn projection(mode: cuda.qmmf.Mode, n: u32, k: u32) @import("src/families/qwen3_
         .bf16 => .{ .bf16 = w },
         else => unreachable,
     } };
+}
+
+test "full mode: production mixed GDN dispatch makes two grouped launches" {
+    var d: cuda.Driver = undefined;
+    var e: Engine = undefined;
+    e.d = &d;
+    e.stream = .{ .d = &d, .handle = null };
+    e.kit = null;
+    e.int8 = .{};
+    e.affine.split = null;
+    e.affine.pdl = false;
+    e.xs = 0;
+    e.tables.ptr = 0;
+    e.mo = fullKernels(&d);
+    e.mo.?.lane.clusters = true;
+    e.mo.?.lane.pdl = false;
+    e.mo.?.lane.fuse_split_n = 0;
+    e.mo.?.lane.half_below = cuda.qmmf.half_below_default;
+    var grouped: cuda.qmmf_group.Group = .{ .fns = undefined };
+    for (&grouped.fns) |*set| for (set) |*f| {
+        f.* = function(&d, 2);
+    };
+    grouped.fns[1][1] = function(&d, 10);
+    grouped.fns[3][1] = function(&d, 11);
+    e.mo.?.group = grouped;
+    var ls = [4]@import("src/families/qwen3_5/cuda_engine.zig").Proj{
+        projection(.fp8, 10240, 5120),
+        projection(.fp8, 6144, 5120),
+        projection(.bf16, 48, 5120),
+        projection(.bf16, 48, 5120),
+    };
+    const codes = [_]u64{ 0x1100, 0x1200, 0x1300, 0x1400 };
+    ls[0].ql.fp8.codes = codes[0];
+    ls[1].ql.fp8.codes = codes[1];
+    ls[2].ql.bf16.codes = codes[2];
+    ls[3].ql.bf16.codes = codes[3];
+    const outs = [_]u64{ 0x2100, 0x2200, 0x2300, 0x2400 };
+    for ([_]usize{ 1, 16 }) |rows| {
+        Recorded.count = 0;
+        try e.projManyPrompt(&ls, 0x5000, &outs, rows, false);
+        try t.expectEqual(@as(usize, 2), Recorded.count);
+        const ids = [_]usize{ 10, 11 };
+        const grids = [_]u32{ 512, 32 };
+        const slices = [_]c_int{ 2, 8 };
+        const widths = [_][2]c_int{ .{ 10240, 6144 }, .{ 48, 48 } };
+        for (0..2) |i| {
+            const call = Recorded.calls[i];
+            try t.expectEqual(ids[i], call.id);
+            try t.expectEqual(grids[i], call.grid);
+            try t.expectEqual(@as(u64, 0x5000), call.input);
+            try t.expectEqual(@as(c_int, @intCast(rows)), call.rows);
+            try t.expectEqual(@as(c_int, 5120), call.k);
+            try t.expectEqual(@as(c_int, 2), call.segs.count);
+            for (0..2) |j| {
+                try t.expectEqual(widths[i][j], call.segs.s[j].n);
+                try t.expectEqual(slices[i], call.segs.s[j].sk);
+                try t.expectEqual(codes[2 * i + j], call.segs.s[j].w);
+                try t.expectEqual(outs[2 * i + j], call.segs.s[j].out);
+            }
+        }
+    }
+    e.mo.?.group = null;
+    Recorded.count = 0;
+    try e.projManyPrompt(&ls, 0x5000, &outs, 1, false);
+    try t.expectEqual(@as(usize, 4), Recorded.count);
+    for (Recorded.calls[0..Recorded.count]) |call| try t.expectEqual(@as(usize, 2), call.id);
+    e.mo.?.group = grouped;
+    var bad = ls;
+    bad[3].ql.bf16.n = 6400;
+    bad[3].ql.bf16.npad = @intCast(cuda.modelopt.padded(6400));
+    Recorded.count = 0;
+    try e.projManyPrompt(&bad, 0x5000, &outs, 1, false);
+    try t.expectEqual(@as(usize, 4), Recorded.count);
+    for (Recorded.calls[0..Recorded.count]) |call| try t.expectEqual(@as(usize, 2), call.id);
+    var aliased = outs;
+    aliased[2] = aliased[0];
+    Recorded.count = 0;
+    try e.projManyPrompt(&ls, 0x5000, &aliased, 1, false);
+    try t.expectEqual(@as(usize, 4), Recorded.count);
+    for (Recorded.calls[0..Recorded.count]) |call| try t.expectEqual(@as(usize, 2), call.id);
 }
 
 test "ModelOpt partials: real reservations cover every 27B projection below the fused boundary" {

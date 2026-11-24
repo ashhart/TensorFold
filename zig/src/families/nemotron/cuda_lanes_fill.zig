@@ -11,8 +11,6 @@ const heat = @import("heat");
 const Cuda = @import("cuda_lanes.zig").Cuda;
 const LogRow = lanes.LogprobRow;
 const row_words = lanes.logprob.words;
-/// Host-mapped words for every row a shared window holds, then the first token's row (cuda_lanes.zig's row_slots).
-const row_slots = engine.max_streams * state.max_rows + 1;
 
 /// Stepped passes between their chunks, by stream: each one's serial pass (cuda_prompt.zig's Pass).
 pub const Fills = std.AutoHashMapUnmanaged(*const lanes.Stream, pass.Pass);
@@ -112,7 +110,7 @@ fn finish(self: *Cuda, s: *lanes.Stream, first: u32) !void {
     _ = self.take(first);
     s.fill_at.store(@intCast(ids.len), .monotonic); // the whole prompt, as a whole pass or a last chunk ends it
     if (s.logprobs) |k| {
-        const at = (row_slots - 1) * row_words;
+        const at = (@import("cuda_lanes.zig").rowSlots(self.e.c) - 1) * row_words;
         try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, false, self.rows_dev + at * 4, 1);
         try e.stream.synchronize();
         self.lanes.getPtr(s).?.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);

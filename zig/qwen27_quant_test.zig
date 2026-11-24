@@ -134,7 +134,7 @@ test "qwen27 quant: preparation skips projections that cannot take a decode lane
 }
 
 const wide_formats = [_]lane_projection.Format{
-    .{ .bits = 8, .group = 64 }, .{ .bits = 6, .group = 32 }, .{ .bits = 5, .group = 64 },
+    .{ .bits = 8, .group = 64 }, .{ .bits = 6, .group = 32 }, .{ .bits = 5, .group = 32 },
     .{ .bits = 3, .group = 32 }, .{ .bits = 2, .group = 64 }, .{ .bits = 8, .group = 128 },
 };
 
@@ -189,10 +189,17 @@ test "qwen27 quant: each non-reg whole prompt is one projection dispatch" {
         k.long_prompt = false;
         r.count = 0;
         try k.quant(r.encoder(), p, ref, producer, ref, ref, 2048);
-        try t.expectEqual(@as(usize, 128), r.count);
-        for (r.launches[0..r.count]) |call| {
-            try t.expectEqual(@as(u32, 16), call.rows);
-            try t.expectEqual(@as(usize, 1), call.grid.height);
+        // Tensor units take the row blocks a dispatch at every width; elsewhere 16 rows a dispatch.
+        if (r.device().tensorUnits()) {
+            try t.expectEqual(@as(usize, 1), r.count);
+            try t.expectEqual(@as(u32, 2048), r.launches[0].rows);
+            try t.expectEqual(@as(usize, (2048 + 15) / 16), r.launches[0].grid.height);
+        } else {
+            try t.expectEqual(@as(usize, 128), r.count);
+            for (r.launches[0..r.count]) |call| {
+                try t.expectEqual(@as(u32, 16), call.rows);
+                try t.expectEqual(@as(usize, 1), call.grid.height);
+            }
         }
     };
 }
@@ -351,4 +358,28 @@ test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only it
     }
     try t.expectEqual(@as(u32, 6), k.cache.count());
     try t.expectEqual(@as(usize, 6), r.libraries);
+}
+
+test "qwen27 quant: 5-bit and 6-bit g64 use reg lane keys with 128/2048 row capacity and producer sums" {
+    for ([_]u8{ 5, 6 }) |bits| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, 64);
+        p.bits = bits;
+        p.group = 64;
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const sums: quant.Sums = .{ .ref = ref, .stride = 2080 };
+        try k.prepareDecode(p);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 128);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(u32, 128), r.launches[0].rows);
+        try t.expectEqual(@as(i32, 2080), r.launches[0].stride);
+        k.prompt = true;
+        r.count = 0;
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 2048);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(u32, 2048), r.launches[0].rows);
+        try t.expectEqual(@as(u32, 2), k.lanes.count());
+    }
 }

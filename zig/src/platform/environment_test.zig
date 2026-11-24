@@ -43,8 +43,12 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "0", .n = 0 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
@@ -78,6 +82,8 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_PDL", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_PDL", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_GROUP_PROJ", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q35_GROUP_PROJ", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_COST_KEY_TRACE", .raw = "0", .n = 0 },
@@ -86,6 +92,10 @@ const valid = [_]Case{
     .{ .name = "TF_TIMING", .raw = "1", .n = 1 },
     .{ .name = "TF_NO_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_NO_TREES", .raw = "1", .n = 1 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "0", .n = 0 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "1", .n = 1 },
+    .{ .name = "TF_DFLASH_GRAPH", .raw = "0", .n = 0 },
+    .{ .name = "TF_DFLASH_GRAPH", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_TREES", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_BATCH", .raw = "0", .n = 0 },
@@ -104,6 +114,8 @@ const valid = [_]Case{
     .{ .name = "TF_DRAFT_NODES", .raw = "0", .n = 0 },
     .{ .name = "TF_DRAFT_NODES", .raw = "64", .n = 64 },
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
+    .{ .name = "TF_QMMF_HALF_BN", .raw = "0", .n = 0 },
+    .{ .name = "TF_QMMF_HALF_BN", .raw = "1", .n = 1 },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .raw = "10", .n = 10 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
@@ -118,6 +130,8 @@ const valid = [_]Case{
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_HCA", .raw = "rocep1s0f0,rocep1s0f1", .n = 2 },
     .{ .name = "TF_ROCE_HCA", .raw = "=mlx5_0:1", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
@@ -144,6 +158,8 @@ const valid = [_]Case{
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "1", .n = 1 },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "128", .n = 128 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
@@ -161,6 +177,8 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_PREFILL_MIN", .raw = "0", .n = 0 },
@@ -174,6 +192,8 @@ const valid = [_]Case{
     .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
     .{ .name = "TF_DSV41_PRODUCE_LINK", .raw = "tfkv2", .n = 0 },
+    .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
+    .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "XPU_TP", .raw = "1", .n = 1 },
@@ -272,36 +292,38 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
-        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },                      .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
-        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },                    .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
-        .{ "TF_CUDA_SEGMENTS", "0" },                              .{ "TF_CUDA_SEGMENTS", "5" },
-        .{ "TF_CUDA_CARVEOUT", "true" },                           .{ "TF_CUDA_CARVEOUT", "01" },
-        .{ "TF_CUDA_CARVEOUT_MIB", "0" },                          .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
-        .{ "TF_ROCE_GID_INDEX", "2147483648" },                    .{ "TF_PROMPT_ROWS", "16" },
-        .{ "TF_PROMPT_ROWS", "129" },                              .{ "TF_PROMPT_ROWS", "2064" },
-        .{ "TF_PROMPT_ROWS", " 512" },                             .{ "XPU_A8_BITS", "04" },
-        .{ "XPU_A8_BITS", "16" },                                  .{ "XPU_TP", "0" },
-        .{ "XPU_TP", "3" },                                        .{ "XPU_TP", " 4" },
-        .{ "XPU_CTX", "0" },                                       .{ "XPU_CTX", "262145" },
-        .{ "XPU_CHUNK", "0" },                                     .{ "XPU_CHUNK", "2049" },
-        .{ "XPU_CHUNK_SOLO", "0" },                                .{ "XPU_CHUNK_SOLO", "2049" },
-        .{ "XPU_MTP_DEPTH", "0" },                                 .{ "XPU_MTP_DEPTH", "16" },
-        .{ "XPU_DEVICE_ID", "0" },                                 .{ "XPU_DEVICE_ID", "0xzz" },
-        .{ "TF_SLIDE_POCKET_KEY", "AUTO" },                        .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },
-        .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },             .{ "TF_DSPINE_WINDOW", "0" },
-        .{ "TF_DSPINE_WINDOW", "15" },                             .{ "TF_DSPINE_WINDOW", "8193" },
-        .{ "TF_PREFILL_CHUNK", "0" },                              .{ "TF_PREFILL_CHUNK", "520" },
-        .{ "TF_PREFILL_KEEP", "true" },                            .{ "TF_PREFILL_AHEAD", "0" },
-        .{ "TF_PREFILL_TIMEOUT_S", "0" },                          .{ "TF_PREFILL_TIMEOUT_S", "86401" },
-        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },                 .{ "TF_QWEN_KV_PAGE_TEST", "0" },
-        .{ "TF_Q27_GEMM", "wide" },                                .{ "TF_Q27_GEMM", "NARROW" },
-        .{ "TF_Q27_TAIL", "on" },                                  .{ "TF_Q27_TAIL", "OFF" },
-        .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },                   .{ "TF_QWEN_KEEP_LATE", "2" },
-        .{ "TF_TIMING", "2" },                                     .{ "TF_NO_TREES", "true" },
-        .{ "TF_GEMMA4_ARGMAX_GRAPH", "2" },                        .{ "TF_GEMMA4_ARGMAX_GRAPH", "on" },
-        .{ "TF_MTP_TREES", "yes" },                                .{ "TF_MTP_BATCH", "off" },
-        .{ "TF_QWEN_POOL_LOG", "true" },                           .{ "TF_COST_KEY_TRACE", "on" },
-        .{ "TF_ROCE_HCA", "rocep1s0f0,rocepP2p1s0f0,rocep1s0f1" },
+        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
+        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
+        .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
+        .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
+        .{ "TF_CUDA_CARVEOUT_MIB", "0" },              .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
+        .{ "TF_ROCE_GID_INDEX", "2147483648" },        .{ "TF_PROMPT_ROWS", "16" },
+        .{ "TF_PROMPT_ROWS", "129" },                  .{ "TF_PROMPT_ROWS", "2064" },
+        .{ "TF_PROMPT_ROWS", " 512" },                 .{ "XPU_A8_BITS", "04" },
+        .{ "XPU_A8_BITS", "16" },                      .{ "XPU_TP", "0" },
+        .{ "XPU_TP", "3" },                            .{ "XPU_TP", " 4" },
+        .{ "XPU_CTX", "0" },                           .{ "XPU_CTX", "262145" },
+        .{ "XPU_CHUNK", "0" },                         .{ "XPU_CHUNK", "2049" },
+        .{ "XPU_CHUNK_SOLO", "0" },                    .{ "XPU_CHUNK_SOLO", "2049" },
+        .{ "XPU_MTP_DEPTH", "0" },                     .{ "XPU_MTP_DEPTH", "16" },
+        .{ "XPU_DEVICE_ID", "0" },                     .{ "XPU_DEVICE_ID", "0xzz" },
+        .{ "TF_SLIDE_POCKET_KEY", "AUTO" },            .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },
+        .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" }, .{ "TF_DSPINE_WINDOW", "0" },
+        .{ "TF_DSPINE_WINDOW", "15" },                 .{ "TF_DSPINE_WINDOW", "8193" },
+        .{ "TF_PREFILL_CHUNK", "0" },                  .{ "TF_PREFILL_CHUNK", "520" },
+        .{ "TF_PREFILL_KEEP", "true" },                .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TIMEOUT_S", "0" },              .{ "TF_PREFILL_TIMEOUT_S", "86401" },
+        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },     .{ "TF_QWEN_KV_PAGE_TEST", "0" },
+        .{ "TF_Q27_GEMM", "wide" },                    .{ "TF_Q27_GEMM", "NARROW" },
+        .{ "TF_Q27_TAIL", "on" },                      .{ "TF_Q27_TAIL", "OFF" },
+        .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },       .{ "TF_QWEN_KEEP_LATE", "2" },
+        .{ "TF_TIMING", "2" },                         .{ "TF_NO_TREES", "true" },
+        .{ "TF_GEMMA4_ARGMAX_GRAPH", "2" },            .{ "TF_GEMMA4_ARGMAX_GRAPH", "on" },
+        .{ "TF_Q35_GROUP_PROJ", "2" },                 .{ "TF_Q35_GROUP_PROJ", "on" },
+        .{ "TF_QMMF_HALF_BN", "2" },                   .{ "TF_QMMF_HALF_BN", "on" },
+        .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
+        .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
@@ -464,7 +486,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
@@ -482,7 +504,9 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
+    try t.expect(!(try e.value(bool, "TF_QWEN27_TIED_HEAD", null, false)) and try e.value(bool, "TF_QWEN27_TIED_HEAD", "1", false));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+    try t.expect(!(try e.value(bool, "TF_Q27_MTP_GPU_PICK", null, false)) and try e.value(bool, "TF_Q27_MTP_GPU_PICK", "1", false));
 }
 
 test "rank aliases name their flag and refuse from their retirement release" {

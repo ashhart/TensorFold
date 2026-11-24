@@ -45,10 +45,19 @@ const prompt_served = [_]c.Shape{
     .{ .rows = parts.max_chunk, .n = nv * dv, .k = dk },
 };
 
+/// The existing dispatch seams and chunk limits stay first; KR15's ordinary short-row cells follow.
+const chain_served = prompt_served ++ [_]c.Shape{
+    .{ .rows = 1, .n = nv * dv, .k = dk },
+    .{ .rows = 4, .n = nv * dv, .k = dk },
+    .{ .rows = 8, .n = nv * dv, .k = dk },
+    .{ .rows = 16, .n = nv * dv, .k = dk },
+    .{ .rows = 32, .n = nv * dv, .k = dk },
+};
+
 /// rows = token rows; n = outputs a row (value heads x width, pooled blocks, or the read-out's mixed dims).
 pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
-        .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &prompt_served },
+        .chain => .{ .name = "cuda flashnext DeltaNet prompt chain fn_gdn_chain_tpr", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "ys and the state bit-equal to fn_gdn_rows_to's, non-finite inputs included" }, .replaces = "fn_gdn_rows_to", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .served = &chain_served },
         .scores => .{ .name = "cuda flashnext indexer scores qsa_tile::scores<8, 4>", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "every score byte equal to fn_qsa_scores', non-finite inputs included" }, .replaces = "fn_qsa_scores", .tiles = .{ .{ .size = 8 }, .{ .size = 256, .step = 1, .min = 1 }, .{} }, .served = &.{ .{ .rows = 64, .n = 600, .k = di }, .{ .rows = 300, .n = 2100, .k = di } } },
         .fused => .{ .name = "cuda flashnext DeltaNet prompt block fn_gdn_fused (front, chain, gated norm)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "gated-norm rows, xs, the state, the readouts and on even row counts two cache marks' kept states bit-equal to fn_gdn_front -> fn_gdn_rows_to -> fn_gdn_norm (rows_to over each mark's rows), non-finite inputs included" }, .replaces = "fn_gdn_front, fn_gdn_chain_tpr and fn_gdn_norm", .tiles = .{ .{ .size = 16 }, .{}, .{} }, .in_place = true, .served = &prompt_served },
         .readout => .{ .name = "cuda flashnext hyper-connection read-out on prompt tiles (hcf down, reduce, hcf up, rinv, mix_h)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "act, xs, inj, mixed and xsm bit-equal to #952's chain, non-finite inputs included" }, .replaces = "fn_hc_down, fn_hc_reduce_act and fn_hc_upmix", .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{ .{ .rows = 64, .n = dims, .k = wide }, .{ .rows = 130, .n = dims, .k = wide } } },
