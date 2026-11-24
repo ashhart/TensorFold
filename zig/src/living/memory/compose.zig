@@ -1,5 +1,6 @@
 //! Living-memory bank routing and composition: conflict search, gate routing and prefix + unit state assembly.
 const std = @import("std");
+const addScaled = @import("compress.zig").addScaled;
 const quant = @import("quant.zig");
 const gate = @import("gate.zig");
 const types = @import("types.zig");
@@ -153,18 +154,14 @@ pub fn composeRawState(self: *const Bank, active_indices: []const usize) !RawSta
 
     // 3. Parent-balanced SVD recurrent state blending (plus sleep-time consolidated `skill_rec` steering!)
     var has_standing_active = false;
-    var max_active_rank: usize = 0;
+    var any_rec = false;
     for (active_indices) |idx| {
         const u = &self.units.items[idx];
         if (u.gate.is_standing) has_standing_active = true;
-        if (u.rec.len > 0 and u.rec[0].rank > max_active_rank) max_active_rank = u.rec[0].rank;
+        if (u.rec.len > 0) any_rec = true;
     }
-    const use_skill_rec = has_standing_active and self.skill_rec.len == arch.num_rec and self.skill_rec[0].rank > 0;
-    if (use_skill_rec and self.skill_rec[0].rank > max_active_rank) {
-        max_active_rank = self.skill_rec[0].rank;
-    }
-
-    if (max_active_rank == 0) {
+    const use_skill_rec = has_standing_active and self.skill_rec.len == arch.num_rec;
+    if (!any_rec and !use_skill_rec) {
         for (0..arch.num_rec) |r| {
             @memcpy(out.rec_state[r], pref.rec_state[r]);
             @memcpy(out.rec_conv[r], pref.rec_conv[r]);
@@ -212,33 +209,14 @@ pub fn composeRawState(self: *const Bank, active_indices: []const usize) !RawSta
     }
     const skill_w: f32 = if (use_skill_rec) 1.0 / @as(f32, @floatFromInt(total_groups)) else 0.0;
 
-    const head_mat = arch.rec_rows * arch.rec_cols;
-
     for (0..arch.num_rec) |r| {
         @memcpy(out.rec_state[r], pref.rec_state[r]);
-        if (use_skill_rec) {
-            const rl = &self.skill_rec[r];
-            const rk: usize = rl.rank;
-            for (0..arch.rec_heads) |h| {
-                const fu = rl.u[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
-                const fv = rl.v[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
-                const dst = out.rec_state[r][h * head_mat ..][0..head_mat];
-                quant.lowRankAdd(fu, fv, arch.rec_rows, rk, arch.rec_cols, skill_w, dst);
-            }
-        }
+        if (use_skill_rec) addScaled(self.skill_rec[r].delta, skill_w, out.rec_state[r]);
         for (active_indices, weights) |idx, w| {
             if (w == 0.0) continue;
             const u = &self.units.items[idx];
             if (u.rec.len <= r) continue;
-            const rl = &u.rec[r];
-            const rk: usize = rl.rank;
-            if (rk == 0) continue;
-            for (0..arch.rec_heads) |h| {
-                const fu = rl.u[h * arch.rec_rows * rk ..][0 .. arch.rec_rows * rk];
-                const fv = rl.v[h * rk * arch.rec_cols ..][0 .. rk * arch.rec_cols];
-                const dst = out.rec_state[r][h * head_mat ..][0..head_mat];
-                quant.lowRankAdd(fu, fv, arch.rec_rows, rk, arch.rec_cols, w, dst);
-            }
+            addScaled(u.rec[r].delta, w, out.rec_state[r]);
         }
         const use_unit_conv = active_indices.len == 1 and
             self.units.items[active_indices[0]].rec.len > r and

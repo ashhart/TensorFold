@@ -99,21 +99,18 @@ pub fn loadIfPresent(self: *Bank) !bool {
     // Optional sleep-time consolidated spectral skill steering
     const skill_rk: u16 = if (lf.getMeta("skill_rk")) |s| (std.fmt.parseInt(u16, s, 10) catch 0) else 0;
     const skill_pols: u32 = if (lf.getMeta("skill_pols")) |s| (std.fmt.parseInt(u32, s, 10) catch 0) else 0;
-    if (skill_rk > 0 and arch.num_rec > 0) {
+    if (skill_rk > 1) return error.BadLivingWeights; // 1: the whole steering is stored
+    if (skill_rk == 1 and arch.num_rec > 0) {
         const arr = try self.gpa.alloc(RecLayerData, arch.num_rec);
         var rc_done: usize = 0;
         errdefer {
             for (arr[0..rc_done]) |*r| r.deinit(self.gpa);
             self.gpa.free(arr);
         }
-        const rk_u: usize = skill_rk;
         for (0..arch.num_rec) |r| {
-            const fu = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.u", .{r}), arch.rec_heads * arch.rec_rows * rk_u);
-            errdefer self.gpa.free(fu);
-            const fv = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.v", .{r}), arch.rec_heads * rk_u * arch.rec_cols);
-            errdefer self.gpa.free(fv);
-            const cv = try self.gpa.alloc(u16, 0);
-            arr[r] = .{ .rank = skill_rk, .u = fu, .v = fv, .conv = cv };
+            const d = try lf.copyF32(self.gpa, try std.fmt.bufPrint(&name_buf, "sk.rc.{d}.d", .{r}), arch.rec_heads * arch.rec_rows * arch.rec_cols);
+            errdefer self.gpa.free(d);
+            arr[r] = .{ .delta = d, .conv = try self.gpa.alloc(u16, 0) };
             rc_done += 1;
         }
         self.skill_rec = arr;
