@@ -495,7 +495,9 @@ fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
 }
 
 /// Admission bytes of a rank: the split matrices' share of `total`, plus the embeddings and dflash/ whole on each.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, _: bool) !u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, _: bool, rank: u32, world: u32) !u64 {
+    // the server's --tp place is always rank 0 of 1 here (no Options.rank); the two ranks are TF_TP_*'s, split evenly
+    _ = .{ rank, world };
     return share(a, io, dir, total, tpRead());
 }
 
