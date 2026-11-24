@@ -75,6 +75,8 @@ The reader fails closed rather than guessing.
 | `glp.alpha_default` is not a floating-point value | A malformed strength is not silently replaced with 1. |
 | A direction holds a NaN or an infinity | The direction is added as it stands, so every value has to be finite. |
 | The digest does not match the bytes | The file says one thing and holds another. |
+| `glp.content_sha256` is not text | A digest nobody can check is refused, not read as no claim. |
+| Metadata arrays nest deeper than four levels | A writer that recursed is refused by name instead of followed. |
 | One layer is named twice | `direction.5` and `direction.05` both parse as layer 5; a file has one direction per layer. |
 | A layer id is past the checkpoint's depth | The checkpoint's `num_hidden_layers` is read at startup, so the file is refused before the model loads. |
 | The width does not match the checkpoint | The vector is for another model. |
