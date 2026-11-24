@@ -518,3 +518,27 @@ test "the child's flags carry the cache format the benchmark asked for" {
     var u: cli.Usage = .{};
     try std.testing.expectError(error.Usage, cli.parse(a, args[2..], &u));
 }
+
+test "a managed child's key never reaches its log file, raw or encoded across writes, only its replacement" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try Setup.init(a, &tmp);
+    const routes = try healthy(a, "{\"status\": \"ok\"}", ".tensorfold-benchmark");
+    const f = try fake.Fake.start(std.testing.allocator, &routes);
+    defer f.stop();
+    const leak = "printf 'echo %s\\n' \"$TENSORFOLD_API_KEY\"; printf 'enc child%%2Dlog'; sleep 0.2; printf '%%2Dkey\\n'; ";
+    const sh = try a.dupe([]const u8, &.{ "/bin/sh", "-c", try std.mem.concat(a, u8, &.{ leak, try serving(a, f.port, "exec sleep 30") }) });
+    var problem: []const u8 = "";
+    var m = (try server.Managed.spawn(a, std.testing.io, &s.env, sh, .{ .startup_timeout_s = 10, .bench_dir = s.bench, .key = "child-log-key" }, &problem)) orelse return error.TestUnexpectedResult;
+    defer _ = m.stop();
+    // the file itself, not a cleaned tail: what reached the disk
+    var buf: [4096]u8 = undefined;
+    const got = buf[0..try m.log.readPositionalAll(std.testing.io, &buf, 0)];
+    try std.testing.expect(std.mem.indexOf(u8, got, "child-log-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "child%2Dlog%2Dkey") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "echo [redacted]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:") != null);
+}
