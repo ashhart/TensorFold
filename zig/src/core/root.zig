@@ -14,6 +14,7 @@ pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const checkpoint_file_cache = @import("checkpoint_file_cache.zig");
 pub const dfloat11_config = @import("dfloat11_config.zig");
 pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
 pub const dfloat11_fixtures = @import("dfloat11_fixtures.zig");

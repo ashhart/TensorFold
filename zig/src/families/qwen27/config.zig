@@ -11,7 +11,7 @@ pub const max_layers = 128;
 pub const max_eos = 8;
 pub const Problem = fields.Problem;
 comptime {
-    std.debug.assert(eos_ids.qwen27_metal.max.? == max_eos);
+    std.debug.assert(eos_ids.qwen35.max.? == max_eos);
 }
 
 pub const Config = struct {
@@ -46,6 +46,8 @@ pub const Config = struct {
     moe_intermediate: usize = 0,
     /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
     renorm: bool = false,
+    /// The head is the embedding (`tie_word_embeddings`), admitted only by `parseTied` with its switch on.
+    tied_head: bool = false,
 
     pub fn moe(c: Config) bool {
         return c.experts != 0;
@@ -261,6 +263,11 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
 
 /// `parse`, with `p` naming the field behind a BadConfig the field layer refused.
 pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, p: *Problem) !Config {
+    return parseTied(gpa, json, generation, p, false);
+}
+
+/// `parseWhy`, admitting a dense tied head when `allow_tied`; a routed tied head stays refused.
+pub fn parseTied(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, p: *Problem, allow_tied: bool) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
     const root = try object(parsed.value);
@@ -274,7 +281,8 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
     } else return error.NotQwenDense;
     const experts = if (t.get("num_experts")) |v| try integer(v, true, tower.at("num_experts"), p) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
-    if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
+    const tied_head = try rules.tied(root, t, .metal27);
+    if (tied_head and (!allow_tied or routed)) return error.TiedEmbeddingHead;
     try rules.check(t, .metal27);
     const heads = try required(tower, "num_attention_heads");
     const hidden = try required(tower, "hidden_size");
@@ -301,6 +309,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
         .dk = try required(tower, "linear_key_head_dim"),
         .dv = try required(tower, "linear_value_head_dim"),
         .conv_kernel = try required(tower, "linear_conv_kernel_dim"),
+        .tied_head = tied_head,
         .eps = @floatCast(try optional(tower, "rms_norm_eps", 1e-6)),
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rp) |r| try optional(r, "rope_theta", try optional(tower, "rope_theta", 10000000)) else try optional(tower, "rope_theta", 10000000),
@@ -331,7 +340,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
     const gen = if (generation) |text| try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) else null;
     defer if (gen) |g| g.deinit();
     const gen_doc: std.json.Value = if (gen) |g| .{ .object = try object(g.value) } else .null;
-    const ids = eos_ids.collect(&c.eos, eos_ids.qwen27_metal, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
+    const ids = eos_ids.collect(&c.eos, eos_ids.qwen35, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
         error.BadEosValue => error.BadConfig,
         else => e,
     };

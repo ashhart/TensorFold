@@ -159,7 +159,8 @@ row-invariant linear, grouped experts and the 27B and Flash Next packs
 ([cuda/exl3](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3),
 [exl3.md](https://github.com/ashhart/TensorFold/blob/v0.6.6/docs/recipes/exl3.md)). The native EXL3 decoder
 (`zig/src/core/exl3_format.zig`, `exl3_projection.zig`) follows the format notes from #42, and the EXLR8 codebook
-that serves GLM-5.3 builds on that decoder. The native engine does not serve EXL3 packs yet.
+that serves GLM-5.3 builds on that decoder. The native CUDA engine serves EXL3 packs too: GLM-5.3-Flash's routed
+experts, Qwen3.5's `mul1` and `mcg` checkpoints, and Muse Spark Open's 1.8-bit pack.
 
 ## More Python engine work
 

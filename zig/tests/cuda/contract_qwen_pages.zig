@@ -259,6 +259,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
         try cuda.launch.launch(t.partial, .{ .grid = .{ .x = @intCast(m), .y = max_chunks, .z = kv_heads }, .block = .{ .x = 128 }, .shared = t.shared }, s, &args);
         var rows_args: cuda.Args = .{};
         inline for (.{ geo, qn, segs_d, rowseg_d, rowanc_d, layer, none, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(m)), pm, pl, po }) |x| rows_args.add(x);
+        if (f.format == .bf16) rows_args.add(false);
         const groups = (m + 64 / group - 1) / (64 / group);
         try cuda.launch.launch(t.rows, .{ .grid = .{ .x = @intCast(groups), .y = max_chunks, .z = kv_heads }, .block = .{ .x = 256 }, .shared = t.shared }, s, &rows_args);
     } else try cuda.launch.launch(fns.partial, .{ .grid = .{ .x = max_chunks, .y = kv_heads, .z = @intCast(m) }, .block = .{ .x = 32 * group } }, s, &args);

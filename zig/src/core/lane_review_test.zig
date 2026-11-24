@@ -138,7 +138,7 @@ test "halt transfers queued and admitted jobs when every subsequent allocation f
     try engine.submit(2, &request, .{ .ctx = &box, .event = Box.event });
     try host.admitted.append(host.gpa, host.queued.pop().?);
     failing.fail_index = failing.alloc_index;
-    host.closing = true;
+    host.closing.store(true, .release);
     @import("lane_halt.zig").haltAll(&host, "drain deadline");
     try std.testing.expectEqual(@as(usize, 2), box.finished);
     try std.testing.expectEqual(@as(usize, 0), host.queued.items.len + host.admitted.items.len);

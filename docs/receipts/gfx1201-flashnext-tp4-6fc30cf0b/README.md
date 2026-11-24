@@ -25,7 +25,7 @@ This receipt does not qualify other model families, other checkpoints, other wor
 | cold prefill 8,192 | 1,358 tok/s | 1,165 tok/s | +16.6% |
 | cold prefill 32,768 | 1,263 tok/s | 1,079 tok/s | +17.1% |
 
-Reading, in the measured scope only: the world pays on cold prefill (the prompt work splits across ranks), is neutral to slightly negative on 4-stream decode aggregate, and leaves single-stream decode unchanged. The earlier tp 2 receipt (`v1.2.7-399`, in #3608 until it lands) measured 121.2 tok/s decode and 1,191/1,121/1,058 tok/s prefill on two of the same cards; it crosses commits and is context, not a comparison — the control column above is the clean one.
+Reading, in the measured scope only: the world pays on cold prefill (the prompt work splits across ranks), is neutral to slightly negative on 4-stream decode aggregate, and leaves single-stream decode unchanged. The earlier tp 2 receipt (`v1.2.7-399`, [gfx1201-flashnext-tp2-f8dacd77](../gfx1201-flashnext-tp2-f8dacd77/README.md)) measured 121.2 tok/s decode and 1,191/1,121/1,058 tok/s prefill on two of the same cards; it crosses commits and is context, not a comparison — the control column above is the clean one.
 
 ## Cold prefill
 

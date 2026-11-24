@@ -23,7 +23,7 @@ pub fn append(ptr: *anyopaque, transaction: u64, epoch: u64, layer: u32, keys: o
     try values.check(keys.rows, keys.width, .bf16);
     if (b.appended != 0 and b.appended_rows != positions.len) return error.BadCommittedTaps;
     for (positions, 0..) |position, i| if (position != b.context.end + i) return error.BadCommittedTaps;
-    try appendRows(b, e, b.caches[layer], keys, values, positions);
+    try appendRows(b, e, b.caches[layer], layer, keys, values, positions);
     b.appended |= @as(u32, 1) << @intCast(layer);
     b.appended_rows = @intCast(positions.len);
 }
@@ -33,24 +33,25 @@ pub fn streamAppend(ptr: *anyopaque, epoch: u64, stream: u32, layer: u32, keys: 
     if (b.transaction != null or stream >= b.batch.len or layer >= b.config.layers or positions.len == 0) return error.BadDraftContext;
     try keys.check(@intCast(positions.len), b.config.kvWidth(), .bf16);
     try values.check(keys.rows, keys.width, .bf16);
-    try appendRows(b, e, b.batch[stream][layer], keys, values, positions);
+    try appendRows(b, e, b.batch[stream][layer], layer, keys, values, positions);
 }
 /// Rows' keys and values into `cache` at their positions' ring slots, 16 a dispatch.
-fn appendRows(b: *Backend, e: @import("metal").ComputeEncoder, cache: @import("runtime_backend.zig").Cache, keys: op.View, values: op.View, positions: []const u64) !void {
+fn appendRows(b: *Backend, e: @import("metal").ComputeEncoder, cache: @import("runtime_backend.zig").Cache, layer: u32, keys: op.View, values: op.View, positions: []const u64) !void {
+    const window = b.config.layerWindow(layer);
     const k = try b.frame.ref(keys);
     const v = try b.frame.ref(values);
     var first: usize = 0;
     while (first < positions.len) : (first += 16) {
         const count = @min(positions.len - first, 16);
         var slots: [16]u32 = undefined;
-        for (slots[0..count], 0..) |*slot, i| slot.* = @intCast(positions[first + i] % b.config.window);
+        for (slots[0..count], 0..) |*slot, i| slot.* = @intCast(positions[first + i] % window);
         const off = first * b.config.kvWidth() * 2;
-        try b.attention.appendKv(e, slots[0..count], .{ .buf = k.buf, .off = k.off + off }, .{ .buf = v.buf, .off = v.off + off }, .{ .buf = cache.keys }, .{ .buf = cache.values });
+        try b.attentionFor(layer).appendKv(e, slots[0..count], .{ .buf = k.buf, .off = k.off + off }, .{ .buf = v.buf, .off = v.off + off }, .{ .buf = cache.keys }, .{ .buf = cache.values });
         e.barrier();
     }
 }
 fn ready(b: *Backend, transaction: u64, epoch: u64, next: op.Context) !void {
-    if (b.transaction != transaction or transaction != epoch or b.appended != (@as(u32, 1) << @intCast(b.config.layers)) - 1 or next.cache != b.context.cache or next.end != b.context.end + b.appended_rows or next.begin != @max(b.context.begin, next.end -| (@as(u64, b.config.window) - 1))) return error.BadDraftContext;
+    if (b.transaction != transaction or transaction != epoch or b.appended != (@as(u32, 1) << @intCast(b.config.layers)) - 1 or next.cache != b.context.cache or next.end != b.context.end + b.appended_rows or next.begin != @max(b.context.begin, next.end -| (@as(u64, b.config.span()) - 1))) return error.BadDraftContext;
 }
 pub fn commit(ptr: *anyopaque, transaction: u64, epoch: u64, next: op.Context) !void {
     const b = cast(ptr);
@@ -81,11 +82,11 @@ pub fn abort(ptr: *anyopaque, transaction: u64) void {
         b.staged = null;
     }
 }
-fn gather(b: *Backend, e: @import("metal").ComputeEncoder, context: op.Context, cache: @import("metal").Buffer, out: Ref) !void {
+fn gather(b: *Backend, e: @import("metal").ComputeEncoder, context: op.Context, cache: @import("metal").Buffer, window: u32, out: Ref) !void {
     const rows: u32 = @intCast(context.end - context.begin);
     if (rows == 0) return;
-    const at: u32 = @intCast(context.begin % b.config.window);
-    const first = @min(rows, b.config.window - at);
+    const at: u32 = @intCast(context.begin % window);
+    const first = @min(rows, window - at);
     const width = b.config.kvWidth();
     try b.copy(e, .{ .buf = cache, .off = @as(usize, at) * width * 2 }, out, first, width);
     if (first < rows) try b.copy(e, .{ .buf = cache }, .{ .buf = out.buf, .off = out.off + @as(usize, first) * width * 2 }, rows - first, width);
@@ -107,12 +108,14 @@ pub fn attention(ptr: *anyopaque, epoch: u64, p: op.Attention) !op.View {
 }
 
 /// Query rows [first, first + rows) against `context`'s cached keys and their own, into the same rows of `result`.
-fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, context: op.Context, caches: []const @import("runtime_backend.zig").Cache, first: u32, rows: u32, result: op.View) !void {
+fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, kept: op.Context, caches: []const @import("runtime_backend.zig").Cache, first: u32, rows: u32, result: op.View) !void {
+    const window = b.config.layerWindow(p.layer);
+    const context = layerContext(kept, window);
     const context_rows: u32 = @intCast(context.end - context.begin);
     const keys = context_rows + rows;
     // An unwrapped context is contiguous in the cache: the query rows go behind it and attention reads in place.
-    const at: u32 = @intCast(context.begin % b.config.window);
-    const in_place = at + context_rows <= b.config.window and at + keys <= b.config.window + 16;
+    const at: u32 = @intCast(context.begin % window);
+    const in_place = at + context_rows <= window and at + keys <= window + 16;
     var k: Ref = undefined;
     var v: Ref = undefined;
     if (in_place) {
@@ -123,8 +126,8 @@ fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, 
         const merged_v = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
         k = try b.frame.ref(merged_k);
         v = try b.frame.ref(merged_v);
-        try gather(b, e, context, caches[p.layer].keys, k);
-        try gather(b, e, context, caches[p.layer].values, v);
+        try gather(b, e, context, caches[p.layer].keys, window, k);
+        try gather(b, e, context, caches[p.layer].values, window, v);
     }
     const off = @as(usize, context_rows) * b.config.kvWidth() * 2;
     const own_k = try b.frame.ref(p.keys);
@@ -133,16 +136,27 @@ fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, 
     try b.copy(e, .{ .buf = own_v.buf, .off = own_v.off + @as(usize, first) * p.values.stride * 2 }, .{ .buf = v.buf, .off = v.off + off }, rows, p.values.width);
     const mask = try b.frame.alloc(rows, keys, .u8);
     const mask_ref = try b.frame.ref(mask);
-    try fillMask(mask_ref.buf.contents()[mask_ref.off..][0 .. @as(usize, rows) * keys], context_rows, rows, b.config.window, b.config.block);
+    try fillMask(mask_ref.buf.contents()[mask_ref.off..][0 .. @as(usize, rows) * keys], context_rows, rows, window, b.config.block);
     const q = try b.frame.ref(p.query);
     const y = try b.frame.ref(result);
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(b.config.head_dim)));
     const R = @import("core").shared_attention.Ref;
     const views = [_]R{ .{ .buf = q.buf, .off = q.off + @as(usize, first) * p.query.stride * 2 }, .{ .buf = k.buf, .off = k.off }, .{ .buf = v.buf, .off = v.off }, .{ .buf = mask_ref.buf, .off = mask_ref.off }, .{ .buf = y.buf, .off = y.off + @as(usize, first) * result.stride * 2 } };
     // Long contexts share each 256-key chunk across the query heads of one KV head.
-    if (keys > 1024) try b.attention.encodeSplit(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]) else try b.attention.encode(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]);
+    const attend = b.attentionFor(p.layer);
+    if (keys > 1024) try attend.encodeSplit(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]) else try attend.encode(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]);
 }
 
+/// The rows a layer of window `window` attends: the kept context's last `window` - 1 (all of it for a full layer).
+pub fn layerContext(kept: op.Context, window: u32) op.Context {
+    return .{ .cache = kept.cache, .begin = @max(kept.begin, kept.end -| (@as(u64, window) - 1)), .end = kept.end };
+}
+test "a sliding layer attends its own window of a longer kept context, a full layer all of it" {
+    const kept = op.Context{ .cache = 1, .begin = 0, .end = 10000 };
+    try std.testing.expectEqual(@as(u64, 10000 - 4095), layerContext(kept, 4096).begin);
+    try std.testing.expectEqual(@as(u64, 0), layerContext(kept, 32768).begin);
+    try std.testing.expectEqual(@as(u64, 7), layerContext(.{ .cache = 1, .begin = 7, .end = 100 }, 4096).begin);
+}
 /// Slots before `trained` cannot see later slots, retaining their trained-block mask.
 pub fn fillMask(out: []u8, context_rows: u32, queries: u32, window: u32, trained: u32) !void {
     if (queries == 0 or window == 0 or context_rows >= window or trained == 0) return error.BadDraftContext;

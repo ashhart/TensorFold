@@ -225,7 +225,7 @@ template <int MT, class Tiles, bool JOIN = false>  // JOIN: another stream's row
 __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                       const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                       const int* __restrict__ P, float scale, int total,
-                                                                      float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
+                                                                      float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO, bool all_rows = false) {
     constexpr int LINES = 16 * MT, WARPS = 2 * MT, NT = HD / 8 / WARPS;
     __shared__ __align__(16) __nv_bfloat16 pt[LINES][TK + 8];
     __shared__ float red[2][LINES], alpha[LINES];
@@ -237,12 +237,12 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, qd = lane & 3;
     const int c = blockIdx.y, h = blockIdx.z, m0 = blockIdx.x * RB;
     if (c >= MAXCH) return;
-    // the group's rows of long streams (a short stream's rows are attn_one's)
+    // Long streams, or every stream under the exact all-length opt-in.
     if (tid < RB) {
         const int m = m0 + tid;
         r_seg[tid] = -1;
         if constexpr (JOIN) r_p0[tid] = -1;
-        if (m < total && !past_rows(P, m) && segs[rowseg[m]].len >= GROUP_LEN) {
+        if (m < total && !past_rows(P, m) && (all_rows || segs[rowseg[m]].len >= GROUP_LEN)) {
             const Seg sg = segs[rowseg[m]];
             const Ancestor anc = rowanc[m];
             const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);

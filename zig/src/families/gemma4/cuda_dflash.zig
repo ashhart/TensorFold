@@ -114,7 +114,8 @@ const Weights = struct {
 };
 
 fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, c: *const Config, w: *Weights) !void {
-    var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
+    // the draft shares the model's directory: index only its own roots so `model.`/`vision_` names never count
+    var ck = try core.checkpoint.Checkpoint.openModelPrefixes(gpa, io, dir, &.{ "fc.", "hidden_norm.", "norm.", "layers." });
     defer core.checkpoint.cache.close(&ck);
     var x: aw.Loader = .{ .gpa = gpa, .d = d, .s = s, .k = k, .ck = &ck, .bufs = &w.buffers };
     const h = c.hidden;
@@ -142,6 +143,18 @@ fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Strea
         l.q_norm = try x.vector(try name(&buf, i, "self_attn.q_norm.weight"), dim);
         l.k_norm = try x.vector(try name(&buf, i, "self_attn.k_norm.weight"), dim);
     }
+    try refuseLeftovers(&ck, error.UnusedDFlashTensors);
+}
+
+/// `ck` names `get`/`expect` never took, refused with up to five named.
+pub fn refuseLeftovers(ck: *const core.checkpoint.Checkpoint, comptime err: anyerror) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return err;
 }
 
 /// One stream's context: each layer's keys then values, [kv heads, capacity, 128] bf16; the chain it holds.
