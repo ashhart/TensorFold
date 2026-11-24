@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: decode experts run a warp over 8 columns with gate and up in one launch, about 3% faster one-stream decode on GB10 on top of #4728, with identical tokens (#4729). Thanks @jschmied.
+
 - Hy4-flash: a host weight map for its ModelOpt NVFP4 build (groups of 16, no KV quantization), with the build's recipe and quality notes; serving it comes in later slices (#4110). Thanks @atakann.
 
 - OCR: `POST /ocr` takes docTR's request contract (step 5 of #2440), with each page's response naming its file (#2574). Thanks @laudney.
