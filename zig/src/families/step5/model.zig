@@ -30,13 +30,12 @@ pub const Model = struct {
     route: [2]mtl.Pipeline,
     /// Prompt attention on the tensor units, for the shape it is written for (192 dims, 16 heads a KV group).
     attend_nax: ?mtl.Pipeline = null,
-    /// The image tower, loaded with --vision when the checkpoint holds one (tools/step5_fp8_to_mlx.py --only-vision).
+    /// The image tower, when the checkpoint holds one (tools/step5_fp8_to_mlx.py --only-vision).
     vision: ?*vision.Vision = null,
     mm: [4]Mm = undefined,
     mms: usize = 0,
 
-    /// With `tower` false (serve without --vision) the tower and projector stay on disk and are never built.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, tower: bool) !*Model {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const m = try gpa.create(Model);
@@ -54,7 +53,7 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        for (files) |path| try addShard(&m.checkpoint, m.device, path, tower);
+        for (files) |path| try m.checkpoint.addFile(m.device, path, "");
         m.weights = try weights.load(gpa, m.device, &m.checkpoint, &m.config);
         errdefer m.weights.deinit(gpa);
         const c = &m.config;
@@ -90,7 +89,7 @@ pub const Model = struct {
             defer lib.deinit();
             m.attend_nax = try mtl.Pipeline.init(m.device, lib, "s5_attend_nax", false);
         }
-        if (tower and m.checkpoint.has("vision_model.conv1.weight")) m.vision = try vision.Vision.load(gpa, m.device, &m.checkpoint, c.hidden);
+        if (m.checkpoint.has("vision_model.conv1.weight")) m.vision = try vision.Vision.load(gpa, m.device, &m.checkpoint, c.hidden);
         errdefer if (m.vision) |v| v.deinit();
         for (m.weights.layers) |l| {
             try m.addMm(l.attn.q);
@@ -148,48 +147,3 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
-
-/// The tower and projector tensors: the ones tools/step5_fp8_to_mlx.py --vision or --only-vision writes.
-fn isTower(name: []const u8, _: usize) bool {
-    return std.mem.startsWith(u8, name, "vision_model.") or std.mem.startsWith(u8, name, "vit_large_projector");
-}
-
-/// A shard as before with `tower`; without it the text tensors pack into their own buffer, the tower stays in the file.
-pub fn addShard(c: *ck.Checkpoint, device: mtl.Device, path: [:0]const u8, tower: bool) !void {
-    try c.addFileSplit(device, path, "", null, if (tower) null else isTower);
-}
-
-test "without --vision a Step-5 shard holds its text tensors only; the tower and projector stay in the file" {
-    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
-    const device = mtl.Device.init() catch return error.SkipZigTest;
-    defer device.deinit();
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // --vision writes the tower and projector into the same shards as the text model
-    const header =
-        \\{"model.a":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]},
-        \\ "vision_model.conv1.weight":{"dtype":"U8","shape":[4096],"data_offsets":[4,4100]},
-        \\ "vit_large_projector.weight":{"dtype":"U8","shape":[1024],"data_offsets":[4100,5124]},
-        \\ "lm_head.b":{"dtype":"BF16","shape":[3],"data_offsets":[5124,5130]}}
-    ;
-    var data: [8 + header.len + 5130]u8 = undefined;
-    std.mem.writeInt(u64, data[0..8], header.len, .little);
-    @memcpy(data[8..][0..header.len], header);
-    for (data[8 + header.len ..], 0..) |*b, i| b.* = @truncate(i);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = &data });
-    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/model.safetensors", .{tmp.sub_path}, 0);
-    defer gpa.free(path);
-    var all = ck.Checkpoint.init(gpa);
-    defer all.deinit();
-    try addShard(&all, device, path, true);
-    try std.testing.expectEqual(@as(usize, 5130), all.residentBytes());
-    try std.testing.expect(all.tensors.contains("vision_model.conv1.weight"));
-    var text = ck.Checkpoint.init(gpa);
-    defer text.deinit();
-    try addShard(&text, device, path, false);
-    try std.testing.expectEqual(@as(usize, ck.alignment + 6), text.residentBytes());
-    try std.testing.expect(!text.tensors.contains("vision_model.conv1.weight") and !text.tensors.contains("vit_large_projector.weight"));
-    inline for (.{ "model.a", "lm_head.b" }) |name|
-        try std.testing.expectEqualSlices(u16, (try all.get(name)).host(u16), (try text.get(name)).host(u16));
-}
