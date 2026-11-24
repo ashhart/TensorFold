@@ -65,6 +65,9 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
     const previous_salt = store.salt;
     store.salt = r.cacheSalt();
     defer store.salt = previous_salt;
+    const previous_messages = store.message_starts;
+    store.message_starts = r.message_starts;
+    defer store.message_starts = previous_messages;
     return store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame);
 }
 

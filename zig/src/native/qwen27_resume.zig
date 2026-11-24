@@ -110,6 +110,13 @@ pub const Standing = struct {
     }
 };
 
+/// Message-start states a request keeps at most when TF_QWEN27_MESSAGE_STARTS=1 (read at start; unset or 0: none).
+pub const MESSAGE_STARTS: u8 = 4;
+
+pub fn messageStarts() !u8 {
+    return if (try @import("sys").environment.read(bool, "TF_QWEN27_MESSAGE_STARTS", false)) MESSAGE_STARTS else 0;
+}
+
 /// Slot 0 needs its smaller history copy unless the cache can keep both full snapshots.
 pub fn needsRewind(cache: u64, snapshot: u64) bool {
     return cache < snapshot +| snapshot;
