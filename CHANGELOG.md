@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal serves images under `--vision`: PNG, JPEG and WebP decode to 40-pixel patch tokens (resized only past the image budget), the 23-layer vision tower and its projector run on the GPU with the processor's rounding, and the tower's rows replace the image placeholders in a prefill chunk, split across chunks and cache restores like text rows. Without `--vision` images stay refused by name. Each picture the tower runs logs one `inkling2 image tower:` line with the picture's content hash, its rows and the SHA-256 of the BF16 rows it hands to the splice. The tower is checked against an FP64 reference on the original checkpoint, and its kernels carry contract records and planted controls (#4704, refs #4274 and #4387). Thanks to @BlivionIaG.
+
 - Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout` (#4963).
 
 - Qwen 3.8-27B on Metal M5: 5-bit and 6-bit group-64 checkpoints split K for decode and prompt rows as v1.3.4 did again, so their sums run in v1.3.4's order; #4419 had moved them onto the 4-bit M5 split tables, and its register-direct kernels stay, at the restored splits. Gemma 4 and 4-bit are unchanged (#4962).
@@ -214,8 +216,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Nemotron's offline build uses the shared expert kernel sources, and two duplicate files are gone; the kernels are unchanged (#4738). Thanks @jschmied.
 
 - Docs: a plan for Inkling 2 Mini on CUDA and Metal in slices a contributor can claim (#4274). Thanks @akol1.
-
-- Inkling 2 Mini on Metal serves images under `--vision`: PNG, JPEG and WebP decode to 40-pixel patch tokens (resized only past the image budget), the 23-layer vision tower and its projector run on the GPU with the processor's rounding, and the tower's rows replace the image placeholders in a prefill chunk, split across chunks and cache restores like text rows. Without `--vision` images stay refused by name. Each picture the tower runs logs one `inkling2 image tower:` line with the picture's content hash, its rows and the SHA-256 of the BF16 rows it hands to the splice. The tower is checked against an FP64 reference on the original checkpoint, and its kernels carry contract records and planted controls (#4704, refs #4274 and #4387). Thanks to @BlivionIaG.
 
 - Docs: the Flash Next HIP recipe adds the measured four-rank serve path and fixes its receipt link (#4669). Thanks @timmyit.
 
