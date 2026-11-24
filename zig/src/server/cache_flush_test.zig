@@ -71,12 +71,12 @@ const Wire = struct {
     }
 };
 
-const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full, body: []const u8 = "{}" };
+const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full, body: []const u8 = "{}", length: ?[]const u8 = null };
 
 /// One flush through the dispatcher, as the connection thread hands it over after the key gate; status and body.
 fn call(srv: *Server, a: Allocator, c: Caller) !struct { status: u16, body: json.Value } {
     var wire: Wire = .{ .a = a };
-    const length = try std.fmt.allocPrint(a, "{d}", .{c.body.len});
+    const length = c.length orelse try std.fmt.allocPrint(a, "{d}", .{c.body.len});
     const headers = try std.mem.concat(a, http.Header, &.{ &.{.{ .name = "Content-Length", .value = length }}, c.headers });
     var conn: http.Conn = .{ .fd = -1, .peer = c.peer, .buf = try a.dupe(u8, c.body), .end = c.body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = flush.path, .headers = headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write }, .key_label = c.key, .key_scopes = c.scopes };
     routes.dispatch(srv, &conn, a);
@@ -198,6 +198,37 @@ test "prompt cache flush: the body retains explicitly, while absent and unrecogn
         const got = try call(srv, a, .{ .body = body });
         try t.expectEqual(@as(u16, 400), got.status);
         try t.expectEqual(before, e.asks);
+    }
+}
+
+test "prompt cache flush: a body that cannot be read, or is refused, still gets main's full flush and reply" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var e: Engine = .{};
+    const srv = try serve(e.engine(), null);
+    defer srv.deinit();
+    const te: []const http.Header = &.{.{ .name = "Transfer-Encoding", .value = "chunked" }};
+    for ([_]Caller{
+        .{ .body = "{\"retain\":0}", .length = "33554433" }, // past the 32 MiB body limit
+        .{ .body = "{\"retain\":2}", .length = "33554433" },
+        .{ .body = "{}", .length = "4x" }, // an invalid length
+        .{ .body = "{\"retain\":2}", .length = "40" }, // shorter than its length
+        .{ .body = "{}", .headers = te }, // a length and a transfer coding together
+        .{ .body = "" },
+        .{ .body = "{}" },
+        .{ .body = "{\"retain\":0}" },
+    }) |c| {
+        const before = e.asks;
+        e.retain_seen = 99;
+        const got = try call(srv, a, c);
+        try t.expectEqual(@as(u16, 200), got.status);
+        try t.expectEqual(before + 1, e.asks);
+        try t.expectEqual(@as(u32, 0), e.retain_seen); // the full flush
+        try t.expectEqualStrings("prompt_cache.flush", got.body.strField("object").?);
+        try t.expectEqual(@as(i64, 3), got.body.get("states").?.int64().?);
+        try t.expectEqual(@as(i64, 4096), got.body.get("ram_bytes").?.int64().?);
+        try t.expectEqual(@as(i64, 512), got.body.get("disk_bytes").?.int64().?);
     }
 }
 
