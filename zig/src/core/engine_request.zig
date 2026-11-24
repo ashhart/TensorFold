@@ -79,6 +79,10 @@ pub const Request = struct {
     salted: bool = false,
     /// The full salt id that produced `cache_key`, compared separately from its non-injective masked words.
     cache_salt: u64 = 0,
+    /// Folded Memory Weights v3: latest user-turn token ids for the neural gate (empty: skip memory gating).
+    memory_query: []const u32 = &.{},
+    /// Leading prompt tokens to strip when memory fires (e.g. an empty template system header).
+    memory_strip: u32 = 0,
 
     /// The cache-tenant identity: null for an unsalted request, the exact numeric salt otherwise.
     pub fn cacheSalt(r: *const Request) ?u64 {

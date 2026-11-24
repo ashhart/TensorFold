@@ -153,10 +153,12 @@ pub const Spec = struct {
     audios: []const Audio = &.{}, // in prompt order; the backend's audio encoder fills their rows
     key: []const u32 = &.{},
     cache_salt: ?u64 = null, // effective cache key and its exact optional salt
+    memory_active: bool = false, // Folded Memory Weights v3 state injected as virtual prefix
 };
 pub const Stream = struct {
     embedding: ?@import("embedding.zig").Batch = null,
     readout: ?*const @import("readout.zig").Spec = null, // the request's; the backend writes its logits
+    memory_active: bool = false,
     id: []const u8,
     prompt_len: usize,
     max_new: u32,
@@ -295,6 +297,7 @@ pub const Stream = struct {
             .audios = spec.audios,
             .key = spec.key,
             .cache_salt = spec.cache_salt,
+            .memory_active = spec.memory_active,
         };
         // under a grammar a forced close ends at the think end: the grammar takes the reply from the next token
         if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {

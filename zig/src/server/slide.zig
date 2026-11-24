@@ -62,8 +62,9 @@ pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
     conn.sendJson(200, body);
 }
 
-/// The graph goes; the weights keep what they learned.
+/// The graph goes; under Folded Memory Weights v3, clears memory units too.
 pub fn forget(srv: *Server, conn: *Conn, _: Allocator) void {
+    if (srv.info.folded_memory) @import("slide_memory.zig").clearAll(srv);
     srv.slide.clear();
     conn.sendJson(200, "{\"cleared\": true}");
 }
@@ -80,9 +81,22 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = @import("slide_input.zig").read(body) catch |e|
         return refuse(conn, a, 400, @import("slide_input.zig").message(e));
+    const source = body.strField("source") orelse "chat";
+    if (srv.info.folded_memory) {
+        const replace_id: ?u32 = if (body.field("replace_id")) |v| blk: {
+            const iv = v.int64() orelse break :blk null;
+            break :blk if (iv > 0 and iv <= std.math.maxInt(u32)) @intCast(iv) else null;
+        } else null;
+        const standing = if (body.field("standing")) |v| (v == .bool and v.bool) else false;
+        const consolidate = if (body.field("consolidate")) |v| !(v == .bool and !v.bool) else true;
+        return @import("slide_memory.zig").learn(srv, conn, a, text, source, .{
+            .replace_id = replace_id,
+            .standing = standing,
+            .consolidate = consolidate,
+        });
+    }
     const recall = metrics_route.read(srv, conn, a, body) orelse return;
     const correcting = @import("slide_correction.zig").requested(body) catch return refuse(conn, a, 400, "correction must be true or false");
-    const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,
         else => |r| return refuse(conn, a, 400, supplied_questions.message(r)),

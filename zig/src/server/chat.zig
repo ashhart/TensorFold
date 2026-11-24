@@ -123,6 +123,76 @@ pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 
+fn extractMsgText(a: Allocator, msg: Value) ?[]const u8 {
+    const content = msg.field("content") orelse return null;
+    if (content == .string) {
+        const t = std.mem.trim(u8, content.string, " \t\r\n");
+        return if (t.len > 0) t else null;
+    }
+    if (content == .array) {
+        var buf: std.ArrayList(u8) = .empty;
+        for (content.array) |part| {
+            if (part.strField("text")) |s| {
+                if (buf.items.len > 0) buf.append(a, '\n') catch return null;
+                buf.appendSlice(a, s) catch return null;
+            }
+        }
+        const t = std.mem.trim(u8, buf.items, " \t\r\n");
+        return if (t.len > 0) t else null;
+    }
+    return null;
+}
+
+/// Extracts the trimmed text of the latest user message for the Folded Memory Weights neural gate.
+fn lastUserText(a: Allocator, messages: Value) ?[]const u8 {
+    if (messages != .array or messages.array.len == 0) return null;
+    var i = messages.array.len;
+    while (i > 0) {
+        i -= 1;
+        const msg = messages.array[i];
+        const role = msg.strField("role") orelse continue;
+        if (!std.mem.eql(u8, role, "user")) continue;
+        return extractMsgText(a, msg);
+    }
+    return null;
+}
+
+const Exchange = struct {
+    prev_assistant: ?[]const u8 = null,
+    user: []const u8,
+};
+
+/// Extracts the latest `(prev_assistant, user)` exchange for v6 implicit multi-turn correction learning.
+fn lastExchange(a: Allocator, messages: Value) ?Exchange {
+    if (messages != .array or messages.array.len == 0) return null;
+    var i = messages.array.len;
+    var user_idx: ?usize = null;
+    var user_txt: []const u8 = "";
+    while (i > 0) {
+        i -= 1;
+        const msg = messages.array[i];
+        const role = msg.strField("role") orelse continue;
+        if (std.mem.eql(u8, role, "user")) {
+            user_txt = extractMsgText(a, msg) orelse return null;
+            user_idx = i;
+            break;
+        }
+    }
+    const ui = user_idx orelse return null;
+    var prev_asst: ?[]const u8 = null;
+    var j = ui;
+    while (j > 0) {
+        j -= 1;
+        const msg = messages.array[j];
+        const role = msg.strField("role") orelse continue;
+        if (std.mem.eql(u8, role, "assistant")) {
+            prev_asst = extractMsgText(a, msg);
+            break;
+        }
+    }
+    return .{ .prev_assistant = prev_asst, .user = user_txt };
+}
+
 test "Server recovery: token staging allocation failure ends the loop without consuming tokens" {
     for (0..2) |fail_index| {
         var m: Mailbox = .{ .io = std.testing.io, .gpa = std.testing.allocator, .finished = true };
@@ -233,6 +303,18 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .audios = rendered.audios,
         .cache_key = rendered.cache_key,
     };
+    if (input.prompt == null and !background and !input.own) {
+        if (lastUserText(a, input.messages)) |q_text| {
+            if (srv.text.encode(a, q_text, false)) |q_ids| {
+                request.memory_query = q_ids;
+            } else |_| {}
+        }
+        if (srv.empty_system_prefix.len > 0 and rendered.ids.len > srv.empty_system_prefix.len and
+            std.mem.eql(u32, rendered.ids[0..srv.empty_system_prefix.len], srv.empty_system_prefix))
+        {
+            request.memory_strip = @intCast(srv.empty_system_prefix.len);
+        }
+    }
     const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
     if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
     request.salted = salt != 0;
@@ -327,6 +409,12 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     if (input.trace) |trace| trace.timed(reply);
     if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
+    // In-flight Folded Memory Weights v6: enqueue learnable user statements & multi-turn corrections asynchronously (0 ms added TTFT!)
+    if (srv.inflight.enabled and input.prompt == null and !request.background and !input.own and !request.untaught) {
+        if (lastExchange(a, input.messages)) |ex| {
+            srv.inflight.maybeEnqueueExchange(ex.prev_assistant, ex.user, input.fields);
+        }
+    }
     return reply;
 }
 
