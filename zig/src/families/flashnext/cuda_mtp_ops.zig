@@ -100,8 +100,7 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
-        /// `next`: the ids the stream's next prompt pass likely takes (Hooks.next), whose n-gram rows go ahead.
+        /// Prompt rows [at, stop) (keeping `marks`), their streams, then the head; `next` is Hooks.next.
         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark, next: []const u32) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;

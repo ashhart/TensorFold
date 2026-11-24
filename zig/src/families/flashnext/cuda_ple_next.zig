@@ -1,5 +1,4 @@
-//! A lone prompt pass's n-gram rows for the pass after it, gathered on a host thread while the GPU runs this one.
-//! A pass takes them only when its history and ids are the ones gathered for: the rows are a function of those alone.
+//! The next prompt pass's n-gram rows, gathered while the GPU runs this one; taken only for the same history and ids.
 
 const std = @import("std");
 const ple = @import("cuda_ple.zig");
@@ -50,8 +49,7 @@ pub const Next = struct {
         }
     }
 
-    /// Starts the gather of `next` after `history` on a host thread, in place of any earlier one; none if it can't.
-    /// An empty `next` (a window or a prompt's last pass) leaves the rows gathered for another pass in place.
+    /// Gathers `next` after `history` on a host thread in place of any earlier rows; an empty `next` keeps them.
     pub fn start(a: *Next, gpa: std.mem.Allocator, ngram: *const ple.Ngram, history: []const i64, next: []const u32) void {
         if (next.len == 0) return;
         a.join();
