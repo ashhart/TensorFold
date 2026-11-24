@@ -69,114 +69,18 @@ fn webpAlpha(b: []const u8) bool {
     return false;
 }
 
-// --- Pillow's resample (Resample.c), LANCZOS, 8 bits: double coefficients, fixed point with 22 fraction bits -------
-
-const precision = 22;
-
-extern "c" fn sin(x: f64) f64;
-
-fn sinc(x0: f64) f64 {
-    if (x0 == 0.0) return 1.0;
-    const x = x0 * std.math.pi;
-    return sin(x) / x;
-}
-
-fn lanczos(x: f64) f64 {
-    return if (-3.0 <= x and x < 3.0) sinc(x) * sinc(x / 3) else 0.0;
-}
-
-/// One axis's taps: each output's first input and fixed-point coefficients (precompute_coeffs, normalize_coeffs_8bpc).
-const Taps = struct {
-    first: []usize,
-    count: []usize,
-    k: []i32,
-    ksize: usize,
-
-    fn init(a: Allocator, in: usize, out: usize) !Taps {
-        const scale = @as(f64, @floatFromInt(in)) / @as(f64, @floatFromInt(out));
-        const fs = @max(scale, 1.0);
-        const support = 3.0 * fs;
-        const ksize: usize = @as(usize, @intFromFloat(@ceil(support))) * 2 + 1;
-        const t: Taps = .{ .first = try a.alloc(usize, out), .count = try a.alloc(usize, out), .k = try a.alloc(i32, out * ksize), .ksize = ksize };
-        const w = try a.alloc(f64, ksize);
-        defer a.free(w);
-        for (0..out) |xx| {
-            const center = (@as(f64, @floatFromInt(xx)) + 0.5) * scale;
-            const ss = 1.0 / fs;
-            const lo: i64 = @max(@as(i64, @intFromFloat(center - support + 0.5)), 0);
-            const hi: i64 = @min(@as(i64, @intFromFloat(center + support + 0.5)), @as(i64, @intCast(in)));
-            const n: usize = @intCast(hi - lo);
-            var ww: f64 = 0;
-            for (0..n) |x| {
-                w[x] = lanczos((@as(f64, @floatFromInt(@as(i64, @intCast(x)) + lo)) - center + 0.5) * ss);
-                ww += w[x];
-            }
-            const k = t.k[xx * ksize ..][0..ksize];
-            @memset(k, 0);
-            for (0..n) |x| {
-                const v = if (ww != 0.0) w[x] / ww else w[x];
-                const f = v * @as(f64, 1 << precision);
-                k[x] = @intFromFloat(if (v < 0) -0.5 + f else 0.5 + f);
-            }
-            t.first[xx] = @intCast(lo);
-            t.count[xx] = n;
-        }
-        return t;
-    }
-
-    fn deinit(t: *Taps, a: Allocator) void {
-        a.free(t.first);
-        a.free(t.count);
-        a.free(t.k);
-    }
-};
-
-fn clip8(ss: i32) u8 {
-    return @intCast(std.math.clamp(ss >> precision, 0, 255));
-}
-
-/// Image.resize(LANCZOS) of 8-bit pixels: width, then height; a pass keeping its size is skipped, as Pillow skips it.
+/// Image.resize(LANCZOS) of 8-bit pixels (3 or 4 channels) through core/picture's shared Lanczos-3.
 pub fn resample(a: Allocator, src: []const u8, w: usize, h: usize, ch: usize, ow: usize, oh: usize) ![]u8 {
-    var cur = try a.dupe(u8, src);
-    var cw = w;
-    if (ow != w) {
-        var t = try Taps.init(a, w, ow);
-        defer t.deinit(a);
-        const out = try a.alloc(u8, ow * h * ch);
-        for (0..h) |y| for (0..ow) |x| for (0..ch) |c| {
-            var ss: i32 = 1 << (precision - 1);
-            const k = t.k[x * t.ksize ..];
-            for (0..t.count[x]) |i| ss += @as(i32, cur[(y * w + t.first[x] + i) * ch + c]) * k[i];
-            out[(y * ow + x) * ch + c] = clip8(ss);
-        };
-        a.free(cur);
-        cur = out;
-        cw = ow;
-    }
-    if (oh != h) {
-        var t = try Taps.init(a, h, oh);
-        defer t.deinit(a);
-        const out = try a.alloc(u8, cw * oh * ch);
-        for (0..oh) |y| {
-            const k = t.k[y * t.ksize ..];
-            for (0..cw * ch) |xc| {
-                var ss: i32 = 1 << (precision - 1);
-                for (0..t.count[y]) |i| ss += @as(i32, cur[(t.first[y] + i) * cw * ch + xc]) * k[i];
-                out[y * cw * ch + xc] = clip8(ss);
-            }
-        }
-        a.free(cur);
-        cur = out;
-    }
-    return cur;
+    return picture.resample.resizeWith(a, .pillow, .lanczos, .ofChannels(src, w, h, ch), ow, oh);
 }
 
-fn muldiv255(v: u32, b: u32) u8 {
+/// v * b / 255, rounded to nearest.
+fn premultiply(v: u32, b: u32) u8 {
     const t = v * b + 128;
     return @intCast((t + (t >> 8)) >> 8);
 }
 
-/// Image.resize of `im` as Pillow does it: RGBA through RGBa (premultiplied by MULDIV255, back by 255 v / a truncated).
+/// Image.resize of `im` as Pillow gives it: RGBA premultiplied by its alpha, resized, then 255 v / a truncated.
 pub fn resize(a: Allocator, im: Image, ow: usize, oh: usize) !Image {
     if (im.width == ow and im.height == oh) return .{ .width = ow, .height = oh, .channels = im.channels, .pixels = try a.dupe(u8, im.pixels) };
     if (im.channels == 3) return .{ .width = ow, .height = oh, .channels = 3, .pixels = try resample(a, im.pixels, im.width, im.height, 3, ow, oh) };
@@ -184,7 +88,7 @@ pub fn resize(a: Allocator, im: Image, ow: usize, oh: usize) !Image {
     defer a.free(pre);
     for (0..im.width * im.height) |i| {
         const px = pre[i * 4 ..][0..4];
-        for (px[0..3]) |*c| c.* = muldiv255(c.*, px[3]);
+        for (px[0..3]) |*c| c.* = premultiply(c.*, px[3]);
     }
     const out = try resample(a, pre, im.width, im.height, 4, ow, oh);
     for (0..ow * oh) |i| {
@@ -341,10 +245,10 @@ pub fn finish(a: Allocator, im: Image, given: ?[]const u8, crop_margin: f64, out
     }
     var big = try resize(a, .{ .width = cw, .height = ch, .channels = 4, .pixels = crop }, size, size);
     defer big.deinit(a);
-    // paste on black with the alpha as the mask: v * a / 255 by Pillow's BLEND
+    // paste on black with the alpha as the mask: v * a / 255, rounded
     for (0..size * size) |i| {
         const px = big.pixels[i * 4 ..][0..4];
-        for (0..3) |c| out[i * 3 + c] = muldiv255(px[c], px[3]);
+        for (0..3) |c| out[i * 3 + c] = premultiply(px[c], px[3]);
     }
 }
 
@@ -361,7 +265,7 @@ test "Python's round halves to even, as preprocess's int(round(...)) sizes do" {
     try std.testing.expectEqual(@as(usize, 1024), resizedSize(1280, 960)[1]);
 }
 
-test "Pillow's LANCZOS fixed point keeps a flat picture flat and its premultiply round-trips opaque pixels" {
+test "the shared LANCZOS keeps a flat picture flat, and the premultiply round-trips opaque pixels" {
     const a = std.testing.allocator;
     const src = try a.alloc(u8, 37 * 53 * 3);
     defer a.free(src);
@@ -369,5 +273,21 @@ test "Pillow's LANCZOS fixed point keeps a flat picture flat and its premultiply
     const out = try resample(a, src, 37, 53, 3, 100, 64);
     defer a.free(out);
     for (out) |v| try std.testing.expectEqual(@as(u8, 200), v);
-    for (0..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), muldiv255(@intCast(v), 255));
+    for (0..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), premultiply(@intCast(v), 255));
+}
+
+test "an RGBA photo's resize gives Pillow 13's Image.resize(LANCZOS) bytes, shrinking and enlarging" {
+    // Pillow 13.0.0: Image.fromarray(px, "RGBA").resize((w, h), Image.LANCZOS) of the 9 x 7 picture below; FNV-1a
+    const a = std.testing.allocator;
+    var px: [9 * 7 * 4]u8 = undefined;
+    for (&px, 0..) |*p, i| p.* = @intCast((i * 37 + 11) % 256);
+    const alphas = [9]u8{ 0, 255, 128, 37, 255, 200, 255, 9, 255 };
+    for (0..9 * 7) |i| px[i * 4 + 3] = alphas[i % 9];
+    for ([_][2]usize{ .{ 5, 4 }, .{ 12, 9 } }, [_]u64{ 0xbc5b2fb257d802c2, 0xd1559dc65d4f5715 }) |wh, want| {
+        var out = try resize(a, .{ .width = 9, .height = 7, .channels = 4, .pixels = &px }, wh[0], wh[1]);
+        defer out.deinit(a);
+        var f: u64 = 0xcbf29ce484222325;
+        for (out.pixels) |b| f = (f ^ b) *% 0x100000001b3;
+        try std.testing.expectEqual(want, f);
+    }
 }
