@@ -44,6 +44,10 @@ pub const Vision = struct {
 
 /// The checkpoint's tower for `model`'s width under its rope, for `o.image_tokens` image tokens a request.
 pub fn open(gpa: Allocator, io: std.Io, model: *const q.model.Model, dir: []const u8, o: api.VisionOpen, a: Allocator, why: *[]const u8) !*Vision {
+    if (q.model.a3b(model.config)) {
+        why.* = "--vision: Qwen3.6-35B-A3B is served as text only; its image path is not qualified";
+        return error.VisionUnqualified;
+    }
     const read = struct {
         fn f(al: Allocator, i: std.Io, d: []const u8, name: []const u8) ?[]const u8 {
             const path = std.fs.path.join(al, &.{ d, name }) catch return null;

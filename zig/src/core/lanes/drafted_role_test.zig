@@ -38,9 +38,11 @@ test "the drafter wrapper sees the committed callback before its first hold" {
     defer head.deinit();
     var backend = target.backend();
     backend.first_before_draft = true;
+    backend.keep_full_lone = true;
     var wrapped = try Drafted.init(gpa, backend, head.drafter());
     defer wrapped.deinit();
     try std.testing.expect(wrapped.backend().first_before_draft);
+    try std.testing.expect(wrapped.backend().keep_full_lone);
     var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
     defer cfg.deinit(gpa);
     var clock: fake.FixedClock = .{};

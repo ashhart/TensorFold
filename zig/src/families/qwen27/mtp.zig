@@ -37,7 +37,7 @@ pub const Scratch = struct {
 };
 
 /// A logits row's pick and its probability under the head's softmax.
-pub const Pick = struct { token: u32, chance: f32 };
+pub const Pick = @import("mtp_pick.zig").Pick;
 pub fn pick(values: []const u16) !Pick {
     const token = try @import("session.zig").argmax(values);
     const top: f32 = @bitCast(@as(u32, values[token]) << 16);
@@ -75,6 +75,42 @@ pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forw
 
 /// One MTP head pass on `r` (`round`: its cache rows and positions); a round left to keep reads nothing it writes.
 pub fn pass(r: *Runner, round: *const Round, sc: *const Scratch, hidden: Ref, head: forward.Head) !Ref {
+    return passAround(r, round, sc, hidden, head, Plain{});
+}
+
+const Plain = struct {
+    pub fn before(_: Plain, _: mtl.ComputeEncoder) !void {}
+    pub fn after(_: Plain, _: mtl.ComputeEncoder, _: Ref) !void {}
+};
+
+fn Steps(Around: type) type {
+    return struct {
+        r: *Runner,
+        sc: *const Scratch,
+        e: *mtl.ComputeEncoder,
+        cb: mtl.CommandBuffer,
+        hidden: Ref,
+        rows: u32,
+        mode: forward.Head,
+        around: Around,
+        pub fn before(s: *@This()) !void {
+            try s.around.before(s.e.*);
+        }
+        pub fn head(s: *@This()) !Ref {
+            return encode(s.r.model, s.sc, s.e, .{ .ptr = s.r, .gdn = Runner.gdnForward, .attention = Runner.attentionForward }, s.hidden, s.rows, s.mode);
+        }
+        pub fn after(s: *@This(), out: Ref) !void {
+            try s.around.after(s.e.*, out);
+        }
+        pub fn commit(s: *@This()) !void {
+            s.e.end();
+            s.cb.commit();
+        }
+    };
+}
+
+/// `pass` with `around.before` and `around.after` encoded on its one command buffer, before and after the head.
+pub fn passAround(r: *Runner, round: *const Round, sc: *const Scratch, hidden: Ref, head: forward.Head, around: anytype) !Ref {
     if (r.failed or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
     var attention_plan = try r.attentionPlan(round);
     defer attention_plan.deinit();
@@ -91,9 +127,8 @@ pub fn pass(r: *Runner, round: *const Round, sc: *const Scratch, hidden: Ref, he
     const cb = r.model.queue.commandBuffer();
     var e = cb.compute(.serial);
     errdefer e.end(); // an encoder left open aborts the process when it is released
-    const out = try encode(r.model, sc, &e, .{ .ptr = r, .gdn = Runner.gdnForward, .attention = Runner.attentionForward }, hidden, @intCast(round.ids.len), head);
-    e.end();
-    cb.commit();
+    var steps = Steps(@TypeOf(around)){ .r = r, .sc = sc, .e = &e, .cb = cb, .hidden = hidden, .rows = @intCast(round.ids.len), .mode = head, .around = around };
+    const out = try @import("mtp_pick.zig").fused(&steps, Ref);
     cb.wait();
     if (rounds.gpuFailed(cb, "the MTP head")) {
         r.failed = true;

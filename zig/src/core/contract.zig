@@ -1,5 +1,6 @@
 //! The kernel contract every GPU kernel's test registers with: its spec, the gates and the input families.
 pub const delta_slots_ref = @import("contract/delta_slots_ref.zig");
+pub const inkling2_attn_ref = @import("contract/inkling2_attn_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
@@ -11,6 +12,10 @@ pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
+pub const inkling2_glue_metal_records = @import("contract/inkling2_glue_metal_records.zig");
+pub const inkling2_dspark_metal_records = @import("contract/inkling2_dspark_metal_records.zig");
+pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_records.zig");
+pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
 pub const registry = @import("contract/registry.zig");
@@ -66,6 +71,7 @@ test {
     _ = cubin;
     _ = hsaco;
     _ = hip_records;
+    _ = inkling2_attn_ref;
     _ = @import("contract/hip_records_qwen3.zig");
     _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");

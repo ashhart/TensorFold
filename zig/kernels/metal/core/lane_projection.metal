@@ -322,29 +322,46 @@ uint group_id [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_sim
 }
 #endif
 
-#if (TF_BITS == 4 || TF_BITS == 8) && defined(TF_REG)
-// A lane's codes for one group (4-bit: two quads; 8-bit: the same codes a byte each), metadata quads and row sums.
+#if (TF_BITS == 4 || TF_BITS == 5 || TF_BITS == 6 || TF_BITS == 8) && defined(TF_REG)
+// A lane's codes (4/8-bit: two/four quads; 5/6-bit split-plane: low nibbles + hi plane), metadata quads and sums.
 #if TF_BITS == 8
 struct tf_reg_load { uint4 w[4]; uint4 q0, q1; float x0, x1; };
-constant constexpr int TF_REG_QUADS = 4;
-#define TF_REG_CODES(wl, g) {wl[(size_t)(g) * 128], wl[(size_t)(g) * 128 + 32], wl[(size_t)(g) * 128 + 64], wl[(size_t)(g) * 128 + 96]}
+constant constexpr int TF_REG_STRIDE = 128;
+#define TF_REG_CODES(wg, lane) {wg[lane], wg[32 + lane], wg[64 + lane], wg[96 + lane]}
 #else
-struct tf_reg_load { uint4 w0, w1, q0, q1; float x0, x1; };
-constant constexpr int TF_REG_QUADS = 2;
-#define TF_REG_CODES(wl, g) wl[(size_t)(g) * 64], wl[(size_t)(g) * 64 + 32]
+constant constexpr int TF_REG_STRIDE = TF_BITS == 6 ? 96 : TF_BITS == 5 ? 80 : 64;
+struct tf_reg_load {
+  uint4 w0, w1;
+#if TF_BITS == 5
+  uint2 h;
+#elif TF_BITS == 6
+  uint4 h;
+#endif
+  uint4 q0, q1;
+  float x0, x1;
+};
+#if TF_BITS == 5
+#define TF_REG_CODES(wg, lane) wg[lane], wg[32 + lane], ((const device uint2*)(wg + 64))[lane]
+#elif TF_BITS == 6
+#define TF_REG_CODES(wg, lane) wg[lane], wg[32 + lane], wg[64 + lane]
+#else
+#define TF_REG_CODES(wg, lane) wg[lane], wg[32 + lane]
+#endif
 #endif
 
-inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv, const device float* XS, int g, int n, int m, int stride) {
-  return {TF_REG_CODES(wl, g), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XS[g * stride + m], XS[g * stride + m + 8]};
+inline tf_reg_load tf_reg_fetch(const device uint4* wt, const device uint4* sbv, const device float* XS, int g, int n, int m, int stride, int lane) {
+  const device uint4* wg = wt + (size_t)g * TF_REG_STRIDE;
+  return {TF_REG_CODES(wg, lane), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XS[g * stride + m], XS[g * stride + m + 8]};
 }
 
 #if TF_INLINE_SUMS
-inline tf_reg_load tf_reg_fetch_tg(const device uint4* wl, const device uint4* sbv, const threadgroup float* XT, int g, int first, int n, int m) {
-  return {TF_REG_CODES(wl, g), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XT[(g - first) * 16 + m], XT[(g - first) * 16 + m + 8]};
+inline tf_reg_load tf_reg_fetch_tg(const device uint4* wt, const device uint4* sbv, const threadgroup float* XT, int g, int first, int n, int m, int lane) {
+  const device uint4* wg = wt + (size_t)g * TF_REG_STRIDE;
+  return {TF_REG_CODES(wg, lane), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XT[(g - first) * 16 + m], XT[(g - first) * 16 + m + 8]};
 }
 #endif
 
-// tf_lane's arithmetic with codes unpacked straight into tensor-op registers: every word equals tf_lane_pair's.
+// tf_lane's arithmetic with codes unpacked straight into tensor-op registers (4, 4+1, 4+2, and 8-bit).
 [[kernel]] void tf_lane_reg(const device bfloat* X [[buffer(0)]], const device uint4* W [[buffer(1)]], const device bfloat* SB [[buffer(2)]],
     const device int* mdims [[buffer(3)]], device TF_OUT* Y [[buffer(4)]], const device float* XS [[buffer(5)]],
     uint sgi [[simdgroup_index_in_threadgroup]], uint lanei [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
@@ -363,7 +380,7 @@ inline tf_reg_load tf_reg_fetch_tg(const device uint4* wl, const device uint4* s
   auto cb = op.template get_right_input_cooperative_tensor<bfloat, half, float>();
   auto P = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(a0)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   thread half2* b2 = (thread half2*)&cb[0];
-  const device uint4* wl = W + (size_t)tile * KG * 32 * TF_REG_QUADS + lane;
+  const device uint4* wt = W + (size_t)tile * KG * TF_REG_STRIDE;
   const device uint4* sbv = (const device uint4*)SB;
   const half2 bias = half2(1024.0h);
   float C[16];
@@ -377,9 +394,9 @@ inline tf_reg_load tf_reg_fetch_tg(const device uint4* wl, const device uint4* s
   simdgroup_barrier(mem_flags::mem_threadgroup);
   for (int p = lane; p < (last - first) * M; p += 32) XT[(p / M) * 16 + p % M] = tf_lane_xsum(X, p % M, first + p / M, M);
   simdgroup_barrier(mem_flags::mem_threadgroup);
-#define TF_REG_FETCH(g) tf_reg_fetch_tg(wl, sbv, XT, g, first, n0 + nb, mb)
+#define TF_REG_FETCH(g) tf_reg_fetch_tg(wt, sbv, XT, g, first, n0 + nb, mb, lane)
 #else
-#define TF_REG_FETCH(g) tf_reg_fetch(wl, sbv, XS, g, n0 + nb, mb, stride)
+#define TF_REG_FETCH(g) tf_reg_fetch(wt, sbv, XS, g, n0 + nb, mb, stride, lane)
 #endif
   if (first < last) next = TF_REG_FETCH(first);
   for (int g = first; g < last; g++) {
@@ -396,10 +413,24 @@ inline tf_reg_load tf_reg_fetch_tg(const device uint4* wl, const device uint4* s
 #else
       // 1024 + code as fp16 bits, codes (0,4) (1,5) (2,6) (3,7) of a word; subtracting 1024 is exact
       const uint word = w < 4 ? cur.w0[w] : cur.w1[w - 4], lo = word & 0x0F0F0F0Fu, hi = (word >> 4) & 0x0F0F0F0Fu;
+#if TF_BITS == 5
+      const uint hh = cur.h[w >> 2] >> (4 * (w & 3));
+      b2[e]     = as_type<half2>((lo & 0x00FF00FFu)        | ((hh & 0x00010001u) << 4) | 0x64006400u) - bias;
+      b2[e + 1] = as_type<half2>((hi & 0x00FF00FFu)        | ((hh & 0x00020002u) << 3) | 0x64006400u) - bias;
+      b2[e + 8] = as_type<half2>(((lo >> 8) & 0x00FF00FFu) | ((hh & 0x00040004u) << 2) | 0x64006400u) - bias;
+      b2[e + 9] = as_type<half2>(((hi >> 8) & 0x00FF00FFu) | ((hh & 0x00080008u) << 1) | 0x64006400u) - bias;
+#elif TF_BITS == 6
+      const uint hh = cur.h[w >> 1] >> (8 * (w & 1));
+      b2[e]     = as_type<half2>((lo & 0x00FF00FFu)        | ((hh & 0x00030003u) << 4) | 0x64006400u) - bias;
+      b2[e + 1] = as_type<half2>((hi & 0x00FF00FFu)        | ((hh & 0x000C000Cu) << 2) | 0x64006400u) - bias;
+      b2[e + 8] = as_type<half2>(((lo >> 8) & 0x00FF00FFu) | (hh & 0x00300030u)        | 0x64006400u) - bias;
+      b2[e + 9] = as_type<half2>(((hi >> 8) & 0x00FF00FFu) | ((hh & 0x00C000C0u) >> 2) | 0x64006400u) - bias;
+#else
       b2[e] = as_type<half2>((lo & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 1] = as_type<half2>((hi & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 8] = as_type<half2>(((lo >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 9] = as_type<half2>(((hi >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
+#endif
 #endif
     }
     if (g + 1 < last) next = TF_REG_FETCH(g + 1);

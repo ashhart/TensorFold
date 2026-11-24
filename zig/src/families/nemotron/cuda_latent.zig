@@ -85,15 +85,22 @@ pub fn partFloats(c: Config, rows: usize) usize {
     return rows * c.top_k * own * c.latent + rows * own * c.hidden;
 }
 
-/// TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD into `c`: both or neither; a world must hold whole shares.
+/// The tools' place (cli, tf-cuda-test): TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD, both or neither, their input as before.
 pub fn place(c: *Config) !void {
     const env = @import("sys").environment;
     const r = try env.read(?u64, "TF_NEMOTRON_RANK", null);
     const w = try env.read(?u64, "TF_NEMOTRON_WORLD", null);
     if (r == null and w == null) return;
     if (r == null or w == null) return error.NoRank;
-    c.rank = @intCast(r.?);
-    c.world = @intCast(w.?);
+    return placeAt(c, .{ .rank = @intCast(r.?), .world = @intCast(w.?) });
+}
+
+pub const At = struct { rank: usize, world: usize };
+
+/// `at` into `c` (the server's resolved launch, or a tool's variables): a world must hold whole shares.
+pub fn placeAt(c: *Config, at: At) !void {
+    c.rank = at.rank;
+    c.world = at.world;
     if (c.world < 1 or c.rank >= c.world) return error.NoRank;
     if (c.world == 1) return;
     if (c.latent == 0) {

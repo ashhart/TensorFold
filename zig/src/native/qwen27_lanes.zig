@@ -95,6 +95,7 @@ pub const Metal = struct {
     standing: @import("qwen27_resume.zig").Standing = .{}, // what slot 0 stands at once its stream left (#1197)
     rewind: ?mtl.Buffer = null, // slot 0's DeltaNet states and taps at its last pass's history end
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
+    give_back: [max_streams]bool = @splat(false), // a free slot's grown K/V and ring wait to go back (slots.giveBack)
     draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
@@ -123,7 +124,10 @@ pub const Metal = struct {
         if (draft) |d| {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
-            for (b.contexts[1..runner.ready], 1..) |*x, slot| x.* = try Context.init(gpa, d.model, slot < b.draft_slots);
+            for (b.contexts[1..runner.ready], 1..) |*x, slot| {
+                x.* = try Context.initGrow(gpa, d.model, slot < b.draft_slots, runner.kv_step);
+                x.*.?.settle = .{ .ctx = runner, .slot = @intCast(slot), .run = q.decode_round.Runner.settleOpaque };
+            }
         }
         return b;
     }
@@ -353,11 +357,12 @@ pub const Metal = struct {
         std.debug.assert(r.active == null);
         if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, r.taps.count, rows[0..n], out.contents()[0..out.length()]);
+        const src = r.taps.source();
+        try q.tap_gather.gather(src.buffer.contents()[0..src.buffer.length()], r.taps.capacity, r.taps.rows, src.width, src.planes, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
-            if (g.stride != r.taps.width * r.taps.count * 2) return error.BadTapGather;
+            if (g.stride != @as(usize, src.width) * src.planes * 2) return error.BadTapGather; // a v1 ring: one fused plane
             if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;

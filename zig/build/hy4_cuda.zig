@@ -14,6 +14,7 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .target = target,
         .optimize = optimize,
     }));
+    root.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     const exe = b.addExecutable(.{ .name = "tf-hy4-cuda-generate", .root_module = root });
     b.step("hy4-cuda-generate", "Build the Hy4-flash CUDA greedy generator for EXL3 checkpoints").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }
