@@ -257,8 +257,12 @@ pub const Model = struct {
                 const name = try std.fmt.bufPrintSentinel(&buf, "sp_matvec_{d}", .{rows}, 0);
                 m.dense[i] = try mtl.Pipeline.init(m.device, lib, name, false);
                 made += 1;
+                if (m.dense[i].maxThreads() < 256) return error.Inkling2Threads;
             }
-            m.norm = try mtl.Pipeline.init(m.device, lib, "sp_norm", false);
+            const sp_norm = try mtl.Pipeline.init(m.device, lib, "sp_norm", false);
+            errdefer sp_norm.deinit();
+            if (sp_norm.maxThreads() < 256) return error.Inkling2Threads;
+            m.norm = sp_norm;
         }
         errdefer {
             m.norm.deinit();
@@ -272,6 +276,7 @@ pub const Model = struct {
             for (runtime_names, 0..) |name, i| {
                 m.runtime[i] = try mtl.Pipeline.init(m.device, lib, name, false);
                 made += 1;
+                if (m.runtime[i].maxThreads() < 256) return error.Inkling2Threads;
             }
         }
         errdefer for (m.runtime) |p| p.deinit();

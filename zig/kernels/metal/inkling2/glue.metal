@@ -101,6 +101,7 @@ kernel void tf_inkling2_ar(
 }
 
 struct InkConvArgs { uint rows, channels; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_conv_static(
     const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkConvArgs& a [[buffer(3)]],
@@ -113,6 +114,7 @@ kernel void tf_inkling2_conv_static(
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_conv_dynamic(
     const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
     const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
@@ -138,6 +140,7 @@ kernel void tf_inkling2_conv_dynamic(
 }
 
 struct InkRouteArgs { uint rows; };
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_router(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
     const device float* bias [[buffer(2)]], device uint* ids [[buffer(3)]],
@@ -178,6 +181,7 @@ kernel void tf_inkling2_router(
 }
 
 struct InkActArgs { uint rows, width; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_swiglu(
     const device bfloat* gu [[buffer(0)]], device bfloat* out [[buffer(1)]],
     constant InkActArgs& a [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
@@ -189,6 +193,7 @@ kernel void tf_inkling2_swiglu(
 }
 
 struct InkLogitArgs { uint rows, vocab; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_logits(
     const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
     device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
@@ -203,6 +208,7 @@ kernel void tf_inkling2_logits(
 }
 
 struct InkExpertArgs { uint rows, channels; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_expert_pick(
     const device bfloat* experts [[buffer(0)]], const device uint* ids [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkExpertArgs& a [[buffer(3)]],
@@ -212,6 +218,7 @@ kernel void tf_inkling2_expert_pick(
   out[(size_t(r) * 8 + j) * a.channels + d] = experts[(size_t(r) * 128 + ids[r * 8 + j]) * a.channels + d];
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_expert_combine(
     const device bfloat* picked [[buffer(0)]], const device float* weights [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkExpertArgs& a [[buffer(3)]],
