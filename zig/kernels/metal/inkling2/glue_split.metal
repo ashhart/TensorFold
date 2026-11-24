@@ -1,4 +1,4 @@
-// tf_inkling2_router's bits in two launches, after glue.metal: a thread a score with main's serial dot, then picks.
+// Main's router bits in two launches, after glue.metal: a thread a score with main's serial dot, then picks.
 
 kernel void tf_inkling2_route_scores(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]], device float* scores [[buffer(2)]],
