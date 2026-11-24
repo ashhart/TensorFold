@@ -197,7 +197,7 @@ def check(root, requested=None, pr=None):
 
 
 def import_cycles(root, base, current):
-    """The current cycle checker on both trees: a new cycle edge is an ERROR, an inherited cycle a WARN."""
+    """The current cycle checker on both trees: a cycle the PR closes on its own, or a new core import, is an ERROR."""
     return runpy.run_path(str(root / 'tools/zig/structure_check.py'))['compare'](base, current)
 
 
@@ -222,7 +222,8 @@ def main(argv=None):
         print(level + ': ' + message)
     print(f"merge base {counts['merge_base']}; {counts['changed_files']} changed files; "
           f"lean {counts['lean_head']} vs {counts['lean_base']}, {counts['new_lean']} new; "
-          f"import cycle edges {counts['cycle_head']} vs {counts['cycle_base']}, {counts['new_cycle']} new, "
+          f"import cycle edges {counts['cycle_head']} vs {counts['cycle_base']}, {counts['new_cycle']} new "
+          f"({counts['closing_cycle']} closing on their own), "
           f"{counts['removed_cycle']} removed")
     errors = sum(level == 'ERROR' for level, _ in findings)
     warnings = sum(level == 'WARN' for level, _ in findings)
