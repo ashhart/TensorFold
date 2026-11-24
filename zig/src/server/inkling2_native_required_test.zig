@@ -59,13 +59,35 @@ fn allowed(words: []const u32, id: u32) bool {
     return words[id / 32] >> @intCast(id % 32) & 1 == 1;
 }
 
-// The grammar library decides whether a constant may spell a special token; this host has none, so the test skips.
+/// `raw` in the library's ids: the harness puts added tokens after the cut base vocabulary; the library, declared ids.
+fn declaredIds(a: std.mem.Allocator, text: []const u8, raw: []const u8) ![]u32 {
+    const doc = (try json.parseText(a, text)).ok;
+    const base: u32 = @intCast(doc.get("model").?.get("vocab").?.object.count());
+    const added = doc.get("added_tokens").?.array;
+    const ids = try a.dupe(u32, try h.encodeReply(a, raw));
+    for (ids) |*id| if (id.* >= base) {
+        const declared = added[id.* - base].get("id").?;
+        id.* = try std.fmt.parseInt(u32, declared.int, 10);
+    };
+    return ids;
+}
+
+// The grammar library decides whether a constant may spell a special token; without the library the test skips.
 test "Inkling 2 reply: probe, the grammar library opens a native reply on <|message_model|> and ends it at the end of sampling" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const tok = try tokenizer(a);
+    const model: u32 = 200001;
+    const end_message: u32 = 200010;
     const end_sampling: u32 = 200006;
+    // the reply in the library's id space, checked before the library: two whole call messages
+    const ids = try declaredIds(a, tok.text, message("x") ++ message("y"));
+    try t.expectEqual(model, ids[0]);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u32, ids, &.{model}));
+    try t.expectEqual(@as(usize, 2), std.mem.count(u32, ids, &.{200049}));
+    try t.expectEqual(end_message, ids[ids.len - 1]);
+    const first_end = std.mem.indexOfScalar(u32, ids, end_message).?;
     var err: [512]u8 = undefined;
     var c = api.grammar.Compiler.open(t.io, a, tok.text, tok.vocab, &.{end_sampling}, &err) catch |e| switch (e) {
         error.NoGrammarLibrary => return error.SkipZigTest,
@@ -79,17 +101,17 @@ test "Inkling 2 reply: probe, the grammar library opens a native reply on <|mess
     const r = m.rules();
     defer r.vtable.free(r.ptr);
     const words = try a.alloc(u32, c.words);
-    const ids = try h.encodeReply(a, message("x") ++ message("y"));
-    const model: u32 = 200001;
-    try t.expectEqual(model, ids[0]);
-    // the one-token probe: the reply's first token may be <|message_model|>, and nothing generic is
+    // the one-token probe: the reply's first token may be <|message_model|>, and the end of sampling may not
     try r.vtable.fill(r.ptr, words);
     try t.expect(allowed(words, model));
     try t.expect(!allowed(words, end_sampling));
-    const first_end = std.mem.indexOfScalar(u32, ids, 200010).?;
     for (ids, 0..) |id, i| {
+        if (i == ids.len - 1) { // the last call's JSON is complete: its end of message is allowed
+            try r.vtable.fill(r.ptr, words);
+            try t.expect(allowed(words, end_message));
+        }
         try t.expect(try r.vtable.accept(r.ptr, id));
-        if (i == first_end) { // after a whole call: another call's message, or the end of sampling
+        if (i == first_end or i == ids.len - 1) { // after a whole call: another call's message, or the end of sampling
             try r.vtable.fill(r.ptr, words);
             try t.expect(allowed(words, model) and allowed(words, end_sampling));
         }
