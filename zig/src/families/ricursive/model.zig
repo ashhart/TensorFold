@@ -37,6 +37,10 @@ pub const Model = struct {
     fp4: ?Fp4 = null,
     /// RoPE's inverse frequencies: fp32 [head_dim / 2].
     inv: mtl.Buffer,
+    /// A drafter's taps: each layer's place in its features (-1 untapped), their count, and the copy (dflash2.metal).
+    tap_at: [cfg.max_layers]i8 = @splat(-1),
+    taps: u32 = 0,
+    tap: ?mtl.Pipeline = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -44,6 +48,9 @@ pub const Model = struct {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.gpa = gpa;
+        m.tap_at = @splat(-1);
+        m.taps = 0;
+        m.tap = null;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -107,7 +114,25 @@ pub const Model = struct {
         return m.llama[@backingInt(g)];
     }
 
+    /// The drafter's layers, in the order its features concatenate them; the copy compiled once.
+    pub fn setTaps(m: *Model, layers: []const u32) !void {
+        if (layers.len == 0 or layers.len > 16) return error.UnsupportedRicursiveTaps;
+        var at: [cfg.max_layers]i8 = @splat(-1);
+        for (layers, 0..) |l, i| {
+            if (l >= m.config.layers or at[l] >= 0) return error.UnsupportedRicursiveTaps;
+            at[l] = @intCast(i);
+        }
+        if (m.tap == null) {
+            const lib = try mtl.Library.fromSource(m.device, ks.ricursive_dflash2, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
+            defer lib.deinit();
+            m.tap = try mtl.Pipeline.init(m.device, lib, "rc_tap", false);
+        }
+        m.tap_at = at;
+        m.taps = @intCast(layers.len);
+    }
+
     pub fn deinit(m: *Model) void {
+        if (m.tap) |p| p.deinit();
         m.inv.deinit();
         if (m.fp4) |*f| f.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();

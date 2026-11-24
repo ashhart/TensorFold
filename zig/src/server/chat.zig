@@ -52,6 +52,10 @@ pub const Input = struct {
     prompt_logprobs: ?u8 = null,
     /// The prompt cache's salt (cache_salt.zig): a hash, 0 for none; states kept under one salt serve only that salt.
     cache_salt: u64 = 0,
+    /// ``echo: true`` on ``/v1/completions``: the reply's text and legacy logprobs start with the prompt's own.
+    echo: bool = false,
+    /// ``echo`` with ``max_tokens: 0``: the engine draws one token the reply drops, so the reply is the prompt alone.
+    prompt_only: bool = false,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
     /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
@@ -60,6 +64,13 @@ pub const Input = struct {
     fill_room: bool = false,
     /// ``"execution_witness": true``: the reply binds the witness, its prompt, resolved request and tokens.
     execution_witness: bool = false,
+
+    /// The prompt rows the engine computes: ``prompt_logprobs``' alternatives, or echo's ``logprobs`` when more.
+    pub fn promptRows(input: Input) ?u8 {
+        const echoed: ?u8 = if (input.echo) input.logprobs else null;
+        const asked = input.prompt_logprobs orelse return echoed;
+        return @max(asked, echoed orelse 0);
+    }
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -101,6 +112,8 @@ pub const Reply = struct {
     decode_tps: f64 = 0,
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
+    /// The engine's prompt rows, one a prompt token after the first, for a request that asked (completion_echo.zig).
+    prompt_rows: ?[]const api.LogprobRow = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
     reasoning_recovered: bool = false, // ended at its end token in an unclosed think block: content repeats it
     execution_witness: ?Value = null, // the reply binding, when the request asked (witness_reply.zig)
@@ -244,7 +257,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         if (srv.info.capability(.answer_limit)) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }
     request.logprobs = input.logprobs;
-    request.prompt_logprobs = input.prompt_logprobs;
+    request.prompt_logprobs = input.promptRows();
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
     const deadline: ?i96 = if (f.get("deadline_s")) |v| blk: {
         const s = (if (v == .bool) null else v.float64()) orelse return cx.refuse("deadline_s must be a number of seconds");
@@ -297,7 +310,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .report_seed = input.choices > 1, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .report_seed = input.choices > 1, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .grammar = if (request.structure) |st| (if (st.after) |t| .{ .after = t } else .on) else .none, .max_tokens = if (input.prompt_only) 0 else request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = fields_mod.flag(input.fields, "tool_call_single") orelse false, .required = fields_mod.flag(input.fields, "tool_call_required") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
     gen.call_end = @import("chat_inkling2.zig").callEnd(srv, gen.required, request.structure);
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished

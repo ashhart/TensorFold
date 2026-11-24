@@ -1,49 +1,53 @@
-//! H3's shards read into the page cache ahead of their Metal mappings, through the shared reader.
+//! Weight bytes read into the page cache before the GPU or a loader faults their mapping, via core's checked reader.
 const std = @import("std");
 const core = @import("core");
+const ahead = core.checkpoint_read_ahead;
 
-/// One shard's path and whole-file size.
-pub const Shard = struct { path: [:0]const u8, size: u64 };
+/// A byte range of one file; its path outlives the read.
+pub const Span = ahead.Span;
 
-/// Every shard's bytes in `checkpoint_read_ahead.chunk` spans, read with `TF_LOAD_PREFETCH` readers.
-pub fn read(gpa: std.mem.Allocator, io: std.Io, shards: []const Shard) !u64 {
-    const readers = try core.checkpoint_read_ahead.readers();
+/// Every span's bytes, cut into `chunk` pieces, with `TF_LOAD_PREFETCH` readers; missing or short files fail.
+pub fn read(gpa: std.mem.Allocator, io: std.Io, spans: []const Span) !u64 {
+    const readers = try ahead.readers();
     if (readers == 0) return 0;
-    var spans: std.ArrayList(core.checkpoint_read_ahead.Span) = .empty;
-    errdefer spans.deinit(gpa);
-    for (shards) |shard| {
-        var lo: u64 = 0;
-        while (lo < shard.size) {
-            const hi = lo + @min(core.checkpoint_read_ahead.chunk, shard.size - lo);
-            try spans.append(gpa, .{ .path = shard.path.ptr, .lo = lo, .hi = hi });
+    var pieces: std.ArrayList(Span) = .empty;
+    errdefer pieces.deinit(gpa);
+    for (spans) |s| {
+        var lo = s.lo;
+        while (lo < s.hi) {
+            const hi = lo + @min(ahead.chunk, s.hi - lo);
+            try pieces.append(gpa, .{ .path = s.path, .lo = lo, .hi = hi });
             lo = hi;
         }
     }
-    var reader = try core.checkpoint_read_ahead.start(gpa, io, try spans.toOwnedSlice(gpa), readers);
+    var reader = try ahead.start(gpa, io, try pieces.toOwnedSlice(gpa), readers);
     defer reader.deinit();
     return reader.check();
 }
 
-test "h3 read ahead: complete shards, short or missing files refused, disabled reads skipped" {
+test "h3 read ahead: every span's bytes across pieces and files, short or missing files refused, disabled reads skipped" {
     const gpa = std.testing.allocator;
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const big = try gpa.alloc(u8, core.checkpoint_read_ahead.chunk + 5);
+    const big = try gpa.alloc(u8, ahead.chunk + 5);
     defer gpa.free(big);
     @memset(big, 1);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = big });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b", .data = big[0..100] });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = big });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = big[0..100] });
     const a = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/a", .{tmp.sub_path}, 0);
     defer gpa.free(a);
     const b = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/b", .{tmp.sub_path}, 0);
     defer gpa.free(b);
-    if (try core.checkpoint_read_ahead.readers() == 0) {
-        try std.testing.expectEqual(0, try read(gpa, std.testing.io, &.{.{ .path = a, .size = big.len + 1 }}));
+    if (try ahead.readers() == 0) {
+        try std.testing.expectEqual(0, try read(gpa, io, &.{.{ .path = b, .lo = 0, .hi = 101 }}));
         return;
     }
-    try std.testing.expectEqual(big.len + 100, try read(gpa, std.testing.io, &.{ .{ .path = a, .size = big.len }, .{ .path = b, .size = 100 } }));
-    try std.testing.expectEqual(0, try read(gpa, std.testing.io, &.{}));
-    try std.testing.expectError(error.LoadPrefetchRead, read(gpa, std.testing.io, &.{.{ .path = a, .size = big.len + 1 }}));
-    try tmp.dir.deleteFile(std.testing.io, "b");
-    try std.testing.expectError(error.LoadPrefetchRead, read(gpa, std.testing.io, &.{.{ .path = b, .size = 1 }}));
+    // a's span crosses a piece boundary: two pieces; b's is one; an empty span reads nothing
+    const spans = [_]Span{ .{ .path = a, .lo = 3, .hi = ahead.chunk + 5 }, .{ .path = b, .lo = 0, .hi = 100 }, .{ .path = b, .lo = 7, .hi = 7 } };
+    try std.testing.expectEqual(ahead.chunk + 2 + 100, try read(gpa, io, &spans));
+    try std.testing.expectEqual(0, try read(gpa, io, &.{}));
+    try std.testing.expectError(error.LoadPrefetchRead, read(gpa, io, &.{.{ .path = b, .lo = 0, .hi = 101 }}));
+    try tmp.dir.deleteFile(io, "b");
+    try std.testing.expectError(error.LoadPrefetchRead, read(gpa, io, &.{.{ .path = b, .lo = 0, .hi = 1 }}));
 }

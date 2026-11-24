@@ -24,7 +24,7 @@ fn gemvDepth(s: c.Shape) usize {
 pub const Mut = struct { name: []const u8, find: []const u8, with: []const u8, gate: g.Gate };
 
 /// `text` with every `m.find` replaced (the substitution must land, or the control proves nothing).
-fn mutated(a: std.mem.Allocator, text: []const u8, m: Mut) ![]u8 {
+pub fn mutated(a: std.mem.Allocator, text: []const u8, m: Mut) ![]u8 {
     if (std.mem.indexOf(u8, text, m.find) == null) return error.ControlDidNotApply;
     return std.mem.replaceOwned(u8, a, text, m.find, m.with);
 }

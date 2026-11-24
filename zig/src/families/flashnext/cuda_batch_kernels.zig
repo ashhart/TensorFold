@@ -42,7 +42,7 @@ pub const Forms = struct {
     in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
     readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
     fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
-    readout_fused: bool = false, // TF_FLASHNEXT_READOUT_FUSED
+    readout_fused: bool = true, // TF_FLASHNEXT_READOUT_FUSED
 
     pub fn resolve() Forms {
         return .{

@@ -129,6 +129,8 @@ const valid = [_]Case{
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_MINIMAX_GRAPHS", .raw = "0", .n = 0 },
+    .{ .name = "TF_MINIMAX_GRAPHS", .raw = "1", .n = 1 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
     .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "0", .n = 0 },
@@ -172,6 +174,11 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
+    .{ .name = "GLM_ROUND_PROF", .raw = "0", .n = 0 },
+    .{ .name = "GLM_ROUND_PROF", .raw = "1", .n = 1 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = "1024", .n = 1024 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = " 2000000 ", .n = 2000000 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = "4294967231", .n = 4294967231 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
@@ -310,9 +317,14 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_GEMMA4_ARGMAX_GRAPH", "2" },            .{ "TF_GEMMA4_ARGMAX_GRAPH", "on" },
         .{ "TF_Q35_GROUP_PROJ", "2" },                 .{ "TF_Q35_GROUP_PROJ", "on" },
         .{ "TF_QMMF_HALF_BN", "2" },                   .{ "TF_QMMF_HALF_BN", "on" },
+        .{ "TF_MINIMAX_GRAPHS", "2" },                 .{ "TF_MINIMAX_GRAPHS", "on" },
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
         .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
+        .{ "GLM_POOL_TOKENS", "0" },                   .{ "GLM_POOL_TOKENS", "1023" },
+        .{ "GLM_POOL_TOKENS", "4294967232" },          .{ "GLM_POOL_TOKENS", "2k" },
+        .{ "GLM_POOL_TOKENS", "+2000000" },            .{ "GLM_POOL_TOKENS", "-1" },
+        .{ "GLM_POOL_TOKENS", "1e6" },                 .{ "GLM_POOL_TOKENS", "lots" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
@@ -475,7 +487,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "GLM_ROUND_PROF", "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
