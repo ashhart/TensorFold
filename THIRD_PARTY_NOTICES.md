@@ -689,3 +689,12 @@ transformers' `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` 
 ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the cross-pass message from
 `Inkling2LoopMessageAttentionResidual`, the rank-64 gates from `Inkling2LoopMessageGate`, and their norms from
 `Inkling2LoopUnweightedRMSNorm`. The kernels, their fixed sum order and their rounding points are TensorFold's own.
+
+## Inkling 2 Mini serving
+
+`zig/src/families/inkling2/visits.zig` and the loop in `zig/src/families/inkling2/forward.zig` run the passes of
+`Inkling2LoopTextModel` from Hugging Face transformers'
+`src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the looped core's
+`Inkling2LoopSlidingLoopDecoderLayer` and `Inkling2LoopFullLoopDecoderLayer` visits and their cross-pass messages.
+The visit plan and the two-rank runtime are TensorFold's own.
