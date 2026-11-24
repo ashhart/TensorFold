@@ -1,5 +1,6 @@
 //! One chat turn over HTTP: the request body, the streamed reply printed as it arrives, and how the turn ended.
 const std = @import("std");
+const credential = @import("sys").credential;
 const json = @import("json");
 const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");
@@ -75,6 +76,13 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
         try o.put(a, "chat_template_kwargs", .{ .object = kw });
     }
     return json.stringify(a, .{ .object = o }, .{});
+}
+
+/// The exact serialized request, or null when credential containment suppresses it; null must never be POSTed.
+pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []const u8, credentials: Credentials) !?[]u8 {
+    const request = try body(a, s, history, user);
+    if (try credential.contains(a, request, credentials.forms)) return null;
+    return request;
 }
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
@@ -290,6 +298,63 @@ test "chat CLI: the request body sends the history, stream and only the settings
     h.clear();
     try std.testing.expectEqualStrings("{\"model\": \"m\", \"messages\": [{\"role\": \"system\", \"content\": \"Be brief.\"}, {\"role\": \"user\", \"content\": \"q\"}], " ++
         "\"stream\": true, \"max_tokens\": 64, \"temperature\": 0.0, \"chat_template_kwargs\": {\"enable_thinking\": false}}", try body(a, .{ .model = "m", .temperature = 0, .max_tokens = 64, .no_thinking = true }, &h, "q"));
+}
+
+test "chat CLI: final request containment catches JSON escape synthesis in model IDs and retained replies" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { secret: []const u8, decoded: []const u8 }{
+        .{ .secret = "\\u00e9", .decoded = "\u{e9}" },
+        .{ .secret = "\\n", .decoded = "\n" },
+        .{ .secret = "\\\"", .decoded = "\"" },
+        .{ .secret = "\\\\", .decoded = "\\" },
+    };
+    for (cases) |case| {
+        const secrets = [_][]const u8{case.secret};
+        const credentials: Credentials = .{ .forms = &secrets };
+        var retained: History = .{ .a = a };
+        try retained.keep("question", case.decoded);
+        try std.testing.expect(std.mem.indexOf(u8, case.decoded, case.secret) == null);
+        const from_history = try body(a, .{ .model = "m" }, &retained, "next");
+        try std.testing.expect(std.mem.indexOf(u8, from_history, case.secret) != null);
+        try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &retained, "next", credentials)) == null);
+
+        var empty: History = .{ .a = a };
+        const from_model = try body(a, .{ .model = case.decoded }, &empty, "next");
+        try std.testing.expect(std.mem.indexOf(u8, from_model, case.secret) != null);
+        try std.testing.expect((try checkedBody(a, .{ .model = case.decoded }, &empty, "next", credentials)) == null);
+    }
+}
+
+test "chat CLI: final request containment catches a key completed by a retained backslash and structural quote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = [_]u8{ '\\', '"' };
+    const escaped_end = [_]u8{ '\\', '\\', '"' };
+    const forms = [_][]const u8{&secret};
+    var h: History = .{ .a = a };
+    try h.keep("question", "safe decoded reply ending in \\");
+    try std.testing.expect(std.mem.indexOf(u8, h.turns.items[0].assistant, &secret) == null);
+    try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &h, "next", .{ .forms = &forms })) == null);
+    const request = try body(a, .{ .model = "m" }, &h, "next");
+    try std.testing.expect(std.mem.indexOf(u8, request, &escaped_end) != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, &secret) != null);
+    try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &h, "again", .{ .forms = &forms })) == null);
+    try std.testing.expectEqual(@as(usize, 1), h.turns.items.len);
+}
+
+test "chat CLI: final request containment preserves an ordinary serialized body byte for byte" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const forms = [_][]const u8{ "\\u00e9", "\\n", "\\\"", "\\\\" };
+    var h: History = .{ .a = a };
+    try h.keep("one", "1");
+    const expected = try body(a, .{ .model = "m" }, &h, "two");
+    const checked = (try checkedBody(a, .{ .model = "m" }, &h, "two", .{ .forms = &forms })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, checked);
 }
 
 test "chat CLI: on a terminal hidden reasoning shows a hint, shown reasoning is dimmed, and control characters are dropped" {

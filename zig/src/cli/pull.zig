@@ -105,7 +105,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     if (kind.drafter) {
         try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
     } else if (hub.family(model_type)) |family| {
-        try out.print("{s}: {s} ({s})\n", .{ repo, family.title, family.model_type });
+        try out.print("{s}: {s} ({s})\n", .{ repo, family.title, try safeModelType(a, family.model_type, auth) });
     } else {
         try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
         return 1;
