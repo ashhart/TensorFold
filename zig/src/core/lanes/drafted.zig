@@ -78,7 +78,7 @@ pub const Drafted = struct {
     /// The target's policy through the wrapper; it never calls the drafter, which a target-only test may leave inert.
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.prepares, x.first_rows) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .keep_full_lone = x.target.keep_full_lone, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .warm_images = x.target.warm_images, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.prepares, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
