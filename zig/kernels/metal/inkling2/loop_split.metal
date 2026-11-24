@@ -1,4 +1,4 @@
-// tf_inkling2_loop_gates' bits in three launches over every row (m's rows a.m_stride floats apart), after loop.metal.
+// Main's loop gate bits in three launches over every row (m's rows a.m_stride floats apart), after loop.metal.
 
 struct InkLoopSplitArgs { uint rows, m_stride; };
 
