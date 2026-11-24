@@ -11,6 +11,7 @@ const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const share_fit = @import("qwen27_share_fit.zig");
 const slot_state = @import("qwen27_slots.zig");
+const standing = @import("qwen27_standing.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
@@ -431,7 +432,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
-    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = slot_state.resumeAt }, why); // --prefill-from
+    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
     errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();

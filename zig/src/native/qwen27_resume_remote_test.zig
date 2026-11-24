@@ -8,7 +8,7 @@ const t = std.testing;
 
 var pulled_state: u8 = 0; // a pulled copy's stand-in: these rules never read it
 
-/// As qwen27_slots.takeStanding: the record taken by its plan; a pass that resumes there stands on its rows.
+/// As qwen27_standing.takeStanding: the record taken by its plan; a pass that resumes there stands on its rows.
 fn open(st: *rules.Standing, s: *Stream, kept_at: u32) rules.Resume {
     const plan = if (rules.plain(s)) st.plan(s.prompt(), s.decode_spans, kept_at) else .none;
     st.take(t.allocator, plan);
@@ -16,7 +16,7 @@ fn open(st: *rules.Standing, s: *Stream, kept_at: u32) rules.Resume {
     return plan;
 }
 
-/// As qwen27_slots.leave once `s`'s reply `reply` is in: slot 0 stands one short of its end, `rewind` saved.
+/// As qwen27_standing.leave once `s`'s reply `reply` is in: slot 0 stands one short of its end, `rewind` saved.
 fn leave(st: *rules.Standing, s: *Stream, reply: []const u32, rewind: u32, reason: Reason) !void {
     try s.context.appendSlice(t.allocator, reply);
     s.fill_at.store(@intCast(s.prompt_len), .monotonic);
