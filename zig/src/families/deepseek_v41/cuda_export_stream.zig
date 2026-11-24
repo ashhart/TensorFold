@@ -75,7 +75,8 @@ pub const Stream = struct {
 
     /// The cut: waits for the queued segments; whether every paged part is converted (else the cut reads them).
     pub fn drain(s: *Stream) bool {
-        while (s.queued.load(.acquire) > 0 and !s.broken.load(.acquire)) std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
+        // the wait outlasts a failure: a part the worker is converting must not be converted beside it
+        while (s.queued.load(.acquire) > 0) std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
         if (s.broken.load(.acquire)) return false;
         if (s.slot != @intFromPtr(s.kx.slot)) return false; // the slot at the cut is another's: its pages are not this stream's
         s.closing.store(true, .release); // nothing is queued after the cut: the worker ends, its stream and buffer freed
