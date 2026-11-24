@@ -137,7 +137,7 @@ pub const Tier = struct {
         return t.page_of[tk.frame] == id and t.gen[tk.frame] == tk.gen;
     }
 
-    /// Pin `id` for a call: a frame if it has none (a miss: copy `host_page(id)` in); FrameMemory past the promise.
+    /// Pin `id` in the lease's `frames` until its device work ends: a frame, or a miss to copy `host_page(id)` in.
     pub fn pin(t: *Tier, l: *Lease, id: u32) error{ FrameMemory, OutOfMemory }!Fill {
         if (t.pool.refs[id] == 0) std.debug.panic("kv tier: page {d} pinned while free", .{id});
         if (l.pins.items.len + l.lent.items.len >= l.frames) return error.FrameMemory;
@@ -367,7 +367,7 @@ pub const Tier = struct {
         if (t.promised > t.count()) return error.Broken;
     }
 
-    /// A hash of what two ranks must hold alike: mapping, generations, LRU order, pins, holders and promises.
+    /// A hash of what two ranks must hold alike: mapping, generations, LRU order, pins, holders, promises, dirty pages.
     pub fn digest(t: *const Tier) u64 {
         var h = std.hash.Wyhash.init(0);
         h.update(std.mem.sliceAsBytes(t.frame_of));
@@ -375,6 +375,7 @@ pub const Tier = struct {
         h.update(std.mem.sliceAsBytes(t.gen));
         h.update(std.mem.sliceAsBytes(t.stamp));
         h.update(std.mem.sliceAsBytes(t.pinned));
+        h.update(std.mem.sliceAsBytes(t.dirty));
         h.update(std.mem.sliceAsBytes(t.free_frames[0..t.nfree]));
         h.update(std.mem.sliceAsBytes(t.pool.refs));
         h.update(std.mem.sliceAsBytes(t.pool.free[0..t.pool.nfree]));
@@ -431,4 +432,5 @@ pub const Tier = struct {
 
 test {
     _ = @import("kv_tier_test.zig");
+    _ = @import("kv_tier_digest_test.zig");
 }
