@@ -95,6 +95,7 @@ test {
     _ = @import("compact_at_cli_test.zig");
     _ = @import("toml_flat_test.zig");
     _ = @import("cli_config_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("router/router_test.zig"); // spawns /bin/sh children
     _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");

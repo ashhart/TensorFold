@@ -31,6 +31,18 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
         all.dependOn(&run.step);
         if (std.mem.eql(u8, file, "security-cases.json")) b.step("test-security-golden-host", "Native HTTP key, host and origin security with the local fake server").dependOn(&run.step);
     }
+    // serve --router over real serve children: fake_serve under the router's keys, loads, stops and restarts
+    if (target.result.os.tag != .windows) {
+        const children = b.addOptions();
+        children.addOptionPath("path", fake_serve.getEmittedBin());
+        const router = b.createModule(.{ .root_source_file = b.path("zig/src/server/router_serve_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+        for (server.import_table.keys(), server.import_table.values()) |name, module| router.addImport(name, module);
+        router.addOptions("fake_serve_exe", children);
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = router, .filters = &.{"serve --router: real serve children"} }));
+        run.setCwd(b.path("."));
+        run.has_side_effects = true; // it starts processes and reads zig/tests/server/fixtures
+        b.step("test-router-serve-host", "serve --router over fake_serve children: their own keys, replies, --max-loaded and restarts").dependOn(&run.step);
+    }
     const security = b.step("test-server-security", "API authentication and hostile HTTP framing on the CPU");
     const wire = b.addSystemCommand(&.{"python3"});
     wire.addFileArg(b.path("zig/tests/server/security_check.py"));
