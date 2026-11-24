@@ -504,9 +504,9 @@ function ConnectStep({
   return (
     <div className="grid gap-4">
       {connectedLabel && (
-        <div className="rounded-xl border border-positive/25 bg-positive/10 px-4 py-3 text-[13px] text-positive">
-          <div className="flex items-center gap-2 font-medium"><Icon name="check" size={15} />{t("setup.connected")}</div>
-          <div className="mt-1 text-ink-3">{connectedLabel}</div>
+        <div className="rounded-xl border border-positive/25 bg-positive/10 px-4 py-3 text-[13px] text-ink">
+          <div className="flex items-center gap-2 font-medium"><Icon name="check" size={15} className="text-positive" />{t("setup.connected")}</div>
+          <div className="mt-1 text-ink-2">{connectedLabel}</div>
         </div>
       )}
       <EngineChoice minimal={desktopMode === 'minimal'} onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
@@ -528,9 +528,9 @@ function ConnectStep({
       </div></details>}
       <div className="flex flex-wrap items-center gap-3">
         {desktopMode === 'full' && <Button variant="default" icon="settings" onClick={onOpenModels}>{t("setup.providerSettings")}</Button>}
-        <button type="button" onClick={onContinue} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
-          {connectedLabel ? t("common.continue") : t("setup.withoutModel")}
-        </button>
+        {!connectedLabel && <button type="button" onClick={onContinue} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
+          {t("setup.withoutModel")}
+        </button>}
       </div>
     </div>
   )
