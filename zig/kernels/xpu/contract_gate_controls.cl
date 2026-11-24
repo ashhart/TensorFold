@@ -248,8 +248,9 @@ KERNEL(16) void tf_ctl_attn_exp_lanes(global const ushort *Q, global const ushor
   }
   for (int a = 0; a < 6; a++) {
     const long base = ((long)t * 24 + hk * 6 + a) * NS + sp;
+    const float ma = sub_group_broadcast(mv, a);
     if (lane == 0) {
-      PM[base] = sub_group_broadcast(mv, a);
+      PM[base] = ma;
       PL[base] = l[a];
     }
     for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
