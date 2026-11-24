@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: the MTP draft rows' best value, first id and log-sum-exp run over 32 one-warp blocks a row in place of one 1024-thread block, with the same bytes (#4632).
 
+
+
 - Desktop: the app typecheck passes again after two engine types were restored (#4829).
 
 - GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
