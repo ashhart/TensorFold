@@ -849,6 +849,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
       if (mode === 'home') {
         const launchCwd = homeWorkspace?.kind === 'ssh' ? homeWorkspace.path : cwd || homeWorkspace?.path || projectRoot || ''
         if (!launchCwd) {
+          useStore.setState({ notice: { kind: 'info', message: tx("Choose a folder for this conversation. Your draft and attachments stay here if you cancel.") } })
           if (isOrchestratorProject) void loadRemoteProjectDir(projectRoot)
           else void chooseDir()
           return
@@ -892,7 +893,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   const submit = () => {
     if (quoteEditingRef.current) return
     const t = text.trim()
-    if (!t) return
+    if (!t && !attachments.length) return
     if (!draft.ready || attachments.some((attachment) => !isAttachmentReady(attachment))) { useStore.setState({ notice: { kind: 'error', message: tx("Some files need review, retry or reselection; finish them or remove them before sending.") } }); return }
     if (currentModelFit.disabledReason) { useStore.getState().setNotice({ kind: 'error', message: modelFitReason(currentModelFit.disabledReason, tx) }); return }
     if (recoveryBlocked) { useStore.getState().setNotice({ kind: 'error', message: tx("Review the previous run outcome before sending another request.") }); return }
@@ -1320,7 +1321,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
                 <Icon name="stop" size={16} />
               </button>
             ) : (
-              <button onClick={submit} disabled={!text.trim() || quoteEditing || botBlocked || recoveryBlocked || !!currentModelFit.disabledReason || submitting} aria-label={submitting ? tx("Starting request") : tx("Send")} title={settings.uiPreferences?.sendKey === 'modified-enter' ? tx("Command or Control + Enter to send") : tx("Enter to send")} className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
+              <button onClick={submit} disabled={(!text.trim() && !attachments.length) || quoteEditing || botBlocked || recoveryBlocked || !!currentModelFit.disabledReason || submitting} aria-label={submitting ? tx("Starting request") : tx("Send")} title={settings.uiPreferences?.sendKey === 'modified-enter' ? tx("Command or Control + Enter to send") : tx("Enter to send")} className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
                 <Icon name="send" size={16} strokeWidth={2} />
               </button>
             )}
