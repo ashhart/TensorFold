@@ -241,11 +241,12 @@ pub const Drafted = struct {
         try x.enroll(s);
         errdefer x.dropStream(s);
         if (s.head_context == false) return step(x.target.ptr, s, max_rows);
-        const done = try step(x.target.ptr, s, max_rows);
-        if (!x.lanes.getPtr(s).?.opened) { // the target's lane is open now: the drafter can find its rows
+        // The first step's target forward captures into the drafter's stage, so the lane must exist first.
+        if (!x.lanes.getPtr(s).?.opened) {
             try x.drafter.open(s);
             x.lanes.getPtr(s).?.opened = true;
         }
+        const done = try step(x.target.ptr, s, max_rows);
         const lane = x.lanes.getPtr(s).?;
         const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
         const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);

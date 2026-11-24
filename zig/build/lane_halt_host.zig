@@ -25,6 +25,7 @@ pub fn steps(b: *std.Build) void {
     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);
     b.step("test-lane-api-host", "Shared lane host and engine API CPU regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     b.step("test-shared-price-learning-host", "Independent plain prices and signed row learning together without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{ "shared combined prices:", "shared price modes:" } })).step);
+    b.step("test-drafted-prefill-taps-host", "A stepping target's first tapped prompt step opens the drafter lane before the step, and a failed step releases it").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"drafted prefill taps:"} })).step);
     b.step("test-wait-reasons-host", "Stored wait reasons in the load ledger with a fake backend and planner").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"wait reason ledger:"} })).step);
     const spares = b.step("test-cache-spares-host", "Fallback and guarded keeps preserve cache retention");
     for ([_][]const u8{ "lane_cache_promise_test.zig", "prompt_cache_promised_test.zig" }) |file| {
