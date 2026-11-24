@@ -3,10 +3,11 @@ const std = @import("std");
 const api = @import("engine_api");
 const registry = @import("cuda_families.zig").registry;
 
-/// The Info `openWith` serves: the host's fields, then what the family declares (its reasoning block).
+/// The Info `openWith` serves: the host's fields, then what the family declares (its reasoning block, its think rules).
 pub fn familyInfo(comptime F: type, host: api.Info) api.Info {
     var info = host;
     info.reasoning = reasoning(F);
+    if (@hasDecl(F, "thinking")) F.thinking(&info); // a family's own think block rules
     return info;
 }
 
@@ -32,4 +33,6 @@ test "the Info openWith serves carries each family's reasoning declaration over 
     const kept = familyInfo(Plain, .{ .lanes = 6, .context_window = 8192, .startup = "plan" });
     try std.testing.expect(kept.lanes == 6 and kept.context_window == 8192 and std.mem.eql(u8, kept.startup, "plan"));
     inline for (registry) |F| try std.testing.expectEqual(reasoning(F), familyInfo(F, .{ .reasoning = !reasoning(F) }).reasoning);
+    const bare = familyInfo(@import("ricursive_cuda").native, .{}); // Ripple's think rules: <think> optional, no budget
+    try std.testing.expect(bare.reasoning_optional and !bare.thinking_budget);
 }

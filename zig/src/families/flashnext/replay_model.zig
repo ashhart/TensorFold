@@ -348,7 +348,7 @@ pub const Model = struct {
             try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
             if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(L.xw));
             r.tp_layer = true;
-            const by_expert = if (r.gx) |g| rows >= g.min_rows and r.tp == null and L.xw != null and gx_mod.applies(L.xw.?) else false;
+            const by_expert = gx_mod.windowGroups(r, L.xw, rows);
             if (by_expert) r.gx.?.encode(r, t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             if (r.fsr) |stream| try stream.after(r);
             r.tp_layer = false;

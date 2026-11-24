@@ -103,15 +103,15 @@ fn symbol(
 }
 
 /// The 16-row tile at 32 columns a block (MXFP8 and BF16): plain, then with a cluster.
-fn halfSymbol(comptime mode: Mode, comptime cluster: bool, comptime wide: bool) [:0]const u8 {
+pub fn halfSymbol(comptime mode: Mode, comptime cluster: bool, comptime wide: bool) [:0]const u8 {
     const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi16ELi32ELi1ELi4ELi4ELb{d}ELb{d}ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
     return std.fmt.comptimePrint(name, .{ @backingInt(mode), @intFromBool(wide), @intFromBool(cluster) });
 }
 
 /// Dynamic shared bytes of the half tile: a stage holds half the weights (and scales) of the 64-column tile's.
 pub fn halfShared(mode: Mode) u32 {
-    const w: u32 = if (mode == .bf16) 32 * group * 2 else 32 * group;
-    const s: u32 = if (mode == .mxfp8) 32 * 2 else 0;
+    const w: u32 = if (mode == .bf16) 32 * group * 2 else if (mode == .fp4) 32 * group / 2 else 32 * group;
+    const s: u32 = if (mode == .mxfp8) 32 * 2 else if (mode == .fp4 or mode == .fp8g) 32 * 4 else 0;
     const stage = (16 * group * 2 + w + s + 127) / 128 * 128;
     const partials = 1 * 1 * 4 * threads * 4;
     return @max(4 * stage, partials);
@@ -183,6 +183,7 @@ pub const Lane = struct {
     f32_fns: [modes.len][7]Function,
     reduce: [2]Function, // by Out
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
+    half_n: ?@import("qmmf_half.zig").Set = null, // TF_QMMF_HALF_BN: FP4, FP8 and FP8G half tiles too
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
     /// Output columns from which this lane fuses a split-K cluster call; 0 keeps its original schedule.
@@ -226,6 +227,7 @@ pub const Lane = struct {
             l.fuse_s[mi][oi][bi] = f;
         };
         l.half_below = try halfBelow();
+        try @import("qmmf_half.zig").apply(&l, d);
         return l;
     }
 
@@ -295,8 +297,9 @@ pub const Lane = struct {
         const hm = halfModeIndex(w.mode);
         // fuse_split_n: a cluster call this wide on the fused form (row tile 64: the fused instance), one block a tile
         const fs = l.fuse_split_n != 0 and p.cluster and w.n >= l.fuse_split_n and hm != null;
-        const half = hm != null and p.bm == 16 and !p.fused and !fs and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
-        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
+        const hn = if (l.half_n != null) @import("qmmf_half.zig").index(w.mode) else null;
+        const half = (hm != null or hn != null) and p.bm == 16 and !p.fused and !fs and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
+        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) (if (hm) |i| l.half[i] else l.half_n.?[hn.?])[@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const cols: usize = if (prompt) 128 else if (half) 32 else bn;
         const band = @max(1, @min(rows_t, (12 << 20) / (bm * w.k * 2)));
         var args: launch_.Args = .{};

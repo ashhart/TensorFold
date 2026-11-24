@@ -71,6 +71,8 @@ row. Every (row, expert) pair keeps the per-row kernels' sums, so replies keep t
 or fewer, which is every prose round, are untouched. `TF_FLASHNEXT_GROUPED_ROWS` sets the first grouped width
 (`1` through `32`; `0` turns grouping off); it does nothing with tensor units, `--ssd-experts` or speed-up mode.
 
+Shared target rounds keep per-pair expert launches by default. `TF_FN_GX_SHARED=1` routes eligible shared rounds through the same grouped kernels under the same row threshold and 4-bit/group-32 restrictions; `0` is the default. Tensor-unit Macs, SSD experts and speed-up mode do not use these kernels.
+
 The prefill path uses sparse selected-key attention, fused hyper-connections and n-gram lookups,
 stacked DeltaNet projections and sorted expert rows. It submits bounded groups of layers to limit live
 workspace. Compatible prefill matmul kernels check against MLX; unsupported paths use MLX's kernels.

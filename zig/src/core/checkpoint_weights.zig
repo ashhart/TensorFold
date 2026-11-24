@@ -1,10 +1,17 @@
-//! Header-based admission bytes for the text side and optional RADIO tower, including mixed shards.
+//! Header-based admission bytes for the text side and an optional vision tower, including mixed shards.
 const std = @import("std");
 const ck = @import("checkpoint.zig");
 const st = @import("safetensors.zig");
 
+/// Tower and projector prefixes: RADIO's, then Qwen-VL's, Gemma 4's, LFM2-VL's, LightOn's, DeepSeek's and GLM's.
+const vision_prefixes = [_][]const u8{
+    "vision_model.",         "vision_projector.",        "mlp1.",            "model.visual.", "visual.",
+    "vision_tower.",         "model.vision_tower.",      "vision_embedder.", "embed_vision.", "model.vision_model.",
+    "model.vision_encoder.", "model.vision_projection.", "vision.",
+};
+
 pub fn visionTensor(name: []const u8) bool {
-    for ([_][]const u8{ "vision_model.", "vision_projector.", "mlp1." }) |p|
+    for (vision_prefixes) |p|
         if (std.mem.startsWith(u8, name, p)) return true;
     return false;
 }
@@ -49,4 +56,11 @@ test "text admission excludes RADIO tensors even in a shared shard" {
     defer a.free(dir);
     try std.testing.expectEqual(@as(u64, 8), try count(a, io, dir, false));
     try std.testing.expectEqual(@as(u64, 24), try count(a, io, dir, true));
+}
+
+test "every family's tower prefix is a vision tensor, and no text tensor of theirs is" {
+    for ([_][]const u8{ "model.visual.blocks.0.attn.qkv.weight", "vision_tower.blocks.0.norm1.weight", "vision.blocks.3.mlp.w1.weight", "model.vision_model.embeddings.patch_embedding.weight", "model.vision_tower.vision_model.post_layernorm.weight", "vision_embedder.patch_dense.weight", "model.vision_encoder.patch_conv.weight" }) |n|
+        try std.testing.expect(visionTensor(n));
+    for ([_][]const u8{ "model.language_model.embed_tokens.weight", "language_model.model.layers.0.mlp.gate_proj.weight", "model.layers.0.self_attn.q_proj.weight", "backbone.layers.0.mixer.in_proj.weight", "lm_head.weight", "model.embed_tokens.weight", "mtp.layers.0.eh_proj.weight", "model.multi_modal_projector.linear_1.weight" }) |n|
+        try std.testing.expect(!visionTensor(n));
 }

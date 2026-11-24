@@ -53,6 +53,16 @@ pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     });
 }
 
+pub fn startModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, checkpoint: *std.Build.Module, api: *std.Build.Module, core: *std.Build.Module, j: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("zig/src/server/start_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "checkpoint_cli", .module = checkpoint }, .{ .name = "engine_api", .module = api }, .{ .name = "core", .module = core }, .{ .name = "json", .module = j } },
+    });
+}
+
 /// Attach a server's shared JSON module (tests run apart), and Living Weights' families where the build gave none.
 pub fn addTo(
     b: *std.Build,
@@ -162,6 +172,10 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const inkling = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Inkling 2 reply:", "Inkling 2 parse:" } }));
+    inkling.has_side_effects = true;
+    all.dependOn(&inkling.step);
+    b.step("test-server-inkling2-reply-host", "Inkling 2 native reply split, tools and default-model isolation without devices").dependOn(&inkling.step);
     const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
     quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
     b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);

@@ -156,11 +156,12 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
-        // --vision on a checkpoint without a tower serves text, as before; an unreadable tower still refuses at open
-        const seen: @FieldType(Options, "vision") = if (o.vision == null) null else if (vision.Vision.config(gpa, io, dir)) |_| o.vision else |err| switch (err) {
-            error.NoQwenVision => null,
+        // --vision on a checkpoint without a tower refuses by name (core's gate); an unreadable tower refuses too
+        const tower = if (o.vision == null) false else if (vision.Vision.config(gpa, io, dir)) |_| true else |err| switch (err) {
+            error.NoQwenVision => false,
             else => return err,
         };
+        const seen: @FieldType(Options, "vision") = if (try @import("engine_api").visionGate(o.vision != null, tower)) o.vision else null;
         e.o = o;
         e.o.prompt_rows = @max(o.prompt_rows, o.cut_rows); // a test's cut is one piece: the prompts arena holds it
         e.o.vision = seen;
@@ -303,6 +304,17 @@ pub const Engine = struct {
             e.workspace.free();
         }
         e.blas = null;
+    }
+
+    /// Rows a prompt pass takes through a layer at once (every rank the same: `prompt_rows.step`).
+    pub fn stepRows(e: *const Engine) usize {
+        return @import("prompt_rows.zig").step(e.o.prompt_rows, e.o.policy);
+    }
+
+    /// The share of `sizeBytes` that grows with the prompt rows: the prompts arena and the ids a pass uploads.
+    pub fn promptBytes(e: *Engine, capacity: usize) !usize {
+        const prompt_rows = @min(e.o.prompt_rows, capacity);
+        return try scratch.prompts(e, prompt_rows, capacity) + prompt_rows * 4;
     }
 
     /// Device bytes `size(capacity, pool_pages)` would allocate with `rows` rows a forward: what admission weighs.
@@ -517,7 +529,7 @@ pub const Engine = struct {
         for (ids) |t| if (t >= e.model().spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         var p: Poll = undefined;
-        const rows = try fwd.spanFor(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p), reads);
+        const rows = try fwd.spanFor(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.stepRows(), e.poll(cancel, end - pos0, &p), reads);
         try e.stream.synchronize();
         return rows;
     }
@@ -536,7 +548,7 @@ pub const Engine = struct {
         const o = e.ops(&e.prompts);
         var p: Poll = undefined;
         // the last row's logits and MTP's input are read: past its keys, the last layer runs that row's tile
-        const kept = try fwd.spanFor(o, m, caches, e.ids_dev.base(), len, pos0, e.poll(cancel, len, &p), passes.prefill);
+        const kept = try fwd.spanFor(o, m, caches, e.ids_dev.base(), len, pos0, e.stepRows(), e.poll(cancel, len, &p), passes.prefill);
         const row = kept.row(len - 1, m.spec.hidden);
         if (last) |b| try hip.raw.copy(b, 0, row.ptr, m.spec.hidden * m.act.size(), e.stream.handle);
         var token: [1]u32 = undefined;

@@ -19,10 +19,16 @@ It needs the M5's tensor units and refuses to load without them. `dense` makes e
 and leaves the pooled branch out (not how the checkpoint was trained; for kernel work only). `profile` times one more
 forward stage by stage.
 
+Like `tf-h3-image`, it waits between blocks while live speech holds `/tmp/tensorfold-speech.lock`
+([the picture recipe](minimax-h3-image-metal.md#run-a-case)). Each step line and the profile's heading print
+`timing_valid` and seconds waited. Exclude every `timing_valid=false` sample, even with zero wait: a whole speech
+request can finish between polls. The generation checks bracket the entire wall interval, including output copies.
+
 ## Arithmetic
 
-- Block projections: the prefill kernels' `tfp::gemm_nax` (MLX 0.32.3's NAX GEMM), bf16 x w^T as the checkpoint
-  stores w, fp32 sums, bf16 out. The SwiGLU's first projection is one product over its stored [value; gate] rows.
+- Block projections: H3's own `h3_gemm_32x64` (64 x 128 a threadgroup, 32 x 64 a warp), bf16 x w^T as the checkpoint
+  stores w, fp32 sums in MLX 0.32.3's NAX GEMM order, bf16 out: bit-equal to `tfp::gemm_nax`. Threadgroups walk 64
+  row tiles under each weight tile. The SwiGLU's first projection is one product over its stored [value; gate] rows.
 - Norms, rotary, the gated adds and the SwiGLU round to bf16 where the reference's bf16 MLX arithmetic rounds.
 - Attention is FastH3's video sparse attention over 64-row tiles: a text, keyframe or audio tile attends every
   tile; a video tile attends the prefix tiles and its top 20% of video tiles by pooled score; the pooled branch is
@@ -32,8 +38,8 @@ forward stage by stage.
 
 ## Kernel contract
 
-Thirteen kernels are registered (`zig/tests/contract/metal_h3*.zig`), each against its formula in float64, and their
-launches in `registry.zig`. The two GEMM entry points are the prefill source's own and are registered as launches.
+The kernels are registered (`zig/tests/contract/metal_h3*.zig`), each against its formula in float64, and their
+launches in `registry.zig`. The two products also match MLX's gemm_nax byte for byte at the served shapes.
 Kernels whose outputs pass through intermediate bf16 roundings declare them as `mids`; their test inputs are of one
 sign where a sum could cancel, so no rounding hides behind a small result.
 

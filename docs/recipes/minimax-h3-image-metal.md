@@ -183,6 +183,106 @@ It writes `out/case.latent.f32`, the normalised latent [24, rows, columns] in fl
 decoder. `once` runs the first teacher-forced step alone; `free` runs only the free run. It needs the M5's tensor
 units, as the clip tool does.
 
+It and `tf-h3-image-server` make way for live speech on the same GPU. The speech server holds a shared flock on
+`/tmp/tensorfold-speech.lock` while it synthesizes (`zig/src/server/gpu_turn.zig`). The tools submit each block as its
+own command buffer, with three queued, and wait before the forward, between blocks, after profile stages and after the
+step's output while that lock is held. During an earlier 4096 x 4096 render, five streamed Drama 3 voice notes reached
+first audio in 1.3 to 1.6 s, against 9.5 to 10.8 s without yielding. The run resumes on the same rows with a
+byte-identical latent.
+Each step and profile prints `timing_valid`: benchmarks must exclude every `false` sample, including zero-wait
+samples. A separate 16-byte generation in `/tmp/tensorfold-speech.lock.stamp` detects speech that starts and ends
+between lock polls. Missing, malformed or inaccessible signals invalidate timings; uncoordinated forwards do too.
+Both processes must use this protocol; an old speech binary cannot certify clean timings. Speech remains best-effort
+on filesystem errors: if both publishing and invalidating a generation fail, a short request can remain unobserved.
+Speech releases its hold when the engine's work ends, before the reply goes to the client, so a slow client never
+holds a render back. It opens the lock without following symlinks and creates it only when absent; behind an
+exclusive hold longer than a second (a render's probes last microseconds) it synthesizes without the hold rather
+than wait. A command buffer that fails is reported only after every buffer committed with it has completed.
+The prompt encoder (`tf-h3-image-prompt`, the server's first stage) waits
+before each pass with three queued, and the decoder (`tf-h3-image-decoder`, its last) before each batch of tiles; both
+print the seconds they waited.
+
+### Speech contention receipt, 12 November 2026
+
+Apple M5 Ultra, 256 GiB RAM, macOS 27.0 (26A425), Zig 0.17.0, ReleaseFast with `-Dcpu=apple_m1`.
+The branch's isolated Drama 3 NVFP4 server served a voice catalog in `synth.json`, CFG 1.5 with paired submission,
+one lane and context 8192. The live release server was not changed. More than 170 GiB was free before loading.
+The client timed from sending each HTTP request until reading the first two PCM bytes, not response headers.
+
+The reference cache was warmed before starting `tf-h3-image MODEL_DIR CASE OUT free`. The case was a
+4096-square, seed-42, 24-text-row case (SHA-256 `af4f85f19ebeb4e4af5beada167d8e8fd00bf1b880541b88a60c0a2b5b6dd66b`).
+Five sequential requests, seeds 42–46, used `stream=true` and `response_format="pcm"`:
+
+| Public input | First PCM (s) | PCM bytes | Status |
+|---|---:|---:|---:|
+| The little boat crossed the harbor before the sun came up. | 1.168 | 212992 | 200 |
+| A blue bicycle waited beside the garden gate. | 1.174 | 180224 | 200 |
+| Please put the fresh apples in the bowl on the table. | 1.208 | 196608 | 200 |
+| We can take the quiet path through the woods today. | 1.265 | 180224 | 200 |
+| The train will arrive at the station in a few minutes. | 1.357 | 192512 | 200 |
+
+The render was running at the start and end of every request. Step 1 waited 12.68 s and reported
+`timing_valid=false`; steps 2–6 waited zero and reported `true`. The render exited 0 and its final rows matched
+the uncoordinated baseline byte-for-byte (SHA-256 `b3726693636bbe7ce77eac8da41868bd959262646bfc5ac889e2c939ee1cd5fd`).
+The server drained and stopped afterward. This is a transformer-step benchmark exclusion check, not a clip-profile
+receipt: a valid audio/video clip case is still required to exercise `tf-h3-dit` directly.
+
+Cold reference conditioning remains outside the demonstrated latency bound: first PCM without a render took
+14.819 s while building 1284 cached reference rows, versus 0.528 s on the next idle request. A cold request during
+a render took 15.332 s. The five sub-three-second results therefore establish warm live-voice contention relief,
+not a cold-start guarantee. Generation checks now bracket the complete wall interval, including output copies.
+
+### Five voice notes during a resident render, 13 November 2026
+
+Same machine, speech server and client, built from `b82e132` and served on port 18899; `tf-h3-image-server` drew
+a prompt at 4096x4096, seed 42. The server's first request after start, with its reference rows still unbuilt
+in memory, reached first PCM in 2.879 s idle; the next took 0.414 s. Five notes then went out 15 s apart during the
+render, all HTTP 200 with the render running at the start and end of each:
+
+| Note | First PCM (s) | PCM bytes |
+|---:|---:|---:|
+| 1 | 1.375 | 245760 |
+| 2 | 1.142 | 192512 |
+| 3 | 0.687 | 225280 |
+| 4 | 1.165 | 188416 |
+| 5 | 1.355 | 225280 |
+
+Steps 1-3, 5 and 6 waited 2.27-3.21 s each and reported `timing_valid=false`; step 4 waited zero and reported
+`true`, with 10.04 s on the GPU like the others. The render resumed after each wait and exited 0; its latent matched
+the uncoordinated `t2i-4096.latent.f32` and its rows the 12 November baseline (`b3726693...`) byte-for-byte. The prompt
+encoder and decoder are too short at this spacing to catch a note; `test-h3-image-server` has speech arrive during
+each stage. The isolated server was stopped afterward; the live release server was not changed.
+
+### Large resident renders and a live speech server, 14-15 November 2026
+
+The render gives way only to a speech server that publishes the same lock: updating `tf-h3-image-server` alone
+cannot make an older speech process announce a request, and `timing_valid=true` cannot detect a speech process
+that does not take part. To check a live deployment during a real request:
+
+- Attempt a nonblocking exclusive `flock` on `/tmp/tensorfold-speech.lock` from a separate process every 20 ms;
+  contention means speech holds it.
+- Compare `/tmp/tensorfold-speech.lock.stamp` before and after the request. The coordinated server writes it even
+  when acquiring the speech hold fails. Across users the lock needs mode 0644, the stamp 0666 and length 16.
+- Time the complete audio response, not only first PCM: a streamed HTTP 200 can still miss a caller's deadline.
+
+Apple M5 Ultra, 256 GiB, macOS 27.0, Zig 0.17.0, `tf-h3-image-server` built with
+`zig build tf-h3-image-server -Dcpu=apple_m1 -Doptimize=ReleaseFast`, rendering 5472x3072 (seed 2201, 183 prompt
+tokens; six steps of 11-12 s each). Each voice request used `model="fishaudio/drama-3"` and the public input "The
+little boat crossed the harbor before the sun came up, and the gulls were quiet over the water while the fishermen
+coiled their nets along the pier." (618,496 PCM bytes), sent after the render's `drawn on` line.
+
+With a speech server that did not publish the lock, the streamed reply completed in **72.854 s** (first PCM 18.856 s)
+while the render ran; 776 probes found no hold, the stamp never changed and all six steps reported zero wait.
+With the speech server publishing the lock and the same renderer executable (same SHA-256), five voice notes sent
+after step 2 of consecutive renders completed in **9.397, 9.538, 9.774, 9.769 and 9.676 s**, each an M4A including
+transport and encoding; 76-93 of every 93-111 probes found a hold and the generation changed each time.
+
+That server replayed 17 resident requests (eight 5472x3072, six 3072x5472, three 4096x4096) in one process, with a
+streamed voice request at the start of each: 17/17 HTTP 200, first PCM 1.061-2.224 s, complete body 5.484-9.421 s.
+The image logs recorded 183.28 s of waits and 25 of 102 steps with `timing_valid=false`. All 17 final latents and
+PNGs matched the uncoordinated run's by SHA-256. These are contention measurements, not a speech-free throughput
+comparison.
+
 ## Gates, fixed before any run
 
 These are the bounds `tf-h3-image` checks (`picture.gates`). It exits 1 when one fails, and 2 when the case holds no
@@ -210,7 +310,7 @@ tensor units.
 3. Each tile runs `post_quant_conv`, then its cells become tokens through `x_embedder`, with the 4 registers and one
    zero token appended.
 4. The 2D rotary table is built, and the 24 blocks run, then `norm_out` and `proj_out`.
-5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 16 tiles run in one command buffer.
+5. Each token's 768 values are unpatchified to its 16 x 16 pixels. Up to 64 tiles run in one command buffer.
 6. Tiles are blended in float32: the top band against the tile above, then the left band against the tile to the left,
    both as decoded.
 7. The result is mapped to [0, 1] with ImageNet's statistics, clamped and truncated to bytes.
@@ -335,7 +435,6 @@ the United States of America. Read it before use.
 - **Edits end to end:** the encoder makes a reference's rows and the prompt path places its vision rows, but
   Qwen3-VL's vision tower is not here, so an edit's prompt rows still come from a case. No one tool runs an edit.
 - **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
-- **Kernel contract:** the new kernels are gated by each tool's `selftest`, not registered with `tf-kernel-contract`.
 - **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
 ## Host checks
@@ -349,3 +448,31 @@ the United States of America. Read it before use.
 - the case reader's picture admission.
 
 `zig build compile-h3-host` compiles both H3 tools without the Metal compiler.
+
+## Kernel contract
+
+Metal compiles each kernel at load with the options its tool uses. Its contract coverage is:
+
+- The edit encoder (`h3_image_encoder.metal`, fp32 with precise functions): its convolution at every layer geometry of
+  the released encoder (3x3, 3x3 adding its residual in place, 3x3 downsampling, 1x1), GroupNorm's partial sums (plain
+  and centred) and their finish, and the norm's SiLU, each within float64's range through its fp32 steps (nine
+  controls).
+- The prompt path (`h3_prompt.metal`): the bf16 product at every projection of Qwen3-VL to layer 50 and of the token
+  refiner, with and without a bias; both norms and both head layouts in the Qwen and H3 rounding orders; causal and full
+  attention within `attention_range`'s bound, with entries that plant an infinite value at a padded row's last key;
+  both gates, the residual add and the vision rows' scatter (fifteen controls).
+- The image decoder (`image_decoder.metal`, bf16): post_quant, the embedding with its registers, both norms, the
+  product plain and with LayerScale in place, the heads with their half-width rotary, attention over a 261-token tile
+  and a batch of 16 tiles, and SwiGLU, each at its bf16 points (ten controls).
+
+Every launch reserves its group size in its source.
+
+The edit encoder's, prompt path's and image decoder's kernels are registered with the kernel contract
+([kernel-contract.md](../kernel-contract.md)): 31 registrations with 34 planted controls, and every launch's limits.
+They are checked against float64 at their rounding points, beside each tool's own `selftest`. `zig build
+h3-image-contract` runs them on any Mac, with no Metal compiler; `tf-kernel-contract` runs them with every other kernel.
+On an M3 Ultra all 31 pass gates 1 to 4 and every control goes red as planted.
+
+The contract found one fault, now fixed: the prompt path's attention filled a row's last block of 4 keys with its last
+key at weight 0, so an infinite value there gave 0 x Inf = NaN where float64 keeps the infinity. A padded key now adds
+nothing; finite outputs keep their bytes.

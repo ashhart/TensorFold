@@ -204,9 +204,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (embeddings[0..embed_made]) |*p| try kernels.append(a, p.kernel());
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
-    if (wanted(o, mixed.kernel().spec.name)) {
-        if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
-    }
+    if (wanted(o, mixed.kernel().spec.name) and @import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
@@ -356,6 +354,8 @@ pub fn main(init: std.process.Init) !u8 {
     var ling_mla_set = ling_mla.Suite{ .a = a, .device = device, .queue = queue };
     defer ling_mla_set.deinit();
     try ling_mla_set.collect(&kernels, o.only);
+    var inkling2_suites = try @import("metal_inkling2_main.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer inkling2_suites.deinit();
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
@@ -566,6 +566,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
+    var h3_image_suites = try @import("metal_h3_image_suites.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer h3_image_suites.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);

@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
 const variants = @import("variants.zig");
+const gx_mod = @import("gx.zig");
 const Session = @import("session.zig").Session;
 const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
@@ -74,7 +75,12 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
                 r.rows = g.rows;
                 const ins = [_]Buf{ v.p, sl.cs[0], sl.so[0], l.conv, l.alog, l.dt, l.norm, t.eps, g.s.m.t.rows };
                 const outs = [_]Buf{ v.gout, sl.cs[1], sl.so[1] };
-                if (r.gdn_pipe) |pipe| fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                const wide = if (g.rows == 8 or g.rows == 16) r.batch_gdn_wide else null;
+                if (wide orelse r.gdn_pipe) |pipe| {
+                    fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48);
+                } else {
+                    try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                }
             }
         } else {
             try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, l.qn, l.kn, l.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
@@ -90,7 +96,7 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
         try m.hcProject(t.h[cur], l.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
         try r.router("q4_router_float@moe", t.mixed, l.router, t.rows, t.lg, rows);
         if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < fz.LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(l.xw));
-        if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+        if (gx_mod.sharedGroups(r, l.xw, rows, r.gx_shared)) r.gx.?.encode(r, t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
         if (r.fsr) |stream| try stream.after(r);
     }
     try m.grouped(t.h[cur], t.h[1 - cur]);

@@ -152,5 +152,6 @@ pub const Keeps = struct {
 /// The same content key names lookup and every completed or interrupted keep.
 pub fn marks(e: *engine.Engine, slot: u32, s: *const Stream, at: []const u32, keeps: *Keeps) ?engine.Marks {
     keeps.* = .{ .e = e, .slot = slot, .prompt = cacheKey(s) orelse return null, .images = s.images };
-    return if (at.len == 0) null else .{ .at = at, .ctx = keeps, .call = Keeps.at, .interrupted = Keeps.at };
+    // A cancellation can keep its last completed cut even when no later mark was scheduled.
+    return .{ .at = at, .ctx = keeps, .call = Keeps.at, .interrupted = Keeps.at };
 }

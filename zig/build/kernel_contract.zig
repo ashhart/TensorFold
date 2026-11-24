@@ -28,6 +28,20 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-qwen27-paged-contract-host", "Paged prompt source controls, shuffled pages and boundary witnesses without a device").dependOn(&q27_pages.step);
     step.dependOn(&q27_pages.step);
+    const inkling_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_inkling2_controls_host.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
+            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
+            .{ .name = "inkling2_glue_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig") }) },
+            .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
+            .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
+        },
+    }) }));
+    b.step("test-inkling2-controls-host", "Inkling 2 Mini source controls plant one fault without a Metal compiler").dependOn(&inkling_controls.step);
+    step.dependOn(&inkling_controls.step);
     const mapping_stub = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_mapping_host.zig") });
     const llama_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_llama_controls.zig"),
@@ -57,19 +71,23 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .{ .name = "metal", .module = mapping_stub },
         .{ .name = "kernel_sources", .module = mapping_stub },
     } });
-    const mapping = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+    const mapping_root = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_mapping_test.zig"),
         .target = b.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
+            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
             .{ .name = "metal", .module = mapping_stub },
             .{ .name = "tensorfold", .module = mapping_tf },
             .{ .name = "kernel_sources", .module = mapping_stub },
         },
-    }) }));
+    });
+    const mapping = b.addRunArtifact(b.addTest(.{ .root_module = mapping_root }));
     mapping.has_side_effects = true;
     b.step("test-metal-launch-map-host", "Every registered Metal launch maps without a device or shader compiler").dependOn(&mapping.step);
+    const dspark_mapping = b.addRunArtifact(b.addTest(.{ .root_module = mapping_root, .filters = &.{"Metal launch map: every DSpark"} }));
+    b.step("test-inkling2-launch-map-host", "Every Inkling DSpark launch resolves without other families' device checks").dependOn(&dspark_mapping.step);
     step.dependOn(&mapping.step);
     const precision = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/attention_precision.zig"),
@@ -133,6 +151,10 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
     @import("ling_forward.zig").steps(b, target, optimize, metal_mod, sources, kimi_metallib);
+    const inkling2_metal = engine.import_table.get("inkling2_metal").?;
+    const inkling2_glue_plan = engine.import_table.get("inkling2_glue_plan").?;
+    const inkling2_loop_plan = engine.import_table.get("inkling2_loop_plan").?;
+    const image = @import("h3_image_contract.zig").sources(b);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,
@@ -144,9 +166,16 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "contract", .module = module(b, target, optimize) },
             .{ .name = "h3_kernels", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }) },
+            .{ .name = "h3_image_encoder_kernels", .module = image[0].module },
+            .{ .name = "h3_prompt_kernels", .module = image[1].module },
+            .{ .name = "h3_image_decoder_kernels", .module = image[2].module },
             .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
             .{ .name = "ling_route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },
             .{ .name = "masked_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) },
+            .{ .name = "inkling2_metal", .module = inkling2_metal },
+            .{ .name = "inkling2_glue_plan", .module = inkling2_glue_plan },
+            .{ .name = "inkling2_loop_plan", .module = inkling2_loop_plan },
+            .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
         },
     }) });
     const install = b.addInstallArtifact(exe, .{});

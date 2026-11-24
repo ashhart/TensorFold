@@ -245,7 +245,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     }
     return u;
 }
-/// Restored Qwen launches retain a pending entry wherever a compiler receipt is absent.
+/// Restored Qwen launches, and Ripple's unmeasured ones, retain a pending entry wherever a compiler receipt is absent.
 pub const cuda_pending = joins.cuda_pending;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
@@ -298,8 +298,14 @@ pub const metal = joins.metal_before ++ [_]M{
     .{ .name = "simd_qmm_bits tf_sqw_mma_q3_16_4_1", .threads = 512, .tg_memory = 16384, .adapts = true, .m1 = 512, .m2 = 512 },
     .{ .name = "simd_qmm_bits tf_sqw_mma_q6_16_4_1", .threads = 512, .tg_memory = 16384, .adapts = true, .m1 = 512, .m2 = 512 },
     .{ .name = "simd_qmm_bits tf_sqw_mma_q8_16_4_1", .threads = 512, .tg_memory = 16384, .adapts = true, .m1 = 224, .m2 = 224 },
+    .{ .name = "lane order q5 tf_lane_order_q5", .threads = 256, .tg_memory = 1280, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "lane order q6 tf_lane_order_q6", .threads = 256, .tg_memory = 1536, .m1 = 1024, .m2 = 1024 },
     .{ .name = "lane projection q6 g32 sk1 tf_lane", .threads = 32, .tg_memory = 3072, .offline = false },
     .{ .name = "lane projection q6 g32 sk4 tf_lane", .threads = 128, .tg_memory = 10240, .offline = false },
+    .{ .name = "lane projection q5 g64 reg sk1 tf_lane_reg", .threads = 32, .tg_memory = 0, .offline = false },
+    .{ .name = "lane projection q5 g64 reg sk8 tf_lane_reg", .threads = 256, .tg_memory = 14336, .offline = false },
+    .{ .name = "lane projection q6 g64 reg sk1 tf_lane_reg", .threads = 32, .tg_memory = 0, .offline = false },
+    .{ .name = "lane projection q6 g64 reg sk8 tf_lane_reg", .threads = 256, .tg_memory = 14336, .offline = false },
     .{ .name = "tile_qmm q4 tf_tile_qmm_q4", .threads = 128, .tg_memory = 11008, .reserved = 128 },
     .{ .name = "tile_qmm grouped q4 tf_tile_qmm_grouped_q4", .threads = 128, .tg_memory = 11008, .reserved = 128 },
     .{ .name = "tile_qmm grouped glu q4 tf_tile_qmm_grouped_glu_q4", .threads = 128, .tg_memory = 11008, .reserved = 128 },
@@ -353,6 +359,8 @@ pub const metal = joins.metal_before ++ [_]M{
     .{ .name = "h3 routed attention h3_attention", .threads = 256, .tg_memory = 25856, .offline = false },
     .{ .name = "h3 gemm whole custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "h3 gemm ragged custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "h3 product 32x64 h3_gemm_32x64", .threads = 128, .tg_memory = 0, .reserved = 128 },
+    .{ .name = "h3 product 32x64 ragged h3_gemm_32x64_ragged", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_00", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_01", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_10", .threads = 256, .tg_memory = 0, .reserved = 256 },

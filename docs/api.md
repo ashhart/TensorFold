@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, `/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -275,12 +275,13 @@ context-window check still applies. Cohere-style requests retain the reranker's 
 
 ## OCR
 
-The native HIP engine reads pages through Mistral's OCR contract when it serves a model with an OCR reader
-and `--vision`.
+The native HIP engine reads pages through two OCR contracts when it serves a model with an OCR reader and
+`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers LiteParse's.
 
 | Route | Contract | Request | Reply | Written for |
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+| `POST /ocr` | LiteParse HTTP OCR | multipart, one `file` part | `{"results": [...]}` | `lit parse --ocr-server-url http://HOST:PORT/ocr` |
 
 Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
 orientation), never in the model's resized frame.
@@ -290,10 +291,23 @@ orientation), never in the model's resized frame.
 | dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
 | GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
-Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
+Any other model answers both routes with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
 and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
-Embedding, reranker and readout engines refuse the OCR route as they refuse chat. The route takes the `inference`
-key scope.
+Embedding, reranker and readout engines refuse the OCR routes as they refuse chat. The routes take the
+`inference` key scope.
+
+`POST /ocr` picks its contract in this order:
+
+1. `?format=liteparse`. A query parameter sent twice is HTTP 400 ("the format query parameter is repeated; send
+   it once"), because servers differ on which copy wins.
+2. `multipart/form-data`: exactly one part named `file` is LiteParse; any other set of parts is HTTP 400, and so
+   is a body with any `files` part ("a multipart OCR request has files parts, which this server does not read;
+   LiteParse sends one file part"), even when `?format=` names the contract.
+3. Any other content type, or none, is HTTP 415.
+
+Refusals made before the contract is known (415, those 400s, a drain's 503 and an admission 429 with
+`Retry-After`) use the server's `{"error": {"message", "type"}}` envelope. On a model without a reader, or a
+server without `--vision`, a request no contract takes gets the 400 above instead of its 415 or 400.
 
 ### Reader Markdown
 
@@ -304,7 +318,7 @@ Both readers write block text in one Markdown flavour, the one Mistral's page Ma
   block holds exactly one table.
 - Display math as `$$…$$` and inline math as `$…$`, the LaTeX kept as the model wrote it.
 - Lists with `-` or `1.` markers, and code in fenced blocks.
-- No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
+- No images: a picture block has empty text, and its caption, if any, is its own block. Each contract writes its
   own image references.
 - GLM-OCR's single block holds the whole page's Markdown, headings, tables and math included.
 
@@ -335,18 +349,28 @@ stops on its end token and the reader can parse it.
 
 ### Failures
 
-| Failure | Mistral |
-| --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 |
-| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
-| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
-| Engine fault, out of memory, PDF renderer crash or deadline | 500 |
-| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
+| Failure | Mistral | LiteParse |
+| --- | --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"error": "..."}` |
 
 A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
 message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
 same request fails the same way again under greedy decoding; a 503 carries `Retry-After`. A client that disconnects
 stops the request before its next page or PDF render.
+
+### Estimates
+
+dots.mocr gives one box a block and GLM-OCR none, so LiteParse's lines estimate what the models do not give:
+
+- **Lines.** A block's plain-text lines (Markdown markup removed, a table one line a row with tab-separated
+  cells, math without its `$`) divide the block's box into equal bands along its left and right edges, first
+  line at the top. A paragraph written without line breaks stays one line covering the block.
+- **Scores.** Every score is `1.0`: LiteParse `confidence`. Mistral replies leave `confidence_scores` out.
+- **No geometry.** With GLM-OCR, Mistral returns `blocks: []` and LiteParse is refused.
 
 ### Mistral: `POST /v1/ocr`
 
@@ -369,6 +393,20 @@ stops the request before its next page or PDF render.
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
+
+### LiteParse: `POST /ocr`
+
+The contract is LiteParse's published
+[OCR API specification](https://github.com/run-llama/liteparse/blob/main/OCR_API_SPEC.md). One `file` part holds a PNG,
+JPEG or WebP page image; `language` and other parts are ignored, but a `files` part is HTTP 400 (above). A PDF is
+HTTP 400: the specification sends an image.
+Each line is one result `{"text", "bbox", "confidence"}`: `bbox` is the line's axis-aligned `[x1, y1, x2, y2]` in
+pixels of the image received, and `confidence` is `1.0`, the value the specification asks for when the engine gives
+none. The specification's optional `polygon` is not sent: it gives the point order, but not how LiteParse turns a
+polygon into a text rotation, so a rotated line is sent as its axis-aligned box. GLM-OCR gives no boxes, so
+LiteParse requests to it are HTTP 400 "this model gives no text boxes; LiteParse needs them". With dots.mocr a
+paragraph written without line breaks is one result covering its block. Errors use the specification's
+`{"error": "..."}` body.
 
 ### GLM-OCR context
 
@@ -647,6 +685,8 @@ whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
+`TENSORFOLD_PRIORITY_AGE_MS` above 0 lets a background request queued for at least that many milliseconds go before
+foreground work. Prefix, disk-read, lane and memory admission checks are unchanged.
 Session-title requests are also treated as background work.
 
 The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same
@@ -1453,7 +1493,9 @@ store for each model and build. That store takes the place of `--learn`'s store 
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
 cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
 instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
-one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
+one Mac, and Nemotron, the Qwen3.5 hybrids, Flash Next and GLM-5.3-Flash on CUDA keep them; other engines refuse the
+flag at startup. GLM-5.3-Flash on CUDA across ranks writes every rank's part to rank 0's disk, so a state is read back
+on every rank or on none; it takes neither `--spill-gib` nor `--checkpoint-slots`.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
 and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on

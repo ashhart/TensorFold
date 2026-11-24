@@ -207,12 +207,8 @@ kernel void q27_attn_prompt_scan(device const Q27AttnReadPtrs* caches [[buffer(0
   if (simd_any(inf != 0) && lane == 0) atomic_fetch_or_explicit(flag, 1u, memory_order_relaxed);
 }
 
-// The indirect grids: q27_attn_prompt's if the scan found nothing, else the masked kernel's; clears the flag.
-kernel void q27_attn_prompt_pick(device atomic_uint* flag [[buffer(0)]], constant uint* grid [[buffer(1)]], device uint* grids [[buffer(2)]]) {
-  const bool masked = atomic_load_explicit(flag, memory_order_relaxed) != 0;
-  atomic_store_explicit(flag, 0u, memory_order_relaxed);
-  for (int i = 0; i < 3; i++) { grids[i] = masked ? 0u : grid[i]; grids[3 + i] = masked ? grid[i] : 0u; }
-}
+// The indirect grids: q27_attn_prompt's if the scan found nothing, else the masked kernel's (core/prompt_pick.metal).
+TF_PROMPT_PICK(q27_attn_prompt_pick)
 
 // A packed row's chunks merged in key order, normalized and written as the row's head output.
 kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],

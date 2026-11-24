@@ -25,6 +25,12 @@ test {
     _ = @import("kimi_reply_test.zig");
     _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
+    _ = @import("inkling2_chat_test.zig");
+    _ = @import("inkling2_reply_test.zig");
+    _ = @import("inkling2_boundary_test.zig");
+    _ = @import("inkling2_ks51_test.zig");
+    _ = @import("inkling2_required_test.zig");
+    _ = @import("inkling2_ks53_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
@@ -45,6 +51,7 @@ test {
     _ = @import("keepalive_test.zig");
     _ = @import("request_deadline_test.zig");
     _ = @import("request_deadline_http_test.zig");
+    _ = @import("gpu_turn.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
@@ -113,6 +120,7 @@ test {
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_generations_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voices_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_speakers_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_sampling_test.zig");
     _ = @import("drama_voice_tool.zig");
@@ -284,7 +292,10 @@ test {
         _ = @import("benchmark_stop_test.zig");
         _ = @import("benchmark_sse_test.zig");
         _ = @import("benchmark_stream_test.zig");
+        _ = @import("chat_cli_key_test.zig");
         _ = @import("benchmark_server_test.zig");
+        _ = @import("benchmark_server_log_test.zig");
+        _ = @import("benchmark_log.zig");
         _ = @import("benchmark_facts_test.zig");
         _ = @import("benchmark_rocm_test.zig");
         _ = @import("benchmark_manifest.zig");
@@ -310,6 +321,9 @@ test {
     if (comptime @import("builtin").os.tag != .windows) {
         _ = @import("chat_cli_child.zig");
         _ = @import("chat_cli_test.zig");
+        _ = @import("chat_cli_kr67_test.zig");
+        _ = @import("chat_cli_kia68_test.zig");
+        _ = @import("chat_cli_kr69_test.zig");
     }
 }
 
@@ -355,6 +369,8 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("multipart_test.zig");
+    _ = @import("query_test.zig");
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
@@ -365,13 +381,16 @@ test {
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");
     _ = @import("ocr/run_pdf_test.zig");
+    _ = @import("ocr/route_test.zig");
     _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/liteparse_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");

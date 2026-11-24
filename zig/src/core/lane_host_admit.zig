@@ -1,4 +1,5 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
+const std = @import("std");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
@@ -12,13 +13,14 @@ const Wait = @import("wait_reason.zig").Wait;
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return hold(h, .memory_pressure); // under memory pressure nothing starts or is read ahead
     if (h.disk.holding()) return null; // a flush waits for the requests in flight: nothing starts or is read ahead
-    if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    if (!h.stale.load(.acquire)) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
-    if (h.stale) return hold(h, .engine_unavailable);
+    if (h.stale.load(.acquire)) return hold(h, .engine_unavailable);
     if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return hold(h, .engine_busy);
     prefix.release(h); // requests whose awaited cut is in (or will not come) go on first
+    const now: i96 = if (h.priority_age_ns > 0) std.Io.Clock.awake.now(h.io).toNanoseconds() else 0;
     while (true) { // a request that waits for a cut another prompt is filling stays queued, passed over
-        const at = choose(h) orelse return null;
+        const at = chooseAt(h, now) orelse return null;
         if (!prefix.waits(h, h.queued.items[at])) return at;
         h.queued.items[at].wait_reason = .prefix_cut;
     }
@@ -49,10 +51,11 @@ pub fn holds(h: *LaneHost) bool {
 }
 
 /// The head, or one behind a head that waits for pool room, passing over prefix and read waiters.
-fn choose(h: *LaneHost) ?usize {
-    const first = for (h.queued.items, 0..) |j, i| {
+fn chooseAt(h: *LaneHost, now: i96) ?usize {
+    const ordinary = for (h.queued.items, 0..) |j, i| {
         j.wait_reason = passedFor(h, j) orelse break i;
     } else return null;
+    const first = promoted(h, now, ordinary);
     if (h.info_.admit == null and !ledger.priced(h)) return first;
     // alone: the whole pool is free (kept prefixes give their blocks back); a ledger counts leases, not live streams
     if (if (ledger.priced(h)) !ledger.outstanding(h) else h.core.activeCount() == 0) return first;
@@ -61,15 +64,19 @@ fn choose(h: *LaneHost) ?usize {
     const room: Wait = if (ledger.priced(h)) .ledger_bytes else .pool_room;
     head.wait_reason = room;
     if (head.waits_since == null) head.waits_since = h.admissions;
+    const rest = if (h.priority_age_ns <= 0) first + 1 else 0;
     // it waits on the streams admitted before it waited: while one runs, later requests that fit go first; then none do
     for (h.admitted.items) |j| if (j.seq < head.waits_since.?) {
-        for (h.queued.items[first + 1 ..], first + 1..) |j2, i| {
+        for (h.queued.items[rest..], rest..) |j2, i| {
+            if (i == first) continue;
             j2.wait_reason = passedFor(h, j2) orelse if (fits(h, j2)) return i else room;
         }
         return null;
     };
     // the rest stay behind the head that waits for room
-    for (h.queued.items[first + 1 ..]) |j2| j2.wait_reason = passedFor(h, j2) orelse room;
+    for (h.queued.items[rest..], rest..) |j2, i| {
+        if (i != first) j2.wait_reason = passedFor(h, j2) orelse room;
+    }
     return null;
 }
 
@@ -78,6 +85,24 @@ fn fits(h: *const LaneHost, job: *const Job) bool {
     if (ledger.priced(h)) return ledger.fits(h, job);
     const a = h.info_.admit.?;
     return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
+}
+
+/// The oldest eligible background job past the opt-in age that came before the ordinary head, else that head.
+fn promoted(h: *LaneHost, now: i96, ordinary: usize) usize {
+    if (h.priority_age_ns <= 0) return ordinary;
+    // only one submitted before the head may pass it: later arrivals never do, so every request is reached in time
+    const head = h.queued.items[ordinary].submitted;
+    for (h.queued.items[ordinary..], ordinary..) |j, i| {
+        if (!j.request.background or now - j.submitted < h.priority_age_ns or j.submitted >= head) continue;
+        j.wait_reason = passedFor(h, j) orelse return i;
+    }
+    return ordinary;
+}
+
+/// TENSORFOLD_PRIORITY_AGE_MS in nanoseconds; 0 keeps foreground-first FIFO.
+pub fn ageFromEnv() i96 {
+    const ms = @import("sys").environment.read(u32, "TENSORFOLD_PRIORITY_AGE_MS", 0) catch return 0;
+    return @as(i96, ms) * std.time.ns_per_ms;
 }
 
 /// Whether to admit several at once: prompts batch (beside chunked fills up to many_rows), two wait, two lanes free.
@@ -134,4 +159,96 @@ pub fn many(h: *LaneHost) bool {
         _ = h.deliver(job);
     }
     return took;
+}
+
+fn testEvent(_: *anyopaque, _: @import("engine_api.zig").Id, _: *const @import("engine_api.zig").Event) void {}
+
+fn testJob(h: *LaneHost, request: *const @import("engine_api.zig").Request, submitted: i96) Job {
+    return .{ .host = h, .id = 1, .request = request, .sink = .{ .ctx = h, .event = testEvent }, .submitted = submitted };
+}
+
+test "priority aging: default FIFO, threshold, prefix holds and pool room" {
+    const a = std.testing.allocator;
+    var cfg = try lanes.Config.init(a, .{}, 1, 0);
+    defer cfg.deinit(a);
+    var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
+    core.live = .empty;
+    defer core.live.deinit(a);
+    var h = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2 });
+    defer h.queued.deinit(a);
+    defer h.admitted.deinit(a);
+    const foreground: @import("engine_api.zig").Request = .{ .prompt = &.{ 1, 2, 3 }, .max_tokens = 1 };
+    const background: @import("engine_api.zig").Request = .{ .prompt = &.{ 4, 5, 6 }, .max_tokens = 1, .background = true };
+    const long_prompt: [64]u32 = @splat(7);
+    const long: @import("engine_api.zig").Request = .{ .prompt = &long_prompt, .max_tokens = 1, .background = true };
+    var first = testJob(&h, &foreground, 95 * std.time.ns_per_s);
+    var aged = testJob(&h, &background, 60 * std.time.ns_per_s);
+    var young = testJob(&h, &background, 90 * std.time.ns_per_s);
+    try h.queued.append(a, &first);
+    try h.queued.append(a, &aged);
+    try h.queued.append(a, &young);
+    const now = 100 * std.time.ns_per_s;
+    h.priority_age_ns = 30 * std.time.ns_per_s;
+    try std.testing.expectEqual(@as(?usize, 1), chooseAt(&h, now));
+    h.priority_age_ns = 0;
+    try std.testing.expectEqual(@as(?usize, 0), chooseAt(&h, now));
+    h.priority_age_ns = 50 * std.time.ns_per_s;
+    try std.testing.expectEqual(@as(?usize, 0), chooseAt(&h, now));
+    h.priority_age_ns = 30 * std.time.ns_per_s;
+    aged.prefix.leader = &first;
+    try std.testing.expectEqual(@as(?usize, 0), chooseAt(&h, now));
+    aged.prefix.leader = null;
+    var running = testJob(&h, &foreground, 0);
+    var stream: lanes.Stream = undefined;
+    stream.finished = false;
+    try core.live.append(a, &stream);
+    try h.admitted.append(a, &running);
+    h.admissions = 1;
+    var unused: u8 = 0;
+    h.info_.admit = .{ .ctx = &unused, .fits = struct {
+        fn fits(_: *anyopaque, prompt: u32, _: u32) bool {
+            return prompt < 64;
+        }
+    }.fits };
+    aged.request = &long;
+    try std.testing.expectEqual(@as(?usize, 0), chooseAt(&h, now));
+    h.queued.clearRetainingCapacity();
+    try h.queued.append(a, &aged);
+    try std.testing.expectEqual(@as(?usize, null), chooseAt(&h, now));
+}
+
+test "priority aging: a foreground head behind a steady stream of aged backgrounds is admitted within a bound" {
+    const a = std.testing.allocator;
+    var cfg = try lanes.Config.init(a, .{}, 1, 0);
+    defer cfg.deinit(a);
+    var core: lanes.Engine = undefined;
+    core.cfg = &cfg;
+    core.live = .empty;
+    defer core.live.deinit(a);
+    var h = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2 });
+    defer h.queued.deinit(a);
+    defer h.admitted.deinit(a);
+    h.priority_age_ns = 30 * std.time.ns_per_s;
+    const foreground: @import("engine_api.zig").Request = .{ .prompt = &.{ 1, 2, 3 }, .max_tokens = 1 };
+    const background: @import("engine_api.zig").Request = .{ .prompt = &.{ 4, 5, 6 }, .max_tokens = 1, .background = true };
+    // the head arrives at 100 s; two backgrounds were already waiting, and more keep arriving after it
+    var head = testJob(&h, &foreground, 100 * std.time.ns_per_s);
+    var jobs: [64]Job = undefined;
+    for (&jobs, 0..) |*j, i| j.* = testJob(&h, &background, if (i < 2) (90 + @as(i96, @intCast(i))) * std.time.ns_per_s else (100 + @as(i96, @intCast(i))) * std.time.ns_per_s);
+    try h.queued.append(a, &head);
+    var next: usize = 0;
+    while (next < 4) : (next += 1) try h.queued.append(a, &jobs[next]);
+    var picks: usize = 0;
+    const admitted = while (picks < 32) : (picks += 1) {
+        // every queued background is past the threshold by now; a fresh aged one replaces each one admitted
+        const now = (200 + @as(i96, @intCast(picks))) * std.time.ns_per_s;
+        const at = chooseAt(&h, now).?;
+        if (h.queued.items[at] == &head) break picks + 1;
+        _ = h.queued.orderedRemove(at);
+        try h.queued.append(a, &jobs[next]);
+        next += 1;
+    } else 0;
+    // the two that came before it, then the head itself: never any of those that came after
+    try std.testing.expectEqual(@as(usize, 3), admitted);
 }

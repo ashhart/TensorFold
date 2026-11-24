@@ -163,7 +163,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (try refusals.startup(a, o, problem)) return null;
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
-    if (@import("moss_image_spec.zig").recognize(a, io, o.dir)) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
+    const moss_image = @import("moss_image_spec.zig").recognize(a, io, o.dir);
+    if (cuda.kernels.built_sm == 110 and try refusals.sm110Product(a, io, o, moss_image, problem)) return null;
+    if (moss_image) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
@@ -178,11 +180,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
-    const o = family_memory.familyOpen(F, asked);
-    if (try refusals.place(F, a, o)) |why| { // a rank inside its world, a world the family serves: before admission
-        problem.* = why;
-        return null;
-    }
+    const resolved = (try @import("cuda_launch.zig").resolve(F, a, asked, problem)) orelse return null; // resolved and placed, before admission
+    const o = family_memory.familyOpen(F, resolved);
     if (refusals.family(F, o)) |why| {
         problem.* = why;
         return null;
@@ -402,7 +401,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         const store = try gpa.create(pc.Store);
         errdefer gpa.destroy(store);
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
+        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (F == @import("glm_cuda").native) &@import("cuda_glm_disk.zig").image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
         if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
@@ -416,7 +415,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
         h.store = store;
         if (o.learn_conversations) if (o.learn) |root| {
-            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store) else if (F == @import("glm_cuda").native) try @import("cuda_glm_disk.zig").attach(a, io, &g.ctx, o, root, kernels, loaded, store);
             if (comptime cuda_disk.keptDisk(F)) |K| try cuda_disk.attachKept(K, F.model_type, a, io, &g.ctx, o, root, kernels, loaded, store);
         };
     }
@@ -559,6 +558,7 @@ test {
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
+    _ = @import("cuda_glm_disk.zig");
     _ = @import("cuda_disk_identity_test.zig");
     _ = cuda_witness;
     _ = @import("cuda_pool_after_warmup.zig");

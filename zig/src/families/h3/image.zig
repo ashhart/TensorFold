@@ -9,6 +9,7 @@ pub const Tensors = h3.Tensors;
 pub const modulation = h3.modulation;
 pub const schedule = h3.schedule;
 pub const picture = h3.picture;
+pub const gpu_turn = h3.gpu_turn;
 
 pub const rules = prompt.rules;
 pub const tensors = prompt.tensors;
@@ -18,5 +19,6 @@ pub const Runner = prompt.Runner;
 pub const Vision = prompt.Vision;
 
 pub const Decoder = decoder.Decoder;
+pub const most_batch = decoder.most_batch;
 pub const host = decoder.host;
 pub const vae = decoder.vae;

@@ -267,7 +267,8 @@ zig build -Dgpu=spark -Dnvcc=/usr/local/cuda/bin/nvcc            # zig-out/nativ
 zig build -Dgpu=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc          # zig-out/native-hip/bin/tensorfold-native
 ```
 
-- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_110`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- `sm_110` serves Qwen3.8-27B text on one Thor GPU with BF16 KV and DFlash2. Its checkpoint formats are MLX affine 4-bit/group-64 and the NVIDIA ModelOpt NVFP4 export.
 - `sm_89` builds, but the release set (sm_80, 86, 120, 121) holds no image qualified on it.
 - The server refuses a GPU of another architecture at startup and names the `-Dgpu` that fits it (HIP already refuses one at device open).
 - CUDA needs `-Dnvcc`, or `-Dfatbins` with prebuilt images; each prebuilt image must hold exactly the one SASS profile its kernel needs on that GPU. `-Dstrip=false` keeps debug info.

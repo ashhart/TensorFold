@@ -6,6 +6,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const sm110 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"SM110"} }));
     b.step("test-qwen35-sm110-host", "SM110 startup refusals without device or weight loading").dependOn(&sm110.step);
     step.dependOn(&sm110.step);
+    const sm110_driver = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cuda/driver_sm110_host_test.zig"),
+        .target = host,
+        .link_libc = true,
+    }), .filters = &.{"SM110 CUDA driver:"} }));
+    b.step("test-cuda-driver-sm110-host", "SM110 CUDA device matching without loading a driver").dependOn(&sm110_driver.step);
+    step.dependOn(&sm110_driver.step);
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
@@ -24,6 +31,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("idol_cuda.zig").hostTests(b, cuda, mods.core, step);
     @import("inkling2.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
+    @import("ricursive_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix", "MTP suffix filtering", "MTP tap boundary", "partial tap capture", "qwen3_5 prompt tail:" } }));
     b.step("test-qwen35-prefill-host", "Stepped, whole, opening and interrupted prompt lifecycle without devices").dependOn(&prefill.step);
