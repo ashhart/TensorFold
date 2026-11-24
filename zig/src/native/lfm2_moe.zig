@@ -137,7 +137,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true, .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DSpark", .name = o.drafter_name orelse o.drafter.? } else null } });
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;
