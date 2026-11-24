@@ -94,6 +94,9 @@ pub const Error = error{
     Tfq3Bits, // a width the kernels do not decode
     Tfq3Layer, // a layer file's index, experts or widths differ from the checkpoint's
     Tfq3Table, // the shared table's payload is short or not finite
+    Tfq3RecordShape, // a nonmoe.tffpw record whose rows or columns are not the model's for its name
+    Tfq3RecordSlice, // a nonmoe.tffpw record the model would read only part of
+    Tfq3TensorParallel, // TFQ3 files with --tp: their records are whole tensors, never a rank's share
 };
 
 /// A byte range of a file: [off, off + len).
@@ -241,6 +244,12 @@ pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     var with = out;
     with.has_5b = has_5b;
     return with;
+}
+
+/// Whether a named record serves the model's [all, k] tensor read whole from row lo, x rows: else a named refusal.
+pub fn recordFits(r: u32, c: u32, lo: usize, x: usize, all: usize, k: usize) Error!void {
+    if (lo != 0 or x != all) return error.Tfq3RecordSlice;
+    if (r != all or c != k) return error.Tfq3RecordShape;
 }
 
 /// A projection's widths as the fusion sees them.
