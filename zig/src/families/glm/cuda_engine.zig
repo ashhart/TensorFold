@@ -105,6 +105,7 @@ pub const Engine = struct {
     structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
     pages: ?*pages_mod.Pages = null, // the other streams' KV pages and sequences (cuda_pages), once the server attached them
     index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
+    cap_rows: u32 = 0, // full GLM-5.3: a capped prompt step's rows (cuda_prompt_cuts.cappedRows), this step's alone
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
     keep_seqs: bool = false, // TF_GLM_KEEP_SEQS: a released slot keeps its sequence for its next request
@@ -402,8 +403,10 @@ pub const Engine = struct {
     pub fn prefillChunk(e: *Engine, part: []const u32, start: usize, len: usize, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !?u32 {
         const split = e.index_split; // this step's alone
         e.index_split = false;
+        const capped = e.cap_rows;
+        e.cap_rows = 0;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
-        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
+        const rows = if (capped == 0) try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len) else if (e.c.dsa) try prompt_cuts.cappedRows(len, e.cur.cuts.items, start, capped) else return error.BadChunk;
         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
@@ -428,7 +431,7 @@ pub const Engine = struct {
         const heat_before = if (f.prof != null) e.heat_gate.waited_s else 0;
         var stamp = prof_mod.span(f.prof, e.stream, .gate);
         e.gate(cancel) catch |err| {
-            if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
+            if (err == error.Cancelled) try snapshots.interrupted(e, if (prompt_cuts.coldCut(len, e.cur.cuts.items, start)) marks else null, @intCast(start)); // a resume reads cold cuts alone
             return err;
         };
         stamp.end();

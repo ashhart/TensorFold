@@ -362,7 +362,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     };
     return .{
         .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
-        .backend = own.lanes.backend(),
+        .backend = @import("cuda_prompt_cuts.zig").declared(own.lanes.backend(), own.e.c.dsa),
         .facts = own.lanes.factsWithCopies(own.copies),
         .rows = glm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
