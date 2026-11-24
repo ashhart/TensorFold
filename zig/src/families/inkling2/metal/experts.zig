@@ -7,7 +7,20 @@ const plan = @import("experts_plan.zig");
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Format = plan.Format;
 pub const Call = plan.Call;
-pub const Operation = enum { nvfp4_gu, nvfp4_down, mxfp8_gu, mxfp8_down, nvfp4_quantize, mxfp8_quantize, combine };
+pub const Operation = enum {
+    nvfp4_gu,
+    nvfp4_down,
+    mxfp8_gu,
+    mxfp8_down,
+    nvfp4_quantize,
+    mxfp8_quantize,
+    combine,
+    expert_group,
+    nvfp4_gu_grouped,
+    nvfp4_down_grouped,
+    mxfp8_gu_grouped,
+    mxfp8_down_grouped,
+};
 
 pub const function_names = [_][:0]const u8{
     "tf_ink2_nvfp4_gu",
@@ -17,6 +30,11 @@ pub const function_names = [_][:0]const u8{
     "tf_ink2_nvfp4_quantize",
     "tf_ink2_mxfp8_quantize",
     "tf_ink2_combine",
+    "tf_ink2_expert_group",
+    "tf_ink2_nvfp4_gu_grouped",
+    "tf_ink2_nvfp4_down_grouped",
+    "tf_ink2_mxfp8_gu_grouped",
+    "tf_ink2_mxfp8_down_grouped",
 };
 
 /// The grouping launch, then gate-up and down for each format, on simdgroup matrices for GPUs without tensor units.
@@ -27,6 +45,7 @@ const mma_tile_rows = 64;
 const mma_cap: u32 = 256;
 /// A chunk of at least this many rows takes the simdgroup-matrix kernels, where the GPU has no tensor units.
 pub const mma_rows: u32 = 16;
+pub const max_grouped_rows: u32 = plan.max_grouped_rows;
 
 const MmaGroupArgs = extern struct { pairs: u32, experts: u32, cap: u32 };
 const MmaArgs = extern struct { k: u32, n: u32, topk: u32, cap: u32 };
@@ -72,7 +91,8 @@ pub const Pipelines = struct {
         for (function_names, 0..) |name, i| {
             out.entries[i] = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
-            if (out.entries[i].maxThreads() < 32) return error.ExpertThreads;
+            const need: usize = if (i == @backingInt(Operation.expert_group)) 128 else 32;
+            if (out.entries[i].maxThreads() < need) return error.ExpertThreads;
         }
         return out;
     }
@@ -90,6 +110,10 @@ pub const Pipelines = struct {
 
 fn args(c: Call) plan.MatrixArgs {
     return .{ .k = c.k, .n = c.n, .topk = c.topk, .experts = c.experts };
+}
+
+fn groupedArgs(c: Call) plan.GroupedMatrixArgs {
+    return .{ .rows = c.rows, .k = c.k, .n = c.n, .topk = c.topk, .experts = c.experts };
 }
 
 fn launch(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, groups: u32) void {
@@ -211,4 +235,53 @@ pub fn mma(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Re
     e.setBuffer(out.buf, out.off, at + 2);
     e.setValue(MmaArgs{ .k = c.k, .n = c.n, .topk = c.topk, .cap = mma_cap }, at + 3);
     e.dispatchGroups(mtl.Size.of(weight_rows / mma_tile_rows, c.experts, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Bucket route pairs by expert ID into <= 8-pair work items on GPU without host readback.
+pub fn groupBuckets(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, out: Ref, c: Call) !void {
+    try plan.checkGrouped(c);
+    e.setBuffer(ids.buf, ids.off, 0);
+    e.setBuffer(out.buf, out.off, 1);
+    e.setValue(plan.GroupArgs{ .rows = c.rows, .topk = c.topk, .experts = c.experts }, 2);
+    e.setPipeline(p.get(.expert_group));
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(128, 1, 1));
+}
+
+pub fn nvfp4GuGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, amax: Ref, denominator: Ref, group_buf: Ref, out: Ref, c: Call) !void {
+    if (c.format != .nvfp4) return error.WrongExpertFormat;
+    try plan.checkGrouped(c);
+    for ([_]Ref{ x, w, scales, amax, denominator, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(groupedArgs(c), 7);
+    try launchGrid(p, e, .nvfp4_gu_grouped, plan.groupedGeometry(c), &.{});
+}
+
+pub fn mxfp8GuGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, group_buf: Ref, out: Ref, c: Call) !void {
+    if (c.format != .mxfp8) return error.WrongExpertFormat;
+    try plan.checkGrouped(c);
+    for ([_]Ref{ x, w, scales, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(groupedArgs(c), 5);
+    try launchGrid(p, e, .mxfp8_gu_grouped, plan.groupedGeometry(c), &.{});
+}
+
+pub fn nvfp4DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, amax: Ref, denominator: Ref, group_buf: Ref, out: Ref, c: Call) !void {
+    if (c.format != .nvfp4) return error.WrongExpertFormat;
+    try plan.checkGrouped(c);
+    for ([_]Ref{ act, w, scales, amax, denominator, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(groupedArgs(c), 7);
+    try launchGrid(p, e, .nvfp4_down_grouped, plan.groupedGeometry(c), &.{});
+}
+
+pub fn mxfp8DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, group_buf: Ref, out: Ref, c: Call) !void {
+    if (c.format != .mxfp8) return error.WrongExpertFormat;
+    try plan.checkGrouped(c);
+    for ([_]Ref{ act, w, scales, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
+    e.setValue(groupedArgs(c), 5);
+    try launchGrid(p, e, .mxfp8_down_grouped, plan.groupedGeometry(c), &.{});
+}
+
+pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, group_buf: Ref, out: Ref, c: Call) !void {
+    switch (c.format) {
+        .nvfp4 => if (nv_globals) |g| return nvfp4GuGrouped(p, e, x, w, scales, g.amax, g.denominator, group_buf, out, c) else return error.MissingNvfp4Globals,
+        .mxfp8 => return mxfp8GuGrouped(p, e, x, w, scales, group_buf, out, c),
+    }
 }
