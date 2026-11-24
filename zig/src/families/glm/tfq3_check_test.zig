@@ -242,3 +242,11 @@ test "TFQ3 check: without a TFQ3 layer the KDA keeps main's pipeline in every ca
         try t.expectEqual(want, got);
     };
 }
+
+test "TFQ3 check: a record serves a tensor only whole and at the model's shape" {
+    try check.recordFits(154880, 4096, 0, 154880, 154880, 4096);
+    try t.expectError(error.Tfq3RecordShape, check.recordFits(128, 128, 0, 154880, 154880, 4096)); // E329b's witness
+    try t.expectError(error.Tfq3RecordShape, check.recordFits(154880, 2048, 0, 154880, 154880, 4096));
+    try t.expectError(error.Tfq3RecordSlice, check.recordFits(154880, 4096, 77440, 77440, 154880, 4096)); // TP2 rank 1's head
+    try t.expectError(error.Tfq3RecordSlice, check.recordFits(154880, 4096, 0, 77440, 154880, 4096));
+}

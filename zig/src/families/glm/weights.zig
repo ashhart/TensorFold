@@ -263,7 +263,7 @@ const Loader = struct {
         for (parts, los, ns, alls, 0..) |p, lo, x, all, i| {
             var full: [240]u8 = undefined;
             const module = try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p });
-            if (!tfq3.matchPart(if (l.tfq3_ctx.nonmoe) |*nm| nm else null, module, lo, x, all, k, &pws[i], &ws[i], &any_pw)) {
+            if (!try tfq3.matchPart(&l.tfq3_ctx, module, lo, x, all, k, &pws[i], &ws[i], &any_pw)) {
                 ws[i] = try l.widths.of(module);
                 srcs[i] = try l.stored(module, all, k, ws[i]);
             }
@@ -544,11 +544,11 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     const V: usize = c.vocab;
     const dh_name = prefix ++ "layers.45.shared_head.head"; // a lighter LM head for the MTP drafts (verification keeps lm_head)
     const dh = c.tp == 1 and c.mtp > 0 and l.names.contains(dh_name ++ ".weight");
-    const dh_bytes = if (dh) affine.bytes(V, D, try l.widths.of(dh_name)) else 0;
-    const head_bytes = if (l.tfq3_ctx.nonmoe != null and l.tfq3_ctx.nonmoe.?.find("lm_head") != null) 0 else affine.bytes(V, D, try l.widths.of("lm_head"));
+    const dh_bytes = if (dh and try tfq3.record(&l.tfq3_ctx, dh_name, 0, V, V, D) == null) affine.bytes(V, D, try l.widths.of(dh_name)) else 0;
+    const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
+    const head_bytes = if (try tfq3.record(&l.tfq3_ctx, "lm_head", vp[0], vp[1] - vp[0], V, D) != null) 0 else affine.bytes(V, D, try l.widths.of("lm_head"));
     try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + head_bytes + dh_bytes + D * 2 + 8 * 256);
     w.embed = try l.mat(.embed, D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
-    const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
     w.head = try l.stack(.head, D, "lm_head", &.{""}, &.{vp[0]}, &.{vp[1] - vp[0]}, &.{V}, 1, .{});
     if (dh) w.draft_head = try l.stack(.head, D, dh_name, &.{""}, &.{0}, &.{V}, &.{V}, 1, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
