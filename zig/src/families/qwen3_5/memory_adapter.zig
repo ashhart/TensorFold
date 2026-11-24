@@ -52,7 +52,6 @@ pub const Adapter = struct {
             .conv_elems = (c.conv_taps - 1) * c.conv_dim, // 3 * 6144
             .svd_rank = 4, // spectral-denoised rank-4 beats rank-20 on 2B (3.3x smaller!)
             .svd_rank_short = 4,
-            .kv_bits = 8, // Q8 KV on 2B is tiny (~12 MiB) and keeps <think> rock-solid!
             .keep_conv = false,
         };
     }

@@ -1,4 +1,4 @@
-//! BF16/F32 conversion, NaN-safe symmetric Q8 quantization, partial RoPE rotation,
+//! BF16/F32 conversion, partial RoPE rotation and shift,
 //! and deterministic randomized SVD for low-rank recurrent state deltas.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -43,188 +43,6 @@ pub fn dotF32(a: []const f32, b: []const f32) f32 {
     var sum: f32 = @reduce(.Add, acc);
     while (i < a.len) : (i += 1) sum += a[i] * b[i];
     return sum;
-}
-
-/// NaN-safe symmetric int8 quantization along the last axis with F32 per-row scales.
-/// Never underflows to 0/0 NaN -> -128! Exact zeros stay exact zeros.
-pub fn quantizeRowsF32(src: []const f32, rows: usize, cols: usize, out_q: []i8, out_s: []f32) void {
-    std.debug.assert(src.len == rows * cols);
-    std.debug.assert(out_q.len == rows * cols);
-    std.debug.assert(out_s.len == rows);
-    for (0..rows) |r| {
-        const row = src[r * cols ..][0..cols];
-        const qrow = out_q[r * cols ..][0..cols];
-        var max_abs: f32 = 0;
-        for (row) |v| {
-            if (std.math.isFinite(v)) {
-                const av = @abs(v);
-                if (av > max_abs) max_abs = av;
-            }
-        }
-        if (max_abs > 1e-12) {
-            const scale = max_abs / 127.0;
-            const inv = 127.0 / max_abs;
-            out_s[r] = scale;
-            for (row, qrow) |v, *q| {
-                const f = if (std.math.isFinite(v)) v * inv else 0.0;
-                const clamped = std.math.clamp(@round(f), -127.0, 127.0);
-                q.* = @intFromFloat(clamped);
-            }
-        } else {
-            out_s[r] = 0.0;
-            @memset(qrow, 0);
-        }
-    }
-}
-
-/// NaN-safe symmetric int8 quantization directly from BF16 rows.
-pub fn quantizeRowsBf16(src: []const u16, rows: usize, cols: usize, out_q: []i8, out_s: []f32) void {
-    std.debug.assert(src.len == rows * cols);
-    std.debug.assert(out_q.len == rows * cols);
-    std.debug.assert(out_s.len == rows);
-    for (0..rows) |r| {
-        const row = src[r * cols ..][0..cols];
-        const qrow = out_q[r * cols ..][0..cols];
-        var max_abs: f32 = 0;
-        for (row) |bits| {
-            const v = bf16ToF32(bits);
-            if (std.math.isFinite(v)) {
-                const av = @abs(v);
-                if (av > max_abs) max_abs = av;
-            }
-        }
-        if (max_abs > 1e-12) {
-            const scale = max_abs / 127.0;
-            const inv = 127.0 / max_abs;
-            out_s[r] = scale;
-            for (row, qrow) |bits, *q| {
-                const v = bf16ToF32(bits);
-                const f = if (std.math.isFinite(v)) v * inv else 0.0;
-                const clamped = std.math.clamp(@round(f), -127.0, 127.0);
-                q.* = @intFromFloat(clamped);
-            }
-        } else {
-            out_s[r] = 0.0;
-            @memset(qrow, 0);
-        }
-    }
-}
-
-pub fn dequantizeRowsF32(q: []const i8, s: []const f32, rows: usize, cols: usize, out: []f32) void {
-    std.debug.assert(q.len == rows * cols and s.len == rows and out.len == rows * cols);
-    for (0..rows) |r| {
-        const sc = s[r];
-        const qrow = q[r * cols ..][0..cols];
-        const orow = out[r * cols ..][0..cols];
-        if (sc == 0.0) {
-            @memset(orow, 0.0);
-            continue;
-        }
-        for (qrow, orow) |qv, *ov| ov.* = @as(f32, @floatFromInt(qv)) * sc;
-    }
-}
-
-pub fn dequantizeRowsBf16(q: []const i8, s: []const f32, rows: usize, cols: usize, out: []u16) void {
-    std.debug.assert(q.len == rows * cols and s.len == rows and out.len == rows * cols);
-    for (0..rows) |r| {
-        const sc = s[r];
-        const qrow = q[r * cols ..][0..cols];
-        const orow = out[r * cols ..][0..cols];
-        if (sc == 0.0) {
-            @memset(orow, 0);
-            continue;
-        }
-        for (qrow, orow) |qv, *ov| ov.* = f32ToBf16(@as(f32, @floatFromInt(qv)) * sc);
-    }
-}
-
-pub const q4_group: usize = 32;
-
-/// Symmetric 4-bit group-32 quantization directly from BF16 rows (`cols % 32 == 0`).
-/// Packs 2 signed nibbles `[-7, 7]` (biased by `+8` into `[1..15]`, zero -> `8`) per byte,
-/// with 1 BF16 scale per 32-element group (0.5625 bytes/elem = 1.8x smaller than Q8!).
-pub fn quantizeRowsBf16Q4(src: []const u16, rows: usize, cols: usize, out_q: []u8, out_s: []u16) void {
-    std.debug.assert(cols % q4_group == 0);
-    const groups_per_row = cols / q4_group;
-    const packed_per_row = cols / 2;
-    std.debug.assert(src.len == rows * cols);
-    std.debug.assert(out_q.len == rows * packed_per_row);
-    std.debug.assert(out_s.len == rows * groups_per_row);
-
-    for (0..rows) |r| {
-        const row = src[r * cols ..][0..cols];
-        const qrow = out_q[r * packed_per_row ..][0..packed_per_row];
-        const srow = out_s[r * groups_per_row ..][0..groups_per_row];
-        for (0..groups_per_row) |g| {
-            const gsrc = row[g * q4_group ..][0..q4_group];
-            const gq = qrow[g * (q4_group / 2) ..][0 .. q4_group / 2];
-            var max_abs: f32 = 0;
-            for (gsrc) |bits| {
-                const v = bf16ToF32(bits);
-                if (std.math.isFinite(v)) {
-                    const av = @abs(v);
-                    if (av > max_abs) max_abs = av;
-                }
-            }
-            if (max_abs > 1e-12) {
-                const sc_bf = f32ToBf16(max_abs / 7.0);
-                const sc = bf16ToF32(sc_bf);
-                if (sc > 0.0) {
-                    const inv = 1.0 / sc;
-                    srow[g] = sc_bf;
-                    for (0..q4_group / 2) |p| {
-                        const v0 = bf16ToF32(gsrc[2 * p]);
-                        const v1 = bf16ToF32(gsrc[2 * p + 1]);
-                        const f0 = if (std.math.isFinite(v0)) v0 * inv else 0.0;
-                        const f1 = if (std.math.isFinite(v1)) v1 * inv else 0.0;
-                        const q0: i32 = @intFromFloat(std.math.clamp(@round(f0), -7.0, 7.0));
-                        const q1: i32 = @intFromFloat(std.math.clamp(@round(f1), -7.0, 7.0));
-                        const lo: u8 = @intCast(q0 + 8);
-                        const hi: u8 = @intCast(q1 + 8);
-                        gq[p] = (lo & 0x0f) | ((hi & 0x0f) << 4);
-                    }
-                } else {
-                    srow[g] = 0;
-                    @memset(gq, 0x88);
-                }
-            } else {
-                srow[g] = 0;
-                @memset(gq, 0x88);
-            }
-        }
-    }
-}
-
-/// Dequantizes symmetric 4-bit group-32 packed rows back to BF16 (`u16`).
-pub fn dequantizeRowsBf16Q4(q: []const u8, s: []const u16, rows: usize, cols: usize, out: []u16) void {
-    std.debug.assert(cols % q4_group == 0);
-    const groups_per_row = cols / q4_group;
-    const packed_per_row = cols / 2;
-    std.debug.assert(q.len == rows * packed_per_row);
-    std.debug.assert(s.len == rows * groups_per_row);
-    std.debug.assert(out.len == rows * cols);
-
-    for (0..rows) |r| {
-        const qrow = q[r * packed_per_row ..][0..packed_per_row];
-        const srow = s[r * groups_per_row ..][0..groups_per_row];
-        const orow = out[r * cols ..][0..cols];
-        for (0..groups_per_row) |g| {
-            const sc = bf16ToF32(srow[g]);
-            const gd = orow[g * q4_group ..][0..q4_group];
-            if (sc == 0.0) {
-                @memset(gd, 0);
-                continue;
-            }
-            const gq = qrow[g * (q4_group / 2) ..][0 .. q4_group / 2];
-            for (0..q4_group / 2) |p| {
-                const byte = gq[p];
-                const q0: i32 = @as(i32, byte & 0x0f) - 8;
-                const q1: i32 = @as(i32, (byte >> 4) & 0x0f) - 8;
-                gd[2 * p] = f32ToBf16(@as(f32, @floatFromInt(q0)) * sc);
-                gd[2 * p + 1] = f32ToBf16(@as(f32, @floatFromInt(q1)) * sc);
-            }
-        }
-    }
 }
 
 /// Half-split partial RoPE matching TensorFold's qwen35_rotate and q27_rope bit-for-bit.
@@ -272,6 +90,32 @@ pub fn ropeRotateKvBf16(
                 data[base + i] = f32ToBf16(a * cs - b * sn);
                 data[base + i + half] = f32ToBf16(b * cs + a * sn);
             }
+        }
+    }
+}
+
+/// Every row's K rotated on by `delta` positions (K computed at p + t lands at p + delta + t); 0 leaves it untouched.
+pub fn ropeShiftKvBf16(data: []u16, kv_heads: usize, seq_len: usize, head_dim: usize, delta: usize, rotary_dim: usize, theta: f64) void {
+    if (delta == 0 or rotary_dim == 0 or seq_len == 0) return;
+    std.debug.assert(rotary_dim <= head_dim and rotary_dim % 2 == 0);
+    std.debug.assert(data.len == kv_heads * seq_len * head_dim);
+    const half = rotary_dim / 2;
+    var cs_buf: [128]f32 = undefined;
+    var sn_buf: [128]f32 = undefined;
+    std.debug.assert(half <= cs_buf.len);
+    for (0..half) |i| {
+        const inv_freq = std.math.pow(f64, theta, -@as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(half)));
+        const ang = @as(f64, @floatFromInt(delta)) * inv_freq;
+        cs_buf[i] = @floatCast(@cos(ang));
+        sn_buf[i] = @floatCast(@sin(ang));
+    }
+    for (0..kv_heads * seq_len) |row| {
+        const base = row * head_dim;
+        for (0..half) |i| {
+            const a = bf16ToF32(data[base + i]);
+            const b = bf16ToF32(data[base + i + half]);
+            data[base + i] = f32ToBf16(a * cs_buf[i] - b * sn_buf[i]);
+            data[base + i + half] = f32ToBf16(b * cs_buf[i] + a * sn_buf[i]);
         }
     }
 }
@@ -393,7 +237,7 @@ pub fn symmetricJacobi(a: []f64, evecs: []f64, evals: []f64, n: usize) void {
 
 /// Randomized low-rank SVD of `A [m, n]` (row-major f32) to target rank `r <= min(max_rank, m, n)`.
 /// Writes `u_out [m, r]` (= U_r * sqrt(S_r)) and `vt_out [r, n]` (= sqrt(S_r) * V_r^T) so
-/// `u_out @ vt_out ≈ A`, with balanced singular values minimizing Q8 quantization error!
+/// `u_out @ vt_out ≈ A`, with balanced singular values.
 /// Returns actual rank `<= r` (0 if A is identically zero).
 pub fn randomizedSvdBalanced(
     scratch_alloc: Allocator,
@@ -582,37 +426,18 @@ pub fn topRightSingularVectors(
     return orthonormalizeRows(vt_out, got, cols);
 }
 
-/// Reconstructs `dst[m, n] += weight * (deq(u_q, u_s)[m, r] @ deq(v_q, v_s)[r, n])` in-place.
-pub fn reconstructSvdAdd(
-    u_q: []const i8,
-    u_s: []const f32,
-    v_q: []const i8,
-    v_s: []const f32,
-    m: usize,
-    r: usize,
-    n: usize,
-    weight: f32,
-    dst: []f32,
-    v_f32_scratch: []f32,
-) void {
-    std.debug.assert(u_q.len == m * r and u_s.len == m);
-    std.debug.assert(v_q.len == r * n and v_s.len == r);
-    std.debug.assert(dst.len == m * n and v_f32_scratch.len >= r * n);
+/// `dst[m, n] += weight * (u[m, r] @ v[r, n])` in place, from the factors as the SVD computed them.
+pub fn lowRankAdd(u: []const f32, v: []const f32, m: usize, r: usize, n: usize, weight: f32, dst: []f32) void {
+    std.debug.assert(u.len == m * r and v.len == r * n and dst.len == m * n);
     if (r == 0 or weight == 0) return;
-
-    // Dequantize V once ([r, n])
-    dequantizeRowsF32(v_q, v_s, r, n, v_f32_scratch[0 .. r * n]);
-
     const V = @Vector(8, f32);
     for (0..m) |row| {
-        const sc = u_s[row] * weight;
-        if (sc == 0.0) continue;
-        const urow = u_q[row * r ..][0..r];
+        const urow = u[row * r ..][0..r];
         const drow = dst[row * n ..][0..n];
         for (0..r) |k| {
-            const uk = @as(f32, @floatFromInt(urow[k])) * sc;
+            const uk = urow[k] * weight;
             if (uk == 0.0) continue;
-            const vrow = v_f32_scratch[k * n ..][0..n];
+            const vrow = v[k * n ..][0..n];
             const vu: V = @splat(uk);
             var j: usize = 0;
             while (j + 8 <= n) : (j += 8) {
@@ -623,42 +448,6 @@ pub fn reconstructSvdAdd(
             while (j < n) : (j += 1) drow[j] += uk * vrow[j];
         }
     }
-}
-
-test "quant: NaN-safe Q8 keeps zeros exact and round-trips finite values accurately" {
-    const src = [_]f32{ 0, 0, 0, 0, 1.5, -3.0, 0.25, std.math.nan(f32) };
-    var q: [8]i8 = undefined;
-    var s: [2]f32 = undefined;
-    quantizeRowsF32(&src, 2, 4, &q, &s);
-    try std.testing.expectEqual(@as(f32, 0.0), s[0]);
-    try std.testing.expectEqualSlices(i8, &.{ 0, 0, 0, 0 }, q[0..4]);
-    var out: [8]f32 = undefined;
-    dequantizeRowsF32(&q, &s, 2, 4, &out);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), out[4], 0.03);
-    try std.testing.expectApproxEqAbs(@as(f32, -3.0), out[5], 0.03);
-    try std.testing.expectEqual(@as(f32, 0.0), out[7]);
-}
-
-test "quant: NaN-safe group-32 Q4 BF16 preserves zeros and round-trips accurately" {
-    var src: [64]u16 = @splat(0);
-    var rng = SplitMix{ .state = 77 };
-    for (32..64) |i| src[i] = f32ToBf16(rng.normal() * 1.5);
-    var q: [32]u8 = undefined;
-    var s: [2]u16 = undefined;
-    quantizeRowsBf16Q4(&src, 1, 64, &q, &s);
-    try std.testing.expectEqual(@as(u16, 0), s[0]);
-    var out: [64]u16 = undefined;
-    dequantizeRowsBf16Q4(&q, &s, 1, 64, &out);
-    for (0..32) |i| try std.testing.expectEqual(@as(u16, 0), out[i]);
-    var err2: f64 = 0;
-    var ref2: f64 = 0;
-    for (32..64) |i| {
-        const a = bf16ToF32(src[i]);
-        const b = bf16ToF32(out[i]);
-        err2 += @as(f64, a - b) * @as(f64, a - b);
-        ref2 += @as(f64, a) * @as(f64, a);
-    }
-    try std.testing.expect(@sqrt(err2 / ref2) < 0.12);
 }
 
 test "quant: partial RoPE forward + inverse roundtrip preserves BF16 within 1 ULP" {
@@ -686,7 +475,7 @@ test "quant: partial RoPE forward + inverse roundtrip preserves BF16 within 1 UL
     try std.testing.expect(max_err < 0.05);
 }
 
-test "quant: randomized SVD + Q8 recovers low-rank 64x128 matrix under 0.5% relative error" {
+test "quant: randomized SVD recovers a low-rank 64x128 matrix from its F32 factors" {
     const gpa = std.testing.allocator;
     const m = 64;
     const n = 128;
@@ -714,23 +503,10 @@ test "quant: randomized SVD + Q8 recovers low-rank 64x128 matrix under 0.5% rela
     const got_r = try randomizedSvdBalanced(gpa, a, m, n, r, u_out, vt_out);
     try std.testing.expect(got_r >= true_r);
 
-    const uq = try gpa.alloc(i8, m * r);
-    defer gpa.free(uq);
-    const us = try gpa.alloc(f32, m);
-    defer gpa.free(us);
-    const vq = try gpa.alloc(i8, r * n);
-    defer gpa.free(vq);
-    const vs = try gpa.alloc(f32, r);
-    defer gpa.free(vs);
-    quantizeRowsF32(u_out, m, r, uq, us);
-    quantizeRowsF32(vt_out, r, n, vq, vs);
-
     const recon = try gpa.alloc(f32, m * n);
     defer gpa.free(recon);
     @memset(recon, 0);
-    const scratch = try gpa.alloc(f32, r * n);
-    defer gpa.free(scratch);
-    reconstructSvdAdd(uq, us, vq, vs, m, r, n, 1.0, recon, scratch);
+    lowRankAdd(u_out, vt_out, m, r, n, 1.0, recon);
 
     var err2: f64 = 0;
     var ref2: f64 = 0;
