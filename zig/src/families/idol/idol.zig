@@ -35,6 +35,8 @@ pub const birefnet_kernels = @import("birefnet_kernels.zig");
 pub const birefnet_reference = @import("birefnet_reference.zig");
 pub const birefnet_decoder = @import("birefnet_decoder.zig");
 pub const birefnet_weights = @import("birefnet_weights.zig");
+/// BiRefNet's GELU erf (br_erf) on the host, for its error bound.
+pub const birefnet_erf = @import("birefnet_erf.zig");
 pub const Model = model.Model;
 pub const Condition = model.Condition;
 pub const Timing = model.Timing;
@@ -69,4 +71,5 @@ test {
     _ = birefnet_reference;
     _ = birefnet_decoder;
     _ = birefnet_weights;
+    _ = birefnet_erf;
 }
