@@ -8,7 +8,7 @@ const g = contract.gates;
 const Fixture = tf.flashnext_grouped_fixture.Fixture;
 const fx = tf.flashnext_grouped_fixture;
 
-/// MB=2's served widths: every row count from 5 to 16, odd and even.
+/// Grouped shared and MB=2 widths: every row count from 5 to 16, odd and even.
 const widths = blk: {
     var out: [12]c.Shape = undefined;
     for (&out, 5..) |*s, rows| s.* = .{ .rows = rows, .n = fx.inner, .k = fx.d };
@@ -50,7 +50,7 @@ pub const Probe = struct {
             .out = .raw,
             .replaces = if (p.mb2) "the grouped gate/up decoding an expert's weights once a pair (MB=1), on the same weights, logits and rows" else "the recorded 4/32 expert gate/up and down kernels a row at a time, on the same weights, logits and rows",
             .nan = .{ .stated = "every output bit of the recorded kernels, non-finite scales included, is retained" },
-            .served = if (p.mb2) &widths else &.{ .{ .rows = 5, .n = fx.inner, .k = fx.d }, .{ .rows = 8, .n = fx.inner, .k = fx.d }, .{ .rows = 13, .n = fx.inner, .k = fx.d }, .{ .rows = 16, .n = fx.inner, .k = fx.d } },
+            .served = &widths,
             .sums = .{ .why = "grouping changes which threadgroup runs a (row, expert) pair, not a sum; the recorded kernels' sums are not requalified here" },
         }, .vt = &vt };
     }
