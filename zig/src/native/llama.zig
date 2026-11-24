@@ -159,7 +159,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     }
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.folded_mem = null;
-    if ((o.slide or mem_ctrl.hasSavedFile(a, io, o.dir)) and !mem_ctrl.useLegacyPocket()) {
+    // a saved bank is read only when --slide asks for learning: its file alone never attaches it
+    if (o.slide and !mem_ctrl.useLegacyPocket()) {
         const adapter = try fl.memory_adapter.Adapter.init(gpa, h.metal);
         errdefer adapter.deinit(gpa);
         const fm = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, fl.memory_adapter.Adapter.deinitOpaque);
