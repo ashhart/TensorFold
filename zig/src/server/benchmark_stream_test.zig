@@ -343,12 +343,35 @@ test "chat CLI: a streamed reply authenticates Latin-1 bearer bytes and refuses 
     }
     try std.testing.expectEqual(@as(usize, 1), f.count());
     try std.testing.expectEqual(@as(usize, 0), f.refusals());
+    const malformed = "{\"model\":\"\\u00E9abc";
+    var deep: std.ArrayList(u8) = .empty;
+    for (0..901) |_| try deep.appendSlice(a, "[");
+    try deep.appendSlice(a, "{\"model\":\"\\u00E9abc\"}");
+    for (0..901) |_| try deep.append(a, ']');
+    const hostile_first = "{\"model\":\"\\u00E9abc\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
+    const hostile_last = "{\"model\":\"safe\",\"model\":\"\\u00E9abc\",\"messages\":[],\"stream\":true}";
+    for ([_][]const u8{ malformed, deep.items, hostile_first, hostile_last }) |request| {
+        const attack = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, request), &out.writer, .{});
+        switch (attack) {
+            .failed => |why| try std.testing.expectEqualStrings("[withheld]", why.reason),
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    const safe_duplicate = "{\"model\":\"first\",\"model\":\"safe\",\"messages\":[],\"stream\":true}";
+    const safe = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), token, unicode_credentials, try a.dupe(u8, safe_duplicate), &out.writer, .{});
+    switch (safe) {
+        .finished => |got| try std.testing.expectEqualStrings("Ready.", got.content),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), f.count());
+    try std.testing.expectEqualStrings(safe_duplicate, f.request(1).body);
     const refused = try turn.run(a, std.testing.io, try f.url(a, "/v1/chat/completions"), "fixture-\u{20ac}", .{}, try turn.body(a, .{ .model = "m" }, &h, "ready?"), &out.writer, .{});
     switch (refused) {
         .failed => |why| try std.testing.expect(std.mem.indexOf(u8, why.reason, "fixture") == null),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqual(@as(usize, 2), f.count());
     try std.testing.expectEqual(@as(usize, 0), f.refusals());
     try std.testing.expect(std.mem.indexOf(u8, f.request(0).path, token) == null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), token) == null);
