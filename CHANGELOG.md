@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Transcribe on CUDA: chat requests take speech as 16 kHz mono WAV in OpenAI `input_audio` and vLLM `audio_url` parts, up to an hour of audio a request in the model's trained 65,536-token window, with each clip's rows keyed in the prompt cache and MTP drafts running over them; `/v1/models` lists `audio` among its input types (#1632, closes #1549). Thanks to @BobClawblaw.
+
 - OCR: `POST /ocr` takes PaddleX's request contract (step 6 of #2440): page results with reading-order blocks, lines and optional word boxes, the whole document's page count kept when processing stops early, and a repeated query refused (#2575).
 
 - XPU: Qwen3.8-27B decode attention computes the twelve exponentials of a key (each of the six heads' rescale and weight) as one 16-lane vector `exp` instead of twelve scalar ones, with the same operands in the same order, so every output byte is unchanged (vector `exp` equals scalar `exp` on all 2^32 float bit patterns and `fmax` on 5.4e8 pairs; token hashes equal to main, drafted and plain, at 7,588, 28,946 and 121,022 prompt tokens). On an Arc Pro B70 `attn_decode` takes 5.5 to 7.5 % less GPU time a drafted round and served drafted decode gains 1.3 % at 7,588 prompt tokens, 3.0 % at 28,946 and 4.9 % at 121,022; plain decode is level. The kernel contract adds a planted control for the vector's lanes (#4651, refs #2543).
