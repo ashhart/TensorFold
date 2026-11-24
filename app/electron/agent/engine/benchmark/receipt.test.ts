@@ -26,8 +26,24 @@ for (const sample of historical.samples) { delete sample.finish_reason; delete s
 for (const version of ['1.0.12', '1.1.0']) {
   historical.runtime.tensorfold_version = version
   assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(historical)), historical, 'reviewed historical receipts without the new fields remain readable')
+  const historicalShort = structuredClone(historical)
+  Object.assign(historicalShort.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100 })
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historicalShort)), /invalid|unsupported/, 'historical receipts without finish_reason still require 256 completion tokens for ok samples')
 }
 assert.throws(() => parseBenchmarkReceipt(JSON.stringify(historical), { model: historical.model.repo_id, serial: false, engineVersion: BENCHMARK_ENGINE_VERSION }), /invalid|unsupported/, 'a historical receipt cannot substitute for a live run on the new engine')
+const natural = structuredClone(receipt)
+Object.assign(natural.samples[5], { completion_tokens: 177, delivery_seconds: 2, delivery_tps: 88, finish_reason: 'stop' })
+const naturalParsed = parseBenchmarkReceipt(JSON.stringify(natural), { model: natural.model.repo_id, serial: false })
+assert.deepEqual(naturalParsed, natural, 'a 177-token natural stop with finish_reason stop is accepted')
+assert.equal(benchmarkProtocolComplete(naturalParsed), true)
+assert.equal(benchmarkCells(naturalParsed)[1].successful, 5)
+assert.deepEqual(benchmarkCells(naturalParsed)[1].deliveryTokensPerSecond, { median: 100, min: 88, max: 100, spread: 12 })
+const minNatural = structuredClone(receipt)
+Object.assign(minNatural.samples[5], { completion_tokens: 128, delivery_seconds: 1.27, delivery_tps: 100, finish_reason: 'stop' })
+assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(minNatural))), true, '128 tokens with finish_reason stop meets the natural-stop floor')
+const codeChatRoute = structuredClone(receipt)
+for (const sample of codeChatRoute.samples) sample.route = '/v1/chat/completions'
+assert.deepEqual(parseBenchmarkReceipt(JSON.stringify(codeChatRoute)), codeChatRoute, 'code samples may consistently use /v1/chat/completions across the whole run')
 for (const mutate of [
   (value: any) => { value.prompt = 'SYNTHETIC_PRIVATE_PROMPT' },
   (value: any) => { value.model.repo_id = '/private/operator/model' },
@@ -36,6 +52,10 @@ for (const mutate of [
   (value: any) => { value.samples[0].seed = 999 },
   (value: any) => { value.samples.push(value.samples[0]) },
   (value: any) => { value.samples[0].completion_tokens = 257 },
+  (value: any) => { Object.assign(value.samples[5], { completion_tokens: 127, delivery_seconds: 1.26, delivery_tps: 100, finish_reason: 'stop' }) },
+  (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: null }) },
+  (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100 }); delete value.samples[5].finish_reason },
+  (value: any) => { Object.assign(value.samples[5], { completion_tokens: 177, delivery_seconds: 1.76, delivery_tps: 100, finish_reason: 'length' }) },
   (value: any) => { value.created_at = '2026-02-30T00:00:00Z' },
   (value: any) => { value.suite.sha256 = '0'.repeat(64) },
   (value: any) => { value.settings.managed = false },
@@ -44,6 +64,11 @@ for (const mutate of [
   (value: any) => { value.settings.extra = true },
   (value: any) => { value.samples[0].finish_reason = 'tool_calls' },
   (value: any) => { value.samples[0].route = '/v1/models' },
+  (value: any) => { for (const sample of value.samples) if (sample.fixture_id === 'chat') sample.route = '/v1/completions' },
+  (value: any) => { value.samples[1].route = '/v1/chat/completions' },
+  (value: any) => { value.samples[10].route = '/v1/chat/completions' },
+  (value: any) => { delete value.samples[1].route },
+  (value: any) => { for (const sample of value.samples) if (sample.fixture_id === 'chat') delete sample.route },
   (value: any) => { value.samples[0].extra = true },
   (value: any) => { value.settings.context_tokens = 8192 },
   (value: any) => { value.runtime.dependencies.private_path = '/private/operator' },
