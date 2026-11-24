@@ -37,7 +37,7 @@ pub const Backend = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     m: *Model,
-    k: *const Kernels,
+    k: *Kernels,
     s: cuda.Stream,
     lanes_: [engine.max_slots]?Lane = @splat(null),
     streams: [engine.max_slots]?*lanes.Stream = @splat(null), // the stream each model slot holds
@@ -50,7 +50,7 @@ pub const Backend = struct {
 
     const be = lanes.backend;
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *Model, k: *const Kernels, s: cuda.Stream) !Backend {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *Model, k: *Kernels, s: cuda.Stream) !Backend {
         const v = m.w.c.text.unpadded_vocab;
         var tokens = try cuda.DeviceBuffer.alloc(d, (token_ring + window_rows) * 4);
         errdefer tokens.free();

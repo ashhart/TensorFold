@@ -5,6 +5,8 @@ const core = @import("core");
 const config = @import("config.zig");
 const plan_ = @import("plan.zig");
 const modelopt = @import("modelopt.zig");
+const exl3 = @import("exl3.zig");
+const pack = @import("pack_weights.zig");
 
 pub const Controller = struct {
     down: u64,
@@ -16,6 +18,7 @@ pub const Attention = struct {
     wq: u64,
     wk: u64,
     wv: u64,
+    exl3: ?pack.Projections = null,
     wr: u64,
     wo: u64,
     gate: u64,
@@ -39,7 +42,7 @@ pub const Layer = struct {
     mlp_conv: u64,
     router: u64,
     router_bias: u64,
-    experts: modelopt.Layer,
+    experts: union(enum) { modelopt: modelopt.Layer, exl3: exl3.Experts },
     controllers: [4]Controller,
 };
 
@@ -91,6 +94,11 @@ const Loader = struct {
         return p;
     }
 
+    fn putExl3(ctx: *anyopaque, bytes: []const u8) !u64 {
+        const l: *Loader = @ptrCast(@alignCast(ctx));
+        return l.put(bytes);
+    }
+
     fn tensor(l: *Loader, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.safetensors.DType, dims: []const usize) !u64 {
         var buf: [256]u8 = undefined;
         const name = try std.fmt.bufPrint(&buf, fmt, args);
@@ -98,10 +106,10 @@ const Loader = struct {
     }
 };
 
-fn checkpointBytes(ck: *const core.Checkpoint) !usize {
+pub fn checkpointBytes(ck: *const core.Checkpoint, is_exl3: bool) !usize {
     var total: usize = 0;
     for (ck.files.items) |file| for (file.names.keys(), file.names.values()) |name, entry| {
-        if (!std.mem.startsWith(u8, name, "model.llm.")) continue;
+        if (!is_exl3 and !std.mem.startsWith(u8, name, "model.llm.")) continue;
         const padded = std.mem.alignForward(usize, entry.end - entry.begin, 256);
         total = try std.math.add(usize, total, padded);
     };
@@ -126,7 +134,7 @@ fn controllers(l: *Loader, ck: *core.Checkpoint, c: *const config.Text, i: u32, 
 }
 
 /// Load every text tensor, including all four controller triplets and both cross-pass query matrices.
-pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan) !Weights {
+pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan, bits: ?std.json.ObjectMap) !Weights {
     if (c.text.loop == null) return error.Inkling2LoopRequired;
     var formats: [config.max_layers]modelopt.Format = undefined;
     for (p.layers[0..c.text.layers], 0..) |layer, k| {
@@ -135,7 +143,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
             .mxfp8 => .mxfp8,
         };
     }
-    const total = try checkpointBytes(ck);
+    const total = try checkpointBytes(ck, bits != null);
     var arena = try cuda.DeviceBuffer.alloc(d, @max(total, 256));
     var w: Weights = .{ .gpa = gpa, .c = c.*, .p = p };
     errdefer w.deinit();
@@ -147,6 +155,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
     w.attn_queries = try gpa.alloc(u64, c.text.layers);
     w.mlp_queries = try gpa.alloc(u64, c.text.layers);
     var l: Loader = .{ .w = &w, .arena = arena };
+    const sink: exl3.MiniSink = .{ .ctx = &l, .put = Loader.putExl3 };
     const h: usize = c.text.hidden;
     w.embed = try l.tensor(ck, "model.llm.embed.weight", .{}, .bf16, &.{ c.text.vocab, h });
     w.embed_norm = try l.tensor(ck, "model.llm.embed_norm.weight", .{}, .bf16, &.{h});
@@ -176,12 +185,13 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
             }
         };
         layer.attn = .{
-            .wq = try A.put(&l, ck, "model.llm.layers.{d}.attn.wq_du.weight", L, &.{ q, h }),
-            .wk = try A.put(&l, ck, "model.llm.layers.{d}.attn.wk_dv.weight", L, &.{ kv, h }),
-            .wv = try A.put(&l, ck, "model.llm.layers.{d}.attn.wv_dv.weight", L, &.{ kv, h }),
+            .exl3 = if (bits) |b| try pack.miniAttention(ck, sink, b, i, h, q, kv) else null,
+            .wq = if (bits != null) 0 else try A.put(&l, ck, "model.llm.layers.{d}.attn.wq_du.weight", L, &.{ q, h }),
+            .wk = if (bits != null) 0 else try A.put(&l, ck, "model.llm.layers.{d}.attn.wk_dv.weight", L, &.{ kv, h }),
+            .wv = if (bits != null) 0 else try A.put(&l, ck, "model.llm.layers.{d}.attn.wv_dv.weight", L, &.{ kv, h }),
             .wr = try A.put(&l, ck, "model.llm.layers.{d}.attn.wr_du.weight", L, &.{ @as(usize, hd.q) * c.text.d_rel, h }),
-            .wo = try A.put(&l, ck, "model.llm.layers.{d}.attn.wo_ud.weight", L, &.{ h, q }),
-            .gate = try A.put(&l, ck, "model.llm.layers.{d}.attn.gate_attn.weight", L, &.{ q, h }),
+            .wo = if (bits != null) 0 else try A.put(&l, ck, "model.llm.layers.{d}.attn.wo_ud.weight", L, &.{ h, q }),
+            .gate = if (bits != null) 0 else try A.put(&l, ck, "model.llm.layers.{d}.attn.gate_attn.weight", L, &.{ q, h }),
             .sink = try A.put(&l, ck, "model.llm.layers.{d}.attn.attn_sink_proj.weight", L, &.{ hd.q, h }),
             .q_scale = try A.put(&l, ck, "model.llm.layers.{d}.attn.q_l2_clip.scale", L, &.{ hd.q, hd.dim }),
             .rel_scale = try A.put(&l, ck, "model.llm.layers.{d}.attn.rel_l2_clip.scale", L, &.{ hd.q, c.text.d_rel }),
@@ -218,10 +228,18 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         layer.router = try A.put(&l, ck, "model.llm.layers.{d}.mlp.gate.weight", L, &.{ c.text.experts, h });
         layer.router_bias = try l.tensor(ck, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{c.text.experts});
         var prefix: [96]u8 = undefined;
-        layer.experts = try modelopt.load(&l, ck, try std.fmt.bufPrint(&prefix, "model.llm.layers.{d}.mlp.experts.", L), formats[k], c.text.experts, h, c.text.expert_inter);
+        layer.experts = if (bits) |b|
+            .{ .exl3 = try exl3.miniExperts(gpa, ck, sink, b, i, c.text.experts, h, c.text.expert_inter) }
+        else
+            .{ .modelopt = try modelopt.load(&l, ck, try std.fmt.bufPrint(
+                &prefix,
+                "model.llm.layers.{d}.mlp.experts.",
+                L,
+            ), formats[k], c.text.experts, h, c.text.expert_inter) };
         @memset(&layer.controllers, .{ .down = 0, .forget = 0, .gain = 0 });
         const lp = c.text.loop.?;
         if (i >= lp.core_start and i < lp.core_end) try controllers(&l, ck, &c.text, i, lp.gate_rank, &layer.controllers);
+        if (bits != null) ck.release();
     }
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
     return w;

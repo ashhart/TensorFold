@@ -7,51 +7,13 @@ const weights_ = @import("loop_weights.zig");
 const ops = @import("ops.zig");
 const attention = @import("kernels.zig");
 const modelopt = @import("modelopt.zig");
+const exl3_experts = @import("experts.zig");
 const loop_math = @import("loop_math_cuda.zig");
 
 pub const prompt_rows: usize = 2048;
 pub const window_rows: usize = 16;
 
-pub const Kernels = struct {
-    glue: ops.Kernels,
-    attn: attention.Kernels,
-    moe: modelopt.Kernels,
-    loop: loop_math.Kernels,
-    sample_mod: cuda.Module,
-    draws: cuda.sample.Draws,
-
-    pub fn load(ctx: *const cuda.Context) !Kernels {
-        const d = ctx.d;
-        var glue = try ops.Kernels.load(d);
-        errdefer glue.unload();
-        var attn = try attention.Kernels.load(d);
-        errdefer attn.unload();
-        const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
-        var moe = try modelopt.Kernels.load(d, sms);
-        errdefer moe.unload();
-        var lm = try loop_math.Kernels.load(d);
-        errdefer lm.unload();
-        var sample_mod = try cuda.Module.load(d, cuda.kernels.sample);
-        errdefer sample_mod.unload();
-        return .{
-            .glue = glue,
-            .attn = attn,
-            .moe = moe,
-            .loop = lm,
-            .sample_mod = sample_mod,
-            .draws = try cuda.sample.Draws.resolve(sample_mod),
-        };
-    }
-
-    pub fn deinit(k: *Kernels) void {
-        k.sample_mod.unload();
-        k.loop.unload();
-        k.moe.unload();
-        k.attn.unload();
-        k.glue.unload();
-        k.* = undefined;
-    }
-};
+pub const Kernels = @import("loop_kernels.zig").Kernels;
 
 const Scratch = struct {
     ids: u64,
@@ -92,6 +54,7 @@ const Scratch = struct {
     route_weights: u64,
     moe_out: u64,
     moe_scratch: u64,
+    exl3_scratch: ?cuda.exl3_experts.Scratch,
     hidden: u64,
     logits: u64,
     backup: u64,
@@ -234,6 +197,10 @@ pub const Model = struct {
         const global_slots = attention.slotsFor(global, context);
         const part_slots = @max(rows * c.local.q * local_slots, rows * c.global.q * global_slots);
         const hist_values = @as(usize, w.p.n_visits) * (2 * kv + 2 * h) * window_rows;
+        const expert_scratch = switch (w.layers[0].experts) {
+            .modelopt => try m.alloc(try modelopt.scratchBytes(rows, c.topk, h, c.expert_inter)),
+            .exl3 => |e| try m.alloc(try exl3_experts.scratchBytes(e.layer, rows, c.topk)),
+        };
         m.s = .{
             .ids = try m.alloc(rows * 4),
             .pos = try m.alloc(rows * 4),
@@ -270,8 +237,12 @@ pub const Model = struct {
             .route_scores = try m.alloc(rows * c.experts * 4),
             .route_pick = try m.alloc(rows * c.experts * 4),
             .route_weights = try m.alloc(rows * c.experts * 4),
-            .moe_out = try m.alloc(rows * h * 2),
-            .moe_scratch = try m.alloc(try modelopt.scratchBytes(rows, c.topk, h, c.expert_inter)),
+            .moe_out = try m.alloc(rows * h * (if (w.c.exl3) @as(usize, 4) else 2)),
+            .moe_scratch = expert_scratch,
+            .exl3_scratch = switch (w.layers[0].experts) {
+                .modelopt => null,
+                .exl3 => |e| try cuda.exl3_experts.scratch(expert_scratch, e.layer, rows, c.topk),
+            },
             .hidden = try m.alloc(rows * h * 2),
             .logits = try m.alloc(window_rows * c.unpadded_vocab * 4),
             .backup = try m.alloc(layout.bytes - layout.at(0).conv_offset),
@@ -337,7 +308,7 @@ pub const Model = struct {
     }
 
     /// One prompt chunk or one decode window. `record` retains every convolution input for exact prefix rollback.
-    pub fn forward(m: *Model, k: *const Kernels, s: cuda.Stream, tokens: []const u32, p0: usize, head0: usize, heads: usize, record: bool) !void {
+    pub fn forward(m: *Model, k: *Kernels, s: cuda.Stream, tokens: []const u32, p0: usize, head0: usize, heads: usize, record: bool) !void {
         const c = m.w.c.text;
         const rows = tokens.len;
         const h: usize = c.hidden;
@@ -403,9 +374,21 @@ pub const Model = struct {
             const u_v = if (layer.kind == .global or messages) m.s.normalized + 2 * norm_stride else u_q;
             const q_width: usize = @as(usize, layer.heads.q) * layer.heads.dim;
             const kv_width: usize = @as(usize, layer.heads.kv) * layer.heads.dim;
-            try loop_math.projectQkv(&k.loop, s, u_q, u_k, u_v, lw.attn.wq, lw.attn.wk, lw.attn.wv, m.s.q_raw, m.s.k_raw, m.s.v_raw, rows, h, q_width, kv_width);
+            if (lw.attn.exl3) |a| {
+                const d = &k.dense.?;
+                if (rows <= window_rows and u_q == u_k and u_q == u_v) {
+                    try d.decodeGroup(s, &.{ a.q, a.k, a.v }, u_q, .bf16, rows, &.{ m.s.q_raw, m.s.k_raw, m.s.v_raw }, .bf16);
+                } else {
+                    try Kernels.project(d, s, a.q, u_q, rows, m.s.q_raw);
+                    try Kernels.project(d, s, a.k, u_k, rows, m.s.k_raw);
+                    try Kernels.project(d, s, a.v, u_v, rows, m.s.v_raw);
+                }
+                try Kernels.project(d, s, a.gate, u_q, rows, m.s.gate);
+            } else {
+                try loop_math.projectQkv(&k.loop, s, u_q, u_k, u_v, lw.attn.wq, lw.attn.wk, lw.attn.wv, m.s.q_raw, m.s.k_raw, m.s.v_raw, rows, h, q_width, kv_width);
+            }
             try ops.rowdot(&k.glue, s, u_q, lw.attn.wr, m.s.rel_raw, rows, layer.heads.q * c.d_rel, h, true, false);
-            try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, false);
+            if (lw.attn.exl3 == null) try ops.rowdot(&k.glue, s, u_q, lw.attn.gate, m.s.gate, rows, q_width, h, true, false);
             try ops.rowdot(&k.glue, s, u_q, lw.attn.sink, m.s.sink, rows, layer.heads.q, h, true, false);
 
             const geometry = m.layerGeometry(visit.layer);
@@ -452,7 +435,10 @@ pub const Model = struct {
             try attention.prep(&k.attn, s, r, geometry, prep, .{ m.s.q_raw, m.s.k_conv, m.s.v_conv, m.s.rel_raw }, .{ lw.attn.q_scale, lw.attn.rel_scale }, m.s.q_prepared, m.s.rel_prepared, cache);
             try attention.relTable(&k.attn, s, r, m.s.rel_prepared, lw.attn.rel_proj, m.s.rel_table);
             try attention.attend(&k.attn, s, r, geometry, stride, part_capacity, m.s.q_prepared, cache, m.s.rel_table, m.s.part_o, m.s.part_ml, m.s.sink, m.s.gate, m.s.attn_heads);
-            try ops.rowdot(&k.glue, s, m.s.attn_heads, lw.attn.wo, m.s.attn_out, rows, h, q_width, true, false);
+            if (lw.attn.exl3) |a|
+                try Kernels.project(&k.dense.?, s, a.o, m.s.attn_heads, rows, m.s.attn_out)
+            else
+                try ops.rowdot(&k.glue, s, m.s.attn_heads, lw.attn.wo, m.s.attn_out, rows, h, q_width, true, false);
 
             if (layer.boundary) {
                 try m.copy(s, m.s.blocks[n_blocks], partial, rows * h * 2);
@@ -483,7 +469,10 @@ pub const Model = struct {
             }
             try ops.rowdot(&k.glue, s, m.s.normalized, lw.router, m.s.route_scores, rows, c.experts, h, false, true);
             try ops.topk(&k.glue, s, m.s.route_scores, lw.router_bias, m.s.route_pick, m.s.route_weights, rows, c.experts, c.topk, c.route_scale);
-            try modelopt.run(&k.moe, s, lw.experts, .{ .gate = c.gate_cap, .up = c.up_cap }, m.s.normalized, h, m.s.route_pick, m.s.route_weights, rows, c.topk, m.s.moe_out, m.s.moe_scratch);
+            switch (lw.experts) {
+                .modelopt => |e| try modelopt.run(&k.moe.modelopt, s, e, .{ .gate = c.gate_cap, .up = c.up_cap }, m.s.normalized, h, m.s.route_pick, m.s.route_weights, rows, c.topk, m.s.moe_out, m.s.moe_scratch),
+                .exl3 => |e| try exl3_experts.run(&k.moe.exl3, s, e.layer, .{ .gate = c.gate_cap, .up = c.up_cap }, e.bits, m.s.normalized, h, .bf16, m.s.route_pick, m.s.route_weights, rows, m.s.moe_out, m.s.exl3_scratch.?),
+            }
             try ops.conv(&k.glue, s, .{
                 .x = m.s.moe_out,
                 .state = m.convOf(visit.cache_slot, 3),
@@ -491,7 +480,8 @@ pub const Model = struct {
                 .resid = m.s.t,
                 .out = next,
                 .hist = if (record) m.histOf(visit.cache_slot, 3) else 0,
-                .x_bf16 = 1,
+                .x_bf16 = @intFromBool(!m.w.c.exl3),
+                .round_in = @intFromBool(m.w.c.exl3),
                 .c = @intCast(h),
                 .rows = @intCast(rows),
                 .mode = 2,

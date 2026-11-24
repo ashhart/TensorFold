@@ -8,9 +8,11 @@ const plan_ = @import("plan.zig");
 const loop = @import("loop.zig");
 const engine = @import("loop_engine.zig");
 const backend = @import("loop_backend.zig");
+const pack = @import("pack_weights.zig");
+const weights = @import("loop_weights.zig");
 
 pub const model_type = "inkling2_loop";
-pub const formats: []const []const u8 = &.{"modelopt-mixed"};
+pub const formats: []const []const u8 = &.{ "modelopt-mixed", "exl3" };
 pub const default_context: i64 = 1_048_576;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
@@ -39,7 +41,7 @@ pub const Owned = struct {
     admission: loop.Admission,
     kernels: engine.Kernels,
     stream: cuda.Stream,
-    weights: @import("loop_weights.zig").Weights,
+    weights: weights.Weights,
     model: engine.Model,
     backend: backend.Backend,
 };
@@ -82,41 +84,65 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return o.admission.fits(prompt, max_tokens) and o.backend.admits(prompt, max_tokens);
 }
 
+fn readConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, why: *config.Why) !config.Config {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+    defer gpa.free(bytes);
+    return config.parseCuda(gpa, bytes, why);
+}
+
+/// EXL3's text arena is sized from the same shards the loader opens, before the native pool admits the model.
+pub fn textWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 {
+    var why: config.Why = .{};
+    const c = readConfig(gpa, io, dir, &why) catch |err| return if (err == error.OutOfMemory) err else null;
+    if (!c.exl3) return null;
+    var ck = try core.Checkpoint.openModelExcluding(gpa, io, dir, pack.sidecars);
+    defer ck.close();
+    return try weights.checkpointBytes(&ck, true);
+}
+
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.Inkling2CapturedKernels;
     if (o.segments != 1 or o.tp != 1 or o.rank != 0) return error.Inkling2LoopOneRankOnly;
     if (o.vision != null) return error.Inkling2LoopTextOnly;
     if (o.drafter != null) return error.Inkling2DSparkPending;
-    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
-    defer gpa.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
-    defer gpa.free(bytes);
     var why: config.Why = .{};
-    const c = config.parse(gpa, bytes, &why) catch |err| {
-        std.log.err("Inkling 2 Mini config refused: {s}", .{why.text()});
+    const c = readConfig(gpa, io, dir, &why) catch |err| {
+        if (why.text().len != 0) std.log.err("Inkling 2 Mini config refused: {s}", .{why.text()});
         return err;
     };
     try loop.validateLoad(&c, 1, false);
     if (o.context == 0 or o.context > c.text.max_context or o.context > std.math.maxInt(u32)) return error.BadLoopCache;
-    var ck = try core.Checkpoint.openModel(gpa, io, dir);
+    if (c.exl3) try pack.validateMini(c.text);
+    var ck = if (c.exl3)
+        try core.Checkpoint.openModelExcluding(gpa, io, dir, pack.sidecars)
+    else
+        try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     try ck.skip("model.visual."); // The checkpoint carries Small's tower; text-only Mini never loads or executes it.
     var precisions: [config.max_layers]plan_.Precision = undefined;
     @memset(&precisions, .nvfp4);
-    var header_arena = std.heap.ArenaAllocator.init(gpa);
-    defer header_arena.deinit();
-    var merged: core.safetensors.Header = .empty;
-    for (ck.files.items) |file| try @import("names.zig").merge(header_arena.allocator(), &merged, file.names);
-    try @import("names.zig").precisions(merged, c.text.layers, &precisions);
+    if (!c.exl3) {
+        var header_arena = std.heap.ArenaAllocator.init(gpa);
+        defer header_arena.deinit();
+        var merged: core.safetensors.Header = .empty;
+        const names = @import("names.zig");
+        for (ck.files.items) |file| try names.merge(header_arena.allocator(), &merged, file.names);
+        try names.precisions(merged, c.text.layers, &precisions);
+    }
     const p = try plan_.build(&c.text, precisions[0..c.text.layers]);
-    var w = try @import("loop_weights.zig").load(gpa, ctx.d, &ck, &c, p);
+    var bits = if (c.exl3) try pack.readBits(gpa, io, dir) else null;
+    defer if (bits) |*b| b.deinit();
+    var w = try weights.load(gpa, ctx.d, &ck, &c, p, if (bits) |b| try pack.bitsMap(b.value) else null);
     errdefer w.deinit();
     if (ck.unused() != 0) return error.UnusedCheckpointTensor;
     ck.release();
-    var k = try engine.Kernels.load(ctx);
+    var k = try engine.Kernels.load(ctx, c.exl3);
     errdefer k.deinit();
     var stream = try cuda.Stream.init(ctx.d, true);
     errdefer stream.deinit();
+    try k.reserveDense(stream, w.layers);
     var m = try engine.Model.init(gpa, ctx.d, stream, &w, o.context);
     errdefer m.deinit();
     var be = try backend.Backend.init(gpa, ctx.d, &m, &k, stream);

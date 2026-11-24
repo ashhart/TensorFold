@@ -12,8 +12,17 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// The family in tf-cuda-test's `runner`, where the kernel contract reaches its launchers.
 pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, strip: bool, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, runner: *std.Build.Module) void {
-    _ = strip;
-    runner.addImport("inkling2", module(b, target, optimize, cuda, core, lanes));
+    const family = module(b, target, optimize, cuda, core, lanes);
+    runner.addImport("inkling2", family);
+    const exe = b.addExecutable(.{ .name = "tf-inkling2-mini-exl3-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/inkling2_mini_exl3_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "inkling2", .module = family } },
+    }) });
+    b.step("tf-inkling2-mini-exl3-test", "Build the Mini EXL3 grouped contract and teacher-forced check tool").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }
 
 /// The family's host regressions (config, chat wiring, reply split, admission, the attention plan) in `all`.

@@ -156,3 +156,25 @@ test "a scoring function, a layer count, a quantization_config and a root that t
     try t.expectError(error.BadConfig, config.parse(t.allocator, "{", &why));
     try t.expectEqualStrings("config.json is not JSON", why.text());
 }
+
+test "Mini EXL3 is admitted only by CUDA, with an optional exllamav3 1.x version on mul1" {
+    const metadata = [_][]const u8{
+        "\"codebook\": \"mul1\"",
+        "\"codebook\": \"mul1\", \"version\": \"1.6.6\"",
+        "\"codebook\": \"mul1\", \"version\": \"0.9\"",
+        "\"codebook\": \"mcg\"",
+    };
+    for (metadata, 0..) |fields, i| {
+        const replacement = try std.fmt.allocPrint(t.allocator, "\"quant_method\": \"exl3\", {s}", .{fields});
+        defer t.allocator.free(replacement);
+        const json = try std.mem.replaceOwned(u8, t.allocator, mini, "\"quant_method\": \"modelopt\"", replacement);
+        defer t.allocator.free(json);
+        var why: config.Why = .{};
+        if (i < 2) {
+            try t.expect((try config.parseCuda(t.allocator, json, &why)).exl3);
+        } else {
+            try t.expectError(error.UnsupportedExl3, config.parseCuda(t.allocator, json, &why));
+        }
+        try t.expectError(error.Quant, config.parse(t.allocator, json, &why));
+    }
+}

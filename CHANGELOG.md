@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: serve text from a stock exllamav3 EXL3 pack with its packed attention projections and routed experts (#4966). Thanks to @ajensenwaud for the EXL3 reader and grouped kernels it builds on.
+
 - Inkling 2 on CUDA: a standard exllamav3 EXL3 pack loads with each projection and expert cut to one of two ranks, and other codebooks, versions and formats are refused by name (#4841, refs #3476). Thanks to @ajensenwaud.
 
 - Hy4-flash: a host weight map for its ModelOpt NVFP4 build (groups of 16, no KV quantization), with the build's recipe and quality notes; serving it comes in later slices (#4110). Thanks @atakann.

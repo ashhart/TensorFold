@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const config = @import("config.zig");
 const cfg = @import("shape.zig");
 const shard = @import("shard.zig");
 const exl3 = @import("exl3.zig");
@@ -231,4 +232,78 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dense: *c
     w.head = try exl3.linear(gpa, &ck, L.sink, prefix ++ "unembed", padded, c.hidden, if (w.share.whole()) .whole else .{ .cols = v });
     try stream.synchronize();
     return w;
+}
+
+pub const sidecars: []const []const u8 = &.{ "model-mtp.safetensors", "model-vision.safetensors" };
+
+pub const Projections = struct { q: Linear, k: Linear, v: Linear, o: Linear, gate: Linear };
+
+pub fn readBits(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.Parsed(std.json.Value) {
+    const path = try std.fs.path.join(gpa, &.{ dir, "quantization_config.json" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
+    defer gpa.free(bytes);
+    return std.json.parseFromSlice(std.json.Value, gpa, bytes, .{ .allocate = .alloc_always });
+}
+
+pub fn bitsMap(json: std.json.Value) !std.json.ObjectMap {
+    if (json != .object) return error.BadExl3Bits;
+    const bits = json.object.get("bits") orelse return error.BadExl3Bits;
+    if (bits != .object) return error.BadExl3Bits;
+    return bits.object;
+}
+
+/// Exact Mini dimensions shared by the EXL3 projections and the grouped expert tiles.
+pub fn validateMini(c: config.Text) !void {
+    const heads: config.Heads = .{ .q = 24, .kv = 8, .dim = 128 };
+    if (c.hidden != 2304 or c.expert_inter != 1152 or c.experts != 128 or c.topk != 8 or
+        !std.meta.eql(c.local, heads) or !std.meta.eql(c.global, heads) or c.gate_cap <= 0 or c.up_cap <= 0)
+        return error.Inkling2MiniExl3Shape;
+}
+
+pub fn miniAttention(ck: *core.Checkpoint, sink: exl3.MiniSink, bits: std.json.ObjectMap, i: u32, h: usize, q: usize, kv: usize) !Projections {
+    const l: MiniLoader = .{ .ck = ck, .sink = sink, .bits = bits };
+    return .{
+        .q = try l.linear(i, "q_proj.linear", q, h),
+        .k = try l.linear(i, "k_proj.linear", kv, h),
+        .v = try l.linear(i, "v_proj.linear", kv, h),
+        .o = try l.linear(i, "o_proj.linear", h, q),
+        .gate = try l.linear(i, "o_proj.gate_proj", q, h),
+    };
+}
+
+const MiniLoader = struct {
+    ck: *core.Checkpoint,
+    sink: exl3.MiniSink,
+    bits: std.json.ObjectMap,
+
+    fn linear(l: MiniLoader, i: u32, name: []const u8, n: usize, k: usize) !Linear {
+        var buf: [96]u8 = undefined;
+        const base = try std.fmt.bufPrint(&buf, "{d}.self_attn.{s}", .{ i, name });
+        return exl3.miniLinear(l.ck, l.sink, l.bits, base, n, k);
+    }
+};
+
+test "Mini EXL3 bit table uses projection-specific halves" {
+    const a = std.testing.allocator;
+    const doc = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"bits":{"gate_up":3.5,"down":3,"other":4,"dense":6,"bad":3.2}}
+    , .{});
+    defer doc.deinit();
+    const bits = try bitsMap(doc.value);
+    try std.testing.expectEqual(7, try exl3.sidecarHalves(bits, "gate_up"));
+    try std.testing.expectEqual(6, try exl3.sidecarHalves(bits, "down"));
+    try std.testing.expectEqual(8, try exl3.sidecarHalves(bits, "other"));
+    try std.testing.expectEqual(12, try exl3.sidecarHalves(bits, "dense"));
+    try std.testing.expectError(error.BadExl3Bits, exl3.sidecarHalves(bits, "bad"));
+}
+
+test "Mini EXL3 attention dimensions resolve built mul1 plans" {
+    for ([_][2]usize{ .{ 2304, 3072 }, .{ 2304, 1024 }, .{ 3072, 2304 } }) |kn| {
+        for ([_]u32{ 12, 16 }) |width| {
+            const p = cuda.exl3.plan(kn[0], kn[1], 192, 8);
+            try std.testing.expect(cuda.exl3.variantIndex(width, .mul1, p.wk) != null);
+            try std.testing.expectEqual(0, kn[0] % (16 * p.sk * p.wk));
+        }
+    }
 }

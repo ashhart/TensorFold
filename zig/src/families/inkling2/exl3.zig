@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const shard = @import("shard.zig");
+const metadata = @import("exl3_config.zig");
 const experts_run = @import("experts.zig");
 
 const Tensor = core.checkpoint.Tensor;
@@ -30,10 +31,7 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8) !void {
     if (q != .object) return error.NotExl3;
     const method = q.object.get("quant_method") orelse return error.NotExl3;
     if (method != .string or !std.mem.eql(u8, method.string, "exl3")) return error.NotExl3;
-    const book = q.object.get("codebook") orelse return error.UnsupportedExl3;
-    if (book != .string or !std.mem.eql(u8, book.string, "mul1")) return error.UnsupportedExl3;
-    const version = q.object.get("version") orelse return error.UnsupportedExl3;
-    if (version != .string or !std.mem.startsWith(u8, version.string, "1.")) return error.UnsupportedExl3;
+    try metadata.admit(q.object, false);
 }
 
 /// One stored projection's tensors, checked: trellis [k/16][n/16][16 * bits] i16, the mul1 marker, fp16 suh and svh.
@@ -126,6 +124,42 @@ pub const Experts = struct { layer: cuda.exl3_experts.Layer, bits: experts_run.B
 
 /// Layer `i`'s routed experts as one grouped EXL3 layer: gate and up by the rank's columns, down by its rows.
 pub fn experts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: Sink, prefix: []const u8, i: u32, count: usize, d: usize, inter: usize, span: shard.Span) !Experts {
+    return expertLayer(gpa, ck, sink, i, count, d, inter, .{ .rank = .{ .prefix = prefix, .span = span } });
+}
+
+/// Uploads Mini's whole projections into its text weight arena before dense scratch is reserved.
+pub const MiniSink = struct {
+    ctx: *anyopaque,
+    put: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!u64,
+};
+
+pub fn miniLinear(ck: *core.Checkpoint, sink: MiniSink, widths: std.json.ObjectMap, name: []const u8, n: usize, k: usize) !cuda.exl3.Weight {
+    const g = try checkedGroup(ck, widths, name, n, k);
+    if (cuda.exl3.variantIndex(g.halves, .mul1, 4) == null) return error.UnsupportedExl3;
+    const st = cuda.exl3.strides(k, n, g.halves, false);
+    return .{
+        .trellis = try sink.put(sink.ctx, g.trellis.bytes),
+        .suh = try sink.put(sink.ctx, g.suh.bytes),
+        .svh = try sink.put(sink.ctx, g.svh.bytes),
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .halves = g.halves,
+        .codebook = .mul1,
+        .stride_k = st.k,
+        .stride_nb = st.nb,
+    };
+}
+
+pub fn miniExperts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: MiniSink, widths: std.json.ObjectMap, i: u32, count: usize, d: usize, inter: usize) !Experts {
+    return expertLayer(gpa, ck, sink, i, count, d, inter, .{ .mini = widths });
+}
+
+const ExpertLayout = union(enum) {
+    rank: struct { prefix: []const u8, span: shard.Span },
+    mini: std.json.ObjectMap,
+};
+
+fn expertLayer(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: anytype, i: u32, count: usize, d: usize, inter: usize, layout: ExpertLayout) !Experts {
     const mods = [3][]const u8{ "gate_proj", "up_proj", "down_proj" };
     var ptrs: [3]u64 = undefined;
     var k2: [3]u64 = undefined;
@@ -135,8 +169,12 @@ pub fn experts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: Sink, prefix:
     var bits: experts_run.Bits = .{ .lo = 16, .hi = 0 };
     for (mods, 0..) |mod, m| {
         const down = m == 2;
-        const n = if (down) d else inter;
+        const n = if (down) d else if (layout == .mini) 2 * inter else inter;
         const k = if (down) inter else d;
+        const c: Cut = switch (layout) {
+            .rank => |rank| if (down) .{ .rows = rank.span } else .{ .cols = rank.span },
+            .mini => if (down) .whole else .{ .cols = .{ .lo = m * inter, .hi = (m + 1) * inter } },
+        };
         var tr: std.ArrayList(u8) = .empty;
         defer tr.deinit(gpa);
         var su: std.ArrayList(u8) = .empty;
@@ -148,12 +186,18 @@ pub fn experts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: Sink, prefix:
         const widths = try gpa.alloc(i32, count);
         defer gpa.free(widths);
         for (0..count) |e| {
-            const base = try std.fmt.bufPrint(&base_buf, "{s}layers.{d}.mlp.experts.{d}.{s}", .{ prefix, i, e, mod });
-            const g = try group(ck, base, n, k);
+            const base = switch (layout) {
+                .rank => |rank| try std.fmt.bufPrint(&base_buf, "{s}layers.{d}.mlp.experts.{d}.{s}", .{ rank.prefix, i, e, mod }),
+                .mini => try std.fmt.bufPrint(&base_buf, "{d}.experts.{s}.{d}", .{ i, if (down) mod else "gate_up_proj", e }),
+            };
+            const g = switch (layout) {
+                .rank => try group(ck, base, n, k),
+                .mini => |table| try checkedGroup(ck, table, base, n, k),
+            };
             at[e] = tr.items.len;
             widths[e] = @intCast(g.halves);
             bits = .{ .lo = @min(bits.lo, g.halves), .hi = @max(bits.hi, g.halves) };
-            _ = try cut(gpa, g, n, k, if (down) .{ .rows = span } else .{ .cols = span }, &tr, &su, &sv);
+            _ = try cut(gpa, g, n, k, c, &tr, &su, &sv);
         }
         const words = try sink.put(sink.ctx, tr.items);
         const table = try gpa.alloc(u64, count);
@@ -161,9 +205,9 @@ pub fn experts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: Sink, prefix:
         for (table, at) |*t, off| t.* = words + off;
         ptrs[m] = try sink.put(sink.ctx, std.mem.sliceAsBytes(table));
         k2[m] = try sink.put(sink.ctx, std.mem.sliceAsBytes(widths));
-        suh[m] = try sink.put(sink.ctx, su.items);
+        suh[m] = if (layout == .mini and m == 1) suh[0] else try sink.put(sink.ctx, su.items);
         svh[m] = try sink.put(sink.ctx, sv.items);
-        ck.release();
+        if (layout == .rank) ck.release();
     }
     return .{ .bits = bits, .layer = .{
         .gate = ptrs[0],
@@ -180,9 +224,32 @@ pub fn experts(gpa: std.mem.Allocator, ck: *core.Checkpoint, sink: Sink, prefix:
         .svh_d = svh[2],
         .experts = count,
         .dims = d,
-        .width = span.len(),
+        .width = if (layout == .rank) layout.rank.span.len() else inter,
         .codebook = .mul1,
     } };
+}
+
+pub fn sidecarHalves(bits: std.json.ObjectMap, base: []const u8) !u32 {
+    const value = bits.get(base) orelse {
+        std.log.err("Inkling 2 Mini EXL3: missing bit width for {s}", .{base});
+        return error.BadExl3Bits;
+    };
+    const count = 2 * switch (value) {
+        .integer => @as(f64, @floatFromInt(value.integer)),
+        .float => value.float,
+        else => return error.BadExl3Bits,
+    };
+    if (!std.math.isFinite(count) or count < 2 or count > 16 or count != @trunc(count)) return error.BadExl3Bits;
+    return @intFromFloat(count);
+}
+
+fn checkedGroup(ck: *core.Checkpoint, widths: std.json.ObjectMap, base: []const u8, n: usize, k: usize) !Group {
+    const g = try group(ck, base, n, k);
+    if (g.halves != try sidecarHalves(widths, base)) {
+        std.log.err("Inkling 2 Mini EXL3: {s} bit width disagrees with its trellis", .{base});
+        return error.BadExl3Bits;
+    }
+    return g;
 }
 
 test "exl3: admit takes exllamav3 1.x on mul1 and refuses other codebooks, versions and formats" {
@@ -191,6 +258,10 @@ test "exl3: admit takes exllamav3 1.x on mul1 and refuses other codebooks, versi
     try std.testing.expectError(error.UnsupportedExl3, admit(a, "{\"quantization_config\":{\"quant_method\":\"exl3\",\"version\":\"1.6.6\",\"codebook\":\"mcg\"}}"));
     try std.testing.expectError(error.UnsupportedExl3, admit(a, "{\"quantization_config\":{\"quant_method\":\"exl3\",\"version\":\"0.9\",\"codebook\":\"mul1\"}}"));
     try std.testing.expectError(error.NotExl3, admit(a, "{\"text_config\":{}}"));
+    const mini = try std.json.parseFromSlice(std.json.Value, a, "{\"codebook\":\"mul1\"}", .{});
+    defer mini.deinit();
+    try metadata.admit(mini.value.object, true);
+    try std.testing.expectError(error.UnsupportedExl3, metadata.admit(mini.value.object, false));
 }
 
 test "exl3: a cut takes a rank's tile columns of every k row, or its whole tile rows, with the matching scales" {

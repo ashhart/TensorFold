@@ -124,6 +124,7 @@ pub const Config = struct {
     mtp: ?Mtp,
     eos: u32,
     image_token: u32,
+    exl3: bool = false,
 };
 
 fn get(o: std.json.ObjectMap, key: []const u8, why: *Why) !std.json.Value {
@@ -375,23 +376,43 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
 }
 
 /// A quantization_config must be ModelOpt NVFP4 (the experts' header dtype refines it per layer) or EXL3.
-fn quantization(o: std.json.ObjectMap, why: *Why) !void {
-    const v = o.get("quantization_config") orelse return;
+fn quantization(o: std.json.ObjectMap, why: *Why, looped: bool, cuda: bool) !bool {
+    const v = o.get("quantization_config") orelse return false;
     const q = if (v == .object) v.object else {
         why.set("quantization_config is not an object", .{});
         return error.Quant;
     };
-    if (std.mem.eql(u8, text(q, "quant_method") orelse "", "exl3")) return; // EXL3 tensors carry their own records
+    if (std.mem.eql(u8, text(q, "quant_method") orelse "", "exl3")) {
+        if (!looped) return false;
+        if (!cuda) {
+            why.set("quantization_config: Mini EXL3 requires CUDA", .{});
+            return error.Quant;
+        }
+        @import("exl3_config.zig").admit(q, true) catch |err| {
+            why.set("quantization_config: Mini EXL3 requires mul1 and version 1.x when supplied", .{});
+            return err;
+        };
+        return true;
+    }
     const ok = std.ascii.eqlIgnoreCase(text(q, "quant_method") orelse "", "modelopt") and
         std.ascii.eqlIgnoreCase(text(q, "quant_algo") orelse "", "NVFP4");
     if (!ok) {
         why.set("quantization_config: the loader reads ModelOpt NVFP4 experts or an EXL3 pack", .{});
         return error.Quant;
     }
+    return false;
 }
 
 /// config.json as the reference (configuration_inkling2.py) and the checkpoint read it; a refusal is in `why`.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
+    return parseFor(gpa, json, why, false);
+}
+
+pub fn parseCuda(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
+    return parseFor(gpa, json, why, true);
+}
+
+fn parseFor(gpa: std.mem.Allocator, json: []const u8, why: *Why, cuda: bool) !Config {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch {
         why.set("config.json is not JSON", .{});
         return error.BadConfig;
@@ -413,7 +434,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         return error.NotInkling2;
     }
     try fixed(o, "tie_word_embeddings", false, why);
-    try quantization(o, why);
+    const exl3 = try quantization(o, why, looped, cuda);
     const t = try parseText(try object(o, "text_config", why), why);
     if (looped and t.loop == null) {
         why.set("inkling2_loop requires text_config.loop_config", .{});
@@ -436,5 +457,6 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         .mtp = mtp,
         .eos = eos,
         .image_token = image,
+        .exl3 = exl3,
     };
 }

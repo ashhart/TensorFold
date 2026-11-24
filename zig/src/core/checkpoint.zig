@@ -90,13 +90,28 @@ pub const Checkpoint = struct {
     }
     /// Every shard of `dir`, mapped, with only names under `prefixes` indexed (an empty list: every name).
     pub fn openModelPrefixes(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefixes: []const []const u8) !Checkpoint {
+        return openModelSelected(gpa, io, dir, prefixes, &.{});
+    }
+
+    /// Separate checkpoint components can be omitted by relative shard name, including from an index.
+    pub fn openModelExcluding(gpa: std.mem.Allocator, io: Io, dir: []const u8, exclude: []const []const u8) !Checkpoint {
+        return openModelSelected(gpa, io, dir, &.{}, exclude);
+    }
+
+    fn openModelSelected(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefixes: []const []const u8, exclude: []const []const u8) !Checkpoint {
         try @import("save_guard").check(io, dir);
         const paths = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();
         try ck.files.ensureTotalCapacityPrecise(gpa, paths.len);
-        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefixes(gpa, io, p, prefixes));
+        for (paths) |p| {
+            const name = p[dir.len + 1 ..];
+            for (exclude) |excluded| {
+                if (std.mem.eql(u8, excluded, name)) break;
+            } else ck.files.appendAssumeCapacity(try st.File.openPrefixes(gpa, io, p, prefixes));
+        }
+        if (ck.files.items.len == 0) return error.NoSafetensors;
         return ck;
     }
 
@@ -503,4 +518,28 @@ test "a checkpoint whose index names shards in a folder opens and reads them" {
     defer ck.close();
     _ = try ck.get("a");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "a text checkpoint can exclude separate components before opening their files" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "text", 4);
+    defer gpa.free(image);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    const sidecars = [_][]const u8{ "model-mtp.safetensors", "model-vision.safetensors" };
+    for (sidecars) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "not a tensor file" });
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    for (0..2) |pass| {
+        if (pass == 1) try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+            \\{"weight_map":{"text":"model.safetensors","draft":"model-mtp.safetensors","vision":"model-vision.safetensors"}}
+        });
+        var ck = try Checkpoint.openModelExcluding(gpa, io, dir, &sidecars);
+        defer ck.close();
+        try std.testing.expectEqual(1, ck.files.items.len);
+        _ = try ck.get("text");
+        try std.testing.expectEqual(0, ck.unused());
+    }
 }
