@@ -81,6 +81,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - OCR: `POST /ocr` now answers LiteParse's OCR server contract, with one text item per line and its box in page pixels (#2573). Thanks @laudney.
 
 - H3 on Metal: transformer products run on the `h3_gemm_32x64` kernel in 64-row bands and the decoder decodes 64 tiles a pass, with sums unchanged (#4641).
+- Kolibri-1 on CUDA: decode rounds of two or more rows replay a CUDA graph captured once a shape, making the eager round's launches, so tokens are unchanged; `TENSORFOLD_KOLIBRI_GRAPHS=0` keeps them eager (#4884).
 
 - Hy4-flash: host-side weight map, TP=1/2/4 partition and Engram FP8 row codec for the official W8A16 FP8 checkpoint, with refusal tests; serving follows in later PRs (#4827). Thanks @GrgaPalcic.
 
