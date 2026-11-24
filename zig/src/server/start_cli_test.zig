@@ -9,14 +9,12 @@ const fake = @import("benchmark_fake.zig");
 const stop = @import("benchmark_stop.zig");
 const stream = @import("benchmark_stream.zig");
 const Allocator = std.mem.Allocator;
-
 const revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const draft_revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const gib = machine_mod.gib;
 const entries = [_]registry.Entry{
     .{ .title = "Fixture", .format = "4-bit", .repo = "Org/Model", .revision = revision, .drafter = "Org/Draft", .drafter_revision = draft_revision, .download = 5 * gib, .metal = true, .cuda = true, .m5 = .drafts, .recipe = "fixture" },
 };
-
 const Run = struct {
     a: Allocator,
     env: std.process.Environ.Map,
@@ -126,7 +124,6 @@ const Run = struct {
         return false;
     }
 };
-
 fn events(a: Allocator, content: []const u8) ![]const []const fake.Write {
     const head = try fake.headOf(a, "200 OK", "text/event-stream");
     const body = try fake.event(a, try std.fmt.allocPrint(a, "{{\"choices\": [{{\"index\": 0, \"delta\": {{\"content\": \"{s}\"}}, \"finish_reason\": \"stop\"}}]}}", .{content}));
@@ -597,4 +594,7 @@ test "start CLI: KR66 managed logs redact repeatedly encoded ASCII and Latin-1 c
     for ([_][]const u8{ "a/b", "a%252Fb", "a%25252Fb", "%252Fb", "%25252Fb", "%2Fb", "2Fb", "fixture-caf\u{e9}", "fixture-caf\xe9", "fixture-caf%25E9", "fixture-caf%2525E9", "%25E9", "%2525E9", "%E9", "E9", "fixture-caf%25C3%25A9", "fixture-caf%2525C3%2525A9", "%25C3", "%2525C3", "%25A9", "%2525A9", "%C3", "%A9", "C3", "A9" }) |secret|
         for ([_][]const u8{ r.out.written(), r.err.written() }) |text|
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+}
+test {
+    _ = @import("start_cli_kr67_test.zig");
 }

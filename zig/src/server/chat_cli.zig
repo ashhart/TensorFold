@@ -142,8 +142,8 @@ fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
     try say(ctx.err, "Loading {s}; Ctrl-C cancels.", .{args.model.?});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, try credentials.redact(ctx.a, problem));
-        try lastLines(ctx, tail, credentials);
+        const code = try fail(ctx, (try credentials.safe(ctx.a, problem)) orelse "");
+        try lastLines(ctx, tail);
         return code;
     };
     errdefer _ = own.managed.stop();
@@ -156,10 +156,10 @@ fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
 }
 
 /// An exited child's last log lines after its failure, as the benchmark prints them.
-fn lastLines(ctx: *const Context, tail: []const []const u8, credentials: turn.Credentials) !void {
-    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{try credentials.redact(ctx.a, tail[0])});
+fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
+    if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{tail[0]});
     if (tail.len > 1) try ctx.err.writeAll("Last server log lines:\n");
-    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{try credentials.redact(ctx.a, line)});
+    if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{line});
     try ctx.err.flush();
 }
 
@@ -190,10 +190,11 @@ const Session = struct {
     /// A failed turn said; a conversation goes on (null) unless the server it started has exited.
     fn failed(s: *Session, f: turn.Failure) !?u8 {
         const hint = if (f.status == 401) s.target.denied else null;
-        _ = try fail(s.ctx, if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason);
+        const reason = if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason;
+        _ = try fail(s.ctx, try s.target.credentials.check(s.ctx.a, reason));
         if (comptime !windows) if (f.connect) if (s.target.own) |own| if (try own.managed.exitedTail(s.ctx.a)) |tail| {
             try s.ctx.err.writeAll("The model server has exited.\n");
-            try lastLines(s.ctx, tail, s.target.credentials);
+            try lastLines(s.ctx, tail);
             return 1;
         };
         return if (s.ctx.interactive) null else 1;
@@ -326,8 +327,8 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
         };
         return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} {s}; name one after the URL", .{ url, why }) };
     };
-    const name = if (target.model == null) try target.credentials.clean(ctx.a, raw_name, sse.line_limit) else raw_name;
-    return .{ .model = name, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, raw_name) else null };
+    const name: ?[]const u8 = if (target.model == null) try target.credentials.clean(ctx.a, raw_name, sse.line_limit) else raw_name;
+    return .{ .model = name orelse return .{ .problem = try target.credentials.check(ctx.a, "the server supplied an unsafe model name") }, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, raw_name) else null };
 }
 
 /// The first ``data[].id`` of a ``/v1/models`` document.

@@ -303,14 +303,14 @@ pub fn lastLines(a: Allocator, log: []const u8) ![]const []const u8 {
     return lastLinesRedacted(a, log, &.{});
 }
 
-/// Select managed log lines only after credentials are removed and before their 300-byte terminal cut.
+/// Select managed log lines after sanitization, redaction, limiting and final containment.
 pub fn lastLinesRedacted(a: Allocator, log: []const u8, secrets: []const []const u8) ![]const []const u8 {
     var picked: std.ArrayList([]const u8) = .empty; // newest first
     var fallback: []const u8 = "";
     var hint: ?[]const u8 = null;
     var lines = std.mem.splitBackwardsAny(u8, log, "\r\n");
     while (lines.next()) |line| {
-        const text = try sse.clean(a, try sse.redact(a, line, secrets), sse.line_limit);
+        const text = (try sse.cleanContained(a, line, secrets, sse.line_limit)) orelse continue;
         if (text.len == 0 or leakNoise(text)) continue;
         if (fallback.len == 0) fallback = text;
         if ((std.mem.startsWith(u8, text, "tensorfold:") or std.mem.startsWith(u8, text, "error:")) and picked.items.len < 3) {

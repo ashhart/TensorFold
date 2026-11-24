@@ -9,6 +9,9 @@ const runs = @import("pull_runs.zig");
 const single = @import("pull_file.zig");
 const FakeHub = @import("pull_test.zig").FakeHub;
 const Map = std.process.Environ.Map;
+const credential = @import("sys").credential;
+
+const redaction_marker = "[redacted]";
 
 const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
 const plain_token = "fixture-token";
@@ -45,6 +48,24 @@ fn envWithToken(a: Allocator, fake: *FakeHub, token: []const u8) !Map {
 
 fn expectAbsent(text: []const u8, secret: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+}
+
+fn expectFinalContainment(a: Allocator, out: []const u8, err_out: []const u8, secret: []const u8) !void {
+    for ([_][]const u8{ out, err_out }) |text| {
+        var matcher = credential.Matcher.init(a, text);
+        defer matcher.deinit();
+        try std.testing.expect((try matcher.spanFrom(0, secret)) == null);
+    }
+}
+
+// Pull configures one active token, so marker synthesis stays within that one-token API.
+fn markerModelType(a: Allocator, io: std.Io, fake: *FakeHub, root: []const u8, secret: []const u8, model_type: []const u8) !void {
+    const env = try envWithToken(a, fake, secret);
+    fake.config = try std.fmt.allocPrint(a, "{{\"model_type\":\"{s}\"}}", .{model_type});
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try expectFinalContainment(a, out.written(), err_out.written(), secret);
 }
 
 fn expectNoFile(io: std.Io, path: []const u8) !void {
@@ -454,4 +475,47 @@ test "security KR66-2: mixed-depth hub credentials are redacted from model_type"
     try std.testing.expectEqual(@as(u32, 0), attack_requests.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 0), fake.weight_requests.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, err_out.written(), "[redacted]") != null);
+}
+
+test "security KR67-2: exact redaction-marker HF_TOKEN cannot survive model_type output" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr67-marker-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try markerModelType(a, io, &fake, root, redaction_marker, redaction_marker);
+}
+
+test "security KR67-2: redaction-marker substring HF_TOKEN cannot survive model_type output" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr67-substring-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    try markerModelType(a, io, &fake, root, "redacted", redaction_marker);
+}
+
+test "security KR67-2: raw percent and nested-encoded redaction markers are contained in model_type output" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr67-encoded-marker-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const once = try encoded(a, redaction_marker);
+    const twice = try encoded(a, once);
+    for ([_][]const u8{ redaction_marker, once, twice }) |model_type| {
+        try markerModelType(a, io, &fake, root, redaction_marker, model_type);
+    }
 }

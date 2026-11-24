@@ -318,6 +318,8 @@ test {
     if (comptime @import("builtin").os.tag != .windows) {
         _ = @import("chat_cli_child.zig");
         _ = @import("chat_cli_test.zig");
+        _ = @import("chat_cli_kr67_test.zig");
+        _ = @import("start_cli_kr67_test.zig");
     }
 }
 
