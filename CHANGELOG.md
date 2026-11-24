@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Transcribe on CUDA: chat requests take speech as 16 kHz mono WAV in OpenAI `input_audio` and vLLM `audio_url` parts, up to an hour of audio a request in the model's trained 65,536-token window, with each clip's rows keyed in the prompt cache and MTP drafts running over them; `/v1/models` lists `audio` among its input types (#1632, closes #1549). Thanks to @BobClawblaw.
+
 - Inkling 2 Mini on Metal: the startup line breaks the serve's demand into weights, dense layers and scratch, the state of each stream at the window and what the streams share, beside the room the load limit leaves; which streams and windows start is unchanged (#4705, refs #4274 and #4387).
 
 - Inkling 2 Mini on Metal: the router's and loop gates' dots run a thread per output with main's serial arithmetic (one row keeps main's kernels), so prompts reach the first token about 42% sooner and four streams decode about 64% faster on an M5 Ultra, with identical tokens (#4912).
