@@ -30,7 +30,14 @@ inline void ink2_dense_mma(const device bfloat* X, const device bfloat* W, const
       simdgroup_matrix<bfloat, 8, 8> fa[ROWS][2], fb[COLS];
       _Pragma("clang loop unroll(full)") for (uint i = 0u; i < ROWS; ++i) {
         simdgroup_matrix<bfloat, 8, 8> v;
-        simdgroup_load(v, x + ulong(8u * i) * a.k + col + 8u * c, a.k);
+        if (r0 + 8u * i + 8u <= a.rows) {
+          simdgroup_load(v, x + ulong(8u * i) * a.k + col + 8u * c, a.k);
+        } else {
+          // A tile's rows past the last read the last row: they only feed outputs that are never stored.
+          const device bfloat* tail = X + ulong(min(r0 + 8u * i + fm, a.rows - 1u)) * a.k + 64u * g + col + 8u * c + fn;
+          v.thread_elements()[0] = tail[0];
+          v.thread_elements()[1] = tail[1];
+        }
         const bfloat z = bfloat(0.0f);
         fa[i][0].thread_elements()[0] = low ? v.thread_elements()[0] : z;
         fa[i][0].thread_elements()[1] = low ? v.thread_elements()[1] : z;
