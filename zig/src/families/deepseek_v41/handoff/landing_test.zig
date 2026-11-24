@@ -1,6 +1,7 @@
 //! A hand-off file fed through the landing: ring parts are dropped, everything else lands as a direct import does.
 const std = @import("std");
 const g = @import("geometry.zig");
+const c = @import("codec.zig");
 const plan = @import("plan.zig");
 const ex = @import("export.zig");
 const metal = @import("metal.zig");
@@ -73,4 +74,46 @@ test "a hand-off file refuses a corrupt header, a short body and tokens that do 
     const other = try arena.dupe(u8, file);
     other[20] ^= 1; // the first token
     try std.testing.expectError(error.BadBlob, blob.Blob.parse(arena, other));
+}
+
+test "a pooled row the served lane cannot hold exactly is refused, while the bf16 release lane takes it" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const upto: u64 = 20;
+    const w = try s.make(arena, .{ .upto = upto, .seed = 3 });
+    const parts = try ex.build(arena, .{ .upto = upto }, w.cuda);
+    const pk = try target(arena);
+    var imp = try im.Import.init(arena, .{ .upto = upto }, .{ .@"packed" = pk }, .{});
+    var buf: [40]u8 = undefined;
+    var offered: usize = 0;
+    for (parts) |p| {
+        var bytes = p.bytes;
+        if (p.spec.kind == .comp) { // a whole first block of 1.25: off the E2M1 grid at its own scale
+            bytes = try arena.dupe(u8, p.bytes);
+            for (0..16) |i| std.mem.writeInt(u16, bytes[2 * i ..][0..2], c.f32ToBf16(1.25), .little);
+            offered += 1;
+            try std.testing.expectError(error.NotExact, imp.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, bytes));
+            continue;
+        }
+        try imp.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, bytes);
+    }
+    try std.testing.expect(offered > 0);
+    try std.testing.expectError(error.Incomplete, imp.complete()); // the refused part never landed
+
+    // the release lane stores the same row as bf16: the exact consumer is not broken by the refusal
+    const layers = try arena.alloc(metal.Release.Layer, g.release.layers);
+    for (layers, 0..) |*l, i| {
+        l.* = .{ .window = try arena.alloc(u8, 2 * 144 * 1024) };
+        if (g.release.sourceIndex(@intCast(i))) |si| {
+            const rows: usize = @intCast(g.release.rowsOf(si, upto) + 1);
+            l.* = .{ .window = l.window, .pool = try arena.alloc(u8, rows * 1024), .keys = try arena.alloc(u8, rows * 68), .carry = try arena.alloc(u8, 4 * 2048) };
+        }
+    }
+    var rel = try im.Import.init(arena, .{ .upto = upto }, .{ .release = .{ .layers = layers } }, .{});
+    for (parts) |p| if (p.spec.kind == .comp) {
+        var bytes = try arena.dupe(u8, p.bytes);
+        for (0..16) |i| std.mem.writeInt(u16, bytes[2 * i ..][0..2], c.f32ToBf16(1.25), .little);
+        try rel.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, bytes);
+    };
 }

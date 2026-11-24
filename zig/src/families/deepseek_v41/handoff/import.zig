@@ -76,7 +76,7 @@ pub const Import = struct {
             .swa => for (0..spec.rows) |i| {
                 const row = c.loadRow(512, bytes[i * 1024 ..]);
                 try finite(&row);
-                im.layout.setWindow(spec.layer, sh.upto - spec.rows + i, &row);
+                try im.layout.setWindow(spec.layer, sh.upto - spec.rows + i, &row);
             },
             .ring => {
                 if (!im.opts.drafter or !im.layout.hasDrafter(geo.mtp_layers)) return;
@@ -84,7 +84,7 @@ pub const Import = struct {
                 for (0..spec.rows) |i| {
                     const row = c.loadRow(512, bytes[i * 1024 ..]);
                     try finite(&row);
-                    im.layout.setDrafter(spec.layer - geo.layers, sh.upto - spec.rows + i, &row, geo.layers);
+                    try im.layout.setDrafter(spec.layer - geo.layers, sh.upto - spec.rows + i, &row, geo.layers);
                 }
             },
             .carry => im.layout.setCarry(geo, geo.sourceIndex(spec.layer).?, sh.upto, bytes[0..2048], bytes[2048..4096]),
@@ -96,12 +96,12 @@ pub const Import = struct {
                     if (spec.kind == .comp) {
                         const row = c.loadRow(512, bytes[at..]);
                         try finite(&row);
-                        im.layout.setPool(geo, src, run.row + k, &row);
+                        try im.layout.setPool(geo, src, run.row + k, &row);
                         at += 1024;
                     } else {
                         const row = c.loadRow(128, bytes[at..]);
                         try finite(&row);
-                        im.layout.setIndex(geo, src, run.row + k, &row);
+                        try im.layout.setIndex(geo, src, run.row + k, &row);
                         at += 256;
                     }
                 };

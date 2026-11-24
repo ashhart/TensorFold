@@ -79,35 +79,36 @@ test "main's index key packer equals an independent f64 reference on random keys
         const k = row128(&rng);
         var got: [68]u8 = undefined;
         var want: [68]u8 = undefined;
-        fp4.releaseIndexKey(&k, &got);
+        try fp4.releaseIndexKey(&k, &got);
         refRelease(&k, &want);
         try std.testing.expectEqualSlices(u8, &want, &got);
     }
 }
 
-test "the index packers at their boundaries: amax 6 and 3, an all-zero block, -0, NaN and infinity" {
+test "the index packers at their boundaries: amax 6, 3 and 12, an all-zero block and -0 pack; off-grid, NaN and infinity refuse" {
     var k: [128]u16 = @splat(0);
     k[0] = c.f32ToBf16(6.0);
     k[32] = c.f32ToBf16(3.0);
-    k[64] = c.f32ToBf16(6.03125); // the next bf16 above 6
+    k[64] = c.f32ToBf16(12.0); // 6 2^1: e = 1
     k[96] = 0x8000; // -0 alone: scale 2^-126, code 8
     var out: [68]u8 = undefined;
-    fp4.releaseIndexKey(&k, &out);
+    try fp4.releaseIndexKey(&k, &out);
     try std.testing.expectEqual(@as(u8, 127), out[64]); // 6 / 6 = 1: e = 0
     try std.testing.expectEqual(@as(u8, 126), out[65]); // 3 / 6 = 0.5: e = -1
-    try std.testing.expectEqual(@as(u8, 128), out[66]); // just over 6: e = 1
+    try std.testing.expectEqual(@as(u8, 128), out[66]); // 12 / 6 = 2: e = 1
     try std.testing.expectEqual(@as(u8, 1), out[67]); // zero blocks: max(amax, 6 2^-126) / 6 = 2^-126
     try std.testing.expectEqual(@as(u8, 7), out[0] & 15); // 6 at scale 1 is code 7
     try std.testing.expectEqual(@as(u8, 8), out[48] & 15);
     var alt: [68]u8 = undefined;
-    fp4.index(&k, &alt);
+    try fp4.index(&k, &alt);
     try std.testing.expectEqualSlices(u8, &out, &alt); // the served lane's division form agrees here
-    k[5] = 0x7fc0;
-    k[70] = 0x7f80;
-    fp4.releaseIndexKey(&k, &out);
-    try std.testing.expectEqual(@as(u8, 255), out[64]);
-    try std.testing.expectEqual(@as(u8, 255), out[66]);
-    try std.testing.expect(std.mem.allEqual(u8, out[0..16], 0) and std.mem.allEqual(u8, out[32..48], 0));
+    k[5] = c.f32ToBf16(6.03125); // the next bf16 above 6: not a multiple of the block's scale
+    try std.testing.expectError(error.NotExact, fp4.releaseIndexKey(&k, &out));
+    try std.testing.expectError(error.NotExact, fp4.index(&k, &out));
+    k[5] = 0x7fc0; // NaN
+    k[70] = 0x7f80; // infinity
+    try std.testing.expectError(error.NotExact, fp4.releaseIndexKey(&k, &out));
+    try std.testing.expectError(error.NotExact, fp4.index(&k, &out));
 }
 
 test "the two index packers agree on random keys (they differ only at a divide-versus-multiply boundary)" {
@@ -116,97 +117,48 @@ test "the two index packers agree on random keys (they differ only at a divide-v
         const k = row128(&rng);
         var a: [68]u8 = undefined;
         var b: [68]u8 = undefined;
-        fp4.releaseIndexKey(&k, &a);
-        fp4.index(&k, &b);
+        try fp4.releaseIndexKey(&k, &a);
+        try fp4.index(&k, &b);
         try std.testing.expectEqualSlices(u8, &a, &b);
     }
 }
 
-test "index keys: every element is within one scale step of its source, and the codes are the nearest" {
+test "index keys: every key on the record grid round-trips bit for bit" {
     var rng = s.Rng.init(8);
     for (0..300) |_| {
         const k = row128(&rng);
         var packed_key: [68]u8 = undefined;
-        fp4.releaseIndexKey(&k, &packed_key);
+        try fp4.releaseIndexKey(&k, &packed_key);
         var back: [128]u16 = undefined;
         fp4.unpackIndex(&packed_key, &back);
-        for (0..128) |d| {
-            const scale = std.math.pow(f64, 2, @as(f64, @floatFromInt(@as(i32, packed_key[64 + d / 32]) - 127)));
-            const err = @abs(@as(f64, c.bf16ToF32(back[d])) - c.bf16ToF32(k[d]));
-            try std.testing.expect(err <= scale * 1.0 + 1e-30); // the widest E2M1 gap (4 to 6) is 2 scale steps
-        }
+        try std.testing.expectEqualSlices(u16, &k, &back);
     }
 }
 
-test "fp8 index keys requantised to fp4 keep the top of the ranking: overlap and top-1 on synthetic keys" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
+test "a decoded fp8 index row off the fp4 grid is refused, and an accepted row is bit-exact" {
     var rng = s.Rng.init(21);
-    const n = 2048;
-    const keys = try arena.allocator().alloc([128]f32, n); // what CUDA stored, decoded
-    const approx = try arena.allocator().alloc([128]f32, n); // what the Mac will hold
-    for (keys, approx) |*kd, *ka| {
-        const k = row128(&rng);
+    var refused: usize = 0;
+    for (0..500) |_| {
+        var k: [128]u16 = @splat(0);
+        for (&k) |*v| v.* = c.f32ToBf16(rng.norm()); // keys as the kernel computes them, not on the grid
         var row: [g.cuda_index_fp8_bytes]u8 = undefined;
         _ = s.encodeIndex(&k, &row);
         var dec: [128]u16 = undefined;
         try c.decodeIndexFp8(&row, &dec);
         var pk: [68]u8 = undefined;
-        fp4.releaseIndexKey(&dec, &pk);
-        var rq: [128]u16 = undefined;
-        fp4.unpackIndex(&pk, &rq);
-        for (0..128) |d| {
-            kd[d] = c.bf16ToF32(dec[d]);
-            ka[d] = c.bf16ToF32(rq[d]);
-        }
-    }
-    const top = 16;
-    var overlap: usize = 0;
-    var top1: usize = 0;
-    const queries = 64;
-    for (0..queries) |_| {
-        var q: [128]f32 = undefined;
-        for (&q) |*v| v.* = rng.norm();
-        const a = try arena.allocator().alloc(f64, n);
-        const b = try arena.allocator().alloc(f64, n);
-        for (0..n) |i| {
-            var da: f64 = 0;
-            var db: f64 = 0;
-            for (0..128) |d| {
-                da += q[d] * keys[i][d];
-                db += q[d] * approx[i][d];
-            }
-            a[i] = da;
-            b[i] = db;
-        }
-        const ta = topK(a, top);
-        const tb = topK(b, top);
-        for (ta) |x| overlap += @intFromBool(std.mem.indexOfScalar(u32, &tb, x) != null);
-        top1 += @intFromBool(ta[0] == tb[0] or std.mem.indexOfScalar(u32, &tb, ta[0]) != null);
-    }
-    const frac = @as(f64, @floatFromInt(overlap)) / (queries * top);
-    // fixed seed: the thresholds leave room for the seed's luck, not for a different quantiser
-    try std.testing.expect(frac >= 0.8); // 0.884 here
-    try std.testing.expect(top1 >= queries * 15 / 16); // 64 of 64 here
-}
-
-fn topK(v: []const f64, comptime k: usize) [k]u32 {
-    var out: [k]u32 = undefined;
-    var used: [4096]bool = @splat(false);
-    for (&out) |*o| {
-        var best: usize = 0;
-        var bv: f64 = -std.math.inf(f64);
-        for (v, 0..) |x, i| if (!used[i] and x > bv) {
-            best = i;
-            bv = x;
+        fp4.releaseIndexKey(&dec, &pk) catch |err| {
+            try std.testing.expectEqual(error.NotExact, err);
+            refused += 1;
+            continue;
         };
-        used[best] = true;
-        o.* = @intCast(best);
+        var back: [128]u16 = undefined;
+        fp4.unpackIndex(&pk, &back);
+        try std.testing.expectEqualSlices(u16, &dec, &back);
     }
-    return out;
+    try std.testing.expect(refused > 400); // an fp8 key's mantissa is finer than fp4's: most rows are not storable
 }
 
-test "window rows: NoPE dims survive the fp8 repack exactly, RoPE dims within one e4m3 step of their block scale" {
+test "window rows: a row on the fp8 grid round-trips bit for bit, and an off-grid RoPE dim is refused" {
     var rng = s.Rng.init(9);
     for (0..200) |_| {
         var row: [512]u16 = undefined;
@@ -215,30 +167,29 @@ test "window rows: NoPE dims survive the fp8 repack exactly, RoPE dims within on
         s.encodeRecord(&row, &rec);
         var dec: [512]u16 = undefined;
         try c.decodeRecord(&rec, &dec);
+        try std.testing.expectEqualSlices(u16, &row, &dec);
         var w: [528]u8 = undefined;
-        fp4.window(&dec, &w);
+        try fp4.window(&dec, &w);
         var back: [512]u16 = undefined;
         fp4.unpackWindow(&w, &back);
-        try std.testing.expectEqualSlices(u16, dec[0..448], back[0..448]);
-        for (448..512) |d| {
-            const scale = std.math.pow(f64, 2, @as(f64, @floatFromInt(@as(i32, w[512 + d / 32]) - 127)));
-            const err = @abs(@as(f64, c.bf16ToF32(back[d])) - c.bf16ToF32(dec[d]));
-            try std.testing.expect(err <= @max(@abs(@as(f64, c.bf16ToF32(dec[d]))) * 0x1p-4, scale * 0x1p-10) * 1.0001);
-        }
+        try std.testing.expectEqualSlices(u16, &dec, &back);
     }
+    var row: [512]u16 = @splat(0);
+    row[500] = c.f32ToBf16(1.1); // 1.1015625: between two e4m3 codes of its block's scale
+    var w: [528]u8 = undefined;
+    try std.testing.expectError(error.NotExact, fp4.window(&row, &w));
 }
 
-test "main rows: scales are the E4M3 of amax / 6, codes the nearest E2M1, error within a scale step plus the clip" {
+test "main rows: scales are the E4M3 of amax / 6, codes the nearest E2M1, and grid blocks round-trip" {
     var rng = s.Rng.init(10);
-    var sq_err: f64 = 0;
-    var sq_val: f64 = 0;
     for (0..300) |_| {
         var row: [512]u16 = undefined;
         s.genRow(&rng, &row);
         var m: [288]u8 = undefined;
-        fp4.mainRow(&row, &m);
+        try fp4.mainRow(&row, &m);
         var back: [512]u16 = undefined;
         fp4.unpackMain(&m, &back);
+        try std.testing.expectEqualSlices(u16, &row, &back);
         for (0..32) |b| {
             var amax: f32 = 0;
             for (row[16 * b ..][0..16]) |v| amax = @max(amax, @abs(c.bf16ToF32(v)));
@@ -249,12 +200,26 @@ test "main rows: scales are the E4M3 of amax / 6, codes the nearest E2M1, error 
                 const code = nearestE2(@abs(v / scale)) | (if (std.math.signbit(v)) @as(u8, 8) else 0);
                 const nib = if (d & 1 != 0) m[d / 2] >> 4 else m[d / 2] & 15;
                 try std.testing.expectEqual(code, nib);
-                const err = @abs(@as(f64, c.bf16ToF32(back[d])) - v);
-                try std.testing.expect(err <= scale * 1.0 + @max(0, amax - 6 * scale) + 1e-30);
-                sq_err += err * err;
-                sq_val += v * v;
             }
         }
     }
-    try std.testing.expect(@sqrt(sq_err / sq_val) < 0.2); // E2M1 with a fine scale: about 10% rms on gaussian blocks
+    var row: [512]u16 = @splat(0);
+    row[0] = c.f32ToBf16(6.0);
+    row[1] = c.f32ToBf16(1.25); // the E2M1 gap at the block's scale of 1
+    var m: [288]u8 = undefined;
+    try std.testing.expectError(error.NotExact, fp4.mainRow(&row, &m));
+}
+
+test "index keys: a block on the record grid round-trips bit for bit, and 6 with 1.25 is refused, not packed as 6 and 1" {
+    var k: [128]u16 = @splat(0);
+    k[0] = c.f32ToBf16(6.0);
+    k[1] = c.f32ToBf16(1.5);
+    var out: [68]u8 = undefined;
+    try fp4.index(&k, &out);
+    var back: [128]u16 = undefined;
+    fp4.unpackIndex(&out, &back);
+    try std.testing.expectEqualSlices(u16, &k, &back);
+    k[1] = c.f32ToBf16(1.25); // between the E2M1 codes for 1 and 1.5
+    try std.testing.expectError(error.NotExact, fp4.index(&k, &out));
+    try std.testing.expectError(error.NotExact, fp4.releaseIndexKey(&k, &out));
 }
