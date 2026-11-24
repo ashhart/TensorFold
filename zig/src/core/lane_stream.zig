@@ -21,6 +21,10 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     var effective_prompt: []const u32 = r.prompt;
     var effective_max_new: u32 = r.max_tokens;
     var memory_active = false;
+    // one version for the whole request: memory ops run on this thread, so none lands between this read and the route
+    if (h.folded_memory) |fm| if (h.info_.folded_memory) if (fm.version) |v| {
+        job.memory_version = v(fm.ctx);
+    };
     // the latest user turn's memory gate, only where the engine serves learning (Info.folded_memory, --slide)
     if (h.folded_memory) |fm| if (h.info_.folded_memory and !job.memory_refused and fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
         if (fm.routeAndCompose(fm.ctx, r.memory_query)) |maybe_snap| {

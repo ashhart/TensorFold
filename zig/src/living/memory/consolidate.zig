@@ -45,6 +45,7 @@ pub fn consolidate(self: *Bank, prune_superseded: bool, compact_policies: bool) 
     rep.bytes = try self.saveFull();
     rep.units = self.activeUnitCount();
     rep.clusters = @intCast(self.cluster_index.n_clusters);
+    self.version += 1; // pruned history, compacted policies or a new skill steering: a new published version
     return rep;
 }
 
