@@ -1,8 +1,4 @@
-//! Cross-platform CUDA / HIP Device Bridge for Folded Memory Weights v6.
-//! Allows any CUDA or HIP engine (Nemotron-H CUDA, Qwen3.5 CUDA, Qwen3/Llama CUDA) to attach the
-//! full v6 Folded Memory Weights engine (exact BF16 KV, spectral SVD, temporal belief revision,
-//! ClusterIndex, CRC delta journal, in-flight learning, sleep-time consolidation) by supplying
-//! ONLY device-side launch + DtoH/HtoD copy callbacks — zero duplicated compression or routing logic!
+//! CUDA/HIP device bridge: an engine attaches Folded Memory Weights by supplying launch and copy callbacks only.
 const std = @import("std");
 const quant = @import("quant.zig");
 const bank = @import("bank.zig");
@@ -29,8 +25,7 @@ pub const DeviceOps = struct {
         out_lex_bf16: []u16,
         out_sem_bf16: []u16,
     ) anyerror!void,
-    /// Upload optional `base` KV + recurrent state to a scratch device slot, run `ids`, and download ONLY
-    /// the new `ids.len` KV rows (in `kv_layout`) + final recurrent state into host buffers.
+    /// Run `ids` on a scratch slot seeded with optional `base` state; download only the new KV rows + recurrent state.
     compileDeviceState: *const fn (
         ctx: *anyopaque,
         base_len: u32,
@@ -44,7 +39,7 @@ pub const DeviceOps = struct {
         out_rec_state: [][]f32,
         out_rec_conv: [][]u16,
     ) anyerror!void,
-    /// Upload composed KV + recurrent state to a device snapshot slot, run `suffix_ids`, and return opaque device Snap handle.
+    /// Upload composed KV + recurrent state to a snapshot slot, run `suffix_ids`, return an opaque device Snap handle.
     buildDeviceSnap: *const fn (
         ctx: *anyopaque,
         len: u32,

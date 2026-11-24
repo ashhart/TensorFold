@@ -1,5 +1,4 @@
-//! Folded Memory Weights v3 engine-API types: synchronous engine-thread teach/save/forget/stats
-//! operations and the backend-neutral MemoryController hook attached to LaneHost.
+//! Memory engine-API types: engine-thread teach/save/forget/stats ops and LaneHost's MemoryController hook.
 const std = @import("std");
 
 pub const SnapHandle = struct {

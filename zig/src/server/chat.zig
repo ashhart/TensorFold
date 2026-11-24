@@ -410,7 +410,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     if (input.trace) |trace| trace.timed(reply);
     if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
-    // In-flight Folded Memory Weights v6: enqueue learnable user statements & multi-turn corrections asynchronously (0 ms added TTFT!)
+    // In-flight memory: queue learnable user statements and corrections for background learning.
     if (srv.inflight.enabled and input.prompt == null and !request.background and !input.own and !request.untaught) {
         if (lastExchange(a, input.messages)) |ex| {
             srv.inflight.maybeEnqueueExchange(ex.prev_assistant, ex.user, input.fields);

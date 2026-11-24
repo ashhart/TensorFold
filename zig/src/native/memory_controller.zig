@@ -24,6 +24,7 @@ pub const Holder = struct {
         errdefer gpa.destroy(h);
         const bank = try mem.Bank.init(gpa, io, dir, backend);
         errdefer bank.deinit();
+        bank.trace = @import("sys").environment.read(bool, "TF_SLIDE_TRACE", false) catch false;
         h.* = .{
             .gpa = gpa,
             .bank = bank,
@@ -204,16 +205,7 @@ pub const Holder = struct {
     }
 };
 
-/// True if `dir` already contains a Folded Memory Weights v3 file on disk.
-pub fn hasSavedFile(gpa: Allocator, io: std.Io, dir: []const u8) bool {
-    const path = std.fs.path.join(gpa, &.{ dir, mem.store.file_name }) catch return false;
-    defer gpa.free(path);
-    return mem.store.isFoldedMemoryFile(gpa, io, path);
-}
-
-/// Legacy pocket slide opt-in (`TF_SLIDE_LEGACY=1`); Folded Memory Weights v3 is the default.
+/// Legacy pocket slide opt-in (`TF_SLIDE_LEGACY`, checked at startup with --slide); folded memory is the default.
 pub fn useLegacyPocket() bool {
-    const v = std.c.getenv("TF_SLIDE_LEGACY") orelse return false;
-    const s = std.mem.span(v);
-    return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "true");
+    return @import("sys").environment.read(bool, "TF_SLIDE_LEGACY", false) catch false;
 }
