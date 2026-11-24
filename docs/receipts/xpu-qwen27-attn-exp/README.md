@@ -133,6 +133,36 @@ Host checks, no GPU: `zig build test-kernel-contract test-qwen27-config-xpu-host
 (48 of 48 steps, 288 of 288 tests; the rerun on the final commit, which only changed two
 comments, ran the 252 tests that were not cached and passed them all).
 
+## Rerun after the review fix
+
+Review: in `attn_decode`, `sub_group_broadcast(mv, a)` sat inside `if (lane == 0)`, so only lane 0 reached the
+collective. Commit `8b99d80e3` computes `const float ma = sub_group_broadcast(mv, a);` before the branch on every lane
+and lane 0 stores `ma`; the same hoist is in the planted control `tf_ctl_attn_exp_lanes`, whose score-lane mutation is
+unchanged. Nothing else moved. The branch binary is new, `tensorfold-native` SHA-256
+`b286eee7271352a1c8044692374a61a47cf801b863786e1445a3b0cd60378dc3` (MD5 `707d02a181dda93c756e692d01452ab3`), built
+as above on 2026-11-24; the main binary is the one of the table above (same SHA-256). Same host, driver stack and
+checkpoints, every run on card 0 (`ZE_AFFINITY_MASK=0`).
+
+- Kernel contract, `contract/contract-run-branch-fix.out`: `SUMMARY bmg-g31 0xe223 21 kernels: 21 pass gates 1-4, 0 fail,
+  0 known findings; 12 controls: 12 red as planted, 0 missed; 0 limit problems`. Apart from timings the file is the same as
+  `contract/contract-run-branch.out`, which ran on card 1. `xpu-kernel-contract-limits`: every launch fits, `attn_decode`
+  16 work-items, SLM 0, 256 GRF, 0 spill bytes.
+- Served, `runs-fix/` (same script, `scripts/run_pass.sh`; one fresh server a pass, one pass a side and depth group:
+  branch then main at 7,588 and 28,946 tokens, then branch then main at 121,022; `summarize.py` prints the table):
+  every request of every cell carries the `token_sha256` of the first table, in full, and the drafter's counters are
+  unchanged (71 rounds, 1,065 drafted, 186 accepted at 7,588; 70, 1,050, 188 at 28,946; 67, 1,005, 188 at 121,022).
+
+| prompt tokens | mode | token_sha256 (first 16 hex) | main | branch | branch / main |
+|---|---|---|---|---|---|
+| 7588 | drafted | `9764d2d6fb7cbdbf` | 62.26 | 63.28 | 1.016 |
+| 7588 | plain | `9764d2d6fb7cbdbf` | 32.67 | 32.69 | 1.001 |
+| 28946 | drafted | `1d59abb499c48841` | 36.34 | 37.47 | 1.031 |
+| 28946 | plain | `1d59abb499c48841` | 28.94 | 28.98 | 1.001 |
+| 121022 | drafted | `0ac2491477780561` | 13.30 | 13.97 | 1.050 |
+| 121022 | plain | `0ac2491477780561` | 19.50 | 19.54 | 1.002 |
+
+Decode tok/s, the median of three measured requests (one pass a side, so no paired ratio); the speed matches the table above.
+
 ## Limits
 
 - Code prompts only, at the three depths named. One host, one card for the served numbers, one driver stack.
