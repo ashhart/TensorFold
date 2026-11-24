@@ -20,11 +20,12 @@ Build the native engine with the Zig version in `.zig-version` and Xcode's Metal
 ```sh
 zig build native -Dcpu=apple_m1
 ./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-1.7B-MLX-4bit --context 8192
-./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-VL-2B-MLX-4bit --context 8192
+./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-VL-2B-MLX-4bit --context 8192 --vision
 ```
 
 Replace `4bit` with `6bit` or `8bit` for those exports. A complete local checkpoint folder also works.
-The VL checkpoint loads its own image tower. Send images through OpenAI `image_url` content parts.
+The VL checkpoint loads its own image tower only with `--vision`; without it the server is text-only.
+Send images through OpenAI `image_url` content parts.
 The default image budget is 256 tokens per request, with at most four images.
 Budgets outside 64–4096 tokens are refused. Each prepared image must cover at least 65,536 pixels (64 merged tokens).
 Smaller nonempty raw images are resized up to that floor; an undersized prepared grid is refused before vision execution.
