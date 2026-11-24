@@ -109,3 +109,35 @@ test "folded memory: an attached bank routes only when the engine serves learnin
     try t.expectEqual(@as(u32, 1), c_on.routed);
     try t.expectEqualSlices(u32, plain.tokens.items, on.tokens.items);
 }
+
+test "folded memory: without a bank the in-flight answer takes no host lock between rounds" {
+    const gpa = t.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
+    defer host.stop();
+    const Answer = struct {
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(a: *@This(), h: *LaneHost) void {
+            @import("lane_host_memory.zig").answerOneInFlight(h);
+            a.done.store(true, .release);
+        }
+    };
+    var answer: Answer = .{};
+    host.lock(); // as a request's admission holds it: the engine thread's call must not wait for it
+    const thread = std.Thread.spawn(.{}, Answer.run, .{ &answer, &host }) catch |e| {
+        host.unlock();
+        return e;
+    };
+    var waited: usize = 0;
+    while (!answer.done.load(.acquire) and waited < 2_000) : (waited += 1) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    const unblocked = answer.done.load(.acquire);
+    host.unlock();
+    thread.join();
+    try t.expect(unblocked);
+}
