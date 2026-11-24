@@ -35,6 +35,26 @@ fn orderProbe(x: []f32, weight: []f32) void {
 fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
+fn writeF32s(bytes: []u8, v: f32) void {
+    const bits: u32 = @bitCast(v);
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 4) std.mem.writeInt(u32, bytes[i..][0..4], bits, .little);
+}
+fn arSim(acc: c.Accum, order: g.Order) p.ArSum {
+    return .{
+        .accum = switch (acc) {
+            .none => .none,
+            .f32 => .f32,
+            .f16 => .f16,
+            .bf16 => .bf16,
+        },
+        .order = switch (order) {
+            .sequential => .sequential,
+            .pairwise => .pairwise,
+            .strided => .strided,
+        },
+    };
+}
 
 // The attention-residual probe runs a batch of rows, each with its own blocks, partial sums and two output queries.
 const ar_batch = 2;
@@ -52,11 +72,14 @@ pub const Probe = struct {
     rig: rig_.Rig,
     kind: p.Kind,
     pipes: host.Pipelines,
+    base: ?host.Pipelines = null,
     shape: c.Shape = undefined,
-    served: [3]c.Shape = undefined,
+    served: []const c.Shape = &.{},
     f: [4][]f32 = @splat(&.{}),
     ids: []u32 = &.{},
     route_ids: rig_.Ref = undefined,
+    inv_rms: rig_.Ref = undefined,
+    base_out: rig_.Ref = undefined,
     refs: [5]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     nonfinite: bool = false,
@@ -69,29 +92,55 @@ pub const Probe = struct {
         return initSource(a, device, queue, kind, sources.glue);
     }
     pub fn initSource(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind, text: []const u8) !Probe {
-        var self: Probe = .{ .a = a, .arena = .init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .kind = kind, .pipes = try host.Pipelines.loadSource(device, text) };
+        var pipes = try host.Pipelines.loadSource(device, text);
+        errdefer pipes.deinit();
+        var self: Probe = .{
+            .a = a,
+            .arena = .init(a),
+            .rig = .{ .a = a, .device = device, .queue = queue },
+            .kind = kind,
+            .pipes = pipes,
+            .base = if (kind == .cached_ar) try host.Pipelines.load(device) else null,
+        };
         self.served = switch (kind) {
-            .embed_norm => .{ .{ .rows = 1, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden }, .{ .rows = 7, .n = p.hidden, .k = p.hidden } },
-            .ar => .{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
-            .conv_static => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
-            .conv_dynamic => .{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
-            .router => .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
-            .swiglu => .{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
-            .logits => .{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
-            .expert_pick => .{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
-            .expert_combine => .{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
+            .embed_norm => &.{ .{ .rows = 1, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden }, .{ .rows = 7, .n = p.hidden, .k = p.hidden } },
+            .ar => &.{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
+            .cached_ar => &.{
+                .{ .rows = 2, .n = 2 * p.hidden, .k = p.hidden },
+                .{ .rows = 1, .n = p.hidden, .k = p.hidden },
+                .{ .rows = 1, .n = 3 * p.hidden, .k = p.hidden },
+                .{ .rows = 2, .n = p.hidden, .k = p.hidden },
+                .{ .rows = 3, .n = 3 * p.hidden, .k = p.hidden },
+                .{ .rows = 4, .n = p.hidden, .k = p.hidden },
+                .{ .rows = 5, .n = p.hidden, .k = p.hidden },
+                .{ .rows = 5, .n = 3 * p.hidden, .k = p.hidden },
+            },
+            .block_inv_rms => &.{
+                .{ .rows = 4, .n = 1, .k = p.hidden },
+                .{ .rows = 5, .n = 2, .k = p.hidden },
+                .{ .rows = 7, .n = 3, .k = p.hidden },
+                .{ .rows = 32, .n = 4, .k = p.hidden },
+            },
+            .conv_static => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
+            .conv_dynamic => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
+            .router => &.{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
+            .swiglu => &.{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
+            .logits => &.{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
+            .expert_pick => &.{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
+            .expert_combine => &.{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
         };
         return self;
     }
     pub fn initSplit(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, text: []const u8) !Probe {
         var self = try initSource(a, device, queue, .router, text);
         self.split = true;
-        self.served = .{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 33, .n = 8, .k = p.hidden }, .{ .rows = 64, .n = 8, .k = p.hidden } };
+        self.served = &.{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 33, .n = 8, .k = p.hidden }, .{ .rows = 64, .n = 8, .k = p.hidden } };
         return self;
     }
     pub fn deinit(self: *Probe) void {
         self.rig.deinit();
         self.arena.deinit();
+        if (self.base) |*base| base.deinit();
         self.pipes.deinit();
     }
     const vt_checked = g.hooks(Probe);
@@ -102,7 +151,7 @@ pub const Probe = struct {
     };
     pub fn kernel(self: *Probe) g.Kernel {
         const out: c.Elem = switch (self.kind) {
-            .ar, .router, .logits => .f32,
+            .ar, .cached_ar, .block_inv_rms, .router, .logits => .f32,
             else => .bf16,
         };
         return .{
@@ -110,21 +159,25 @@ pub const Probe = struct {
             .vt = if (self.kind == .router) &vt_checked else &vt_plain,
             .spec = .{
                 .name = if (self.split) split_label else self.kind.label(),
-                .replaces = if (self.split) "tf_inkling2_router" else null,
                 .accum = .f32,
                 .depth = depth,
-                .ops = 96,
+                .ops = if (self.kind == .block_inv_rms) 8 else 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
-                .served = &self.served,
+                .replaces = if (self.split) "tf_inkling2_router" else if (self.kind == .cached_ar) "tf_inkling2_ar" else null,
+                .served = self.served,
                 .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
-                .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
+                .sums = if (self.kind == .ar or self.kind == .cached_ar or self.kind == .block_inv_rms) .{} else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
         };
     }
     pub fn count(self: *Probe) usize {
-        return if (self.kind == .ar) ar_batch * 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
+        return switch (self.kind) {
+            .ar => ar_batch * 2 * p.hidden,
+            .cached_ar => self.shape.n,
+            else => p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k }),
+        };
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const out = try self.arena.allocator().alloc(f32, n);
@@ -187,6 +240,64 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], false);
                 self.refs[2] = try self.input(self.f[2], false);
             },
+            .cached_ar => {
+                const q_count = n / p.hidden;
+                self.f[0] = try self.floats((r - 1) * p.hidden, rng);
+                self.f[1] = try self.floats(p.hidden, rng);
+                self.f[2] = try self.floats(q_count * p.hidden, rng);
+                if (fill == .stress) {
+                    // Each 2304-term square sum is exactly 9 * 2^24 in FP32 under every order.
+                    for (0..r) |s| {
+                        const values = if (s + 1 == r) self.f[1] else self.f[0][s * p.hidden ..][0..p.hidden];
+                        @memset(values, if (s % 2 == 0) 256 else -256);
+                    }
+                    for (0..q_count) |query_row| {
+                        const row = self.f[2][query_row * p.hidden ..][0..p.hidden];
+                        for (0..p.hidden / 2) |d| {
+                            const v: f32 = @floatFromInt(1 + rng.uintLessThan(u32, 64));
+                            const nudge: f32 = if (d < 8) 1 else 0;
+                            row[d] = v;
+                            row[p.hidden / 2 + d] = nudge - v;
+                        }
+                    }
+                } else if (fill == .random and q_count == 3 and (r == 3 or r == 5)) {
+                    if (r == 3) {
+                        @memset(self.f[0][0..p.hidden], 0);
+                        self.f[0][1] = -0.0;
+                        @memset(self.f[0][p.hidden .. 2 * p.hidden], 1e-18);
+                        for (self.f[1], 0..) |*v, d| v.* = if (d % 3 == 0) 1e6 else if (d % 3 == 1) -1e6 else 1e-5;
+                    } else {
+                        @memset(self.f[0][0..p.hidden], 256);
+                        @memset(self.f[0][p.hidden .. 2 * p.hidden], -0.0078125);
+                        @memset(self.f[0][2 * p.hidden .. 3 * p.hidden], 1e8);
+                        @memset(self.f[0][3 * p.hidden .. 4 * p.hidden], 1e-20);
+                        for (self.f[1], 0..) |*v, d| v.* = if (d % 3 == 0) 256 else if (d % 3 == 1) -256 else 0.5;
+                    }
+                }
+                if (nf) self.f[2][0] = std.math.inf(f32);
+                const blocks_bits = try self.arena.allocator().alloc(u16, 4 * p.hidden);
+                @memset(blocks_bits, c.toBf16(123));
+                for (self.f[0], 0..) |x, i| blocks_bits[i] = c.toBf16(x);
+                self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(blocks_bits));
+                self.inv_rms = try self.rig.scratch(4 * 4);
+                writeF32s(self.rig.bytes(self.inv_rms, 4 * 4), 999);
+                self.base_out = try self.rig.scratch(q_count * p.hidden * 4);
+                self.refs[1] = try self.input(self.f[1], false);
+                self.refs[2] = try self.input(self.f[2], false);
+            },
+            .block_inv_rms => {
+                const slot = n - 1;
+                self.f[0] = try self.floats(r * 4 * p.hidden, rng);
+                if (fill == .stress) {
+                    for (0..r) |row| {
+                        const block = self.f[0][(row * 4 + slot) * p.hidden ..][0..p.hidden];
+                        @memset(block, 1);
+                        block[0] = 1024;
+                    }
+                }
+                if (nf) self.f[0][slot * p.hidden] = std.math.nan(f32);
+                self.refs[0] = try self.input(self.f[0], true);
+            },
             .conv_static => {
                 self.f[0] = try self.floats((r + 3) * n, rng);
                 self.f[1] = try self.floats(4 * n, rng);
@@ -244,17 +355,40 @@ pub const Probe = struct {
         }
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
         for (self.f, 0..) |values, j| if (values.len > 0 and switch (self.kind) {
-            .ar => j == 0,
+            .ar, .cached_ar => j == 0,
             .router => j < 2,
             .expert_combine => j == 0,
             else => true,
         }) round(values);
-        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits) 4 else 2);
+        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .cached_ar or self.kind == .block_inv_rms or self.kind == .router or self.kind == .logits) 4 else 2);
         self.out = try self.rig.output(bytes);
+        if (self.kind == .block_inv_rms) writeF32s(self.rig.bytes(self.out, bytes), 1);
         return true;
     }
     fn at(ref: rig_.Ref) host.Ref {
         return .{ .buf = ref.buf, .off = ref.off };
+    }
+    pub fn replaced(self: *Probe) ![]const u8 {
+        if (self.split) {
+            const r: u32 = @intCast(self.shape.rows);
+            const ids = try self.rig.scratch(r * 8 * 4);
+            const weights = try self.rig.scratch(r * 8 * 4);
+            const pass = self.rig.begin();
+            host.router(&self.pipes, pass.e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(ids), at(weights), r);
+            try self.rig.finish(pass);
+            const want = self.rig.bytes(weights, r * 8 * 4);
+            const main_ids = self.rig.bytes(ids, r * 8 * 4);
+            if (std.mem.eql(u8, main_ids, self.rig.bytes(self.route_ids, r * 8 * 4))) return want;
+            return std.mem.concat(self.arena.allocator(), u8, &.{ want, main_ids });
+        }
+        const base = &(self.base orelse return error.NoBaseline);
+        const len = self.count() * 4;
+        @memset(self.rig.bytes(self.base_out, len), 0xff);
+        const pass = self.rig.begin();
+        const q: u32 = @intCast(self.shape.n / p.hidden);
+        host.ar(base, pass.e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.base_out), @intCast(self.shape.rows), q);
+        try self.rig.finish(pass);
+        return self.rig.bytes(self.base_out, len);
     }
     pub fn run(self: *Probe) !void {
         const pass = self.rig.begin();
@@ -267,6 +401,11 @@ pub const Probe = struct {
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
+            .cached_ar => {
+                for (0..r - 1) |s| host.blockInvRms(pl, e, at(R[0]), at(self.inv_rms), 1, @intCast(s));
+                host.cachedAr(pl, e, at(R[0]), at(R[1]), at(self.inv_rms), at(R[2]), y, r, n / p.hidden);
+            },
+            .block_inv_rms => host.blockInvRms(pl, e, at(R[0]), y, r, n - 1),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .router => if (self.split)
@@ -291,6 +430,20 @@ pub const Probe = struct {
             .ar => {
                 for (0..ar_batch) |b| for (0..2) |q| p.blockResidual(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], r, q, want[(b * 2 + q) * p.hidden ..][0..p.hidden]);
                 break;
+            },
+            .cached_ar => {
+                const q_count = n / p.hidden;
+                var qout: [3 * p.hidden]f64 = undefined;
+                for (0..q_count) |q| p.blockResidual(self.f[0], self.f[1], self.f[2], r, q, qout[q * p.hidden ..][0..p.hidden]);
+                @memcpy(want, qout[0 .. q_count * p.hidden]);
+                break;
+            },
+            .block_inv_rms => {
+                const slot = n - 1;
+                for (0..4) |s| want[row * 4 + s] = if (s == slot)
+                    p.blockInvRms(self.f[0][(row * 4 + s) * p.hidden ..][0..p.hidden])
+                else
+                    1;
             },
             .conv_static => {
                 for (0..n) |d| want[row * n + d] = p.staticConv(self.f[0], self.f[1], n, row, d);
@@ -321,38 +474,30 @@ pub const Probe = struct {
     }
     pub fn simulate(self: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
         if (self.kind == .ar) {
-            const sim: p.ArSum = .{
-                .accum = switch (acc) {
-                    .none => .none,
-                    .f32 => .f32,
-                    .f16 => .f16,
-                    .bf16 => .bf16,
-                },
-                .order = switch (order) {
-                    .sequential => .sequential,
-                    .pairwise => .pairwise,
-                    .strided => .strided,
-                },
-            };
+            const sim = arSim(acc, order);
             for (0..ar_batch) |b| for (0..2) |q| p.blockResidualIn(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], self.shape.rows, q, sim, out[(b * 2 + q) * p.hidden ..][0..p.hidden]);
+            return;
+        }
+        if (self.kind == .cached_ar) {
+            const sim = arSim(acc, order);
+            const q_count = self.shape.n / p.hidden;
+            for (0..q_count) |q| p.blockResidualIn(self.f[0], self.f[1], self.f[2], self.shape.rows, q, sim, out[q * p.hidden ..][0..p.hidden]);
+            return;
+        }
+        if (self.kind == .block_inv_rms) {
+            const sim = arSim(acc, order);
+            const slot = self.shape.n - 1;
+            for (0..self.shape.rows) |row| for (0..4) |s| {
+                out[row * 4 + s] = if (s == slot)
+                    p.blockInvRmsIn(self.f[0][(row * 4 + s) * p.hidden ..][0..p.hidden], sim)
+                else
+                    1;
+            };
             return;
         }
         const mag = try self.a.alloc(f64, out.len);
         defer self.a.free(mag);
         return self.reference(out, mag);
-    }
-    /// Main's router on the same inputs; IDs that differ append main's, so no byte comparison can pass.
-    pub fn replaced(self: *Probe) ![]const u8 {
-        const r: u32 = @intCast(self.shape.rows);
-        const ids = try self.rig.scratch(r * 8 * 4);
-        const weights = try self.rig.scratch(r * 8 * 4);
-        const pass = self.rig.begin();
-        host.router(&self.pipes, pass.e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(ids), at(weights), r);
-        try self.rig.finish(pass);
-        const want = self.rig.bytes(weights, r * 8 * 4);
-        const main_ids = self.rig.bytes(ids, r * 8 * 4);
-        if (std.mem.eql(u8, main_ids, self.rig.bytes(self.route_ids, r * 8 * 4))) return want;
-        return std.mem.concat(self.arena.allocator(), u8, &.{ want, main_ids });
     }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
         if (self.kind != .router) return "numeric hooks must be used";
