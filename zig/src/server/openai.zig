@@ -193,7 +193,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
         return;
     };
     p.input.id = id;
-    p.input.learns = @import("auth_scope.zig").learnsFrom(gone.conn.key_scopes);
+    if (srv.info.folded_memory) p.input.learns = @import("auth_scope.zig").learnsFrom(gone.conn.key_scopes); // --slide
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
     var asked: cancel_ids.Entry = .{ .owner = gone.conn.key_digest };
     const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
