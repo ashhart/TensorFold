@@ -38,7 +38,7 @@ import { type ComposerSubmit } from './useComposerSubmit'
 
 export function ComposerView(state: ComposerState & ComposerWorkspace & ComposerSubmit) {
   const {
-    tx, settings, status, launch, send, cancel,
+    mode, thread, tx, settings, status, launch, send, cancel,
     saveSettings, setThreadProvider, noteModelChange, compactThread, patchThread, projects,
     terminals, activeTerminalId, readiness, setReadiness, authBusy, setAuthBusy,
     setThreadProject, addProject, pendingMention, composerSeed, sshHosts, sshStatus,
