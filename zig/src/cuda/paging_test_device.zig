@@ -5,6 +5,10 @@ const Driver = @import("driver.zig").Driver;
 const t = std.testing;
 pub const Device = struct {
     pub const stream: abi.Stream = @ptrFromInt(17);
+    pub const Copy = struct { dst: u64, src: u64, len: usize };
+    pub fn bytes(ptr: u64, len: usize) []u8 {
+        return @as([*]u8, @ptrFromInt(ptr))[0..len];
+    }
     pub var observe: ?*const fn () bool = null;
     pub var expected: usize = 0;
     pub var early = false;
@@ -15,17 +19,30 @@ pub const Device = struct {
     pub var freed_pending: usize = 0;
     pub var fail_wait_in: usize = 0; // > 0: the stream wait this many waits on fails, once
     pub var hosts: usize = 0; // pinned buffers held
-    var next: u64 = 0x10000;
+    pub var devices: usize = 0;
+    pub var fail_alloc = false;
+    pub var fail_dtod = false;
+    pub var dtods: usize = 0;
+    pub var last_dtod: Copy = .{ .dst = 0, .src = 0, .len = 0 };
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
-        out.* = next;
-        next += len + 256;
+        if (fail_alloc) {
+            fail_alloc = false;
+            return abi.error_not_ready;
+        }
+        const all = t.allocator.alignedAlloc(u8, .@"16", len + 16) catch return abi.error_not_ready;
+        std.mem.writeInt(usize, all[0..@sizeOf(usize)], len, .little);
+        out.* = @intFromPtr(all.ptr + 16);
+        devices += 1;
         return 0;
     }
-    fn free(_: u64) callconv(.c) c_int {
+    fn free(ptr: u64) callconv(.c) c_int {
         freed_pending += @intFromBool(pending);
+        const at: [*]align(16) u8 = @ptrCast(@alignCast(@as([*]u8, @ptrFromInt(ptr)) - 16));
+        t.allocator.free(at[0 .. std.mem.readInt(usize, at[0..@sizeOf(usize)], .little) + 16]);
+        devices -= 1;
         return 0;
     }
-    fn fill(_: u64, _: u8, _: usize, s: abi.Stream) callconv(.c) c_int {
+    fn fill(dst: u64, v: u8, n: usize, s: abi.Stream) callconv(.c) c_int {
         _ = s;
         pending = true;
         if (fail_fill) {
@@ -33,6 +50,7 @@ pub const Device = struct {
             fail_wait = true;
             return abi.error_not_ready;
         }
+        @memset(bytes(dst, n), v);
         return 0;
     }
     fn legacyFill(dst: u64, v: u8, n: usize) callconv(.c) c_int {
@@ -58,12 +76,25 @@ pub const Device = struct {
         proof();
         return 0;
     }
-    fn copy(_: u64, _: ?*const anyopaque, _: usize, _: abi.Stream) callconv(.c) c_int {
+    fn copy(dst: u64, src: ?*const anyopaque, len: usize, _: abi.Stream) callconv(.c) c_int {
         pending = true;
+        if (len > 0) @memcpy(bytes(dst, len), @as([*]const u8, @ptrCast(src.?))[0..len]);
         return 0;
     }
-    fn copyOut(_: ?*anyopaque, _: u64, _: usize, _: abi.Stream) callconv(.c) c_int {
+    fn copyOut(dst: ?*anyopaque, src: u64, len: usize, _: abi.Stream) callconv(.c) c_int {
         pending = true;
+        if (len > 0) @memcpy(@as([*]u8, @ptrCast(dst.?))[0..len], bytes(src, len));
+        return 0;
+    }
+    fn dtod(dst: u64, src: u64, len: usize, _: abi.Stream) callconv(.c) c_int {
+        pending = true;
+        dtods += 1;
+        last_dtod = .{ .dst = dst, .src = src, .len = len };
+        if (fail_dtod) {
+            fail_dtod = false;
+            return abi.error_not_ready;
+        }
+        @memcpy(bytes(dst, len), bytes(src, len));
         return 0;
     }
     // each buffer's length in the 16 bytes before it
@@ -105,7 +136,11 @@ pub const Device = struct {
         freed_pending = 0;
         fail_wait_in = 0;
         hosts = 0;
-        next = 0x10000;
+        devices = 0;
+        fail_alloc = false;
+        fail_dtod = false;
+        dtods = 0;
+        last_dtod = .{ .dst = 0, .src = 0, .len = 0 };
         var d: Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -115,6 +150,7 @@ pub const Device = struct {
         d.api.cuCtxSynchronize = context;
         d.api.cuMemcpyHtoDAsync_v2 = copy;
         d.api.cuMemcpyDtoHAsync_v2 = copyOut;
+        d.api.cuMemcpyDtoDAsync_v2 = dtod;
         d.api.cuMemHostAlloc = hostAlloc;
         d.api.cuMemFreeHost = hostFree;
         d.api.cuEventCreate = eventCreate;

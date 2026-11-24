@@ -22,6 +22,11 @@ pub fn enabled() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
+/// TF_FLASHNEXT_WINDOW_GRAPH_PARITY=1: retain both whole-accept state/spare pointer directions.
+pub fn retainSettleGraphs() bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH_PARITY", false) catch false;
+}
+
 /// attnRows' host values for rows ending at `ends` in a `cap`-token cache: dense chunks, the score grid (0: none).
 pub const Geometry = struct {
     chunks: u32,
@@ -113,6 +118,17 @@ pub const Key = struct {
         var h: Hash = .{};
         h.geometry(.at(pos0 + rows, seq.cap));
         h.values(&[_]u64{ seq.gen, seq.cap, pieces(seq), s.h, s.cap, scores, model, hooks.logits_out, hooks.streams });
+        if (retainSettleGraphs()) {
+            var parity: u64 = 0;
+            if (hooks.keep) |keep| if (seq.state.len != 0) {
+                for (keep.layers) |layer| {
+                    if (layer.state_out == 0) continue;
+                    parity = @intFromBool(seq.state[0].ptr < layer.state_out);
+                    break;
+                }
+            };
+            h.fixed(parity); // a shape bucket: the full pointers still move in place below
+        }
         h.keep(hooks.keep);
         return .{ .rows = @intCast(rows), .shape = h.shape.final(), .moving = h.moving.final() };
     }
@@ -209,6 +225,8 @@ pub fn Cache(comptime K: type) type {
         map: std.AutoHashMapUnmanaged(K, Held) = .empty,
         /// Slots run once eagerly and are captured the second time (a one-off pass would never pay its capture back).
         seen: std.AutoHashMapUnmanaged(K, void) = .empty,
+        /// Every run, including eager warm-ups and disabled-graph fallbacks; updates and replays split graph launches.
+        calls: u64 = 0,
         captures: u64 = 0,
         replays: u64 = 0,
         /// Held graphs re-recorded at a new length, for a new sequence or on other buffers and updated in place.
@@ -225,6 +243,7 @@ pub fn Cache(comptime K: type) type {
 
         /// `pass.run()` (kernels only: its uploads already queued) as `key`'s graph, captured first when new.
         pub fn run(c: *Self, gpa: std.mem.Allocator, stream: cuda.Stream, key: K, pass: anytype) !void {
+            c.calls += 1;
             if (c.off) return pass.run();
             const slot = slotOf(key);
             if (c.map.getPtr(slot)) |h| {
@@ -247,7 +266,7 @@ pub fn Cache(comptime K: type) type {
             errdefer exec.deinit();
             try c.map.put(gpa, slot, .{ .key = key, .exec = exec });
             c.captures += 1;
-            if (c.captures % 64 == 1) std.log.info("{s} graphs: {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.captures, c.updates, c.replays, c.map.count() });
+            if (c.captures % 64 == 1) std.log.info("{s} graphs: {d} calls, {d} captured, {d} updated, {d} replayed, {d} held", .{ @typeName(K), c.calls, c.captures, c.updates, c.replays, c.map.count() });
             try exec.launchOn(stream);
         }
 
