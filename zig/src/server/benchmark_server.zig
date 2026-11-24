@@ -173,7 +173,7 @@ pub const Managed = struct {
         };
         const group: ?posix.pid_t = if (o.own_group) 0 else null;
         // the child writes into a pipe: keys are replaced before any byte reaches the log file
-        const sink: ?*Sink = Sink.open(std.heap.page_allocator, io, log, try sinkSecrets(a, o)) catch {
+        const sink: ?*Sink = Sink.open(std.heap.page_allocator, io, log, try sinkSecrets(a, o), o.served) catch {
             cwd.deleteFile(io, log_path) catch {};
             log.close(io);
             if (lock) |l| l.close(io);
@@ -225,7 +225,8 @@ pub const Managed = struct {
                 return false;
             }
             if (port == null) {
-                port = servingPort(m.logEnd(&buf), m.served);
+                // the sink reads it from the raw line: a key may have changed the file's copy
+                port = if (m.sink) |k| k.servingPort() else servingPort(m.logEnd(&buf), m.served);
                 if (port) |p| m.base_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{p});
             }
             if (port != null and try probe(a, m.io, &client, m.base_url, m.served, m.key)) return true;

@@ -542,3 +542,24 @@ test "a managed child's key never reaches its log file, raw or encoded across wr
     try std.testing.expect(std.mem.indexOf(u8, got, "echo [redacted]") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:") != null);
 }
+
+test "a valid key that overlaps the serving line still lets a healthy managed child become ready, and stays off disk" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try Setup.init(a, &tmp);
+    const routes = try healthy(a, "{\"status\": \"ok\"}", ".tensorfold-benchmark");
+    const f = try fake.Fake.start(std.testing.allocator, &routes);
+    defer f.stop();
+    for ([_][]const u8{ "serving", ".tensorfold-benchmark", "127.0.0.1" }) |key| {
+        const sh = try a.dupe([]const u8, &.{ "/bin/sh", "-c", try serving(a, f.port, "exec sleep 30") });
+        var problem: []const u8 = "";
+        var m = (try server.Managed.spawn(a, std.testing.io, &s.env, sh, .{ .startup_timeout_s = 5, .bench_dir = s.bench, .key = key }, &problem)) orelse return error.TestUnexpectedResult;
+        var buf: [4096]u8 = undefined;
+        const got = buf[0..try m.log.readPositionalAll(std.testing.io, &buf, 0)];
+        try std.testing.expect(std.mem.indexOf(u8, got, key) == null);
+        try std.testing.expect(m.stop() == null);
+    }
+}
