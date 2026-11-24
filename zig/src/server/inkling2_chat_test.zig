@@ -354,7 +354,8 @@ test "Inkling 2 reply: a grammar's bare JSON is the content, and its bare call e
     try t.expectEqualStrings("{\"city\":\"Paris\"}", json_reply.content);
     try t.expectEqualStrings("", json_reply.reasoning);
     const raw = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}</tool_call>";
-    const call = try probeIds(a, "release", try encodeReply(a, raw), lookup);
+    // ended on the fixture's EOS (2), as a grammar's reply ends: a script that runs out reports the token cap
+    const call = try probeIds(a, "release", try std.mem.concat(a, u32, &.{ try encodeReply(a, raw), &.{2} }), lookup);
     try t.expectEqualStrings("lookup", call.names);
     try t.expectEqualStrings("{\"q\":\"x\"}", call.arguments);
     try t.expectEqualStrings("", call.content);
