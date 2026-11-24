@@ -18,6 +18,7 @@ const Engine = struct {
     answers: bool = true,
     takes: bool = false, // with `answers` false: taken by the engine thread, so its caller cannot withdraw it
     held: ?*Ask = null,
+    retain_seen: u32 = 0,
     fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .imprint = imprint } };
     }
@@ -27,6 +28,7 @@ const Engine = struct {
     fn imprint(ctx: *anyopaque, ask: *Ask) bool {
         const e: *Engine = @ptrCast(@alignCast(ctx));
         e.asks += 1;
+        e.retain_seen = ask.retain;
         if (!e.answers) {
             if (e.takes) ask.claim.store(.taken, .release);
             e.held = ask;
@@ -69,13 +71,14 @@ const Wire = struct {
     }
 };
 
-const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full };
+const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full, body: []const u8 = "{}" };
 
 /// One flush through the dispatcher, as the connection thread hands it over after the key gate; status and body.
 fn call(srv: *Server, a: Allocator, c: Caller) !struct { status: u16, body: json.Value } {
     var wire: Wire = .{ .a = a };
-    const headers = try std.mem.concat(a, http.Header, &.{ &.{.{ .name = "Content-Length", .value = "2" }}, c.headers });
-    var conn: http.Conn = .{ .fd = -1, .peer = c.peer, .buf = try a.dupe(u8, "{}"), .end = 2, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = flush.path, .headers = headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write }, .key_label = c.key, .key_scopes = c.scopes };
+    const length = try std.fmt.allocPrint(a, "{d}", .{c.body.len});
+    const headers = try std.mem.concat(a, http.Header, &.{ &.{.{ .name = "Content-Length", .value = length }}, c.headers });
+    var conn: http.Conn = .{ .fd = -1, .peer = c.peer, .buf = try a.dupe(u8, c.body), .end = c.body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = flush.path, .headers = headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write }, .key_label = c.key, .key_scopes = c.scopes };
     routes.dispatch(srv, &conn, a);
     const out = wire.bytes.items;
     const at = std.mem.indexOf(u8, out, "\r\n\r\n") orelse return error.MissingHttpHead;
@@ -165,6 +168,37 @@ test "prompt cache flush: 501 where no store keeps states, and a 503 whose flush
     defer t.allocator.destroy(e.held.?);
     try t.expectEqual(api.ImprintClaim.taken, e.held.?.claim.load(.acquire));
     try t.expect(std.mem.indexOf(u8, taken.body.get("error").?.strField("message").?, "withdrawn") == null);
+}
+
+test "prompt cache flush: the body retains explicitly, while absent and unrecognized bodies still flush all" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var e: Engine = .{};
+    const srv = try serve(e.engine(), null);
+    defer srv.deinit();
+    for ([_]struct { body: []const u8, retain: u32 }{
+        .{ .body = "{}", .retain = 0 },
+        .{ .body = "", .retain = 0 },
+        .{ .body = "not JSON", .retain = 0 },
+        .{ .body = "[]", .retain = 0 },
+        .{ .body = "{\"unrelated\":1}", .retain = 0 },
+        .{ .body = "{\"retain\":0}", .retain = 0 },
+        .{ .body = "{\"retain\":2}", .retain = 2 },
+        .{ .body = "{\"retain\":1,\"unrelated\":true}", .retain = 1 },
+    }) |c| {
+        const before = e.asks;
+        const got = try call(srv, a, .{ .body = c.body });
+        try t.expectEqual(@as(u16, 200), got.status);
+        try t.expectEqual(before + 1, e.asks);
+        try t.expectEqual(c.retain, e.retain_seen);
+    }
+    for ([_][]const u8{ "{\"retain\":-1}", "{\"retain\":1.5}", "{\"retain\":\"1\"}", "{\"retain\":4294967296}" }) |body| {
+        const before = e.asks;
+        const got = try call(srv, a, .{ .body = body });
+        try t.expectEqual(@as(u16, 400), got.status);
+        try t.expectEqual(before, e.asks);
+    }
 }
 
 test "prompt cache flush: a model --idle-unload parked answers 503 unloaded, neither asked nor woken" {

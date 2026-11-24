@@ -139,7 +139,6 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
     }
     if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
-        discardBody(conn, a);
         return flush.post(srv, conn, a);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
