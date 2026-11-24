@@ -3,6 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const every: u64 = 64;
 pub const stale: u64 = 256;
+/// An unpriced round this many times its load-time forward runs on the table's prices well past the clock.
+pub const over_table: f64 = 2;
 const Point = struct { residual: f64, rows: f64, head: f64 = 0, at: u64 };
 const Bucket = struct {
     streams: usize,
@@ -12,6 +14,7 @@ const Bucket = struct {
     trials: u64 = 0, // completed all-plain trials, the first of them a warm-up
     plain: ?Point = null,
     draft: ?Point = null,
+    over: bool = false, // a round with no plain price took `over_table` times its load-time forward
 };
 pub const Price = struct { plain: f64, fixed: f64, row: f64, head: f64 = 0 };
 
@@ -33,12 +36,20 @@ pub const Prices = struct {
         return &p.buckets.items[p.buckets.items.len - 1];
     }
 
-    /// Missing/stale plain prices earn a trial on round 64, then at least 64 completed rounds apart.
+    /// A missing or stale plain price earns a trial 64 rounds apart; a marked count takes its first two in a row.
     pub fn due(p: *Prices, a: Allocator, streams: usize, sampled: bool) !bool {
         const b = try p.get(a, streams, sampled);
         const next = b.rounds +| 1;
         const old = if (b.plain) |v| next -| v.at >= stale else true;
-        return old and next -| b.last_probe >= every;
+        // the kept trial must follow a completed warm-up: a selected trial that never completed waits `every`
+        const early = b.plain == null and b.over and (b.last_probe == 0 or (b.trials == 1 and b.last_probe == b.rounds));
+        return old and (early or next -| b.last_probe >= every);
+    }
+
+    /// A round of a count with no plain price that takes `over_table` times its load-time forward marks the count.
+    pub fn observeTable(p: *Prices, a: Allocator, streams: usize, sampled: bool, ms: f64, forward: f64) !void {
+        const b = try p.get(a, streams, sampled);
+        if (b.plain == null and ms >= over_table * forward) b.over = true;
     }
 
     /// Spend the trial's spacing when it is selected, even if its forward width cannot be measured.
