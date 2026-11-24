@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
+
 - Flash Next on Metal: `--ssd-experts GIB` now fits an oversized SSD expert pool to the load ceiling instead of refusing the load; nothing changes without the flag (#4811).
 
 - Metal on M5: 5-bit and 6-bit group-64 checkpoints get split-plane storage and register-direct lane kernels (#4419). Thanks @gilby.

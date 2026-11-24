@@ -567,6 +567,7 @@ test "qwen27 startup: the adaptive block hooks are analyzed" {
 
 test {
     _ = @import("qwen27_draft_block.zig");
+    _ = @import("qwen27_mtp.zig");
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_startup_line.zig");
 }
