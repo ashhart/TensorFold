@@ -415,7 +415,8 @@ pub const Engine = struct {
         const idle = try e.stream.done();
         if (e.host.used <= half) {
             e.host.used = half; // the last forward's span is in [stage_from, used): below half
-            e.host.limit = len;
+            const head_rows = if (e.weights.model.mtp != null) tokens.len else 0;
+            e.host.limit = head_mod.promptUpperLimit(len, head_rows);
             staged = forward.stageWith(&e.weights.model, &e.host, &segs, false, idle) catch |err| if (err == error.StagingTooSmall) null else return err;
         } else if (e.stage_from >= half) {
             e.host.used = 0;

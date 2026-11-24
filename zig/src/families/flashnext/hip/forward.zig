@@ -22,13 +22,19 @@ pub const Host = struct {
     limit: usize = std.math.maxInt(usize),
     tables: *tables.Tables,
 
+    /// The next unused byte after `bytes` goes through the same aligned placement as `put`.
+    pub fn putEnd(used: usize, bytes: usize) usize {
+        return std.mem.alignForward(usize, used, 16) + bytes;
+    }
+
     /// `bytes` copied through the staging into fresh arena memory, queued on the stream.
     pub fn put(h: *Host, o: Ops, bytes: []const u8) !u64 {
-        const from = std.mem.alignForward(usize, h.used, 16);
-        if (from + bytes.len > h.staging.bytes.len) return error.StagingTooSmall;
+        const to = putEnd(h.used, bytes.len);
+        const from = to - bytes.len;
+        if (to > h.staging.bytes.len) return error.StagingTooSmall;
         const dst = try o.arena.take(bytes.len);
         @memcpy(h.staging.bytes[from..][0..bytes.len], bytes);
-        h.used = from + bytes.len;
+        h.used = to;
         if (o.stream != hip.counting and bytes.len > 0) try hip.runtime.check(h.d.api.hipMemcpyHtoDAsync(
             @ptrFromInt(dst),
             h.staging.bytes[from..].ptr,
