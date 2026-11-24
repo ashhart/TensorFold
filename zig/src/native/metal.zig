@@ -284,13 +284,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.slide = s;
         h.host.learner = s.hook;
         h.host.info_.slide_conversations = s.conversations;
-    } else if (o.slide or mem_ctrl.hasSavedFile(gpa, io, o.dir)) {
+    } else if (o.slide) { // a saved bank alone never attaches it: --slide asks for learning
         const adapter = try nemotron.memory_adapter.Adapter.init(gpa, h.metal);
         errdefer adapter.deinit(gpa);
         const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, nemotron.memory_adapter.Adapter.deinitOpaque);
         h.folded_mem = holder;
         h.host.folded_memory = holder.controller();
-        if (o.slide) h.host.info_.folded_memory = true;
+        h.host.info_.folded_memory = true;
     }
     errdefer if (h.folded_mem) |fm| fm.deinit();
     errdefer if (h.slide) |s| s.deinit(gpa);
