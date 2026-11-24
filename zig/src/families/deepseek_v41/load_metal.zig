@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const st = @import("core").safetensors;
-const cp = @import("core").checkpoint_metal;
+const cp = @import("../../core/checkpoint_metal.zig");
 const paced = @import("core").paced_read;
 
 pub const Reference = struct { shard: usize, entry: st.Entry };

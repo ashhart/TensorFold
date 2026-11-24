@@ -1,6 +1,11 @@
 //! Experimental DS4.1 weight-loading qualification targets.
 const std = @import("std");
 
+/// The checkpoint-number readers as the module the family's config imports by name.
+fn numbers(b: *std.Build) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") });
+}
+
 pub fn weights(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -16,6 +21,7 @@ pub fn weights(
         .imports = &.{
             .{ .name = "metal", .module = metal },
             .{ .name = "core", .module = core },
+            .{ .name = "config_number", .module = numbers(b) },
         },
     }) });
     const step = b.step("test-deepseek-v41-weights", "V4.1 configuration, Engram table plans and resident weight staging");
@@ -42,6 +48,7 @@ pub fn checks(
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "core", .module = core },
             .{ .name = "engram_hash_core", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }) },
+            .{ .name = "config_number", .module = numbers(b) },
         },
     }) });
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
@@ -171,6 +178,7 @@ pub fn checks(
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "core", .module = core },
             .{ .name = "engram_hash_core", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }) },
+            .{ .name = "config_number", .module = numbers(b) },
         },
     }), .filters = &.{"index one-shot select"} });
     const probe_run = b.addRunArtifact(probe);
