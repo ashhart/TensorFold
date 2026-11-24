@@ -458,10 +458,10 @@ test "start CLI: persistent mode requires a valid environment credential before 
         try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
         try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
     }
-    for ([_][]const u8{ "\xc2\xa0", "good-key,bad key", "good-key,\xc2\xa0", "fixture-\u{009b}", "good-key,fixture-\u{009b}" }) |key| {
+    for ([_][]const u8{ "\xc2\xa0", "good-key,bad key", "good-key,\xc2\xa0", "fixture-\u{009b}", "good-key,fixture-\u{009b}", "fixture-\u{20ac}" }) |key| {
         try r.env.put("TENSORFOLD_API_KEY", key);
         try std.testing.expectEqual(@as(u8, 2), try r.command(&.{}));
-        try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null);
+        try std.testing.expect(std.mem.indexOf(u8, r.err.written(), "expected Latin-1 keys without spaces or control characters") != null and std.mem.indexOf(u8, r.err.written(), key) == null);
         try std.testing.expectEqual(@as(usize, 0), r.pulls.items.len);
         try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "Selected ") == null);
     }
