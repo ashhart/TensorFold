@@ -223,9 +223,10 @@ extern "C" __global__ void tf_exl3_gateup_capped(const CappedArgs c) {
     for (int j = 0; j < 4; ++j) {
         const float g = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
         const float u = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);
-        const float act =
-            c.gate_cap * tanhf(g / c.gate_cap) * (1.f / (1.f + expf(-g))) * c.up_cap * tanhf(u / c.up_cap);
-        v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
+        // Each product and the sum round on their own: core's flags would otherwise fuse them into FMAs.
+        const float gs = __fmul_rn(__fmul_rn(c.gate_cap, tanhf(g / c.gate_cap)), 1.f / __fadd_rn(1.f, expf(-g)));
+        const float act = __fmul_rn(__fmul_rn(gs, c.up_cap), tanhf(u / c.up_cap));
+        v[j] = __fmul_rn(act, __half2float(a.suh_d[(size_t)e * a.n + n + j]));
     }
     gateup_store(a, p, n, lane, v);
 }
