@@ -165,6 +165,7 @@ pub fn main(init: std.process.Init) !void {
     defer cache.deinit();
     var s = try g4.state.Scratch.init(m.device, geo, 256);
     defer s.deinit();
+    if (all.value.len < rows) return error.IdsTooShort;
     const ids = all.value[0..rows];
     const segs = [_]fwd.Segment{.{ .cache = &cache, .rows = rows }};
     var chunks: fwd.Chunks = undefined;

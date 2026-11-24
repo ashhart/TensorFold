@@ -100,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
         const len: u32 = if (len_cfg == 0) m + 3 else len_cfg;
         if (len_cfg == 0 and m >= 128) continue;
         if (len <= m) continue;
+        if (len > all.value.len) return error.IdsTooShort; // fast builds skip bounds checks: a short file reads past it
         const ids = all.value[0..len];
         // the host's plan: chunk starts at multiples of 512 (planned) are cut in every pass; marks add the resume point
         var planned: [4]u32 = undefined;
