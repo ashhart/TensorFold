@@ -1,5 +1,5 @@
 //! Folded Memory Weights v6 Metal adapter for Pure-Attention Llama models (`num_rec == 0`).
-//! Stores ONLY compressed Pre-RoPE Q4 KV caches + dual-layer whitened gate prototypes — zero recurrent
+//! Stores the KV caches exactly as computed (BF16) + dual-layer whitened gate prototypes — zero recurrent
 //! state deltas, zero SVD overhead, instant RoPE-shifted composition, and bit-exact atomic unlearning!
 const std = @import("std");
 const mtl = @import("metal");
@@ -50,7 +50,6 @@ pub const Adapter = struct {
             .conv_elems = 0,
             .svd_rank = 0,
             .svd_rank_short = 0,
-            .kv_bits = 4, // group-32 symmetric Q4 KV (0.5625 B/elem)
             .keep_conv = false,
         };
     }
