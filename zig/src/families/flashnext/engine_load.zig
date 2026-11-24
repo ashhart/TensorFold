@@ -445,6 +445,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         r.gx = try @import("gx.zig").init(r, grouped_rows, gateup_mb2);
         std.log.info("flash next: grouped experts from {d} rows{s}", .{ r.gx.?.min_rows, if (gateup_mb2) ", gate/up MB=2" else "" });
     }
+    r.gx_shared = try platform.environment.read(bool, "TF_FN_GX_SHARED", false);
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
