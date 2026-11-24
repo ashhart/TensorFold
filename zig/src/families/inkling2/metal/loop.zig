@@ -68,7 +68,7 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 
 /// Output layout is [token][12 core layers][q,k,v,mlp][H], all binary32.
 pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, bank0: Ref, bank1: Ref, q_mlp: Ref, kv: Ref, out: Ref, rows: u32) void {
-    std.debug.assert(rows > 0 and rows <= 64);
+    std.debug.assert(rows > 0 and rows <= 256);
     e.setPipeline(p.messages);
     bind(e, &.{ bank0, bank1, q_mlp, kv, out });
     e.setValue(RowsArgs{ .rows = rows }, 5);
@@ -77,7 +77,7 @@ pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, ban
 
 /// One controller tuple; h, m and output are [token][H] binary32 tensors.
 pub fn gates(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32) void {
-    std.debug.assert(rows > 0 and rows <= 64);
+    std.debug.assert(rows > 0 and rows <= 256);
     e.setPipeline(p.gates);
     bind(e, &.{ h, m, down, forget, gain, out });
     e.setValue(RowsArgs{ .rows = rows }, 6);
@@ -103,9 +103,9 @@ pub fn gatesSplit(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// The gates of `rows` rows (at most 64) at once: h and out hold [row][H], m's rows are `m_stride` values apart.
+/// The gates of `rows` rows (at most 256) at once: h and out hold [row][H], m's rows are `m_stride` values apart.
 pub fn gatesRows(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, down: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32) !void {
-    std.debug.assert(rows > 0 and rows <= 64);
+    std.debug.assert(rows > 0 and rows <= 256);
     const pipe = p.gates_mma orelse return error.NoSimdgroupMatrices;
     e.setPipeline(pipe);
     bind(e, &.{ h, m, down, forget, gain, out });
