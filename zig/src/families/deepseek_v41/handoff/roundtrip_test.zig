@@ -99,7 +99,7 @@ fn releaseCase(cs: Case) !void {
             bytesOf(w.truth.comp[si][r * 512 ..][0..512], &want);
             try std.testing.expectEqualSlices(u8, &want, l.pool[r * 1024 ..][0..1024]);
             var key: [68]u8 = undefined;
-            fp4.releaseIndexKey(w.truth.idx[si][r * 128 ..][0..128], &key);
+            try fp4.releaseIndexKey(w.truth.idx[si][r * 128 ..][0..128], &key);
             try std.testing.expectEqualSlices(u8, &key, l.keys[r * 68 ..][0..68]);
         }
         try std.testing.expect(std.mem.allEqual(u8, l.pool[@intCast(rows * 1024)..], 0x77)); // rows past the prefix untouched
@@ -155,7 +155,7 @@ fn packedCase(cs: Case) !void {
         var live: [128]bool = @splat(false);
         for (0..wrows) |i| {
             const pos = cs.upto - wrows + i;
-            fp4.window(w.truth.swa[li][i * 512 ..][0..512], &ringrow);
+            try fp4.window(w.truth.swa[li][i * 512 ..][0..512], &ringrow);
             const at = (li * 128 + pos % 128) * 528;
             try std.testing.expectEqualSlices(u8, &ringrow, pk.live[at..][0..528]);
             live[pos % 128] = true;
@@ -164,7 +164,7 @@ fn packedCase(cs: Case) !void {
     }
     for (0..3) |stage| for (0..cs.ds_rows) |i| {
         const pos = cs.upto - cs.ds_rows + i;
-        fp4.window(w.truth.ds[stage][i * 512 ..][0..512], &ringrow);
+        try fp4.window(w.truth.ds[stage][i * 512 ..][0..512], &ringrow);
         try std.testing.expectEqualSlices(u8, &ringrow, pk.live[((40 + stage) * 128 + pos % 128) * 528 ..][0..528]);
     };
     var main_off: usize = 0;
@@ -174,9 +174,9 @@ fn packedCase(cs: Case) !void {
         var m: [288]u8 = undefined;
         var key: [68]u8 = undefined;
         for (0..rows) |r| {
-            fp4.mainRow(w.truth.comp[si][r * 512 ..][0..512], &m);
+            try fp4.mainRow(w.truth.comp[si][r * 512 ..][0..512], &m);
             try std.testing.expectEqualSlices(u8, &m, pk.storage[main_off + r * 288 ..][0..288]);
-            fp4.index(w.truth.idx[si][r * 128 ..][0..128], &key);
+            try fp4.index(w.truth.idx[si][r * 128 ..][0..128], &key);
             try std.testing.expectEqualSlices(u8, &key, pk.storage[main_off + cap_rows * 288 + r * 68 ..][0..68]);
         }
         try std.testing.expect(std.mem.allEqual(u8, pk.storage[main_off + rows * 288 ..][0 .. (cap_rows - rows) * 288], 0x77));

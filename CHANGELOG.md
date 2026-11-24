@@ -148,9 +148,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port; a request cancelled by its cut leaves no held export. Nothing is exported unless the flag is given (#3565).
 
-- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
+- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
 
-- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers, the part plan); nothing calls it yet (#3563).
+- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers that refuse a row their format cannot hold exactly, the part plan); nothing calls it yet (#3563).
 
 - DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export (#3729).
 
