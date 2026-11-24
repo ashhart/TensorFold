@@ -289,3 +289,91 @@ test "tfq3: decode at 1 and 4 rows, prefill and a repeat give the same output by
         }
     }
 }
+
+const Stored = struct { name: []const u8, dtype: []const u8, shape: [2]usize, bytes: usize };
+
+/// A safetensors shard of headers alone: each tensor's bytes are a hole, which a dry load never reads.
+fn writeShard(a: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, tensors: []const Stored) !void {
+    var json: []const u8 = "{";
+    var at: usize = 0;
+    for (tensors, 0..) |s, i| {
+        const dims = if (s.shape[1] == 0) try std.fmt.allocPrint(a, "{d}", .{s.shape[0]}) else try std.fmt.allocPrint(a, "{d},{d}", .{ s.shape[0], s.shape[1] });
+        json = try std.fmt.allocPrint(a, "{s}{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[{s}],\"data_offsets\":[{d},{d}]}}", .{ json, if (i == 0) "" else ",", s.name, s.dtype, dims, at, at + s.bytes });
+        at += s.bytes;
+    }
+    json = try std.fmt.allocPrint(a, "{s}}}", .{json});
+    const f = try dir.createFile(testing.io, name, .{ .read = true });
+    defer f.close(testing.io);
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, json.len, .little);
+    try f.writePositionalAll(testing.io, &len, 0);
+    try f.writePositionalAll(testing.io, json, 8);
+    try f.setLength(testing.io, 8 + json.len + at);
+}
+
+/// A one-Mac checkpoint: real-shaped 4/64 embedding and head, TFQ3 tables, one `record` of `rows` x `cols`.
+fn writeCheckpoint(a: std.mem.Allocator, dir: std.Io.Dir, record: []const u8, rows: u32, cols: u32) !void {
+    const io = testing.io;
+    const V: usize = 154880;
+    const D: usize = 4096;
+    var tensors: [7]Stored = undefined;
+    for ([_][]const u8{ "model.language_model.embed_tokens", "lm_head" }, 0..) |m, i| {
+        tensors[3 * i] = .{ .name = try std.fmt.allocPrint(a, "{s}.weight", .{m}), .dtype = "U32", .shape = .{ V, D / 8 }, .bytes = V * D / 2 };
+        tensors[3 * i + 1] = .{ .name = try std.fmt.allocPrint(a, "{s}.scales", .{m}), .dtype = "BF16", .shape = .{ V, D / 64 }, .bytes = V * D / 32 };
+        tensors[3 * i + 2] = .{ .name = try std.fmt.allocPrint(a, "{s}.biases", .{m}), .dtype = "BF16", .shape = .{ V, D / 64 }, .bytes = V * D / 32 };
+    }
+    tensors[6] = .{ .name = "model.language_model.norm.weight", .dtype = "BF16", .shape = .{ D, 0 }, .bytes = D * 2 };
+    try writeShard(a, dir, "model.safetensors", &tensors);
+    var map: []const u8 = "";
+    for (tensors, 0..) |s, i| map = try std.fmt.allocPrint(a, "{s}{s}\"{s}\":\"model.safetensors\"", .{ map, if (i == 0) "" else ",", s.name });
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = try std.fmt.allocPrint(a, "{{\"weight_map\":{{{s}}}}}", .{map}) });
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"}}" });
+    var tbl: [16384]u8 = @splat(0);
+    std.mem.writeInt(u32, tbl[0..4], tfq3.magic_v3_tables, .little);
+    std.mem.writeInt(u32, tbl[4..8], tfq3.format_version, .little);
+    try dir.writeFile(io, .{ .sub_path = "pw_v3_tables.bin", .data = &tbl });
+    // nonmoe.tffpw: records at 128, scales at 16384, weights on the next 16 KiB boundary (a hole past the header)
+    const words: u64 = @as(u64, rows) * cols * 4 / 32;
+    const halfs: u64 = (rows / 128) * (cols / 128);
+    const at_weights: u64 = 16384 + std.mem.alignForward(u64, halfs * 2, 16384);
+    var head: [256]u8 = @splat(0);
+    const h: tfq3.NonMoeHeader = .{ .magic = tfq3.magic_nonmoe, .version = tfq3.format_version, .num_tensors = 1, .pad0 = 0, .off_meta = 128, .off_scales = 16384, .off_weights = at_weights, .total_scale_halfs = halfs, .total_weight_words = words, .pad1 = 0 };
+    @memcpy(head[0..@sizeOf(tfq3.NonMoeHeader)], std.mem.asBytes(&h));
+    const m = makeMeta(record, rows, cols, 4, 0, 0, words);
+    @memcpy(head[128..][0..@sizeOf(tfq3.NonMoeTensorMeta)], std.mem.asBytes(&m));
+    const f = try dir.createFile(io, "nonmoe.tffpw", .{ .read = true });
+    defer f.close(io);
+    try f.writePositionalAll(io, &head, 0);
+    try f.setLength(io, at_weights + words * 4);
+}
+
+/// weights.load's dry plan and construction of `c`'s embedding and head over that checkpoint.
+fn dryLoad(dir: []const u8, c: tf.glm.config.Config) !affine.Affine {
+    const w = try tf.glm.weights.load(testing.allocator, undefined, dir, &c, 1, true);
+    defer {
+        w.deinit();
+        testing.allocator.destroy(w);
+    }
+    return w.head;
+}
+
+test "tfq3: a dry load refuses a head record the model cannot read whole, before planning, and maps one it can" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const one: tf.glm.config.Config = .{ .run = 0, .mtp = 0 };
+    // E329b: a valid 128x128 lm_head record beside real-shaped 4/64 fallback tensors: refused by name, not copied
+    try writeCheckpoint(a, tmp.dir, "lm_head", 128, 128);
+    try testing.expectError(error.Tfq3RecordShape, dryLoad(dir, one));
+    // control: no head record, the ordinary 4/64 head
+    try writeCheckpoint(a, tmp.dir, "model.language_model.layers.0.mlp.down_proj", 4096, 12288);
+    try testing.expectEqual(@as(u16, 64), (try dryLoad(dir, one)).group);
+    // the head's own shape: mapped from nonmoe.tffpw, as planned
+    try writeCheckpoint(a, tmp.dir, "lm_head", 154880, 4096);
+    try testing.expectEqual(@as(u16, 512), (try dryLoad(dir, one)).group);
+    // TP2 would read rank 1's half of the head: refused before any plan
+    try testing.expectError(error.Tfq3TensorParallel, dryLoad(dir, .{ .run = 0, .mtp = 0, .tp = 2, .tp_rank = 1 }));
+}
