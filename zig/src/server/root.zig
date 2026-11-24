@@ -154,6 +154,7 @@ test {
     _ = @import("chat_ocr_test.zig");
     _ = @import("memory_off_test.zig");
     _ = @import("slide_memory_honest_test.zig");
+    _ = @import("slide_access_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
