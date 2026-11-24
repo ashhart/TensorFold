@@ -13,7 +13,7 @@ const cfg = @import("config.zig");
 
 pub const model_type = "kolibri1";
 /// Kolibri 1.1 (config_v11.zig): the same family, its dense layers, shared caches and window read from config.json.
-pub const also_model_types: []const []const u8 = &.{"kolibri1_1"};
+pub const cuda_also_model_types: []const []const u8 = &.{"kolibri1_1"};
 pub const formats: []const []const u8 = &.{"fp8-block"};
 pub const default_context: i64 = 65536;
 pub const max_segments: u32 = 1;
