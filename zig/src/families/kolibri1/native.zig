@@ -77,7 +77,7 @@ pub const Loaded = struct {
     engine_paged: bool = true,
 };
 
-const Owned = struct { gpa: std.mem.Allocator, w: weights.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, kb: be.Kolibri, room: ?Room = null };
+const Owned = struct { gpa: std.mem.Allocator, w: weights.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, kb: be.Kolibri, room: ?Room = null, window: usize = 0, lanes: ?u32 = null };
 
 /// Streams to allocate in `room`: as asked, else (auto) the most that fit; a fixed count past them or a round refuses.
 fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
@@ -148,6 +148,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.gpa = gpa;
     own.room = o.room;
+    own.window = o.context;
+    own.lanes = if (o.lanes_fixed) o.lanes else null;
     own.w = try weights.load(gpa, io, ctx.d, dir, null);
     errdefer own.w.deinit();
     own.k = try kern.Kernels.load(ctx);
@@ -188,9 +190,17 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.kb.lanes.count() != 0) return error.TapsAfterStreams;
     const left = if (own.room) |r| r.read(r.ctx) else null; // the release's own bytes refuse before any is allocated
-    const d = try eagle.Drafter.open(gpa, io, &own.kb, &own.k, dir, left);
+    const d = try eagle.Drafter.open(gpa, io, &own.kb, &own.k, dir, drafterLoad(own, left));
     errdefer d.deinit();
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+}
+
+/// What the drafter's load holds that the server's stream plan does not count (linear: every stream's slot).
+fn drafterLoad(own: *const Owned, left: ?u64) eagle.Drafter.Load {
+    if (!own.m.paged) return .{ .slots = own.m.slots, .now = own.m.slots + 1, .left = left };
+    const l = own.m.layout(); // pages: the plan pays each later stream's slot; the first's, timing slot, window here
+    const first = l.pages(own.window + window_rows) * l.pageBytes();
+    return .{ .slots = own.lanes orelse 1, .first = first, .now = 2, .left = left };
 }
 
 fn closeDrafter(p: *anyopaque) void {

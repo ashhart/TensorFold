@@ -43,6 +43,7 @@ pub const Drafter = struct {
     depth: u32,
     step_ms: f64 = 0,
     costs: [row_costs.widths.len]lanes.config.Cost = undefined, // the target's round ms by rows (timed at reserve)
+    n_costs: usize = 0, // the widths the served streams' slots hold
     holds: [2 * hold_streams.len]lanes.hold_price.HoldCost = undefined, // a hold pass's ms by streams and depth
     n_holds: usize = 0,
     timed: bool = false,
@@ -51,8 +52,8 @@ pub const Drafter = struct {
     layers: []E.Layer,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
 
-    /// The release in `dir` over `kb`'s model: refused by name (logged) if not served or past `left` device bytes.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, kb: *be.Kolibri, k: *const kern.Kernels, dir: []const u8, left: ?u64) !*Drafter {
+    /// The release in `dir` over `kb`'s model: refused by name (logged) if not served or past `load`'s device bytes.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, kb: *be.Kolibri, k: *const kern.Kernels, dir: []const u8, load: Load) !*Drafter {
         var folder = try std.Io.Dir.cwd().openDir(io, dir, .{});
         defer folder.close(io);
         var why: release.Why = .{};
@@ -66,8 +67,8 @@ pub const Drafter = struct {
             std.log.err("--drafter {s}: a {s} release; Kolibri-1 on CUDA serves eagle3 releases", .{ dir, @tagName(c.architecture) });
             return error.DrafterArchitectureNotServed;
         }
-        _ = admit(c, r.vocab.len, kb.m.slots, left) catch |e| {
-            std.log.err("--drafter {s}: needs {d:.2} GiB of device memory for {d} stream{s} and a timing slot; the budget leaves {d:.2} GiB", .{ dir, gib(need(c, r.vocab.len, kb.m.slots)), kb.m.slots, if (kb.m.slots == 1) "" else "s", gib(left.?) });
+        _ = admit(c, r.vocab.len, load) catch |e| {
+            std.log.err("--drafter {s}: needs {d:.2} GiB of device memory for {d} stream{s} and a timing slot, and the first stream's window {d:.2} GiB; the budget leaves {d:.2} GiB", .{ dir, gib(need(c, r.vocab.len, load.slots)), load.slots, if (load.slots == 1) "" else "s", gib(load.first), gib(load.left.?) });
             return e;
         };
         const x = try gpa.create(Drafter);
@@ -81,6 +82,8 @@ pub const Drafter = struct {
         const w = try x.upload(dir, c, r.names, k);
         const ops: E.Ops = .{ .dense = &k.dense, .norms = &k.norms, .qk = &k.qk, .win = &k.win, .embed = &k.embed, .act = &x.act, .argmax = k.argmax_fn, .to_bf16 = k.to_bf16_fn };
         x.e = try E.Eagle3.init(gpa, kb.d, kb.s, dimsOf(c, x.vocab.len), w, ops);
+        errdefer x.e.deinit();
+        try x.e.reserve(load.now); // before the server reads its room: what its stream plan leaves out is held already
         return x;
     }
 
@@ -110,10 +113,18 @@ pub const Drafter = struct {
         return weightBytes(c, vocab) + dm.scratchBytes() + (slots + 1) * dm.streamBytes();
     }
 
-    /// `need` when `left` (null: unread) holds it, else DrafterPastMemory; from the config alone, nothing allocated.
-    pub fn admit(c: *const release.Config, vocab: usize, slots: usize, left: ?u64) !usize {
-        const bytes = need(c, vocab, slots);
-        if (left) |l| if (l < bytes) return error.DrafterPastMemory;
+    /// What a load holds once served, read before the drafter allocates anything.
+    pub const Load = struct {
+        slots: usize, // the streams reserve() gets at most, if known now (else 1: the plan pays each later one's)
+        first: u64 = 0, // the first stream's target window, made after the drafter (paged caches: the plan's)
+        now: usize, // drafter slots allocated at open: those the server's stream plan does not count
+        left: ?u64, // the budget's room now (null: unread)
+    };
+
+    /// `need` plus the first stream's window when `load.left` holds them, else DrafterPastMemory; from numbers alone.
+    pub fn admit(c: *const release.Config, vocab: usize, load: Load) error{DrafterPastMemory}!usize {
+        const bytes = need(c, vocab, load.slots) + load.first;
+        if (load.left) |l| if (l < bytes) return error.DrafterPastMemory;
         return bytes;
     }
 
@@ -221,7 +232,7 @@ pub const Drafter = struct {
         x.step_ms = try x.time(streams);
         x.n_holds = try x.timeHolds(streams); // on the streams' slots: zeroed after, before any stream opens
         try x.clearCaches();
-        try row_costs.time(x.kb, x.io, &x.costs); // without them the depth rule cannot trade drafts against rows
+        x.n_costs = try row_costs.time(x.kb, x.io, &x.costs); // the depth rule trades drafts against rows by them
         x.timed = true;
     }
 
@@ -290,7 +301,7 @@ pub const Drafter = struct {
     /// Chains of the release's serving depth, every stream's step in one pass, capped by the rule in shared rounds.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
-        const costs: []const lanes.config.Cost = if (x.timed) &x.costs else &.{};
+        const costs: []const lanes.config.Cost = if (x.timed) x.costs[0..x.n_costs] else &.{};
         const holds: []const lanes.hold_price.HoldCost = if (x.timed) x.holds[0..x.n_holds] else &.{};
         return .{ .limit_shared_drafts = true, .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs, .hold_costs = holds };
     }
@@ -407,7 +418,35 @@ test "the drafter's device bytes come from its config alone; one byte short refu
     const stream: usize = 2 * 2368 * 2560 * 2 + 2560 * 2; // a slot's keys, values and last output
     const one = Drafter.need(c, v, 1);
     try std.testing.expectEqual(348813568 + 70528256 + 2 * stream, one); // scratch 70528256: a pass of 256 rows
-    try std.testing.expectError(error.DrafterPastMemory, Drafter.admit(c, v, 1, one - 1));
-    try std.testing.expectEqual(one, try Drafter.admit(c, v, 1, one));
-    try std.testing.expectEqual(one + 7 * stream, try Drafter.admit(c, v, 8, null)); // linear caches: 8 at open
+    try std.testing.expectError(error.DrafterPastMemory, Drafter.admit(c, v, .{ .slots = 1, .now = 2, .left = one - 1 }));
+    try std.testing.expectEqual(one, try Drafter.admit(c, v, .{ .slots = 1, .now = 2, .left = one }));
+    try std.testing.expectEqual(one + 7 * stream, try Drafter.admit(c, v, .{ .slots = 8, .now = 9, .left = null }));
+}
+
+test "DrafterPastMemory: --parallel 8 on pages counts 9 drafter slots and the first window, nothing allocated before" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const config = @import("config.zig");
+    var why: config.Why = .{};
+    const kc = try config.parse(arena.allocator(), config.pinned, &why);
+    const text =
+        \\{"architecture": "kolibri1-eagle3-drafter", "target": "Aleph-Alpha/Kolibri-1",
+        \\ "drafter": {"hidden": 2560, "heads": 20, "head_dim": 128, "ffn": 4096, "eps": 1e-06, "theta": 10000.0,
+        \\  "layers": 1, "taps": 3}, "taps": [44, 47, 49], "draft_vocab": "draft_vocab.json", "draft_vocab_size": 32768}
+    ;
+    var rwhy: release.Why = .{};
+    const got = try published.parse(arena.allocator(), text, .{ .repo = target_repo, .adapter = adapter(kc) }, &rwhy);
+    const c = &got.config;
+    const v = 32768;
+    const stream: usize = 2 * 2368 * 2560 * 2 + 2560 * 2;
+    const window: u64 = 3 << 30; // the first stream's paged window, made after the drafter
+    const final = 348813568 + 70528256 + 9 * stream + window;
+    const fixed: Drafter.Load = .{ .slots = 8, .first = window, .now = 2, .left = final - 1 };
+    try std.testing.expectError(error.DrafterPastMemory, Drafter.admit(c, v, fixed));
+    // the old check (one stream, no window) let this budget through and failed or overran later
+    _ = try Drafter.admit(c, v, .{ .slots = 1, .now = 2, .left = final - 1 });
+    try std.testing.expectEqual(final, try Drafter.admit(c, v, .{ .slots = 8, .first = window, .now = 2, .left = final }));
+    // admit takes numbers only, no allocator and no device: nothing can be allocated before it refuses
+    const Numbers = fn (*const release.Config, usize, Drafter.Load) error{DrafterPastMemory}!usize;
+    try std.testing.expect(@TypeOf(Drafter.admit) == Numbers);
 }

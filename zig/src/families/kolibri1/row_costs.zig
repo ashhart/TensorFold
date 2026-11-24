@@ -49,17 +49,25 @@ const Timer = struct {
     }
 };
 
-/// Every width's fastest run (lanes.cost_rule, as the other families time theirs), their slots' pages returned after.
-pub fn time(x: *be.Kolibri, io: std.Io, out: *[widths.len]Cost) !void {
+/// Widths a round over `slots` streams can take: each stream's window at most be.max_window rows.
+pub fn widthsFor(slots: usize) usize {
+    var n: usize = 0;
+    while (n < widths.len and chainsFor(widths[n]) <= slots) n += 1;
+    return n;
+}
+
+/// Every width the target's slots hold, fastest run each (lanes.cost_rule), pages returned after; the count timed.
+pub fn time(x: *be.Kolibri, io: std.Io, out: *[widths.len]Cost) !usize {
     if (x.lanes.count() != 0) return error.TimingWithStreams;
-    const most = chainsFor(widths[widths.len - 1]);
-    if (x.m.slots < most) return error.TimingSlots;
+    const n = widthsFor(x.m.slots);
+    if (n == 0) return error.TimingSlots;
+    const most = chainsFor(widths[n - 1]);
     var leases: [chainsFor(widths[widths.len - 1])]@import("core").kv_pool.Lease = @splat(.{});
-    defer for (&leases, 0..) |*l, slot| if (x.pool) |*p| {
+    defer for (leases[0..most], 0..) |*l, slot| if (x.pool) |*p| {
         p.finish(l);
         x.m.unmapPages(slot);
     };
-    if (x.pool) |*p| for (&leases, 0..) |*l, slot| {
+    if (x.pool) |*p| for (leases[0..most], 0..) |*l, slot| {
         try p.promise(l, 1);
         var map: Map = .{ .m = x.m, .x = x, .slot = slot };
         try p.cover(l, 1, .{ .ctx = &map, .write = Map.write });
@@ -67,13 +75,14 @@ pub fn time(x: *be.Kolibri, io: std.Io, out: *[widths.len]Cost) !void {
     var ids: [fwd.round_rows]u32 = undefined; // spread ids, as qwen27_costs.zig times its windows
     for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % x.m.c.vocab);
     const timer: Timer = .{ .x = x, .io = io, .tokens = &ids };
-    for (0..5) |_| _ = try timer.time(widths.len - 1); // the widest round first, while the GPU's clocks ramp up
+    for (0..5) |_| _ = try timer.time(n - 1); // the widest round first, while the GPU's clocks ramp up
     var ms: [widths.len]f64 = undefined;
-    for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
-    try lanes.cost_rule.smooth(timer, &ms);
-    for (out, widths, ms) |*c, w, m| c.* = .{ .width = w, .ms = m };
-    std.log.info("Kolibri round costs: 1 row {d:.2} ms, 8 rows {d:.2}, 24 rows {d:.2}, 64 rows {d:.2}", .{ ms[0], ms[5], ms[8], ms[11] });
+    for (ms[0..n], 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
+    try lanes.cost_rule.smooth(timer, ms[0..n]);
+    for (out[0..n], widths[0..n], ms[0..n]) |*c, w, m| c.* = .{ .width = w, .ms = m };
+    std.log.info("Kolibri round costs over {d} slot{s}: 1 row {d:.2} ms, {d} rows {d:.2}", .{ x.m.slots, if (x.m.slots == 1) "" else "s", ms[0], widths[n - 1], ms[n - 1] });
     for (x.taps.written[0..@min(most, x.taps.written.len)]) |*w| w.* = 0; // no stream wrote these rows
+    return n;
 }
 
 test "a round splits into windows of at most max_window rows" {
@@ -82,4 +91,13 @@ test "a round splits into windows of at most max_window rows" {
     try std.testing.expectEqual(@as(u32, 2), chainsFor(17));
     try std.testing.expectEqual(@as(u32, 4), chainsFor(64));
     for (widths) |w| try std.testing.expect(chainsFor(w) * be.max_window >= w);
+}
+
+test "calibration times the widths 1, 2 and 3 streams can take, without asking four slots" {
+    try std.testing.expectEqual(@as(usize, 0), widthsFor(0));
+    for ([_]usize{ 1, 2, 3, 4, 8 }, [_]u32{ 16, 32, 48, 64, 64 }, [_]usize{ 8, 10, 11, 12, 12 }) |slots, widest, n| {
+        try std.testing.expectEqual(n, widthsFor(slots));
+        try std.testing.expectEqual(widest, widths[widthsFor(slots) - 1]);
+        try std.testing.expect(chainsFor(widths[n - 1]) <= slots);
+    }
 }
