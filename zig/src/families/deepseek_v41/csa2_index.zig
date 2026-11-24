@@ -261,73 +261,85 @@ pub const Pipelines = struct {
             const raw = std.c.getenv("TF_DSV41_INDEX_SELECT_ONE_ROWS") orelse break :blk 16384;
             break :blk std.fmt.parseInt(u32, std.mem.span(raw), 10) catch 8;
         };
+        // Rows scored and selected together: every key tile of them must fit the tile-major scores (a multiple of 64).
+        const tiles: u32 = (count + score_tile_width - 1) / score_tile_width;
+        const fit: u32 = if (tiles == 0) 0 else scratch.rows / tiles;
+        const block: u32 = if (fit >= args.rows) args.rows else fit / 64 * 64;
         const one_shot = (one_env == null or !std.mem.eql(u8, std.mem.span(one_env.?), "0")) and
             args.rows <= one_rows and args.use_candidates == 0 and args.make_candidates == 0 and
-            mask == 0 and score_passes == 1 and count != 0 and
-            @as(u64, (count + score_tile_width - 1) / score_tile_width) * args.rows <= scratch.rows;
+            mask == 0 and score_passes == 1 and count != 0 and block != 0;
         if (one_shot) {
-            // At one row the tile-major score layout is the key-major one, so the three 4,096-key launches are one.
-            const score_one_env = std.c.getenv("TF_DSV41_INDEX_SCORE_ONE");
-            const score_one = args.rows == 1 and keys_ok and
-                (score_one_env == null or !std.mem.eql(u8, std.mem.span(score_one_env.?), "0"));
-            if (score_one) {
-                var tile = args;
-                tile.tile_start = 0;
-                tile.score_layout = 1;
-                enc.setPipeline(p.keys_score.?);
-                for ([_]View{ q, weights, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
-                    enc.setBuffer(v.buffer, v.offset, i);
-                enc.setValue(tile, 4);
-                enc.dispatchGroups(mtl.Size.of((count + 63) / 64, 1, 1), mtl.Size.of(128, 1, 1));
-                enc.barrier();
-            } else {
-                var shot: u32 = 0;
-                while (shot < count) : (shot += score_tile_width) {
-                    var tile = args;
-                    tile.tile_start = shot;
+            var r0: u32 = 0;
+            while (r0 < args.rows) : (r0 += block) {
+                var a = args;
+                a.rows = @min(block, args.rows - r0);
+                a.position = args.position + r0;
+                const qv = q.shifted(@as(usize, r0) * args.q_stride * 2);
+                const wv = weights.shifted(@as(usize, r0) * args.weight_stride * 2);
+                const out = scratch.positions().shifted(@as(usize, r0) * 512 * 4);
+                // At one row the tile-major score layout is the key-major one, so the three 4,096-key launches are one.
+                const score_one_env = std.c.getenv("TF_DSV41_INDEX_SCORE_ONE");
+                const score_one = a.rows == 1 and keys_ok and
+                    (score_one_env == null or !std.mem.eql(u8, std.mem.span(score_one_env.?), "0"));
+                if (score_one) {
+                    var tile = a;
+                    tile.tile_start = 0;
                     tile.score_layout = 1;
-                    const keys_here: u32 = @min(score_tile_width, count - shot);
-                    if (keys_ok) {
-                        enc.setPipeline(p.keys_score.?);
-                        for ([_]View{ q, weights, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
-                            enc.setBuffer(v.buffer, v.offset, i);
-                        enc.setValue(tile, 4);
-                        enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, 1, 1), mtl.Size.of(128, 1, 1));
-                        enc.barrier();
-                    } else if (row_ok) {
-                        enc.setPipeline(p.row_score.?);
-                        for ([_]View{ q, weights, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
-                            enc.setBuffer(v.buffer, v.offset, i);
-                        enc.setValue(tile, 4);
-                        enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, (args.rows + 15) / 16, 1), mtl.Size.of(128, 1, 1));
-                        enc.barrier();
-                    } else if (nax_ok) {
-                        enc.setPipeline(p.nax_score.?);
-                        for ([_]View{ q, weights, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
-                            enc.setBuffer(v.buffer, v.offset, i);
-                        enc.setValue(tile, 4);
-                        enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, (args.rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
-                        enc.barrier();
-                    } else {
-                        enc.setPipeline(p.score);
-                        for ([_]View{ q, weights, keys, scratch.candidates(), scratch.scores() }, 0..) |v, i|
-                            enc.setBuffer(v.buffer, v.offset, i);
-                        enc.setValue(tile, 5);
-                        enc.dispatchGroups(mtl.Size.of(score_tile_width / keys_per_group, args.rows, 1), mtl.Size.of(32 * warps, 1, 1));
-                        enc.barrier();
+                    enc.setPipeline(p.keys_score.?);
+                    for ([_]View{ qv, wv, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
+                        enc.setBuffer(v.buffer, v.offset, i);
+                    enc.setValue(tile, 4);
+                    enc.dispatchGroups(mtl.Size.of((count + 63) / 64, 1, 1), mtl.Size.of(128, 1, 1));
+                    enc.barrier();
+                } else {
+                    var shot: u32 = 0;
+                    while (shot < count) : (shot += score_tile_width) {
+                        var tile = a;
+                        tile.tile_start = shot;
+                        tile.score_layout = 1;
+                        const keys_here: u32 = @min(score_tile_width, count - shot);
+                        if (keys_ok) {
+                            enc.setPipeline(p.keys_score.?);
+                            for ([_]View{ qv, wv, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
+                                enc.setBuffer(v.buffer, v.offset, i);
+                            enc.setValue(tile, 4);
+                            enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, 1, 1), mtl.Size.of(128, 1, 1));
+                            enc.barrier();
+                        } else if (row_ok) {
+                            enc.setPipeline(p.row_score.?);
+                            for ([_]View{ qv, wv, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
+                                enc.setBuffer(v.buffer, v.offset, i);
+                            enc.setValue(tile, 4);
+                            enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, (a.rows + 15) / 16, 1), mtl.Size.of(128, 1, 1));
+                            enc.barrier();
+                        } else if (nax_ok) {
+                            enc.setPipeline(p.nax_score.?);
+                            for ([_]View{ qv, wv, scratch.denseKeys(), scratch.scores() }, 0..) |v, i|
+                                enc.setBuffer(v.buffer, v.offset, i);
+                            enc.setValue(tile, 4);
+                            enc.dispatchGroups(mtl.Size.of((keys_here + 63) / 64, (a.rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
+                            enc.barrier();
+                        } else {
+                            enc.setPipeline(p.score);
+                            for ([_]View{ qv, wv, keys, scratch.candidates(), scratch.scores() }, 0..) |v, i|
+                                enc.setBuffer(v.buffer, v.offset, i);
+                            enc.setValue(tile, 5);
+                            enc.dispatchGroups(mtl.Size.of(score_tile_width / keys_per_group, a.rows, 1), mtl.Size.of(32 * warps, 1, 1));
+                            enc.barrier();
+                        }
                     }
                 }
+                var one = a;
+                one.score_layout = 1;
+                const v_env = std.c.getenv("TF_DSV41_INDEX_SELECT_V");
+                const fast_scan = v_env == null or !std.mem.eql(u8, std.mem.span(v_env.?), "0");
+                enc.setPipeline(if (fast_scan) p.select_one_v else p.select_one);
+                for ([_]View{ scratch.scores(), out }, 0..) |v, i|
+                    enc.setBuffer(v.buffer, v.offset, i);
+                enc.setValue(one, 2);
+                enc.dispatchGroups(mtl.Size.of(a.rows, 1, 1), mtl.Size.of(256, 1, 1));
+                enc.barrier();
             }
-            var one = args;
-            one.score_layout = 1;
-            const v_env = std.c.getenv("TF_DSV41_INDEX_SELECT_V");
-            const fast_scan = v_env == null or !std.mem.eql(u8, std.mem.span(v_env.?), "0");
-            enc.setPipeline(if (fast_scan) p.select_one_v else p.select_one);
-            for ([_]View{ scratch.scores(), scratch.positions() }, 0..) |v, i|
-                enc.setBuffer(v.buffer, v.offset, i);
-            enc.setValue(one, 2);
-            enc.dispatchGroups(mtl.Size.of(args.rows, 1, 1), mtl.Size.of(256, 1, 1));
-            enc.barrier();
             return;
         }
         // The heap/candidate clear is paid only by the heap path, which reads those regions.

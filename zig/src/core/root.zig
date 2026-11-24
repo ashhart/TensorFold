@@ -170,7 +170,6 @@ pub const frags = @import("frags.zig");
 pub const expert_groups = @import("expert_groups.zig");
 pub const gpu_counters = @import("gpu_counters.zig");
 pub const gpu_profile = @import("gpu_profile.zig");
-pub const checkpoint_metal = @import("checkpoint_metal.zig");
 pub const exl3_projection_gpu_test = @import("exl3_projection_gpu_test.zig");
 pub const safetensors_security_test = @import("safetensors_security_test.zig");
 

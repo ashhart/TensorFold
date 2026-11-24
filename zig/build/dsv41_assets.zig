@@ -11,6 +11,9 @@ pub fn steps(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "config_number", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }) },
+        },
     }) });
     step.dependOn(&b.addInstallArtifact(token_map, .{}).step);
     const tests = b.addRunArtifact(b.addTest(.{ .root_module = @import("dsv41_cuda.zig").module(b, b.graph.host, "asset_main.zig", false) }));

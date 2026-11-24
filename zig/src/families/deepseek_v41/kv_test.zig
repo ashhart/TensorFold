@@ -262,6 +262,7 @@ test {
     _ = @import("csa2_test.zig");
     _ = @import("csa2_concurrent_test.zig");
     _ = @import("csa2_identity_test.zig");
+    _ = @import("index_select_blocks_test.zig");
 }
 
 test "cache pack rejects undersized borrowed input and output before encoding" {

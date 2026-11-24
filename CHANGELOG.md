@@ -240,6 +240,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 - DeepSeek-V4.1 EXL3 on Metal: the sparse-attention prompt scan reuses its key fragments as value fragments and divides by a verified reciprocal product, 4096 rows x 16k keys in 6.93 ms instead of 10.02 ms on an M5 Ultra, with bit-identical output (#3735).
+- DeepSeek-V4.1 EXL3 on Metal: the indexer's one-shot select also runs for prefill chunks past 4096 keys, in row sub-blocks, instead of the one-thread-per-row heap select, with the same selected indices (#3734).
 - DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention (#3382),
   per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
   Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.

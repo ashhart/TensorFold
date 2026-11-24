@@ -316,8 +316,9 @@ pub const Config = struct {
     }
 };
 
-const numberText = @import("config_number.zig").numberText;
-pub const unsigned = @import("config_number.zig").unsigned;
+// The readers are a module: every graph that compiles this file declares it (hy4_flash does the same).
+const numberText = @import("config_number").numberText;
+pub const unsigned = @import("config_number").unsigned;
 
 fn intAs(comptime T: type, v: std.json.Value) !T {
     const n = unsigned(u64, v) catch return error.BadConfig;
