@@ -319,8 +319,8 @@ test "an engine is asked for what the flags say, and the defaults of the flags n
     defer arena.deinit();
     const a = arena.allocator();
     const plain = try request(a, "d", "t", .{});
-    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null };
-    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
+    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null, .lanes = cli.parallel("auto").? };
+    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "lanes_fixed", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
     try std.testing.expectEqualStrings("", plain.policy);
     try std.testing.expectEqualStrings("", plain.master);
     const gpu = try request(a, "d", "t", .{ .tp = 4, .rank = 1, .master = "node0", .master_port = 29600, .mtp_drafts = 2, .mtp_confidence = 0.5, .checkpoint_slots = 3, .policy = "matrix=off" });
