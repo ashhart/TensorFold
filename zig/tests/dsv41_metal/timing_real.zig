@@ -302,8 +302,8 @@ pub fn time(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *con
 fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) !void {
     const fp8 = pkg.pipelines.fp8;
     const w = &r.layers[0];
-    const Shape = struct { name: []const u8, w: pkg.weights.Fp8 };
-    const shapes = [_]Shape{ .{ .name = "wq_a", .w = w.wq_a }, .{ .name = "wkv", .w = w.wkv }, .{ .name = "wq_b", .w = w.wq_b }, .{ .name = "wo_b", .w = w.wo_b }, .{ .name = "shared w1", .w = w.shared[0] }, .{ .name = "shared w2", .w = w.shared[1] }, .{ .name = "ix_wq_b", .w = w.ix_wq_b.? } };
+    var shape_buf: [7]pkg.weights.NamedFp8 = undefined;
+    const shapes = w.fp8ProjectionShapes(&shape_buf);
     const samples = try counters.SampleBuffer.init(r.device, 64);
     defer samples.deinit();
     const pass = try counters.ComputePass.init();
