@@ -20,23 +20,6 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
-/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
-fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
-    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
-}
-
-/// The 27B's source for a launch, by its label: the copy, the steering kernel, MoE, or the glue.
-fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
-    if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
-    if (std.mem.indexOf(u8, name, " norm steer ") != null) {
-        return specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;");
-    }
-    if (std.mem.indexOf(u8, name, " moe rows ") != null) return tf.qwen27.moe_gpu.rows_source;
-    if (std.mem.indexOf(u8, name, " moe ") != null) return tf.qwen27.runtime_sources.moe;
-    return tf.qwen27.runtime_sources.glue;
-}
-
 /// A Bolt op's source: a norm by its key beside Lightning's, else the engine's prefill op file its label names.
 fn boltSource(name: []const u8) ![]const u8 {
     const in = std.mem.indexOf;
@@ -103,6 +86,13 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
         }
         return error.UnknownLaunch;
+    }
+    if (std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
+        if (!assemble) return undefined;
+        // the serving specialization: Q27_XS where this GPU has tensor units, as quant_gpu keys the launch
+        const q = tf.qwen27.quant_gpu;
+        const here = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = device.tensorUnits() });
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = false }) };
     }
 
     const has = struct {
@@ -417,7 +407,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = if (has(d.name, " mamba ")) sources.nemotron_tree else try boltSource(d.name);
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
-        text = try qwen27Source(a, d.name);
+        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;
@@ -528,6 +518,21 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
+/// The steering launch's sources against serving's specialization: this GPU's Q27_XS here, none before the M5.
+fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize {
+    if (!std.mem.startsWith(u8, l.decl.name, "qwen27 norm steer ")) return 0;
+    const q = tf.qwen27.quant_gpu;
+    const xs = device.tensorUnits();
+    const here = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = xs });
+    defer a.free(here);
+    const pre = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = false });
+    defer a.free(pre);
+    const same = std.mem.eql(u8, l.here, here) and std.mem.eql(u8, l.pre_m5, pre);
+    const line = "{s} limits {s}: the serving source here (Q27_XS {d}) and before the M5 (Q27_XS 0)\n";
+    std.debug.print(line, .{ if (same) "PASS" else "FAIL", l.decl.name, @intFromBool(xs) });
+    return @intFromBool(!same);
+}
+
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
@@ -563,7 +568,10 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     }
     var n = try registry.checkMetal(a, list.items, false);
     std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
-    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    for (list.items) |d| {
+        const l = try launchOf(a, device, d);
+        n += try steerServed(a, device, l) + try onThisGpu(a, device, l, false);
+    }
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
