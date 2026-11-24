@@ -174,3 +174,7 @@ test "Inkling 2 reply: a json_schema reply ends on the same token ids as before 
         try t.expectEqual(try plainEnds(a), got.eos_len);
     }
 }
+
+test {
+    _ = @import("inkling2_stop_test.zig");
+}
