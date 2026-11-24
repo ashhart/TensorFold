@@ -60,7 +60,7 @@ pub const Engine = struct {
     graphs: cuda.graph_cache.Cache(Key),
     gengine: cuda.graph_cache.CudaEngine,
     states: kept.Store,
-    checkpoint_digest: [32]u8 = @splat(0),
+    checkpoint_digest: [32]u8 = @splat(0), // every shard byte this rank loaded (native.zig); the ranks compare it
     vision: ?pictures.Limits = null, // images on (--vision): every rank's rows a slot, rank 0's tower
     tower: ?*vision.Tower = null,
     rows: []pictures.Rows = &.{},

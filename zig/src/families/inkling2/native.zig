@@ -134,6 +134,9 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer _ = own.lib.?.api.ncclCommDestroy(own.comm);
     const cap = capacity(o.context);
     const lim: ?pictures.Limits = if (o.vision) |v| .{ .image_tokens = v.image_tokens, .max_images = @min(v.max_images, 64) } else null;
+    // every shard byte, hashed beside the weights' load; the ranks compare the digests at ready
+    var content: ?*core.checkpoint_identity.Content = try startIdentity(gpa, io, dir);
+    errdefer if (content) |x| x.abandon();
     own.e = try engine.Engine.init(gpa, io, ctx.d, dir, p.rank, p.world, .{ .capacity = cap, .vision = lim });
     errdefer own.e.deinit();
     own.link = try follow.Link.init(gpa, ctx.d, &own.lib.?, own.comm, own.e.stream, @max(cap, engine.prompt_rows));
@@ -143,6 +146,9 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try own.group.?.openRoce(gpa, io, ctx.d, own.e.stream, own.e.roceBytes());
     errdefer if (own.group.?.fast) |f| f.deinit();
     own.e.exchange = .{ .nccl = .{ .lib = &own.lib.?, .comm = own.comm, .group = &own.group.? } };
+    const hashing = content.?;
+    content = null;
+    own.e.checkpoint_digest = try hashing.finish();
     try load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready);
     // rank 0 admits by the smallest room of the ranks
     var peer: ?Peer = null;
@@ -246,6 +252,11 @@ fn release(own: *Owned) void {
     own.gpa.destroy(own);
 }
 
+/// Every shard byte of the pack, hashed on threads: both ranks read whole files, so their digests must match.
+pub fn startIdentity(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*core.checkpoint_identity.Content {
+    return core.checkpoint_identity.Content.start(gpa, io, dir, false);
+}
+
 /// The server's words for this family's refusals.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return admission.explain(err) orelse switch (err) {
@@ -253,6 +264,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.UnexpectedInkling2Tensor => "a tensor is not stored as the Inkling 2 EXL3 pack stores it (the log names it)",
         error.NotExl3 => "Inkling 2 on CUDA reads EXL3 packs: config.json needs a quantization_config with quant_method exl3",
         error.UnsupportedExl3 => "this EXL3 pack is not from exllamav3 1.x on the mul1 codebook, the only form validated here",
+        error.CheckpointBytesDiffer => "the two ranks' packs hold different bytes: copy the same pack to both hosts",
         error.NoVision => "images need --vision on both ranks (rank 0 runs the tower from the pack's vision.safetensors)",
         error.ImagePlaceholders => "the prompt's image placeholders do not match its pictures",
         error.ImageTooLarge => pictures.Offer.explain(error.ImageTooLarge).?,
@@ -266,4 +278,33 @@ test "native: refusals explain themselves; a stream's capacity holds the context
     try std.testing.expect(explain(null, error.NoCommId) != null);
     try std.testing.expectEqual(@as(usize, 1048576 + 64), capacity(1048576));
     try std.testing.expectEqual(@as(usize, 131072 + 64), capacity(131072));
+}
+
+test "native: the ranks compare every shard byte, so one changed byte in a pack changes the digest" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const head = "{\"t\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}";
+    var bytes: [8 + head.len + 64]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], head.len, .little);
+    @memcpy(bytes[8..][0..head.len], head);
+    for (bytes[8 + head.len ..], 0..) |*b, i| b.* = @truncate(i);
+    const subs = [_][]const u8{ "a", "b", "c" };
+    var got: [3][32]u8 = undefined;
+    for (subs, &got, 0..) |sub, *g, k| {
+        if (k == 2) bytes[bytes.len - 1] ^= 1; // the last tensor byte of the third copy
+        try tmp.dir.createDirPath(io, sub);
+        var d = try tmp.dir.openDir(io, sub, .{});
+        defer d.close(io);
+        try d.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+        try d.writeFile(io, .{ .sub_path = "model.safetensors", .data = &bytes });
+        const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, sub });
+        defer gpa.free(path);
+        g.* = try (try startIdentity(gpa, io, path)).finish();
+    }
+    try std.testing.expectEqual(got[0], got[1]);
+    try std.testing.expect(!std.mem.eql(u8, &got[0], &got[2]));
+    try std.testing.expect(!std.mem.eql(u8, &got[0], &@as([32]u8, @splat(0))));
+    try std.testing.expect(explain(null, error.CheckpointBytesDiffer) != null);
 }
