@@ -20,6 +20,8 @@ pub const Pipelines = struct {
     mlp_partial_ar: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
+    kv_conv_static: mtl.Pipeline,
+    kv_conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
     route_scores: mtl.Pipeline,
     route_select: mtl.Pipeline,
@@ -38,7 +40,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [19]mtl.Pipeline = undefined;
+        var pipes: [21]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -50,6 +52,8 @@ pub const Pipelines = struct {
             "tf_inkling2_mlp_partial_ar",
             "tf_inkling2_conv_static",
             "tf_inkling2_conv_dynamic",
+            "tf_inkling2_kv_conv_static",
+            "tf_inkling2_kv_conv_dynamic",
             "tf_inkling2_router",
             "tf_inkling2_swiglu",
             "tf_inkling2_logits",
@@ -61,7 +65,7 @@ pub const Pipelines = struct {
             "tf_inkling2_coalesced_logits_r8",
             "tf_inkling2_coalesced_logits_r16",
             "tf_inkling2_coalesced_logits_r32",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -75,17 +79,19 @@ pub const Pipelines = struct {
             .mlp_partial_ar = pipes[5],
             .conv_static = pipes[6],
             .conv_dynamic = pipes[7],
-            .router = pipes[8],
-            .swiglu = pipes[9],
-            .logits = pipes[10],
-            .expert_pick = pipes[11],
-            .expert_combine = pipes[12],
-            .route_scores = pipes[13],
-            .route_select = pipes[14],
-            .logits_r4 = pipes[15],
-            .logits_r8 = pipes[16],
-            .logits_r16 = pipes[17],
-            .logits_r32 = pipes[18],
+            .kv_conv_static = pipes[8],
+            .kv_conv_dynamic = pipes[9],
+            .router = pipes[10],
+            .swiglu = pipes[11],
+            .logits = pipes[12],
+            .expert_pick = pipes[13],
+            .expert_combine = pipes[14],
+            .route_scores = pipes[15],
+            .route_select = pipes[16],
+            .logits_r4 = pipes[17],
+            .logits_r8 = pipes[18],
+            .logits_r16 = pipes[19],
+            .logits_r32 = pipes[20],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -170,6 +176,51 @@ pub fn convDynamic(p: *const Pipelines, e: mtl.ComputeEncoder, taps: Ref, input:
     inline for (.{ taps, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 5);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Paired K+V static short convolution in a single Metal compute dispatch.
+pub fn convStaticKv(
+    p: *const Pipelines,
+    e: mtl.ComputeEncoder,
+    k_taps: Ref,
+    k_weight: Ref,
+    k_out: Ref,
+    v_taps: Ref,
+    v_weight: Ref,
+    v_out: Ref,
+    rows: u32,
+    channels: u32,
+) void {
+    std.debug.assert(rows > 0 and channels > 0);
+    e.setPipeline(p.kv_conv_static);
+    inline for (.{ k_taps, k_weight, k_out, v_taps, v_weight, v_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 6);
+    e.dispatchThreads(mtl.Size.of(channels, rows, 2), unit);
+}
+
+/// Paired K+V dynamic short convolution in a single Metal compute dispatch.
+pub fn convDynamicKv(
+    p: *const Pipelines,
+    e: mtl.ComputeEncoder,
+    k_taps: Ref,
+    k_input: Ref,
+    k_static_w: Ref,
+    k_projection: Ref,
+    k_out: Ref,
+    v_taps: Ref,
+    v_input: Ref,
+    v_static_w: Ref,
+    v_projection: Ref,
+    v_out: Ref,
+    rows: u32,
+    channels: u32,
+) void {
+    std.debug.assert(rows > 0 and channels > 0 and channels <= 1024);
+    e.setPipeline(p.kv_conv_dynamic);
+    inline for (.{ k_taps, k_input, k_static_w, k_projection, k_out, v_taps, v_input, v_static_w, v_projection, v_out }, 0..) |r, i|
+        e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 10);
+    e.dispatchGroups(mtl.Size.of(rows, 2, 1), mtl.Size.of(256, 1, 1));
 }
 
 const RouteArgs = extern struct { rows: u32 };
