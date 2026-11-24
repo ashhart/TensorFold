@@ -39,7 +39,7 @@ pub const GpuSampler = struct {
     pub fn init(gpa: std.mem.Allocator, f: *fwd.Forward) !*GpuSampler {
         const x = try gpa.create(GpuSampler);
         errdefer gpa.destroy(x);
-        x.* = .{ .gpa = gpa, .f = f, .gpu = try Gpu.init(f.runner.d, f.runner.stream, f.runner.kernels), .p = undefined };
+        x.* = .{ .gpa = gpa, .f = f, .gpu = try Gpu.init(f.runner.d, f.runner.stream, f.runner.kernels, f.runner.kernels.wideLogits()), .p = undefined };
         errdefer x.gpu.deinit();
         x.p = try pipe.Pipe.initVocabAt(gpa, f.comm, f.opts.rank, f.cfg.vocab, try pipe.nucleusEnv());
         f.sampler = .{ .ptr = x, .follow = follow };

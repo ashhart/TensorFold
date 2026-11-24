@@ -38,7 +38,7 @@ pub fn l2pfSources(e: *Emitter, L: u32, site: L2Site) ![]const L2Src {
         },
         .f => {
             const D: i64 = e.cfg.hidden;
-            const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
+            const I: i64 = (try @import("partition.zig").expertShare(e.cfg, e.o.rank, e.o.world)).len;
             const ex = e.cfg.expertsOf(L);
             const sh = try e.fmt("L{d}.moe.shared.0.w1", .{L});
             const k2: u64 = try e.w.k2(sh);
@@ -81,6 +81,7 @@ pub fn take(e: *const Emitter, sizes: []const u64) i64 {
 
 /// Site "o" (after wq_b): wo_a's groups, then wo_b; l2pf segments.
 pub fn prefetchO(e: *Emitter, L: u32) !void {
+    if (e.o.format == .release_fp8) return; // no trellis words to prefetch: the release path runs without L2PF
     const sizes = try e.srcSizes(try e.l2pfSources(L, .o));
     var total: u64 = 0;
     var left = e.o.l2pf_budget;
@@ -103,10 +104,12 @@ pub fn paced(e: *Emitter, role: []const u8, rows: i64) !void {
 
 /// Site "f" (after the attention sublayer): the router's gate, then the shared expert's gate and up trellises.
 pub fn prefetchF(e: *Emitter, L: u32) !void {
+    if (e.o.format == .release_fp8) return;
     try e.paced(try e.fmt("s.L{d}.pf.f", .{L}), e.take(try e.srcSizes(try e.l2pfSources(L, .f))));
 }
 
 /// Site "x" of the block before `nxt` (after its MoE): `nxt`'s x group, then its q group.
 pub fn prefetchX(e: *Emitter, nxt: u32) !void {
+    if (e.o.format == .release_fp8) return;
     try e.paced(try e.fmt("s.L{d}.pf.x", .{nxt}), e.take(try e.srcSizes(try e.l2pfSources(nxt, .x))));
 }

@@ -226,7 +226,7 @@ fn pruneArg(c: Call, i: usize) !ops.rg.Prune {
 
 // tf_dsv41_router_gemv_v2.route (router_gemv.cpp / dsv41_rg_route_cuda)
 pub fn route(o: ops.Ops, args: []const Arg, kwargs: []const Kw) !bool {
-    const c: Call = .{ .args = args, .kwargs = kwargs, .names = &.{ "X", "W", "B", "pick", "wts", "LG", "cnt", "K", "slots", "scale", "rt", "nw", "ew", "select", "kit", "gid", "gcnt", "gmem", "GE", "group", "prune" } };
+    const c: Call = .{ .args = args, .kwargs = kwargs, .names = &.{ "X", "W", "B", "pick", "wts", "LG", "cnt", "K", "slots", "scale", "rt", "nw", "ew", "select", "kit", "gid", "gcnt", "gmem", "GE", "group", "prune", "eps" } };
     const x = try c.tensor(0);
     const w = try c.tensor(1);
     const lg = try c.tensor(5);
@@ -257,6 +257,7 @@ pub fn route(o: ops.Ops, args: []const Arg, kwargs: []const Kw) !bool {
         .GE = @intCast(try c.int(18)),
         .maxm = if (group) @intCast(try dim(gmem, 1)) else 0,
         .prune = try pruneArg(c, 20),
+        .eps = if (try c.opt(21)) |_| @floatCast(try c.float(21)) else 0,
     };
     try o.route(a, try c.u(10), try c.u(11), try c.u(12), @intCast(numel(lg)), @intCast(numel(cnt)));
     return true;

@@ -44,7 +44,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
         const vals_dev = try f.greedyScratch(r, n);
         const cols_dev = vals_dev + std.mem.alignForward(u64, 4 * n, 16);
         const k = r.kernels.others(r.stream);
-        try k.topKeys(logits, V, n, V, 1, vals_dev, cols_dev);
+        try k.topKeys(logits, V, n, V, 1, vals_dev, cols_dev, r.kernels.wideLogits());
         f.pick_last = null;
         if (k.f.pick_pack != null and k.f.pick_merge != null and n <= kops.glue.pick_max_rows) {
             // the pairs, their exchange and the merge on the device; one copy back (glue.cu pick_*)

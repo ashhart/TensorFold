@@ -4,12 +4,14 @@ const host = @import("dsv41");
 
 const ep = host.engram_pack;
 const em = host.engram_manifest;
+const et = host.engram_tables;
 
 const usage =
-    \\usage: tf-dsv41-engram-pack pack     RELEASE_DIR OUT_DIR [--layers 1,14] [--chunk-rows N] [--seed S]
+    \\usage: tf-dsv41-engram-pack pack     RELEASE_DIR OUT_DIR [--layers 1,14] [--chunk-rows N] [--seed S] [--rank R --world W]
     \\       tf-dsv41-engram-pack manifest RELEASE_DIR TABLES_DIR [--seed S]
-    \\       tf-dsv41-engram-pack verify   RELEASE_DIR TABLES_DIR [--layers 1,14] [--samples N] [--seed S]
-    \\RELEASE_DIR holds the release's safetensors shards and index; OUT_DIR gets engram-l<L>-r0of1.bin, the engram_dir
+    \\       tf-dsv41-engram-pack verify   RELEASE_DIR TABLES_DIR [--layers 1,14] [--samples N] [--seed S] [--rank R --world W]
+    \\RELEASE_DIR holds the release's safetensors shards, index and config.json; OUT_DIR gets engram-l<L>-r<R>of<W>.bin
+    \\(rank R of W's whole hash columns, the rows that rank reads; default rank 0 of 1, the whole table), the engram_dir
     \\of the server, and the engram-manifest.json beside them. pack streams each table (never holding it); manifest
     \\rebuilds the manifest for shards that already exist, proving its sampled rows against the release before it
     \\writes; verify decodes N random rows (default 100000, plus the first and last) of each shard through the
@@ -40,11 +42,13 @@ pub fn main(init: std.process.Init) !void {
     var chunk: u64 = ep.default_chunk;
     var samples: u64 = 100_000;
     var seed: u64 = 1;
+    var rank: u32 = 0;
+    var world: u32 = 1;
     var i: usize = 4;
     while (i < args.len) : (i += 2) {
         if (i + 1 >= args.len) return error.Usage;
         const v = args[i + 1];
-        if (std.mem.eql(u8, args[i], "--layers")) layers = try layerList(init.arena.allocator(), v) else if (std.mem.eql(u8, args[i], "--chunk-rows")) chunk = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, args[i], "--samples")) samples = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, args[i], "--seed")) seed = try std.fmt.parseInt(u64, v, 10) else return error.Usage;
+        if (std.mem.eql(u8, args[i], "--layers")) layers = try layerList(init.arena.allocator(), v) else if (std.mem.eql(u8, args[i], "--chunk-rows")) chunk = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, args[i], "--samples")) samples = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, args[i], "--seed")) seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, args[i], "--rank")) rank = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, args[i], "--world")) world = try std.fmt.parseInt(u32, v, 10) else return error.Usage;
     }
     var pack = try host.pack.Pack.open(a, io, args[2]);
     defer pack.deinit();
@@ -52,6 +56,14 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(found);
     const ls = layers orelse found;
     if (ls.len == 0) return error.NoEngramTables;
+    if (world == 0 or rank >= world) return error.Usage;
+    // each layer's rows for this rank: its whole hash columns under the release's own Engram geometry
+    const cfg = try host.config.Config.read(a, io, args[2]);
+    const spans = try init.arena.allocator().alloc(ep.Span, ls.len);
+    for (ls, spans) |l, *sp| {
+        sp.* = try et.rankRows(&cfg, l, rank, world);
+        if (sp.total != (try ep.tableOf(&pack, l)).rows) return error.EngramGeometryMismatch;
+    }
     if (std.mem.eql(u8, args[1], "manifest")) {
         const r = try em.manifestFor(a, io, args[2], args[3], seed);
         std.debug.print("{s}: {d} tables, {d} sampled rows against the release\n", .{ em.filename, r.tables, r.samples });
@@ -62,17 +74,17 @@ pub fn main(init: std.process.Init) !void {
         defer dir.close(io);
         var plans: std.ArrayList(ep.Plan) = .empty;
         defer plans.deinit(a);
-        for (ls) |l| {
-            const rows = try ep.pack(a, io, &pack, dir, l, chunk, progress);
-            std.debug.print("layer {d}: {d} rows packed\n", .{ l, rows });
+        for (ls, spans) |l, sp| {
+            const rows = try ep.pack(a, io, &pack, dir, l, sp, chunk, progress);
+            std.debug.print("layer {d}: rows {d}..{d} of {d} packed ({d}) for rank {d} of {d}\n", .{ l, sp.lo, sp.hi, sp.total, rows, rank, world });
             try plans.append(a, try ep.tableOf(&pack, l));
         }
-        const m = try em.Manifest.build(a, io, args[3], &pack, plans.items, seed);
+        const m = try em.Manifest.build(a, io, args[3], &pack, plans.items, spans, seed);
         defer m.deinit();
         try m.write(a, io, args[3]);
         std.debug.print("{s}: {d} layers, {d} sampled rows\n", .{ em.filename, ls.len, m.samples.len });
     }
-    const v = try ep.verify(a, io, &pack, args[3], ls, samples, seed);
+    const v = try ep.verify(a, io, &pack, args[3], ls, spans, samples, seed);
     std.debug.print("{s}: {d} rows read back through engram_rows, {d} differ\n", .{ if (v.bad == 0) "PASS" else "FAIL", v.rows, v.bad });
     if (v.bad != 0) return error.VerifyFailed;
 }

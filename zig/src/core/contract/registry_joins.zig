@@ -49,6 +49,7 @@ pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133 ++
     @import("paging_pending.zig").cuda_133 ++
     @import("experts_bf16_records.zig").cuda_133;
+pub const nvcc_135_after = @import("dsv41_release_records.zig").cuda_135;
 pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("flashnext_tile_records.zig").pending ++
     @import("exl3_prompt_pending.zig").records ++
@@ -144,6 +145,7 @@ pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
     @import("nvfp4_tile_pending.zig").records ++
     landed_cuda ++
     dsv41_pending ++
+    @import("dsv41_release_records.zig").cuda ++
     @import("inc4_pending.zig").trees ++
     @import("inc4_pending.zig").rows ++
     @import("affine_verify_records.zig").records;
@@ -163,4 +165,5 @@ test {
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("h3_image_cuda_records.zig");
+    _ = @import("dsv41_release_records.zig");
 }

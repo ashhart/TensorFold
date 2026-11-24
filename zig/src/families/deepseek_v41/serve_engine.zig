@@ -39,7 +39,7 @@ fn startupLine(text: []const u8) void {
 }
 
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
+pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{ "exl3", "fp8" }, .raw_text = false }};
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return null;
