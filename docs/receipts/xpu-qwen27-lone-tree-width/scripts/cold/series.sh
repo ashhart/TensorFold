@@ -21,11 +21,14 @@ cells() { # prints "prompt round arm" in run order
     else for a in F3 F7 F15 A; do echo "$p $r $a"; done; fi
   done; done
 }
-NCELLS=$(cells | wc -l); PER=${PER_CELL_S:-110}  # coarse: the 34- and 7,588-token cells took ~40 s each, the deep ones are longer (prefill)
-echo "cells: $NCELLS (${#PROMPTS[@]} prompts x ${#ARMS[@]} arms x $SERVERS fresh servers), about $((NCELLS * PER / 60)) min at ${PER}s a cell; out: $OUT"
+# coarse: the 34- and 7,588-token cells took ~40 s each, the deep ones are longer (prefill)
+NCELLS=$(cells | wc -l); PER=${PER_CELL_S:-110}
+echo "cells: $NCELLS (${#PROMPTS[@]} prompts x ${#ARMS[@]} arms x $SERVERS fresh servers)," \
+  "about $((NCELLS * PER / 60)) min at ${PER}s a cell; out: $OUT"
 if [ $DRY = 1 ]; then
-  cells | awk '{printf "%2d  %-5s round %s  %-3s  tree=%s\n", NR, $1, $2, $3, ($3=="A"?"default (adaptive)":substr($3,2))}'
-  for f in "$BHEAD" "$BMAIN" "$MODEL" "$DRAFTER" "$CORP" "$HERE/cold_request.py" "$HERE/summarize.py" "$HERE/mkprompts.py"; do
+  cells | awk '{t = ($3 == "A" ? "default (adaptive)" : substr($3, 2))
+    printf "%2d  %-5s round %s  %-3s  tree=%s\n", NR, $1, $2, $3, t}'
+  for f in "$BHEAD" "$BMAIN" "$MODEL" "$DRAFTER" "$CORP" "$HERE"/{cold_request,summarize,mkprompts}.py; do
     [ -e "$f" ] && echo "ok      $f" || echo "MISSING $f"; done
   ss -ltn | grep -q ":$PORT " && echo "PORT $PORT BUSY" || echo "port $PORT free"
   pgrep -af 'tensorfold-nativ[e]' | cut -c1-110 | sed 's/^/running: /'
@@ -43,7 +46,10 @@ exec 9>/tmp/xpu-card$CARD.lock; log "waiting for the card $CARD lock"; flock 9; 
 trap 'log DRIVER_EXIT' EXIT
 busy() { # another tensorfold-native on this card: its pid, or nothing
   for p in $(pgrep -f 'tensorfold-nativ[e] serve'); do
-    [ "$(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -n 's/^ZE_AFFINITY_MASK=//p')" = "$CARD" ] && echo $p; done; }
+    mask=$(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -n 's/^ZE_AFFINITY_MASK=//p')
+    [ "$mask" = "$CARD" ] && echo $p
+  done
+}
 n=0
 while read -r P R A; do
   n=$((n + 1)); L=$P-$A-s$R; B=$(arm_bin $A); T=$(arm_tree $A)
@@ -51,16 +57,22 @@ while read -r P R A; do
   [ -n "$(busy)" ] && { log "card $CARD held by pid $(busy), stop"; exit 4; }
   log "cell $n/$NCELLS $L start (tree=${T:-default})"
   ( [ -n "$T" ] && export XPU_TREE=$T || unset XPU_TREE
-    exec timeout -k 120 -s INT 30m "$B" serve "$MODEL" --drafter "$DRAFTER" --context 132096 --parallel 1 --host 127.0.0.1 \
-      --port $PORT --name m --no-update-check --prompt-cache-gib 0 ) > "$OUT/raw/$L.server.log" 2>&1 &
+    exec timeout -k 120 -s INT 30m "$B" serve "$MODEL" --drafter "$DRAFTER" --context 132096 --parallel 1 \
+      --host 127.0.0.1 --port $PORT --name m --no-update-check --prompt-cache-gib 0 ) > "$OUT/raw/$L.server.log" 2>&1 &
   SP=$!
-  for i in $(seq 300); do kill -0 $SP 2>/dev/null || break; curl -sf localhost:$PORT/health >/dev/null && break; sleep 2; done
+  for i in $(seq 300); do
+    kill -0 $SP 2>/dev/null || break
+    curl -sf localhost:$PORT/health >/dev/null && break
+    sleep 2
+  done
   RC=1
   if curl -sf localhost:$PORT/health >/dev/null; then # the one request, nothing before it
     timeout 900 python3 -I "$HERE/cold_request.py" http://127.0.0.1:$PORT "$OUT/prompts/$P.txt" "$OUT/raw/$L.jsonl" \
       arm=$A prompt=$P server=$R order=$n tree=${T:-default} > "$OUT/raw/$L.request.log" 2>&1; RC=$?
   else log "cell $L: server not ready"; fi
-  kill -INT $SP 2>/dev/null; for i in $(seq 90); do kill -0 $SP 2>/dev/null || break; sleep 1; done; kill -9 $SP 2>/dev/null
+  kill -INT $SP 2>/dev/null
+  for i in $(seq 90); do kill -0 $SP 2>/dev/null || break; sleep 1; done
+  kill -9 $SP 2>/dev/null
   wait $SP 2>/dev/null
   sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches > /dev/null
   log "cell $n/$NCELLS $L done rc=$RC: $(tail -1 "$OUT/raw/$L.request.log" 2>/dev/null)"

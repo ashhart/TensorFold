@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""One chat request, the first of a fresh server, as one JSON line. usage: cold_request.py URL PROMPTFILE OUT.jsonl KEY=VALUE...
+"""One chat request, the first of a fresh server, as one JSON line.
+usage: cold_request.py URL PROMPTFILE OUT.jsonl KEY=VALUE...
 
-The request is bench_tree.py's draft mode: greedy, 256 new tokens, thinking off, streamed. decode_tok_s is its definition,
-(tokens - 1) / (last chunk - first token); ttft_s is the time to the first content chunk. The KEY=VALUE pairs (arm, prompt,
-server, ...) are copied into the record. Exit 1 when the reply has no token_sha256 or no speculative object.
+The request is bench_tree.py's draft mode: greedy, 256 new tokens, thinking off, streamed. decode_tok_s is its
+definition, (tokens - 1) / (last chunk - first token); ttft_s is the time to the first content chunk. The KEY=VALUE
+pairs (arm, prompt, server, ...) are copied into the record. Exit 1 when the reply has no token_sha256 or no
+speculative object.
 """
 import hashlib, json, sys, time, urllib.request
 

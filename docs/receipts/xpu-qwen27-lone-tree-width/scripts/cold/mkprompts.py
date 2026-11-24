@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Writes the prompts of the cold-start series: short (34 tokens), long (7,588), p28946 and p121022. usage: mkprompts.py CORP OUTDIR
+"""Writes the prompts of the cold-start series: short (34 tokens), long (7,588), p28946 and p121022.
+usage: mkprompts.py CORP OUTDIR
 
 Same texts as scripts/bench_tree.py of the lone-tree-width receipt (cells 0, 8192, 32768 and 131072): the first
-(depth - 300) * 3.8729666924864445 characters of corp_code (the calibration request's 5,179 tokens for 20,000 characters),
-framed as bench_tree.py frames them. prompt_sha256 prefixes: long 829dddadac0f329f (the xpu-qwen27-attn-exp receipt's
-7,588 tokens), p28946 0bd40816987651da, p121022 60986a50b4990e56. Nothing is sent to a server.
+(depth - 300) * 3.8729666924864445 characters of corp_code (the calibration request's 5,179 tokens for 20,000
+characters), framed as bench_tree.py frames them. prompt_sha256 prefixes: long 829dddadac0f329f (the
+xpu-qwen27-attn-exp receipt's 7,588 tokens), p28946 0bd40816987651da, p121022
+60986a50b4990e56. Nothing is sent to a server.
 """
 import hashlib, os, sys
 

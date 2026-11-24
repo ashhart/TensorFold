@@ -42,7 +42,8 @@ for prompt in ("short", "long", "p28946", "p121022"):
     if "A" in med and fixed:
         best = max(fixed, key=fixed.get)
         worst_a = min(r["decode_tok_s"] for r in cell["A"])
-        print(f"Adaptive / best fixed tree ({NAMES[best]}, {fixed[best]:.2f}): {med['A'] / fixed[best]:.3f} on the medians "
+        print(f"Adaptive / best fixed tree ({NAMES[best]}, {fixed[best]:.2f}): "
+              f"{med['A'] / fixed[best]:.3f} on the medians "
               f"({'at or above' if med['A'] >= fixed[best] else 'BELOW'}); the slowest adaptive server is "
               f"{worst_a / fixed[best]:.3f} of it.")
         if "F15" in fixed:
