@@ -260,6 +260,7 @@ test "window FP8 quantization includes the RoPE tail and index FP4 uses E8M0 sca
 
 test {
     _ = @import("csa2_test.zig");
+    _ = @import("csa2_concurrent_test.zig");
     _ = @import("csa2_identity_test.zig");
 }
 

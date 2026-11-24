@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 on Metal: the EXL3 register-only decode body now serves every speculative window's fused gate+up call, up to the eight-token window; a four-draft window no longer switches to the tensor-unit compact body for its seventy rows, so its replies match plain decode again (the 8 reference and the 10 code prompts, four-draft against plain), its 5-row round's event p50 falls from ~104 ms to 61 ms, and the default config's hashes and timings are unchanged.
+- Metal: DeepSeek V4.1's concurrent dispatch mode (`TF_DSV41_CONCURRENT=1`) put the attention sparse scan before the dense-table pass and the split merge before the scan that feeds it; both barriers are now explicit, so the mode no longer changes the reply.
 - Gemma 4 on CUDA (assistant and DFlash drafters) and one more MoE family's CUDA loader: loading now refuses a checkpoint with tensors the engine never binds, each scoped to its own directory or prefix (#4566).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GDN_CHAIN_TPR=1` runs short verify windows (under 64 rows) on the existing two-threads-a-row GDN chain kernel, which keeps the same bits with one shuffle level instead of five; off by default until the GB10 measurements (#4484).
@@ -167,6 +169,22 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 - DeepSeek-V4.1 EXL3 on Metal: the sparse-attention prompt scan reuses its key fragments as value fragments and divides by a verified reciprocal product, 4096 rows x 16k keys in 6.93 ms instead of 10.02 ms on an M5 Ultra, with bit-identical output (#3735).
+- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention (#3382),
+  per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
+  Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.
+  Small dense, filtered and indexed projections retain matching reduction orders and logical output bounds.
+  Attention tiles stop at their split boundary instead of counting some keys twice, and packed NaNs survive BF16 decoding.
+  Draft embedding IDs grow without replacing Markov picks; unload releases host state, Markov IDs and drafter scratch.
+  MTP-only configurations no longer depend on lookup drafting; proposal depth is capped at the four-ID capacity.
+  Adaptive trained depth remains available with lookup disabled; suffix lookup reads the committed stream context.
+  Matching suffix proposals take precedence over paid trained proposals.
+  The diagnostic runner honors an explicit prefill-workspace setting without changing its unset default.
+  GPU profiling starts deferred mHC spans only when work is encoded, avoiding empty counter samples.
+  Last-row logits expand the selected final stream row rather than row zero of a multi-row window.
+  Fused mHC Sinkhorn uses the unfused split's FP32 row and column reduction order.
+  Stacked on #2373; whole-model qualification is still incomplete.
+  See [scope and qualification limits](docs/deepseek-v41.md#exl3-optimization-follow-up)
+  and [full-window fidelity](docs/receipts/dsv41-exl3-metal/fidelity-128.json).
 
 ## 1.3.4
 

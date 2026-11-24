@@ -317,8 +317,6 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var dsv41_routes = try @import("metal_dsv41_main.zig").Routes.create(a, device, queue, &kernels, o.only);
     defer dsv41_routes.destroy();
-    var exl3 = try @import("metal_exl3_suites.zig").Suites.init(a, device, queue, &kernels, o.only, tensor);
-    defer exl3.deinit();
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
     defer for (d3combines[0..d3combine_count]) |*p| p.deinit();
