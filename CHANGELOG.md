@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_WINDOW_CHECK=1` (default off) runs a boot self-check that measures the widest verify window whose every row's scores equal its one-token step on that machine, and a lone stream's copy window then grows past the shipped 32 rows to at most the 48 the pending-row log holds; a check that cannot run, fails or proves nothing past 32 leaves the window at 32, and with the switch off every buffer the window sizes is main's (#4075). Thanks to @BadAd84.
+
 - Inkling 2 Mini on Metal: the routed experts and the combine run one thread per output with the same serial arithmetic, so one-stream decode is about 16x faster on an M5 Ultra and 17x on an M3 Ultra, with identical tokens (#4894). Thanks @sethforprivacy for the grid idea.
 
 - Qwen 3.8-27B on XPU: Arc Pro B60 cards open through device detection when no B70 is found; explicit overrides and the B70 default are unchanged (#4802).
