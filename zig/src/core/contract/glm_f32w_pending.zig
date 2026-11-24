@@ -12,19 +12,27 @@ fn measured(comptime symbol: []const u8) [limits.sms.len]limits.Usage {
     if (std.mem.eql(u8, symbol, "tf_ctl_glm_old_rmsnorm_1536")) out = .{ .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 } };
     if (std.mem.eql(u8, symbol, "tf_glm_rmsnorm_4096")) out = .{ .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 39, .static = 32, .bound = 256 }, .{ .regs = 39, .static = 32, .bound = 256 } };
     if (std.mem.eql(u8, symbol, "tf_ctl_glm_old_rmsnorm_4096")) out = .{ .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 39, .static = 32, .bound = 256 }, .{ .regs = 39, .static = 32, .bound = 256 } };
+    if (std.mem.eql(u8, symbol, "tf_glm_rmsnorm_6144")) out = .{ .{ .regs = 58, .static = 32, .bound = 256 }, .{ .regs = 58, .static = 32, .bound = 256 }, .{ .regs = 58, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 }, .{ .regs = 48, .static = 32, .bound = 256 } };
+    if (std.mem.eql(u8, symbol, "tf_glm_rmsnorm_2048")) out = .{ .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 40, .static = 16, .bound = 128 }, .{ .regs = 39, .static = 16, .bound = 128 }, .{ .regs = 39, .static = 16, .bound = 128 } };
     if (std.mem.eql(u8, symbol, "tf_glm_hc_finish")) out = .{ .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 79, .static = 48, .bound = 256 }, .{ .regs = 79, .static = 48, .bound = 256 } };
     if (std.mem.eql(u8, symbol, "tf_ctl_glm_old_hc_finish")) out = .{ .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 64, .static = 48, .bound = 256 }, .{ .regs = 79, .static = 48, .bound = 256 }, .{ .regs = 79, .static = 48, .bound = 256 } };
     return out;
 }
 
 pub const records = blk: {
-    var out: [8]registry.CudaRecord = undefined;
+    var out: [10]registry.CudaRecord = undefined;
     var at: usize = 0;
     for (.{ 512, 1536, 4096 }) |width| for (.{ false, true }) |baseline| {
         const symbol = (if (baseline) "tf_ctl_glm_old_rmsnorm_" else "tf_glm_rmsnorm_") ++ std.fmt.comptimePrint("{d}", .{width});
         out[at] = .{ .launch = .{ .name = "GLM BF16 " ++ symbol, .symbol = symbol, .image = if (baseline) "contract_controls" else "glm_glue", .threads = if (width == 4096) 256 else 128, .min_sm = 80 }, .usage = measured(symbol), .later_pending = true };
         at += 1;
     };
+    // Full GLM-5.3's hidden and q_lora norms: new widths with no old entrypoint, checked against float64 alone.
+    for (.{ 6144, 2048 }) |width| {
+        const symbol = "tf_glm_rmsnorm_" ++ std.fmt.comptimePrint("{d}", .{width});
+        out[at] = .{ .launch = .{ .name = "GLM BF16 " ++ symbol, .symbol = symbol, .image = "glm_glue", .threads = if (width == 6144) 256 else 128, .min_sm = 80 }, .usage = measured(symbol), .later_pending = true };
+        at += 1;
+    }
     for (.{ false, true }) |baseline| {
         const symbol = if (baseline) "tf_ctl_glm_old_hc_finish" else "tf_glm_hc_finish";
         out[at] = .{ .launch = .{ .name = "GLM BF16 " ++ symbol, .symbol = symbol, .image = if (baseline) "contract_controls" else "glm_glue", .threads = 256, .min_sm = 80 }, .usage = measured(symbol), .later_pending = true };
