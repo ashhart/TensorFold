@@ -6,10 +6,12 @@ const affine4 = @import("../../core/affine4.zig");
 const wts = @import("weights.zig");
 const kernels = @import("kernels.zig");
 
-test "tryHeadTop1 admission requires TP=1, m_row=0, 4-bit/64 head, aligned K and n, and valid rows" {
+test "tryHeadTop1 admission requires TP=1, m_row=0, 4-bit/64 head, aligned K and n, and single row" {
     const ok: wts.Affine = .{ .w = undefined, .s = undefined, .b = undefined, .n = 154880, .k = 4096, .bits = 4, .group = 64 };
     try std.testing.expect(kernels.canHeadTop1(true, 1, 0, 154880, ok, 1));
-    try std.testing.expect(kernels.canHeadTop1(true, 1, 0, 154880, ok, kernels.max_rows));
+    try std.testing.expect(!kernels.canHeadTop1(true, 1, 0, 154880, ok, 2));
+    try std.testing.expect(!kernels.canHeadTop1(true, 1, 0, 154880, ok, 3));
+    try std.testing.expect(!kernels.canHeadTop1(true, 1, 0, 154880, ok, kernels.max_rows));
     try std.testing.expect(!kernels.canHeadTop1(false, 1, 0, 154880, ok, 1));
     try std.testing.expect(!kernels.canHeadTop1(true, 2, 0, 154880, ok, 1));
     try std.testing.expect(!kernels.canHeadTop1(true, 1, 1, 154880, ok, 1));
@@ -30,7 +32,7 @@ test "tryHeadTop1 admission requires TP=1, m_row=0, 4-bit/64 head, aligned K and
     try std.testing.expect(!kernels.canHeadTop1(true, 1, 0, 154880, bad, 1));
 }
 
-test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" {
+test "glm_mtp_prep_4b and glm_head_top1_4b_one match exact host reference on Metal" {
     const dev = mtl.Device.init() catch return error.SkipZigTest;
     defer dev.deinit();
     const lib = try mtl.Library.fromSource(dev, sources.glm_mtp_opt, mtl.CompileOptions.mlx());
@@ -39,8 +41,6 @@ test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" 
     defer p_prep.deinit();
     const p_one = try mtl.Pipeline.init(dev, lib, "glm_head_top1_4b_one", false);
     defer p_one.deinit();
-    const p_many = try mtl.Pipeline.init(dev, lib, "glm_head_top1_4b", false);
-    defer p_many.deinit();
     const p_red = try mtl.Pipeline.init(dev, lib, "glm_reduce_top1", false);
     defer p_red.deinit();
 
@@ -66,10 +66,8 @@ test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" 
     defer b_out.deinit();
     const b_head_in = try dev.buffer(rows * width * 2, mtl.ResourceOptions.shared);
     defer b_head_in.deinit();
-    const b_pairs = try dev.buffer(rows * ((vocab + 3) / 4) * 8, mtl.ResourceOptions.shared);
+    const b_pairs = try dev.buffer(((vocab + 7) / 8) * 8, mtl.ResourceOptions.shared);
     defer b_pairs.deinit();
-    const b_picks = try dev.buffer(rows * 4, mtl.ResourceOptions.shared);
-    defer b_picks.deinit();
     const b_pick1 = try dev.buffer(4, mtl.ResourceOptions.shared);
     defer b_pick1.deinit();
 
@@ -106,20 +104,8 @@ test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" 
     inline for (.{ b_ids, b_w, b_s, b_b, b_we, b_wh, b_h, b_out }, 0..) |b, i| enc.setBuffer(b, 0, i);
     enc.setValue(kernels.MtpPrepArgs{ .rows = rows, .width = width, .eps = 1e-5 }, 8);
     enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(((width + 3) / 4 + 31) / 32 * 32, 1, 1));
-    const many_pairs: u32 = (vocab + 3) / 4;
-    const args_many = kernels.HeadTop1Args{ .k = width, .n = vocab, .rows = rows, .pairs = many_pairs };
-    enc.setPipeline(p_many);
-    inline for (.{ b_head_in, b_w, b_s, b_b }, 0..) |b, i| enc.setBuffer(b, 0, i);
-    enc.setValue(args_many, 4);
-    enc.setBuffer(b_pairs, 0, 5);
-    enc.dispatchGroups(mtl.Size.of(many_pairs, 1, 1), mtl.Size.of(32 * rows, 1, 1));
-    enc.setPipeline(p_red);
-    enc.setBuffer(b_pairs, 0, 0);
-    enc.setBuffer(b_picks, 0, 1);
-    enc.setValue(args_many, 2);
-    enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
     const one_pairs: u32 = (vocab + 7) / 8;
-    const args_one = kernels.HeadTop1Args{ .k = width, .n = vocab, .rows = 1, .pairs = one_pairs };
+    const args_one = kernels.HeadTop1Args{ .k = width, .n = vocab, .pairs = one_pairs };
     enc.setPipeline(p_one);
     inline for (.{ b_head_in, b_w, b_s, b_b }, 0..) |b, i| enc.setBuffer(b, 0, i);
     enc.setValue(args_one, 4);
@@ -135,7 +121,6 @@ test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" 
     cb.wait();
     try std.testing.expect(cb.failure() == null);
 
-    const picks_many: [*]const u32 = @ptrCast(@alignCast(b_picks.contents()));
     const pick_one: [*]const u32 = @ptrCast(@alignCast(b_pick1.contents()));
     const prepped: [*]const u16 = @ptrCast(@alignCast(b_out.contents()));
     for (0..rows) |r| {
@@ -165,22 +150,23 @@ test "glm_mtp_prep_4b and glm_head_top1_4b match exact host reference on Metal" 
             try std.testing.expect(@abs(ne - got_e) < 0.02);
             try std.testing.expect(@abs(nh - got_h) < 0.02);
         }
-        var best_idx: u32 = 0;
-        var best_val: f32 = -std.math.inf(f32);
-        for (0..vocab) |v| {
-            var acc: f32 = 0;
-            for (0..width) |j| {
-                const g = v * ng + j / 64;
-                const code = (ww[g * 8 + (j % 64) / 8] >> @as(u5, @intCast(4 * (j % 8)))) & 0xf;
-                const wv = affine4.asFloat(ws[g]) * @as(f32, @floatFromInt(code)) + affine4.asFloat(wb[g]);
-                acc += affine4.asFloat(hin[r * width + j]) * wv;
+        if (r == 0) {
+            var best_idx: u32 = 0;
+            var best_val: f32 = -std.math.inf(f32);
+            for (0..vocab) |v| {
+                var acc: f32 = 0;
+                for (0..width) |j| {
+                    const g = v * ng + j / 64;
+                    const code = (ww[g * 8 + (j % 64) / 8] >> @as(u5, @intCast(4 * (j % 8)))) & 0xf;
+                    const wv = affine4.asFloat(ws[g]) * @as(f32, @floatFromInt(code)) + affine4.asFloat(wb[g]);
+                    acc += affine4.asFloat(hin[j]) * wv;
+                }
+                if (acc > best_val) {
+                    best_val = acc;
+                    best_idx = @intCast(v);
+                }
             }
-            if (acc > best_val) {
-                best_val = acc;
-                best_idx = @intCast(v);
-            }
+            try std.testing.expectEqual(best_idx, pick_one[0]);
         }
-        try std.testing.expectEqual(best_idx, picks_many[r]);
     }
-    try std.testing.expectEqual(picks_many[0], pick_one[0]);
 }

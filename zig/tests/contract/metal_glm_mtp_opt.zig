@@ -21,10 +21,9 @@ const prep_served = [_]c.Shape{
     .{ .rows = 8, .n = 2048, .k = 1024 },
 };
 const head_served = [_]c.Shape{
-    .{ .rows = 4, .n = 256, .k = 512 },
-    .{ .rows = 1, .n = 154880, .k = 4096 },
     .{ .rows = 1, .n = 256, .k = 512 },
-    .{ .rows = 8, .n = 512, .k = 1024 },
+    .{ .rows = 1, .n = 154880, .k = 4096 },
+    .{ .rows = 1, .n = 512, .k = 1024 },
 };
 
 fn noSums(_: c.Shape) usize {
@@ -36,17 +35,17 @@ pub fn entryName(v: Variant) []const u8 {
         0 => switch (v.kind) {
             .prep4 => "glm mtp glm_mtp_prep_4b",
             .prep8 => "glm mtp glm_mtp_prep_8b",
-            .head => "glm mtp glm_head_top1_4b",
+            .head => "glm mtp glm_head_top1_4b_one",
         },
         1 => switch (v.kind) {
             .prep4 => "control: glm mtp glm_mtp_prep_4b writes into H",
             .prep8 => "control: glm mtp glm_mtp_prep_8b writes into H",
-            .head => "control: glm mtp glm_head_top1_4b writes into X",
+            .head => "control: glm mtp glm_head_top1_4b_one writes into X",
         },
         else => switch (v.kind) {
             .prep4 => "control: glm mtp glm_mtp_prep_4b drops tail cols",
             .prep8 => "control: glm mtp glm_mtp_prep_8b drops tail cols",
-            .head => "control: glm mtp glm_head_top1_4b drops tail vocab",
+            .head => "control: glm mtp glm_head_top1_4b_one drops tail vocab",
         },
     };
 }
@@ -69,7 +68,7 @@ fn spec(v: Variant) c.Spec {
             .out = .raw,
             .replaces = "qmv + glm_argmax",
             .nan = .{ .stated = "NaN and -Inf logits are skipped; +Inf wins in index order" },
-            .tiles = .{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 512, .min = 512 } },
+            .tiles = .{ .{}, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 512, .step = 512, .min = 512 } },
             .served = &head_served,
         },
     };
@@ -83,7 +82,6 @@ pub const Probe = struct {
     rig: rig_.Rig,
     v: Variant,
     pipe: mtl.Pipeline,
-    one_pipe: ?mtl.Pipeline = null,
     reduce_pipe: ?mtl.Pipeline = null,
     embed_pipe: ?mtl.Pipeline = null,
     rms_pipe: mtl.Pipeline,
@@ -129,7 +127,6 @@ pub const Probe = struct {
     pub fn deinit(p: *Probe) void {
         p.drop();
         p.pipe.deinit();
-        if (p.one_pipe) |o| o.deinit();
         if (p.reduce_pipe) |r| r.deinit();
         if (p.embed_pipe) |em| em.deinit();
         p.rms_pipe.deinit();
@@ -158,7 +155,7 @@ pub const Probe = struct {
                 try p.preparePrep(shape, fill, seed);
             },
             .head => {
-                if (shape.n == 0 or shape.n % 4 != 0 or shape.k < 512 or shape.k % 512 != 0) return false;
+                if ((shape.rows != 1 and fill != .nonfinite) or shape.n == 0 or shape.n % 4 != 0 or shape.k < 512 or shape.k % 512 != 0) return false;
                 try p.prepareHead(shape, fill, seed);
             },
         }
@@ -215,8 +212,8 @@ pub const Probe = struct {
         p.refs[1] = try p.rig.input(std.mem.sliceAsBytes(words));
         p.refs[2] = try p.rig.input(std.mem.sliceAsBytes(f.scales));
         p.refs[3] = try p.rig.input(std.mem.sliceAsBytes(f.biases));
-        const pairs: usize = if (shape.rows == 1) (shape.n + 7) / 8 else (shape.n + 3) / 4;
-        p.pairs_ref = try p.rig.scratch(shape.rows * pairs * 8);
+        const pairs: usize = (shape.n + 7) / 8;
+        p.pairs_ref = try p.rig.scratch(pairs * 8);
         p.out_ref = try p.rig.output(shape.rows * 4);
         p.logits_ref = try p.rig.scratch(shape.rows * shape.n * 2);
         p.base_ref = try p.rig.scratch(shape.rows * 4);
@@ -235,23 +232,23 @@ pub const Probe = struct {
                 pass.e.dispatchGroups(mtl.Size.of(p.shape.rows, 1, 1), mtl.Size.of(tg, 1, 1));
             },
             .head => {
-                const pairs: u32 = @intCast(if (p.shape.rows == 1) (p.shape.n + 7) / 8 else (p.shape.n + 3) / 4);
-                const args = HeadTop1Args{ .k = @intCast(p.shape.k), .n = @intCast(p.shape.n), .rows = @intCast(p.shape.rows), .pairs = pairs };
-                pass.e.setPipeline(if (p.shape.rows == 1) p.one_pipe.? else p.pipe);
-                for (0..4) |i| pass.e.setBuffer(p.refs[i].buf, p.refs[i].off, i);
-                pass.e.setValue(args, 4);
-                pass.e.setBuffer(p.pairs_ref.buf, p.pairs_ref.off, 5);
-                if (p.shape.rows == 1) {
+                const pairs: u32 = @intCast((p.shape.n + 7) / 8);
+                const args = HeadTop1Args{ .k = @intCast(p.shape.k), .n = @intCast(p.shape.n), .pairs = pairs };
+                for (0..p.shape.rows) |r| {
+                    pass.e.setPipeline(p.pipe);
+                    pass.e.setBuffer(p.refs[0].buf, p.refs[0].off + r * p.shape.k * 2, 0);
+                    for (1..4) |i| pass.e.setBuffer(p.refs[i].buf, p.refs[i].off, i);
+                    pass.e.setValue(args, 4);
+                    pass.e.setBuffer(p.pairs_ref.buf, p.pairs_ref.off, 5);
                     pass.e.dispatchGroups(mtl.Size.of(pairs, 1, 1), mtl.Size.of(128, 1, 1));
-                } else {
-                    pass.e.dispatchGroups(mtl.Size.of(pairs, 1, 1), mtl.Size.of(512, 1, 1));
+                    pass.e.barrier();
+                    pass.e.setPipeline(p.reduce_pipe.?);
+                    pass.e.setBuffer(p.pairs_ref.buf, p.pairs_ref.off, 0);
+                    pass.e.setBuffer(p.out_ref.buf, p.out_ref.off + r * 4, 1);
+                    pass.e.setValue(args, 2);
+                    pass.e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+                    if (r + 1 < p.shape.rows) pass.e.barrier();
                 }
-                pass.e.barrier();
-                pass.e.setPipeline(p.reduce_pipe.?);
-                pass.e.setBuffer(p.pairs_ref.buf, p.pairs_ref.off, 0);
-                pass.e.setBuffer(p.out_ref.buf, p.out_ref.off, 1);
-                pass.e.setValue(args, 2);
-                pass.e.dispatchGroups(mtl.Size.of(p.shape.rows, 1, 1), mtl.Size.of(1024, 1, 1));
             },
         }
         try p.rig.finish(pass);
@@ -439,14 +436,13 @@ pub const Suite = struct {
             const fn_name = switch (v.kind) {
                 .prep4 => "glm_mtp_prep_4b",
                 .prep8 => "glm_mtp_prep_8b",
-                .head => "glm_head_top1_4b",
+                .head => "glm_head_top1_4b_one",
             };
             try s.probes.append(a, .{
                 .a = a,
                 .rig = .{ .a = a, .device = device, .queue = queue },
                 .v = v,
                 .pipe = try mtl.Pipeline.init(device, pipe_lib, fn_name, false),
-                .one_pipe = if (v.kind == .head) try mtl.Pipeline.init(device, pipe_lib, "glm_head_top1_4b_one", false) else null,
                 .reduce_pipe = if (v.kind == .head) try mtl.Pipeline.init(device, pipe_lib, "glm_reduce_top1", false) else null,
                 .embed_pipe = switch (v.kind) {
                     .prep4 => try mtl.Pipeline.init(device, s.embed_lib, "tf_embed_b4_g64", false),

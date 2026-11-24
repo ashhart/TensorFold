@@ -13,7 +13,7 @@ struct GlmMtpPrepArgs {
 };
 
 struct GlmHeadTop1Args {
-  uint k, n, rows, pairs;
+  uint k, n, pairs;
 };
 
 template <int BITS>
@@ -109,26 +109,27 @@ inline float glm_mtp_qdot16(const device uint8_t* w, const thread float* xt, flo
   return scale * accum + sum * bias;
 }
 
-template <int RPS, bool ONE>
-inline void glm_head_top1_mv(const device bfloat* X, const device uint32_t* W, const device bfloat* S,
-                             const device bfloat* B, constant GlmHeadTop1Args& a, device uint2* PAIRS, uint sg,
-                             uint lane, uint3 tg, threadgroup float* tv, threadgroup uint* ti) {
-  const int r = ONE ? 0 : int(sg);
-  if (!ONE && r >= int(a.rows)) return;
-  const int row0 = ONE ? (int(tg.x) * 4 + int(sg)) * RPS : int(tg.x) * RPS;
+[[max_total_threads_per_threadgroup(128)]]
+kernel void glm_head_top1_4b_one(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+                                 const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
+                                 constant GlmHeadTop1Args& a [[buffer(4)]], device uint2* PAIRS [[buffer(5)]],
+                                 uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                                 uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float tv[4];
+  threadgroup uint ti[4];
+  const int row0 = (int(tg.x) * 4 + int(sg)) * 2;
   if (TF_CTL_GLM_MTP == 1 && sg == 0u && lane == 0u && tg.x == 0u) ((device uint16_t*)X)[1] ^= 1u;
   float best = -INFINITY;
   uint best_idx = 0xffffffffu;
   if (row0 < int(a.n)) {
-    const int cols = (TF_CTL_GLM_MTP == 2 && row0 >= int(a.n) / 2) ? 0 : min(RPS, int(a.n) - row0);
+    const int cols = (TF_CTL_GLM_MTP == 2 && row0 >= int(a.n) / 2) ? 0 : min(2, int(a.n) - row0);
     const size_t kb = size_t(a.k) / 2u;
     const size_t kg = size_t(a.k) / 64u;
     const device uint8_t* w = (const device uint8_t*)W + size_t(row0) * kb + lane * 8u;
     const device bfloat* sc = S + size_t(row0) * kg + lane / 4u;
     const device bfloat* bi = B + size_t(row0) * kg + lane / 4u;
-    const device bfloat* x = X + size_t(r) * a.k + lane * 16u;
-    float acc[RPS];
-    for (int j = 0; j < RPS; ++j) acc[j] = 0.0f;
+    const device bfloat* x = X + lane * 16u;
+    float acc[2] = {0.0f, 0.0f};
     for (uint k0 = 0; k0 < a.k; k0 += 512u) {
       if (k0 + lane * 16u < a.k) {
         float xt[16];
@@ -151,60 +152,35 @@ inline void glm_head_top1_mv(const device bfloat* X, const device uint32_t* W, c
       }
     }
   }
-  if (ONE) {
-    if (lane == 0u) {
-      tv[sg] = best;
-      ti[sg] = best_idx;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sg == 0u && lane == 0u) {
-      float bval = tv[0];
-      uint bidx = ti[0];
-      for (int s = 1; s < 4; ++s) {
-        const float ov = tv[s];
-        const uint oi = ti[s];
-        if (oi < a.n && (bidx == 0xffffffffu ? (ov > -INFINITY) : (ov > bval || (ov == bval && oi < bidx)))) {
-          bval = ov;
-          bidx = oi;
-        }
-      }
-      PAIRS[tg.x] = uint2(as_type<uint>(bval), bidx);
-    }
-  } else if (lane == 0u) {
-    PAIRS[size_t(r) * a.pairs + tg.x] = uint2(as_type<uint>(best), best_idx);
+  if (lane == 0u) {
+    tv[sg] = best;
+    ti[sg] = best_idx;
   }
-}
-
-[[max_total_threads_per_threadgroup(128)]]
-kernel void glm_head_top1_4b_one(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
-                                 const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
-                                 constant GlmHeadTop1Args& a [[buffer(4)]], device uint2* PAIRS [[buffer(5)]],
-                                 uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                                 uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup float tv[4];
-  threadgroup uint ti[4];
-  glm_head_top1_mv<2, true>(X, W, S, B, a, PAIRS, sg, lane, tg, tv, ti);
-}
-
-[[max_total_threads_per_threadgroup(512)]]
-kernel void glm_head_top1_4b(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
-                             const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
-                             constant GlmHeadTop1Args& a [[buffer(4)]], device uint2* PAIRS [[buffer(5)]],
-                             uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                             uint3 tg [[threadgroup_position_in_grid]]) {
-  glm_head_top1_mv<4, false>(X, W, S, B, a, PAIRS, sg, lane, tg, nullptr, nullptr);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0u && lane == 0u) {
+    float bval = tv[0];
+    uint bidx = ti[0];
+    for (int s = 1; s < 4; ++s) {
+      const float ov = tv[s];
+      const uint oi = ti[s];
+      if (oi < a.n && (bidx == 0xffffffffu ? (ov > -INFINITY) : (ov > bval || (ov == bval && oi < bidx)))) {
+        bval = ov;
+        bidx = oi;
+      }
+    }
+    PAIRS[tg.x] = uint2(as_type<uint>(bval), bidx);
+  }
 }
 
 [[max_total_threads_per_threadgroup(1024)]]
 kernel void glm_reduce_top1(const device uint2* PAIRS [[buffer(0)]], device uint* OUT [[buffer(1)]],
-                            constant GlmHeadTop1Args& a [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
+                            constant GlmHeadTop1Args& a [[buffer(2)]],
                             uint t [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                             uint sg [[simdgroup_index_in_threadgroup]]) {
-  const device uint2* in = PAIRS + size_t(row) * a.pairs;
   float best = -INFINITY;
   uint at = 0xffffffffu;
   for (uint i = t; i < a.pairs; i += 1024u) {
-    const uint2 e = in[i];
+    const uint2 e = PAIRS[i];
     const float v = as_type<float>(e.x);
     const uint id = e.y;
     if (id < a.n && (at == 0xffffffffu ? (v > -INFINITY) : (v > best || (v == best && id < at)))) {
@@ -243,5 +219,5 @@ kernel void glm_reduce_top1(const device uint2* PAIRS [[buffer(0)]], device uint
       at = oa;
     }
   }
-  if (lane == 0u) OUT[row] = at;
+  if (lane == 0u) OUT[0] = at;
 }
