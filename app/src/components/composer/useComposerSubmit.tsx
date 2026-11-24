@@ -2,6 +2,7 @@ import { editQueuedFollowUp, capturedDraftMatches } from '../../lib/queued-follo
 import { isComposerSendKey } from '../../lib/composer-keyboard'
 import { modelFitReason } from '../../lib/preferences/display'
 import { useStore } from '../../lib/store'
+import { isPickerGuidance, PICKER_GUIDANCE_MESSAGE } from '../../lib/store/slices/uiSlice'
 import { api } from '../../lib/ipc'
 import { shortPath, basename } from '../../lib/format'
 import { Icon } from '../../lib/icons'
@@ -19,7 +20,7 @@ import { type ComposerWorkspace } from './useComposerWorkspace'
 export type ComposerSubmit = ReturnType<typeof useComposerSubmit>
 export function useComposerSubmit(state: ComposerState & ComposerWorkspace) {
   const {
-    tx, settings, status, launch, send, cancel,
+    mode, thread, tx, settings, status, launch, send, cancel,
     saveSettings, setThreadProvider, noteModelChange, compactThread, patchThread, projects,
     terminals, activeTerminalId, readiness, setReadiness, authBusy, setAuthBusy,
     setThreadProject, addProject, pendingMention, composerSeed, sshHosts, sshStatus,
@@ -80,13 +81,14 @@ export function useComposerSubmit(state: ComposerState & ComposerWorkspace) {
       if (mode === 'home') {
         const launchCwd = homeWorkspace?.kind === 'ssh' ? homeWorkspace.path : cwd || homeWorkspace?.path || projectRoot || ''
         if (!launchCwd) {
-          useStore.setState({ notice: { kind: 'info', persistent: true, message: tx("Choose a folder for this conversation. Your draft and attachments stay here if you cancel.") } })
+          useStore.setState({ notice: { kind: 'info', persistent: true, message: tx(PICKER_GUIDANCE_MESSAGE) } })
           if (isOrchestratorProject) void loadRemoteProjectDir(projectRoot)
           else void chooseDir()
           return
         }
         const result = await launch({ text: body, cwd: launchCwd, providerId: provider.id, providerAccountId, model: model || provider.models[0], approvalMode: settings.approvalMode, projectId: homeProject, workspace: homeWorkspace, attachments: atts, incognito, memoryPolicy: newMemoryPolicy })
         if (!result.ok) return
+        if (isPickerGuidance(useStore.getState().notice, tx(PICKER_GUIDANCE_MESSAGE))) useStore.setState({ notice: null })
       } else {
         if (!thread || !await send(body, atts, thread.id, submitted.quotes)) return
       }

@@ -1,6 +1,8 @@
 import { currentIntlLocale } from '../../lib/preferences/current-locale'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../lib/ipc'
+import { useStore } from '../../lib/store'
+import { isPickerGuidance, PICKER_GUIDANCE_MESSAGE } from '../../lib/store/slices/uiSlice'
 import { COMPOSER_INSERT_EVENT } from '../../lib/browser-preview'
 import type { Attachment, ApprovalMode, ControllerSnapshot, Project, Provider, Thread, Skill, Command, SshHost, WorkspaceLocation, RemoteDirectoryListResult, TokenUsageSnapshot, ModelRouterSnapshot, ContextPressureSnapshot, PersistedProviderStatus } from '../../lib/types'
 import { buildTerminalReference } from '../../lib/terminal-context'
@@ -29,7 +31,7 @@ function formatControllerSnapshot(snapshot: ControllerSnapshot): string {
 
 export function useComposerWorkspace(state: ComposerState) {
   const {
-    tx, settings, status, launch, send, cancel,
+    mode, thread, tx, settings, status, launch, send, cancel,
     saveSettings, setThreadProvider, noteModelChange, compactThread, patchThread, projects,
     terminals, activeTerminalId, readiness, setReadiness, authBusy, setAuthBusy,
     setThreadProject, addProject, pendingMention, composerSeed, sshHosts, sshStatus,
@@ -62,7 +64,13 @@ export function useComposerWorkspace(state: ComposerState) {
     recentModels, setRecentModels, pickModel
   } = state
   const setApproval = (m: ApprovalMode) => saveSettings({ ...settings, approvalMode: m })
-  const chooseDir = async () => { const d = await api.pickDirectory(); if (d) { setCwd(d); setHomeWorkspace(null) } }
+  const chooseDir = async () => {
+    const d = await api.pickDirectory()
+    if (!d) return
+    setCwd(d)
+    setHomeWorkspace(null)
+    if (isPickerGuidance(useStore.getState().notice, tx(PICKER_GUIDANCE_MESSAGE))) useStore.setState({ notice: null })
+  }
   const setFolder = (dir: string) => {
     if (mode === 'thread' && thread) {
       void setThreadWorkspace(thread.id, null, dir)
