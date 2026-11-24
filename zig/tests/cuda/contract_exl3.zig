@@ -134,14 +134,18 @@ fn other(w: exl3.Weight) exl3.Weight {
     return x;
 }
 
+/// A family's group launch in place of matmulGroup (contract_inkling2_group5.zig): its members by n, fit and launch.
+pub const Ext = struct { members: *const fn (usize) []const usize, fits: *const fn ([]const exl3.Weight, usize) bool, run: *const fn (*Case, []const exl3.Weight, []const u64) anyerror!void };
+
 pub const Case = struct {
     rig: rig_.Rig,
     lin: *exl3.Linear,
     kind: Kind,
+    ext: ?*const Ext = null,
     halves: u32 = 8,
     control: bool = false,
     shape: c.Shape = undefined,
-    mats: [3]Mat = .{ .{ .k = 0, .n = 0 }, .{ .k = 0, .n = 0 }, .{ .k = 0, .n = 0 } },
+    mats: [5]Mat = @splat(.{ .k = 0, .n = 0 }),
     nm: usize = 1,
     x: []u16 = &.{},
     xd: u64 = 0,
@@ -151,7 +155,7 @@ pub const Case = struct {
     xh_base: u64 = 0,
     z: u64 = 0,
     counters: u64 = 0,
-    wbuf: [3]exl3.Weight = undefined,
+    wbuf: [5]exl3.Weight = undefined,
     msg: [160]u8 = undefined,
 
     pub fn deinit(self: *Case) void {
@@ -175,7 +179,7 @@ pub const Case = struct {
         return .{ .spec = spec(self.kind, self.halves, self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
 
-    const vt = g.hooks(Case);
+    pub const vt = g.hooks(Case);
 
     fn random16(rng: std.Random, out: []u16) void {
         for (out) |*v| v.* = @bitCast(@as(f16, @floatCast(rng.float(f32) * 2 - 1)));
@@ -191,7 +195,7 @@ pub const Case = struct {
         const a = self.rig.gpu.gpa;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        const widths: []const usize = if (grouped) members(shape.n) else &.{shape.n};
+        const widths: []const usize = if (!grouped) &.{shape.n} else if (self.ext) |e| e.members(shape.n) else members(shape.n);
         self.nm = widths.len;
         const width = fmt.Width{ .halves = @intCast(self.halves) };
         var zb: usize = 0;
@@ -216,7 +220,7 @@ pub const Case = struct {
             zb += @max(exl3.Linear.zBytes(m.w, 128), exl3.Linear.zBytes(other(m.w), 128));
             cb += exl3.Linear.counterBytes(m.w);
         }
-        if (grouped and !exl3.groupable(self.weights(), shape.rows)) return false;
+        if (grouped and !(if (self.ext) |e| e.fits(self.weights(), shape.rows) else exl3.groupable(self.weights(), shape.rows))) return false;
         self.x = try a.alloc(u16, shape.rows * shape.k);
         for (self.x) |*v| v.* = c.toBf16(rng.float(f32) * 2 - 1);
         switch (fill) {
@@ -260,8 +264,8 @@ pub const Case = struct {
         return self.shape.rows * n;
     }
 
-    fn ys(self: *const Case, at: u64) [3]u64 {
-        var y: [3]u64 = .{ 0, 0, 0 };
+    pub fn ys(self: *const Case, at: u64) [5]u64 {
+        var y: [5]u64 = @splat(0);
         var off: u64 = 0;
         for (self.mats[0..self.nm], 0..) |m, i| {
             y[i] = at + off;
@@ -283,14 +287,14 @@ pub const Case = struct {
             },
             .group, .rot_group => {
                 var ws = self.weights();
-                var bad: [3]exl3.Weight = undefined;
+                var bad: [5]exl3.Weight = undefined;
                 if (self.control) {
                     @memcpy(bad[0..self.nm], ws);
                     if (self.kind == .group) bad[1].svh = bad[0].svh else bad[1].suh = bad[0].suh;
                     ws = bad[0..self.nm];
                 }
                 const y = self.ys(if (self.kind == .group) self.out else self.base);
-                try self.lin.matmulGroup(self.rig.s, ws, self.xd, .bf16, m, y[0..self.nm], .bf16, if (self.kind == .rot_group) self.out else self.xh, self.z, self.counters);
+                if (self.ext) |e| try e.run(self, ws, y[0..self.nm]) else try self.lin.matmulGroup(self.rig.s, ws, self.xd, .bf16, m, y[0..self.nm], .bf16, if (self.kind == .rot_group) self.out else self.xh, self.z, self.counters);
             },
         }
         try self.rig.s.synchronize();

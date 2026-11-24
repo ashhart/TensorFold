@@ -4,6 +4,7 @@ pub const image = @import("image.zig");
 pub const vision = @import("vision.zig");
 pub const kernels = @import("kernels.zig");
 pub const ops = @import("ops.zig");
+pub const proj_group = @import("proj_group.zig");
 pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const loop = @import("loop.zig");
@@ -20,6 +21,7 @@ test {
     _ = vision;
     _ = kernels;
     _ = ops;
+    _ = proj_group;
     _ = experts;
     _ = modelopt;
     _ = native;
