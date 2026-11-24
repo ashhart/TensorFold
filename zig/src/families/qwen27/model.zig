@@ -369,8 +369,8 @@ test "a qwen3_5 dense checkpoint opens at the 27B and 9B shapes and refuses its 
     try testShape(4096, 12288, 32, 16, 32);
     try testShapeTied(2560, 9216, 32, 16, 32); // the tied 4B: qualified by #3702's size rows
     // wrong KV counts: a consistent GDN width set with the other size's KV count must still refuse
-    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(2560, 9216, 32, 16, 4, 16)); // the 4B row, KV 2 (the 0.8B's KV count)
-    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(1024, 3584, 24, 8, 2, 32)); // the 0.8B row, KV 4 (the 4B's KV count)
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(2560, 9216, 32, 16, 2, 32)); // the 4B row, KV 2 (the 0.8B's KV count)
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShapeKv(1024, 3584, 24, 8, 4, 16)); // the 0.8B row, KV 4 (the 4B's KV count)
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(4096, 12288, 64, 16, 32)); // 9B widths, 27B depth
     try std.testing.expectError(error.UnqualifiedQwenShape, testShape(5120, 17408, 64, 24, 32)); // 27B, 9B GDN heads
 }

@@ -34,9 +34,19 @@ pub const Geometry = struct {
     solo_prompt: bool = false,
     /// SenseNova-Loop allows single-chain 2,048-row prompt chunks when `shared_prefix` is false (M3/M4).
     wide_prompt: bool = false,
+    /// Unsplit attention: the tied 0.8B's whole 8/2 takes the 9B's group-4 build; a two-rank 9B shard's 8/2 refuses.
+    whole_attention: bool = false,
     /// Read the target's attention geometry; the current kernel qualification still applies.
     pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
-        const g = Geometry{ .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape, .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape, .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape, .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape, .shared_prefix = shared_prefix, .wide_prompt = c.looped };
+        const g = Geometry{
+            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
+            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
+            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
+            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
+            .shared_prefix = shared_prefix,
+            .wide_prompt = c.looped,
+            .whole_attention = !c.split_attention,
+        };
         try g.check();
         return g;
     }
@@ -49,7 +59,7 @@ pub const Geometry = struct {
         // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2), 4 (16/4) or 8 (16/2).
         if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
         const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4) or (g.heads == 16 and g.kv_heads == 2);
-        const small = g.heads == 8 and g.kv_heads == 2; // the tied 0.8B: the same group-4 shader build as the 9B
+        const small = g.whole_attention and g.heads == 8 and g.kv_heads == 2; // the tied 0.8B: the same group-4 shader build as the 9B
         if (g.heads / g.kv_heads != 6 and !one_mac and !small) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
@@ -527,12 +537,13 @@ test "a window that starts below 8192 keeps its partials within the scratch's ch
 }
 
 test "target attention reads every config dimension without widening kernel qualification" {
-    // fromConfig reads only these four fields; no other config field is consumed here.
+    // fromConfig reads only these five fields; no other config field is consumed here.
     var c: @import("config.zig").Config = undefined;
     c.heads = 24;
     c.kv_heads = 4;
     c.head_dim = 256;
     c.rope_dims = 64;
+    c.split_attention = false;
     const g = try Geometry.fromConfig(c, false);
     try std.testing.expect(g.sameShape(.{}));
     try std.testing.expect(!g.shared_prefix);
@@ -547,6 +558,9 @@ test "target attention reads every config dimension without widening kernel qual
     c.heads = 8; // the 0.8B's whole-model shape: the same group-4 shader build the 9B takes
     c.kv_heads = 2;
     try std.testing.expectEqual(@as(u32, 4), (try Geometry.fromConfig(c, true)).group());
+    c.split_attention = true; // a two-rank 9B's shard shows the same 8/2: still not qualified
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.split_attention = false;
     c.heads = 20; // GQA5: no shader build takes it
     c.kv_heads = 4;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
