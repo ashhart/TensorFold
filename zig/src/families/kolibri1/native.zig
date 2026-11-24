@@ -9,8 +9,11 @@ const be = @import("backend.zig");
 const snap = @import("snap.zig");
 const limits = @import("context.zig");
 const kv = @import("core").kv_pool;
+const cfg = @import("config.zig");
 
 pub const model_type = "kolibri1";
+/// Kolibri 1.1 (config_v11.zig): the same family, its dense layers, shared caches and window read from config.json.
+pub const also_model_types: []const []const u8 = &.{"kolibri1_1"};
 pub const formats: []const []const u8 = &.{"fp8-block"};
 pub const default_context: i64 = 65536;
 pub const max_segments: u32 = 1;
@@ -25,6 +28,30 @@ pub const drafter_refusal = "--drafter: Kolibri-1 on CUDA loads no drafter yet; 
 pub const explains_open = true;
 /// A request's verify reserve: its pages hold that many rows past its prompt and reply.
 pub const window_rows: u32 = be.max_window;
+
+/// The longest window: Kolibri 1.1 to its 2,184 attended keys (no sparse selection yet), else max_position_embeddings.
+pub fn contextCeiling(a: std.mem.Allocator, io: std.Io, dir: []const u8, _: ?f64) !i64 {
+    const path = try std.fs.path.join(a, &.{ dir, "config.json" });
+    defer a.free(path);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 22));
+    defer a.free(text);
+    return ceilingOf(a, text);
+}
+
+fn ceilingOf(a: std.mem.Allocator, text: []const u8) !i64 {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(a, text, &why);
+    if (c.max_context != 0) return @intCast(c.max_context);
+    var doc = try std.json.parseFromSlice(std.json.Value, a, text, .{});
+    defer doc.deinit();
+    const v = doc.value.object.get("max_position_embeddings") orelse return 0;
+    return if (v == .integer and v.integer > 0) v.integer else 0;
+}
+
+test "the window: Kolibri 1.1 up to its 2,184 attended keys, Kolibri-1 its max_position_embeddings" {
+    try std.testing.expectEqual(@as(i64, 2184), try ceilingOf(std.testing.allocator, cfg.kolibri11.pinned));
+    try std.testing.expectEqual(@as(i64, 0), try ceilingOf(std.testing.allocator, cfg.pinned));
+}
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
