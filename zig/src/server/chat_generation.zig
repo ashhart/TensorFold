@@ -56,6 +56,7 @@ pub const Generation = struct {
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     required: bool = false, // tool_choice "required" or a named function: the reply must call a tool
+    call_end: bool = false, // Inkling 2's required call grammar: its end of message after a complete call ends the turn
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
@@ -129,7 +130,7 @@ pub const Generation = struct {
             landed += 1;
             if (g.eos(t)) {
                 g.reason = "stop";
-            } else if (@import("chat_inkling2.zig").endsBare(g, t)) {
+            } else if (try @import("chat_inkling2.zig").endsBare(g, t)) {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // an Inkling 2 grammar's call or text message ended: the turn ends there
             } else if (try g.stopHit()) {
