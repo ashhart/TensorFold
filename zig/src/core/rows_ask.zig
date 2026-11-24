@@ -2,6 +2,7 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const rows = pc.rows;
+const modes = @import("cache_modes.zig");
 
 /// flush: every kept state dropped, in RAM and on disk, once no request is in flight (a waiting one holds admissions).
 pub const Op = enum { where, load, forget, flush };
@@ -76,21 +77,30 @@ fn newer(a: *const pc.Entry, b: *const pc.Entry) bool {
     return a.used > b.used or (a.used == b.used and a.serial > b.serial);
 }
 
-fn forgetExcept(r: *@import("rows_store.zig").Rows, entries: []const *pc.Entry) u64 {
+/// Whether a disk state or staged write is a kept entry's own: the same position, tokens and decoded spans.
+fn ownOf(entries: []const *pc.Entry, at: u32, tokens: []const u32, spans: []const modes.Span) bool {
+    for (entries) |e| {
+        if (e.expired or e.salt != null or e.at != at or !std.mem.eql(u32, e.tokens, tokens)) continue;
+        if (modes.equal(e.decode_spans, spans, at)) return true;
+    }
+    return false;
+}
+
+fn forgetExcept(r: *rows.Rows, entries: []const *pc.Entry) u64 {
     const before = r.held();
+    if (r.worker) |w| {
+        var jobs: [rows.write.io.max_jobs]?*rows.write.io.Job = undefined;
+        w.cancellations(&jobs);
+        for (jobs) |job| if (job) |j| if (!ownOf(entries, j.at, j.tokens, j.spans)) {
+            rows.write.fence(r); // a dropped entry's staged write must not publish; ones not yet staged went with it
+            break;
+        };
+    }
     var i = r.states.items.len;
     while (i > 0) {
         i -= 1;
         const s = &r.states.items[i];
-        var kept = false;
-        for (entries) |e| {
-            if (e.expired or e.salt != null) continue;
-            if (r.matches(s, e.tokens, &.{}, e.decode_spans)) {
-                kept = true;
-                break;
-            }
-        }
-        if (!kept) r.remove(i);
+        if (!ownOf(entries, s.at, s.tokens, s.spans)) r.remove(i);
     }
     return before - r.held();
 }
