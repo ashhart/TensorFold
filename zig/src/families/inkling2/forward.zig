@@ -188,7 +188,7 @@ pub const Partials = struct { o: u64, ml: u64, slots: usize };
 pub const Buffers = struct {
     gpa: std.mem.Allocator,
     bufs: std.ArrayList(Buf) = .empty,
-    ids: Buf = undefined, // int32 rows, then pos, seg_of, the segments and the tiles
+    ids: Buf, // int32 rows, then pos, seg_of, the segments and the tiles
     x: u64 = 0, // bf16 [rows][hidden]: the residual stream between layers
     resid: u64 = 0, // fp32 [rows][hidden]: the residual inside a layer
     blocks: u64 = 0, // bf16 [8][rows][hidden]: the completed blocks' inputs of these rows
@@ -215,13 +215,13 @@ pub const Buffers = struct {
     moe: u64 = 0,
     gathered: u64 = 0, // fp32 [world][rows][hidden]: every rank's partial of a site (world > 1)
     exs: cuda.exl3_experts.Scratch = undefined,
-    logits: Buf = undefined, // fp32 [rows][padded vocab of the rank]
+    logits: Buf, // fp32 [rows][padded vocab of the rank]
 
     /// Scratch for `s.rows` rows; `shared` partials, else its own for every row at the shape's context.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, s: Shape, shared: ?Partials) !Buffers {
         const c = &w.config;
-        var b: Buffers = .{ .gpa = gpa };
-        errdefer b.deinit();
+        var b: Buffers = .{ .gpa = gpa, .ids = .{ .d = d, .ptr = 0, .len = 0 }, .logits = .{ .d = d, .ptr = 0, .len = 0 } };
+        errdefer b.deinit(); // ids and logits start empty, so a failure before either is made frees neither
         const n = s.rows;
         const h: usize = c.hidden;
         const hd: usize = c.head_dim;
@@ -512,4 +512,8 @@ test "forward: a staged call's words sit where launch reads them" {
     const c: cfg.Config = .{};
     try std.testing.expectEqual(@as(u32, 5), stride(&c, 100));
     try std.testing.expectEqual(@as(u32, 64), stride(&c, 1048575));
+}
+
+test {
+    _ = @import("forward_test.zig");
 }
