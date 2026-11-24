@@ -1,5 +1,5 @@
 // From omarchy-mlx overlay/mlx/backend/omarchy/shaders/sdpa_decode_native.comp at 2dcd24ba9c50.
-// Code adapted: 1 lines added or changed, 1 removed.
+// Code adapted: 3 lines added or changed, 1 removed.
 // Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 
 // One 1024-thread workgroup handles each query head.

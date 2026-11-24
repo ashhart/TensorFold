@@ -319,15 +319,29 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
         const tv: f64 = if (wide) @as(f32, @bitCast(t)) else cx.fromBf16(t);
         omag = @max(omag, @abs(sv - tv));
     }
-    const ok = located == fx.heads and pmis == 0 and omis == 0;
+    // Served greedy draw over each path's output row: largest value wins, exact ties keep the lowest
+    // index, and a non-finite value cannot win (the comparison refuses it). Output equality alone does
+    // not prove the served token survives a future non-byte-identical divergence, so assert the tokens.
+    var token: [2]usize = .{ 0, 0 };
+    for (0..2) |i| {
+        var best_v: f64 = -std.math.inf(f64);
+        for (got[i], 0..) |bits, j| {
+            const v: f64 = if (wide) @as(f32, @bitCast(bits)) else cx.fromBf16(bits);
+            if (!(v > best_v)) continue;
+            best_v = v;
+            token[i] = j;
+        }
+    }
+    const tokens_ok = token[0] == token[1];
+    const ok = located == fx.heads and pmis == 0 and omis == 0 and tokens_ok;
     const strides = struct {
         fn f(ws: []const usize) void {
             for (ws, 0..) |v, h| std.debug.print("{s}{d}={d}", .{ if (h == 0) "" else " ", h, v });
         }
     };
     strides.f(&head_at);
-    std.debug.print("\n{s} probs keys={d} {s} data={s}: located={d} prob_mismatched={d} of {d} first=(head {d}, key {d}) prob_max_abs={e} | out_mismatched={d} of {d} first={d} max_abs={e}\n", .{
-        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", located, pmis, @as(usize, @intCast(fx.heads * keys)), pfirst_h, pfirst_k, pmag, omis, row_elems, ofirst, omag,
+    std.debug.print("\n{s} probs keys={d} {s} data={s}: located={d} prob_mismatched={d} of {d} first=(head {d}, key {d}) prob_max_abs={e} | out_mismatched={d} of {d} first={d} max_abs={e} | tokens single={d} tiled={d}\n", .{
+        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", located, pmis, @as(usize, @intCast(fx.heads * keys)), pfirst_h, pfirst_k, pmag, omis, row_elems, ofirst, omag, token[0], token[1],
     });
     return ok;
 }

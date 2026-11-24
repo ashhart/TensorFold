@@ -1,4 +1,5 @@
-// Prefill attention softmax, in place over the f32 scores of sdpa_scores_tile: one 256-thread workgroup per (head, row).
+// Prefill attention softmax, in place over the f32 scores of sdpa_scores_tile:
+// one 256-thread workgroup per (head, row).
 // Arithmetic is sdpa_decode_native.comp's: strided max scan and 256-lane tree, strided exp-sum and tree, then
 // probs = exp(score - max) * (1 / sum), each lane writing only its own slots.
 

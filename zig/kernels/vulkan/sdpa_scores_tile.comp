@@ -1,5 +1,5 @@
-// Prefill attention scores for one kv head, tiled: a workgroup scores 16 queries (4 query heads x 4 rows) against 16 keys, so
-// every K tile is read once for 16 queries instead of once per (head, row) workgroup.
+// Prefill attention scores for one kv head, tiled: a workgroup scores 16 queries (4 query heads x 4 rows) against
+// 16 keys, so every K tile is read once for 16 queries instead of once per (head, row) workgroup.
 // Per-dot order is sdpa_decode_native.comp's: f32 q*scale once, bf16 K widened exactly, ascending-d accumulation.
 // The first pass of the three-kernel prefill SDPA: sdpa_scores_tile, sdpa_softmax_rows, sdpa_pv_tile.
 

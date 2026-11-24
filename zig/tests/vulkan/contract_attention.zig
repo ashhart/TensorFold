@@ -106,7 +106,8 @@ pub const tile_cases = [_]TileCase{
 pub const route_keys = [_]u64{ 496, 508, 510, 511, 512, 513, 514, 1024, 1025, 2048 };
 
 /// Probes past the shared stream (7168): byte-compare both paths' probability arrays.
-pub const probe_keys = [_]u64{ 7200, 7201, 7205 };
+pub const probe_keys = [_]u64{ 256, 511, 513, 1025, 7200, 7201, 7205 };
+/// The first four keys carry the served-token check: 256 is the default decode window, 511/513/1025 the routing boundaries.
 
 /// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
 pub fn finiteRows(case: TileCase) u64 {
