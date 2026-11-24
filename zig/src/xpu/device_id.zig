@@ -1,10 +1,13 @@
 //! Shared Level Zero device selection and peer opening for the Xe2 runners.
 const std = @import("std");
+const builtin = @import("builtin");
 const ze = @import("ze");
 
 /// Discover the first Level Zero device's PCI ID; XPU_DEVICE_ID bypasses discovery (for example 0xe211 B60).
 pub fn detectDeviceId() !u32 {
     if (try @import("sys").environment.read(?u32, "XPU_DEVICE_ID", null)) |id| return id;
+    // Level Zero's loader is Linux's libze_loader.so.1; elsewhere std.DynLib cannot open it, so no device is found
+    if (comptime builtin.os.tag != .linux) return error.LoaderUnavailable;
     var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
     defer lib.close();
     const api = try ze.resolve(ze.Api, &lib);
