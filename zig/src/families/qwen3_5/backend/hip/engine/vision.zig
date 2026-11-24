@@ -24,17 +24,9 @@ pub const Vision = struct {
         defer arena.deinit();
         const aa = arena.allocator();
         const cfg = try read(aa, io, dir, "config.json") orelse return error.NoQwenVision;
-        if (!declared(aa, cfg)) return error.NoQwenVision;
+        if (!api.visionDeclared(aa, cfg)) return error.NoQwenVision;
         // a declared vision_config the parser cannot read is a broken tower, not a text checkpoint
         return try vl.Config.parse(aa, cfg, try read(aa, io, dir, "preprocessor_config.json"), try read(aa, io, dir, "processor_config.json")) orelse error.UnsupportedQwenVision;
-    }
-
-    /// Whether config.json names a vision_config other than null: absent or null is a text-only checkpoint.
-    fn declared(a: std.mem.Allocator, cfg: []const u8) bool {
-        const doc = std.json.parseFromSliceLeaky(std.json.Value, a, cfg, .{}) catch return true;
-        if (doc != .object) return true;
-        const vc = doc.object.get("vision_config") orelse return false;
-        return vc != .null;
     }
 
     /// Aggregate image tokens also bound each independently encoded image; scratch is fixed at open.
@@ -262,14 +254,13 @@ test "Qwen HIP vision memory matches fixed weights and receipt/default scratch e
     }
 }
 
-test "only an absent or null vision_config is a text-only checkpoint; another value is a broken tower" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try std.testing.expect(!Vision.declared(a, "{\"model_type\":\"qwen3_5\"}"));
-    try std.testing.expect(!Vision.declared(a, "{\"vision_config\":null}"));
-    try std.testing.expect(Vision.declared(a, "{\"vision_config\":[]}"));
-    try std.testing.expect(Vision.declared(a, "{\"vision_config\":\"x\"}"));
-    try std.testing.expect(Vision.declared(a, "{\"vision_config\":{}}"));
-    try std.testing.expect(Vision.declared(a, "not json"));
+test "--vision on a checkpoint without a vision_config is refused by name before the HIP runtime opens" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"qwen3_5\"}" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(dir);
+    // the runtime, the context and the weights open after the gate: a refusal here held none of them
+    try std.testing.expectError(error.VisionWithoutTower, @import("engine.zig").Engine.load(a, std.testing.io, dir, .{ .vision = .{} }));
 }

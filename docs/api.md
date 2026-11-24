@@ -647,6 +647,8 @@ whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
+`TENSORFOLD_PRIORITY_AGE_MS` above 0 lets a background request queued for at least that many milliseconds go before
+foreground work. Prefix, disk-read, lane and memory admission checks are unchanged.
 Session-title requests are also treated as background work.
 
 The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same

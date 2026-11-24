@@ -13,6 +13,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_PARALLEL` | Whole count 1 through 4096, or `auto` (`auto` = 8); default: what `--parallel` says. Read only when `--parallel` is not on the command line, so the flag wins; blank keeps the default; other values are refused at server startup |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
 | `TENSORFOLD_PREFIX_WAIT_MS` | Whole milliseconds 0 through 4294967295; zero disables waiting; default 60000 |
+| `TENSORFOLD_PRIORITY_AGE_MS` | Whole milliseconds 0 through 4294967295; default 0. Above 0, a background request queued for at least this long may be admitted before foreground requests. Eligibility, memory and lane limits still apply; 0 keeps foreground-first FIFO |
 | `TENSORFOLD_PULL_CONNECT_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for a connection to the hub, the storage host or the proxy; default 30 |
 | `TENSORFOLD_PULL_STALL_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for the next byte before it resumes the file with a range request (at most 3 times); default 60 |
 | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
@@ -175,7 +176,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 37 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 39 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -188,6 +189,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GPU_TOPK` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_GDN_WIDE` | Exactly `0` or `1`; default off. Metal batch segments of 8 or 16 rows use non-replay GDN when enabled |
 | `TF_FLASHNEXT_GDN_FUSED` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_GDN_CHAIN_TPR` | Exactly `0` or `1`; default off: opt into the two-thread reduction for ordinary recurrence rows below 64 |
 | `TF_FLASHNEXT_GDN_LANES` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |

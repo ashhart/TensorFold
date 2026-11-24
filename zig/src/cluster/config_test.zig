@@ -104,6 +104,7 @@ test "every broken file names what to change" {
     try check(head ++ four ++ "\"models\":{\"k\":{\"path\":\"/m\",\"mode\":\"disaggregated\",\"prefill\":[\"c1\"],\"decode\":[\"c1\",\"zz\"]}}}", &.{ "both a prefill and a decode", "\"zz\" is not a node" });
     try check(head ++ four ++ "\"models\":{\"k\":{\"path\":\"/m\",\"mode\":\"disaggregated\"}}}", &.{"needs \"prefill\" and \"decode\""});
     try check(head ++ four ++ "\"models\":{\"k\":{\"nodes\":[\"m9\"],\"parallel\":{\"tensor\":\"many\"}}}}", &.{ "path: required", "\"m9\" is not a node", "or \"auto\"" });
+    try check(head ++ four ++ "\"models\":{\"k\":{\"path\":\"/m\",\"nodes\":[\"c1\"],\"vision\":\"yes\"}}}", &.{"vision: true or false"});
     try check("{\"cluster\":1}", &.{ "schema: must be", "nodes: at least one" });
     try check("not json", &.{"not JSON"});
 }
