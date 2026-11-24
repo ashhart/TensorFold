@@ -184,7 +184,7 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = 7, .step_ms = d.step_ms, .prior = &draft_prior, .plain_guard = false, .batched = true, .chances = true, .copy_first = true, .hold_costs = d.hold_costs[0..d.hold_timed], .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
+        return .{ .depth = 7, .step_ms = d.step_ms, .prior = &draft_prior, .plain_guard = false, .batched = true, .chances = true, .copy_first = true, .copy_match = 12, .hold_costs = d.hold_costs[0..d.hold_timed], .stream_bytes = @intCast(state.laneBytes(d.capacity)) };
     }
 
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {

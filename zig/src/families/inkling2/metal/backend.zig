@@ -21,7 +21,7 @@ const SavedSnap = struct {
     dspark: ?dspark_state.Snap = null,
 };
 
-pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null, gpu_tokens: bool = false };
+pub const Options = struct { capacity: usize, streams: u32 = 4, drafts: bool = true, budget: u64, images: ?img.Encoder = null, gpu_tokens: bool = false };
 const shared_widths = [_]usize{ 24, 32, 48, 64 };
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
@@ -94,7 +94,8 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.window_rows, .gpu_tokens = self.options.gpu_tokens, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
+        const d = self.options.drafts;
+        return .{ .exact_width = st.window_rows, .gpu_tokens = self.options.gpu_tokens, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .copy_drafts = d, .copy_guard = d, .own_copy_rates = d, .copy_match = 8, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
     }
 
     fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {

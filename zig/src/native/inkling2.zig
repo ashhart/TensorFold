@@ -244,13 +244,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.markers = .{model.config.image_token};
     const reserved = if (drafter) |d| d.reservedBytes(streams, @intCast(window)) else 0;
     if (reserved > budget) return error.DSparkReservationExceeded;
-    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget - reserved, .images = if (tower != null) .{ .ctx = h, .encode = Host.encode } else null });
+    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .drafts = o.drafts, .budget = budget - reserved, .images = if (tower != null) .{ .ctx = h, .encode = Host.encode } else null });
     errdefer h.metal.deinit();
     try h.metal.warm();
+    if (drafter != null or (o.drafts and streams > 1)) try h.metal.measure();
     h.drafted = null;
     h.warm = .{ .queue = model.queue };
     if (drafter) |d| {
-        try h.metal.measure();
         try d.setContext(@intCast(window));
         switch (d) {
             .dspark => |ds| {
@@ -465,4 +465,142 @@ test "Inkling native longest context accounts target, streams and shared draft s
     // 36 GiB of state hold the model's whole window for eight drafted streams.
     const shared = dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0);
     try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fixed, token, shared));
+}
+
+test "Inkling native startup draft_sources reports copies with --drafts, clears them with --no-drafts, and keeps DSpark --drafter" {
+    const Stub = struct {
+        fn prefill(_: *anyopaque, _: *lanes.Stream) !void {}
+        fn first(_: *anyopaque, _: *lanes.Stream, _: u64) !u64 {
+            return 0;
+        }
+        fn queue(_: *anyopaque, _: *lanes.Stream, _: lanes.backend.Feed, _: u64) !u64 {
+            return 0;
+        }
+        fn read(_: *anyopaque, _: u64) !u32 {
+            return 0;
+        }
+        fn verify(_: *anyopaque, _: []const lanes.backend.Window, _: []lanes.backend.Verified) !void {}
+        fn keep(_: *anyopaque, _: []const lanes.backend.Window, _: []const []const u32) !void {}
+        fn draft(_: *anyopaque, _: []const lanes.backend.DraftRequest) !void {}
+        fn release(_: *anyopaque, _: *lanes.Stream) void {}
+        const backend_impl: lanes.backend.Backend = .{
+            .keep_full_lone = true,
+            .ptr = undefined,
+            .vtable = &.{
+                .prefill = prefill,
+                .first = first,
+                .queue = queue,
+                .read = read,
+                .verify = verify,
+                .keep = keep,
+                .draft = draft,
+                .release = release,
+            },
+        };
+    };
+    const StubDrafter = struct {
+        fn taps(_: *anyopaque) []const u32 {
+            return &.{0};
+        }
+        fn facts(_: *anyopaque) lanes.drafter.Facts {
+            return .{ .depth = 7, .step_ms = 0, .copy_first = true, .copy_match = 12, .plain_guard = false };
+        }
+        fn openStream(_: *anyopaque, _: *lanes.Stream) !void {}
+        fn absorb(_: *anyopaque, _: []const lanes.drafter.Absorb) !void {}
+        fn hold(_: *anyopaque, _: []const lanes.drafter.Hold) !void {}
+        fn held(_: *anyopaque, _: []const *lanes.Stream, _: []const []u32) !void {}
+        fn releaseStream(_: *anyopaque, _: *lanes.Stream) void {}
+        const vtable: lanes.drafter.Drafter.VTable = .{
+            .taps = taps,
+            .facts = facts,
+            .open = openStream,
+            .absorb = absorb,
+            .hold = hold,
+            .held = held,
+            .release = releaseStream,
+        };
+    };
+
+    const gpa = std.testing.allocator;
+    var dummy: u8 = 0;
+    var clock: lanes.backend.WallClock = .{ .io = std.testing.io };
+    var target_b = Stub.backend_impl;
+    target_b.ptr = &dummy;
+
+    // 1) Verify DSpark Drafter facts directly enable copy_first.
+    var ds: dspark.Drafter = .{ .gpa = gpa, .target = undefined, .weights = undefined, .pipelines = undefined, .sampler = undefined, .scratch = undefined, .capacity = 64 };
+    const ds_facts = ds.drafter().facts();
+    try std.testing.expect(ds_facts.copy_first);
+    try std.testing.expectEqual(@as(u32, 7), ds_facts.depth);
+    try std.testing.expectEqual(@as(i64, 12), ds_facts.copy_match);
+    try std.testing.expect(!ds_facts.plain_guard);
+
+    // 2) Test --drafts vs --no-drafts across 1 and 2 lanes, and --drafts + DSpark --drafter.
+    for ([_]u32{ 1, 2 }) |stream_count| {
+        for ([_]bool{ true, false }) |drafts_on| {
+            var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = stream_count, .drafts = drafts_on, .budget = 0 }, .scratch = undefined, .prompt = undefined, .tokens = &.{}, .values = &.{} };
+            for (0..st.window_rows) |i| m.costs[i] = .{ .width = @intCast(i + 1), .ms = 10 + 0.5 * @as(f64, @floatFromInt(i)) };
+            m.timed = st.window_rows;
+            const mf = m.facts();
+            try std.testing.expectEqual(drafts_on, mf.copy_drafts);
+            try std.testing.expectEqual(drafts_on, mf.copy_guard);
+            try std.testing.expectEqual(drafts_on, mf.own_copy_rates);
+            try std.testing.expectEqual(@as(i64, 8), mf.copy_match);
+
+            var cfg = try lanes.Config.init(gpa, mf, st.window_rows, st.window_rows - 1);
+            defer cfg.deinit(gpa);
+            try std.testing.expectEqual(@as(u32, if (drafts_on) st.window_rows - 1 else 0), cfg.max_copy);
+            try std.testing.expectEqual(drafts_on, cfg.copy_guard);
+            try std.testing.expectEqual(drafts_on, cfg.own_copy_rates);
+            try std.testing.expectEqual(@as(i64, 8), cfg.enter_match);
+            try std.testing.expect(!cfg.family_costs.empty());
+
+            var core = lanes.Engine.init(gpa, &cfg, target_b, clock.clock());
+            defer core.deinit();
+            var host = api.LaneHost.init(gpa, std.testing.io, &core, .{
+                .lanes = stream_count,
+                .context_window = 64,
+                .prefill_step = st.prompt_rows,
+                .structures = true,
+                .logprobs = true,
+                .draft_sources = .{ .drafter = null },
+            });
+            host.stop();
+            const ds_info = host.engine().info().draft_sources;
+            try std.testing.expectEqual(drafts_on, ds_info.copies);
+            try std.testing.expect(!ds_info.mtp);
+            try std.testing.expect(ds_info.drafter == null);
+        }
+    }
+
+    var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = 2, .drafts = true, .budget = 0 }, .scratch = undefined, .prompt = undefined, .tokens = &.{}, .values = &.{} };
+    var drafted = try lanes.drafted.Drafted.init(gpa, target_b, .{ .ptr = &dummy, .vtable = &StubDrafter.vtable });
+    defer drafted.deinit();
+    const df = drafted.facts(m.facts());
+    try std.testing.expect(df.copy_drafts);
+    try std.testing.expect(df.copy_guard);
+    try std.testing.expect(df.own_copy_rates);
+    try std.testing.expect(df.copy_first);
+    try std.testing.expectEqual(@as(i64, 12), df.copy_match);
+    try std.testing.expectEqual(@as(u32, 7), df.drafts);
+
+    var cfg = try lanes.Config.init(gpa, df, st.window_rows, st.window_rows - 1);
+    defer cfg.deinit(gpa);
+    var core = lanes.Engine.init(gpa, &cfg, drafted.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(gpa, std.testing.io, &core, .{
+        .lanes = 2,
+        .context_window = 64,
+        .prefill_step = st.prompt_rows,
+        .structures = true,
+        .logprobs = true,
+        .draft_sources = .{ .drafter = .{ .kind = "DSpark", .name = "test-dspark" } },
+    });
+    host.stop();
+    const with_drafter = host.engine().info().draft_sources;
+    try std.testing.expect(with_drafter.copies);
+    try std.testing.expect(!with_drafter.mtp);
+    try std.testing.expect(with_drafter.drafter != null);
+    try std.testing.expectEqualStrings("DSpark", with_drafter.drafter.?.kind);
+    try std.testing.expectEqualStrings("test-dspark", with_drafter.drafter.?.name);
 }

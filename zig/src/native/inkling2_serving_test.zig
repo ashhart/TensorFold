@@ -375,3 +375,46 @@ test "Mini Metal verify tree matches serial target bit-for-bit across all branch
         }
     }
 }
+
+test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies and matches plain tokens" {
+    const dir = try checkpoint();
+    var why: []const u8 = "";
+    const with_copies = (try native.open(gpa, gpa, io, .{
+        .dir = dir,
+        .model_type = "inkling2_loop",
+        .context = context,
+        .lanes = 1,
+        .drafts = true,
+        .drafter = null,
+        .decode_share = 0.5,
+    }, &why)) orelse return error.MiniMetalOpenRefused;
+    defer with_copies.close(with_copies.ctx);
+    const info_on = with_copies.engine.info().draft_sources;
+    try std.testing.expect(info_on.copies);
+    try std.testing.expect(!info_on.mtp);
+    try std.testing.expect(info_on.drafter == null);
+
+    why = "";
+    const no_drafts = (try native.open(gpa, gpa, io, .{
+        .dir = dir,
+        .model_type = "inkling2_loop",
+        .context = context,
+        .lanes = 1,
+        .drafts = false,
+        .drafter = null,
+        .decode_share = 0.5,
+    }, &why)) orelse return error.MiniMetalOpenRefused;
+    defer no_drafts.close(no_drafts.ctx);
+    const info_off = no_drafts.engine.info().draft_sources;
+    try std.testing.expect(!info_off.copies);
+    try std.testing.expect(!info_off.mtp);
+    try std.testing.expect(info_off.drafter == null);
+
+    const ids = prompt(history, 1);
+    var plain = try serve(no_drafts, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
+    defer plain.deinit();
+    var copied = try serve(with_copies, 2, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
+    defer copied.deinit();
+    try std.testing.expectEqualSlices(u32, plain.tokens.items, copied.tokens.items);
+    try std.testing.expectEqual(@as(u64, 0), plain.drafted);
+}
