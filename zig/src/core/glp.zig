@@ -236,6 +236,10 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
     }
 
     var sha: [32]u8 = undefined;
+    if (file.find("glp.content_sha256")) |v| switch (v) {
+        .string => {},
+        else => return refuse(why, "glp.content_sha256 is not text", .{}),
+    };
     if (file.str("glp.content_sha256")) |claimed| {
         const all = digest(file, false) orelse return refuse(why, "the file's tensors point past its end", .{});
         const dirs = digest(file, true) orelse return refuse(why, "the file's tensors point past its end", .{});

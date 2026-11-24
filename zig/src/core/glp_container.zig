@@ -237,7 +237,7 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, problem: *Problem) Error!F
         const key = try c.string();
         const kind = std.enums.fromInt(Type, try c.u32v()) orelse
             return refuse(problem, "the container holds an unknown metadata type", .{});
-        const value = try readValue(a, &c, kind);
+        const value = try readValue(a, &c, kind, 0, problem);
         try entries.append(a, .{ .key = key, .value = value });
     }
 
@@ -265,7 +265,10 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, problem: *Problem) Error!F
     };
 }
 
-fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type) Error!Value {
+/// How many metadata arrays may nest: four levels name every value a producer writes, deeper is a recursion to refuse.
+pub const max_array_depth: u8 = 4;
+
+fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type, depth: u8, problem: *Problem) Error!Value {
     return switch (kind) {
         .u8v => .{ .u8v = try c.u8v() },
         .i8v => .{ .i8v = @bitCast(try c.u8v()) },
@@ -280,11 +283,12 @@ fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type) Error!Value {
         .i64v => .{ .i64v = @bitCast(try c.u64v()) },
         .f64v => .{ .f64v = @bitCast(try c.u64v()) },
         .array => blk: {
+            if (depth == max_array_depth) return refuse(problem, "the container's metadata arrays nest deeper than {d}", .{max_array_depth});
             const elem = std.enums.fromInt(Type, try c.u32v()) orelse return error.BadGguf;
             const n = try c.u64v();
             if (n > 1 << 20) return error.BadGguf;
             const items = try a.alloc(Value, @intCast(n));
-            for (items) |*it| it.* = try readValue(a, c, elem);
+            for (items) |*it| it.* = try readValue(a, c, elem, depth + 1, problem);
             break :blk .{ .array = .{ .elem = elem, .items = items } };
         },
     };
