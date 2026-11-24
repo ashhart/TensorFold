@@ -40,7 +40,7 @@ pub fn finalPlan(rows: usize, all: bool, taps: bool) FinalPlan {
 
 const RArgs = extern struct { count: u32, boundary: u32 = 0 };
 const NormArgs = extern struct { rows: u32, width: u32, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 };
-const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
+pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
@@ -107,30 +107,35 @@ fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, o
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
+pub const DenseStep = struct { variant: usize, rows: usize };
+
+/// Ceiling-power-of-two matvec variant for `left` rows, reading weights once per <=32 rows.
+pub fn denseStep(left: usize) DenseStep {
+    std.debug.assert(left > 0);
+    const take = @min(left, 32);
+    const variant: usize = if (take <= 1) 0 else if (take <= 2) 1 else if (take <= 4) 2 else if (take <= 8) 3 else if (take <= 16) 4 else 5;
+    return .{ .variant = variant, .rows = take };
+}
+
 /// Every projection uses the shared BF16 matvec's FP32 reduction and one BF16 store.
 pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+    encodeDense(mtl.ComputeEncoder, m, e, weight, input, out, rows);
+}
+
+/// Dispatch helper parameterized on encoder so host tests record exact launch counts and arguments.
+pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     const k = weight.shape[weight.rank - 1];
     const n = weight.shape[weight.rank - 2];
     var base: usize = 0;
     while (base < rows) {
-        const left = rows - base;
-        const take: usize = if (left >= 32) 32 else if (left >= 16) 16 else if (left >= 8) 8 else if (left >= 4) 4 else if (left >= 2) 2 else 1;
-        const variant: usize = switch (take) {
-            1 => 0,
-            2 => 1,
-            4 => 2,
-            8 => 3,
-            16 => 4,
-            32 => 5,
-            else => unreachable,
-        };
-        e.setPipeline(m.dense[variant]);
+        const step = denseStep(rows - base);
+        e.setPipeline(m.dense[step.variant]);
         e.setBuffer(input.buf, input.off + base * k * 2, 0);
         e.setBuffer(weight.buffer, weight.offset, 1);
-        e.setValue(DenseArgs{ .rows = @intCast(take), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) }, 2);
+        e.setValue(DenseArgs{ .rows = @intCast(step.rows), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) }, 2);
         e.setBuffer(out.buf, out.off + base * n * 2, 3);
         e.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
-        base += take;
+        base += step.rows;
     }
 }
 

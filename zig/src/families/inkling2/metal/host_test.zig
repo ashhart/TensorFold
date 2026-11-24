@@ -13,6 +13,7 @@ test {
     _ = @import("dspark_weights.zig");
     _ = @import("dspark_state.zig");
     _ = @import("dspark.zig");
+    _ = @import("dense_test.zig");
     _ = @import("backend.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
