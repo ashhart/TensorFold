@@ -558,6 +558,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer weight_only.destroy(a);
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
     defer families.deinit();
+    // int4's gates are family registrations, so `kernel-contract int4` selects them; the skipped-slot check is not one
+    const int4 = try @import("contract_int4_run.zig").Set.init(gpu, s, a, &kernels);
+    defer int4.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     t0.* = check.now(gpu.io);
