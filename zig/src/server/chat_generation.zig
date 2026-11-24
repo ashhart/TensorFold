@@ -113,7 +113,7 @@ pub const Generation = struct {
         const inkling = @import("chat_inkling2.zig");
         const window = if (inkling.enabled(g.srv)) inkling.stopWindow(g.stops.strings) else g.stops.tail();
         const tail = t[t.len -| window..];
-        if (inkling.enabled(g.srv)) return inkling.stopIn(g.a, g.srv.text, tail, g.stops.strings);
+        if (inkling.enabled(g.srv)) return inkling.stopIn(g.a, g.srv.text, t, window, g.stops.strings);
         const text = try g.srv.text.decode(g.a, tail);
         for (g.stops.strings) |s| if (std.mem.indexOf(u8, text, s) != null) return true;
         return false;

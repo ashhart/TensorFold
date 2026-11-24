@@ -152,7 +152,7 @@ fn appendCall(a: std.mem.Allocator, call: json.Value, ids: *std.ArrayList(u8), n
     if (f.get("arguments")) |v| if (v == .string) try arguments.appendSlice(a, v.string);
 }
 
-fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool) !Seen {
+pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool) !Seen {
     var fx = try Fixture.init(a, kind);
     defer fx.deinit();
     var problem: []const u8 = "";
