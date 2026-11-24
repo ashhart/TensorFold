@@ -7,7 +7,7 @@ const g = contract.gates;
 const rig_ = @import("rig.zig");
 const sources = @import("kernel_sources");
 
-/// A registration: the variant, its planted fault, `plan`: tf_dsv41_route_gate_plan on given logits (k 0, 12 groups).
+/// A registration: the variant, its planted fault, `plan`: tf_dsv41_route_gate_plan on given logits (k 0).
 pub const Variant = struct { kind: Kind = .backbone, ctl: u8 = 0, plan: bool = false };
 
 pub const Kind = enum { backbone, drafter };
@@ -46,7 +46,12 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .out = .f32,
         .nan = .{ .stated = "a NaN logit or bias is never picked; a +inf logit is picked at a NaN weight and its row's other weights 0" },
         .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{}, .{} },
-        .served = if (v.plan) &.{
+        .served = if (v.plan and v.kind == .drafter) &.{
+            .{ .rows = 4, .n = 128, .k = 3 },
+            .{ .rows = 1, .n = 128, .k = 3 },
+            .{ .rows = 8, .n = 128, .k = 3 },
+            .{ .rows = 16, .n = 128, .k = 3 },
+        } else if (v.plan) &.{
             .{ .rows = 4, .n = 384, .k = 6 },
             .{ .rows = 1, .n = 384, .k = 6 },
             .{ .rows = 6, .n = 384, .k = 6 },
