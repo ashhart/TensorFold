@@ -261,47 +261,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 36. Qwen normalization and head | ? | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
-| Optimization | gdsa | kimi | qwen3 |
-| --- | --- | --- | --- |
-| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) |
-| 2. Paged KV | yes | yes | no (prompt) |
-| 3. Prompt store | yes | yes | no (prompt) |
-| 4. iGPU states | no (unified) | no (unified) | no (prompt) |
-| 5. State walk | yes | yes | no (prompt) |
-| 6. KV ledger | yes | yes | no (prompt) |
-| 7. Host KV tier | yes | yes | no (prompt) |
-| 8. Disk cache | yes | yes | no (prompt) |
-| 9. FP8 KV | yes | yes | no (prompt) |
-| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) |
-| 11. Fused proj. | yes | yes | yes |
-| 12. Add + norm | done¹ | done M¹ | yes |
-| 13. MoE grouped | done¹ | done¹ | no (dense) |
-| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
-| 15. MTP | done¹ | no (DSpark) | no (prompt) |
-| 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | yes | no (prompt) |
-| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) |
-| 19. Shared drafts | yes | yes | no (prompt) |
-| 20. Solo chunks | yes | yes | no (prompt) |
-| 21. Read-ahead | no (Metal) | no (Metal) | yes |
-| 22. Direct load | yes | yes | yes |
-| 23. Page drop | done M[#1888] | yes | yes |
-| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) |
-| 25. TP ranks | yes | yes | no (small) |
-| 26. Pipeline | yes | yes | no (small) |
-| 27. Profiles | yes | yes | yes |
-| 28. Scale index | ? | ? | ? |
-| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
-| 30. Small-kernel fusion | ? | ? | ? |
-| 31. Stream-tile prefetch | ? | ? | ? |
-| 32. Filled-item prompt grid | ? | ? | ? |
-| 33. Dependent launches | ? | ? | ? |
-| 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
-| 35. FP8 KV prefill waits | ? | ? | ? |
-| 36. Qwen normalization and head | ? | ? | ? |
-| 37. Text metadata uploads | ? | ? | ? |
-| 38. Greedy readback | ? | ? | ? |
-| 39. Drafted rows share the walk | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
