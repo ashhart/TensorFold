@@ -30,6 +30,11 @@ pub fn open(h: *LaneHost, job: *Job) bool {
                 const total_len = @as(usize, handle.at) + tail.len;
                 const ctx_win: usize = if (h.info_.context_window > 0) h.info_.context_window else std.math.maxInt(usize);
                 if (total_len + 1 < ctx_win) {
+                    // the prefix is priced as any prompt is: a job its promise cannot cover is refused by name
+                    if (!@import("lane_host_ledger.zig").grow(h, job, total_len)) {
+                        fm.dropSnap(fm.ctx, handle.saved);
+                        return !h.drop(job, @import("lane_host_ledger.zig").memory_unfit);
+                    }
                     if (h.gpa.alloc(u32, total_len)) |buf| {
                         @memset(buf[0..handle.at], 0);
                         @memcpy(buf[handle.at..], tail);

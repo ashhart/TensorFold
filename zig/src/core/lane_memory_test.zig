@@ -11,6 +11,7 @@ const Box = struct {
     tokens: std.ArrayList(u32) = .empty,
     failed: bool = false,
     reason: ?api.Reason = null,
+    message: [160]u8 = @splat(0), // the finish's message, cut to fit
     fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
         const b: *@This() = @ptrCast(@alignCast(ctx));
         b.mutex.lockUncancelable(t.io);
@@ -19,7 +20,11 @@ const Box = struct {
             .tokens => |got| b.tokens.appendSlice(t.allocator, got) catch {
                 b.failed = true;
             },
-            .finished => |f| b.reason = f.reason,
+            .finished => |f| {
+                b.reason = f.reason;
+                const n = @min(f.message.len, b.message.len);
+                @memcpy(b.message[0..n], f.message[0..n]);
+            },
             else => {},
         }
     }
@@ -72,6 +77,17 @@ const request: api.Request = .{ .prompt = &prompt, .max_tokens = 12, .memory_que
 
 /// One request through a lane host over the fake target, `ctrl` attached when given; `serving`: Info.folded_memory.
 fn reply(ctrl: ?*Ctrl, serving: bool, box: *Box, prepare: ?*const fn (*lanes.Engine) void) !void {
+    return replyPriced(ctrl, serving, box, prepare, null);
+}
+
+/// `reply` on a host whose ledger holds `bytes`, a request costing its prompt rows and reply tokens (null: none).
+fn replyPriced(ctrl: ?*Ctrl, serving: bool, box: *Box, prepare: ?*const fn (*lanes.Engine) void, bytes: ?u64) !void {
+    const Cost = struct {
+        fn cost(_: *anyopaque, prompt_rows: u32, max_tokens: u32) u64 {
+            return @as(u64, prompt_rows) + max_tokens;
+        }
+    };
+    var unused: u8 = 0;
     const gpa = t.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -81,7 +97,7 @@ fn reply(ctrl: ?*Ctrl, serving: bool, box: *Box, prepare: ?*const fn (*lanes.Eng
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
     if (prepare) |p| p(&core);
-    var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2, .folded_memory = serving });
+    var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2, .folded_memory = serving, .ledger = if (bytes) |n| .{ .ctx = &unused, .total = n, .cost = Cost.cost } else null });
     if (ctrl) |c| host.folded_memory = c.controller();
     try host.start();
     defer host.stop();
@@ -179,4 +195,20 @@ test "folded memory: a prefix the backend cannot restore runs the request's own 
     try t.expectEqual(@as(u32, 1), c.dropped); // its snap given back once
     try t.expectEqualSlices(u32, plain.tokens.items, got.tokens.items);
     try t.expectEqual(plain.reason, got.reason);
+}
+
+test "folded memory: a memory prefix is priced like any prompt, and a request it cannot fit is refused by name" {
+    // the plain request costs 8 + 12 = 20 of 40 bytes; with a 30-row prefix it would cost 30 + 8 + 12 = 50
+    var plain: Box = .{};
+    defer plain.deinit();
+    try replyPriced(null, false, &plain, null, 40);
+    try t.expectEqual(api.Reason.length, plain.reason.?);
+    var c: Ctrl = .{ .handle = .{ .saved = @ptrCast(&Unrestorable.snap), .at = 30 } };
+    var got: Box = .{};
+    defer got.deinit();
+    try replyPriced(&c, true, &got, Unrestorable.install, 40);
+    try t.expectEqual(api.Reason.failed, got.reason.?);
+    try t.expectStringStartsWith(&got.message, "the memory prefix this request would run does not fit");
+    try t.expectEqual(@as(u32, 1), c.dropped);
+    try t.expectEqual(@as(usize, 0), got.tokens.items.len);
 }
