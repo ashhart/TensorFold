@@ -18,7 +18,7 @@ pub fn Cases(comptime F: type) type {
             try std.testing.expectError(error.VisionWithoutTower, F.open(a, std.testing.io, &ctx, dir, null, o));
             const words = @import("cuda_lanes_explain.zig").open(error.VisionWithoutTower).?;
             try std.testing.expectEqualStrings("--vision given but this Flash Next checkpoint has no vision tower", words);
-            try std.testing.expectEqual(@as(u64, 0), try @import("cuda_lanes_bytes.zig").visionBytes(a, std.testing.io, dir));
+            try std.testing.expectEqual(@as(u64, 0), try @import("cuda_lanes_bytes.zig").visionBytes(a, std.testing.io, dir, 0, 1));
         }
     };
 }
