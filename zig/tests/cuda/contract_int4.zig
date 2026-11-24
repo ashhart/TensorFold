@@ -1,8 +1,7 @@
-//! fn_int4.cu under the contract at the checkpoint's shapes: five controls, the epilogue's model, a skipped slot.
+//! fn_int4.cu at the checkpoint's shapes: its registrations, five controls, the epilogue's model, a skipped slot.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
-const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const ir = @import("int4_ref.zig");
 const scalar = @import("int4_controls.zig");
@@ -14,7 +13,7 @@ const grouped = cuda.grouped;
 const int4 = cuda.int4;
 
 /// The form a registration runs.
-pub const Kind = enum { gu, down_f32, down_bf16, head, prompt_down, prompt_gu };
+pub const Kind = enum { gu, down_f32, down_bf16, head, head_f32, prompt_down, prompt_down_bf16, prompt_gu };
 
 /// A planted fault: gate 4's control kernel, or a head packed with its nibbles unshuffled (gate 3 must catch it).
 pub const Fault = enum { none, bf16_group_sums, unshuffled_nibbles };
@@ -30,7 +29,7 @@ const vocab = 248320;
 const used = 8;
 /// Pairs a token row: five routed picks and the shared expert, whose slot is skipped.
 const slots = 6;
-const shared = used - 1;
+pub const shared = used - 1;
 /// The inputs whose mirror carries the nudge: small, so the nudge 4 is exact in bf16 at their size.
 const nudged = 8;
 /// Gate 4's bf16 proof of a bf16 SwiGLU output: a mirrored row's bf16 sum is 0 in the halves order, missing by want.
@@ -49,17 +48,17 @@ fn depth(s: c.Shape) usize {
 
 fn tiles(e: Entry) [3]c.Tile {
     return switch (e.kind) {
-        .head => .{ .{}, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
-        .prompt_down, .prompt_gu => .{ .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
+        .head, .head_f32 => .{ .{}, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
+        .prompt_down, .prompt_down_bf16, .prompt_gu => .{ .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
         else => .{ .{ .size = 16, .step = 1, .min = 1 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
     };
 }
 
 fn served(e: Entry) []const c.Shape {
     return switch (e.kind) {
-        .head => &head_rows,
+        .head, .head_f32 => &head_rows,
         .down_f32, .down_bf16 => if (e.tile == int4.prompt_tile) &prompt_rows else &down_rows,
-        .prompt_down => &prompt_down_rows,
+        .prompt_down, .prompt_down_bf16 => &prompt_down_rows,
         else => if (e.tile == int4.prompt_tile) &prompt_rows else &up_rows,
     };
 }
@@ -69,6 +68,7 @@ fn replaces(e: Entry) ?[]const u8 {
     if (e.fault != .none) return null;
     return switch (e.kind) {
         .prompt_down => "the routed down of 16-pair items",
+        .prompt_down_bf16 => "the routed down of 16-pair items to bf16",
         .prompt_gu => "the routed gate/up of 16-pair items",
         else => null,
     };
@@ -85,8 +85,8 @@ pub fn spec(e: Entry) c.Spec {
             s.mids = 3;
             s.sums = .{ .bf16 = 60, .why = gate_up_why };
         },
-        .down_bf16, .head => s.out = .bf16,
-        .down_f32, .prompt_down => {},
+        .down_bf16, .head, .prompt_down_bf16 => s.out = .bf16,
+        .down_f32, .prompt_down, .head_f32 => {},
     }
     return s;
 }
@@ -97,7 +97,9 @@ pub const entries = [_]Entry{
     .{ .name = "cuda int4 routed down to fp32 (int4_kernel)", .kind = .down_f32 },
     .{ .name = "cuda int4 routed down to bf16 (int4_kernel)", .kind = .down_bf16 },
     .{ .name = "cuda int4 lm head to bf16 (int4_kernel, dense items)", .kind = .head },
+    .{ .name = "cuda int4 lm head to fp32 (int4_kernel, dense items)", .kind = .head_f32 },
     .{ .name = "cuda int4 routed down to fp32 (int4_prompt_kernel, 64-pair items)", .kind = .prompt_down },
+    .{ .name = "cuda int4 routed down to bf16 (int4_prompt_kernel, 64-pair items)", .kind = .prompt_down_bf16 },
     .{ .name = "cuda int4 routed gate/up SwiGLU (int4_prompt_kernel, 64-pair items)", .kind = .prompt_gu },
     .{ .name = "cuda int4 routed gate/up SwiGLU (the epilogue's scalar model, int4_controls)", .kind = .gu, .gu = .epilogue },
     .{ .name = "control: int4 routed down with each group's sum rounded to bf16", .kind = .down_f32, .fault = .bf16_group_sums },
@@ -181,7 +183,12 @@ pub const Fixture = struct {
     }
 
     fn prompt(self: *const Fixture) bool {
-        return self.entry.kind == .prompt_down or self.entry.kind == .prompt_gu;
+        return self.entry.kind == .prompt_down or self.entry.kind == .prompt_down_bf16 or self.entry.kind == .prompt_gu;
+    }
+
+    /// The head's dense rows: one matrix, a row a row, either store width.
+    fn denseForm(self: *const Fixture) bool {
+        return self.entry.kind == .head or self.entry.kind == .head_f32;
     }
 
     fn elem(self: *const Fixture) usize {
@@ -238,7 +245,7 @@ pub const Fixture = struct {
     }
 
     fn x_rows(self: *const Fixture) usize {
-        return if (self.entry.kind == .head) self.shape.rows else self.pairs;
+        return if (self.denseForm()) self.shape.rows else self.pairs;
     }
 
     /// Random or planted rows, the checkpoint matrices of the shape, the plan at the entry's tile and the buffers.
@@ -256,7 +263,7 @@ pub const Fixture = struct {
         self.pairs = shape.rows * slots;
         try self.matrices(a, shape.n, shape.k, seed);
         // the rows in: gate/up read a token row a pair, down reads its own row a pair, the head a row
-        const rows = if (self.entry.kind == .head) shape.rows else self.pairs;
+        const rows = if (self.denseForm()) shape.rows else self.pairs;
         self.x = try a.alloc(u16, rows * shape.k);
         for (self.x) |*v| v.* = c.toBf16(rng.float(f32) * 2 - 1);
         self.ids = try a.alloc(i32, @max(1, self.pairs));
@@ -325,8 +332,10 @@ pub const Fixture = struct {
             .gu => try int4.gateUp(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, sh.rows, self.skip, self.entry.tile),
             .down_f32, .down_bf16 => try int4.down(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, self.entry.kind == .down_f32, sh.rows, self.skip, self.entry.tile),
             .prompt_down => try int4.downPrompt(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, true, sh.rows, self.skip),
+            .prompt_down_bf16 => try int4.downPrompt(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, false, sh.rows, self.skip),
             .prompt_gu => try int4.gateUpPrompt(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, sh.rows, self.skip),
             .head => try int4.dense(self.kx, self.rig.s, self.xd, sh.k, self.mat, self.out, false, sh.rows),
+            .head_f32 => try int4.dense(self.kx, self.rig.s, self.xd, sh.k, self.mat, self.out, true, sh.rows),
         }
     }
 
@@ -361,7 +370,7 @@ pub const Fixture = struct {
     }
 
     pub fn count(self: *Fixture) usize {
-        return if (self.entry.kind == .head) self.shape.rows * self.shape.n else self.pairs * self.shape.n;
+        return if (self.denseForm()) self.shape.rows * self.shape.n else self.pairs * self.shape.n;
     }
 
     /// The rows a pair's products read: its token row for gate/up, its own row for down.
@@ -399,7 +408,7 @@ pub const Fixture = struct {
         const d = depth(self.shape);
         // gate 4's stress inputs are integers whose partial sums are exact in fp32 in any order
         const ex = self.fill == .stress;
-        if (self.entry.kind == .head) {
+        if (self.denseForm()) {
             for (0..self.shape.rows) |r| for (0..self.shape.n) |j| {
                 self.headTerms(r, j, t);
                 var sum: f64 = 0;
@@ -454,7 +463,7 @@ pub const Fixture = struct {
         defer self.rig.gpu.gpa.free(t);
         const u = try self.rig.gpu.gpa.alloc(f64, self.shape.k);
         defer self.rig.gpu.gpa.free(u);
-        if (self.entry.kind == .head) {
+        if (self.denseForm()) {
             for (0..self.shape.rows) |r| for (0..self.shape.n) |j| {
                 self.headTerms(r, j, t);
                 out[r * self.shape.n + j] = contract.rows.sumIn(acc, order, t);
@@ -478,6 +487,7 @@ pub const Fixture = struct {
         const sh = self.shape;
         switch (self.entry.kind) {
             .prompt_down => try int4.down(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan16, slots, 512, self.base, true, sh.rows, -1, int4.plan_tile),
+            .prompt_down_bf16 => try int4.down(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan16, slots, 512, self.base, false, sh.rows, -1, int4.plan_tile),
             .prompt_gu => try int4.gateUp(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan16, slots, 512, self.base, sh.rows, -1, int4.plan_tile),
             else => return error.NoBaseline,
         }
@@ -499,97 +509,6 @@ fn packRaw(src: int4.Source, sl: int4.Slice, out: []u32) !void {
             at += 1;
         }
     };
-}
-
-/// Every registration, its modules and its launched control.
-pub const Set = struct {
-    gpa: std.mem.Allocator,
-    kx: int4.Kernels,
-    mod: cuda.Module,
-    ctl: cuda.Module,
-    items: [entries.len]Fixture = undefined,
-
-    const controls = struct {
-        pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
-    };
-
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
-        const set = try gpu.gpa.create(Set);
-        errdefer gpu.gpa.destroy(set);
-        var kx = try int4.Kernels.load(gpu.d);
-        errdefer kx.deinit();
-        var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
-        errdefer mod.unload();
-        var ctl = try cuda.Module.load(gpu.d, &controls.bytes);
-        errdefer ctl.unload();
-        set.* = .{ .gpa = gpu.gpa, .kx = kx, .mod = mod, .ctl = ctl };
-        const router = try grouped.Router.resolve(set.mod);
-        const sums = try set.ctl.function("tf_ctl_int4_bf16_sums");
-        const gu_kernel = try set.ctl.function("tf_ctl_int4_swiglu");
-        for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .kx = &set.kx, .router = router, .ctl = if (e.fault == .bf16_group_sums) sums else null, .gu_ctl = if (e.gu != null) gu_kernel else null };
-        for (&set.items) |*x| try list.append(a, x.kernel());
-        return set;
-    }
-
-    pub fn deinit(set: *Set) void {
-        for (&set.items) |*x| x.deinit();
-        set.ctl.unload();
-        set.mod.unload();
-        set.kx.deinit();
-        set.gpa.destroy(set);
-    }
-};
-
-/// A plan whose shared expert's slot is skipped: those rows stay 0xff, and every other row equals the all-live run.
-fn skipped(set: *Set) !void {
-    const a = set.gpa;
-    var f = Fixture{ .rig = .{ .gpu = set.items[0].rig.gpu, .s = set.items[0].rig.s }, .entry = entries[0], .kx = &set.kx, .router = set.items[0].router };
-    defer f.deinit();
-    const sh: c.Shape = .{ .rows = 16, .n = width, .k = dims };
-    if (!try f.prepare(sh, .random, 0x51ce)) return check.expect(false, "int4 skipped slot: refused a served shape", .{});
-    const all = f.out;
-    try f.launch();
-    try f.rig.s.synchronize();
-    const want = try a.dupe(u8, try f.rig.bytes(all, f.count() * 2));
-    defer a.free(want);
-    f.out = try f.rig.output(f.count() * 2);
-    f.skip = shared;
-    try f.launch();
-    try f.rig.s.synchronize();
-    const got = try f.rig.bytes(f.out, f.count() * 2);
-    var skipped_rows: usize = 0;
-    var differ: usize = 0;
-    for (0..f.pairs) |p| {
-        const row = got[p * sh.n * 2 ..][0 .. sh.n * 2];
-        const live = f.ids[p] != shared;
-        if (live) {
-            if (!std.mem.eql(u8, row, want[p * sh.n * 2 ..][0 .. sh.n * 2])) differ += 1;
-            continue;
-        }
-        skipped_rows += 1;
-        // the skip run leaves the row at its poison, and the all-live run wrote it: a 0xff byte is a value too
-        const base = want[p * sh.n * 2 ..][0 .. sh.n * 2];
-        if (std.mem.indexOfNone(u8, row, &.{0xff}) != null or std.mem.indexOfNone(u8, base, &.{0xff}) == null) differ += 1;
-    }
-    try check.expect(skipped_rows > 0, "int4 skipped slot: the plan has no skipped pair", .{});
-    try check.expect(differ == 0, "int4 skipped slot: {d} of {d} skipped rows differ from the all-live run", .{ differ, skipped_rows });
-    std.debug.print("PASS int4 skipped slot: {d} of {d} pair rows left at 0xff, the others byte-equal to the all-live run\n", .{ skipped_rows, f.pairs });
-}
-
-/// The int4 kernel's gates 1-4, its controls and the skipped expert's rows alone.
-pub fn run(gpu: check.Gpu) !void {
-    const a = gpu.gpa;
-    var s = try cuda.Stream.init(gpu.d, false);
-    defer s.deinit();
-    var list: std.ArrayList(g.Kernel) = .empty;
-    defer list.deinit(a);
-    const set = try Set.init(gpu, s, a, &list);
-    defer set.deinit();
-    var t: g.Tally = .{};
-    try g.runAll(a, list.items, 0x696e7434, &t);
-    try skipped(set);
-    std.debug.print("SUMMARY int4: {d} kernels, {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed\n", .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed });
-    try check.expect(t.problems() == 0, "int4 contract: {d} gate failures, {d} controls missed", .{ t.failed, t.missed });
 }
 
 test "every control is named one, and only the controls plant a fault" {
