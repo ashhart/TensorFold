@@ -84,28 +84,36 @@ Cold prompts (`bench_cache.py --require-cold --repeats 3`, `--prompt-cache-gib 0
 
 ## EAGLE-3 drafter
 
-`--drafter DIR` loads `josch15366/Kolibri-1-EAGLE3-drafter` (revision `6430e5dc74`): one decoder layer over Kolibri's
-layers 45, 48 and 50, a 32,768-token draft vocabulary, bf16. It runs on the shared CUDA operators (no kernels of its
-own) through the lane core's drafter interface, two drafts a round. Every draft is verified by the target, so replies
-are the same tokens as without it, greedy and seeded, at any stream count. `--drafter-bits` takes 0 or 4 (the
-default); both serve the release as published.
+`--drafter DIR` loads `josch15366/Kolibri-1-EAGLE3-drafter` at revision `6430e5dc7453dd4ea57022a4cde46178afe89094`
+(`model.safetensors` sha256 `5f1f38bf3d303faa119e7348f1a6ba4128db9d4febfc23eaaf9310e7a3c7187e`). Its model card
+releases the weights under Apache-2.0 and notes that part of its German training text (`mayflowergmbh/alpaca-gpt4_de`)
+states no licence and derives from CC BY-NC 4.0 data; TensorFold's licence does not cover the weights. It is one
+decoder layer over Kolibri's layers 45, 48 and 50, a 32,768-token draft vocabulary, bf16. It runs on the shared CUDA
+operators (no kernels of its own) through the lane core's drafter interface, two drafts a round. Every draft is
+verified by the target, so replies are the same tokens as without it, greedy and seeded, at any stream count.
+`--drafter-bits` takes 0 or 4 (the default); both serve the release as published.
 
 Refused at load, by name, before any request is queued: a release of another architecture (the block drafter
 `josch15366/Kolibri-1-block-drafter` is not served on CUDA), a release for another target, a draft vocabulary or
 tensor shape that does not match the release's config, a stream opened before the drafter, and a CUDA memory budget
 that leaves less than the drafter's weights, scratch and caches need (computed from its config before anything is
-allocated; about 0.44 GiB with one stream).
+allocated: about 0.44 GiB with one stream, plus a 23 MiB slot for each further stream a fixed `--parallel` asks, plus
+the first stream's paged window). `--parallel 1`, `2` and `3` time the rounds their slots can take.
 
-GB10, greedy, 24 prompts of 256 tokens. Each stream count ran alone on freshly started servers (page cache dropped
-before each start), A-B-B-A-A-B-B-A, with main's copy drafts as A; all eight servers gave the same replies:
+GB10, 24 prompts of 256 tokens, a distinct prompt per stream. Each stream count ran alone, every run on a freshly
+started server (page cache dropped before each start): a noise floor from 3 rounds of main against itself, then 5
+rounds of A-B-B-A with main's copy drafts as A. Every run of both arms gave the same replies.
 
-| streams | copy drafts, tok/s | with `--drafter`, tok/s | paired median | tokens a round |
-| --- | ---: | ---: | ---: | ---: |
-| 1 | 51.2 | 65.1 | +27.0 % | 1.07 -> 1.97 |
-| 4 | 109.6 | 114.6 | +4.9 % | 1.07 -> 1.62 |
-| 8 | 142.0 | 139.5 | -1.9 % | 1.07 -> 1.65 |
+| cell | copy drafts | with `--drafter` | median gap | noise floor | rounds worse |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 stream, greedy, tok/s | 51.3 | 65.4 | +27.9 % | 0.6 % | 0 of 5 |
+| 1 stream, default sampling, tok/s | 52.6 | 69.5 | +32.1 % | 0.8 % | 0 of 5 |
+| 4 streams, tok/s | 108.7 | 113.2 | +4.1 % | 0.4 % | 0 of 5 |
+| 8 streams, tok/s | 139.1 | 136.5 | -1.9 % | 1.4 % | 5 of 5 |
+| cold 7,900-token prompt, first token, s | 3.64 | 5.16 | -41.8 % | 0.5 % | 5 of 5 |
 
-The lane core prices a drafter round (the target's rows, timed at load, and the drafter's own pass, timed by streams
-and depth) against a round with copy drafts only, and drafts less where the drafter does not pay. At 8 streams the
-drafter is still slower in all four A-B pairs: the mean request finishes sooner, but streams whose drafts rarely
-land share the dearer drafted rounds and finish later (slowest request 18.6-20.5 s against 15.1 s).
+Tokens a round: 1.07 with copy drafts; with the drafter about 2.0, 1.63 and 1.66 at 1, 4 and 8 streams.
+
+Two cells are slower. At 8 streams, the drafter's absorb pass (it reads the drafter's weights every round, about
+1 ms) costs more than the drafts gain. On a cold prompt, the drafter absorbs every prompt row in 32-row
+`dense_rows` tiles, about 0.19 ms a row (1.4 of the 1.5 s, by nsys).
