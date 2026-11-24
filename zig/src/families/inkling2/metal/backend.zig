@@ -7,8 +7,15 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const img = @import("images.zig");
+const dspark = @import("dspark.zig");
+const dspark_state = @import("dspark_state.zig");
 const cfg = @import("../config.zig");
 const be = lanes.backend;
+
+const SavedSnap = struct {
+    target: snapshot.Snap,
+    dspark: ?dspark_state.Snap = null,
+};
 
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null };
 const ring = 4096;
@@ -39,6 +46,7 @@ pub const Metal = struct {
     prepared: bool = false,
     sink: ?be.FeatureSink = null,
     tap_gen: u64 = 0,
+    drafter: ?*dspark.Drafter = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -236,14 +244,25 @@ pub const Metal = struct {
         errdefer _ = self.caches.remove(stream);
         stream.cached = 0;
         if (stream.reuse.saved) |saved| {
-            const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < ids.len) {
-                if (snapshot.restore(cache, self.model.queue, snap)) stream.cached = @intCast(snap.at) else |_| stream.reuse_failed = true;
+            const snap: *const SavedSnap = @ptrCast(@alignCast(saved));
+            if (snap.target.at < ids.len) {
+                if (self.restoreSnap(cache, stream, snap)) {
+                    stream.cached = @intCast(snap.target.at);
+                } else |_| {
+                    cache.len = 0;
+                    if (self.drafter) |d| d.resetLane(stream);
+                    stream.reuse_failed = true;
+                }
             } else stream.reuse_failed = true;
         }
         var pictures = try img.Rows.init(self.gpa, self.options.images, stream, cache.len);
         defer pictures.deinit();
         try self.feed(cache, ids[cache.len..], stream, &pictures);
+    }
+
+    fn restoreSnap(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, snap: *const SavedSnap) !void {
+        if (self.drafter) |d| try d.restoreSnap(stream, if (snap.dspark) |*ds| ds else null, snap.target.at);
+        try snapshot.restore(cache, self.model.queue, &snap.target);
     }
 
     pub fn warm(self: *Metal) !void {
@@ -380,17 +399,22 @@ pub const Metal = struct {
     }
 
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        _ = ptr;
-        return snapshot.bytes(at);
+        const self = cast(ptr);
+        return snapshot.bytes(at) + if (self.drafter != null) dspark_state.Snap.bytes(at) else 0;
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const self = cast(ptr);
-        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
+        const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
-        const snap = try self.gpa.create(snapshot.Snap);
+        const snap = try self.gpa.create(SavedSnap);
         errdefer self.gpa.destroy(snap);
-        snap.* = try snapshot.save(self.model.device, self.model.queue, cache);
+        snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };
+        errdefer snap.target.free();
+        if (self.drafter) |d| {
+            snap.dspark = try d.saveSnap(stream, at, cache.tap, self.tap_gen);
+        }
         return snap;
     }
 
@@ -399,8 +423,9 @@ pub const Metal = struct {
     }
 
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-        snap.free();
+        const snap: *SavedSnap = @ptrCast(@alignCast(saved));
+        if (snap.dspark) |*ds| ds.free();
+        snap.target.free();
         cast(ptr).gpa.destroy(snap);
     }
 };
