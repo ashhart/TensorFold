@@ -1,7 +1,7 @@
 //! Qwen's prepared extents leave and rejoin one residency set without changing buffer identity.
 const std = @import("std");
 const mtl = @import("metal");
-const q = @import("qwen27_engine.zig");
+const q = @import("tensorfold").qwen27;
 
 fn Adapter(comptime H: type) type {
     return struct {
