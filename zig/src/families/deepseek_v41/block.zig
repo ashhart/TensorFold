@@ -36,6 +36,8 @@ pub const Widths = struct {
 
 /// Run-time sizes fixed at load (scratch and pools), and the L2 prefetch settings.
 pub const Options = struct {
+    /// how the checkpoint stores its projections (config.json): the emitter's projection bodies follow it
+    format: @import("config.zig").Format = .exl3,
     /// TF_DSV41_IMAGES=native: this prefill segment holds image positions, so Engram fuses with a keep vector
     image_keep: bool = false,
     /// TF_DSV41_BIAS_VL: the segment's image rows (MoE call apart, gate.bias_vl); 0: none; < 0: the buffer plan's

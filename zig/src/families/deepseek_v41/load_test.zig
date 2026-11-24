@@ -226,7 +226,7 @@ test "production loader refuses unsupported expert route before allocating an im
     var prefixes = [_][]const u8{"p"};
     var words = [_]u16{112};
     var offsets = [_]u64{0};
-    const expert: plans.ExpertsPlan = .{ .proj = .w1, .parts = &parts, .prefixes = &prefixes, .layout = .{ .kind = .stack, .k_tiles = 8, .n_tiles = 8, .words = &words, .offsets = &offsets, .elements = 7168 } };
+    const expert: plans.ExpertsPlan = .{ .proj = .w1, .form = .{ .exl3 = .{ .parts = &parts, .prefixes = &prefixes, .layout = .{ .kind = .stack, .k_tiles = 8, .n_tiles = 8, .words = &words, .offsets = &offsets, .elements = 7168 } } } };
     var layers = [_]plans.LayerPlan{.{ .index = 0, .prefix = "layers.0", .mode = .full, .groups = &.{}, .natives = &.{}, .experts = @splat(expert), .gate_up_mismatch = 0 }};
     const plan: plans.Plan = .{ .arena = undefined, .rank = 0, .world = 1, .layers = &layers, .top = &.{}, .head = null, .dspark = null, .leftovers = &.{} };
     var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });

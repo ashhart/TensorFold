@@ -30,7 +30,7 @@ pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan)
     for (p.layers) |*l| {
         var r: [2][2]u32 = .{ .{ 99, 0 }, .{ 99, 0 } };
         for ([_]usize{ 0, 2, 1 }, [_]usize{ 0, 0, 1 }) |proj, slot| {
-            for (l.experts[proj].layout.words) |words| {
+            for (l.experts[proj].form.exl3.layout.words) |words| {
                 r[slot][0] = @min(r[slot][0], words / 8);
                 r[slot][1] = @max(r[slot][1], words / 8);
             }
@@ -41,7 +41,7 @@ pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan)
         try out.experts.put(a, l.index, r);
         // x3gm's widths present: the routed experts' gate (w1) and down (w2) K2s, the shared expert not among them
         var gm: [2]u32 = .{ 0, 0 };
-        for (0..2) |proj| for (l.experts[proj].layout.words) |words| {
+        for (0..2) |proj| for (l.experts[proj].form.exl3.layout.words) |words| {
             gm[proj] |= @as(u32, 1) << @intCast(words / 8);
         };
         try out.gm.put(a, l.index, gm);
