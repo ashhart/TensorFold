@@ -35,12 +35,19 @@ the pack/source metadata and tokenizers, the chat template and the generated tok
   refused admission: 235727027864 resident bytes plus 8589934592 margin exceeded the 230553780224-byte allowance.
   The comparison therefore pins **4096 workspace rows in both arms** instead of raising the machine's limit.
 
-The 73-test family record predates the final core fallback fix. The final standalone projection target,
-`zig build test-exl3-gpu -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all`, ran on the qualification tree:
-**36 passed, 3 failed, 39 total; exit 1**. The parent target returned **21 passed, 6 failed, 27 total; exit 1**.
-All three remaining failing test cases also fail on the parent: mixed-width routed/dense bit parity,
-packed-sign filtered/dense BF16 parity, and grouped/scattered versus separate projection bit parity.
-They remain merge gates; neither complete projection suite is reported as passing.
+The 73-test family record predates the final core fallback fix. On the qualification tree `128cfe743a`,
+`zig build test-exl3-gpu -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all` returned
+**36 passed, 3 failed, 39 total; exit 1**; the parent returned **21 passed, 6 failed, 27 total; exit 1**.
+The three failures, which also fail on the parent, were these tests in `zig/src/core/exl3_projection_gpu_test_decode.zig`:
+
+| Failure | Test | Line |
+|---|---|---|
+| mixed-width routed/dense bit parity | `GPU router descriptors select mixed-width experts with gather and scatter without host routing` | 135 |
+| packed-sign filtered/dense BF16 parity | `packed signs and GPU expert filtering preserve untouched output slots` | 182 |
+| grouped/scattered versus separate projection bit parity | `caller-prepared grouped expert tiles preserve scatter slots and ignore padding` | 280 |
+
+Their assertions have not changed since; the projection-order repair below makes all three pass.
+Current results are under "Projection suites at the current head".
 The indexed odd/wide scalar-reference check, tiled/table bit checks and new chain/MoE fusion checks pass.
 The final native rebuild passed 66/66 build steps. Raw build/server logs are not published because they contain
 local filesystem paths; [operator-checks.json](operator-checks.json) records the scoped outcomes.
@@ -146,6 +153,29 @@ Scalar gate 5 passes with 32 launch threads, 1536 threadgroup bytes and a live 1
 The actual M1/M2 offline compiler also reports 1024 for this body; that is not M1/M2 runtime qualification.
 Final integrated M5 projection/chain/native checks pass 47/47 tests in 63/63 build steps. Their resource checks
 report no findings; each limits run catches both real oversized-resource controls.
+
+#### Projection suites at the current head
+
+`zig build test-exl3-gpu test-deepseek-v41 -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all` at `bab2613de8`:
+
+| Machine | `test-exl3-gpu` | `test-deepseek-v41` |
+|---|---|---|
+| M5 Ultra, 64 GPU cores | 41 passed, 0 skipped | 74 passed, 0 skipped |
+| M4 Pro, no tensor units | 40 passed, 1 skipped | 70 passed, 4 skipped |
+
+At #3736's head `e880b33471` the M5 Ultra runs pass 41/41 and 77/77, with no skips.
+Every M4 skip is a tensor-unit path that M4 never selects, so the M4 runs say nothing about the tensor path:
+
+- `the shared expert's down inside the routed down call keeps every bit of the two separate calls`: the merged shared-down
+  call is taken only when the tensor-unit decode pipelines exist (`canMergeDenseRows`);
+- `the decode chain is bit-identical on a concurrent encoder`;
+- `the tensor-unit prompt kernel matches the scalar kernel on constant keys` and `... on random packed keys`;
+- `batched decode windows match the per-slot chain bit for bit` (`attention_rows_test.zig`, gated on `device.tensorUnits()`).
+
+The M5 Ultra runs execute all of them. The two prompt-kernel tests are tolerance tests, not exactness tests: on the
+M5 Ultra the tensor-unit sparse prompt kernel matches the scalar kernel on 257024 of 262144 outputs (98.05%) with
+constant keys, worst relative error 7.7e-3, and on every output with random, huge and tiny keys; the bounds are 98%
+and 0.02. No exactness claim is made for that kernel.
 
 ## Chain contract on M4
 
@@ -479,9 +509,31 @@ candidate is the final tree and the parent is #2373's head; the arithmetic diffe
 The candidate is faster than the parent at every count, by 35% at eight short streams and 63% at eight long ones. Raising
 `BATCH_MAX` to 8 is 13% slower at eight short streams and 3% slower at eight long ones, so the default of 4 stays.
 
-Still open: the parent's review gates (code provenance and copy rule, integration), ATC coverage (the board is incomplete),
-runtime on M1, M2 and M3 chips, the native window, a comparison against `mlx_lm`, and a source-matched no-slowdown
-comparator against the parent.
+#### Which served results describe the current head
+
+The attention repairs (the batched split-merge head count, `6aa834fdb4`, and the split-boundary scan mask, `efdf7a464e`)
+and the last-row and Sinkhorn repairs (`efdf7a464e`) change served arithmetic. Results measured before them are history:
+the initial served comparison (`e070123319`), the first MTP-only probe, the cold default-policy and 1048576-context runs,
+and the 41 replies measured before the Sinkhorn repair.
+
+The final qualification on `a80eddd9a6` has all four repairs. Two later commits change engine arithmetic:
+`d62498c304` (a fused gate+up call of 65 to 112 descriptors, a window or prompt chunk of five to eight tokens, now keeps
+the one-row body) and `c56e962f4f` (barriers that act only under `TF_DSV41_CONCURRENT`).
+
+- Measured on `a80eddd9a6`, not re-measured on this head: the plain greedy and sampled hashes, resumed against fresh,
+  the 128k run, the cold-prompt table, the parent table and the eight-stream table. Plain decode makes one-row calls,
+  which neither commit changes; `d62498c304` reaches these runs only where a prompt call had five to seven rows.
+  On the eight reference and ten code prompts the default configuration's hashes were unchanged by it.
+- No longer describe this head: the drafted replies and their speed (95.2 and 94.3 tok/s). Before `d62498c304` a
+  four-draft window switched bodies mid-window; they need a rerun.
+
+Still open:
+- Copy rule from #2373: the projection kernels and Metal drafter its review traced to mlx-serve are #2373's code
+  (authors preserved in this branch's history); their independence is not shown. This stack's own commits are separate
+  and proposed on top of them.
+- The served drafted results need a rerun after `d62498c304`; the receipts README lists which served results
+  still describe this head.
+- Runtime on M1, M2 and M3, a comparison against `mlx_lm`, and a source-matched no-slowdown comparator against the parent.
 
 
 
