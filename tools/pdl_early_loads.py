@@ -4,9 +4,9 @@
 ptxas may schedule a non-coherent load (const __restrict__, __ldg) above griddepcontrol.wait (ACQBULK); under a
 dependent launch that reads the predecessor's data early. Every function compiled for sm_90 or later must issue no
 global read before its first ACQBULK, and wait at all unless it is a plain-only entry (PLAIN); only the
-weight-first bodies (qmmf_kernel, glm_mm's matmuls) may start their weights' async copies there. The wait must hold
-on every path: no predicated ACQBULK, and no branch before it to past it except to an EXIT. Exit 1 on any early
-read, a failed disassembly, or images with no such function.
+weight-first bodies (qmmf_kernel, its FP8 QKV/Z pair, and glm_mm's matmuls) may start their weights' async copies
+there. The wait must hold on every path: no predicated ACQBULK, and no branch before it to past it except to an
+EXIT. Exit 1 on any early read, a failed disassembly, or images with no such function.
 """
 import re
 import subprocess
@@ -14,7 +14,7 @@ import sys
 
 READ = re.compile(r"\b(LDG|LD|ULDG|TEX|TLD|TLD4|TXD|TMML|SULD)\b(?=[.\s])")
 ASYNC = re.compile(r"\b(LDGSTS|UBLKCP|UTMALDG|UBLKPF)\b")
-WEIGHT_FIRST = re.compile(r"qmmf_kernel|^glm_mm\d+_(\d+|rows)$")
+WEIGHT_FIRST = re.compile(r"qmmf_kernel|^tf_qmmf_fp8_qkv_z$|^glm_mm\d+_(\d+|rows)$")
 ADDR = re.compile(r"/\*([0-9a-f]{4,})\*/")
 BRANCH = re.compile(r"\b(BRA|BRX|BRXU|JMP|JMX|JMXU|CALL)\b(\S*)\s+(.*?);")
 PLAIN = re.compile(r"qmmf_prompt_k32_kernel|^tf_qmmf_shared|^tf_qmmf_native_fp4_check$|^tf_q35_(embed8?|splice|sums|conv_commit|gdn_chain|attn_merge|attn_partial|attn_rows|attn_rows_join|attn_partial_whole|attn_rows_whole)$")  # launched plain only

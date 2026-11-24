@@ -403,6 +403,7 @@ below; these are estimates for planning a port, not results.
 11. **Projections that share an input, in one launch.** Projections that read the same input (q/k/v/gate, gate/up)
     run as one grouped launch or one fused GEMM, byte-equal to separate launches. [#1783] does this for affine-4
     decode and verify on GB10; [#1439] runs up to four BF16 prompt projections in one grid on Qwen3.8.
+    On `sm_120`, the 16-row Qwen3.8 NVFP4 Gated DeltaNet path pairs the scalar FP8 QKV and Z projections in one launch.
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |

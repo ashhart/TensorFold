@@ -71,6 +71,39 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
 #undef TF_QMMF_WFIRST
 }
 
+template <int WN>
+__device__ __forceinline__ void fp8_qkv_z(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ qkv,
+        const unsigned char* __restrict__ z, void* __restrict__ yq, void* __restrict__ yz,
+        float qs, float zs) {
+    constexpr int MODE = FP8, BM = 16, BN = 64, WM = 1, STAGES = 4;
+    constexpr int M = 16, K = 5120, SK = 2, ldx = K, group = 1;
+    constexpr bool F32 = false, CLUSTER = true, FUSE = false;
+    constexpr int qkv_tiles = 10240 / BN;
+    const bool second = blockIdx.x >= qkv_tiles;
+    const int tile = blockIdx.x - (second ? qkv_tiles : 0);
+    const int N = second ? 6144 : 10240;
+    const auto* w = second ? z : qkv;
+    void* out = second ? yz : yq;
+    const float scale = second ? zs : qs;
+    const uint8_t* bs = nullptr;
+    float* part = nullptr;
+    qmm_frag::grid_launch();
+#define TF_QMMF_WFIRST
+#define TF_QMMF_TILE_INDEX tile
+#include "qmmf_body.cuh"
+#undef TF_QMMF_TILE_INDEX
+#undef TF_QMMF_WFIRST
+}
+
+// Adjacent column grids share a launch; each cluster still reduces one projection's K slices.
+extern "C" __global__ void __launch_bounds__(128) tf_qmmf_fp8_qkv_z(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ qkv,
+        const unsigned char* __restrict__ z, void* __restrict__ yq, void* __restrict__ yz,
+        float qs, float zs) {
+    fp8_qkv_z<4>(x, qkv, z, yq, yz, qs, zs);
+}
+
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
 #define TF_SHARED_DOWN(NAME, BM, BN) \
 extern "C" __global__ void __launch_bounds__(128) NAME( \

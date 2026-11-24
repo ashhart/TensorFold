@@ -13,6 +13,7 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 
 pub const group = 64; // inputs a kernel stage reads
+pub const Fp8Pair = @import("qmmf_pair.zig").Pair;
 pub const fused_rows = 256; // rows from which a projection's K slices meet in one block (linear.py FUSED_ROWS)
 const bn = 64;
 const threads = 128; // WM 1 x WN 4 warps

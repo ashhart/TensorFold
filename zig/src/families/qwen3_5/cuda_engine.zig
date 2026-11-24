@@ -284,7 +284,7 @@ pub const Engine = struct {
             defer stage.free();
             try weights.load(e, &ck, &stage);
         }
-        if (e.mo) |*m| try m.reserveParts(e);
+        if (e.mo) |*m| try m.prepare(e, @intCast(10 * major + minor));
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }

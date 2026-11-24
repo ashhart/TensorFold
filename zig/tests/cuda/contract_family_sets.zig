@@ -5,6 +5,7 @@ const check = @import("check.zig");
 const g = @import("core").contract.gates;
 
 const Prompt = @import("contract_qmmf_prompt.zig").Registrations;
+const Fp8Pair = @import("contract_qmmf_fp8_pair.zig").Registrations;
 const SharedDown = @import("contract_qmmf_shared.zig").Registrations;
 const Grouped = @import("contract_gb10_many.zig").Registrations;
 
@@ -22,6 +23,7 @@ pub const Sets = struct {
     flashnext: *@import("contract_flashnext_more.zig").Set,
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
+    fp8_pair: ?*Fp8Pair,
     prompt: *Prompt,
     muse: *@import("contract_muse.zig").Group,
     a: std.mem.Allocator,
@@ -64,6 +66,8 @@ pub const Sets = struct {
         try exl3.add(gpu, s, list);
         const shared_down = try SharedDown.create(gpu, s, &modelopt.lane, a, list);
         errdefer shared_down.deinit();
+        const fp8_pair = try Fp8Pair.create(gpu, s, &modelopt.lane, cap, a, list);
+        errdefer if (fp8_pair) |p| p.deinit();
         const prompt = try gpu.gpa.create(Prompt);
         errdefer gpu.gpa.destroy(prompt);
         var prompt_lane = modelopt.lane; // the tile in this set's copy only, as Flash Next loads it
@@ -93,6 +97,7 @@ pub const Sets = struct {
             .flashnext = flashnext,
             .exl3 = exl3,
             .shared_down = shared_down,
+            .fp8_pair = fp8_pair,
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
@@ -111,6 +116,7 @@ pub const Sets = struct {
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
+        if (sets.fp8_pair) |p| p.deinit();
         sets.shared_down.deinit();
         sets.exl3.deinit();
         sets.gpa.destroy(sets.exl3);

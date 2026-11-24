@@ -239,6 +239,7 @@ pub fn modeloptRefusal(capability: u32) ?[]const u8 {
 /// The kernels a ModelOpt checkpoint adds: the lane matmul, the prompt GEMM, the packers and the bf16 token rows.
 pub const Kernels = struct {
     lane: cuda.qmmf.Lane,
+    qkv_z: ?cuda.qmmf.Fp8Pair = null,
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
@@ -306,6 +307,12 @@ pub const Kernels = struct {
         }
         if (most > 0) k.part = try DeviceBuffer.alloc(e.d, most);
     }
+
+    /// Resolve the paired GDN entry and reserve slice partials for the loaded projections.
+    pub fn prepare(k: *Kernels, e: *const Engine, capability: u32) !void {
+        if (capability == 120 and !e.g.moe()) k.qkv_z = try cuda.qmmf.Fp8Pair.load(&k.lane);
+        try k.reserveParts(e);
+    }
 };
 
 /// out (rows, n) = x (rows, k): prompt chunks past 16 rows on prompt16, else the lane (a row's bits at any count).
@@ -316,6 +323,14 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
     if (rows >= cuda.qmmf.fused_rows) return error.WindowTooWide; // the fused tile sums its slices in another order
     return l.decode(e.stream, w, in, out, rows);
+}
+
+/// The paired Gated DeltaNet launch covers the same 16-row lane tile as the two separate calls.
+pub fn pairGdn(e: *Engine, qkv: Proj, z: Proj, rows: usize) !bool {
+    if (qkv != .ql or z != .ql or qkv.ql != .fp8 or z.ql != .fp8) return false;
+    const k = if (e.mo) |*m| m else return false;
+    const pair = k.qkv_z orelse return false;
+    return pair.project(&k.lane, e.stream, e.x, rows, qkv.ql.fp8, z.ql.fp8, e.qkv, e.z);
 }
 
 /// NVFP4 prompt gate and up in one lean pair launch into `act`, the bytes of main's path; false: not taken.
