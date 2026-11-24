@@ -107,9 +107,10 @@ test "direct-normalized MTP keeps the target's original stepped chunk boundary" 
     try std.testing.expectEqual(@as(usize, 8192), targetForwardEnd(4096, 8192, 6143, false, false));
 }
 
-/// The shared prefix's page-edge marks join the cold pass's cuts; ordinary reuse keeps its old schedule.
+/// Shared page-edge marks join a 0-based compute grid, so fresh and resumed passes cut identically.
 fn keptCut(len: usize, chunks: []const u32, f: *const Fill, at: usize) usize {
     var end = nextCut(len, chunks, at, 0);
+    if (f.kept != null) end = @min(end, at + E.grid_rows - at % E.grid_rows);
     const marks = if (f.kept) |k| k.marks else &.{};
     for (marks) |mark| if (mark > at) {
         end = @min(end, mark);
