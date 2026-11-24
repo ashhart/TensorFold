@@ -2011,6 +2011,8 @@ Connect Claude Code using the ID from `/v1/models`:
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
 
+The [Claude Code guide](claude-code.md) covers the model ids it asks for and how to keep its prompt prefix cacheable.
+
 ## Launch a coding agent
 
 `tensorfold launch <agent> [args...]` checks that a local server answers at `http://127.0.0.1:8080/v1`,
