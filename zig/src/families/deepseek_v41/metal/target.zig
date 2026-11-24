@@ -55,7 +55,7 @@ pub const Options = struct {
 /// The drafter's work behind a window: `queue` right after its command buffers, `drain` before the target writes.
 pub const Behind = struct {
     ctx: *anyopaque,
-    queue: *const fn (ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: mtl.Buffer) void,
+    queue: *const fn (ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: []const mtl.Buffer) void,
     drain: *const fn (ctx: *anyopaque) anyerror!void,
 };
 /// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
@@ -63,6 +63,7 @@ pub const Stats = struct { prompts: u64 = 0, prompt_rows: u64 = 0, hits: u64 = 0
 
 pub const Slot = @import("target_slot.zig").Slot;
 pub const Target = struct {
+    pub const argmax = pick.argmax;
     a: Allocator,
     env: Env,
     opt: Options,

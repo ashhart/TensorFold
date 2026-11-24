@@ -40,6 +40,11 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         const body = sources.dsv41.keyed ++ sources.dsv41.markov;
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 dspark early ")) {
+        if (!assemble) return @as(Launch, undefined);
+        const body = sources.dsv41.keyed ++ sources.dsv41.early_filtered;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 attn ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.csa2_attn, .pre_m5 = sources.dsv41.csa2_attn };

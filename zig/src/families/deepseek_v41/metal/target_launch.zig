@@ -56,7 +56,9 @@ const Hook = struct {
     fn then(ctx: *anyopaque) void {
         const h: *Hook = @ptrCast(@alignCast(ctx));
         const b = h.t.behind.?;
-        const tb = h.t.slots[h.group[0].slot].kv.taps orelse return;
-        b.queue(b.ctx, h.group, h.t.b.logits.buf, h.t.b.logits.off, tb);
+        var taps: [R]mtl.Buffer = undefined;
+        if (h.group.len > R) return;
+        for (h.group, 0..) |g, i| taps[i] = h.t.slots[g.slot].kv.taps orelse return;
+        b.queue(b.ctx, h.group, h.t.b.logits.buf, h.t.b.logits.off, taps[0..h.group.len]);
     }
 };

@@ -136,6 +136,7 @@ pub const Metal = struct {
             .pass = passFn,
             .calibrate = calibrate,
             .spec_default = m.early != null,
+            .spec_nucleus_default = m.early != null,
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
             .keepalive = m.keepalive(),

@@ -88,8 +88,8 @@ pub const Pass = struct {
     /// one ring buffer a stage: [slots][window + block][head_dim] bf16
     rings: []mtl.Buffer,
     runs: []Run,
-    /// each slot's last window verified `narrow` drafts or more (its passes make the whole block)
-    wide: []bool,
+    /// per-slot confidence-guided wide/narrow block state
+    adapt: st.Adaptive,
     /// each slot's ring rows its last ingest overwrote (put back when a commit cuts that ingest's window)
     undo: undo_.Undo,
     /// the context-free slot the layer encoders' Ctx names (the drafter reads its own rings)
@@ -109,7 +109,7 @@ pub const Pass = struct {
         if (opt.slots == 0 or c.dspark_block == 0 or c.dspark_block > R or opt.candidates == 0) return error.Slots;
         const x = try a.create(Pass);
         errdefer a.destroy(x);
-        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .ib = undefined, .rings = undefined, .runs = undefined, .wide = undefined, .undo = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
+        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .ib = undefined, .rings = undefined, .runs = undefined, .adapt = undefined, .undo = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
         x.b = try forward.Bufs.init(device, c);
         errdefer x.b.deinit();
         x.plan = try plan_.Plan.init(device);
@@ -131,9 +131,8 @@ pub const Pass = struct {
         x.runs = try a.alloc(Run, opt.slots);
         errdefer a.free(x.runs);
         @memset(x.runs, .{});
-        x.wide = try a.alloc(bool, opt.slots);
-        errdefer a.free(x.wide);
-        @memset(x.wide, false);
+        x.adapt = try st.Adaptive.init(a, opt.slots);
+        errdefer x.adapt.deinit(a);
         x.undo = try undo_.Undo.init(a, device, c, x.rings, opt.slots);
         errdefer x.undo.deinit();
         if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) {
@@ -174,7 +173,7 @@ pub const Pass = struct {
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
-        x.a.free(x.wide);
+        x.adapt.deinit(x.a);
         x.ib.deinit();
         x.quant.deinit();
         x.plan.deinit();
@@ -194,13 +193,12 @@ pub const Pass = struct {
 
     /// After a slot's verify window of `rows`: whether its next passes make the whole block or the narrow one.
     pub fn note(x: *Pass, slot: u32, rows: u32) void {
-        if (slot < x.wide.len) x.wide[slot] = rows > x.opt.narrow;
+        x.adapt.note(slot, rows, x.opt.narrow, x.c.dspark_block);
     }
 
     /// The drafts a pass makes for a slot: the whole block after a wide window, else the narrow one.
     pub fn blockOf(x: *const Pass, slot: u32) u32 {
-        if (x.opt.narrow == 0 or x.opt.narrow >= x.c.dspark_block) return x.c.dspark_block;
-        return if (slot < x.wide.len and x.wide[slot]) x.c.dspark_block else x.opt.narrow;
+        return x.adapt.blockOf(slot, x.opt.narrow, x.c.dspark_block);
     }
 
     /// The drafts a pass makes for these asks: the least of their slots'.
@@ -213,7 +211,7 @@ pub const Pass = struct {
     /// A new request on the slot: its context restarts at position 0.
     pub fn reset(x: *Pass, slot: u32) void {
         if (slot < x.runs.len) x.runs[slot] = .{};
-        if (slot < x.wide.len) x.wide[slot] = false;
+        x.adapt.reset(slot);
         x.undo.forget(slot);
     }
 
@@ -465,6 +463,7 @@ pub const Pass = struct {
             const cv = base[j * n * k ..][0 .. n * k];
             for (hid[0 .. n * D], hf[j * n * D ..][0 .. n * D]) |*h, v| h.* = host.dspark.bf16(v);
             try host.dspark.chain(sa, mk, cd, cv, k, a.anchor, a.params, if (mk.conf != null) hid[0 .. n * D] else null, o.drafts[0..n], o.conf[0..n]);
+            x.adapt.record(a.slot, l.n, x.opt.narrow, x.c.dspark_block, o.conf[0..n]);
             @memset(o.drafts[n..], o.drafts[n - 1]);
             @memset(o.conf[n..], 0);
             try copyCands(o, B, k, cd, cv);
@@ -483,10 +482,11 @@ pub const Pass = struct {
         var cpu_base: ?[]f32 = null;
         defer if (cpu_cand) |b| x.a.free(b);
         defer if (cpu_base) |b| x.a.free(b);
-        for (out, 0..) |*o, j| {
+        for (l.asks, out, 0..) |a, *o, j| {
             if (o.drafts.len != B or o.conf.len != B) return error.BadOutput;
             @memcpy(o.drafts[0..n], drafts[j * n ..][0..n]);
             @memcpy(o.conf[0..n], conf[j * n ..][0..n]);
+            x.adapt.record(a.slot, l.n, x.opt.narrow, x.c.dspark_block, o.conf[0..n]);
             @memset(o.drafts[n..], o.drafts[n - 1]);
             @memset(o.conf[n..], 0);
             if (o.cand == null and o.base == null) continue;

@@ -19,6 +19,68 @@ const cl = @import("calls.zig");
 const attn = pipelines.attn;
 const plus = ctx_.plus;
 
+/// Per-slot confidence-guided wide/narrow block state.
+pub const Adaptive = struct {
+    wide: []bool,
+    conf_tail: []f32,
+    last_n: []u32,
+
+    pub fn init(a: std.mem.Allocator, slots: u32) !Adaptive {
+        const wide = try a.alloc(bool, slots);
+        errdefer a.free(wide);
+        @memset(wide, false);
+        const conf_tail = try a.alloc(f32, slots);
+        errdefer a.free(conf_tail);
+        @memset(conf_tail, 0);
+        const last_n = try a.alloc(u32, slots);
+        @memset(last_n, 0);
+        return .{ .wide = wide, .conf_tail = conf_tail, .last_n = last_n };
+    }
+
+    pub fn deinit(ad: *Adaptive, a: std.mem.Allocator) void {
+        a.free(ad.wide);
+        a.free(ad.conf_tail);
+        a.free(ad.last_n);
+    }
+
+    pub fn reset(ad: *Adaptive, slot: u32) void {
+        if (slot >= ad.wide.len) return;
+        ad.wide[slot] = false;
+        ad.conf_tail[slot] = 0;
+        ad.last_n[slot] = 0;
+    }
+
+    pub fn note(ad: *Adaptive, slot: u32, rows: u32, narrow: u32, block: u32) void {
+        if (slot >= ad.wide.len) return;
+        if (narrow == 0 or narrow >= block) {
+            ad.wide[slot] = rows > narrow;
+            return;
+        }
+        if (rows > narrow) {
+            ad.wide[slot] = !(ad.last_n[slot] >= block and ad.conf_tail[slot] < 0.10);
+        } else {
+            ad.wide[slot] = rows == narrow and ad.conf_tail[slot] >= 0.50;
+        }
+    }
+
+    pub fn record(ad: *Adaptive, slot: u32, n: u32, narrow: u32, block: u32, conf: []const f32) void {
+        if (slot >= ad.conf_tail.len) return;
+        ad.last_n[slot] = n;
+        if (narrow == 0 or narrow >= block) {
+            ad.conf_tail[slot] = 0;
+            return;
+        }
+        var p: f32 = 1.0;
+        for (0..@min(n, narrow)) |i| p *= conf[i];
+        ad.conf_tail[slot] = p;
+    }
+
+    pub fn blockOf(ad: *const Adaptive, slot: u32, narrow: u32, block: u32) u32 {
+        if (narrow == 0 or narrow >= block) return block;
+        return if (slot < ad.wide.len and ad.wide[slot]) block else narrow;
+    }
+};
+
 /// Concurrent ingest scratch sized for up to `max(16, window)` rows across all stages plus a 4-slot ring plan.
 pub const IngestBuf = struct {
     buf: mtl.Buffer,
