@@ -221,6 +221,7 @@ pub const Managed = struct {
             if (m.exited()) {
                 problem.* = words.exited;
                 if (m.sink) |k| k.settle(1000);
+                if (m.sink) |k| k.cutHeld(1000); // a descendant may hold the pipe: the last line is written now
                 if (tail) |t| t.* = try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
                 return false;
             }
@@ -258,6 +259,7 @@ pub const Managed = struct {
     pub fn exitedTail(m: *Managed, a: Allocator) !?[]const []const u8 {
         if (m.closed or !m.exited()) return null;
         if (m.sink) |k| k.settle(1000);
+        if (m.sink) |k| k.cutHeld(1000);
         var buf: [64 << 10]u8 = undefined;
         return try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
     }
