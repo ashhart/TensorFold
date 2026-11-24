@@ -4,7 +4,11 @@ const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const fixture = @import("contract_int4.zig");
+const grouped = cuda.grouped;
 const int4 = cuda.int4;
+
+const contract = core.contract;
+const c = contract.spec;
 
 const g = core.contract.gates;
 
@@ -52,7 +56,7 @@ fn skipped(set: *Set) !void {
     const a = set.gpa;
     var f = fixture.Fixture{ .rig = .{ .gpu = set.items[0].rig.gpu, .s = set.items[0].rig.s }, .entry = fixture.entries[0], .kx = &set.kx, .router = set.items[0].router };
     defer f.deinit();
-    const sh: c.Shape = .{ .rows = 16, .n = width, .k = dims };
+    const sh: c.Shape = .{ .rows = 16, .n = fixture.width, .k = fixture.dims };
     if (!try f.prepare(sh, .random, 0x51ce)) return check.expect(false, "int4 skipped slot: refused a served shape", .{});
     const all = f.out;
     try f.launch();
