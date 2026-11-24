@@ -364,6 +364,11 @@ below; these are estimates for planning a port, not results.
    against 1.78 to 2.10 s unset. Prompt passes are cut at replies, so one of the six replies differed from the unset
    path; resumed and fresh replies matched with it set. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
 
+   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#3617]). On an M5
+   Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
+   reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
+   seeded, with and without DFlash2. The starts take only room the cache can already promise.
+
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
    CUDA this takes 1.6–2.1 % off 8k and 32k prompts ([#2113]). Metal is unified already.
@@ -816,6 +821,7 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#3582]: https://github.com/ashhart/TensorFold/pull/3582
+[#3617]: https://github.com/ashhart/TensorFold/issues/3617
 [#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2950]: https://github.com/ashhart/TensorFold/pull/2950
