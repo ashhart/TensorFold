@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import ts from 'typescript'
 import { ConversationDrafts } from '../lib/conversation-drafts'
 import { composerDraftKey } from '../../shared/composer-drafts'

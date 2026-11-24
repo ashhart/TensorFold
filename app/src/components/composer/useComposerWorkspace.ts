@@ -78,6 +78,7 @@ export function useComposerWorkspace(state: ComposerState) {
       setCwd(dir)
       setHomeWorkspace(null)
     }
+    if (mode === 'home' && dir && isPickerGuidance(useStore.getState().notice, tx(PICKER_GUIDANCE_MESSAGE))) useStore.setState({ notice: null })
   }
   const loadRemoteProjectDir = async (dir?: string | null) => {
     if (!activeOrchestrator) return
