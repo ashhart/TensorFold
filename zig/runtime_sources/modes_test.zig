@@ -65,7 +65,7 @@ test "Metal runtime source modes: H3 preserves the loader's complete prefix and 
     const gemm = try std.mem.replaceOwned(u8, a, gemm_text, "#include \"../nax.h\"", sources.nax);
     for ([_]usize{ 56, 16 }, [_]usize{ 288, 4 }, [_][]const u8{ "", "#define H3_TEST 1\n" }) |heads, tiles, defines| {
         const sizes = try std.fmt.allocPrint(a, "#define H3_HEADS {d}\n#define H3_SLOTS {d}\n#define H3_TILES {d}\n{s}\n{s}", .{ heads, tiles * 64, tiles, defines, kernels.source });
-        const before = try std.mem.concat(a, u8, &.{ gemm, sizes });
+        const before = try std.mem.concat(a, u8, &.{ gemm, sizes, kernels.gemm_source });
         const after = try h3.library(a, heads, tiles * 64, tiles, defines);
         try t.expect(std.mem.eql(u8, before, after));
     }
