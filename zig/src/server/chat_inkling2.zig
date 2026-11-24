@@ -11,7 +11,7 @@ pub fn enabled(srv: anytype) bool {
     return srv.text.native_inkling2;
 }
 
-/// The ends a grammar may stop at: the eos ids, and on Inkling 2 the end of the call or text message it holds.
+/// A required call grammar's ends: the eos ids, and on Inkling 2 the end of the call's message.
 pub fn grammarEnds(srv: anytype, a: Allocator, eos: []const u32) Allocator.Error![]const u32 {
     if (!enabled(srv) or eos.len == 0) return eos;
     const end = srv.text.tokenId("<|end_message|>") orelse return eos;
@@ -19,12 +19,21 @@ pub fn grammarEnds(srv: anytype, a: Allocator, eos: []const u32) Allocator.Error
     return std.mem.concat(a, u32, &.{ eos, &.{end} });
 }
 
-/// Whether `t` ends a bare reply (a grammar's): its end of message closes no message, so it ends the turn.
-pub fn endsBare(g: anytype, t: u32) bool {
-    if (!enabled(g.srv) or !g.chat or g.ignore_eos) return false;
+/// Whether a request's ends hold Inkling 2's end of message: only a required call's grammar adds it (grammarEnds).
+pub fn callEnd(srv: anytype, eos: []const u32) bool {
+    if (!enabled(srv)) return false;
+    const end = srv.text.tokenId("<|end_message|>") orelse return false;
+    return std.mem.indexOfScalar(u32, eos, end) != null;
+}
+
+/// Whether `t` ends a required call's bare reply: its end of message after a complete call ends the turn.
+pub fn endsBare(g: anytype, t: u32) Allocator.Error!bool {
+    if (!g.call_end or !g.chat or g.ignore_eos) return false;
     if (g.srv.text.tokenId("<|end_message|>") != t) return false;
-    const first = g.collected.items[0];
-    return first == t or g.srv.text.tokenId("<|message_model|>") != first;
+    const before = g.collected.items[0 .. g.collected.items.len - 1];
+    if (before.len == 0 or g.srv.text.tokenId("<|message_model|>") == before[0]) return false;
+    const text = try g.srv.text.decode(g.a, before);
+    return (try @import("tool_parse.zig").parse(g.a, text, g.tools, null)).calls != null;
 }
 
 /// Tokens a stop check decodes: the longest stop's bytes plus 8, as a byte token can carry one byte of a character.
