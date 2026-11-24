@@ -63,6 +63,12 @@ fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
     return at(s.messages, ((i * state.message_entries + core * 4 + role) * state.hidden) * 4);
 }
 
+/// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
+fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) void {
+    const stride: u32 = state.message_entries * state.hidden;
+    loop.gatesSplit(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), l(at(s.gate_norm, 0)), l(at(s.gate_zeta, 0)), @intCast(rows));
+}
+
 fn runtime(m: *const Model, e: mtl.ComputeEncoder, op: model_file.RuntimeOp, refs: []const Ref, count: usize, boundary: usize) void {
     e.setPipeline(m.runtime[@backingInt(op)]);
     for (refs, 0..) |r_, i| e.setBuffer(r_.buf, r_.off, i);
@@ -148,11 +154,11 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     if (v.hasMessages()) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        for (0..3) |role| for (0..rows) |i| {
+        for (0..3) |role| {
             const c = controllers[role];
             const source_role = if (lp.kind == .local) 0 else role;
-            loop.gates(&m.loop, e, l(arRow(s, source_role, rows, i, false)), l(messageRow(s, core, role, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(arRow(s, role, rows, i, true)), 1);
-        };
+            gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+        }
     }
     const gated = v.hasMessages();
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
@@ -270,10 +276,10 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        for (0..rows) |i| loop.gates(&m.loop, e, l(row(s.mlp_ar, i, state.hidden * 4)), l(messageRow(s, core, 3, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(row(s.mlp_gated, i, state.hidden * 4)), 1);
+        gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
-    glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
     base = 0;
     for (segments) |seg| {
