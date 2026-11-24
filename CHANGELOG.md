@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout`.
+- Settings: `TF_Q27_KV_GROW` (Metal) and `TF_QWEN_KV_SNAPSHOT_GPU` (CUDA) are checked at startup and refused by name like every registered setting; their accepted values are unchanged, except that `TF_QWEN_KV_SNAPSHOT_GPU` text other than `0` or `1`, which was read as off, is now refused. `docs/environment.md` now covers `TF_CUDA_POOL_AFTER_WARMUP`, `TF_GLM_WIDE_EXPERT_TILE`, `TF_Q27_KV_GROW`, `TF_QWEN35_CHUNK` and `TF_QWEN_KV_SNAPSHOT_GPU`, and `docs/run-guide.md` covers `tensorfold start --startup-timeout` (#4963).
 
 - Qwen 3.8-27B on Metal M5: 5-bit and 6-bit group-64 checkpoints split K for decode and prompt rows as v1.3.4 did again, so their sums run in v1.3.4's order; #4419 had moved them onto the 4-bit M5 split tables, and its register-direct kernels stay, at the restored splits. Gemma 4 and 4-bit are unchanged (#4962).
 
