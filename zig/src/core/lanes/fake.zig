@@ -93,6 +93,7 @@ pub const Fake = struct {
     gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
     head_accepts: ?usize = null, // head drafts a round right before one wrong (null: one in five wrong)
     keep_calls: usize = 0, // backend keep calls, including fully accepted lone windows when opted in
+    full_keeps: usize = 0, // of those, windows kept whole (every row accepted): main never makes these
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -482,6 +483,7 @@ pub const Fake = struct {
         const x = self(ptr);
         x.keep_calls += 1;
         for (windows, paths) |w, path| {
+            if (path.len == w.rows()) x.full_keeps += 1;
             const l = x.lane(w.stream);
             l.history.shrinkRetainingCapacity(l.base);
             for (path) |r| try l.history.append(x.gpa, l.rows.items[r]);
