@@ -42,9 +42,9 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
     return try numbered(r, if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls);
 }
 
-/// A reply with calls finishes tool_calls, unless the token cap ended it: then it may have gone on, so length stays.
-fn finished(reason: []const u8) []const u8 {
-    return if (std.mem.eql(u8, reason, "length")) reason else "tool_calls";
+/// Calls in a reply that ended on its own finish tool_calls; any other end (length, deadline, cancel, loop) stays.
+pub fn finished(reason: []const u8) []const u8 {
+    return if (std.mem.eql(u8, reason, "stop")) "tool_calls" else reason;
 }
 
 /// Each call the client gets takes the request's id for its place in the reply (``ids.Calls``).
