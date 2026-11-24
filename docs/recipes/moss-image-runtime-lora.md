@@ -20,6 +20,8 @@ file's values exactly on the device: B as f32, and A as bf16 pieces (as the rows
 exactly, one piece for a bf16 adapter, two for most f16 values, three for f32. Each piece is cut toward zero, so an
 f32 value past bf16's largest stays finite. A piece is never subnormal (the GPU may flush those), so an A value
 that would need one fails the request: a subnormal value, or an f32 one below about 2^-103 with low bits set.
+The scale (alpha / rank, and that times a request's strength) is used in fp32, so one past fp32's range fails the
+request too.
 
 ```sh
 TF_LORA_DIR=~/models/moss-loras tensorfold-native serve --host 127.0.0.1 --port 8020 --name moss-image ~/models/moss-image-base

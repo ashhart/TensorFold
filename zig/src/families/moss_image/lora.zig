@@ -55,6 +55,7 @@ pub const Refusal = error{
     LoraKeys,
     LoraMissingFactor,
     LoraModules,
+    LoraScaleOverflow,
     BadAlpha,
     BadLoraName,
     BadLoraScale,
@@ -120,6 +121,12 @@ fn scalar(t: st.Tensor) !f64 {
         .f16 => @as(f16, @bitCast(std.mem.readInt(u16, t.bytes[0..2], .little))),
         else => error.BadAlpha,
     };
+}
+
+/// `v` as a GEMM's fp32 scale (rounded once), refused past fp32's range, where even zero factors would give NaN.
+fn fp32Scale(v: f64) !f32 {
+    const s: f32 = @floatCast(v);
+    return if (std.math.isFinite(s)) s else error.LoraScaleOverflow;
 }
 
 const max_parts = 3;
@@ -303,7 +310,9 @@ pub const Bank = struct {
                 const t = targets.get(module) orelse return error.LoraModules;
                 const got = try b.active.getOrPut(b.gpa, t.w);
                 if (!got.found_existing) got.value_ptr.* = .empty;
-                try got.value_ptr.append(b.gpa, .{ .f = f, .scale = f.scale * p.scale });
+                // an f64 product of two f32s is exact, so this rounds once, as an f32 multiply does
+                const scale = try fp32Scale(@as(f64, f.scale) * p.scale);
+                try got.value_ptr.append(b.gpa, .{ .f = f, .scale = scale });
             };
             try b.picked.append(b.gpa, .{ .name = try b.gpa.dupe(u8, p.name), .scale = p.scale });
         }
@@ -370,6 +379,10 @@ pub const Bank = struct {
         ad.* = .{ .arena = .init(b.gpa) };
         errdefer ad.deinit(b.gpa);
         for (prepared.overlays) |o| {
+            const scale = fp32Scale(o.scale) catch |e| {
+                std.log.err("lora {s}: alpha / rank = {e} is past fp32's range", .{ name, o.scale });
+                return e;
+            };
             const up = toDevice(b.gpa, b.d, o.a) catch |e| {
                 if (e == error.InexactAdapterFactor) std.log.err("lora {s}: {s} has an A value whose bf16 pieces would be subnormal (below about 2^-103)", .{ name, o.module });
                 return e;
@@ -378,7 +391,7 @@ pub const Bank = struct {
             errdefer da.free();
             var db = try cuda.DeviceBuffer.fromHost(b.d, std.mem.sliceAsBytes(o.b));
             errdefer db.free();
-            try ad.factors.put(b.gpa, try ad.arena.allocator().dupe(u8, o.module), .{ .a = da, .b = db, .rank = o.rank, .parts = up.parts, .n = o.n, .k = o.k, .scale = @floatCast(o.scale), .exact_scale = o.scale });
+            try ad.factors.put(b.gpa, try ad.arena.allocator().dupe(u8, o.module), .{ .a = da, .b = db, .rank = o.rank, .parts = up.parts, .n = o.n, .k = o.k, .scale = scale, .exact_scale = o.scale });
             ad.bytes += da.len + db.len;
         }
         std.log.info("lora {s}: {d} projections, rank {d}, scale {d}, {d} MiB on the device, {d:.1} s (overlay key {x})", .{ name, ad.factors.count(), prepared.rank, prepared.scale, ad.bytes >> 20, @import("cuda_model.zig").seconds() - started, prepared.cache_key.digest[0..6] });
@@ -577,4 +590,10 @@ test "refusal: a host-side failure fails the request alone, out of memory stays 
     try std.testing.expectEqual(error.MismatchedTensorShape, refusal(error.MismatchedTensorShape));
     try std.testing.expectEqual(error.OutOfMemory, refusal(error.OutOfMemory));
     try std.testing.expect(isRefusal(error.LoraUnreadable) and !isRefusal(error.OutOfMemory));
+}
+
+test "scales: alpha / rank and its product with a strength are refused past fp32's range, exact up to it" {
+    const max: f32 = std.math.floatMax(f32);
+    try std.testing.expectEqual(max, try fp32Scale(max));
+    for ([_]f64{ 1e39, @as(f64, max) * 2, -@as(f64, max) * 2 }) |v| try std.testing.expectError(error.LoraScaleOverflow, fp32Scale(v));
 }

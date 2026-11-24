@@ -400,6 +400,7 @@ fn loraWhy(e: anyerror) ?[]const u8 {
         error.LoraModules, error.MismatchedTensorShape, error.UntargetedModule, error.TargetModuleNotAllowed, error.MissingTargetFactors => "a requested LoRA does not fit this model's transformer (the server log names the module)",
         error.UnsupportedLoRAVariant, error.UnsupportedAdapterType, error.UnsupportedTargetModules, error.UnsupportedAdapterDType => "a requested LoRA is a kind this engine does not read (the server log says which)",
         error.BadLoraName, error.BadLoraScale => "a requested LoRA's name or scale is not valid",
+        error.LoraScaleOverflow => "a requested LoRA's scale (alpha / rank, times the requested strength) is too large for fp32",
         error.InexactAdapterFactor => "a requested LoRA has a value the GPU can't hold exactly (the server log names the module)",
         else => "a requested LoRA file cannot be read as a LoRA (the server log says why)",
     };

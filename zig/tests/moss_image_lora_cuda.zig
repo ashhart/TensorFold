@@ -378,6 +378,53 @@ fn cancelCase(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, model: 
     return result;
 }
 
+/// Zero-factor adapters whose scale leaves fp32 (alpha / rank, or times strength) are refused; in range, main's bytes.
+fn scaleCases(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, model: *mi.Model, dir: []const u8, main_bytes: []const u16) !usize {
+    const t = model.targets.get(cancel_module).?;
+    const za = try gpa.alloc(f64, cancel_rank * t.k);
+    defer gpa.free(za);
+    @memset(za, 0);
+    const zb = try gpa.alloc(f64, t.n * cancel_rank);
+    defer gpa.free(zb);
+    @memset(zb, 0);
+    var buf: [512]u8 = undefined;
+    const peft = "gate-scale-alpha";
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, peft }));
+    {
+        var out: Writer = .{ .gpa = gpa };
+        defer out.deinit();
+        try out.put("base_model.model." ++ cancel_module ++ ".lora_A.weight", f32, cancel_rank, t.k, za);
+        try out.put("base_model.model." ++ cancel_module ++ ".lora_B.weight", f32, t.n, cancel_rank, zb);
+        try out.save(io, try std.fmt.bufPrint(&buf, "{s}/{s}/adapter_model.safetensors", .{ dir, peft }));
+        const cfg = try std.Io.Dir.cwd().createFile(io, try std.fmt.bufPrint(&buf, "{s}/{s}/adapter_config.json", .{ dir, peft }), .{});
+        defer cfg.close(io);
+        try cfg.writeStreamingAll(io, std.fmt.comptimePrint("{{\"peft_type\":\"LORA\",\"r\":{d},\"lora_alpha\":1e39}}", .{cancel_rank}));
+    }
+    const kohya = "gate-scale-strength";
+    {
+        var out: Writer = .{ .gpa = gpa };
+        defer out.deinit();
+        try out.put(cancel_module ++ ".lora_down.weight", f32, cancel_rank, t.k, za);
+        try out.put(cancel_module ++ ".lora_up.weight", f32, t.n, cancel_rank, zb);
+        try out.put(cancel_module ++ ".alpha", f32, 0, 0, &.{std.math.floatMax(f32)});
+        try out.save(io, try std.fmt.bufPrint(&buf, "{s}/{s}.safetensors", .{ dir, kohya }));
+    }
+    var bad: usize = 0;
+    for ([_]struct { []const u8, f32 }{ .{ peft, 1 }, .{ kohya, 4 } }) |c| {
+        const r = model.useLoras(io, dir, &.{.{ .name = c[0], .scale = c[1] }});
+        const ok = if (r) |_| false else |e| e == error.LoraScaleOverflow;
+        std.debug.print("{s} at strength {d}: {s}\n", .{ c[0], c[1], if (ok) "refused (LoraScaleOverflow)" else "NOT refused" });
+        if (!ok) bad += 1;
+    }
+    try model.useLoras(io, dir, &.{.{ .name = kohya, .scale = 1 }});
+    const now = try projected(gpa, d, model, cancel_module);
+    defer gpa.free(now);
+    const same = std.mem.eql(u16, main_bytes, now);
+    std.debug.print("{s} at strength 1 (scale {e}, zero factors): {s}\n", .{ kohya, model.lora.?.factor(kohya, cancel_module).?.scale, if (same) "main's bytes" else "DIFFERS from main's bytes" });
+    if (!same) bad += 1;
+    return bad;
+}
+
 /// The projection's bias as stored (bf16), if it has one.
 fn biasOf(model: *mi.Model, t: anytype) !?[]const u16 {
     if (t.bias == 0) return null;
@@ -499,6 +546,8 @@ pub fn main(init: std.process.Init) !u8 {
         // native must sit at FP64's rounding, and A rounded to bf16 must not, or the case no longer catches it
         failed = failed or !within(c.native) or within(c.rounded_a);
     }
+    const scale_bad = try scaleCases(gpa, io, &driver, model, args[2], before.get(cancel_module).?);
+    failed = failed or scale_bad > 0;
     // every LoRA run, then none picked: each projection must give main's bytes again
     try model.useLoras(io, args[2], &.{});
     var differ: usize = 0;

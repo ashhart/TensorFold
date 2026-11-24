@@ -156,6 +156,7 @@ pub const Model = struct {
         t.marks[0] = try cuda.Event.init(d, true);
         errdefer t.marks[0].deinit();
         t.marks[1] = try cuda.Event.init(d, true);
+        errdefer t.marks[1].deinit();
         var at: usize = t.scratch.ptr;
         const views = [_]*u64{ &t.x, &t.xn, &t.qr, &t.kr, &t.vr, &t.qkv, &t.o, &t.y, &t.ug, &t.s, &t.acc, &t.lat, &t.vel, &t.ctx, &t.mods };
         for (views, plan.parts) |view, n| {
