@@ -71,11 +71,12 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
-## Vulkan shaders from omarchy-mlx
+## Vulkan shaders
 
-These files in `zig/kernels/vulkan/` come from [omarchy-mlx](https://github.com/joshuaswarren/omarchy-mlx),
-MIT License, Copyright © 2026 Joshua Warren and mlx-omarchy contributors. The first lines of each file name its
-source path and commit. The native Vulkan path does not link MLX.
+The files in `zig/kernels/vulkan/` are written for TensorFold from the Vulkan compute specification,
+the operator's definition (the same math the Metal and CPU paths implement), and the hardware
+contract receipts (`docs/receipts/vulkan-barrier-hazards-m1/`). The native Vulkan path does not
+link MLX.
 
 - `argreduce_chunk.comp`
 - `argreduce_combine.comp`
@@ -96,7 +97,7 @@ source path and commit. The native Vulkan path does not link MLX.
 - `sdpa_decode_native.comp`
 - `swiglu.comp`
 
-See [the license text](LICENSES/mlx-omarchy-MIT.txt).
+Copyright 2026 TensorFold contributors, BSD-3-Clause. See [the license text](LICENSES/BSD-3-Clause.txt).
 
 ## Qwen Flash Next
 
