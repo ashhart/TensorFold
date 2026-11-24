@@ -8,11 +8,11 @@ constant constexpr float LOG2E = 1.4426950408889634f;
 struct InkPromptSeg { int row0, n, p0, pad; long off; };
 struct InkPromptArgs { uint heads, kv_heads, ring, chunk, c0, chunks; float scale; };
 
-inline size_t ink_prompt_rh(const InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
+inline size_t ink_prompt_rh(const thread InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
   return (size_t(s.row0) + pair / group) * heads + kvh * group + pair % group;
 }
 
-inline void ink_fold(float& mm, float& ll, float m, float l, float& a, float& b) {
+inline void ink_fold(thread float& mm, thread float& ll, float m, float l, thread float& a, thread float& b) {
   const float mn = max(mm, m);
   a = precise::exp2(mm - mn);
   b = precise::exp2(m - mn);
