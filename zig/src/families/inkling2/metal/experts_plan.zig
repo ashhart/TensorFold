@@ -5,6 +5,9 @@ pub const hidden: u32 = 2304;
 pub const intermediate: u32 = 1152;
 pub const expert_count: u32 = 128;
 pub const top_k: u32 = 8;
+pub const grouped_tile_m: u32 = 8;
+pub const max_grouped_rows: u32 = 64;
+pub const max_grouped_pairs: u32 = max_grouped_rows * top_k;
 
 pub const Format = enum {
     nvfp4,
@@ -55,11 +58,35 @@ pub fn combineGeometry(c: Call) Geometry {
     return .{ .groups = c.rows, .blocks = blocks(c.n) };
 }
 
+/// Exact tight upper bound on active expert tiles for `rows * topk` pairs across `experts` with `grouped_tile_m`.
+pub fn maxTiles(c: Call) u32 {
+    const pairs = c.rows * c.topk;
+    const active = @min(c.experts, pairs);
+    return active + (pairs - active) / grouped_tile_m;
+}
+
+/// GPU scratch bytes needed by tf_ink2_expert_group: tile count + packed work items + pair map.
+pub fn groupBytes(rows: usize, topk: usize) usize {
+    return (1 + 2 * rows * topk) * @sizeOf(u32);
+}
+
+/// Grouped product grid: output blocks by worst-case expert tile count; inactive tiles exit on tile_id >= count.
+pub fn groupedGeometry(c: Call) Geometry {
+    return .{ .groups = maxTiles(c), .blocks = blocks(c.n) };
+}
+
 pub fn check(c: Call) !void {
     if (c.rows == 0 or c.k == 0 or c.n == 0 or c.experts == 0 or c.topk == 0 or c.topk > c.experts)
         return error.BadExpertShape;
     if (c.k % c.format.block() != 0 or (c.format == .nvfp4 and c.k % 2 != 0))
         return error.BadExpertBlock;
+}
+
+pub fn checkGrouped(c: Call) !void {
+    try check(c);
+    const pairs = std.math.mul(u32, c.rows, c.topk) catch return error.BadExpertShape;
+    if (pairs > max_grouped_pairs or c.experts > std.math.maxInt(u16))
+        return error.BadExpertShape;
 }
 
 pub fn formatForLayer(layer: u32) !Format {
@@ -119,3 +146,5 @@ pub fn swiglu(gate: f32, up: f32) f32 {
 
 pub const MatrixArgs = extern struct { k: u32, n: u32, topk: u32, experts: u32 };
 pub const DecodeArgs = extern struct { rows: u32, k: u32 };
+pub const GroupArgs = extern struct { rows: u32, topk: u32, experts: u32, tile_m: u32 = grouped_tile_m };
+pub const GroupedMatrixArgs = extern struct { rows: u32, k: u32, n: u32, topk: u32, experts: u32 };
