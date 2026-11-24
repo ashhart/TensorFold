@@ -19,17 +19,54 @@ pub const function_names = [_][:0]const u8{
     "tf_ink2_combine",
 };
 
+/// The grouping launch, then gate-up and down for each format, on simdgroup matrices for GPUs without tensor units.
+const mma_names = [_][:0]const u8{ "tf_ink2_mma_group", "tf_ink2_nvfp4_gu_mma", "tf_ink2_nvfp4_down_mma", "tf_ink2_mxfp8_gu_mma", "tf_ink2_mxfp8_down_mma" };
+/// The weight rows a simdgroup-matrix threadgroup takes.
+const mma_tile_rows = 64;
+/// The route pairs one expert may take: a chunk's rows, each of which names an expert once.
+const mma_cap: u32 = 256;
+/// A chunk of at least this many rows takes the simdgroup-matrix kernels, where the GPU has no tensor units.
+pub const mma_rows: u32 = 16;
+
+const MmaGroupArgs = extern struct { pairs: u32, experts: u32, cap: u32 };
+const MmaArgs = extern struct { k: u32, n: u32, topk: u32, cap: u32 };
+pub const Globals = struct { amax: Ref, denominator: Ref };
+
 pub const Pipelines = struct {
     entries: [function_names.len]mtl.Pipeline,
+    /// Each expert's count, then its route pairs: launches in one encoder run in order, so they share it.
+    groups: ?mtl.Buffer = null,
+    mma: ?[mma_names.len]mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
-        return loadSource(device, src.experts);
+        var out = try loadSource(device, src.experts);
+        errdefer out.deinit();
+        if (!device.tensorUnits()) try out.loadMma(device, src.experts_mma);
+        return out;
+    }
+
+    /// The simdgroup-matrix kernels from `text`; the contract's controls pass an edited one.
+    pub fn loadMma(p: *Pipelines, device: mtl.Device, text: []const u8) !void {
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        var pipes: [mma_names.len]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |pipe| pipe.deinit();
+        for (mma_names, &pipes) |name, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+            made += 1;
+        }
+        const groups = try device.buffer((plan.expert_count + plan.expert_count * mma_cap) * @sizeOf(u32), mtl.ResourceOptions.shared);
+        if (p.mma) |old| for (old) |pipe| pipe.deinit();
+        if (p.groups) |old| old.deinit();
+        p.mma = pipes;
+        p.groups = groups;
     }
 
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var out: Pipelines = undefined;
+        var out: Pipelines = .{ .entries = undefined };
         var made: usize = 0;
         errdefer for (out.entries[0..made]) |pipe| pipe.deinit();
         for (function_names, 0..) |name, i| {
@@ -41,6 +78,8 @@ pub const Pipelines = struct {
     }
 
     pub fn deinit(p: *Pipelines) void {
+        if (p.mma) |pipes| for (pipes) |pipe| pipe.deinit();
+        if (p.groups) |buf| buf.deinit();
         for (p.entries) |pipe| pipe.deinit();
     }
 
@@ -127,4 +166,46 @@ pub fn gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Re
         .nvfp4 => if (nv_globals) |g| return nvfp4Gu(p, e, x, w, scales, g.amax, g.denominator, ids, out, c) else return error.MissingNvfp4Globals,
         .mxfp8 => return mxfp8Gu(p, e, x, w, scales, ids, out, c),
     }
+}
+
+/// Each expert's route pairs of `ids` [rows, topk], for the simdgroup-matrix products after it.
+pub fn group(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, c: Call) !void {
+    const pipes = p.mma orelse return error.NoSimdgroupMatrices;
+    try plan.check(c);
+    if (c.rows > mma_cap or c.experts > plan.expert_count) return error.BadExpertShape;
+    const groups = p.groups.?;
+    e.setPipeline(pipes[0]);
+    e.setBuffer(ids.buf, ids.off, 0);
+    e.setBuffer(groups, 0, 1);
+    e.setBuffer(groups, plan.expert_count * @sizeOf(u32), 2);
+    e.setValue(MmaGroupArgs{ .pairs = c.rows * c.topk, .experts = c.experts, .cap = mma_cap }, 3);
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(c.experts, 1, 1));
+}
+
+/// Gate-up, or down (`down`), after `group`: 64 weight rows by bands of 32 of an expert's pairs a threadgroup.
+pub fn mma(p: *const Pipelines, e: mtl.ComputeEncoder, down: bool, x: Ref, w: Ref, scales: Ref, nv_globals: ?Globals, out: Ref, c: Call) !void {
+    const pipes = p.mma orelse return error.NoSimdgroupMatrices;
+    try plan.check(c);
+    const weight_rows = if (down) c.n else 2 * c.n;
+    if (weight_rows % mma_tile_rows != 0 or c.k % 64 != 0 or c.experts > plan.expert_count) return error.BadExpertShape;
+    const groups = p.groups.?;
+    const nv = c.format == .nvfp4;
+    e.setPipeline(pipes[1 + (if (nv) @as(usize, 0) else 2) + @intFromBool(down)]);
+    var at: usize = 0;
+    for ([_]Ref{ x, w, scales }) |b| {
+        e.setBuffer(b.buf, b.off, at);
+        at += 1;
+    }
+    if (nv) {
+        const g = nv_globals orelse return error.MissingNvfp4Globals;
+        for ([_]Ref{ g.amax, g.denominator }) |b| {
+            e.setBuffer(b.buf, b.off, at);
+            at += 1;
+        }
+    }
+    e.setBuffer(groups, 0, at);
+    e.setBuffer(groups, plan.expert_count * @sizeOf(u32), at + 1);
+    e.setBuffer(out.buf, out.off, at + 2);
+    e.setValue(MmaArgs{ .k = c.k, .n = c.n, .topk = c.topk, .cap = mma_cap }, at + 3);
+    e.dispatchGroups(mtl.Size.of(weight_rows / mma_tile_rows, c.experts, 1), mtl.Size.of(256, 1, 1));
 }
