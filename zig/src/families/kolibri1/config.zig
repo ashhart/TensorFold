@@ -47,7 +47,7 @@ pub const Config = struct {
     dense: [max_layers]bool = @splat(false), // `mlp_only_layers`: a SwiGLU MLP `dense_width` wide, no router
     dense_width: usize = 0,
     kv_from: [max_layers]?u8 = @splat(null), // `kv_source_layers`: reads that layer's cache, no k/v of its own
-    max_context: usize = 0, // 0: none; 1.1: index_topk + local + sink keys, where every key is still attended
+    max_context: usize = 0, // 0: none; 1.1: index_topk, where a query attends every key
 
     pub fn qkvDim(self: Config) usize {
         return (self.heads + 2 * self.kv_heads) * self.head_dim;

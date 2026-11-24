@@ -63,9 +63,10 @@ pub fn extend(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
         }
         c.kv_from[i] = @intCast(s);
     }
-    // where every key is still attended: the selected, the local and the sink keys together (card, blog)
-    c.max_context = try positive(o, "index_topk", why) + try positive(o, "index_num_local_tokens", why) +
-        try positive(o, "index_num_sink_tokens", why);
+    // up to index_topk keys a query attends all, whatever the scores (card: "attends to 2,048 selected keys")
+    c.max_context = try positive(o, "index_topk", why);
+    _ = try positive(o, "index_num_local_tokens", why);
+    _ = try positive(o, "index_num_sink_tokens", why);
 }
 
 /// Kolibri 1.1's config.json at e9515166 (indexed layers every fifth), its module list cut to two entries.
@@ -108,7 +109,7 @@ fn refused(text: []const u8, err: anyerror, word: []const u8) !void {
     }
 }
 
-test "kolibri1_1: dense layers, the shared caches and the 2,184-key cap from the pinned config" {
+test "kolibri1_1: dense layers, the shared caches and the 2,048-key cap from the pinned config" {
     var why: Why = .{};
     const c = try config.parse(std.testing.allocator, pinned, &why);
     try config.checkShapes(c, &why);
@@ -117,7 +118,7 @@ test "kolibri1_1: dense layers, the shared caches and the 2,184-key cap from the
     try std.testing.expect(c.full[4] and c.full[49] and !c.full[5]);
     const want = [_]struct { usize, ?u8 }{ .{ 4, null }, .{ 9, 4 }, .{ 14, 4 }, .{ 19, null }, .{ 24, null }, .{ 29, null }, .{ 34, 29 }, .{ 39, 29 }, .{ 44, 29 }, .{ 49, 4 }, .{ 0, null } };
     for (want) |x| try std.testing.expectEqual(x[1], c.kv_from[x[0]]);
-    try std.testing.expectEqual(@as(usize, 2184), c.max_context);
+    try std.testing.expectEqual(@as(usize, 2048), c.max_context);
 }
 
 test "kolibri1_1 refusals: a sliding or later source, a source that borrows, bad dense lists, 1.1 fields on kolibri1" {
