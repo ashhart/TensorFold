@@ -86,6 +86,8 @@ pub const Stages = struct {
     norm: ?wts.Tensor = null,
     /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
     logits: ?Ref = null,
+    /// Whether the target's control-vector plan applies at the block norms; the MTP head's own block sets this false.
+    steer: bool = true,
     /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
     fn rowsAt(s: *const Stages, index: usize) Span {
         const f = &s.model.frame;
@@ -333,8 +335,9 @@ pub const Stages = struct {
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
 
-    /// The direction that steers the layer whose output just landed; none in force means nothing to add.
-    fn direction(s: *const Stages, layer: usize) ?Direction {
+    /// The direction that steers the layer whose output just landed; none in force (or off) means nothing to add.
+    pub fn direction(s: *const Stages, layer: usize) ?Direction {
+        if (!s.steer) return null;
         const plan = s.model.steer orelse return null;
         const buffer = plan.dir(@intCast(layer)) orelse return null;
         return .{ .buffer = buffer, .alpha = plan.alpha };

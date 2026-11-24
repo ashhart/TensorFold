@@ -537,5 +537,6 @@ test {
         _ = @import("qwen27_served_test.zig");
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
+        _ = @import("qwen27_mtp.zig");
     }
 }
