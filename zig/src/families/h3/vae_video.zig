@@ -307,7 +307,12 @@ pub const Decoder = struct {
         defer if (overlap_prev) |o| gpa.free(o);
         var clip_start: usize = 0;
         var clip_index: usize = 0;
+        var last_gbase: usize = 0;
+        const TailTile = struct { y: usize, x: usize, th: usize, tw: usize, data: []f32 };
+        var last_tiles: std.ArrayList(TailTile) = .empty;
+        defer for (last_tiles.items) |t| gpa.free(t.data);
         while (clip_start < depth) {
+            last_tiles.clearRetainingCapacity();
             const clip_depth = @min(chunk + token_overlap, depth - clip_start);
             var y: usize = 0;
             while (y < height) {
@@ -397,6 +402,10 @@ pub const Decoder = struct {
                     if (overlap_prev) |o| gpa.free(o);
                     overlap_prev = try gpa.alloc(f32, p1_frames * npx1);
                     for (0..p1_frames * npx1) |i| overlap_prev.?[i] = part1[i];
+                    last_gbase = clip_index * part0_frames + part0_frames;
+                    const tail_copy = try gpa.alloc(f32, p1_frames * npx1);
+                    @memcpy(tail_copy, part1);
+                    try last_tiles.append(gpa, .{ .y = y, .x = x, .th = tile_h, .tw = tile_w, .data = tail_copy });
                             if (x + tile_w >= width) break;
                     x += tile_latents - overlap_latents;
                 }
@@ -408,6 +417,28 @@ pub const Decoder = struct {
             clip_index += 1;
         }
 
+        // the reference appends the final clip's part1 (overlap tail) as the last frames
+        for (last_tiles.items) |tt| {
+            const npx1 = tt.th * p_ratio * tt.tw * p_ratio * 3;
+            const o_frames = tt.data.len / npx1;
+            var of: usize = 0;
+            while (of < o_frames) : (of += 1) {
+                const gf = last_gbase + of;
+                if (gf >= out_frames) break;
+                for (0..tt.th * p_ratio) |ph| {
+                    for (0..tt.tw * p_ratio) |pw| {
+                        const gy = tt.y * p_ratio + ph;
+                        const gx = tt.x * p_ratio + pw;
+                        if (gy >= out_h or gx >= out_w) continue;
+                        const ci2 = (gf * out_h + gy) * out_w + gx;
+                        for (0..3) |c| {
+                            canvas[ci2 * 3 + c] += tt.data[of * npx1 + (ph * tt.tw * p_ratio + pw) * 3 + c];
+                        }
+                        weight[ci2] += 1.0;
+                    }
+                }
+            }
+        }
         const pixels = try gpa.alloc(u8, canvas.len);
         for (0..out_frames) |f| {
             for (0..out_h) |h| {
