@@ -35,6 +35,12 @@ test "the split gates' three launches follow the kinds' records, one symbol each
     }
 }
 
+test "the forward takes the split router and gates from two rows, and main's kernels at one" {
+    try t.expect(!p.splitRows(1));
+    try t.expect(p.splitRows(2));
+    try t.expect(p.splitRows(64));
+}
+
 test "shape admission and dispatch geometry fix H=2304, rank 64 and 48 messages" {
     const mc = p.Call{ .rows = 7, .n = 48 * p.hidden, .k = p.hidden };
     const gc = p.Call{ .rows = 7, .n = p.hidden, .k = p.rank };
