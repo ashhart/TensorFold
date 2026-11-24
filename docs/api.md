@@ -1326,7 +1326,8 @@ model with Matryoshka (MRL) widths takes any width in its declared range (32 to 
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
-`delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`.
+`delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`; a reply that
+`max_tokens` ended keeps `finish_reason: "length"` with its calls, finished or cut, since it may have gone on.
 When a template supplies no think opener, a reply-written leading `<think>` tag is removed from
 `reasoning_content`; the streamed and finished forms use the same split. Both strip the reasoning's leading and
 trailing whitespace, so the joined `delta.reasoning_content` pieces equal the finished field byte for byte; a stream

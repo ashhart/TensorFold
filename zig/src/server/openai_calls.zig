@@ -16,7 +16,7 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         const found = reply.native_calls;
         const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse return null;
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
-        if (!reply.native_cut_calls) reply.finish_reason = "tool_calls";
+        if (!reply.native_cut_calls) reply.finish_reason = finished(reply.finish_reason);
         reply.tool_calls_streamed = false;
         const selected = if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
         return if (@import("chat_inkling2.zig").enabled(r.srv)) try numbered(r, selected) else selected;
@@ -37,9 +37,14 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
     };
     if (cut != null) return try numbered(r, calls);
     reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
-    reply.finish_reason = "tool_calls";
+    reply.finish_reason = finished(reply.finish_reason);
     if (r.plan.policy.single) reply.tool_calls_streamed = false;
     return try numbered(r, if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls);
+}
+
+/// A reply with calls finishes tool_calls, unless the token cap ended it: then it may have gone on, so length stays.
+fn finished(reason: []const u8) []const u8 {
+    return if (std.mem.eql(u8, reason, "length")) reason else "tool_calls";
 }
 
 /// Each call the client gets takes the request's id for its place in the reply (``ids.Calls``).
