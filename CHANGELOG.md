@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Idol: octree and decode-trace allocation failures now unwind cleanly and free what they hold, with successful output unchanged (#4304).
 
+
+
 - Idol runs end to end natively on M5 Metal: `tf-idol-generate` takes one preprocessed picture through DINOv3, the FLUX.2 VAE, the denoiser's 50 guided steps and both decoders to a 3DGS PLY and camera. On an M5 Ultra it is 29.1 s against 95.4 s for the SDK's IdolPipeline on MPS (excluding its preprocess), the denoiser 27.5 s against 93.9 s, at a 2.71 GB peak footprint against 12.88 GB. Given the SDK's starting and VAE noise the PLY's points sit as close to the SDK's as sampling resolves, and the camera's angles within 0.006 rad (#1780, after #1773, #1774 and #1775, for #1757). Thanks to @jayleaton.
 
 - Flash Next on CUDA: the MTP draft rows' best value, first id and log-sum-exp run over 32 one-warp blocks a row in place of one 1024-thread block, with the same bytes (#4632).
