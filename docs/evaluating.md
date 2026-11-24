@@ -61,7 +61,7 @@ docker run --rm tensorfold
 docker run --rm tensorfold capabilities --json
 ```
 
-`--build-arg TENSORFOLD_VERSION=1.2.9` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
+`--build-arg TENSORFOLD_VERSION=1.3.4` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
 archive from the build platform. The CUDA base is pinned by its multi-platform digest; cuBLAS and NCCL are pinned
 by package version for both architectures. To serve, the host still needs NVIDIA driver R580 or newer and the NVIDIA
 Container Toolkit, which supplies `libcuda.so.1` to the container. Do not install the host driver in the image.
@@ -86,8 +86,8 @@ It packages that release's signed archives; it does not rebuild the inference en
 There is no rolling `latest` tag, and a backfill refuses to replace an existing version tag.
 
 ```sh
-docker pull ghcr.io/ashhart/tensorfold:v1.2.9
-docker run --rm ghcr.io/ashhart/tensorfold:v1.2.9 --version
+docker pull ghcr.io/ashhart/tensorfold:v1.3.4
+docker run --rm ghcr.io/ashhart/tensorfold:v1.3.4 --version
 ```
 
 The version tag names one manifest for Linux amd64 and arm64. Each image is built on its native GitHub-hosted Ubuntu

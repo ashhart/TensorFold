@@ -1,6 +1,6 @@
 # The signed Linux release archive in an image. Build, run and limits: docs/evaluating.md#container.
 FROM ubuntu:24.04 AS fetch
-ARG TENSORFOLD_VERSION=1.2.9
+ARG TENSORFOLD_VERSION=1.3.4
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssl \
     && rm -rf /var/lib/apt/lists/*
