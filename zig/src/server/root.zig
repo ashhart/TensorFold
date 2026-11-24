@@ -152,6 +152,7 @@ test {
     _ = @import("audio.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("chat_ocr_test.zig");
+    _ = @import("memory_off_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
