@@ -1,5 +1,6 @@
 //! Mini loop math under the contract, with independent host arithmetic and planted single-fault controls.
 const std = @import("std");
+const cuda = @import("cuda");
 const core = @import("core");
 const ink = @import("inkling2");
 const rig_ = @import("contract_rig.zig");
@@ -52,6 +53,10 @@ pub fn Checked(comptime T: type) type {
 
         pub fn simulate(self: *Self, acc: c.Accum, order: g.Order, out: []f64) !void {
             try self.inner.simulate(acc, order, out);
+        }
+
+        pub fn replaced(self: *Self) ![]const u8 {
+            return self.inner.replaced();
         }
 
         pub fn check(self: *Self, _: g.Gate) !?[]const u8 {
@@ -317,10 +322,13 @@ const gate_shapes = [_]c.Shape{
     .{ .rows = 2048, .n = 128, .k = 256 },
 };
 
-/// Host reference preserves BF16 n/zeta and all four FP32 output steps; control substitutes F for Gain.
+/// The served gate, or a control: forget weights again for gain (up half), or zeta from half the rank pairs (down).
+pub const GateFault = enum { none, wrong_gain, half_ranks };
+
+/// Host reference preserves BF16 n/zeta and all four FP32 output steps through both halves' launches.
 pub const Gate = struct {
     kern: *const lm.Kernels,
-    wrong_gain: bool = false,
+    fault: GateFault = .none,
     shape: c.Shape = undefined,
     h: []f32 = &.{},
     m: []f32 = &.{},
@@ -328,10 +336,18 @@ pub const Gate = struct {
     f: []u16 = &.{},
     gain: []u16 = &.{},
     dev: [5]u64 = @splat(0),
+    zeta: u64 = 0,
     out: u64 = 0,
+    base: u64 = 0,
 
     pub fn spec(self: *const Gate) c.Spec {
-        return .{ .name = if (self.wrong_gain) "control: inkling2 loop rank-64 gate with forget weights again instead of gain" else "inkling2 loop tf_ink2_loop_gate (BF16 down input/result, FP32 F/G tanh and four output steps)", .accum = .f32, .depth = depth, .out = .f32, .served = if (self.wrong_gain) gate_shapes[0..2] else &gate_shapes };
+        const name = switch (self.fault) {
+            .none => "inkling2 loop tf_ink2_loop_gate_down + _up (BF16 down input/zeta, FP32 F/G tanh and four output steps)",
+            .wrong_gain => "control: inkling2 loop rank-64 gate up half with forget weights again instead of gain",
+            .half_ranks => "control: inkling2 loop rank-64 gate down half launched for 16 of its 32 rank pairs",
+        };
+        const served = if (self.fault != .none) gate_shapes[0..2] else &gate_shapes;
+        return .{ .name = name, .accum = .f32, .depth = depth, .out = .f32, .served = served, .replaces = "tf_ink2_loop_gate" };
     }
 
     fn depth(s: c.Shape) usize {
@@ -339,7 +355,7 @@ pub const Gate = struct {
     }
 
     pub fn control(self: *const Gate) ?g.Gate {
-        return if (self.wrong_gain) .shapes else null;
+        return if (self.fault != .none) .shapes else null;
     }
 
     pub fn free(self: *Gate, a: std.mem.Allocator) void {
@@ -377,12 +393,29 @@ pub const Gate = struct {
             ref.plant(f32, self.m, shape.rows, cols, ref.asF32);
         }
         self.dev = .{ try ref.input(rig, self.h), try ref.input(rig, self.m), try ref.input(rig, self.d), try ref.input(rig, self.f), try ref.input(rig, self.gain) };
+        self.zeta = try rig.scratch(shape.rows * lm.rank * 2);
+        self.base = try rig.scratch(shape.rows * cols * 4);
         self.out = try rig.output(shape.rows * cols * 4);
         return true;
     }
 
     pub fn run(self: *Gate, rig: *rig_.Rig) !void {
-        try lm.gate(self.kern, rig.s, self.dev[0], self.dev[1], self.dev[2], self.dev[3], if (self.wrong_gain) self.dev[3] else self.dev[4], self.out, self.shape.rows, self.shape.n, eps);
+        const d = self.dev;
+        const rows = self.shape.rows;
+        const pairs: usize = if (self.fault == .half_ranks) lm.rank / 4 else lm.rank / 2;
+        try lm.gateDown(self.kern, rig.s, d[0], d[1], d[2], self.zeta, rows, pairs, self.shape.n, eps);
+        try lm.gateUp(self.kern, rig.s, d[0], d[1], self.zeta, d[3], if (self.fault == .wrong_gain) d[3] else d[4], self.out, rows, self.shape.n);
+    }
+
+    /// The one-block tf_ink2_loop_gate the served halves replace, on the same inputs: gate 3 wants its bytes.
+    pub fn replaced(self: *Gate, rig: *rig_.Rig) ![]const u8 {
+        const f = try self.kern.mod.function("tf_ink2_loop_gate");
+        var a: cuda.Args = .{};
+        for ([_]u64{ self.dev[0], self.dev[1], self.dev[2], self.dev[3], self.dev[4], self.base }) |v| a.add(v);
+        for ([_]i32{ @intCast(self.shape.rows), @intCast(self.shape.n) }) |v| a.add(v);
+        a.add(@as(f32, eps));
+        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.shape.rows) }, .block = .{ .x = 256 } }, rig.s, &a);
+        return rig.bytes(self.base, self.shape.rows * self.shape.n * 4);
     }
 
     pub fn count(self: *const Gate) usize {

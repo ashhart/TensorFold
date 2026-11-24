@@ -25,3 +25,11 @@ test "DeepSeek release: other CUDA admission stays available" {
     defer env.value = null;
     try std.testing.expect(gate.backend(.{ .dir = "not-opened", .model_type = "nemotron_h" }) == null);
 }
+
+test "SM110 product: a recognized MOSS-Image pipeline is refused by name" {
+    const a = std.testing.allocator;
+    var problem: []const u8 = "";
+    try std.testing.expect(try gate.sm110Product(a, std.testing.io, .{ .dir = "not-opened", .model_type = "unknown" }, true, &problem));
+    defer a.free(problem);
+    try std.testing.expectEqualStrings("sm_110 product: MOSS-Image is not qualified; serve Qwen3.8-27B", problem);
+}

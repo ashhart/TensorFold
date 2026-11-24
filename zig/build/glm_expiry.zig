@@ -47,7 +47,7 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
     b.step("check-glm-gather-gpu-host", "Compile the GPU gather equality gate without compiling or running shaders").dependOn(&gpu_check.step);
     const core = sharedHostCore(b, metal);
     const sched_mod = hostMod(b, "zig/src/glm_schedule_tests.zig", metal, lanes, fabric, sources, core);
-    const schedule = b.addTest(.{ .filters = &.{ "glm prefill:", "fill aging:" }, .root_module = sched_mod });
+    const schedule = b.addTest(.{ .filters = &.{ "glm prefill:", "fill aging:", "glm order:" }, .root_module = sched_mod });
     if (b.graph.host.result.os.tag == .macos) schedule.root_module.linkSystemLibrary("objc", .{});
     const schedule_run = b.addRunArtifact(schedule);
     b.step("test-glm-scheduling-host", "Actual GLM prefill chunks and lane-host decode fairness using a fake engine").dependOn(&schedule_run.step);

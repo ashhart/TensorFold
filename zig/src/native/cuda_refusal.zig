@@ -6,6 +6,32 @@ const qwen35 = @import("qwen35");
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
+/// The first Thor product serves Qwen3.8-27B text with DFlash2 on one GPU.
+pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, moss_image: bool, problem: *[]const u8) !bool {
+    const model = if (moss_image) "MOSS-Image" else o.model_type;
+    if (!std.mem.eql(u8, model, qwen35.native.model_type)) {
+        problem.* = try std.fmt.allocPrint(a, "sm_110 product: {s} is not qualified; serve Qwen3.8-27B", .{model});
+        return true;
+    }
+    problem.* = if (o.tp != 1 or o.rank != 0)
+        "sm_110 product: --tp and --rank must select one GPU"
+    else if (o.vision != null)
+        "sm_110 product: --vision is not qualified; serve text without --vision"
+    else if (o.precision == .full)
+        "sm_110 product: --precision full is not qualified; use checkpoint precision"
+    else if (o.mtp_drafts != null)
+        "sm_110 product: --mtp-drafts is not qualified; use the DFlash2 drafter"
+    else if (!o.drafts or o.drafter == null)
+        "sm_110 product: use --drafter with a DFlash2 checkpoint and omit --no-drafts"
+    else if (o.drafter_bits != 4)
+        "sm_110 product: --drafter-bits must be 4 for the qualified DFlash2 path"
+    else if (!(try qwen35.geometry.Geometry.read(a, io, o.dir)).sm110Product())
+        "sm_110 product: use the Qwen3.8-27B MLX affine 4-bit/group-64 or NVIDIA ModelOpt NVFP4 checkpoint"
+    else
+        return false;
+    return true;
+}
+
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))

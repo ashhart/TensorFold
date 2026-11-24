@@ -10,9 +10,12 @@ const journal_log = @import("journal_log.zig");
 const lora_merge = @import("core").lora_merge;
 /// The checkpoints `models` lists, sized, for `tensorfold device`.
 pub const onDisk = models.onDisk;
+/// `tensorfold start`'s view of the existing registry, fit selector and pull implementation.
+pub const start = @import("start.zig");
 
 const usage =
     \\usage: tensorfold models [--all] [--json]
+    \\       tensorfold start [--yes] [--check] [--startup-timeout SECONDS]
     \\       tensorfold info MODEL [--context N] [--parallel N|auto]
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
@@ -106,12 +109,12 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, m.dense, m.adapter, m.dest, m.shipped);
     }
-    const start = if (args.len >= 2) info.parseStart(args[2..]) else null;
-    if (start == null) {
+    const info_start = if (args.len >= 2) info.parseStart(args[2..]) else null;
+    if (info_start == null) {
         try err.interface.writeAll(usage);
         return 2;
     }
-    return info.runStart(a, init.io, &out.interface, env, null, args[1], start.?);
+    return info.runStart(a, init.io, &out.interface, env, null, args[1], info_start.?);
 }
 
 test "wants only the checkpoint subcommands" {

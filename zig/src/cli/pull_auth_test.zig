@@ -71,6 +71,36 @@ fn moved(fake: *FakeHub, conn: std.Io.net.Stream, location: []const u8) bool {
     return true;
 }
 
+var redirect_secret_seen = false;
+var tree_secret_seen = false;
+
+fn reflectedRedirect(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) ?bool {
+    const target = requestTarget(head);
+    if (std.mem.eql(u8, target, "/reflect")) return moved(fake, conn, "/collect?credential=" ++ token);
+    if (std.mem.startsWith(u8, target, "/collect")) {
+        redirect_secret_seen = true;
+        fake.respond(conn, "{}");
+        return true;
+    }
+    return null;
+}
+
+fn reflectedTree(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) ?bool {
+    const target = requestTarget(head);
+    if (std.mem.eql(u8, target, "/api/models/Org/Flash/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1?recursive=true")) {
+        var buf: [512]u8 = undefined;
+        const tree = std.fmt.bufPrint(&buf, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"path\": \"{s}\", \"size\": 0}}]", .{ &fake.config_git_hex, fake.config.len, token }) catch return false;
+        fake.respond(conn, tree);
+        return true;
+    }
+    if (std.mem.indexOf(u8, target, token) != null) {
+        tree_secret_seen = true;
+        fake.respond(conn, "");
+        return true;
+    }
+    return null;
+}
+
 /// A refusal with a body the hub might send, on a connection that then closes.
 fn refuse(fake: *FakeHub, conn: std.Io.net.Stream, status: []const u8) bool {
     const body = "{\"error\": \"Access to this repo is restricted\"}";
@@ -106,6 +136,12 @@ fn gatedEnv(a: Allocator, fake: *FakeHub, with: ?[]const u8) !std.process.Enviro
 
 fn has(text: []const u8, part: []const u8) bool {
     return std.mem.indexOf(u8, text, part) != null;
+}
+
+fn requestTarget(head: []const u8) []const u8 {
+    const start = std.mem.indexOfScalar(u8, head, ' ') orelse return "";
+    const rest = head[start + 1 ..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len];
 }
 
 /// No file under `root` holds `secret`: not a blob, a snapshot link's target, a ref nor a partial download.
@@ -157,6 +193,74 @@ test "security: a gated repo comes down with HF_TOKEN, sent to the hub's host an
     defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
     try pullGated(a, io, &fake, root, .{});
     try std.testing.expectEqual(@as(u32, 1), seen.cdn.load(.monotonic)); // the weights, from the CDN
+}
+
+test "security: a hub cannot reflect HF_TOKEN or controls through model_type errors" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-reflected-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try gatedEnv(a, &fake, token);
+    var shown: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ token, token ++ "\\u001b[31m" }) |model_type| {
+        fake.config = try std.fmt.allocPrint(a, "{{\"model_type\": \"{s}\"}}", .{model_type});
+        var out: std.Io.Writer.Allocating = .init(a);
+        var err_out: std.Io.Writer.Allocating = .init(a);
+        try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+        try shown.appendSlice(a, out.written());
+        try shown.appendSlice(a, err_out.written());
+    }
+    try std.testing.expect(!has(shown.items, token));
+    try std.testing.expect(!has(shown.items, "\x1b"));
+    try std.testing.expect(has(shown.items, "[redacted]"));
+}
+
+test "security: a reflected hub token never enters a redirect request target" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = reflectedRedirect;
+    fake.start();
+    defer fake.stopServer();
+    redirect_secret_seen = false;
+    const hub: auth.Auth = .{ .endpoint = try fake.endpoint(a), .bearer = "Bearer " ++ token, .source = "HF_TOKEN" };
+    var client = @import("pull_http.zig").client(a, std.testing.io);
+    defer client.deinit();
+    var buf: [8 << 10]u8 = undefined;
+    var req: std.http.Client.Request = undefined;
+    _ = hub.send(&client, &req, .GET, try std.Uri.parse(try std.fmt.allocPrint(a, "{s}/reflect", .{hub.endpoint})), .{}, &buf) catch |err| {
+        try std.testing.expectEqual(error.HubCredentialRedirect, err);
+        try std.testing.expect(!redirect_secret_seen);
+        return;
+    };
+    req.deinit();
+    return error.TestExpectedError;
+}
+
+test "security: a reflected hub token in a tree path is refused before output or URL use" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.route = reflectedTree;
+    fake.start();
+    defer fake.stopServer();
+    tree_secret_seen = false;
+    const root = try std.fmt.allocPrint(a, ".tf-pull-tree-secret-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try gatedEnv(a, &fake, token);
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try std.testing.expect(!tree_secret_seen);
+    try std.testing.expect(!has(out.written(), token) and !has(err_out.written(), token));
 }
 
 test "a gated repo's large file comes down as pieces, each redirected to the CDN without the token" {
@@ -314,6 +418,28 @@ test "security: a token pull cannot send is refused by its source, and never sho
     try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, dir, "Org/Name"));
     try std.testing.expectEqualStrings("", out.written());
     try std.testing.expect(has(err_out.written(), "in HF_TOKEN has a space") and !has(err_out.written(), "hf_Example"));
+}
+
+test "security: endpoint userinfo never appears in connection errors" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const user = "fixture-endpoint-user";
+    const password = "fixture-endpoint-password";
+    var env: Map = .init(a);
+    try env.put("HF_ENDPOINT", try std.fmt.allocPrint(a, "http://{s}:{s}@127.0.0.1:9", .{ user, password }));
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, dir, "Org/Name"));
+    for ([_][]const u8{ user, password }) |secret| {
+        try std.testing.expect(!has(out.written(), secret));
+        try std.testing.expect(!has(err_out.written(), secret));
+    }
+    try std.testing.expect(has(err_out.written(), "HF_ENDPOINT"));
 }
 
 test "security: the token goes only to the endpoint's own scheme, host and port" {

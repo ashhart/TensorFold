@@ -6,7 +6,7 @@ const gpu_builds = @import("../src/cuda/gpu_builds.zig");
 
 /// The `-Dgpu` name, or null for the development build.
 pub fn requested(b: *std.Build) ?[]const u8 {
-    return b.option([]const u8, "gpu", "Build one server for one GPU: sm_80, sm_86, sm_89, sm_120, sm_121, spark, or a HIP arch (gfx1201 ...)");
+    return b.option([]const u8, "gpu", "Build one server for one GPU: sm_80, sm_86, sm_89, sm_110, sm_120, sm_121, spark, or a HIP arch (gfx1201 ...)");
 }
 
 /// A CUDA SM as `-Dsm` spells it, or an exact HIP architecture.
@@ -73,7 +73,7 @@ fn undeclared(b: *std.Build) ?[]const u8 {
 
 /// Why `-Dgpu=name` with these options builds nothing, or null when it builds.
 fn refusal(b: *std.Build, name: []const u8, gpu: ?Gpu, o: Options) ?[]const u8 {
-    const g = gpu orelse return b.fmt("-Dgpu={s}: not a GPU this build knows; use sm_80, sm_86, sm_89, sm_120, sm_121, spark, or an exact HIP arch from zig/src/hip/caps.zig", .{name});
+    const g = gpu orelse return b.fmt("-Dgpu={s}: not a GPU this build knows; use sm_80, sm_86, sm_89, sm_110, sm_120, sm_121, spark, or an exact HIP arch from zig/src/hip/caps.zig", .{name});
     if (o.sm) return "-Dsm: -Dgpu sets the architecture";
     if (o.hip) return b.fmt("-Dhip: -Dgpu={s} chooses the backend", .{name});
     if (o.hip_options.hip_arch != null) return "-Dhip-arch: -Dgpu sets the architecture";
