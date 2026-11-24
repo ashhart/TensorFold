@@ -269,7 +269,7 @@ test "start CLI: a cached model answers once, prints no key and --check reaps it
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
-    try r.env.put("TENSORFOLD_API_KEY", "user-key-must-not-leak");
+    try r.env.put("TENSORFOLD_API_KEY", "caller-key-must-not-leak");
     try r.cache();
     const f = try world(&r, try events(a, "Ready."));
     defer f.stop();
@@ -280,7 +280,7 @@ test "start CLI: a cached model answers once, prints no key and --check reaps it
     try std.testing.expect(std.mem.indexOf(u8, r.out.written(), "first-reply check passed; server stopped") != null);
     try std.testing.expect(r.childGone());
     const key = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("child-key"), a, .limited(256));
-    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "user-key-must-not-leak"));
+    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "caller-key-must-not-leak"));
     for ([_][]const u8{ r.out.written(), r.err.written() }) |text| try std.testing.expect(std.mem.indexOf(u8, text, key) == null);
     const args = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("args"), a, .limited(4096));
     const want = try std.fmt.allocPrint(a, "serve\n{s}/models--Org--Model/snapshots/{s}\n--host\n127.0.0.1\n--port\n0\n--name\n{s}\n--name\nModel\n--drafter\n{s}/models--Org--Draft/snapshots/{s}\n", .{ r.root, revision, revision, r.root, draft_revision });

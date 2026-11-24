@@ -56,11 +56,11 @@ pub const Auth = struct {
         return if (auth.owns(uri)) .{ .override = bearer } else .default;
     }
 
-    /// Whether server-controlled text contains this hub's bearer, directly or percent-encoded.
+    /// Complete credentials and decoded prefixes at ``credential.min_prefix`` match at any encoding depth.
     pub fn reflects(auth: Auth, text: []const u8) bool {
         const bearer = auth.bearer orelse return false;
         const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
-        return containsCredential(text, secret);
+        return credential.contains(std.heap.page_allocator, text, &.{secret}) catch true;
     }
 
     /// Server-controlled text with each plain or repeatedly percent-encoded credential occurrence replaced.
@@ -92,6 +92,10 @@ pub const Auth = struct {
         var at = uri;
         var rest = buf;
         while (true) {
+            const exact = std.fmt.allocPrint(client.allocator, "{f}", .{at}) catch return error.HubCredentialRedirect;
+            const reflected = auth.reflects(exact);
+            client.allocator.free(exact);
+            if (reflected) return error.HubCredentialRedirect;
             try @import("pull_route.zig").note(client.io, at);
             o.headers.authorization = auth.header(at);
             req.* = try client.request(method, at, o);
@@ -135,11 +139,6 @@ fn origin(uri: std.Uri, buf: []u8) ?Origin {
     if (host.len == 0) return null;
     const port: u16 = uri.port orelse if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) 443 else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else return null;
     return .{ .scheme = uri.scheme, .host = host, .port = port };
-}
-fn containsCredential(text: []const u8, secret: []const u8) bool {
-    var matcher = credential.Matcher.init(std.heap.page_allocator, text);
-    defer matcher.deinit();
-    return (matcher.spanFrom(0, secret) catch return true) != null;
 }
 /// The first non-empty of HF_TOKEN and HUGGING_FACE_HUB_TOKEN, else the one token file the `hf` tools read.
 pub fn token(a: Allocator, io: std.Io, env: ?*const std.process.Environ.Map, problem: *[]const u8) !?Token {

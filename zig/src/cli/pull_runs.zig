@@ -145,14 +145,14 @@ fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u
     var wait_ms: u64 = 250;
     for (0..attempts) |_| {
         const link = location(s, client, r.file) catch |e| {
-            if (e == error.HubDenied) return e;
+            if (e == error.HubDenied or e == error.HubCredentialRedirect) return e;
             last = e;
             std.Io.sleep(s.io, .fromMilliseconds(@intCast(wait_ms)), .awake) catch {};
             wait_ms *= 2;
             continue;
         };
         get(client, s.auth, link, r.first, buf) catch |e| {
-            if (e == error.HubDenied) return e;
+            if (e == error.HubDenied or e == error.HubCredentialRedirect) return e;
             last = e;
             if (e == error.Forbidden) forget(s, r.file, link);
             std.Io.sleep(s.io, .fromMilliseconds(@intCast(wait_ms)), .awake) catch {};

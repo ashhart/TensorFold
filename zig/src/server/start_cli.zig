@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const registry = @import("checkpoint_cli").start;
 const machine = @import("sys").machine;
 const child = @import("chat_cli_child.zig");
+const credential = @import("sys").credential;
 const turn = @import("chat_cli_turn.zig");
 const history = @import("chat_cli_history.zig");
 const stream = @import("benchmark_stream.zig");
@@ -189,7 +190,7 @@ fn serve(ctx: *const Context, args: Args, choice: registry.Choice, caller_key: ?
     try say(ctx.err, "Loading {s}; Ctrl-C cancels", .{choice.entry.repo});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, 1, "{s}", .{(try credentials.safe(ctx.a, problem)) orelse ""});
+        const code = try fail(ctx, 1, "{s}", .{(try credentials.safe(ctx.a, problem)) orelse credential.withheld});
         try lastLines(ctx, tail);
         return code;
     };
@@ -221,7 +222,10 @@ fn firstReply(ctx: *const Context, own: *Child, credentials: turn.Credentials) !
             return 0;
         },
         .stopped => return stop.exitCode(stop.requested() orelse .INT),
-        .failed => |f| return fail(ctx, 1, "first reply failed: {s}", .{f.reason}),
+        .failed => |f| {
+            const reason = try std.fmt.allocPrint(ctx.a, "first reply failed: {s}", .{f.reason});
+            return fail(ctx, 1, "{s}", .{try credentials.check(ctx.a, reason)});
+        },
     }
 }
 
