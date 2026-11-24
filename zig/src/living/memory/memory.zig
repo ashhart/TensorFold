@@ -24,6 +24,8 @@ test {
     _ = store;
     _ = cuda_bridge;
     _ = @import("safety_test.zig");
+    _ = @import("journal.zig");
+    _ = @import("durable_test.zig");
 }
 
 test "memory bank: end-to-end teach, route, compose, safetensors save/reload (zero plaintext), and forget" {
