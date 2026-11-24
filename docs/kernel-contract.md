@@ -87,10 +87,11 @@ TEXT, `--offline DIR` adds the M1/M2 compiles, and `--repro` prints the smallest
 
 On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), and run `zig build kernel-contract
 -Dnvcc=/usr/local/cuda/bin/nvcc`. A family's suite alone runs as `zig build int4-contract -Dnvcc=...` (the GPTQ int4
-experts and head, its `SUMMARY` line and each control) or as `tf-cuda-test int4-contract` on a built runner. For the
-limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=... -Dsm=80,86,89,120,121`, then
-`tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values `registry.zig` holds for that
-build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
+experts and head, its `SUMMARY` line and each control) or as `tf-cuda-test int4-contract` on a built runner; its gate
+registrations are in the filtered list too, so `tf-cuda-test kernel-contract int4` selects them without the suite's
+skipped-slot check. For the limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=...
+-Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
+`registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
 For the sm_110 image set, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
 The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
@@ -630,8 +631,9 @@ leaves where float64 keeps a denormal-sized value. Gate 4's bf16 proof of that e
 rounded to bf16 before its scale (gate 4, the down), each group's sums rounded to bf16 (gate 4, the gate/up), a head
 whose words are packed unshuffled (gate 3), and on the gate/up silu of the up sum times the gate sum (gate 3) and
 gate, up and silu cut toward zero (gate 3).
-A plan whose shared expert's slot is skipped must leave those rows untouched. nvcc 13.3's usage of its 21 launches is in
-`measurements/pending_133.zig`; a 13.0 record stays pending.
+A plan whose shared expert's slot is skipped must leave those rows untouched. The 21 launches' usage is in
+`int4_records.zig`: nvcc 13.0's from each SM's cubin, the release fatbins' compiler, and nvcc 13.3's where it differs
+(the `cuda_133` set).
 CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
 and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
@@ -735,12 +737,13 @@ and FP32-output paths, FP8G's 32-row cluster tile with FP32 output, the common E
 decode-sized latent top-k and NVFP4 up experts, the Mamba scan and Super's NVFP4 prompt down kernels, three of
 GLM-5.3-Flash's packed matmuls and three of its DFlash2 launches, and the training launches it compiles differently,
 and nvcc 13.3 keeps 13.2's and changes four of GLM-5.3-Flash's KV page launches, its two prompt-indexer launches,
-its wide decode select and the span scan `tf_glm_dsel_scan`. `kernel-contract` and
-`kernel-contract-limits` read the release from each image's `.note.nv.tkinfo`, check the image against the newest set
-at or below that release (13.0's when an image names none), and print which set they used. A release with no set of
-its own is checked against the one below it, so its differences show as stale records: re-derive them with
-`kernel-contract-limits` and add a set for that release rather than loosening the audit. Launch dimensions, dynamic
-shared memory, the device's limits and the planted controls are checked the same way under every release.
+its wide decode select, the span scan `tf_glm_dsel_scan` and 12 of the GPTQ int4 launches' 21 instantiations.
+`kernel-contract` and `kernel-contract-limits` read the release from each image's `.note.nv.tkinfo`, check the image
+against the newest set at or below that release (13.0's when an image names none), and print which set they used.
+A release with no set of its own is checked against the one below it, so its differences show as stale records:
+re-derive them with `kernel-contract-limits` and add a set for that release rather than loosening the audit.
+Launch dimensions, dynamic shared memory, the device's limits and the planted controls are checked the same way under
+every release.
 
 `-Dnative-fp-decode` (off by default; nvcc 13.2 or later) builds prompt16, qmmf and fp8_experts for `sm_<n>a` from
 sm_120 on and decodes their FP4/FP8 weight pairs with PTX ISA 9.2's `cvt.rn.bf16x2.e2m1x2`/`.e4m3x2` (qmmf: FP4 only).

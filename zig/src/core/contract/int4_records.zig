@@ -1,4 +1,4 @@
-//! The int4 launches (fn_int4.cu): every kept instantiation; nvcc 13.3's usage in pending_133.zig, 13.0 pending.
+//! fn_int4's launches: each SM's cubin usage from nvcc 13.0 (13.0.88), the release compiler; 13.3's in cuda_133.
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
@@ -19,42 +19,59 @@ fn prompt(comptime mats: usize, comptime epi: usize, comptime st: usize) [:0]con
 }
 
 /// What the loader launches: a warp a unit (128 threads) for int4_kernel, a block a 64-row item (256) for the prompts.
-fn row(comptime kind: []const u8, comptime nt: usize, comptime mt: usize, comptime mats: usize, comptime epi: usize) registry.CudaRecord {
-    return .{ .launch = .{ .name = std.fmt.comptimePrint("fn_int4 {s} nt {d} mt {d}", .{ kind, nt, mt }), .symbol = kernel(nt, mt, mats, epi), .image = "fn_int4", .threads = 128, .min_sm = 80 }, .usage = registry.none };
+fn launch(comptime kind: []const u8, comptime nt: usize, comptime mt: usize, comptime mats: usize, comptime epi: usize) limits.CudaLaunch {
+    return .{ .name = std.fmt.comptimePrint("fn_int4 {s} nt {d} mt {d}", .{ kind, nt, mt }), .symbol = kernel(nt, mt, mats, epi), .image = "fn_int4", .threads = 128, .min_sm = 80 };
 }
 
-/// Every instantiation the module resolves, each unmeasured until a compiler receipt fills its usage.
+/// Every instantiation the module resolves, each SM's usage from that SM's cubin.
 pub const records = [_]registry.CudaRecord{
-    row("gate-up SwiGLU", 1, 1, 2, 2),
-    row("gate-up SwiGLU", 2, 1, 2, 2),
-    row("gate-up SwiGLU", 4, 1, 2, 2),
-    row("gate-up SwiGLU", 1, 2, 2, 2),
-    row("gate-up SwiGLU", 2, 2, 2, 2),
-    row("gate-up SwiGLU", 4, 2, 2, 2),
-    row("down fp32", 1, 1, 1, 0),
-    row("down fp32", 2, 1, 1, 0),
-    row("down fp32", 4, 1, 1, 0),
-    row("down fp32", 1, 2, 1, 0),
-    row("down fp32", 2, 2, 1, 0),
-    row("down fp32", 4, 2, 1, 0),
-    row("down bf16", 1, 1, 1, 3),
-    row("down bf16", 2, 1, 1, 3),
-    row("down bf16", 4, 1, 1, 3),
-    row("down bf16", 1, 2, 1, 3),
-    row("down bf16", 2, 2, 1, 3),
-    row("down bf16", 4, 2, 1, 3),
-    .{ .launch = .{ .name = "fn_int4 prompt down fp32", .symbol = prompt(1, 0, 2), .image = "fn_int4", .threads = 256, .dynamic = prompt_down_smem, .opt_in = true, .min_sm = 80 }, .usage = registry.none },
-    .{ .launch = .{ .name = "fn_int4 prompt down bf16", .symbol = prompt(1, 3, 2), .image = "fn_int4", .threads = 256, .dynamic = prompt_down_smem, .opt_in = true, .min_sm = 80 }, .usage = registry.none },
-    .{ .launch = .{ .name = "fn_int4 prompt gate-up SwiGLU", .symbol = prompt(2, 2, 3), .image = "fn_int4", .threads = 256, .dynamic = prompt_gu_smem, .opt_in = true, .min_sm = 80 }, .usage = registry.none },
+    .{ .launch = launch("gate-up SwiGLU", 1, 1, 2, 2), .usage = .{ .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("gate-up SwiGLU", 2, 1, 2, 2), .usage = .{ .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 168, .static = 0, .bound = 128 }, .{ .regs = 168, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("gate-up SwiGLU", 4, 1, 2, 2), .usage = .{ .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 251, .static = 0, .bound = 128 }, .{ .regs = 251, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("gate-up SwiGLU", 1, 2, 2, 2), .usage = .{ .{ .regs = 224, .static = 0, .bound = 128 }, .{ .regs = 226, .static = 0, .bound = 128 }, .{ .regs = 226, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("gate-up SwiGLU", 2, 2, 2, 2), .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("gate-up SwiGLU", 4, 2, 2, 2), .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 1, 1, 1, 0), .usage = .{ .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 2, 1, 1, 0), .usage = .{ .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 4, 1, 1, 0), .usage = .{ .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 166, .static = 0, .bound = 128 }, .{ .regs = 166, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 1, 2, 1, 0), .usage = .{ .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 186, .static = 0, .bound = 128 }, .{ .regs = 186, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 2, 2, 1, 0), .usage = .{ .{ .regs = 225, .static = 0, .bound = 128 }, .{ .regs = 225, .static = 0, .bound = 128 }, .{ .regs = 225, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down fp32", 4, 2, 1, 0), .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 1, 1, 1, 3), .usage = .{ .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 2, 1, 1, 3), .usage = .{ .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 }, .{ .regs = 146, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 4, 1, 1, 3), .usage = .{ .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 164, .static = 0, .bound = 128 }, .{ .regs = 166, .static = 0, .bound = 128 }, .{ .regs = 166, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 1, 2, 1, 3), .usage = .{ .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 189, .static = 0, .bound = 128 }, .{ .regs = 189, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 2, 2, 1, 3), .usage = .{ .{ .regs = 225, .static = 0, .bound = 128 }, .{ .regs = 224, .static = 0, .bound = 128 }, .{ .regs = 224, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = launch("down bf16", 4, 2, 1, 3), .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "fn_int4 prompt down fp32", .symbol = prompt(1, 0, 2), .image = "fn_int4", .threads = 256, .dynamic = prompt_down_smem, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 148, .static = 512, .bound = 256 }, .{ .regs = 148, .static = 512, .bound = 256 }, .{ .regs = 148, .static = 512, .bound = 256 }, .{ .regs = 128, .static = 512, .bound = 256 }, .{ .regs = 128, .static = 512, .bound = 256 } } },
+    .{ .launch = .{ .name = "fn_int4 prompt down bf16", .symbol = prompt(1, 3, 2), .image = "fn_int4", .threads = 256, .dynamic = prompt_down_smem, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 150, .static = 512, .bound = 256 }, .{ .regs = 150, .static = 512, .bound = 256 }, .{ .regs = 150, .static = 512, .bound = 256 }, .{ .regs = 128, .static = 512, .bound = 256 }, .{ .regs = 128, .static = 512, .bound = 256 } } },
+    .{ .launch = .{ .name = "fn_int4 prompt gate-up SwiGLU", .symbol = prompt(2, 2, 3), .image = "fn_int4", .threads = 256, .dynamic = prompt_gu_smem, .opt_in = true, .min_sm = 80 }, .usage = .{ .{ .regs = 226, .static = 512, .bound = 256 }, .{ .regs = 226, .static = 512, .bound = 256 }, .{ .regs = 226, .static = 512, .bound = 256 }, .{ .regs = 230, .static = 512, .bound = 256 }, .{ .regs = 230, .static = 512, .bound = 256 } } },
 };
 
-test "int4: every kept instantiation is declared once, unmeasured and inside the block's shared memory" {
+/// nvcc 13.3 (13.3.73)'s usage where it differs from 13.0 (13.0.88)'s.
+pub const cuda_133 = [_]registry.Override{
+    .{ .name = "fn_int4 gate-up SwiGLU nt 1 mt 1", .usage = .{ .{ .regs = 141, .static = 0, .bound = 128 }, .{ .regs = 141, .static = 0, .bound = 128 }, .{ .regs = 141, .static = 0, .bound = 128 }, .{ .regs = 150, .static = 0, .bound = 128 }, .{ .regs = 150, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 gate-up SwiGLU nt 4 mt 1", .usage = .{ .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 246, .static = 0, .bound = 128 }, .{ .regs = 252, .static = 0, .bound = 128 }, .{ .regs = 252, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 gate-up SwiGLU nt 1 mt 2", .usage = .{ .{ .regs = 226, .static = 0, .bound = 128 }, .{ .regs = 226, .static = 0, .bound = 128 }, .{ .regs = 226, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down fp32 nt 1 mt 1", .usage = .{ .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 122, .static = 0, .bound = 128 }, .{ .regs = 122, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down fp32 nt 2 mt 1", .usage = .{ .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down fp32 nt 2 mt 2", .usage = .{ .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down bf16 nt 1 mt 1", .usage = .{ .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 118, .static = 0, .bound = 128 }, .{ .regs = 122, .static = 0, .bound = 128 }, .{ .regs = 122, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down bf16 nt 2 mt 1", .usage = .{ .{ .regs = 126, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 139, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down bf16 nt 1 mt 2", .usage = .{ .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 198, .static = 0, .bound = 128 }, .{ .regs = 187, .static = 0, .bound = 128 }, .{ .regs = 187, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 down bf16 nt 2 mt 2", .usage = .{ .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 227, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 } } },
+    .{ .name = "fn_int4 prompt down fp32", .usage = .{ .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 126, .static = 512, .bound = 256 }, .{ .regs = 126, .static = 512, .bound = 256 } } },
+    .{ .name = "fn_int4 prompt down bf16", .usage = .{ .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 152, .static = 512, .bound = 256 }, .{ .regs = 126, .static = 512, .bound = 256 }, .{ .regs = 126, .static = 512, .bound = 256 } } },
+};
+
+test "int4: every kept instantiation is declared once, in the live registry, and fits every SM" {
     for (records, 0..) |r, i| {
         for (records[i + 1 ..]) |t| try std.testing.expect(!std.mem.eql(u8, r.launch.symbol, t.launch.symbol));
-        try std.testing.expectEqualDeep(registry.none, r.usage);
-        // a missing receipt is one problem on each of the five recorded SMs
-        try std.testing.expectEqual(limits.sms.len, try registry.checkCuda(std.testing.allocator, &.{r}, true));
+        var found: usize = 0;
+        for (registry.all_cuda) |active| found += @intFromBool(std.mem.eql(u8, active.launch.name, r.launch.name));
+        try std.testing.expectEqual(@as(usize, 1), found);
         try std.testing.expectEqual(registry.TargetDecision.applicable, registry.targetDecision(r, limits.sms[0], r.usage[0]));
+        try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{r}, true));
         try std.testing.expect(r.launch.dynamic <= limits.sms[4].smem_optin);
     }
 }
