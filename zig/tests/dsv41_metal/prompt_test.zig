@@ -326,3 +326,64 @@ test "dsv41 metal prompt: timing of a 2048-row chunk, row kernels vs grouped exp
         std.debug.print("TIME dsv41 metal prompt: 2048 rows, experts on {s}: {d:.0} us\n", .{ if (loop) "row kernels" else "grouped kernels", us[1] });
     }
 }
+
+test "dsv41 metal prompt: replay bounds decoder rows, matches short prompts, resumes cleanly, and isolates cache" {
+    const a = testing.allocator;
+    const f = try ff.Fwd.initWith(a, testing.io, fixture.promptConfig(), limit, 73);
+    defer f.deinit();
+    const c = &f.r.c;
+    const hist = try ff.ids(a, c, n_prompt + steps, 74);
+    defer a.free(hist);
+    var rep_o = head_opts;
+    rep_o.replay = true;
+    rep_o.head_rows = 1;
+    // 1. short prompt (<= 128) matches full bit-for-bit
+    {
+        const n_short: usize = 100;
+        var full_o = rep_o;
+        full_o.replay = false;
+        full_o.full = true;
+        var full = try Run.init(a, f, full_o, n_short);
+        defer full.deinit();
+        try full.p.run(env(f), &full.slot, &full.tail, hist[0..n_short]);
+        var rep = try Run.init(a, f, rep_o, 0);
+        defer rep.deinit();
+        try rep.p.run(env(f), &rep.slot, &rep.tail, hist[0..n_short]);
+        const d = runDiff(c, &rep, &full);
+        say(d[0] + d[1] + d[2] == 0, "(g) replay short ({d} <= 128) vs full: {d} logits, {d} taps, {d} state bytes differ", .{ n_short, d[0], d[1], d[2] });
+        try testing.expectEqual(@as(usize, 0), d[0] + d[1] + d[2]);
+    }
+    // 2. long prompt (900): decoder layers run 128 rows, tail cap 128, and 600+300 resume matches fresh
+    var fresh = try Run.init(a, f, rep_o, 0);
+    defer fresh.deinit();
+    try fresh.p.run(env(f), &fresh.slot, &fresh.tail, hist[0..n_prompt]);
+    try testing.expectEqual(@as(u32, 128), fresh.tail.cap);
+    var rows_ok: usize = 0;
+    for (4..7) |L| rows_ok += @intFromBool(fresh.p.outs[L] == 128 and fresh.p.keys[L] == 128);
+    try testing.expectEqual(@as(usize, 3), rows_ok);
+    var two = try Run.init(a, f, rep_o, 0);
+    defer two.deinit();
+    try two.p.run(env(f), &two.slot, &two.tail, hist[0..600]);
+    try two.p.run(env(f), &two.slot, &two.tail, hist[0..n_prompt]);
+    const df = try Out.init(a, c, steps);
+    defer df.deinit(a);
+    const dt = try Out.init(a, c, steps);
+    defer dt.deinit(a);
+    try decode(f, &fresh.slot, hist, n_prompt, n_prompt + steps, df);
+    try decode(f, &two.slot, hist, n_prompt, n_prompt + steps, dt);
+    const pd = bitsDiff(two.p.logits(c), fresh.p.logits(c)) + halfDiff(two.p.tapRows(c), fresh.p.tapRows(c));
+    const dd = bitsDiff(dt.logits, df.logits) + halfDiff(dt.taps, df.taps);
+    say(pd + dd == 0, "(g) replay resumed 600+300 vs fresh 900 + {d} decode steps: {d} prompt, {d} decode diffs", .{ steps, pd, dd });
+    try testing.expectEqual(@as(usize, 0), pd + dd);
+    // 3. snapshots cache isolates replay vs full entries
+    {
+        var store: pkg.snapshots.Store = .{ .a = a, .cap = 1 << 28 };
+        defer store.deinit();
+        const ring = try a.alloc(u16, c.window * c.dspark_targets.len * c.hidden);
+        defer a.free(ring);
+        @memset(ring, 0);
+        try store.save(c, &fresh.slot, hist[0..600], ring, null, true);
+        try testing.expect(store.best(hist[0..n_prompt], false) == null);
+        try testing.expect(store.best(hist[0..n_prompt], true) != null);
+    }
+}

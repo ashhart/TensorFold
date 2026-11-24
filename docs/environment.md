@@ -129,6 +129,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSV41_CALIB_CYCLE` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 timed in interleaved cycles; unset is 4 on CUDA; ignored by Metal's default method |
 | `TF_DSV41_CALIB_DEEP_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs for rows past 8; unset is 5 on CUDA; ignored by Metal's default method |
 | `TF_DSV41_CALIB_BUDGET_MS` | DeepSeek-V4.1 draft pricing on Metal: whole milliseconds 0 through 600000 after which later passes of the start-up measurement are dropped, each entry keeping its first timed run (0: no limit); unset is 1000. Read and checked on CUDA but not used there |
+| `TF_DSV41_PREFILL` | DeepSeek-V4.1 on Metal: `full` (default, exact CED decoder suffix cone) or `replay` (opt-in bounded 128-row decoder suffix replay) |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |

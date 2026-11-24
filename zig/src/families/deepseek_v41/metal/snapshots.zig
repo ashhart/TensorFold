@@ -13,6 +13,7 @@ pub const Entry = struct {
     taps: []u16,
     logits: ?[]f32,
     tick: u64 = 0,
+    replay: bool = false,
 
     fn size(e: *const Entry) u64 {
         return e.ids.len * 4 + e.bytes.len + e.taps.len * 2 + if (e.logits) |l| l.len * 4 else 0;
@@ -87,10 +88,11 @@ pub const Store = struct {
         return st.cap > 0;
     }
 
-    /// The longest entry that starts `ids`: shorter than them, or as long with the choice's logits.
-    pub fn best(st: *Store, ids: []const u32) ?*Entry {
+    /// The longest entry matching `replay` that starts `ids`: shorter than them, or as long with logits.
+    pub fn best(st: *Store, ids: []const u32, replay: bool) ?*Entry {
         var out: ?*Entry = null;
         for (st.entries.items) |e| {
+            if (e.replay != replay) continue;
             if (e.ids.len > ids.len or !std.mem.eql(u32, e.ids, ids[0..e.ids.len])) continue;
             if (e.ids.len == ids.len and e.logits == null) continue;
             if (out == null or e.ids.len > out.?.ids.len) out = e;
@@ -102,11 +104,11 @@ pub const Store = struct {
         return out;
     }
 
-    /// The slot's state after `ids` kept (the oldest entries make room); one entry a distinct `ids`.
-    pub fn save(st: *Store, c: *const Config, slot: *const kv.Slot, ids: []const u32, ring: []const u16, logits: ?[]const f32) !void {
+    /// The slot's state after `ids` kept (the oldest entries make room); one entry a distinct `(ids, replay)`.
+    pub fn save(st: *Store, c: *const Config, slot: *const kv.Slot, ids: []const u32, ring: []const u16, logits: ?[]const f32, replay: bool) !void {
         if (!st.on() or ids.len == 0) return;
         st.tick += 1;
-        for (st.entries.items) |e| if (std.mem.eql(u32, e.ids, ids)) {
+        for (st.entries.items) |e| if (e.replay == replay and std.mem.eql(u32, e.ids, ids)) {
             e.tick = st.tick;
             if (e.logits != null or logits == null) return;
             e.logits = try st.a.dupe(f32, logits.?);
@@ -122,7 +124,7 @@ pub const Store = struct {
         while (st.held + size > st.cap) st.evict();
         const e = try st.a.create(Entry);
         errdefer st.a.destroy(e);
-        e.* = .{ .ids = try st.a.dupe(u32, ids), .bytes = undefined, .taps = undefined, .logits = null, .tick = st.tick };
+        e.* = .{ .ids = try st.a.dupe(u32, ids), .bytes = undefined, .taps = undefined, .logits = null, .tick = st.tick, .replay = replay };
         errdefer st.a.free(e.ids);
         e.bytes = try st.a.alloc(u8, total);
         errdefer st.a.free(e.bytes);

@@ -206,8 +206,8 @@ pub const Scratch = struct {
         return .{ .buf = s.buf, .off = s.meta.off + 4 * at };
     }
 
-    /// Records of positions [a, a + rows) of one stream; `cap` is the tail ring's rows (its destinations).
-    pub fn writeRows(s: *const Scratch, c: *const Config, a: u32, rows: u32, cap: u32) !void {
+    /// Records of positions [a, a + rows) of one stream; `cap` is the tail ring's rows, `wmin` the window floor.
+    pub fn writeRows(s: *const Scratch, c: *const Config, a: u32, rows: u32, cap: u32, wmin: u32) !void {
         if (rows == 0 or rows > s.rows) return error.BadRows;
         const m = s.i32s(s.meta, s.rec.iota);
         @memset(m, -1);
@@ -226,7 +226,7 @@ pub const Scratch = struct {
             m[k.wdest + 2 * r] = @intCast(w[0]);
             m[k.wdest + 2 * r + 1] = @intCast(w[1]);
             m[k.tdest + r] = @intCast(pos % cap);
-            const meta = attn.Meta{ .pos = @intCast(pos), .wofs = back, .wbase = @intCast(a), .cofs = 0, .ncomp = 0 };
+            const meta = attn.Meta{ .pos = @intCast(pos), .wofs = back, .wbase = @intCast(a), .cofs = 0, .ncomp = 0, .pad = .{ @intCast(wmin), 0 } };
             var comp = meta;
             comp.ncomp = attn.max_selected;
             @memcpy(m[k.swa + 8 * r ..][0..8], @as(*const [8]i32, @ptrCast(&meta)));

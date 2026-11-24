@@ -259,6 +259,8 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_PREFILL", .raw = "full", .n = 0 },
+    .{ .name = "TF_DSV41_PREFILL", .raw = " replay\n", .n = 1 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -450,8 +452,11 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
     for ([_][]const u8{ "Native", "1", "nativee" }) |raw| try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_IMAGES", raw));
     for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "32" }, .{ "TF_DSV41_SLOTS", "16" }, .{ "TF_DSV41_ROWS_CAP", "12" }, .{ "TF_DSV41_CONTEXT", "9223372036854775807" } }) |c|
         try t.expect(try e.parse(c[0], c[1]) != null);
-    for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" } }) |c|
+    for ([_][2][]const u8{ .{ "TF_DSV41_ENGRAM_READERS", "33" }, .{ "TF_DSV41_SLOTS", "0" }, .{ "TF_DSV41_SLOTS", "17" }, .{ "TF_DSV41_ROWS_CAP", "9" }, .{ "TF_DSV41_CONTEXT", "9223372036854775808" }, .{ "TF_DSV41_PREFILL_ADAPT_MIN", "15" }, .{ "TF_DSV41_PREFILL", "1" }, .{ "TF_DSV41_PREFILL", "ced" }, .{ "TF_DSV41_PREFILL", "Full" } }) |c|
         try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+    const why_prefill = (try e.refusal(a, Env{ .name = "TF_DSV41_PREFILL", .raw = "bad" }, .{ .metal = true })).?;
+    defer a.free(why_prefill);
+    try t.expect(std.mem.indexOf(u8, why_prefill, "TF_DSV41_PREFILL") != null);
 }
 
 const Alias = struct {
