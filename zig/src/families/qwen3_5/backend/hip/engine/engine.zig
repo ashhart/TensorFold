@@ -117,6 +117,7 @@ pub const Engine = struct {
     ctx: hip.Context,
     lib: hip.Launcher,
     stream: hip.Stream,
+    edge_events: [2]hip.Event = undefined, // a polled prompt pass's layer edges (Poll)
     weights: weights.Model,
     bridge: *bridge.Bridge,
     o: Options,
@@ -187,6 +188,10 @@ pub const Engine = struct {
         if (seen != null and e.act != .bf16) return error.VisionRequiresBf16;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
+        e.edge_events[0] = try hip.Event.init(&e.driver, false);
+        errdefer e.edge_events[0].deinit();
+        e.edge_events[1] = try hip.Event.init(&e.driver, false);
+        errdefer e.edge_events[1].deinit();
         const group: ?slicing.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
         // RCCL's init waits for every rank: none enters it unless every rank got this far
         _ = try steps.done(.{ 0, 0 }, .first);
@@ -386,6 +391,7 @@ pub const Engine = struct {
         if (e.rope) |*k| k.deinit();
         e.bridge.deinit();
         e.weights.deinit();
+        for (&e.edge_events) |*ev| ev.deinit();
         e.stream.deinit();
         e.lib.unload();
         if (e.o.world > 1) e.comm.close();
@@ -480,17 +486,16 @@ pub const Engine = struct {
         return .{ .ptr = whole, .kind = slice.kind };
     }
 
-    /// Asked after each layer of a long prompt (the stream is idle then): true ends the pass with `error.Cancelled`.
+    /// Asked at a long prompt's layer edges once the layer before is done: true drains, then `error.Cancelled`.
     pub const Cancel = @import("lanes").stream.CancelCheck;
 
     const Poll = struct {
-        stream: hip.Stream,
+        edges: @import("hip_serve").cancel.Layers(hip.Stream, hip.Event),
         cancel: Cancel,
 
         fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
             const p: *Poll = @ptrCast(@alignCast(ctx));
-            try p.stream.synchronize();
-            try @import("hip_serve").cancel.poll(p.cancel);
+            try p.edges.edge(p.cancel.ptr, p.cancel.check);
         }
     };
 
@@ -498,7 +503,7 @@ pub const Engine = struct {
     fn poll(e: *Engine, cancel: ?Cancel, len: usize, p: *Poll) ?fwd.Trace {
         const c = cancel orelse return null;
         if (!prefix.pollsLayers(e.o.world, len)) return null;
-        p.* = .{ .stream = e.stream, .cancel = c };
+        p.* = .{ .edges = .{ .stream = e.stream, .events = e.edge_events }, .cancel = c };
         return .{ .ctx = p, .layer = Poll.layer, .reads = false };
     }
 
