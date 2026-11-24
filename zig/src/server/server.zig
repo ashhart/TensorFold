@@ -290,9 +290,6 @@ pub const Server = struct {
             const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
             if (request.structure) |tool| tool.free();
             request.structure = st;
-        } else if (has_tools and required and request.structure != null) {
-            // the required call's grammar stays: on Inkling 2 the reply may also end at its call's end of message
-            request.eos = @import("chat_inkling2.zig").grammarEnds(srv, cx.a, request.eos) catch return cx.fail(.server, "out of memory", .{});
         }
         try budgetStructure(cx, f, request);
     }
