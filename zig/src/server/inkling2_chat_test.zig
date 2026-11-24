@@ -11,12 +11,12 @@ const sample = "<|message_model|><|content_thinking|>The user asks: ... 340 + 51
 const thought = "The user asks: ... 340 + 51 = 391. ... ";
 
 /// The committed release tokenizer and template, with only the served model type changed by a case.
-const Fixture = struct {
+pub const Fixture = struct {
     tmp: std.testing.TmpDir,
     path: [:0]u8,
 
     /// `kind` "release": the Mini checkpoint's own config.json, tokenizer_config.json and chat template.
-    fn init(a: std.mem.Allocator, kind: []const u8) !Fixture {
+    pub fn init(a: std.mem.Allocator, kind: []const u8) !Fixture {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         const release = std.mem.eql(u8, kind, "release");
@@ -43,20 +43,20 @@ const Fixture = struct {
         return .{ .tmp = tmp, .path = try tmp.dir.realPathFileAlloc(t.io, ".", a) };
     }
 
-    fn deinit(f: *Fixture) void {
+    pub fn deinit(f: *Fixture) void {
         f.tmp.cleanup();
     }
 };
 
 /// Answers `reply` in chunks of `stride` tokens.
-const Script = struct {
+pub const Script = struct {
     a: std.mem.Allocator,
     reply: []const u32,
     stride: usize,
     lane: bool = false,
     eos_len: usize = 0, // the request's end ids, as the engine got them
 
-    fn engine(s: *@This()) api.Engine {
+    pub fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
