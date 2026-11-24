@@ -165,17 +165,18 @@ test "capability audit: environment table omits dead readers and slide metadata 
 
 test "capability audit: a flag a build only refuses is not advertised" {
     // --glp is parsed on every platform so its refusal names the engine; only a steering build lists it.
+    const steers = @import("glp_startup.zig").steers;
     var without: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer without.deinit();
     try capabilitiesFor(&without.writer, .{ .version = "test" }, false);
-    try std.testing.expect(std.mem.indexOf(u8, without.written(), "\"--glp\":") == null);
+    // A build that refuses the flags lists none, but a steering host's own advertised bit still wins.
+    try std.testing.expectEqual(steers, std.mem.indexOf(u8, without.written(), "\"--glp\":") != null);
     var serving: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer serving.deinit();
     try capabilitiesFor(&serving.writer, .{ .version = "test" }, true);
-    const listed = std.mem.indexOf(u8, serving.written(), "\"--glp\":") != null;
-    try std.testing.expectEqual(@import("glp_startup.zig").steers, listed);
+    try std.testing.expect(std.mem.indexOf(u8, serving.written(), "\"--glp\":") != null);
     var real: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer real.deinit();
     try capabilities(&real.writer, .{ .version = "test" });
-    try std.testing.expectEqual(listed, std.mem.indexOf(u8, real.written(), "\"--glp\":") != null);
+    try std.testing.expectEqual(steers, std.mem.indexOf(u8, real.written(), "\"--glp\":") != null);
 }
