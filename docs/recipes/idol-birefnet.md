@@ -43,7 +43,7 @@ The port therefore computes everything in fp32:
 - sums in blocks of 256 terms added into the total, because one running sum over the squeeze's 51,840 terms drifts
   to twice torch's distance from float64;
 - LayerNorm in two passes;
-- the exact `erf` GELU (musl's `erff`, within 0.76 ulp);
+- the exact `erf` GELU, our own fp32 erf (its Maclaurin series under 1, a fitted tail above), within 1.6 ulp;
 - `precise::exp`;
 - the deformable columns as torchvision forms them.
 

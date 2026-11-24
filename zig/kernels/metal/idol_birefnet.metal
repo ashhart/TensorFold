@@ -5,51 +5,30 @@ using namespace metal;
 
 #define TF_UNROLL_BR _Pragma("clang loop unroll(full)")
 
-// erf in fp32 to within an ulp (musl's erff), for nn.GELU's exact form.
+// erf for exact GELU: Maclaurin series under 1, our fitted erfc tail to 4 (birefnet_erf.zig: within 1.6 ulp).
+constant float br_erf_series[11] = {
+    1.283791661e-01f, -3.761263788e-01f, 1.128379181e-01f, -2.686617151e-02f,
+    5.223977845e-03f, -8.548327023e-04f, 1.205533263e-04f, -1.492565025e-05f,
+    1.646211444e-06f, -1.636584415e-07f, 1.480719281e-08f};
+constant float br_erf_tail[11] = {
+    3.088846279e-05f, 5.636186004e-01f, 3.914452624e-03f, -2.898161113e-01f,
+    -5.404456705e-02f, 8.660649061e-01f, -1.474402905e+00f, 1.374662042e+00f,
+    -7.791740298e-01f, 2.530610263e-01f, -3.633073717e-02f};
+
+inline float br_poly(constant float* c, float z) {
+  float p = c[10];
+  TF_UNROLL_BR for (int i = 9; i >= 0; i--) p = fma(p, z, c[i]);
+  return p;
+}
+
 inline float br_erf(float x) {
-  const uint ix = as_type<uint>(x) & 0x7fffffffu;
-  const bool neg = as_type<uint>(x) >> 31;
-  if (ix >= 0x7f800000u) return isnan(x) ? x : (neg ? -1.0f : 1.0f);
-  if (ix < 0x3f580000u) {
-    if (ix < 0x31800000u) return 0.125f * (8.0f * x + 1.0270333290e+00f * x);
-    const float z = x * x;
-    const float r = 1.2837916613e-01f + z * (-3.2504209876e-01f + z * (-2.8481749818e-02f + z * (-5.7702702470e-03f +
-                    z * -2.3763017452e-05f)));
-    const float s = 1.0f + z * (3.9791721106e-01f + z * (6.5022252500e-02f + z * (5.0813062117e-03f +
-                    z * (1.3249473704e-04f + z * -3.9602282413e-06f))));
-    return x + x * (r / s);
-  }
-  float y;
-  if (ix < 0x40c00000u) {
-    const float ax = fabs(x);
-    if (ix < 0x3fa00000u) {
-      const float s = ax - 1.0f;
-      const float P = -2.3621185683e-03f + s * (4.1485610604e-01f + s * (-3.7220788002e-01f + s * (3.1834661961e-01f +
-                      s * (-1.1089469492e-01f + s * (3.5478305072e-02f + s * -2.1663755178e-03f)))));
-      const float Q = 1.0f + s * (1.0642088205e-01f + s * (5.4039794207e-01f + s * (7.1828655899e-02f +
-                      s * (1.2617121637e-01f + s * (1.3637083583e-02f + s * 1.1984500103e-02f)))));
-      y = 8.4506291151e-01f + P / Q;
-    } else {
-      const float s = 1.0f / (ax * ax);
-      float R, S;
-      if (ix < 0x4036db6du) {
-        R = -9.8649440333e-03f + s * (-6.9385856390e-01f + s * (-1.0558626175e+01f + s * (-6.2375331879e+01f +
-            s * (-1.6239666748e+02f + s * (-1.8460508728e+02f + s * (-8.1287437439e+01f + s * -9.8143291473e+00f))))));
-        S = 1.0f + s * (1.9651271820e+01f + s * (1.3765776062e+02f + s * (4.3456588745e+02f + s * (6.4538726807e+02f +
-            s * (4.2900814819e+02f + s * (1.0863500214e+02f + s * (6.5702495575e+00f + s * -6.0424413532e-02f)))))));
-      } else {
-        R = -9.8649431020e-03f + s * (-7.9928326607e-01f + s * (-1.7757955551e+01f + s * (-1.6063638306e+02f +
-            s * (-6.3756646729e+02f + s * (-1.0250950928e+03f + s * -4.8351919556e+02f)))));
-        S = 1.0f + s * (3.0338060379e+01f + s * (3.2579251099e+02f + s * (1.5367296143e+03f + s * (3.1998581543e+03f +
-            s * (2.5530502930e+03f + s * (4.7452853394e+02f + s * -2.2440952301e+01f))))));
-      }
-      const float z = as_type<float>(as_type<uint>(ax) & 0xffffe000u);
-      y = 1.0f - precise::exp(-z * z - 0.5625f) * precise::exp((z - ax) * (z + ax) + R / S) / ax;
-    }
-  } else {
-    y = 1.0f - 0x1p-120f;
-  }
-  return neg ? -y : y;
+  if (isnan(x)) return x;
+  const float ax = fabs(x);
+  if (ax < 1.0f) return fma(x, br_poly(br_erf_series, x * x), x);
+  if (ax >= 4.0f) return copysign(1.0f, x);
+  const float hi = ax * ax, lo = fma(ax, ax, -hi);
+  const float e = precise::exp(-hi) * (1.0f - lo);
+  return copysign(1.0f - e * br_poly(br_erf_tail, precise::divide(1.0f, ax)), x);
 }
 
 inline float br_sigmoid(float x) { return 1.0f / (1.0f + precise::exp(-x)); }
