@@ -16,7 +16,7 @@ pub const Queue = struct {
 
 fn isCpuOnly(op: api.MemoryOp) bool {
     return switch (op) {
-        .save, .forget_parent, .supersede_parent, .consolidate, .clear_all, .stats => true,
+        .save, .forget_parent, .supersede_parent, .consolidate, .clear_all, .stats, .publish_parent => true,
         .init, .teach_chunk, .find_conflicts => false,
     };
 }
@@ -47,14 +47,9 @@ pub fn answerOneInFlight(h: *LaneHost) void {
         return;
     }
     const spare_lane = h.admitted.items.len == 0 or h.admitted.items.len < h.info_.lanes;
-    var pick: ?usize = null;
-    for (h.mem_ops.asks.items, 0..) |ask, i| {
-        if (spare_lane or isCpuOnly(ask.op.*)) {
-            pick = i;
-            break;
-        }
-    }
-    const idx = pick orelse {
+    // arrival order: only the oldest op may run, so no later change is published ahead of an earlier one
+    const head = h.mem_ops.asks.items[0];
+    const idx: usize = if (spare_lane or isCpuOnly(head.op.*)) 0 else {
         h.unlock();
         return;
     };

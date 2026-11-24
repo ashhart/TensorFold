@@ -145,6 +145,7 @@ pub fn clearDurable(self: *Bank) !u32 {
     self.pending_deltas = 0;
     self.unflushed_from = 0;
     self.rebuildBridges() catch {};
+    self.version += 1;
     return removed;
 }
 
