@@ -1,6 +1,6 @@
 // From omarchy-mlx overlay/mlx/backend/omarchy/shaders/fast_norm_gated.comp at 69ab4cfc3f6c.
 // Code adapted: 4 lines added or changed, 0 removed.
-// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
