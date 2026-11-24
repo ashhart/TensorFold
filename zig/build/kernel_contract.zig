@@ -38,6 +38,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
             .{ .name = "inkling2_glue_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig") }) },
             .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
+            .{ .name = "inkling2_tree_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/tree_plan.zig") }) },
             .{ .name = "inkling2_experts_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/experts_plan.zig") }) },
         },
     }) }));
@@ -177,6 +178,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const inkling2_metal = engine.import_table.get("inkling2_metal").?;
     const inkling2_glue_plan = engine.import_table.get("inkling2_glue_plan").?;
     const inkling2_loop_plan = engine.import_table.get("inkling2_loop_plan").?;
+    const inkling2_tree_plan = engine.import_table.get("inkling2_tree_plan").?;
     const image = @import("h3_image_contract.zig").sources(b);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
@@ -198,6 +200,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "inkling2_metal", .module = inkling2_metal },
             .{ .name = "inkling2_glue_plan", .module = inkling2_glue_plan },
             .{ .name = "inkling2_loop_plan", .module = inkling2_loop_plan },
+            .{ .name = "inkling2_tree_plan", .module = inkling2_tree_plan },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
         },
     }) });

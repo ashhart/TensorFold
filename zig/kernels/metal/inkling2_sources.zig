@@ -10,6 +10,7 @@ pub const dense_mma = @import("inkling2/dense_sources.zig").dense_mma;
 pub const loop = @import("inkling2/loop_sources.zig").loop;
 pub const loop_mma = @import("inkling2/loop_sources.zig").loop_mma;
 pub const runtime = @import("inkling2/runtime_sources.zig").runtime;
+pub const tree = @import("inkling2/tree_sources.zig").tree;
 pub const inkling2_dspark = @import("inkling2/dspark_sources.zig").dspark;
 pub const inkling2_dspark_pre_m5 = @import("inkling2/dspark_sources.zig").dspark_pre_m5;
 pub const vision = @import("inkling2/vision_sources.zig").vision;
