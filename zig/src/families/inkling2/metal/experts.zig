@@ -155,6 +155,8 @@ pub fn mxfp8Quantize(p: *const Pipelines, e: mtl.ComputeEncoder, w: Ref, scales:
 /// Sum per-token BF16 down outputs in ascending expert index and round once to BF16.
 pub fn combine(p: *const Pipelines, e: mtl.ComputeEncoder, down: Ref, ids: Ref, weights: Ref, out: Ref, c: Call) !void {
     try plan.check(c);
+    // The kernel orders a token's routes in eight registers.
+    if (c.topk > 8) return error.BadExpertShape;
     for ([_]Ref{ down, ids, weights, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 4);
     // Combine's rows are tokens, rather than route pairs.
