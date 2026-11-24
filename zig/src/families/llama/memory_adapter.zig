@@ -46,9 +46,6 @@ pub const Adapter = struct {
             .rec_rows = 0,
             .rec_cols = 0,
             .conv_elems = 0,
-            .svd_rank = 0,
-            .svd_rank_short = 0,
-            .keep_conv = false,
         };
     }
 

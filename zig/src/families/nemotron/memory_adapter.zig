@@ -61,9 +61,6 @@ pub const Adapter = struct {
             .rec_rows = c.mamba_head_dim, // 64
             .rec_cols = c.state, // 128
             .conv_elems = (c.conv_kernel - 1) * c.convDim(), // 3 * 6144
-            .svd_rank = 0, // KV-only on doc chunks (zero Mamba SVD!)
-            .svd_rank_short = 4, // rank-4 Mamba SVD on tiny facts & standing policies so 15-token rules steer all 23 Mamba layers!
-            .keep_conv = false,
         };
     }
 

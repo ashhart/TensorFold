@@ -65,3 +65,30 @@ test "bank exact: a saved and reloaded bank holds bit for bit the values, routes
     try t.expect(a.items.len > 0);
     try t.expectEqualSlices(u8, a.items, b.items);
 }
+
+test "bank exact: a fact's recurrent change and conv state are stored whole, so composing it gives exactly the body's" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    var mock: safety.Mock = .{ .gpa = t.allocator, .arch = safety.Mock.spec };
+    const b = try safety.taught(t.allocator, dir, &mock, true);
+    defer b.deinit();
+    const back = try Bank.init(t.allocator, t.io, dir, mock.backend());
+    defer back.deinit();
+    try t.expect(try back.loadIfPresent());
+    const RawState = @import("bank.zig").RawState;
+    // the fact's state as the model computes it on the shared prefix
+    var body = try RawState.init(t.allocator, mock.arch, safety.fact_ids.len);
+    defer body.deinit(t.allocator);
+    try mock.backend().compileState(&mock, &b.prefix_state.?, &safety.fact_ids, &body);
+    const pref = &b.prefix_state.?;
+    for ([_]*Bank{ b, back }) |bank| {
+        var out = try bank.composeRawState(&.{0}); // the fact alone: one parent, weight 1
+        defer out.deinit(t.allocator);
+        for (out.rec_state, pref.rec_state, body.rec_state) |got, p, s| for (got, p, s) |g, pv, sv| {
+            try t.expectEqual(@as(u32, @bitCast(@mulAdd(f32, 1.0, sv - pv, pv))), @as(u32, @bitCast(g)));
+        };
+        for (out.rec_conv, body.rec_conv) |got, want| try t.expectEqualSlices(u16, want, got);
+    }
+}
