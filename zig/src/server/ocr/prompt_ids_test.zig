@@ -29,11 +29,14 @@ const dots_prompt =
     \\5. Answer with a single JSON object and nothing else.
     \\
 ;
+/// GLM-OCR's reader prompt (families/glm_ocr/ocr.zig).
+const glm_prompt = "Text Recognition:";
 
 /// The SHA-256 each family's reader test checks its prompt against: the prompt every oracle run recorded.
 const Pinned = struct { prompt: []const u8, sha256: []const u8 };
 const readers = [_]Pinned{
     .{ .prompt = dots_prompt, .sha256 = "c06a55ac6420f7b725306c52be3c5fe0822c0ae80b2a8565fc07607d9d0f5308" },
+    .{ .prompt = glm_prompt, .sha256 = "77e8207573e1b8ba857d25db3a5080ae8651d6ddc2ea79007af5ca7958b80017" },
 };
 
 /// The template's image placeholder: a byte no request text holds.
@@ -112,7 +115,7 @@ const Recorder = struct {
     fn info(ctx: *anyopaque) api.Info {
         const r: *Recorder = @ptrCast(@alignCast(ctx));
         const v: api.Vision = .{ .ctx = r, .prepare = prepare, .image_token = image_byte, .image_tokens = 64, .max_images = 4 };
-        return .{ .context_window = 1 << 16, .vision = v, .ocr = .{ .prompt = r.reader, .parse = noBlocks } };
+        return .{ .context_window = 1 << 16, .vision = v, .ocr = .{ .prompt = r.reader, .geometry = .block, .parse = noBlocks } };
     }
     fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const r: *Recorder = @ptrCast(@alignCast(ctx));

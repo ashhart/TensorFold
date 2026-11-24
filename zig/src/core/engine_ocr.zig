@@ -9,7 +9,7 @@ pub const html = @import("ocr_html.zig");
 /// TL, TR, BR, BL of the text in its upright reading frame, in original-image pixels (rotated text keeps its order).
 pub const Quad = [4][2]f32;
 
-/// What a block holds.
+/// What a block holds; ``page`` only for a ``.none`` reader (the whole page's Markdown in one block).
 pub const Kind = enum {
     text,
     title,
@@ -23,12 +23,16 @@ pub const Kind = enum {
     page_header,
     page_footer,
     picture,
+    page,
 };
+
+/// The geometry a reader gives: none, or one quad a block.
+pub const Geometry = enum { none, block };
 
 /// One block of a page in reading order.
 pub const OcrBlock = struct {
     content: []const u8, // normalized Markdown (docs/api.md OCR: Reader Markdown); empty only for .picture
-    quad: Quad,
+    quad: ?Quad, // null only for a reader whose geometry is .none
     kind: Kind,
 };
 
@@ -39,6 +43,8 @@ pub const Error = error{Unreadable};
 pub const Ocr = struct {
     /// Text parts that follow the image in the single user turn (may be empty).
     prompt: []const u8,
+    /// What geometry `parse` gives.
+    geometry: Geometry,
     /// Text to blocks in pixels of ``original``; ``frame`` is the tower input size the prepare step used.
     parse: *const fn (a: Allocator, text: []const u8, original: Size, frame: Size) anyerror![]OcrBlock,
 };

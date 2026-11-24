@@ -1594,7 +1594,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         const command: string = args.command ?? ''
         const blocked = blockedCommandReason(command)
         if (blocked) return { ok: false, output: `Blocked by TensorFold safety policy: ${blocked}.`, command, meta: 'blocked' }
-        const networkReason = ctx.networkCapabilityAllowed === false ? commandNetworkReason(command) : null
+        const networkReason = ctx.networkCapabilityAllowed === false ? commandNetworkReason(command, isRemote(ctx)) : null
         if (networkReason) return { ok: false, output: `Blocked by ticket capability policy: ${networkReason}; add the network capability to run it.`, command, meta: 'blocked' }
         const profile = sandboxProfileForCommand(command)
         if (isRemote(ctx)) {

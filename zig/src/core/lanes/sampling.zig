@@ -75,7 +75,7 @@ pub fn keyBits(seed: u64, position: u64, id: u64) u64 {
 }
 
 /// keyBits before the id, shared by every candidate of one draw.
-fn keyBase(seed: u64, position: u64) u64 {
+pub fn keyBase(seed: u64, position: u64) u64 {
     return mix(mix(seed +% 0x9E3779B97F4A7C15) ^ (position *% 0xD1B54A32D192ED03));
 }
 

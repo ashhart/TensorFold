@@ -206,7 +206,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
 fn positiveInt(v: ?Value) ?i64 {
     const x = v orelse return null;
     if (x != .int) return null;
-    const n = x.int64() orelse return std.math.maxInt(i64);
+    const n = x.int64() orelse return null;
     return if (n > 0) n else null;
 }
 
@@ -227,7 +227,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         if (s != .bool) return cx.refuse("stream must be a boolean");
         try chat.put(a, "stream", s);
     }
-    for ([_][]const u8{ "temperature", "top_p", "top_k" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "cache_salt" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
     if (body.get("stop_sequences")) |stops| {
         const ok = stops == .array and for (stops.array) |s| {
             if (s != .string or s.string.len == 0) break false;
@@ -359,4 +359,26 @@ test "document block refuses remote url source" {
     )).ok;
     try std.testing.expectError(error.Refused, translate(&cx, body, false));
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
+}
+
+test "max_tokens rejects overflow and nonpositive boundaries" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const invalid = [_][]const u8{ "9223372036854775808", "-9223372036854775809", "-9223372036854775808", "0", "-1" };
+    for (invalid) |limit| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":{s},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{limit});
+        const body = (try json.parse(cx.a, text)).ok;
+        try std.testing.expectError(error.Refused, translate(&cx, body, false));
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, "max_tokens") != null);
+    }
+    for ([_][]const u8{ "1", "9223372036854775807" }) |limit| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":{s},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{limit});
+        const result = try translate(&cx, (try json.parse(cx.a, text)).ok, false);
+        try std.testing.expectEqualStrings(limit, result.get("max_tokens").?.int);
+    }
+    for ([_][]const u8{ "5", "9223372036854775808" }) |budget| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":5,\"thinking\":{{\"type\":\"enabled\",\"budget_tokens\":{s}}},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{budget});
+        try std.testing.expectError(error.Refused, translate(&cx, (try json.parse(cx.a, text)).ok, false));
+    }
 }

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from server_fixtures import _client, _echo, _mock
 
 from tensorfold_web import engine as engine_mod
+from tensorfold_web import cli
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.catalog import Catalog
 from tensorfold_web.engine import Engine, rates_from_counters
@@ -39,6 +40,26 @@ def test_studio_token_gates_api_and_relay(tmp_path, monkeypatch):
         for p in ("/openapi.json", "/docs", "/redoc"):                      # no route map outside the token
             r = client.get(p)
             assert r.status_code == 404 or ('"paths"' not in r.text and "swagger" not in r.text.lower()), p
+    finally:
+        server.shutdown()
+
+
+def test_browser_uses_a_single_use_code_not_the_durable_token(tmp_path, monkeypatch):
+    server, port = _mock()
+    try:
+        monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path)
+        s = settings_mod.Settings(engine_url=f"http://127.0.0.1:{port}", remote=True)
+        cat = Catalog()
+        cat.refresh_sizes_async = lambda: None
+        app = create_app(settings=s, engine=Engine(s), catalog=cat, token="durable-secret")
+        assert cli.browser_url(app, "http://127.0.0.1:8090/", None) == "http://127.0.0.1:8090/"
+        opened = cli.browser_url(app, "http://127.0.0.1:8090/", "durable-secret")
+        assert "durable-secret" not in opened and "?code=" in opened
+        code = opened.split("?code=", 1)[1]
+        client = TestClient(app)
+        redeemed = client.post("/api/access/redeem", json={"code": code})
+        assert redeemed.status_code == 200 and redeemed.json()["token"] == "durable-secret"
+        assert client.post("/api/access/redeem", json={"code": code}).status_code == 403
     finally:
         server.shutdown()
 

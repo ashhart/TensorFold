@@ -45,8 +45,7 @@ test "a PNG of a small picture decodes back to its pixels" {
     for (&rgb, 0..) |*v, i| v.* = @truncate(i * 37);
     const png = try encode(a, &rgb, 5, 3);
     defer a.free(png);
-    const picture = @import("../../core/picture/png.zig");
-    const s = try picture.decode(a, png);
+    const s = try @import("core").picture.png.decode(a, png);
     defer a.free(s.data);
     try std.testing.expectEqual(@as(usize, 5), s.width);
     try std.testing.expectEqual(@as(usize, 3), s.height);

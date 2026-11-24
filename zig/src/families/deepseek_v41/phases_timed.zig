@@ -17,10 +17,15 @@ pub const TimedTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .images = images, .resumed = resumed };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .images = images, .resumed = resumed, .first_mask = firstMask };
 
     fn images(p: *anyopaque, slot: u32, list: []const lanes.stream.Image) anyerror!void {
         return self(p).inner.setImages(slot, list);
+    }
+
+    fn firstMask(p: *anyopaque, slot: u32, bits: []const u32) void {
+        const inner = self(p).inner;
+        if (inner.vtable.first_mask) |f| f(inner.ptr, slot, bits);
     }
 
     fn resumed(p: *anyopaque, slot: u32) u64 {

@@ -47,11 +47,11 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const markup = lfm2.isStyle(rendered, probe, key);
     // measured for one call: parallel calls repeat that call's rule, and the limit counts each tool once
-    const once = if (markup) try lfm2.build(cx.a, tools, false) else try build(cx.a, s, tools, false);
+    const once = if (markup) try lfmBuild(cx, tools, false) else try build(cx.a, s, tools, false);
     try fits(cx, once);
-    const text = if (!parallel) once else if (markup) try lfm2.build(cx.a, tools, true) else try build(cx.a, s, tools, true);
+    const text = if (!parallel) once else if (markup) try lfmBuild(cx, tools, true) else try build(cx.a, s, tools, true);
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
-    var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
+    var st = try srv.compiledToolStructure(cx, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
     st.field = "tool_choice";
     return st;
@@ -79,6 +79,13 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
     return if (prompt.renderIds(srv, &scratch, probe_turn, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => "",
+    };
+}
+
+fn lfmBuild(cx: *Cx, tools: []const Value, parallel: bool) errors.Refused![]const u8 {
+    return lfm2.build(cx.a, tools, parallel) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSchema => cx.fail(.request, "tools: LFM2 cannot enforce a required non-keyword property or an unsupported schema constraint", .{}),
     };
 }
 
@@ -142,6 +149,10 @@ pub fn optional(a: Allocator, s: Style, tools: []const Value, all: bool, paralle
         try parts.append(a, ws);
         const content = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
         break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = dsml_open } }, .{ "content", content }, .{ "end", .{ .string = dsml_close } } });
+    } else if (s == .minimax) blk: {
+        const one = try anyCall(a, s, tools, all);
+        const content = if (!parallel) one else try node(a, "sequence", &.{.{ "elements", try list(a, &.{ one, try node(a, "star", &.{.{ "content", one }}) }) }});
+        break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = mm ++ "<tool_call>\n" } }, .{ "content", content }, .{ "end", .{ .string = mm ++ "</tool_call>" } } });
     } else try callTag(a, s, tools, all);
     const triggers = try list(a, &.{tag.get("begin").?});
     const format = try node(a, "triggered_tags", &.{ .{ "triggers", triggers }, .{ "tags", try list(a, &.{tag}) }, .{ "stop_after_first", .{ .bool = !parallel } } });
@@ -154,7 +165,10 @@ const dsml_close = "</｜DSML｜function_calls>";
 /// One call to any of `tools`; arguments in their schema when `all` or the tool is strict, else any JSON object.
 fn anyCall(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Error!Value {
     const calls = try a.alloc(Value, tools.len);
-    for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), if (all or strict(t)) try parameters(a, t) else try anyObject(a));
+    for (tools, calls) |t, *c| {
+        const constrained = all or strict(t);
+        c.* = try call(a, s, try tool_specs.toolName(a, t), if (constrained) try parameters(a, t) else try anyObject(a), constrained);
+    }
     if (calls.len == 1) return calls[0];
     return node(a, "or", &.{.{ "elements", .{ .array = calls } }});
 }
@@ -183,7 +197,7 @@ fn callTag(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Er
 }
 
 /// One call to `name`: <tool_call>, the name and its arguments in the template's style, </tool_call>.
-fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error!Value {
+fn call(a: Allocator, s: Style, name: []const u8, schema: Value, constrained: bool) Allocator.Error!Value {
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     const elements = switch (s) {
         .deepseek => try list(a, &.{
@@ -213,7 +227,8 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
             break :blk try list(a, &.{ try constant(a, "<tool_call>"), ws, try arguments(a, .{ .object = whole }, "json"), ws, try constant(a, "</tool_call>") });
         },
         .minimax => try list(a, &.{
-            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})), try arguments(a, schema, "minimax_m3_xml"),
+            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})),
+            if (constrained) try arguments(a, schema, "minimax_m3_xml") else try node(a, "regex", &.{.{ "pattern", .{ .string = "[\\s\\S]*" } }}),
             try constant(a, mm ++ "</invoke>\n"),
         }),
         // GLM's template writes NAME<arg_key>K</arg_key><arg_value>V</arg_value>... with no blanks: xgrammar's glm_xml

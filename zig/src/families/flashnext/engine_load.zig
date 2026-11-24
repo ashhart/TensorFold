@@ -47,31 +47,49 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     try @import("env_validate.zig").startup();
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
+    var selected = window;
     try @import("readout_fused.zig").refuse("Metal", @import("readout_fused.zig").on());
+    try @import("fused_split.zig").refuse("Metal", try @import("fused_split.zig").on());
     const memory = @import("flashnext_memory");
     const weights = try memory.weightBytes(@import("core").checkpoint_host, gpa, io, model_dir);
     var inventory = try memory.weights_plan.read(@import("core").checkpoint_host.Checkpoint, @import("core").quant.mlx, gpa, io, model_dir);
-    const placement = try @import("fsr_layout.zig").of(inventory, window);
+    const source_inventory = inventory;
+    var placement = try @import("fsr_layout.zig").of(inventory, selected);
     inventory.raw = placement.raw;
     const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
     const route = try @import("pack_route.zig").plan(gpa, io, model_dir, dump_dir, home);
     defer route.deinit(gpa);
     const paired = speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null;
-    const requested = try std.math.add(u64, try std.math.add(u64, window.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
+    var requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
     errdefer device.deinit();
     const existing = device.allocated();
-    const base_extra = try std.math.add(u64, requested, existing);
-    const plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
+    var base_extra = try std.math.add(u64, requested, existing);
+    var plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
-    const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
     const cache = @import("rotary_cache.zig");
+    var pool_fitted = false;
+    const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
+    if (plain.forPhase(route.needs_build) > limit and selected.ssd_experts != null and !paired) {
+        const fitted = try @import("fsr_layout.zig").fit(source_inventory, selected, .{ .limit = limit, .existing = existing, .extra = selected.startup_extra, .needs_build = route.needs_build, .paired = paired, .rotary_growth = if (device.tensorUnits()) cache.growth else 0 });
+        if (fitted.ssd_experts != selected.ssd_experts) {
+            std.log.info("flash next: requested SSD expert maximum {d} bytes exceeds the load ceiling; using {d} bytes", .{ selected.ssd_experts.?, fitted.ssd_experts.? });
+            selected = fitted;
+            pool_fitted = true;
+            placement = try @import("fsr_layout.zig").of(source_inventory, selected);
+            inventory.raw = placement.raw;
+            requested = try std.math.add(u64, try std.math.add(u64, selected.startup_extra, placement.extra), if (paired) fz.Tp2.startupBytes() else 0);
+            base_extra = try std.math.add(u64, requested, existing);
+            plain = try memory.budgetLiveFor(weights, selected.capacity, inventory, base_extra, existing, selected.sibling(paired));
+        }
+    }
     const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
+    if (pool_fitted and device.tensorUnits() and !rotary_enabled) std.log.warn("flash next: minimum SSD pool leaves no rotary-cache room; learned states use the scalar rotary identity", .{});
     const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
-    const startup = try memory.budgetLiveFor(weights, window.capacity, inventory, extra, existing, window.sibling(paired));
+    const startup = try memory.budgetLiveFor(weights, selected.capacity, inventory, extra, existing, selected.sibling(paired));
     const load_limit = memory.admitBudget(limit, startup, route.needs_build) catch |err| {
         if (err == error.FlashNextMemoryShortfall) {
             const need = startup.forPhase(route.needs_build);
@@ -81,7 +99,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
         return err;
     };
     if (placement.pool) |p| std.log.info("flash next FSR plan: {d} expert slots, {d} stored bytes/slot, {d} pool bytes, {d} metadata bytes, {d} unused tail bytes; steady {d} bytes, ceiling {d}; uncached pread", .{ p.slots, p.stride, p.slabs, p.metadata + placement.extra, p.unused, startup.steady, load_limit });
-    if (window.ple_on_ssd) std.log.info("flash next FSR plan: PLE rows on SSD, bounded staging charge {d} bytes; uncached pread", .{placement.ple.?});
+    if (selected.ple_on_ssd) std.log.info("flash next FSR plan: PLE rows on SSD, bounded staging charge {d} bytes; uncached pread", .{placement.ple.?});
     // Pack construction has no engine buffers or numerical pipelines live beside its host work.
     const built_dir = if (route.needs_build) try pack_cache.ensure(gpa, io, model_dir, route.root.?, route.identity, PackBuilder{}) else null;
     defer if (built_dir) |dir| gpa.free(dir);
@@ -92,7 +110,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.copy = true;
     e.copy_min = 3;
     e.copy_long = 6;
-    e.segments = window.staggered();
+    e.segments = selected.staggered();
     e.mark_taps = true;
     e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
@@ -111,7 +129,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     const arena = e.arena_state.allocator();
 
     const r = try arena.create(Run);
-    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window, .load_limit = load_limit, .rotary_enabled = rotary_enabled };
+    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = selected, .load_limit = load_limit, .rotary_enabled = rotary_enabled };
     return @import("load_prefix.zig").build(*Engine, r, Construction{
         .e = e,
         .io = io,
@@ -151,6 +169,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     if (platform.c.getenv("FZ_GDN")) |v| {
         r.gdn_pipe = try fz.gdn_step.compile(r, false);
         if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
+    }
+    if (r.tp == null and try platform.environment.read(bool, "TF_FLASHNEXT_BATCH_GDN_WIDE", false)) {
+        r.batch_gdn_wide = r.gdn_pipe orelse try fz.gdn_step.compile(r, false);
     }
     const index_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
 
@@ -207,7 +228,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
-    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null and !r.device.tensorUnits();
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null;
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -420,8 +441,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     var grouped = false;
     for (&m.layers) |*L| grouped = grouped or (L.xw != null and @import("gx.zig").applies(L.xw.?));
     if (grouped and grouped_rows != 0 and r.tp == null and r.fsr == null and !r.device.tensorUnits()) {
-        r.gx = try @import("gx.zig").init(r, grouped_rows);
-        std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
+        const gateup_mb2 = try platform.environment.read(bool, "TF_FN_GX_GATEUP_MB2", false);
+        r.gx = try @import("gx.zig").init(r, grouped_rows, gateup_mb2);
+        std.log.info("flash next: grouped experts from {d} rows{s}", .{ r.gx.?.min_rows, if (gateup_mb2) ", gate/up MB=2" else "" });
     }
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit

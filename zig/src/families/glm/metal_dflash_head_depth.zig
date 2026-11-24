@@ -32,7 +32,7 @@ pub const Head = struct {
         h.gpa = gpa;
         h.cfg = try lanes.Config.init(gpa, m, st.max_rows, st.max_rows - 1);
         const c = &h.cfg;
-        h.rule = .{ .gpa = gpa, .k = c.k, .prior = c.depth_prior, .most_drafts = c.most_drafts, .family_costs = &c.family_costs, .shared_costs = &c.shared_costs, .mtp_step_ms = c.mtp_step_ms, .plain_guard = c.plain_guard, .node_probabilities = false, .batch_rows = c.batch_rows };
+        h.rule = .{ .gpa = gpa, .k = c.k, .prior = c.depth_prior, .most_drafts = c.most_drafts, .family_costs = &c.family_costs, .shared_costs = &c.shared_costs, .mtp_step_ms = c.mtp_step_ms, .draft_step_ms = c.draft_step_ms, .plain_guard = c.plain_guard, .node_probabilities = false, .batch_rows = c.batch_rows, .batched_heads = c.draft_streams };
         return h;
     }
 
@@ -77,6 +77,41 @@ pub const Head = struct {
         s.first = first;
         s.held = null;
         return out;
+    }
+
+    pub fn observeShared(h: *Head, s: *Stream, accepted: u32) !void {
+        try h.price(s);
+        const asked = s.asked orelse return;
+        const held = s.held orelse return;
+        s.asked = null;
+        s.held = null;
+        if (held > asked or accepted > held) return;
+        if (held > 0) try h.rule.observeDepth(who(s, st.max_rows), held, accepted);
+    }
+
+    fn noCopy(_: *anyopaque, _: *const lanes.depth.Who) bool {
+        return false;
+    }
+
+    pub fn sharedDepths(h: *Head, streams: []const *Stream, asks: []const u32, firsts: []const bool, sampled: bool, total_streams: usize, out: []u32) !void {
+        const n = streams.len;
+        if (n == 0 or n > st.max_rows or asks.len != n or firsts.len != n or out.len != n) return error.BadDraftOptions;
+        var whos: [st.max_rows]lanes.depth.Who = undefined;
+        var raw: [st.max_rows]i64 = undefined;
+        for (streams, asks, 0..) |s, asked, i| {
+            const room: i64 = if (asked >= 2 and asked < 7) @as(i64, asked) + 1 else st.max_rows;
+            whos[i] = .{ .state = &s.state, .draft_room = room, .finished = false, .forced = false, .sampled = sampled };
+        }
+        const probe: lanes.depth.Probe = .{ .ptr = @ptrCast(h), .copy = noCopy };
+        try h.rule.budgetsFor(whos[0..n], probe, sampled, raw[0..n], total_streams);
+        for (streams, asks, firsts, raw[0..n], out) |s, asked, first, d, *o| {
+            try h.price(s);
+            const picked: u32 = if (asked == 0) 0 else @min(asked, @as(u32, @intCast(@max(0, d))));
+            s.asked = picked;
+            s.first = first;
+            s.held = null;
+            o.* = picked;
+        }
     }
 };
 
@@ -148,4 +183,26 @@ test "a window holding more than the head asked is a copy: it moves neither acce
     try std.testing.expectEqualSlices(f64, before, s.state.?.p);
     if (s.state.?.ms) |t| try std.testing.expect(t.get(9) == null);
     try std.testing.expectEqual(@as(?u32, null), s.asked);
+}
+
+test "sharedDepths budgets across streams and observeShared updates acceptance without stream cost" {
+    const gpa = std.testing.allocator;
+    const costs = testCosts();
+    const h = try Head.init(gpa, testModel(&costs));
+    defer h.deinit();
+    var s0: Stream = .{};
+    var s1: Stream = .{};
+    defer s0.deinit(gpa);
+    defer s1.deinit(gpa);
+    var out: [2]u32 = undefined;
+    try h.sharedDepths(&.{ &s0, &s1 }, &.{ 7, 3 }, &.{ true, false }, false, 3, &out);
+    try std.testing.expect(out[0] <= 4 and out[1] <= 3);
+    s0.held = out[0];
+    s1.held = out[1];
+    const p0 = try gpa.dupe(f64, s0.state.?.p);
+    defer gpa.free(p0);
+    try h.observeShared(&s0, @min(out[0], 1));
+    try h.observeShared(&s1, out[1]);
+    try std.testing.expect(s0.cost == null and s0.asked == null and s0.held == null);
+    if (out[0] > 0) try std.testing.expect(!std.mem.eql(f64, p0, s0.state.?.p));
 }

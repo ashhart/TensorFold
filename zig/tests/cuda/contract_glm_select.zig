@@ -111,7 +111,7 @@ pub const Select = struct {
     fn launch(self: *Select, f: cuda.Function, threads: u32, out: u64) !void {
         const x = self.shape;
         var a: cuda.Args = .{};
-        inline for (.{ self.in, out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)) }) |v| a.add(v);
+        inline for (.{ self.in, out, @as(i64, @intCast(x.n)), self.pos, @as(c_int, @intCast(x.k)), @as(c_int, sparse.pool) }) |v| a.add(v);
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(x.rows) }, .block = .{ .x = threads } }, self.rig.s, &a);
     }
 

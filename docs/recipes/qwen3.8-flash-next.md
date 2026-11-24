@@ -58,11 +58,11 @@ the lane matmul; M1 through M4 use the per-row projection and hyper-connection k
 restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
 The load-time row check disables drafting when windows do not reproduce serial steps.
 
-On M1 through M4, expert projections stored at 4 bits in groups of 32 are read through a scale index: at load each
+On every Mac (M1 through M5), expert projections stored at 4 bits in groups of 32 are read through a scale index: at load each
 tensor's (scale, bias) pairs become a table and a 16-bit index a group, and the decode, grouped and prompt-gather
 expert kernels read each group's pair through it. They get the same two values from 10% fewer weight bytes, so every
 reply keeps its tokens, and the routed experts' stored scales and biases are released once indexed.
-`TF_FLASHNEXT_SCALE_INDEX=0` keeps and reads the stored arrays instead. The index is not built with tensor units or
+`TF_FLASHNEXT_SCALE_INDEX=0` keeps and reads the stored arrays instead. The index is not built with
 `--ssd-experts`, nor for 6-bit packs, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
 
 On M1 through M4, a decode window of five rows or more runs its 4-bit experts grouped by expert: rows that picked

@@ -104,6 +104,13 @@ test "Responses socket: a turn equals its SSE twin; the cache continues store:fa
     try expectError(try c.turn(a, try create(a, "\"input\":\"x\",\"store\":false,\"previous_response_id\":\"resp_missing\"")), 400, "previous_response_not_found");
     const stored = try client.http(a, io, f.port, "POST", "/v1/responses", null, "{\"input\":\"kept\",\"store\":true}");
     try testing.expectEqual(@as(u16, 200), stored.status);
+    for ([_][]const u8{ "\"yes\"", "1", "[]", "{}" }) |store| {
+        const wrong_store = try client.http(a, io, f.port, "POST", "/v1/responses", null, try std.fmt.allocPrint(a, "{{\"input\":\"x\",\"store\":{s}}}", .{store}));
+        try testing.expectEqual(@as(u16, 400), wrong_store.status);
+        try testing.expect(std.mem.indexOf(u8, wrong_store.body, "store") != null);
+    }
+    const null_store = try client.http(a, io, f.port, "POST", "/v1/responses", null, "{\"input\":\"x\",\"store\":null}");
+    try testing.expectEqual(@as(u16, 200), null_store.status);
     const stored_id = (try json.parse(a, stored.body)).ok.strField("id").?;
     const miss = try c.turn(a, try create(a, try std.fmt.allocPrint(a, "\"input\":\"x\",\"store\":false,\"previous_response_id\":\"{s}\"", .{stored_id})));
     try expectError(miss, 400, "previous_response_not_found");

@@ -126,7 +126,7 @@ pub const Forward = struct {
     /// the keyed sampler (sampling_gpu.zig): a follower runs rank 0's sampled choices too (their gathers pair up)
     sampler: ?Sampler = null,
     progress: ?*@import("round_progress.zig").Progress = null,
-    grammar: ?Grammar = null, // TF_DSV41_GRAMMAR=1: grammar masks applied to "w.logits" before a pick
+    grammar: ?Grammar = null, // structured output (grammar_gpu.zig): grammar masks applied to "w.logits" before a pick
     calib_marks: std.ArrayList(u64) = .empty, // TF_DSV41_CALIB=measure: a follower's clock at each op_calib_mark
 
     pub fn init(gpa: std.mem.Allocator, cfg: *const Config, widths: *const block.Widths, opts: block.Options, runner: *run.Runner, comm: tp.collective.Collective) Forward {

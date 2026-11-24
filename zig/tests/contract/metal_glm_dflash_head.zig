@@ -44,14 +44,10 @@ pub fn name(v: Variant) []const u8 {
 fn groupDepth64(s: c.Shape) usize {
     return 64 + s.k / 32 + 8;
 }
-
-const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)" };
-
 pub fn spec(v: Variant) c.Spec {
-    const known = if (v.bits == 4 and v.mutation == .none) offset_inf else null;
     // a 16-row block heads its 15 mask rows (the 32-row tile), three streams' blocks 48 rows (the 64-row tile)
     const served = &[_]c.Shape{ .{ .rows = 15, .n = 154880, .k = 4096 }, .{ .rows = 48, .n = 154880, .k = 4096 } };
-    return .{ .name = name(v), .accum = .f32, .depth = groupDepth64, .out = .bf16, .known = known, .tiles = .{ .{ .size = 32 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = served };
+    return .{ .name = name(v), .accum = .f32, .depth = groupDepth64, .out = .bf16, .tiles = .{ .{ .size = 32 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = served };
 }
 
 pub const Head = struct {
@@ -69,7 +65,7 @@ pub const Head = struct {
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant) !Head {
-        const plain = try mm.source(device, a, .{ .bits = v.bits, .group = 64 });
+        const plain = try mm.source(device, a, .{ .bits = v.bits, .group = 64, .exact_nonfinite = true });
         defer a.free(plain);
         const src = if (v.mutation == .none) try a.dupe(u8, plain) else blk: {
             const e = v.mutation.edit();

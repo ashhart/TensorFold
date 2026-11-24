@@ -85,6 +85,7 @@ pub const Entry = struct {
     image_noted: bool = false, // this conversation prefix already named its image-only RAM retention
     images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
+    salt: ?u64 = null, // exact request salt; masked key words alone are not a tenant identity
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
     at: u32,
     saved: Saved,
@@ -101,6 +102,7 @@ pub const Entry = struct {
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     removed_as: @import("prompt_cache_miss.zig").Reason = .evicted, // what the removal ring records when this entry goes
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
+    serial: u64 = 0, // the store's count when it was kept: names it while no lookup borrows it (reborrow)
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
@@ -116,6 +118,7 @@ pub const Store = struct {
     ring: @import("prompt_cache_miss.zig").Ring = .{}, // recently removed or refused states, a fixed 3 KiB
     miss_counts: [@import("engine_status.zig").Status.PromptCache.miss_reason_names.len]u64 = @splat(0),
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
+    salt: ?u64 = null, // current request identity, scoped by the lane host around lookup and keep
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -124,6 +127,7 @@ pub const Store = struct {
     most: usize = std.math.maxInt(usize), // states kept at most: a family's snapshot slots, one a state
     held: u64 = 0,
     clock: u64 = 0,
+    serials: u64 = 0, // entries kept so far: the next one's serial
     entries: std.ArrayList(*Entry) = .empty,
     by_position: std.ArrayList(*Entry) = .empty, // nonowning, longest first; equal positions retain insertion order
     counts: Counts = .{},
@@ -199,6 +203,16 @@ pub const Store = struct {
         return false;
     }
 
+    /// The live entry `serial` names, borrowed again; null when it has been evicted or expired since.
+    pub fn reborrow(s: *Store, serial: u64) ?*Entry {
+        if (serial == 0) return null; // no entry the index holds has it: an unnumbered one is never lent
+        for (s.entries.items) |e| if (e.serial == serial and !e.expired) {
+            e.borrowers += 1;
+            return e;
+        };
+        return null;
+    }
+
     /// Whether an outstanding lookup still borrows `saved`'s state: the family spares it while restoring.
     pub fn borrowed(s: *Store, saved: Saved) bool {
         for (s.entries.items) |e| if (e.saved == saved and !e.expired and e.borrowers > 0) return true;
@@ -242,7 +256,7 @@ pub const Store = struct {
     fn keptNear(s: *const Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, at: u32) ?u32 {
         var best: ?u32 = null;
         for (s.entries.items) |e| {
-            if (e.expired or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
+            if (e.expired or e.salt != s.salt or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
             if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
             if (best == null or e.at > best.?) best = e.at;
         }
@@ -327,7 +341,7 @@ pub const Store = struct {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
         s.active_rewind_key = if (s.active_rewind_at > 0) sharedKey(prompt[0 .. s.active_rewind_at + s.rules.lookahead]) else 0;
-        for (s.entries.items) |kept| if (s.active_rewind_at > 0 and kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
+        for (s.entries.items) |kept| if (s.active_rewind_at > 0 and kept.salt == s.salt and kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
             std.mem.eql(u32, kept.tokens, prompt[0..kept.tokens.len]) and modes.equal(kept.decode_spans, spans, kept.at) and images.matches(s, kept))
         {
             kept.rewind = true;
@@ -387,7 +401,7 @@ pub const Store = struct {
 
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
     pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
-        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
+        for (s.entries.items) |e| if (!e.expired and e.salt == s.salt and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, e.at) and images.matches(s, e)) {
             s.counts.failed += 1;
             e.expired = true;
             return s.collectExpired();
@@ -434,7 +448,7 @@ pub const Store = struct {
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
-        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
+        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt, s.salt);
         const part: u32 = if (kept.len == 0 or short) 0 else @intCast(std.mem.indexOfDiff(u32, kept, prompt) orelse @min(kept.len, prompt.len));
         // the fork rule keeps one before the part, however near: a state at `at` is keyed with the token at `at`
         const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;

@@ -1,7 +1,10 @@
 //! The landed CUDA forward with optional learner taps and pocket contributions.
+const std = @import("std");
 const E = @import("cuda_engine.zig");
+const tap_window = @import("cuda_cache.zig").tap_window;
 const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
+const attention = @import("cuda_attention.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
 const modelopt = @import("cuda_modelopt.zig");
@@ -19,6 +22,34 @@ const rowanc_at = E.Engine.rowanc_at;
 const params_at = E.Engine.params_at;
 const mpos_at = E.Engine.mpos_at;
 const src_at = E.Engine.src_at;
+
+pub fn promptTapKeepRows(prompt: bool, total: usize, mode: E.PromptTapMode, tap_from: ?usize) c_int {
+    if (!prompt) return 0;
+    if (mode == .mtp_direct) return 1; // The final prompt row is fetched after the first target token.
+    if (mode == .mtp) if (tap_from) |from| {
+        if (from > 0) return @intCast(total - from);
+    };
+    return switch (mode) {
+        // Shared tap consumers may need any live ring row; only MTP narrows to its computed prompt suffix.
+        .normal => 0,
+        .mtp => @intCast(tap_window + 1),
+        .mtp_direct => 1,
+        .none => 0,
+    };
+}
+
+test "MTP tap boundary includes the first of its 2048 rows plus the separately absorbed prompt row" {
+    const keep: usize = @intCast(promptTapKeepRows(true, 4096, .mtp, null));
+    try std.testing.expectEqual(@as(usize, 2049), keep);
+    try std.testing.expectEqual(@as(usize, 6143), 8192 - keep);
+    try std.testing.expectEqual(@as(usize, 2047), 4096 - keep);
+    try std.testing.expectEqual(@as(c_int, 1145), promptTapKeepRows(true, 4096, .mtp, 2951));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(true, 4096, .normal, null));
+    try std.testing.expectEqual(@as(c_int, 1), promptTapKeepRows(true, 4096, .mtp_direct, null));
+    try std.testing.expectEqual(@as(c_int, 1), promptTapKeepRows(true, 4096, .mtp_direct, 2048));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(false, 4096, .mtp, null));
+    try std.testing.expectEqual(@as(c_int, 0), promptTapKeepRows(true, 4096, .none, null));
+}
 
 pub fn promptMoe(prompt: bool, rows: usize) bool {
     return prompt and rows > prompt_moe_cutoff;
@@ -53,7 +84,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
     const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
     const unread = prompt and ends and shape.unread; // nothing reads this chunk: its last layer stops after its keys and values
-    const tail_at: ?usize = if (prompt and ends and !unread) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
+    const tail_at: ?usize = if (prompt and ends and !unread) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows, shape.taps, shape.tap_from) else null;
     for (e.layers, 0..) |l, i| {
         const last_layer = i + 1 == e.layers.len;
         const tail = last_layer and tail_at != null;
@@ -66,11 +97,11 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const layer: c_int = @intCast(di);
                 try e.projManyPrompt(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
-                try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                try e.runPdl(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
                 if (!(record and nseg == 1 and total > 1)) try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
-                try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
+                try e.runPdl(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
                 di += 1;
             },
@@ -82,9 +113,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 const head_norm = if (g.bf16) e.fns.head_norm_shift else e.fns.head_norm;
-                try e.run(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
-                try e.run(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
+                try e.runPdl(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
+                try e.runPdl(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
+                try launchPdl(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (unread and last_layer) return; // the keys, values and their rotary rows are all this chunk keeps
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
@@ -99,8 +130,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                         const rows_fn = if (shape.mt2) (if (shape.paged) e.mt2.paged else e.mt2.whole) else (if (shape.join) e.fp8.attn_rows_join else if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole);
                         try launch(e, rows_fn, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ if (shape.mt2) @as(usize, 128) else 256, 1, 1 }, rows_args);
                     } else {
-                        try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
-                        try shared(e, if (shape.join) e.fns.attn_rows_join else if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, rows_args);
+                        const rows_only = attention.rowsOnly(e.attention_all_rows, prompt, total);
+                        const bf16_rows_args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(total)), e.pm, e.pl, e.po, rows_only };
+                        if (!rows_only) try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
+                        try shared(e, if (shape.join) e.fns.attn_rows_join else if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, bf16_rows_args);
                     }
                     try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                 }
@@ -110,7 +143,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const mix0 = e.mix + t0 * aw * 2;
                 const gate_args = .{ geo, y0, e.qraw + t0 * 2 * aw * 2, mix0, @as(c_int, @intCast(rows)), gp, sums };
                 const gate_grid = .{ (rows * aw + 255) / 256, 1, 1 };
-                try launch(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
+                try launchPdl(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
                 if (e.learning) |k| try k.gated(i, e.mix, total);
                 try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
                 ai += 1;
@@ -130,7 +163,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
-                } else {
+                } else if (try @import("cuda_group_proj.zig").run(e, &.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt)) {} else {
                     try e.projAgain(m.gate, x0, e.gate, rows, prompt);
                     try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
@@ -144,7 +177,8 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
-            try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
+            const keep_rows = promptTapKeepRows(prompt, total, e.mtp_prompt.mode, shape.tap_from);
+            try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), keep_rows, t_params });
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
@@ -155,6 +189,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
 fn launch(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
     sig.check(s, @TypeOf(args));
     return e.run(f, grid, block, args);
+}
+
+/// A glue launch with a qwen_pdl::enter() prologue, dependent under TF_QWEN_PDL.
+fn launchPdl(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, block: [3]usize, args: anytype) !void {
+    sig.check(s, @TypeOf(args));
+    return e.runPdl(f, grid, block, args);
 }
 
 /// A bf16 decode attention launch with its two tile buffers of dynamic shared memory.
@@ -179,7 +219,6 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) 
 }
 
 test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row boundary" {
-    const std = @import("std");
     try std.testing.expectEqual(@as(usize, 64), E.most_window);
     var mismatches: usize = 0;
     for ([_]usize{ 16, 17, 32, 64, 65 }) |rows| {
@@ -197,13 +236,12 @@ test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row bou
 }
 
 test "prompt MoE precision: every prompt piece through 128 and admitted verify width keeps its recipe" {
-    const std = @import("std");
     for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
     for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
 }
 
 /// The same scan selected by body, exposed for host launch-contract fixtures.
-pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+pub fn deltaScan(e: anytype, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
     const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
         1 => e.fns.gdn_slots_1,
         2 => e.fns.gdn_slots_2,

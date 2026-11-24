@@ -24,8 +24,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("idol_cuda.zig").hostTests(b, cuda, mods.core, step);
     @import("inkling2.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
+    @import("ricursive_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
-    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix" } }));
+    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix", "MTP suffix filtering", "MTP tap boundary", "partial tap capture", "qwen3_5 prompt tail:" } }));
     b.step("test-qwen35-prefill-host", "Stepped, whole, opening and interrupted prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
     const warm_turns = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen warm turns:"} }));
@@ -224,6 +225,18 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const live_run = b.addRunArtifact(b.addTest(.{ .root_module = live }));
     live_run.has_side_effects = true;
     b.step("test-qwen35-live-host", "Live CUDA launch buckets and startup warmups without devices").dependOn(&live_run.step);
+    const mtp_coupled = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP coupled:"} }));
+    b.step("test-qwen35-mtp-coupled-host", "Target-coupled keyed-Gumbel MTP draft draws across solo, tree and batched rounds without devices").dependOn(&mtp_coupled.step);
+    step.dependOn(&mtp_coupled.step);
+    const mtp_selection = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP drafter selection:"} }));
+    b.step("test-qwen35-mtp-selection-host", "MTP/DFlash2 drafter admission and explicit unsupported-format refusal without devices").dependOn(&mtp_selection.step);
+    step.dependOn(&mtp_selection.step);
+    const mtp_lifecycle = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP context lifecycle:"} }));
+    b.step("test-qwen35-mtp-lifecycle-host", "MTP stream release and pooled context reset after interruption without devices").dependOn(&mtp_lifecycle.step);
+    step.dependOn(&mtp_lifecycle.step);
+    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP startup peak"} }));
+    b.step("test-qwen35-mtp-memory-host", "MTP startup device-memory accounting and overflow guards without a GPU").dependOn(&mtp_memory.step);
+    step.dependOn(&mtp_memory.step);
 }
 
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {

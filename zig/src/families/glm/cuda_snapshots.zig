@@ -45,6 +45,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
     if (e.cur.st.pending != 0 or e.cur.st.mtp_len > e.cur.st.pos + @import("cuda_state.zig").window_rows)
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    const profiled = e.prompt_profs[0] != null;
+    const started: i96 = if (profiled) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
     var lease = try pool.take(plan.len);
     errdefer {
@@ -56,10 +58,48 @@ pub fn keepAs(e: anytype, id: u64) !void {
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
     e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    if (profiled) {
+        const wall_ms: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(e.io).toNanoseconds() - started)) / 1e6;
+        std.log.info("glm prof snapshot rank={d} slot={d} id={d} pos={d} bytes={d} parts={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, id, e.cur.st.pos, plan.len, plan.count, wall_ms });
+    }
+}
+
+/// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
+pub fn blankAs(e: anytype, id: u64, at: usize) !void {
+    if (e.snaps.contains(id)) return error.StateKept;
+    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    var lease = try pool.take(bytes(e, at));
+    errdefer pool.give(&lease);
+    const cur = try e.gpa.alloc(u1, e.cur.st.cur.len);
+    @memset(cur, 0);
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 } });
+}
+
+/// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
+fn ringHolds(base: usize, len: usize, rows: usize) bool {
+    return base <= len and len - base <= rows;
+}
+
+/// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
+pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
+    const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len != 0) return error.StateKept;
+    if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
+    const head = if (e.mtp) @min(e.capacity, s.pos + @import("cuda_state.zig").window_rows) else 0;
+    if (mtp_len > head) return error.DiskWords;
+    const rows = e.cur.st.ring_rows;
+    if (!ringHolds(bases[0], s.pos, rows) or !ringHolds(bases[1], mtp_len, rows)) return error.DiskWords;
+    const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
+    if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
+    for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
+    s.len = n;
+    s.mtp_len = mtp_len;
+    s.bases = bases;
 }
 
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len == 0) return error.UnsealedState;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);

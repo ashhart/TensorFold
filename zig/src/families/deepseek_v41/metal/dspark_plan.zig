@@ -38,6 +38,11 @@ pub const Run = struct {
         r.end = start + n;
     }
 
+    /// A block asked at `p` inside the run: its rows from `p` on were a cut window's (put back), so it ends at `p`.
+    pub fn cut(r: *Run, p: u64) void {
+        if (p >= r.first and p < r.end) r.end = p;
+    }
+
     /// The context positions of a draft block starting at `p`: at most `window`, none clobbered by a later row.
     pub fn context(r: Run, window: u32, p: u64) Context {
         const lo = @max(r.first, @max(r.end -| window, p -| window));
@@ -52,8 +57,8 @@ pub const Plan = struct {
 
     const pos = 0;
     const bdest = max_rows;
-    const ipos = 2 * max_rows;
-    const idest = 3 * max_rows;
+    pub const ipos = 2 * max_rows;
+    pub const idest = 3 * max_rows;
     const meta = 4 * max_rows;
     const sel = meta + 8 * max_rows;
     pub const ints = sel + max_rows * attn.max_selected;
@@ -95,12 +100,16 @@ pub const Plan = struct {
         return .{ .pos = p.at(ipos), .dest = p.at(idest) };
     }
 
-    /// One slot of a draft launch: `block` rows at positions p .. p + block - 1 in rows [row0, row0 + block).
-    pub fn writeBlock(p: *const Plan, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run) !void {
-        const n = c.dspark_block;
+    /// One slot of a draft launch: `n` rows at positions p .. p + n - 1 in rows [j * n, j * n + n).
+    pub fn writeBlock(p: *const Plan, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run, n: u32) !void {
+        return writeBlockTo(p.ints32(), c, j, slot, start, ctx, n);
+    }
+
+    /// `writeBlock` into `m`, a plan's ints held elsewhere (the plans a launch behind a verify picks from).
+    pub fn writeBlockTo(m: []i32, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run, n: u32) !void {
+        if (n == 0 or n > c.dspark_block) return error.BadRows;
         const row0 = j * n;
-        if (row0 + n > max_rows) return error.BadRows;
-        const m = p.ints32();
+        if (row0 + n > max_rows or m.len < ints) return error.BadRows;
         const cx = ctx.context(c.window, start);
         const list = m[sel + row0 * attn.max_selected ..][0..attn.max_selected];
         @memset(list, -1);
@@ -133,6 +142,11 @@ test "a run: contiguous rows extend it, a gap or a rewind before it restarts it"
     r.land(61, 2); // a rewind inside the run keeps its start
     try std.testing.expectEqual(@as(u64, 60), r.first);
     try std.testing.expectEqual(@as(u64, 63), r.end);
+    r.cut(62); // a block asked inside the run: it ends there
+    try std.testing.expectEqual(@as(u64, 62), r.end);
+    r.cut(70); // past its end, or before its start: no change
+    r.cut(10);
+    try std.testing.expectEqual(@as(u64, 62), r.end);
 }
 
 test "a context holds at most a window, none of it clobbered or past the ingested rows" {

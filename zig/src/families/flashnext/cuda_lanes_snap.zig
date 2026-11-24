@@ -78,6 +78,21 @@ pub fn Snaps(comptime Cuda: type) type {
             return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
         }
 
+        /// The kept state the stream's reuse names, restored when it fits: the prompt pass starts there.
+        pub fn resumeKept(self: *Cuda, s: *lanes.Stream, l: anytype, len: usize) !void {
+            const saved = s.reuse.saved orelse return;
+            const kept: *snap.Snap = @ptrCast(@alignCast(saved));
+            if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= len) {
+                s.reuse_failed = true;
+            } else if (if (self.ranks) |r| r.restore(&l.seq, if (l.draft) |*d| d else null, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
+                l.filled = kept.at;
+                s.cached = @intCast(kept.at);
+            } else |err| switch (err) {
+                error.SequenceTooShort, error.NoHeadState => s.reuse_failed = true,
+                else => return err,
+            }
+        }
+
         pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
             const self = of(ptr);
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));

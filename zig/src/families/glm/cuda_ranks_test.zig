@@ -383,9 +383,16 @@ test "TF_GLM_OVERLAP_PIECES: unset, 8 under TF_GLM_CHUNK_SOLO=4096 with TF_GLM_R
         }
     };
     var problem: []const u8 = "";
-    try std.testing.expectEqual(@as(u32, 8), (try Settings.read(Reader.both, &problem)).pieces);
-    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothTwo, &problem)).pieces);
-    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothSet, &problem)).pieces);
+    // the wire opens at three ranks or more: the launch's world, given to wirePieces (TF_GLM_WORLD is an alias of --tp)
+    var at3 = try Settings.read(Reader.both, &problem);
+    ranks.wirePieces(&at3, 3, Reader.both);
+    try std.testing.expectEqual(@as(u32, 8), at3.pieces);
+    var at2 = try Settings.read(Reader.both, &problem);
+    ranks.wirePieces(&at2, 2, Reader.both);
+    try std.testing.expectEqual(@as(u32, 3), at2.pieces);
+    var set = try Settings.read(Reader.bothSet, &problem);
+    ranks.wirePieces(&set, 3, Reader.bothSet);
+    try std.testing.expectEqual(@as(u32, 3), set.pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.solo, &problem)).pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.wire, &problem)).pieces);
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.soloNarrow, &problem)).pieces);
@@ -477,7 +484,7 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
             return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "0" else null;
         }
         fn from(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "65536" else null;
+            return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "32768" else null;
         }
         fn bad(key: [:0]const u8) ?[]const u8 {
             return if (std.mem.eql(u8, key, "TF_GLM_INDEX_SPLIT")) "64k" else null;
@@ -486,7 +493,7 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
     var problem: []const u8 = "";
     try std.testing.expectEqual(@as(u32, 2048), (try Settings.read(Reader.absent, &problem)).index_split);
     try std.testing.expectEqual(@as(u32, 0), (try Settings.read(Reader.never, &problem)).index_split);
-    try std.testing.expectEqual(@as(u32, 65536), (try Settings.read(Reader.from, &problem)).index_split);
+    try std.testing.expectEqual(@as(u32, 32768), (try Settings.read(Reader.from, &problem)).index_split);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
 }

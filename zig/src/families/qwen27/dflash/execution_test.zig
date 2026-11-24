@@ -397,6 +397,46 @@ test "qwen27 window: priced siblings match exhaustive expected accepted tokens p
     try std.testing.expectError(error.BadDraftCosts, selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .costs = &invalid }));
 }
 
+const Favour = struct {
+    token: u32,
+    seen: f64 = 0,
+    fn draw(ptr: *anyopaque, position: u64, token: u32) anyerror!f64 {
+        const f: *Favour = @ptrCast(@alignCast(ptr));
+        f.seen += 1;
+        return if (position == 2 and token == f.token) 64 else 0;
+    }
+};
+
+test "qwen27 window: a sampled proposal's selection ranks its roots with the draw's noise" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    graph.config.topk = 16;
+    var fake: Fake = .{};
+    var lattice = try Fake.lattice(&fake, 1, undefined, .{ .handle = 1, .rows = 2, .width = graph.config.rank, .stride = graph.config.rank, .dtype = .bf16 }, graph.config);
+    defer lattice.deinit();
+    const model = @import("runtime_model.zig").Model;
+    const prices: [16]f64 = @splat(1);
+    var plain = try selector.propose(a, &graph, lattice, 3, 2, model.selection(.{ .context = null, .pending = 3, .nodes = 15, .costs = &prices }));
+    defer plain.deinit();
+    // the last root the greedy ranking kept is the token the keyed draw is told to favour
+    var last: u32 = plain.tokens[0];
+    for (plain.tokens, plain.parents) |token, parent| if (parent == -1) {
+        last = token;
+    };
+    try std.testing.expect(last != plain.tokens[0]);
+    var favour: Favour = .{ .token = last };
+    const sampled = model.selection(.{ .context = null, .pending = 3, .nodes = 15, .costs = &prices, .noise = .{ .ptr = &favour, .draw = Favour.draw }, .temperature = 0.5 });
+    try std.testing.expectEqual(@as(f64, 0.5), sampled.temperature);
+    var tree = try selector.propose(a, &graph, lattice, 3, 2, sampled);
+    defer tree.deinit();
+    try std.testing.expect(favour.seen > 0);
+    try std.testing.expectEqual(last, tree.tokens[0]);
+    try std.testing.expectEqual(@as(i32, -1), tree.parents[0]);
+}
+
 test "qwen27 window: lone callback retains the lane's wide sibling candidates" {
     const a = std.testing.allocator;
     var store = try fixtures.Store.init(a);

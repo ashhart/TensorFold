@@ -394,3 +394,107 @@ test "GLM image cache: suffix encoding wire and actual splice dispatch preserve 
     try peer.take(0, none);
     try t.expectEqual(@as(usize, 0), peer.rowCount());
 }
+
+/// Echo rank zero's reduction locally. The chunk control and the cache go through their serving paths.
+const CancelWire = struct {
+    fn broadcast(_: u64, _: u64, _: usize, _: cuda.nccl.DataType, _: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn reduce(_: u64, _: u64, _: usize, _: cuda.nccl.DataType, _: cuda.nccl.RedOp, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn download(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) c_int {
+        @memcpy(@as([*]u8, @ptrCast(dst.?))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
+        return 0;
+    }
+    fn device(d: *cuda.abi.Device) callconv(.c) c_int {
+        d.* = 0;
+        return 0;
+    }
+    fn attribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) c_int {
+        out.* = 0;
+        return 0;
+    }
+};
+
+fn checkInterruptedPrefix(planned: []const u32) !void {
+    var c: Cache = .{};
+    try c.init();
+    defer c.deinit();
+    var d = Device.driver();
+    d.api.cuDeviceGetAttribute = CancelWire.attribute;
+    d.api.cuCtxGetDevice = CancelWire.device;
+    d.api.cuMemcpyDtoH_v2 = CancelWire.download;
+    cuda.download_stage.forget();
+    defer cuda.download_stage.forget();
+    defer {
+        cuda.copy_source.synchronizeStream(&d, null) catch {};
+        cuda.copy_source.dropSpares(&d, cuda.copy_source.current());
+    }
+    var lib: cuda.nccl.Library = .{ .lib = undefined, .api = undefined };
+    lib.api.ncclBroadcast = CancelWire.broadcast;
+    lib.api.ncclAllReduce = CancelWire.reduce;
+    var word: f64 = 0;
+    var wire_buffer: [10000]u8 = undefined;
+    var wire_ids: [2049]u32 = undefined;
+    c.e.d = &d;
+    c.e.stream = .{ .d = &d, .handle = null };
+    c.e.lib = &lib;
+    c.e.comm = null;
+    c.e.dropped = .empty;
+    c.e.announce = 0;
+    c.e.share.rank = 0;
+    c.e.share.world = 2;
+    c.e.settings = .{};
+    c.e.m.glue.put_words = .{ .d = &d, .handle = null };
+    c.e.heat_gate.bands = null;
+    c.e.prompt_profs = @splat(null);
+    c.e.profiling_prompt = null;
+    c.e.prompt_logprobs = null;
+    c.e.drafter = null;
+    c.e.l2pf = null;
+    c.e.images = null;
+    c.e.pair = null;
+    c.e.shared_buf = .{ .d = &d, .ptr = @intFromPtr(&word), .len = @sizeOf(f64), .borrowed = true };
+    var seq: @TypeOf(c.e.cur.*) = .{ .st = undefined };
+    c.e.seqs = .empty;
+    try c.e.seqs.append(a, &seq);
+    defer c.e.seqs.deinit(a);
+    var link: glm.follow.Link = .{
+        .d = &d,
+        .lib = &lib,
+        .comm = null,
+        .stream = c.e.stream,
+        .ids = &wire_ids,
+        .gpa = a,
+        .wait = true,
+        .buf = .{ .d = &d, .ptr = @intFromPtr(&wire_buffer), .len = wire_buffer.len, .borrowed = true },
+    };
+    var back: glm.lanes.Lanes = .{ .x = .{ .e = &c.e, .link = &link } };
+    defer back.deinit();
+    const ids: [N]u32 = @splat(17);
+    var s = try lanes.Stream.init(a, .{ .id = "cancelled", .prompt = &ids, .max_new = 8 });
+    defer s.deinit(a);
+    const lane = try back.claim(&s);
+    lane.fill = 2048;
+    lane.marks = try a.dupe(u32, planned);
+    c.model.words = .{ 31, 47 };
+    try t.expect(s.reuse.hook == null);
+    try t.expectEqual(@as(u32, 0), try c.begin(&s));
+    const b = back.backend();
+    try b.vtable.cancel_prefill.?(b.ptr, &s);
+    try t.expectEqual(@as(usize, 1), c.model.live);
+    c.model.words = .{ 0, 0 };
+    var retry = try lanes.Stream.init(a, .{ .id = "retry", .prompt = &ids, .max_new = 8 });
+    defer retry.deinit(a);
+    try t.expectEqual(@as(u32, 2048), try c.begin(&retry));
+    try t.expectEqual([2]u64{ 31, 47 }, c.model.words);
+}
+
+test "GLM shared cache: cancellation before a scheduled mark preserves the completed prefix for retry" {
+    try checkInterruptedPrefix(&.{6144});
+}
+
+test "GLM shared cache: cancellation without scheduled marks preserves the completed prefix for retry" {
+    try checkInterruptedPrefix(&.{});
+}

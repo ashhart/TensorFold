@@ -1,4 +1,4 @@
-//! The mla image's absorb_q and expand_v (128-wide heads) under the contract.
+//! The mla image's absorb_q (128- and full GLM-5.3's 192-wide q_nope) and expand_v (128-wide heads) under the contract.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -9,25 +9,27 @@ const c = contract.spec;
 const g = contract.gates;
 
 const lw = 512; // the latent width
-const qs = 192; // a q head: 128 nope columns, then 64 rope
+const rope = 64; // a q head: its nope columns, then 64 roped ones (192 or 256)
 const qaw = 576; // an absorbed q row: the latent, then the roped columns (left as they were)
 const rows_rb = 64; // cuda_latent.prompt_rows and prompt_rb: rows from 64 on go 64 a block
 
 pub const Kind = enum { absorb, expand };
 
-/// next_head: a control red at gate 3, each head launched with the next head's weights.
-pub const Entry = struct { name: []const u8, kind: Kind, next_head: bool = false };
+/// next_head: a control red at gate 3, each head launched with the next head's weights; nope: absorb's q_nope.
+pub const Entry = struct { name: []const u8, kind: Kind, next_head: bool = false, nope: usize = 128 };
 
 pub const entries = [_]Entry{
     .{ .name = "cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent)", .kind = .absorb },
     .{ .name = "cuda mla tf_mla_expand_v_128 (latent . wv into 128-wide v heads)", .kind = .expand },
     .{ .name = "control: mla tf_mla_absorb_q_128 reads each head's wk from the next head", .kind = .absorb, .next_head = true },
     .{ .name = "control: mla tf_mla_expand_v_128 reads each head's wv from the next head", .kind = .expand, .next_head = true },
+    .{ .name = "cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent)", .kind = .absorb, .nope = 192 },
+    .{ .name = "control: mla tf_mla_absorb_q_192 reads each head's wk from the next head", .kind = .absorb, .next_head = true, .nope = 192 },
 };
 
-/// absorb: four fma steps a thread, three butterfly steps, four warps' partials, two more steps.
-fn depthAbsorb(_: c.Shape) usize {
-    return 12;
+/// absorb: k / 32 fma steps a thread (four at 128, six at 192), three butterfly steps, the warps' partials, two more.
+fn depthAbsorb(s: c.Shape) usize {
+    return s.k / 32 + 8;
 }
 
 /// expand: eight fma steps a thread, the warp's five steps, then the two warps.
@@ -36,13 +38,15 @@ fn depthExpand(_: c.Shape) usize {
 }
 
 const absorb_shapes = [_]c.Shape{ .{ .rows = 1, .n = 32, .k = 128 }, .{ .rows = 8, .n = 64, .k = 128 }, .{ .rows = 70, .n = 32, .k = 128 } };
+// full GLM-5.3: 21 or 22 heads a rank at TP=3
+const absorb192_shapes = [_]c.Shape{ .{ .rows = 1, .n = 22, .k = 192 }, .{ .rows = 8, .n = 21, .k = 192 }, .{ .rows = 70, .n = 22, .k = 192 } };
 const expand_shapes = [_]c.Shape{ .{ .rows = 1, .n = 32, .k = lw }, .{ .rows = 8, .n = 64, .k = lw }, .{ .rows = 70, .n = 32, .k = lw } };
 
 pub fn spec(e: Entry) c.Spec {
     const no: c.Tile = .{};
     const rows_edge: c.Tile = .{ .size = rows_rb };
     return switch (e.kind) {
-        .absorb => .{ .name = e.name, .accum = .f32, .depth = depthAbsorb, .out = .bf16, .tiles = .{ rows_edge, no, no }, .served = &absorb_shapes },
+        .absorb => .{ .name = e.name, .accum = .f32, .depth = depthAbsorb, .out = .bf16, .tiles = .{ rows_edge, no, no }, .served = if (e.nope == 192) &absorb192_shapes else &absorb_shapes },
         .expand => .{ .name = e.name, .accum = .f32, .depth = depthExpand, .out = .bf16, .tiles = .{ rows_edge, no, no }, .served = &expand_shapes },
     };
 }
@@ -88,7 +92,12 @@ pub const Proj = struct {
     }
 
     fn xWidth(self: *const Proj) usize {
-        return if (self.entry.kind == .absorb) qs else lw;
+        return if (self.entry.kind == .absorb) self.entry.nope + rope else lw;
+    }
+
+    /// A head's weight rows: absorb's q_nope, expand's 128 v columns.
+    fn headRows(self: *const Proj) usize {
+        return if (self.entry.kind == .absorb) self.entry.nope else 128;
     }
 
     pub fn count(self: *const Proj) usize {
@@ -97,7 +106,7 @@ pub const Proj = struct {
 
     pub fn prepare(self: *Proj, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0) return false;
-        if (shape.k != (if (self.entry.kind == .absorb) @as(usize, 128) else lw)) return false;
+        if (shape.k != (if (self.entry.kind == .absorb) self.entry.nope else lw)) return false;
         self.free();
         self.rig.reset();
         self.shape = shape;
@@ -107,7 +116,7 @@ pub const Proj = struct {
         const rng = prng.random();
         self.x = try a.alloc(u16, shape.rows * heads * self.xWidth());
         for (self.x) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 2);
-        const wn = heads * 128 * lw; // wk [heads][128][lw], wv [heads][128][lw]
+        const wn = heads * self.headRows() * lw; // wk [heads][nope][lw], wv [heads][128][lw]
         self.w = try a.alloc(u16, wn);
         for (self.w) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 0.125);
         switch (fill) {
@@ -150,7 +159,7 @@ pub const Proj = struct {
             self.w[self.wAt(hd, h + i, o)] = c.toBf16(v);
         };
         // x = 512 x odd (terms past fp16's range), the second half -x, the first eight of it -x + 512: small sums
-        const odd: u32 = if (self.entry.kind == .absorb) 64 else 16; // every partial sum under 2^24
+        const odd: u32 = if (self.entry.kind == .absorb) @intCast(8192 / k) else 16; // every partial sum under 2^24
         for (0..self.shape.rows) |r| for (0..heads) |hd| for (0..h) |i| {
             const v: f32 = @floatFromInt(512 * (1 + 2 * rng.uintLessThan(u32, odd)));
             const at = (r * heads + hd) * self.xWidth();
@@ -159,9 +168,9 @@ pub const Proj = struct {
         };
     }
 
-    /// Weight of reduced index i and output column o in head hd: absorb wk [hd*128 + i][o], expand wv [hd*128 + o][i].
+    /// Weight of reduced index i and output column o in head hd: absorb wk [hd*nope + i][o], expand wv [hd*128 + o][i].
     fn wAt(self: *const Proj, hd: usize, i: usize, o: usize) usize {
-        return if (self.entry.kind == .absorb) (hd * 128 + i) * lw + o else (hd * 128 + o) * lw + i;
+        return if (self.entry.kind == .absorb) (hd * self.headRows() + i) * lw + o else (hd * 128 + o) * lw + i;
     }
 
     pub fn run(self: *Proj) !void {
@@ -171,7 +180,7 @@ pub const Proj = struct {
         var a: cuda.Args = .{};
         inline for (.{ self.xd, self.wd, self.out, @as(i64, @intCast(s.rows)), @as(i64, @intCast(s.n)), @as(i64, @intCast(rb)) }) |v| a.add(v);
         if (self.entry.kind == .absorb) {
-            a.add(@as(i64, qs));
+            a.add(@as(i64, @intCast(self.xWidth())));
             a.add(@as(i64, qaw));
         }
         const cols: u32 = if (self.entry.kind == .absorb) lw / 32 else 128 / 16;

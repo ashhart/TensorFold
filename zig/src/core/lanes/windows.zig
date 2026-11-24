@@ -79,14 +79,14 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
         const extend = !e.cfg.root_copies and e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
-        // a lone stream's copy priced as its head's drafts are: a prefix, or none and the head's drafts take the round
-        const keep = if (extend) copy.tokens.len else try lone_copy.rows(e, s, copy, true);
-        if (keep == 0) copy = .{};
+        if (!extend and lone_copy.enabled(e, s)) {
+            const keep = try lone_copy.rows(e, s, copy, true);
+            copy.tokens = copy.tokens[0..keep];
+        }
         if (copy.tokens.len > 0 and !extend) {
             p.kind = .copy;
             p.recalled = copy.recalled;
             p.tokens = try a.dupe(u32, copy.tokens);
-            try cut.prefix(a, &p, @intCast(keep));
         } else if (s.drafts and queued != null) {
             const q = queued.?;
             if (q.tokens) |t| {
@@ -234,7 +234,8 @@ pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     if (e.cfg.root_copies) return false;
     const copied = copyProposal(e, s) catch return false;
     // a copy its price leaves off takes no round: the head drafts its own depth
-    return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
+    if (lone_copy.enabled(e, s)) return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
+    return copied.tokens.len > 0;
 }
 
 pub fn probe(e: *Engine) depth.Probe {

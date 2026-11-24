@@ -1,5 +1,6 @@
 //! The kernel contract every GPU kernel's test registers with: its spec, the gates and the input families.
 pub const delta_slots_ref = @import("contract/delta_slots_ref.zig");
+pub const inkling2_attn_ref = @import("contract/inkling2_attn_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
@@ -11,6 +12,10 @@ pub const dense = @import("contract/dense.zig");
 pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
+pub const inkling2_glue_metal_records = @import("contract/inkling2_glue_metal_records.zig");
+pub const inkling2_dspark_metal_records = @import("contract/inkling2_dspark_metal_records.zig");
+pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_records.zig");
+pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
 pub const registry = @import("contract/registry.zig");
@@ -43,11 +48,13 @@ test {
     _ = @import("contract/simd_pairs_records.zig");
     _ = @import("contract/simd_half_records.zig");
     _ = @import("contract/glm_rows_records.zig");
+    _ = @import("contract/glm_tap_records.zig");
     _ = @import("contract/glm_dflash_records.zig");
     _ = @import("contract/row_wide_records.zig");
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
     _ = @import("contract/idol_records.zig");
+    _ = @import("contract/idol_dino_records.zig");
     _ = @import("contract/metal_pair_records.zig");
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");
@@ -64,6 +71,7 @@ test {
     _ = cubin;
     _ = hsaco;
     _ = hip_records;
+    _ = inkling2_attn_ref;
     _ = @import("contract/hip_records_qwen3.zig");
     _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");

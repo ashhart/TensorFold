@@ -69,8 +69,8 @@ pub const Vision = struct {
         const p = try settings.prepare(v.io, a, bytes, max_tokens);
         return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
     }
-    pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image) !media.State {
-        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
+    pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image, from: usize) !media.State {
+        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits, from), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
     }
     pub fn receive(v: *Vision, n: usize, runs: []const shared.media.Run) !media.State {
         const p = try shared.media.Plan.init(v.a, n, runs, v.limits);

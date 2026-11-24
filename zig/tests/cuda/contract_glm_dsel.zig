@@ -48,7 +48,7 @@ pub const Dsel = struct {
         const b = &self.base;
         const set: glm.glue.Set = .{ .glue = &self.fns, .dsel = true };
         const n = if (self.short and b.shape.n > 2 * sparse.dsel_span) b.shape.n - sparse.dsel_span else b.shape.n;
-        try sparse.decodeSelect(set, b.rig.s, b.in, b.out, n, b.pos, b.at, b.shape.rows, self.bits, 0);
+        try sparse.decodeSelect(set, b.rig.s, b.in, b.out, n, b.pos, b.at, b.shape.rows, self.bits, 0, .{});
         try b.rig.s.synchronize();
     }
 

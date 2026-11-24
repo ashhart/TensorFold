@@ -147,6 +147,10 @@ contributions are in it.
   a change to the TensorFold engine vendored there, Apache-2.0) deferred a kept chain's DeltaNet replay into the next
   slot scan. The Qwen3.5 family's pending kept rows carry its code: the replay and write-back in
   `zig/kernels/cuda/qwen35_slots.cuh`, and `Cache.flush` and `fold` in `zig/src/families/qwen3_5/cuda_cache.zig`.
+- @christopherowen added continuation-ranked band matching, adaptive doubling (`8 -> 15`) and expected-yield gating
+  to DeepSeek-V4.1's lookup planner (`zig/src/families/deepseek_v41/draft/lookup.zig`) in
+  [#2638](https://github.com/ashhart/TensorFold/pull/2638), first tried in
+  [christopherowen/spark-ds41f](https://github.com/christopherowen/spark-ds41f).
 
 ## EXL3
 
@@ -155,7 +159,8 @@ row-invariant linear, grouped experts and the 27B and Flash Next packs
 ([cuda/exl3](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3),
 [exl3.md](https://github.com/ashhart/TensorFold/blob/v0.6.6/docs/recipes/exl3.md)). The native EXL3 decoder
 (`zig/src/core/exl3_format.zig`, `exl3_projection.zig`) follows the format notes from #42, and the EXLR8 codebook
-that serves GLM-5.3 builds on that decoder. The native engine does not serve EXL3 packs yet.
+that serves GLM-5.3 builds on that decoder. The native CUDA engine serves EXL3 packs too: GLM-5.3-Flash's routed
+experts, Qwen3.5's `mul1` and `mcg` checkpoints, and Muse Spark Open's 1.8-bit pack.
 
 ## More Python engine work
 

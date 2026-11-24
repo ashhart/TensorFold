@@ -41,6 +41,20 @@ fn checkLayerNorms(weights: anytype, layer: []const u8, t: config.Text) !void {
     try expect(weights, layer, "self_attn.kv_a_layernorm", ".weight", .bf16, &.{t.kv_lora_rank});
 }
 
+fn checkCompressedIndexer(weights: anytype, layer: []const u8, t: config.Text, affine: Affine) !void {
+    const c = t.compressed_indexer_head_dim;
+    const num_heads = t.compressed_indexer_num_attention_heads;
+    const prefix = "self_attn.compressed_indexer.";
+    try affine.check(weights, layer, prefix ++ "token_key_projection", &.{ c, t.hidden_size });
+    try affine.check(weights, layer, prefix ++ "query_projection", &.{ @as(usize, num_heads) * c, t.q_lora_rank });
+    try affine.check(weights, layer, prefix ++ "head_weight_projection", &.{ num_heads, t.hidden_size });
+    try expect(weights, layer, prefix, "key_value_projection.weight", .f32, &.{ c, c });
+    try expect(weights, layer, prefix, "key_gate_projection.weight", .f32, &.{ c, c });
+    try expect(weights, layer, prefix, "intra_group_ape", .f32, &.{ t.compressed_indexer_compress_ratio, c });
+    try expect(weights, layer, prefix, "key_norm.weight", .f32, &.{c});
+    try expect(weights, layer, prefix, "token_key_norm.weight", .bf16, &.{c});
+}
+
 fn affineMlp(weights: anytype, layer: []const u8, comptime mlp: []const u8, affine: Affine, h: usize, inner: usize) !void {
     try affine.check(weights, layer, mlp ++ "gate_proj", &.{ inner, h });
     try affine.check(weights, layer, mlp ++ "up_proj", &.{ inner, h });
@@ -107,17 +121,7 @@ pub fn check(weights: anytype, model: config.Model, bits: u8) !void {
             try expect(weights, layer, hc, "hc_scale", .f32, &.{2});
         }
         if (t.layer_types[index] == .deepseek_sparse_attention) {
-            const c = t.compressed_indexer_head_dim;
-            const num_heads = t.compressed_indexer_num_attention_heads;
-            const prefix = "self_attn.compressed_indexer.";
-            try affine.check(weights, layer, prefix ++ "token_key_projection", &.{ c, h });
-            try affine.check(weights, layer, prefix ++ "query_projection", &.{ @as(usize, num_heads) * c, t.q_lora_rank });
-            try affine.check(weights, layer, prefix ++ "head_weight_projection", &.{ num_heads, h });
-            try expect(weights, layer, prefix, "key_value_projection.weight", .f32, &.{ c, c });
-            try expect(weights, layer, prefix, "key_gate_projection.weight", .f32, &.{ c, c });
-            try expect(weights, layer, prefix, "intra_group_ape", .f32, &.{ t.compressed_indexer_compress_ratio, c });
-            try expect(weights, layer, prefix, "key_norm.weight", .f32, &.{c});
-            try expect(weights, layer, prefix, "token_key_norm.weight", .bf16, &.{c});
+            try checkCompressedIndexer(weights, layer, t, affine);
         }
         if (t.mlp_layer_types[index] == .sparse) {
             const expert = t.n_routed_experts;
@@ -140,6 +144,20 @@ pub fn check(weights: anytype, model: config.Model, bits: u8) !void {
         }
     }
 
+    try expect(weights, "vit.embeddings.", "patch_embedding.weight", "", .bf16, &.{ model.vision_config.hidden_size, 3, model.vision_config.patch_size, model.vision_config.patch_size });
+    try checkDraft(weights, model);
+}
+
+/// Names the CUDA target deliberately leaves to the indexer, vision and DFly2 consumers.
+pub fn checkCudaAuxiliary(weights: anytype, model: config.Model, bits: u8) !void {
+    const t = model.text_config;
+    const affine: Affine = .{ .bits = bits, .group_size = 64 };
+    for (0..t.num_hidden_layers) |index| {
+        if (t.layer_types[index] != .deepseek_sparse_attention) continue;
+        var prefix_buffer: [56]u8 = undefined;
+        const layer = try std.fmt.bufPrint(&prefix_buffer, "model.layers.{d}.", .{index});
+        try checkCompressedIndexer(weights, layer, t, affine);
+    }
     try expect(weights, "vit.embeddings.", "patch_embedding.weight", "", .bf16, &.{ model.vision_config.hidden_size, 3, model.vision_config.patch_size, model.vision_config.patch_size });
     try checkDraft(weights, model);
 }

@@ -41,7 +41,7 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
     security.dependOn(&wire.step);
     security.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"security:"} })).step);
     const pull = b.step("test-pull-security", "Checkpoint download paths, byte limits and metadata refusal on the CPU");
-    for ([_][]const u8{ "zig/src/cli/hub.zig", "zig/src/cli/pull_test.zig" }) |path| {
+    for ([_][]const u8{ "zig/src/cli/hub.zig", "zig/src/cli/pull.zig", "zig/src/cli/pull_test.zig", "zig/src/cli/pull_security_test.zig" }) |path| {
         const checks = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,

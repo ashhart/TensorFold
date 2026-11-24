@@ -62,6 +62,14 @@ pub const Matvec = struct {
         p.a.free(p.name);
     }
 
+    /// The same pipeline registered for another family that runs it, at that family's shapes and under its label.
+    pub fn retarget(p: *Matvec, label: []const u8, served: [2]c.Shape) !void {
+        const name = try std.fmt.allocPrint(p.a, "{s} ll_matvec_{d}", .{ label, p.per });
+        p.a.free(p.name);
+        p.name = name;
+        p.served = served;
+    }
+
     const vt = g.hooks(Matvec);
 
     pub fn kernel(p: *Matvec) g.Kernel {
@@ -173,6 +181,14 @@ pub const Gemm = struct {
         p.rig.deinit();
         p.pipe.deinit();
         p.a.free(p.name);
+    }
+
+    /// The same pipeline registered for another family that runs it, at that family's shapes and under its label.
+    pub fn retarget(p: *Gemm, label: []const u8, served: [2]c.Shape) !void {
+        const name = try std.fmt.allocPrint(p.a, "{s} ll_gemm_{d}{d}", .{ label, @intFromBool(p.am), @intFromBool(p.an) });
+        p.a.free(p.name);
+        p.name = name;
+        p.served = served;
     }
 
     const vt = g.hooks(Gemm);

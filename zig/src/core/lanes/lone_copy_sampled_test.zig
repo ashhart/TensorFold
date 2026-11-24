@@ -132,9 +132,9 @@ fn serve(m: cfgs.Model, times: [2]f64, asks: []const Ask, out: []Reply, kept: ?*
     if (kept) |k| k.* = .{ e.lone_kept[0][0] != null, e.lone_kept[1][0] != null };
 }
 
-/// hip_lanes.zig facts in small (as lone_copy_price_test.zig's): 16-row windows, timed forwards, copies priced.
+/// hip_lanes.zig facts in small (as lone_copy_price_test.zig's): timed plain rounds and copies priced.
 fn hip(head: bool, forwards: []const cfgs.Cost) cfgs.Model {
-    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = head, .copy_guard = true, .window_costs = forwards, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
+    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = true, .copy_guard = true, .window_costs = forwards, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
 }
 
 /// `asks` served drafts-off and with copies unpriced (main's path) give `got`'s replies, token for token.

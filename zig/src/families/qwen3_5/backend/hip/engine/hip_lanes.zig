@@ -4,11 +4,13 @@ const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const serve = @import("hip_serve");
-const Engine = @import("engine.zig").Engine;
+const engine_mod = @import("engine.zig");
+const Engine = engine_mod.Engine;
 const state = @import("../forward/state.zig");
 const mtp = @import("mtp.zig");
 const costs = @import("hip_costs.zig");
 const prefix = @import("prefix.zig");
+const prompt_rows = @import("prompt_rows.zig");
 const hip_prefix = @import("hip_prefix.zig");
 const memory = @import("memory.zig");
 const pages = @import("../forward/pages.zig");
@@ -55,13 +57,14 @@ pub const Readout = struct {
 /// Where a stream's pass starts and the cuts it keeps: a readout at row 0 with none, the prefix tree not asked.
 pub fn startPlan(tree: anytype, s: *const lanes.Stream, owner: anytype, matched: *std.ArrayList(u32)) !radix.Plan {
     if (s.readout != null) return .{};
-    return tree.begin(if (s.key.len != 0) s.key else s.prompt(), s.history_len, s.shared_prefixes, owner, matched);
+    return tree.begin(if (s.key.len != 0) s.key else s.prompt(), s.cache_salt, s.history_len, s.shared_prefixes, owner, matched);
 }
 
 pub const Lane = struct {
     caches: state.Caches,
     vision: ?vision.Request = null,
     key: []const u32 = &.{},
+    cache_salt: ?u64 = null,
     /// The last kept row's final hidden row: the draft head's input.
     hidden: hip.DeviceBuffer,
     /// Drafts the head holds for the next window.
@@ -69,6 +72,8 @@ pub const Lane = struct {
     held_n: usize = 0,
     /// Slots written and kept: the next window starts here.
     len: usize,
+    /// The first row a pass tapped: a stream resumed from a snapshot has no tap rows below its resume point.
+    tapped_from: usize = 0,
     /// The stream's id on every rank.
     id: u32 = 0,
     /// The prompt pass in progress, a chunk a call (null once it is in).
@@ -179,8 +184,8 @@ pub const Hip = struct {
     /// The facts the round loop reads at setup: shared rounds of exact windows, and the MTP head's batched chains.
     pub fn facts(h: *const Hip) lanes.Model {
         const drafting = h.head != null and h.e.o.policy.mtp.drafts > 0;
-        // plain rounds compete with drafted ones once the forwards are timed
-        const plain_guard = drafting and h.costs.windows > 0;
+        // plain rounds compete with drafted or copy-only ones once the forwards are timed
+        const plain_guard = h.costs.windows > 0;
         return .{
             .exact_width = max_window,
             .gpu_tokens = false,
@@ -193,7 +198,7 @@ pub const Hip = struct {
             .max_streams = @intCast(h.e.o.batch_rows),
             .draft_streams = drafting,
             .plain_guard = plain_guard,
-            .copy_guard = h.costs.windows > 0, // a lone stream's copies too, with a head or without (lanes/lone_copy.zig)
+            .copy_guard = plain_guard,
             .window_costs = h.costs.window[0..h.costs.windows],
             .shared_costs = h.costs.shared[0..h.costs.shareds],
             .mtp_step_ms = h.costs.step_ms,
@@ -288,6 +293,7 @@ pub const Hip = struct {
         if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec, prompt);
         lane.id = try h.streams.idOf(s);
         lane.key = if (s.key.len != 0) s.key else prompt;
+        lane.cache_salt = s.cache_salt;
         if (h.e.vision) |v| {
             lane.vision = try vision.Request.initCancelable(v, s.images, prompt, h.e.o.capacity, h.cancelOf(s));
         } else if (s.images.len != 0) return error.VisionNotLoaded;
@@ -310,6 +316,7 @@ pub const Hip = struct {
         h.e.pool.ids.reserved += need;
         _ = try lane.caches.grow(h.gpa, prompt.len);
         s.cached = @intCast(at);
+        lane.tapped_from = at;
         const fill = glue.Fill.init(at, plan.marks);
         lane.fill = fill;
         // the other ranks get the stream's pages and where it resumed and cuts
@@ -334,9 +341,19 @@ pub const Hip = struct {
         return lane;
     }
 
-    /// Where the chunk from `at` ends: decoding streams wait less; a readout keeps the chunk (rocBLAS bits by rows).
+    /// Where the chunk from `at` ends: the prompt rows alone, fewer beside decoders; rocBLAS bits keep the chunk.
     pub fn reach(h: *Hip, lane: *Lane, at: usize, limit: usize) !usize {
-        const rows = if (h.e.o.cut_rows > 0) h.e.o.cut_rows else if (lane.readout == null and h.decoding()) h.e.o.policy.fill_rows else prefix.chunk;
+        const o = &h.e.o;
+        const rows = if (o.cut_rows > 0)
+            o.cut_rows
+        else if (lane.readout != null)
+            prefix.chunk
+        else if (h.decoding())
+            o.policy.fill_rows
+        else if (h.e.plain())
+            prefix.chunk
+        else
+            prompt_rows.idle(o.prompt_rows, o.policy);
         const end = prefix.chunkEnd(at, limit, rows);
         if (h.cuts) |c| try c.append(h.gpa, @intCast(end));
         return end;
@@ -380,7 +397,7 @@ pub const Hip = struct {
         var owner: hip_prefix.Side.Owner = .{ .caches = &lane.caches, .id = lane.id };
         _ = prompt;
         if (lane.vision) |v| if (v.layout.count != 0) return;
-        try h.prefix.keep(&owner, lane.key, at);
+        try h.prefix.keep(&owner, lane.key, lane.cache_salt, at);
     }
 
     /// Each stream's window from its kept length: the pending token, then the host's drafts; one forward for all.
@@ -479,19 +496,26 @@ pub const Hip = struct {
 
     /// A drafter's tapped layers, told before any stream exists: their rings then come with every stream's caches.
     pub fn prepareFeatures(h: *Hip, taps: []const u32) !void {
-        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
         if (h.e.o.world != 1) return error.TapsUnderTensorParallel;
+        // the taps the memory plan sized the rings for (native.zig sets them before sizing): kept as they are
+        const t = &h.e.model().taps;
+        if (taps.len > 0 and std.mem.eql(u32, taps, t.layers[0..t.n])) return;
+        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
         try h.e.setTaps(taps);
     }
 
-    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), the newest ring rows kept.
+    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), as far as the ring holds them.
     pub fn features(h: *Hip, lane: *const Lane, taps: []const u32, start: u64, count: u32) !be.Features {
         const t = &h.e.model().taps;
         if (taps.len != t.n or !std.mem.eql(u32, taps, t.layers[0..t.n])) return error.TapsMismatch;
         const ring = lane.caches.tap orelse return error.NoTaps;
         // a verify's rows are in the ring before its keep: they count as written until the keep drops them
         const written = lane.len + if (lane.pending) |p| p.rows else 0;
-        if (start + count > written or start + count <= written -| t.rows) return error.RowsNotHeld;
+        const end = start + count;
+        // a resumed lane's ring holds zeros below its resume point: the snapshot keeps no tap rows
+        if (count == 0 or start < lane.tapped_from or end > written) return error.RowsNotHeld;
+        // the drafter reads a span's newest tap_window rows at most: those must not be overwritten yet
+        if (@max(start, end -| engine_mod.tap_window) < written -| t.rows) return error.RowsNotHeld;
         const row_bytes = t.n * h.e.model().spec.hidden * 2;
         return .{ .buffer = ring.base(), .offset = start, .rows = count, .row_bytes = @intCast(row_bytes), .space = .device, .device = h.e.o.device, .dtype = if (h.e.act == .bf16) .bf16 else .f16 };
     }
@@ -521,4 +545,29 @@ test "Qwen HIP image begin receives the stream's original cancellation hook" {
     try serve.cancel.poll(hook);
     stopped = true;
     try std.testing.expectError(error.Cancelled, serve.cancel.poll(hook));
+}
+
+test "Qwen HIP facts price plain rounds for a copies-only engine" {
+    var test_engine: Engine = undefined;
+    test_engine.o = .{};
+    test_engine.o.policy.mtp.drafts = 3;
+    var h: Hip = undefined;
+    h.e = &test_engine;
+    h.head = null;
+    h.costs = .{};
+    h.costs.windows = 1;
+    h.costs.window[0] = .{ .width = 1, .ms = 1 };
+    const facts = h.facts();
+    try std.testing.expect(facts.plain_guard);
+    try std.testing.expect(facts.copy_guard);
+    try std.testing.expect(!facts.mtp and !facts.speculate and !facts.draft_streams);
+    h.head = @ptrFromInt(@alignOf(mtp.Head));
+    const with_head = h.facts();
+    try std.testing.expect(with_head.mtp and with_head.copy_guard);
+    test_engine.o.policy.mtp.drafts = 0;
+    const disabled_head = h.facts();
+    try std.testing.expect(!disabled_head.mtp and disabled_head.copy_guard);
+    h.head = null;
+    h.costs.windows = 0;
+    try std.testing.expect(!h.facts().copy_guard);
 }

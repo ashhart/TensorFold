@@ -1,4 +1,4 @@
-//! A raw completion's list of prompts: each prompt its own engine request, merged into one reply or one stream.
+//! One reply or stream fanned over several engine requests: a prompt list, or n choices of one prompt (choices.zig).
 const std = @import("std");
 const json = @import("json");
 const openai = @import("openai.zig");
@@ -9,6 +9,9 @@ const errors = @import("errors.zig");
 
 /// Prompts one request may list.
 pub const max_prompts = 64;
+
+/// How a merge counts its prompt: each reply's own prompt (a list), or one prompt shared by all replies (n choices).
+pub const PromptSum = enum { each, once };
 
 /// A raw completion's prompts: a list of two or more strings; empty for any other ``prompt``, which keeps its meaning.
 pub fn texts(cx: *errors.Cx, prompt: ?Value) errors.Refused![]const []const u8 {
@@ -24,8 +27,8 @@ pub fn texts(cx: *errors.Cx, prompt: ?Value) errors.Refused![]const []const u8 {
 /// Prompts in flight at once: the rest wait for a free worker.
 const workers = 8;
 
-/// What one prompt's reply sent its client, held for the merge (its values live in its arena).
-const Slot = struct {
+/// What one request's reply sent its client, held for the merge (its values live in its arena).
+pub const Slot = struct {
     arena: std.heap.ArenaAllocator,
     status: u16 = 0, // a whole reply's status, or a refusal's (0: none: its client left)
     body: ?Value = null,
@@ -34,8 +37,8 @@ const Slot = struct {
     after: ?Value = null, // a stream's event after its finish (a loop stop's error)
 };
 
-/// The client's one reply or stream, shared by the choices' threads under `mutex`.
-const Fan = struct {
+/// The client's one reply or stream, shared by the requests' threads under `mutex`.
+pub const Fan = struct {
     out: openai.Out,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
@@ -51,12 +54,12 @@ const Fan = struct {
     }
 };
 
-/// One prompt's view of the client: its chunks get its index; the head opens once; finishes wait for the rest.
-const Choice = struct {
+/// One choice's view of the client: its chunks get its index; the head opens once; finishes wait for the rest.
+pub const Choice = struct {
     fan: *Fan,
     i: u32,
 
-    fn out(c: *Choice) openai.Out {
+    pub fn out(c: *Choice) openai.Out {
         return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
     }
 
@@ -158,7 +161,7 @@ pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, plan:
     for (threads[0..helpers]) |*t| t.* = std.Thread.spawn(.{ .stack_size = 8 << 20 }, Pool.loop, .{&pool}) catch null;
     pool.loop();
     for (threads[0..helpers]) |t| if (t) |h| h.join();
-    if (plan.stream) streamed(&fan, a, plan.separate_usage) else whole(&fan, a);
+    if (plan.stream) streamed(&fan, a, plan.separate_usage, .each) else whole(&fan, a, false, .each);
 }
 
 /// The prompts' runs, taken in order by whichever worker is free, until one is refused or fails.
@@ -179,16 +182,17 @@ const Pool = struct {
 };
 
 /// The first refusal (by index) as the reply, else every choice's reply in one body; nothing if a client left.
-fn whole(f: *Fan, a: Allocator) void {
+pub fn whole(f: *Fan, a: Allocator, prompt_logprobs: bool, sum: PromptSum) void {
     for (f.slots) |s| if (s.status != 0 and s.status != 200) return f.out.vt.reply(f.out.ctx, s.status, s.body.?);
     for (f.slots) |s| if (s.status == 0) return;
-    const merged = mergeWhole(a, f.slots) catch return;
+    const merged = mergeWhole(a, f.slots, prompt_logprobs, sum) catch return;
     f.out.vt.reply(f.out.ctx, 200, merged);
 }
 
 /// Choice 0's body with every choice indexed, each with its own tensorfold block, and the usage of all.
-fn mergeWhole(a: Allocator, slots: []const Slot) !Value {
+pub fn mergeWhole(a: Allocator, slots: []const Slot, prompt_logprobs: bool, sum: PromptSum) !Value {
     const first = slots[0].body.?;
+    const prompt_rows = if (prompt_logprobs) onlyChoice(first).get("prompt_logprobs") else null;
     const o = try json.copyObject(a, first.object);
     for ([_][]const u8{ "stop_sequence", "error" }) |k| _ = o.orderedRemove(k); // each choice's own, below
     const list = try a.alloc(Value, slots.len);
@@ -199,11 +203,12 @@ fn mergeWhole(a: Allocator, slots: []const Slot) !Value {
         try c.put(a, "index", try json.intValue(a, i));
         try c.put(a, "tensorfold", try stamp(a, b.get("tensorfold"), b.get("usage")));
         for ([_][]const u8{ "stop_sequence", "error" }) |k| if (b.get(k)) |v| try c.put(a, k, v);
+        if (prompt_rows) |rows| try c.put(a, "prompt_logprobs", rows);
         slot.* = .{ .object = c };
         usages[i] = b.get("usage") orelse .null;
     }
     try o.put(a, "choices", .{ .array = list });
-    try o.put(a, "usage", try usage(a, usages[0..slots.len]));
+    try o.put(a, "usage", try usage(a, usages[0..slots.len], sum));
     return .{ .object = o };
 }
 
@@ -213,7 +218,7 @@ fn onlyChoice(body: Value) Value {
 }
 
 /// The stream's end: held finishes in index order, the usage of all once, then one [DONE].
-fn streamed(f: *Fan, a: Allocator, separate_usage: bool) void {
+pub fn streamed(f: *Fan, a: Allocator, separate_usage: bool, sum: PromptSum) void {
     if (!f.opened) { // no head went out: the first refusal is the reply (a client gone: nothing)
         for (f.slots) |s| if (s.status != 0) return f.out.vt.reply(f.out.ctx, s.status, s.body.?);
         return;
@@ -227,7 +232,7 @@ fn streamed(f: *Fan, a: Allocator, separate_usage: bool) void {
     for (f.slots) |s| if (s.final == null) return; // a choice ended unfinished: its client left
     var usages: [max_prompts]Value = undefined;
     for (f.slots, 0..) |s, i| usages[i] = s.usage orelse .null;
-    const use = usage(a, usages[0..f.slots.len]) catch return;
+    const use = usage(a, usages[0..f.slots.len], sum) catch return;
     for (f.slots, 0..) |*s, i| {
         const last = s.final.?;
         const sa = s.arena.allocator();
@@ -247,7 +252,7 @@ fn streamed(f: *Fan, a: Allocator, separate_usage: bool) void {
 }
 
 /// A choice's tensorfold block with its cached prompt tokens (what the prompt cache held of its prompt).
-fn stamp(a: Allocator, runtime: ?Value, use: ?Value) !Value {
+pub fn stamp(a: Allocator, runtime: ?Value, use: ?Value) !Value {
     const rt = runtime orelse return .null;
     if (rt != .object) return rt;
     const o = try json.copyObject(a, rt.object);
@@ -256,13 +261,13 @@ fn stamp(a: Allocator, runtime: ?Value, use: ?Value) !Value {
     return .{ .object = o };
 }
 
-fn count(v: ?Value, key: []const u8) i64 {
+pub fn count(v: ?Value, key: []const u8) i64 {
     const x = (v orelse return 0).get(key) orelse return 0;
     return x.int64() orelse 0;
 }
 
-/// One request's usage over its prompts' (Run.usage's shape): every prompt's tokens and every reply's, summed.
-fn usage(a: Allocator, each: []const Value) !Value {
+/// One request's usage over its replies' (Run.usage's shape): each reply's tokens, and the prompt once or per reply.
+pub fn usage(a: Allocator, each: []const Value, sum: PromptSum) !Value {
     var completion: i64 = 0;
     var reasoning: i64 = 0;
     var prompt: i64 = 0;
@@ -270,8 +275,15 @@ fn usage(a: Allocator, each: []const Value) !Value {
     for (each) |u| {
         completion += count(u, "completion_tokens");
         reasoning += count(u.get("completion_tokens_details"), "reasoning_tokens");
-        prompt += count(u, "prompt_tokens");
-        cached_sum += count(u.get("prompt_tokens_details"), "cached_tokens");
+    }
+    if (sum == .each) {
+        for (each) |u| {
+            prompt += count(u, "prompt_tokens");
+            cached_sum += count(u.get("prompt_tokens_details"), "cached_tokens");
+        }
+    } else {
+        prompt = count(each[0], "prompt_tokens");
+        cached_sum = count(each[0].get("prompt_tokens_details"), "cached_tokens");
     }
     const o = try json.newObject(a);
     try o.put(a, "prompt_tokens", try json.intValue(a, prompt));

@@ -5,6 +5,9 @@ const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
 const train_ops = @import("cuda_train_ops.zig");
 const glue = @import("cuda_glue.zig");
+const parts = @import("cuda_wide.zig").wide_streams;
+/// Rows tf_plan_routed stages at most (nemotron_ops.cu pk).
+pub const plan_rows = 32; // a shared round's or batched draft's parts: nemotron_ops.cu PARTS
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -43,11 +46,11 @@ pub const Snaps = extern struct {
 };
 
 /// A batched draft's rows: each part's `a` (wa bytes a row) and `b` (wb bytes a row), its start and row count.
-pub const GatherRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), wa: c_int = 0, wb: c_int = 0 };
+pub const GatherRows = extern struct { a: [parts]u64 = @splat(0), b: [parts]u64 = @splat(0), rows: [parts]c_int = @splat(0), row0: [parts]c_int = @splat(0), wa: c_int = 0, wb: c_int = 0 };
 /// A span's last row: each part's source rows, moved to the destination rows in part order.
-pub const LastRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0) };
+pub const LastRows = extern struct { a: [parts]u64 = @splat(0), b: [parts]u64 = @splat(0) };
 /// A level's rows: each part's token and probability destinations, its start and row count, the level's words.
-pub const ScatterRows = extern struct { tok: [8]u64 = @splat(0), prob: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), tok_at: c_int = 0, prob_at: c_int = 0 };
+pub const ScatterRows = extern struct { tok: [parts]u64 = @splat(0), prob: [parts]u64 = @splat(0), rows: [parts]c_int = @splat(0), row0: [parts]c_int = @splat(0), tok_at: c_int = 0, prob_at: c_int = 0 };
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
@@ -58,6 +61,7 @@ pub const Kernels = struct {
     norms: cuda.norms.Norms,
     moe: cuda.moe_glue.MoeGlue, // the shared top-k and combine
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
+    wide: bool = false, // TF_NEMOTRON_WIDE_ROUNDS took at load: only then do 17-32 rows plan and project
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
     pattn: cuda.Function,
@@ -91,6 +95,7 @@ pub const Kernels = struct {
         const d = ctx.d;
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
+        k.wide = false;
         k.d = d;
         const kk = cuda.kernels;
         const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed, kk.affine4_pack };
@@ -353,6 +358,8 @@ pub const Ops = struct {
 
     /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
+        // a wide round's 17-32 affine-4 rows take verify's tiles (decode's chain a row); main's decode at 16 or fewer
+        if (o.k.wide and q == .affine4 and rows > cuda.qlinear.Affine4Kernels.max_rows) return o.k.affine.verify(o.s, x, xs, q.affine4, out, rows);
         return o.linear().decode(o.s, q, .{ .x = x, .sums = xs, .part = o.part }, out, rows);
     }
 
@@ -449,7 +456,7 @@ pub const Ops = struct {
 
     /// experts.route's plan over the routed slots alone (rows <= 16, experts <= 128): the shared halves run apart.
     pub fn planRouted(o: Ops, picks: u64, rows: usize, slots: usize, routed: usize, count: usize, tile: usize, p: Plan) !void {
-        if (rows > 16 or slots > 8 or count > 128) return error.PlanTooWide;
+        if (rows > @as(usize, if (o.k.wide) plan_rows else 16) or slots > 8 or count > 128) return error.PlanTooWide; // pk: 32 rows on
         var a: cuda.Args = .{};
         a.add(picks);
         for ([_]usize{ rows, slots, routed, count, tile }) |v| a.add(int(v));

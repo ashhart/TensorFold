@@ -6,27 +6,27 @@
 
 constexpr long long PAGE = 512;  // rows a KV page holds
 
-// sparse.select_tokens' assembly, a block a row: K pools' 4 tokens, then the tail; on pages each token's row in them.
+// sparse.select_tokens' assembly, a block a row: K pools' `pool` tokens, then the tail; on pages each token's row.
 extern "C" __global__ void tf_glm_dsa_tokens(const long long* pools, const int* pos, int K,
                                              int* __restrict__ tokens, int* __restrict__ counts,
-                                             const int* pt, long long page_rows) {
+                                             const int* pt, long long page_rows, int pool) {
     glm_pdl::enter();
     const int r = blockIdx.x;
     const long long q = static_cast<long long>(*pos) + r;
-    const long long npool = (q + 1) / 4;
-    const int width = 4 * K + 3;
+    const long long npool = (q + 1) / pool;
+    const int width = pool * K + pool - 1;
     int* row = tokens + static_cast<long long>(r) * width;
     auto at = [&](long long t) { return static_cast<int>(pt ? pt[t / PAGE] * page_rows + t % PAGE : t); };
-    for (int i = threadIdx.x; i < 4 * K; i += blockDim.x)
-        row[i] = at(pools[static_cast<long long>(r) * K + i / 4] * 4 + i % 4);
-    if (threadIdx.x < 3) {
-        const long long t = npool * 4 + threadIdx.x;
-        row[4 * K + threadIdx.x] = t <= q ? at(t) : -1;
+    for (int i = threadIdx.x; i < pool * K; i += blockDim.x)
+        row[i] = at(pools[static_cast<long long>(r) * K + i / pool] * pool + i % pool);
+    if (threadIdx.x < pool - 1) {
+        const long long t = npool * pool + threadIdx.x;
+        row[pool * K + threadIdx.x] = t <= q ? at(t) : -1;
     }
     if (threadIdx.x == 0) {
         int tail = 0;
-        for (int t = 0; t < 3; ++t) tail += npool * 4 + t <= q;
-        counts[r] = npool > K ? 4 * K + tail : 0;
+        for (int t = 0; t < pool - 1; ++t) tail += npool * pool + t <= q;
+        counts[r] = npool > K ? pool * K + tail : 0;
     }
 }
 

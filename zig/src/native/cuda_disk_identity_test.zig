@@ -86,6 +86,28 @@ test "disk identity: an arithmetic value changes actual CUDA identity and zero e
     try t.expect(same.has(key));
 }
 
+test "disk identity: tokenizer and template bytes partition the same checkpoint" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{}" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = "weights" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data = "one" });
+    var first = std.hash.Wyhash.init(0);
+    try identity.checkpoint(&first, a, t.io, dir);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data = "two" });
+    var tokenizer = std.hash.Wyhash.init(0);
+    try identity.checkpoint(&tokenizer, a, t.io, dir);
+    try t.expect(first.final() != tokenizer.final());
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = "one" });
+    var template = std.hash.Wyhash.init(0);
+    try identity.checkpoint(&template, a, t.io, dir);
+    try t.expect(tokenizer.final() != template.final());
+}
+
 const Values = struct {
     const Pair = struct { api.profile.Switch, ?[:0]const u8 };
     var values: []const Pair = &.{};

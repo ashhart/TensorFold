@@ -153,6 +153,8 @@ pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
 pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
 /// Flash Next experts grouped by expert for wide decode windows, the recorded expert kernels' bits (gx.zig).
 pub const flashnext_gx = @embedFile("decode/fn_gx.metal");
+/// The opt-in grouped gate/up decoding an expert's weights once for two pairs (gx_mb2.zig).
+pub const flashnext_gx_mb2 = @embedFile("decode/fn_gx_mb2.metal");
 
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");
@@ -184,6 +186,8 @@ pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
 pub const idol_vae = @embedFile("idol_vae.metal");
+/// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
+pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol_dino.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
@@ -206,7 +210,8 @@ pub const glm_select = @embedFile("glm_select.metal");
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
-pub const core_affine_mm = @embedFile("core/affine_mm.metal");
+pub const core_affine_mm = @embedFile("core/affine_mm.metal") ++ @embedFile("core/affine_mm_glu.metal");
+pub const core_affine_nonfinite = @embedFile("core/affine_mm_nonfinite.h");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
 /// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
@@ -265,6 +270,13 @@ pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/
 pub const llama_attention_nax = "#define TF_PROMPT_ATTENTION ll_prompt_attention\n" ++ prompt_attention_nax;
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const llama_gemm = gemm_nax ++ @embedFile("llama/gemm.metal");
+/// Ripple's glue at the release's rounding points: embedding, four norms a layer, q/k norm, RoPE, gate, clamp.
+pub const ricursive_glue = @embedFile("ricursive/glue.metal");
+/// The NVFP4 release's MLP row kernels and dequantization; its tensor-unit GEMM after gemm_nax.metal.
+pub const ricursive_fp4 = @embedFile("ricursive/fp4.metal");
+pub const ricursive_fp4_gemm = gemm_nax ++ @embedFile("ricursive/fp4_gemm.metal");
+/// Ripple's prompt attention on the tensor units (llama's kernel over a window, keys in a ring; nax.h inlined at load).
+pub const ricursive_attention_nax = @embedFile("ricursive/attention_nax.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 
@@ -303,3 +315,6 @@ pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
 pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
+
+/// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
+pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");

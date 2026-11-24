@@ -58,6 +58,8 @@ pub const Model = struct {
     close: *const fn (ptr: *anyopaque) void,
     /// image input (the lanes' Info.vision); null: text only
     vision: ?api.Vision = null,
+    /// the device and weights a stored cost table is specific to (0: none named)
+    calib_id: u64 = 0,
     /// the calibration knobs (null: TF_DSV41_CALIB / _DIR / _FILE and HOME, as read at open)
     calib: ?calib_env.Knobs = null,
     /// the draft trees' knobs (null: TF_DSV41_TREE / _DUP_MS / _ROWS, as read at open)
@@ -66,6 +68,8 @@ pub const Model = struct {
     steps: bool = false,
     /// --decode-share: the replies' share of wall time beside a prompt's steps (null: `steps_decode_share` in steps)
     decode_share: ?f64 = null,
+    /// the lanes' speculative pass while TF_DSV41_SPEC_DRAFT is unset (a backend that drafts behind its windows)
+    spec_default: bool = false,
 };
 
 /// The replies' share of wall time beside a prompt in steps when neither --decode-share nor the env names one.
@@ -129,7 +133,7 @@ pub const Served = struct {
         const window: u64 = @intCast(@min(context orelse limit, limit));
         // draft pricing: the cached calibration and depth knobs (TF_DSV41_CALIB=measure: timed now, stored)
         const knobs = backend.calib orelse calib_env.Knobs.fromEnv();
-        const want: calib_env.Shape = .{ .slots = backend.slots, .world = backend.world, .dspark = dspark_on, .context = window };
+        const want: calib_env.Shape = .{ .slots = backend.slots, .world = backend.world, .dspark = dspark_on, .context = window, .id = backend.calib_id };
         var cal = try calib_env.load(gpa, io, knobs, want, 64);
         defer if (cal.path) |p| gpa.free(p);
         if (cal.source == .measure) {
@@ -157,7 +161,7 @@ pub const Served = struct {
         }
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
         const trees = if (dspark_on) backend.trees orelse try tree.Settings.fromEnv() else tree.Settings{};
-        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (dspark_on) try spec.Settings.fromEnv() else .{}, .plain_streams_default = 3, .steps = backend.steps, .step_rows = backend.prefill_step });
+        s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettingsFor(&calib_env.env, backend.shape.block), .spec = if (dspark_on) try spec.Settings.fromEnvOr(backend.spec_default) else .{}, .plain_streams_default = 3, .steps = backend.steps, .step_rows = backend.prefill_step });
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = backend.forward_rows;
@@ -188,7 +192,7 @@ pub const Served = struct {
             pl.* = lookup.Planner.init(ls, &s.x.policy.depth.costs, dspark_on);
             s.lookup = pl;
             s.host.proposers = .{ .ctx = pl, .make = makeLookup, .free = freeLookup };
-            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s})", .{ ls.min_match, ls.max_rows, if (ls.lookup) "" else ", lookup off" });
+            std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s}{s})", .{ ls.min_match, ls.max_rows, if (ls.copy_drafter) ", copy drafter" else "", if (ls.lookup) "" else ", lookup off" });
         }
         try s.host.start();
         s.rec = Recorder.init(gpa, io, s.host.engine());

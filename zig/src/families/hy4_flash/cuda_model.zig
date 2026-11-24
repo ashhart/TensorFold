@@ -236,6 +236,8 @@ pub const Model = struct {
             // The layer is on the device: its mapped shard pages (and page cache) would otherwise stay resident.
             ck.release();
         }
+        // the checkpoint's last read: `ck` is this open's own — a name never taken is a stray tensor
+        try @import("loader.zig").finishCuda(ck, cfg.value);
         std.debug.print("all layers: device {d:.2} GiB, MemAvailable {d:.2} GiB\n", .{ gib(self.own.bytes), gib(memAvailable()) });
         self.weight_bytes = self.own.bytes;
         self.scratch = try self.allocScratch();
@@ -369,7 +371,10 @@ pub const Model = struct {
             const shard = try shardOf(a, io, dir, table_name);
             // The config's per-layer row count, so a wrong or repacked table fails here and not mid-forward.
             const rows_expected = try t.engramRows(@intCast(i + 1));
-            eng = .{ .w = w, .table = try direct.openDirect(a, shard, table_name, map, hash, rows_expected) };
+            var table = try direct.openDirect(a, shard, table_name, map, hash, rows_expected);
+            errdefer table.close();
+            try ck.skip(table_name);
+            eng = .{ .w = w, .table = table };
         }
         return .{ .engram = eng, .attention = att, .feed = feed };
     }

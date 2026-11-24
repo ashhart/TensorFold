@@ -4,7 +4,7 @@ const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-pub const Markers = struct { open: []const u8, close: []const u8 };
+pub const Markers = struct { open: []const u8, close: []const u8, optional: bool = false };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
 /// MiniMax-M3's adaptive thinking: the reply writes `<mm:think>...</mm:think>` itself, or `</mm:think>` alone.
@@ -155,6 +155,10 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
         text = trimmed;
     } else if (!finished and std.mem.startsWith(u8, openerOf(m), text)) {
         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
+    } else if (m.optional) {
+        var held: usize = 0; // a reply without the opener answers: only a partial call opener is held while it streams
+        for (o.calls) |c| held = @max(held, if (finished) 0 else partialTag(text, c[0]));
+        return .{ .reasoning = "", .answer = text[0 .. text.len - held] };
     }
     if (at) |v| at = if (v >= shift) v - shift else null;
     const end: ?usize = switch (close) {

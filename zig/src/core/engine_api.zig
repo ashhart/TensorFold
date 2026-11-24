@@ -27,89 +27,12 @@ pub const seedFor = lanes.sampling.seedFor;
 /// A committed token's log probability under the target's raw distribution, with the best tokens at its position.
 pub const LogprobRow = lanes.LogprobRow;
 
-/// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, emitted: []const u32) bool };
-
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
 
 pub const grammar = lanes.grammar;
-
-/// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
-pub const Request = struct {
-    prompt: []const u32,
-    embedding: ?lanes.embedding.Batch = null,
-    readout: ?*const lanes.readout.Spec = null, // an answer from the prompt's rows (Info.readouts engines only)
-    max_tokens: u32,
-    sampling: ?Sampling = null,
-    penalties: Penalties = .{},
-    /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
-    eos: []const u32 = &.{},
-    stop: ?Stop = null,
-    /// false: one token a round and no drafts, the serial reference drafted replies must equal.
-    drafts: bool = true,
-    /// Background work yields to foreground arrivals.
-    background: bool = false,
-    /// The prompt length its kept states count as (0: its own); a pass prefilling a reply carries that request's.
-    born: u32 = 0,
-    /// Prompt prefix lengths worth keeping for a later turn: the rendered history, then shared system blocks.
-    history_len: u32 = 0,
-    shared_prefixes: []const u32 = &.{},
-    /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
-    rewind_len: u32 = 0,
-    /// End of the latest user message in this prompt (0: unknown); background reply passes leave it unknown.
-    user_end: u32 = 0,
-    /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
-    chunks: []const u32 = &.{},
-    /// Where each message the chat template renders begins, sorted, past 0; empty for raw prompts (never a cut).
-    message_starts: []const u32 = &.{},
-    /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
-    decode_spans: []const [2]u32 = &.{},
-    /// Most reply tokens inside a think block before the engine writes ``think_close`` (0: no limit).
-    think_budget: u32 = 0,
-    think_close: []const u32 = &.{},
-    think_end: ?u32 = null,
-    /// Reply tokens after ``think_end`` at most, within ``max_tokens`` (0: ``max_tokens`` alone; Info.answer_limit).
-    answer_max: u32 = 0,
-    /// The offered tools as JSON text, for drafters that propose a call's structure; empty: no tools.
-    tools_json: []const u8 = "",
-    /// Set only when ``Info`` says the engine enforces it.
-    call: ?CallGate = null,
-    structure: ?Structure = null,
-    /// Stop a short exact cycle while the think block is open.
-    loop_guard: bool = false,
-    /// With ``loop_guard``: the reply ends where the guard fires, with no forced close and no answer after it.
-    loop_stop: bool = false,
-    /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
-    decide: ?u32 = null,
-    /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
-    untaught: bool = false,
-    /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
-    logprobs: ?u8 = null,
-    /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
-    prompt_logprobs: ?u8 = null,
-    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
-    images: []const Image = &.{},
-    /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
-    cache_key: []const u32 = &.{},
-    /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
-    unread: ?*const std.atomic.Value(u32) = null,
-
-    /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
-    pub fn cacheKey(r: *const Request) []const u32 {
-        return if (r.cache_key.len > 0) r.cache_key else r.prompt;
-    }
-
-    /// No token is drawn: the backend answers from the prompt's rows (an embedding or a readout).
-    pub fn promptOnly(r: *const Request) bool {
-        return r.embedding != null or r.readout != null;
-    }
-
-    /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
-    pub fn bornLen(r: *const Request) u32 {
-        return if (r.born > 0) r.born else @intCast(r.prompt.len);
-    }
-};
+pub const Request = @import("engine_request.zig").Request;
+pub const Stop = @import("engine_request.zig").Stop;
 
 /// Image and video input an engine serves, and --vision's limits (engine_vision.zig).
 const vision_types = @import("engine_vision.zig");
@@ -121,6 +44,7 @@ pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
 pub const VisionOpen = vision_types.VisionOpen;
+pub const ImageShare = vision_types.ImageShare;
 pub const Size = vision_types.Size;
 pub const ocr = @import("engine_ocr.zig");
 
@@ -165,6 +89,19 @@ pub const Benchmark = @import("benchmark_info.zig").Snapshot;
 /// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
 pub const Rerank = struct { yes: u32, no: u32 };
 
+/// Free bytes are sampled at different phases: before pool allocation, then with the old pool still resident.
+pub const CudaPoolSizing = struct {
+    estimated_free_bytes: u64,
+    measured_free_bytes: u64,
+    final_free_bytes: u64,
+    reserve_bytes: u64,
+    growth_room_bytes: u64,
+    estimated_pages: u64,
+    measured_pages: u64,
+    page_bytes: u64,
+    page_tokens: u32,
+};
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
     /// The loaded world; multi-rank engines override the local engine's one before publication.
@@ -192,6 +129,8 @@ pub const Info = struct {
     thinking_budget: bool = true,
     /// The model can emit a reasoning block; false: all reply text is answer content, whatever enable_thinking renders.
     reasoning: bool = true,
+    /// The reply opens its own think block or answers without one: text that does not open a block is all answer.
+    reasoning_optional: bool = false,
     thinking_switch: bool = false, // server-set from the chat template (Server.init): an explicit thinking off is honoured
     thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
@@ -209,12 +148,16 @@ pub const Info = struct {
     prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// Requests may carry cache_salt: its prompt cache goes by Request.cacheKey() (the lane host's), apart per salt.
+    cache_salt: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
     prompt_cache_capacity: ?PromptCacheCapacity = null,
     /// The policy the engine runs under, one line (`/health` shows it); empty: none.
     policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
+    /// Frozen CUDA pool sizing inputs; the device report reads these without entering a device context.
+    cuda_pool_after_warmup: ?CudaPoolSizing = null,
     /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
     warm_turns: bool = false,
     /// The engine decodes plain whatever a request asks: no drafter loaded, or this chip is faster plain.
@@ -354,8 +297,12 @@ pub const Open = struct {
     keep: ?i64 = null,
     /// Tensor parallelism: `rank` of `tp` (named on the command line when `given` says so); rank 0 listens on `master`.
     tp: u32 = 1,
+    execution_witness: bool = false, // --execution-witness: an engine on a supported path attests it (Info.witness)
     rank: u32 = 0,
     given: Given = .{},
+    /// The build's release (rank aliases retire by it) and where `tp` came from, for the start-up line.
+    release: []const u8 = "",
+    launch_from: []const u8 = "",
     master: []const u8 = "",
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
@@ -533,29 +480,9 @@ pub const Engine = struct {
 };
 
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
-pub const Lone = struct {
-    ctx: *anyopaque,
-    sampled: bool = false, // it drives sampled streams too
-    plain: bool = false, // it drives streams with drafts off too
-    logprobs: bool = false, // it gives each token its logprob row too
-    structures: bool = false, // it masks each window's rows by the stream's grammar too
-    images: bool = true, // it takes image requests too (false: they stay in the lane core)
-    // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
-    min_budget: u32 = 0,
-    resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
-    /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
-    run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
-};
-
+pub const Lone = @import("engine_lone.zig").Lone;
 /// What a lone driver tells the host between rounds: tokens landed; and asks: hand the stream over now?
-pub const LoneHooks = struct {
-    ctx: *anyopaque,
-    committed: *const fn (ctx: *anyopaque) void,
-    yield: *const fn (ctx: *anyopaque) bool,
-    resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
-    // After a completed nonfinal prompt call, true transfers the unfinished pass to the shared fill queue.
-    prefill_yield: ?*const fn (ctx: *anyopaque) bool = null,
-};
+pub const LoneHooks = @import("engine_lone.zig").LoneHooks;
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
@@ -565,6 +492,7 @@ pub const prefill_env = @import("lane_host_env.zig");
 pub const Rounds = @import("lane_host.zig").Rounds;
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
+pub const cache_salt_key = @import("cache_salt_key.zig");
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).

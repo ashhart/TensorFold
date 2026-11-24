@@ -62,6 +62,14 @@ pub fn clear(c: *const Config, slot: *const kv.Slot, high: u64) void {
     for (slot.regions) |*r| kv.resetCarry(r, c);
 }
 
+/// The bytes `clear` zeroes for a state of up to `high` positions.
+pub fn clearedBytes(c: *const Config, slot: *const kv.Slot, high: u64) u64 {
+    var buf: [4 * 64]Run = undefined;
+    var n: u64 = 0;
+    for (runs(c, slot, high, &buf)) |r| n += r.len;
+    return n;
+}
+
 pub const Store = struct {
     a: std.mem.Allocator,
     /// bytes the entries may hold (0: no prompt cache)

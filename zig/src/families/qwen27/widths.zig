@@ -18,7 +18,7 @@ pub fn isUniform(w: Width) bool {
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
 pub const Member = enum { gate, up, down, qkv, z, b, a, out, q, k, v, o, router, shared_gate, egate, eup, edown };
-const members = @backingInt(Member.edown) + 1;
+pub const members = @backingInt(Member.edown) + 1;
 /// The routed block's members: the router, the shared expert's gate and the stacked experts.
 pub const routed = [_]Member{ .router, .shared_gate, .egate, .eup, .edown };
 /// The widths the kernel contract checks the routed block's kernels at, in groups of `routed_group`.
@@ -106,7 +106,8 @@ pub const Widths = struct {
                 l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
             };
         }
-        return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
+        const embed = try one(f, "model.embed_tokens");
+        return .{ .allocator = a, .layers = layers, .embed = embed, .head = if (c.tied_head) embed else try one(f, "lm_head") };
     }
 
     /// Every module 4-bit g64, for synthetic graphs.
@@ -209,12 +210,13 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
     };
 }
 
-/// One run's kernel: 4/64 keeps today's choice; other widths take the non-reg lane kernel or the row kernel.
+/// One run's kernel: 4-, 5-, and 6-bit g64 take reg lanes; other widths take non-reg lanes or row kernels.
 fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     _ = try @import("projection.zig").split(n, k);
     // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
     if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
-    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
+    const reg = (w.bits == 4 or w.bits == 5 or w.bits == 6) and w.group == 64;
+    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = reg or (w.bits == 8 and w.group == 64), .reg = reg }).validate();
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
     return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
@@ -276,6 +278,25 @@ fn testAdmitRouted(quantization: []const u8, why: *Why) !void {
     var w = try Widths.resolve(a, &f, c);
     defer w.deinit();
     return admit(&w, c, .{ .tensor_units = true, .row_bits = &all_rows }, why);
+}
+
+/// Qwen3.6-35B-A3B's shapes (no intermediate_size) at `quantization`, on a chip with or without tensor units.
+fn testAdmitA3b(quantization: []const u8, units: bool, why: *Why) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5_moe","text_config":{{"model_type":"qwen3_5_moe_text","hidden_size":2048,
+        \\"moe_intermediate_size":512,"shared_expert_intermediate_size":512,"num_experts":256,"num_experts_per_tok":8,
+        \\"num_hidden_layers":40,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}},"quantization":{s}}}
+    , .{quantization});
+    defer a.free(text);
+    const c = try cfg.parse(a, text, null);
+    var f = try affine.Formats.init(a, text);
+    defer f.deinit();
+    var w = try Widths.resolve(a, &f, c);
+    defer w.deinit();
+    return admit(&w, c, .{ .tensor_units = units, .row_bits = &all_rows }, why);
 }
 
 /// TensorFold/Qwen3.8-27B-oQ4 override shapes: 4-bit g64, 5-bit GDN, MLP and attention members, one 6-bit v.
@@ -417,4 +438,24 @@ test "a shared expert whose width differs from the experts' is refused at admiss
     try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmitRouted(mixed, &why));
     try std.testing.expectEqual(error.SharedExpertWidth, why.reason);
     try std.testing.expectEqualStrings("mlp.shared_expert.down_proj", why.module);
+}
+
+test "Qwen3.6-35B-A3B's published widths are admitted with and without tensor units" {
+    var why: Why = .{};
+    // mlx-community/Qwen3.6-35B-A3B-4bit: 4-bit g64, every layer's router and shared gate at 8 bits
+    const published =
+        \\{"group_size":64,"bits":4,"mode":"affine",
+        \\"language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.0.mlp.shared_expert_gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.39.mlp.gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.39.mlp.shared_expert_gate":{"group_size":64,"bits":8}}
+    ;
+    for ([_]bool{ true, false }) |units| try testAdmitA3b(published, units, &why);
+    // a router at 8 bits with its shared gate left at 4 cannot share one matrix
+    const split_gate =
+        \\{"group_size":64,"bits":4,"mode":"affine",
+        \\"language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8}}
+    ;
+    try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmitA3b(split_gate, false, &why));
+    try std.testing.expectEqual(error.SharedGateWidth, why.reason);
 }

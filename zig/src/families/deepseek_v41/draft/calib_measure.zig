@@ -25,23 +25,49 @@ pub const Method = struct {
     shape: Shape = .raw,
     cycle: u32 = 4,
     deep: u32 = 5,
+    /// timed repetitions stop once the run has taken this long, each entry keeping its first timed run (0: no limit)
+    budget_ms: u32 = 0,
+    /// only `sparse_rows` are timed, once per pass over a list; the rows between are interpolated
+    sparse: bool = false,
 };
+
+/// Extra timed pairs of the entries the slot term is made of, run past any budget.
+pub const essential_reps = 2;
+
+/// The rows a sparse plan times: every window a lone stream's drafts (at most five) can make, then a spread to 16.
+pub const sparse_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 };
+
+/// A run that was not timed because the budget was spent (a sample's ns).
+pub const skipped: i64 = std.math.minInt(i64);
+
+/// The method for a backend whose launch carries at most 16 rows: a sparse sweep, passes repeated while time remains.
+pub const launch_bound: Method = .{ .reps = 3, .warm = 1, .stat = .min, .recheck = 0, .budget_ms = 1000, .sparse = true };
+
+/// The shared windows a launch-bound backend times: the second launch's first row and the widest two-launch window.
+pub const launch_wide = [_]u32{ 17, 32 };
 
 /// The defaults by shape (raw: G15; fit: G14, VERSION 3), then the explicit knobs, each range-checked.
 pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
-    const shape_s = trimmed(get("TF_DSV41_CALIB_SHAPE")) orelse "raw";
-    const shape: Shape = if (std.ascii.eqlIgnoreCase(shape_s, "raw")) .raw else if (std.ascii.eqlIgnoreCase(shape_s, "fit")) .fit else return error.CalibShape;
-    const d: Method = if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
-    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse "median";
+    return methodFrom(get, .{});
+}
+
+/// `method` where a backend's own defaults (`base`) stand in for the reference's when the shape is not named.
+pub fn methodFrom(get: *const fn ([*:0]const u8) ?[]const u8, base: Method) !Method {
+    const named = trimmed(get("TF_DSV41_CALIB_SHAPE"));
+    const shape: Shape = if (named) |n| (if (std.ascii.eqlIgnoreCase(n, "raw")) .raw else if (std.ascii.eqlIgnoreCase(n, "fit")) .fit else return error.CalibShape) else base.shape;
+    const d: Method = if (named == null) base else if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
+    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse @tagName(d.stat);
     const stat: Stat = if (std.ascii.eqlIgnoreCase(stat_s, "median")) .median else if (std.ascii.eqlIgnoreCase(stat_s, "min")) .min else return error.CalibStat;
     return .{
-        .reps = try num(get("TF_DSV41_CALIB_REPS"), 5, 1, 50),
+        .reps = try num(get("TF_DSV41_CALIB_REPS"), d.reps, 1, 50),
         .warm = try num(get("TF_DSV41_CALIB_WARM"), d.warm, 0, 20),
         .stat = stat,
         .recheck = try num(get("TF_DSV41_CALIB_RECHECK"), d.recheck, 0, early),
         .shape = shape,
         .cycle = try num(get("TF_DSV41_CALIB_CYCLE"), d.cycle, 0, early),
         .deep = try num(get("TF_DSV41_CALIB_DEEP_REPS"), d.deep, 1, 50),
+        .budget_ms = try num(get("TF_DSV41_CALIB_BUDGET_MS"), d.budget_ms, 0, 600_000),
+        .sparse = d.sparse,
     };
 }
 
@@ -131,15 +157,20 @@ pub fn split(total: u32, out: []u32) void {
     for (out, 0..) |*o, i| o.* = total / n + @intFromBool(i < total % n);
 }
 
-/// The wide buckets `slots` slots can time (at most SLOT_ROWS rows a slot), past `rows`.
-pub fn wideBuckets(slots: u32, rows_cap: u64, rows: u32, out: *[wide.len]u32) []u32 {
+/// The wide buckets `slots` slots can time (at most SLOT_ROWS rows a slot), past `rows`, from `list` (ascending).
+pub fn pickWide(slots: u32, rows_cap: u64, rows: u32, list: []const u32, out: *[wide.len]u32) []u32 {
     var n: usize = 0;
     const top = @min(rows_cap, @as(u64, slot_rows) * @max(1, slots));
-    for (wide) |b| if (rows < b and b <= top) {
+    for (list) |b| if (rows < b and b <= top and n < out.len) {
         out[n] = b;
         n += 1;
     };
     return out[0..n];
+}
+
+/// The reference's wide buckets.
+pub fn wideBuckets(slots: u32, rows_cap: u64, rows: u32, out: *[wide.len]u32) []u32 {
+    return pickWide(slots, rows_cap, rows, &wide, out);
 }
 
 fn ceilDiv(a: u32, b: u32) u32 {
@@ -154,11 +185,24 @@ pub const Run = struct {
     nsegs: u8 = 0,
     warm: bool,
     what: What,
+    /// kept whatever the budget: the entries the slot term is made of
+    must: bool = false,
 
     pub fn segments(r: *const Run) []const Seg {
         return r.segs[0..r.nsegs];
     }
 };
+
+/// Rows marked -1 take the line between their timed neighbours (the last row is always timed).
+fn interpolate(v: []f64) !void {
+    if (v.len == 0 or v[v.len - 1] < 0 or v[0] < 0) return error.NoRuns;
+    var lo: usize = 0;
+    for (1..v.len) |i| {
+        if (v[i] < 0) continue;
+        for (lo + 1..i) |k| v[k] = v[lo] + (v[i] - v[lo]) * @as(f64, @floatFromInt(k - lo)) / @as(f64, @floatFromInt(i - lo));
+        lo = i;
+    }
+}
 
 /// The measurement's timed runs, in the reference order.
 pub const Plan = struct {
@@ -175,14 +219,23 @@ pub const Plan = struct {
 
     /// `slots`: engine slots; `rows_cap`: TF_DSV41_GRAPH_ROWS_MAX (64); `rows`: widest window (16); `draft`: DSpark.
     pub fn init(gpa: Allocator, slots: u32, rows_cap: u64, rows: u32, m: Method, draft: bool) !Plan {
+        return initWide(gpa, slots, rows_cap, rows, m, draft, &wide);
+    }
+
+    /// `init` timing the shared windows of `list` (ascending, at most `wide.len`) in place of the reference's.
+    pub fn initWide(gpa: Allocator, slots: u32, rows_cap: u64, rows: u32, m: Method, draft: bool, list: []const u32) !Plan {
         if (rows == 0 or rows > max_rows) return error.BadRows;
         var p: Plan = .{ .rows = rows, .n = 1, .per_slot = false, .draft = draft, .m = m };
         errdefer p.runs.deinit(gpa);
-        const w = wideBuckets(slots, rows_cap, rows, &p.wide_buf);
+        const w = pickWide(slots, rows_cap, rows, list, &p.wide_buf);
         p.nwide = @intCast(w.len);
         const want: u32 = if (w.len > 0) @max(2, ceilDiv(w[w.len - 1], slot_rows)) else 2;
         p.n = @min(@max(1, slots), want);
         p.per_slot = p.n >= 2 and rows >= 8;
+        if (m.sparse) {
+            try p.sparsePasses(gpa, w);
+            return p;
+        }
         try p.block(gpa, @min(rows, early), false);
         var r: u32 = early + 1;
         while (r <= rows) : (r += 1) try p.add(gpa, &.{.{ .slot = 0, .rows = r }}, .{ .sweep = r }, 1, m.deep);
@@ -192,17 +245,43 @@ pub const Plan = struct {
             j += 1;
         }
         for (w) |b| {
-            const k = ceilDiv(b, slot_rows);
-            var parts: [4]u32 = undefined;
-            split(b, parts[0..k]);
-            var segs: [4]Seg = undefined;
-            for (segs[0..k], parts[0..k], 0..) |*s, x, i| s.* = .{ .slot = @intCast(i), .rows = x };
-            try p.add(gpa, segs[0..k], .{ .shared = j }, 1, light_reps);
+            const wr = wideRun(b, j, false);
+            try p.add(gpa, wr.segments(), .{ .shared = j }, 1, light_reps);
             j += 1;
         }
         try p.block(gpa, @min(m.recheck, rows), true);
         if (draft) try p.add(gpa, &.{}, .draft, 1, light_reps);
         return p;
+    }
+
+    /// An untimed window and pass, then `reps` passes timing each sparse row, the 4 + 4 window, wide windows and pass.
+    fn sparsePasses(p: *Plan, gpa: Allocator, w: []const u32) !void {
+        try p.runs.append(gpa, one(1, true, false));
+        if (p.draft) try p.runs.append(gpa, .{ .warm = true, .what = .draft, .nsegs = 0 });
+        for (0..p.m.reps) |_| {
+            for (sparse_rows) |r| if (r <= p.rows) try p.runs.append(gpa, one(r, false, false));
+            var j: u32 = 0;
+            if (p.per_slot) {
+                var x: Run = .{ .warm = false, .what = .{ .shared = j }, .nsegs = 2 };
+                x.segs[0..2].* = .{ .{ .slot = 0, .rows = 4 }, .{ .slot = 1, .rows = 4 } };
+                try p.runs.append(gpa, x);
+                j += 1;
+            }
+            for (w) |b| {
+                try p.runs.append(gpa, wideRun(b, j, false));
+                j += 1;
+            }
+            if (p.draft) try p.runs.append(gpa, .{ .warm = false, .what = .draft, .nsegs = 0 });
+        }
+        // the slot term is the 4 + 4 window less the 8-row one: both again, side by side, whatever the budget
+        if (p.per_slot) for (0..essential_reps) |_| {
+            var eight = one(8, false, false);
+            eight.must = true;
+            try p.runs.append(gpa, eight);
+            var pair: Run = .{ .warm = false, .what = .{ .shared = 0 }, .nsegs = 2, .must = true };
+            pair.segs[0..2].* = .{ .{ .slot = 0, .rows = 4 }, .{ .slot = 1, .rows = 4 } };
+            try p.runs.append(gpa, pair);
+        };
     }
 
     pub fn deinit(p: *Plan, gpa: Allocator) void {
@@ -229,6 +308,16 @@ pub const Plan = struct {
         while (r <= hi) : (r += 1) for (0..p.m.warm + p.m.reps) |k| try p.runs.append(gpa, one(r, k < p.m.warm, recheck));
     }
 
+    /// A shared window of `b` rows over as many slots as it needs.
+    fn wideRun(b: u32, j: u32, warm: bool) Run {
+        const k = ceilDiv(b, slot_rows);
+        var parts: [4]u32 = undefined;
+        split(b, parts[0..k]);
+        var x: Run = .{ .warm = warm, .what = .{ .shared = j }, .nsegs = @intCast(k) };
+        for (x.segs[0..k], parts[0..k], 0..) |*s, rows, i| s.* = .{ .slot = @intCast(i), .rows = rows };
+        return x;
+    }
+
     fn one(r: u32, warm: bool, recheck: bool) Run {
         var x: Run = .{ .warm = warm, .what = if (recheck) .{ .recheck = r } else .{ .sweep = r } };
         x.segs[0] = .{ .slot = 0, .rows = r };
@@ -250,7 +339,8 @@ pub const Plan = struct {
         var buf: [max_samples]f64 = undefined;
         // each entry's timed samples in run order: rows (sweep), rows (recheck), shared, draft
         out[0] = 0.0;
-        for (0..p.rows) |i| out[1 + i] = (try p.stat(samples, .{ .sweep = @intCast(i + 1) }, &buf)) orelse return error.NoRuns;
+        for (0..p.rows) |i| out[1 + i] = (try p.stat(samples, .{ .sweep = @intCast(i + 1) }, &buf)) orelse if (p.m.sparse) -1.0 else return error.NoRuns;
+        if (p.m.sparse) try interpolate(out[1 .. 1 + p.rows]);
         for (0..p.rows) |i| if (try p.stat(samples, .{ .recheck = @intCast(i + 1) }, &buf)) |x| {
             out[1 + i] = @min(out[1 + i], x);
         };
@@ -259,9 +349,16 @@ pub const Plan = struct {
         if (p.draft) out[0] = (try p.stat(samples, .draft, &buf)) orelse return error.NoRuns;
     }
 
+    /// Run `at` repeats an entry an earlier run timed, so dropping it leaves the entry a sample.
+    pub fn repeat(p: *const Plan, at: usize) bool {
+        const run = p.runs.items[at];
+        for (p.runs.items[0..at]) |r| if (!r.warm and std.meta.eql(r.what, run.what)) return true;
+        return false;
+    }
+
     fn stat(p: *const Plan, samples: []const f64, what: What, buf: *[max_samples]f64) !?f64 {
         var n: usize = 0;
-        for (p.runs.items, samples) |r, x| if (!r.warm and std.meta.eql(r.what, what)) {
+        for (p.runs.items, samples) |r, x| if (!r.warm and x >= 0 and std.meta.eql(r.what, what)) {
             if (n == buf.len) return error.TooManyRuns;
             buf[n] = x;
             n += 1;

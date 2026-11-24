@@ -3,11 +3,30 @@ const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
-/// Config/index bytes, stamps of every indexed shard (IndexedShardMissing if absent) and top-level safetensors.
+/// Prompt-file bytes, config/index bytes and stamps of every indexed or top-level safetensors shard.
+const prompt_files = [_][]const u8{ "tokenizer.json", "tokenizer_config.json", "tokenizer.model", "chat_template.jinja", "chat_template.json" };
+
+/// The tokenizer's and template's bytes: missing optional files leave no entry.
+pub fn promptFiles(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
+    for (prompt_files) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        defer a.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |e| switch (e) {
+            error.FileNotFound => continue,
+            else => return e,
+        };
+        defer a.free(bytes);
+        h.update(name);
+        h.update(bytes);
+    }
+}
+
+/// Config/index bytes and every shard stamp, behind the checkpoint's prompt-file identity.
 pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
+    try promptFiles(h, a, io, dir);
     var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(scratch, &.{ dir, name });

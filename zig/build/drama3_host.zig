@@ -53,6 +53,34 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
     b.step("test-drama-metal-quant-host", "Packed expert formats, pruning and CFG state without GPU execution").dependOn(&quant.step);
 }
 
+/// Every codec binding (CUDA for the host, Metal for aarch64-macos) compiled against codec_net.zig's schedules.
+pub fn bindings(b: *std.Build, all: *std.Build.Step, cuda_family: *std.Build.Module) void {
+    const step = b.step("check-drama-codec-bindings", "Compile Drama's codec schedules over every backend's binding");
+    const mac = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+    const runtime = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = mac });
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = mac, .link_libc = true });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = mac, .link_libc = true });
+    core.addImport("tokenizer", tokenizer);
+    const bytes = b.addWriteFiles().add("drama3_bindings_metallib.zig", "pub const bytes: []const u8 = &.{};\n");
+    const metal_family = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"),
+        .target = mac,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = runtime }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = b.createModule(.{ .root_source_file = bytes }) } },
+    });
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda_family }, .{ "metal", metal_family } }) |e| {
+        const root = b.createModule(.{
+            .root_source_file = b.path("zig/tests/drama_codec_bindings.zig"),
+            .target = e[1].resolved_target,
+            .optimize = .debug,
+            .link_libc = true,
+            .imports = &.{.{ .name = "drama3", .module = e[1] }},
+        });
+        step.dependOn(&b.addObject(.{ .name = b.fmt("drama_codec_{s}", .{e[0]}), .root_module = root }).step);
+    }
+    all.dependOn(step);
+}
+
 /// Drama's prompt plan on the host: the single-row default and the opt-in batched plan.
 pub fn plan(b: *std.Build, family: *std.Build.Module, core: *std.Build.Module, api: *std.Build.Module, cuda: *std.Build.Module) void {
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/drama_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api }, .{ .name = "cuda", .module = cuda } } });

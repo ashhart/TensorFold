@@ -75,7 +75,9 @@ pub const Encoder = struct {
         var blocks: std.ArrayList(Value) = .empty;
         for (page.blocks) |b| {
             if (b.kind == .picture) {
-                const box = geometry.mistralBox(b.quad);
+                // a picture without a box cannot be cropped or placed: no reader with geometry writes one
+                const q = b.quad orelse continue;
+                const box = geometry.mistralBox(q);
                 if (!e.keeps(box)) continue;
                 const id = try std.fmt.allocPrint(a, "img-{d}.jpeg", .{e.images});
                 e.images += 1;
@@ -98,7 +100,8 @@ pub const Encoder = struct {
                 try footer.append(a, t.markdown);
             } else if (std.mem.trim(u8, t.markdown, " \t\r\n").len > 0) try md.append(a, t.markdown);
             if (!e.o.blocks) continue;
-            const blk = try boxObject(a, "type", blockType(b.kind), geometry.mistralBox(b.quad));
+            const q = b.quad orelse continue; // a .page block has no geometry and so no block entry
+            const blk = try boxObject(a, "type", blockType(b.kind), geometry.mistralBox(q));
             try blk.put(a, "content", .{ .string = t.content });
             if (b.kind == .table and e.o.tables != null) if (t.first) |tid| try blk.put(a, "table_id", .{ .string = tid });
             try blocks.append(a, .{ .object = blk });
@@ -212,10 +215,10 @@ pub fn tableText(a: Allocator, mode: ?TableFormat, src: []const u8, is_html: boo
     return .{ .text = try html.pipe(a, parsed), .format = .markdown };
 }
 
-/// Mistral's block type for a kind (docs/api.md OCR: Mistral).
+/// Mistral's block type for a kind (docs/api.md OCR: Mistral); ``page`` never reaches here, having no geometry.
 pub fn blockType(kind: api.ocr.Kind) []const u8 {
     return switch (kind) {
-        .text, .footnote => "text",
+        .text, .footnote, .page => "text",
         .title, .section_header => "title",
         .list => "list",
         .table => "table",

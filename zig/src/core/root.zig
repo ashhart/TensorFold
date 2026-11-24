@@ -14,6 +14,7 @@ pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const checkpoint_file_cache = @import("checkpoint_file_cache.zig");
 pub const dfloat11_config = @import("dfloat11_config.zig");
 pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
 pub const dfloat11_fixtures = @import("dfloat11_fixtures.zig");
@@ -73,6 +74,7 @@ pub const moe_ref = @import("moe_ref.zig");
 pub const dense_ref = @import("dense_ref.zig");
 
 pub const checkpoint_weights = @import("checkpoint_weights.zig");
+pub const audio = @import("audio.zig");
 pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
 pub const state_walk = @import("state_walk.zig");
@@ -85,6 +87,7 @@ test {
     _ = dspine;
     _ = profile;
     _ = checkpoint_weights;
+    _ = audio;
     _ = safetensors;
     _ = gguf;
     _ = affine4_host;
@@ -94,6 +97,7 @@ test {
     _ = shard_edit;
     _ = lora_merge;
     _ = quant;
+    _ = @import("runtime_lora.zig");
     _ = quant.gptq;
     _ = nvfp4_rows;
     _ = route_ref;

@@ -20,8 +20,8 @@ pub fn begin(ptr: *anyopaque, slot: u32, ids: []const u32) anyerror!iface.Target
         s.hit_on = true;
     };
     // the profile (TF_DSV41_PROMPT_PROF) counts every prompt's encoder chunks from here to this one's `finish`
-    t.pr.prof = .{};
-    s.began = prompt.now();
+    t.pr.prof = .{ .t0 = prompt.now() };
+    s.began = t.pr.prof.t0;
     s.mark = t.stats.launches;
     s.filling = true;
     return .{ .at = s.resumed };
@@ -56,8 +56,10 @@ pub fn finish(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling
     for (t.keepPoints(s.hist.items, s.resumed)) |k| if (k > s.tail.end) try t.keepAt(s, k);
     const env = t.promptEnv();
     t.pr.encode(env, &s.kv, &s.tail, s.hist.items, n) catch |e| return t.fail(e);
+    const td = prompt.now();
     t.pr.finish(env, &s.kv, &s.tail) catch |e| return t.fail(e);
-    t.pr.report(n - s.resumed, prompt.now() - s.began);
+    t.pr.prof.dec_ns = prompt.now() - td;
+    t.pr.report(env.c, n - s.resumed, prompt.now() - s.began);
     s.filling = false;
     return t.endPrompt(s, null, smp, draw);
 }

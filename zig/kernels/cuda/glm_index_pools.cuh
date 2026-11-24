@@ -174,12 +174,12 @@ __device__ uint32_t sample_floor(Smem& sm, const float* row, int NP, int TARGET,
 // tf_glm_select_rows' pools for scores [R][np]; CAP (<= 4096), TARGET speed only; PATH null or [R] int32; grid (R).
 extern "C" __global__ void __launch_bounds__(glm_index::T)
     tf_glm_index_pools(const float* S, int64_t* __restrict__ OUT, int64_t np, const int* pos,
-                       int K, int CAP, int TARGET, int* __restrict__ PATH) {
+                       int K, int CAP, int TARGET, int* __restrict__ PATH, int pool) {
   glm_pdl::enter();
   using namespace glm_index;
   __shared__ Smem sm;
   CAP = min(CAP, CAP_MAX);
-  const int64_t r = blockIdx.x, vis = ((int64_t)pos[0] + r + 1) / 4;
+  const int64_t r = blockIdx.x, vis = ((int64_t)pos[0] + r + 1) / pool;
   const float* row = S + r * np;
   int64_t* out = OUT + r * K;
   const int NP = (int)min(np, max(vis, (int64_t)K));

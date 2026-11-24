@@ -1,8 +1,10 @@
 // Run: jiti electron/agent/media-cache.test.ts
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import type { MediaCacheResult } from './media-cache.ts'
 import {
   cacheBytes,
   classifyMedia,
@@ -300,4 +302,58 @@ const SCRIPT_BYTES = Uint8Array.from('<script>alert(1)</script>', (c) => c.charC
   }
 }
 
+
+// ---- Streaming failure cleanup ------------------------------------------------
+{
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), 'vontra-media-stream-cleanup-'))
+  const endpoint = { baseUrl: 'http://127.0.0.1:8065', label: 'Mattermost media', options: { allowPrivateNetwork: true } }
+  const url = 'http://127.0.0.1:8065/files/failure.png'
+  const assertNoTemp = async () => {
+    const files = await readdir(cacheRoot, { recursive: true })
+    assert.equal(files.some((name) => name.includes('.tmp-')), false, 'no partial cache file survives failure')
+  }
+  try {
+    const thrown = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(PNG_BYTES)
+        controller.error(new Error('stream broke'))
+      },
+    }), { headers: { 'content-type': 'image/png' } })) as typeof fetch
+    assert.equal((await downloadMedia(url, { cacheRoot, fetchImpl: thrown, endpoint })).ok, false)
+    await assertNoTemp()
+    // This deliberately exercises the real fetch/stream abort timer; deterministic clocks cannot fire its listener.
+
+    const timing = (async (_input: RequestInfo | URL, init?: RequestInit) => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(PNG_BYTES)
+        init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason))
+      },
+    }), { headers: { 'content-type': 'image/png' } })) as typeof fetch
+    assert.equal((await downloadMedia(url, { cacheRoot, fetchImpl: timing, endpoint, timeoutMs: 5 })).ok, false)
+    await assertNoTemp()
+
+    const originalOpen = fs.open
+    fs.open = async (...args: Parameters<typeof originalOpen>) => {
+      const handle = await originalOpen(...args)
+      handle.write = async () => { throw new Error('write broke') }
+      return handle
+    }
+    let overflow: MediaCacheResult
+    try {
+      assert.equal((await downloadMedia(url, { cacheRoot, fetchImpl: thrown, endpoint })).ok, false)
+      await assertNoTemp()
+      const bytes = (async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(PNG_BYTES); controller.close() },
+      }), { headers: { 'content-type': 'image/png' } })) as typeof fetch
+      overflow = await downloadMedia(url, { cacheRoot, fetchImpl: bytes, endpoint, capBytes: 4 })
+    } finally {
+      fs.open = originalOpen
+    }
+    assert.equal(overflow.ok, false)
+    await assertNoTemp()
+    ok('downloadMedia removes streamed temporary files on iteration, timeout, write and overflow failures')
+  } finally {
+    await rm(cacheRoot, { recursive: true, force: true })
+  }
+}
 console.log(`media-cache: ${passed} checks passed`)

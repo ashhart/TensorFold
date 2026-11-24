@@ -44,7 +44,9 @@ thinking setting. `return_token_ids: true` also returns the IDs in the
 
 The default total image budget is 14,400 merged tokens per request.
 `--vision-image-tokens` sets a different total budget, divided across
-the images. Each image has independent tower attention. Quoted image
+the images; `--vision-image-share fixed` divides it over
+`--vision-max-images` instead, so each image keeps its rows as later
+turns add pictures. Each image has independent tower attention. Quoted image
 markers remain text. Video, tensor parallelism, MTP heads, external
 drafters, and incompatible quantized checkpoints are refused. Copy
 proposals remain available with ordinary `draft: true` requests.

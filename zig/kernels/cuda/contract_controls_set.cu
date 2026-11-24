@@ -10,3 +10,5 @@
 #include "contract_hcn_controls.cuh"
 // Idol decoders: controls for rounding, sums and exceptional values.
 #include "contract_controls_idol_decoder.cuh"
+#include "contract_qwen3_asr_controls.cuh"
+#include "contract_ricursive_controls.cuh"

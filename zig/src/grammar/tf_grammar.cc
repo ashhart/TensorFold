@@ -71,6 +71,8 @@ struct CompilerState {
     std::shared_ptr<const Spellings> spell;
     tfb::Cache budgets;
     tfc::Cache<xgrammar::CompiledGrammar> compiles;
+    std::mutex fixed_mutex;
+    std::optional<xgrammar::CompiledGrammar> fixed_json;
     CompilerState(const xgrammar::TokenizerInfo& i, int v)
         : info(i), compiler(i, 8, true, CACHE_BYTES), vocab(v), spell(spellings(i)), budgets(i) {}
 };
@@ -83,6 +85,7 @@ struct Compiled {
     xgrammar::CompiledGrammar g;
     std::shared_ptr<const Spellings> spell;
     std::shared_ptr<CompilerState> owner;
+    tfb::Origin origin;
 };
 
 struct Matcher {
@@ -90,6 +93,7 @@ struct Matcher {
     std::shared_ptr<const Spellings> spell;
     std::shared_ptr<CompilerState> owner;
     xgrammar::CompiledGrammar g;
+    tfb::Origin origin;
     std::unique_ptr<tfb::Follower> budget;  // armed by tfg_budget before the first token (grammar_budget)
 };
 
@@ -173,8 +177,16 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                 default: return c->compiler.CompileGrammar(t);
             }
         };
-        xgrammar::CompiledGrammar g = c->compiles.Compile(kind, std::string(text, len), work);
-        return new Compiled{g, c->spell, c};
+        const bool fixed = kind == 0;  // provenance is the fixed compiler branch, never schema-text equality
+        std::optional<xgrammar::CompiledGrammar> kept;
+        if (fixed) { std::lock_guard<std::mutex> lock(c->fixed_mutex); kept = c->fixed_json; }
+        xgrammar::CompiledGrammar g = kept ? *kept : c->compiles.Compile(kind, fixed ? "" : std::string(text, len), work);
+        if (fixed) {
+            std::lock_guard<std::mutex> lock(c->fixed_mutex);
+            if (!c->fixed_json) c->fixed_json = g;
+            g = *c->fixed_json;
+        }
+        return new Compiled{g, c->spell, c, fixed ? tfb::Origin::fixed_json : tfb::Origin::client};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -183,15 +195,15 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
     return nullptr;
 }
 
-// Compiles holding a slot, abandoned ones included; tests wait for 0 before they end.
-int tfg_compiling(void* c) { return (int)static_cast<Compiler*>(c)->state->compiles.Active(); }
+// Compiles and budget explorations holding slots; tests wait for every worker's cleanup.
+int tfg_compiling(void* c) { return (int)(static_cast<Compiler*>(c)->state->compiles.Active() + static_cast<Compiler*>(c)->state->budgets.Active()); }
 
 void tfg_free(void* g) { delete static_cast<Compiled*>(g); }
 
 void* tfg_matcher(void* g) {
     try {
         auto* c = static_cast<Compiled*>(g);
-        return new Matcher{xgrammar::GrammarMatcher(c->g), c->spell, c->owner, c->g, nullptr};
+        return new Matcher{xgrammar::GrammarMatcher(c->g), c->spell, c->owner, c->g, c->origin, nullptr};
     } catch (...) {
         return nullptr;
     }
@@ -222,14 +234,25 @@ int tfg_rollback(void* m, int n) {
     }
 }
 
-// grammar_budget's tables for a compiled grammar, explored once: 1 covered, 0 not, 2 over the work limit, -1 failed.
-int tfg_budget_ready(void* g) {
+// Extended budget status; old clients keep tfg_budget_ready's original return convention below.
+int tfg_budget_status(void* g) {
     try {
         auto* c = static_cast<Compiled*>(g);
-        return tfb::Ready(*c->owner->budgets.Get(c->g));
+        return tfb::Ready(*c->owner->budgets.Get(c->g, c->origin));
+    } catch (const tfc::CompileSlots&) {
+        return static_cast<int>(tfb::Status::slots);
+    } catch (const tfc::CompileTimeout&) {
+        return static_cast<int>(tfb::Status::timeout);
     } catch (...) {
         return -1;
     }
+}
+
+// Legacy ABI: 1 ready, 0 uncovered, 2 counted resource limit, -1 failed.
+int tfg_budget_ready(void* g) {
+    const int status = tfg_budget_status(g);
+    if (status == 3 || status == 4) return 2;
+    return status == 5 || status == 6 ? -1 : status;
 }
 
 // The work exploring a grammar may take, for grammars first looked up after this (tfb::Limits); tests lower it.
@@ -241,7 +264,7 @@ int tfg_budget(void* m, int32_t* words, int n, int left) {
         auto* w = static_cast<Matcher*>(m);
         if (!w->budget) {
             if (n > 0) return 1;
-            w->budget = std::make_unique<tfb::Follower>(w->owner->budgets.Get(w->g));
+            w->budget = std::make_unique<tfb::Follower>(w->owner->budgets.Get(w->g, w->origin));
             return 0;
         }
         return n == 0 ? 0 : w->budget->Mask(words, n, left);

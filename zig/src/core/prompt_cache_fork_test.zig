@@ -45,6 +45,38 @@ test "a re-sent document learns its fork on a miss, and the next question resume
     try std.testing.expectEqual(@as(u64, 1), s.counts.hits);
 }
 
+test "two salts sharing a prefix each fork only from their own kept prompts" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .fork = true }, 1 << 20);
+    defer s.deinit();
+
+    // Salt 7's pass keeps the document's state; salt 8 cannot see it, so its fork stays empty.
+    s.salt = 7;
+    var p = try s.begin(a, &p1, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{history}, p.marks);
+    try std.testing.expectEqual(fresh(&p1), f.pass(&s, &p1, p));
+
+    s.salt = 8;
+    p = try s.begin(a, &p2, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 0), p.from);
+    try std.testing.expectEqualSlices(u32, &.{history}, p.marks); // no fork mark: the kept prompt is another salt's
+    try std.testing.expectEqual(fresh(&p2), f.pass(&s, &p2, p));
+
+    // Salt 7 still learns its fork from its own kept prompt and its next question resumes it.
+    s.salt = 7;
+    p = try s.begin(a, &p2, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ fork - 1, history }, p.marks);
+    try std.testing.expectEqual(fresh(&p2), f.pass(&s, &p2, p));
+    p = try s.begin(a, &p3, history, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, fork - 1), p.from);
+    try std.testing.expectEqual(fresh(&p3), f.pass(&s, &p3, p));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.hits);
+}
+
 test "without the fork rule a re-sent document keeps no state to resume" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

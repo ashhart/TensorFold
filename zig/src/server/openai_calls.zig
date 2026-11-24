@@ -9,9 +9,6 @@ const log = @import("log.zig");
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
 
-/// The one choice a chat reply has.
-const choice: u32 = 0;
-
 pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
     const tools = r.plan.input.tools;
     if (tools.len == 0) return null;
@@ -19,7 +16,7 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         const found = reply.native_calls;
         const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse return null;
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
-        reply.finish_reason = "tool_calls";
+        if (!reply.native_cut_calls) reply.finish_reason = "tool_calls";
         reply.tool_calls_streamed = false;
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
     }
@@ -46,7 +43,7 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
 
 /// Each call the client gets takes the request's id for its place in the reply (``ids.Calls``).
 fn numbered(r: anytype, calls: []Value) Allocator.Error![]Value {
-    for (calls, 0..) |c, i| if (c == .object) try c.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, choice, i) });
+    for (calls, 0..) |c, i| if (c == .object) try c.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, r.plan.input.choice, i) });
     return calls;
 }
 
@@ -57,12 +54,12 @@ pub fn streamed(r: anytype, delta: Value) Allocator.Error!void {
     for (list.array) |one| {
         if (one != .object or !one.object.contains("id")) continue;
         const at = std.math.cast(u64, (one.get("index") orelse continue).int64() orelse continue) orelse continue;
-        try one.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, choice, at) });
+        try one.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, r.plan.input.choice, at) }); // one of n: its own
     }
 }
 
 /// The reply's `tensorfold.kept_tool_calls`: both counts, and the unoffered names the model wrote.
-fn keptBlock(a: Allocator, parsed: tool_parse.Parsed) Allocator.Error!Value {
+pub fn keptBlock(a: Allocator, parsed: tool_parse.Parsed) Allocator.Error!Value {
     const o = try json.newObject(a);
     try o.put(a, "unoffered", try json.intValue(a, parsed.kept_unoffered));
     try o.put(a, "malformed", try json.intValue(a, parsed.kept_malformed));

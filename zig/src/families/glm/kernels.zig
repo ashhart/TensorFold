@@ -77,6 +77,7 @@ pub const Kernels = struct {
     mla_norms: mtl.Pipeline, // an MLA layer's latent key norm, indexer key norm and indexer weights in one launch
     pool: mtl.Pipeline,
     stream_mean: mtl.Pipeline,
+    tap_mean_ring: mtl.Pipeline,
     add: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     argmax: mtl.Pipeline,
@@ -120,6 +121,7 @@ pub const Kernels = struct {
     mm_groups: mm_groups.Pipes, // the routed gathers walked in column groups (mm_groups.zig): mm_bf16's bits
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
     wide: ?wide.Pipes = null, // the products at other widths (wide.zig), for a checkpoint that has one
+    m3_fast: bool, // pre-M5 Metal dispatch geometry (32x64 affine_mm, 4-sg KDA scan, 32x64/64 index NAX)
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
@@ -175,16 +177,16 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
 };
 
 const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
-    .{ .name = "glm_cast_f32", .field = "cast_f32" },     .{ .name = "glm_rms", .field = "rms" },
-    .{ .name = "glm_layer_norm", .field = "layer_norm" }, .{ .name = "glm_absorb", .field = "absorb" },
-    .{ .name = "glm_unabsorb", .field = "unabsorb" },     .{ .name = "glm_scale", .field = "scale" },
-    .{ .name = "glm_pool", .field = "pool" },             .{ .name = "glm_stream_mean", .field = "stream_mean" },
-    .{ .name = "glm_add", .field = "add" },               .{ .name = "glm_swiglu", .field = "swiglu" },
-    .{ .name = "glm_argmax", .field = "argmax" },         .{ .name = "glm_index_select", .field = "index_select" },
-    .{ .name = "glm_exp_f32", .field = "exp_f32" },       .{ .name = "glm_streams", .field = "streams" },
-    .{ .name = "glm_copy_u32", .field = "copy_u32" },     .{ .name = "glm_route_rows", .field = "route_rows" },
-    .{ .name = "glm_act2", .field = "act2" },             .{ .name = "glm_dense_indices", .field = "dense_indices" },
-    .{ .name = "glm_mla_norms", .field = "mla_norms" },
+    .{ .name = "glm_cast_f32", .field = "cast_f32" },           .{ .name = "glm_rms", .field = "rms" },
+    .{ .name = "glm_layer_norm", .field = "layer_norm" },       .{ .name = "glm_absorb", .field = "absorb" },
+    .{ .name = "glm_unabsorb", .field = "unabsorb" },           .{ .name = "glm_scale", .field = "scale" },
+    .{ .name = "glm_pool", .field = "pool" },                   .{ .name = "glm_stream_mean", .field = "stream_mean" },
+    .{ .name = "glm_tap_mean_ring", .field = "tap_mean_ring" }, .{ .name = "glm_add", .field = "add" },
+    .{ .name = "glm_swiglu", .field = "swiglu" },               .{ .name = "glm_argmax", .field = "argmax" },
+    .{ .name = "glm_index_select", .field = "index_select" },   .{ .name = "glm_exp_f32", .field = "exp_f32" },
+    .{ .name = "glm_streams", .field = "streams" },             .{ .name = "glm_copy_u32", .field = "copy_u32" },
+    .{ .name = "glm_route_rows", .field = "route_rows" },       .{ .name = "glm_act2", .field = "act2" },
+    .{ .name = "glm_dense_indices", .field = "dense_indices" }, .{ .name = "glm_mla_norms", .field = "mla_norms" },
 };
 
 const Job = struct {
@@ -279,7 +281,9 @@ pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype
 
 fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
-    var jobs: [generated.len + 27]Job = undefined;
+    const m3_fast = !device.tensorUnits();
+    k.m3_fast = m3_fast;
+    var jobs: [generated.len + 28]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -317,12 +321,14 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{ moe_route.names[0], "glm_route_logits_one" }, .out = &igate_out };
     const m16_src = try mm_groups.source(device, gpa); // affine_mm.names, then the column-group gathers
     defer gpa.free(m16_src);
-    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true });
+    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true, .glm_m3_fast = m3_fast, .exact_nonfinite = true });
     defer gpa.free(m32_src);
     var m16_out: [m16_names.len]mtl.Pipeline = undefined;
-    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &m16_names, .out = &m16_out };
+    const grouped_from: usize = if (m3_fast) affine_mm.names.len else 0;
+    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = m16_names[grouped_from..], .out = m16_out[grouped_from..] };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
-    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
+    const m3_def = if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
+    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, m3_def, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
     defer gpa.free(kda_src);
     var kda_out: [10]mtl.Pipeline = undefined;
     jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp", "glm_kda_parts", "glm_kda_norm" }, .out = &kda_out };
@@ -347,7 +353,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
     jobs[generated.len + 14] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
-    const index_src = try frags.source(device, gpa, sources.glm_index_nax);
+    const index_raw = try std.mem.concat(gpa, u8, &.{ m3_def, sources.glm_index_nax });
+    defer gpa.free(index_raw);
+    const index_src = try frags.source(device, gpa, index_raw);
     defer gpa.free(index_src);
     var index_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 15] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
@@ -387,12 +395,17 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
 
+    const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true, .exact_nonfinite = true }) else try gpa.dupe(u8, "");
+    defer gpa.free(m3_src);
+    var m3_out: affine_mm.Pipes = undefined;
+    if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
+    const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
-        for (jobs) |j| try visitor.raw("glm", j.names[0], j.source);
+        for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
         return;
     }
     var sources_seen = std.hash.Wyhash.init(0x6b);
-    for (jobs) |j| sources_seen.update(j.source);
+    for (active_jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
@@ -405,17 +418,17 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
         }
     };
     var threads: [8]?std.Thread = @splat(null);
-    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ &jobs, &next }) catch null;
-    Worker.run(&jobs, &next);
+    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ active_jobs, &next }) catch null;
+    Worker.run(active_jobs, &next);
     for (threads) |t| if (t) |th| th.join();
-    for (jobs) |j| if (j.failed) return error.KernelCompile;
+    for (active_jobs) |j| if (j.failed) return error.KernelCompile;
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
     k.sample = sample_out[0]; // the shared sampler's own library: glm_glue's table never named it
     k.latent_scores = attn_out[0];
     k.latent_values = attn_out[1];
     k.latent_scores_rows = attn_out[2];
     k.latent_values_rows = attn_out[3];
-    k.mm_bf16 = m16_out[0..affine_mm.names.len].*;
+    k.mm_bf16 = if (m3_fast) m3_out else m16_out[0..affine_mm.names.len].*;
     k.mm_groups = m16_out[affine_mm.names.len..].*;
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
@@ -440,4 +453,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.index_decode = index_out[1];
     k.select_mark = select_out[0];
     k.select_merge = select_out[1];
+}
+
+test "glm_tap_mean_ring unique source anchor in glm_glue.metal" {
+    try std.testing.expect(std.mem.indexOf(u8, sources.glm_glue, "kernel void glm_tap_mean_ring(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sources.glm_glue, "GlmTapRingArgs") != null);
 }

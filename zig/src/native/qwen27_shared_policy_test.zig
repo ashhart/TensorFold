@@ -122,3 +122,14 @@ test "qwen27 grants: lone landing history cannot reprice shared proposals or the
         try std.testing.expect(out[0] < root / 50);
     }
 }
+
+test "qwen27 grants: a shared round's sampled proposals keep the drafter's scores free of the draw's noise" {
+    var s = try lanes.Stream.init(a, .{ .id = "sampled", .prompt = &.{1}, .max_new = 64 });
+    defer s.deinit(a);
+    const follows = @import("qwen27_drafts.zig").followsDraw;
+    try std.testing.expect(!follows(true, &s));
+    try std.testing.expect(!follows(false, &s));
+    s.sampling = .{ .seed = 7 };
+    try std.testing.expect(follows(true, &s));
+    try std.testing.expect(!follows(false, &s));
+}

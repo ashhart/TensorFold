@@ -241,3 +241,23 @@ test "picture distance and gates: cosine, relative error, worst row; bf16 ULPs a
     try testing.expectEqual(@as(u32, 2), p.ulps(0x0001, 0x8001));
     try testing.expectEqual(@as(u16, 0x3f80), p.bf16(1.0));
 }
+
+test "picture start rows: one draw of the whole channel-major latent, seeded, then patchified" {
+    const fake = struct {
+        var seen: u64 = 0;
+        var len: usize = 0;
+        fn draw(seed: u64, out: []f32) void {
+            seen = seed;
+            len = out.len;
+            for (out, 0..) |*v, i| v.* = @floatFromInt(i);
+        }
+    };
+    const grid = p.Grid{ .rows = 4, .columns = 6 };
+    const rows = try p.startRows(testing.allocator, grid, 42, &fake.draw);
+    defer testing.allocator.free(rows);
+    try testing.expectEqual(@as(u64, 42), fake.seen);
+    try testing.expectEqual(@as(usize, 24 * 4 * 6), fake.len);
+    // row 4 is patch (1, 1); its channel 5's (dy 1, dx 0) is draw index 5 * 24 + 3 * 6 + 2
+    try testing.expectEqual(@as(f32, 5 * 24 + 3 * 6 + 2), rows[4 * 96 + 5 * 4 + 2]);
+    try testing.expectError(error.H3BadPictureGrid, p.startRows(testing.allocator, .{ .rows = 3, .columns = 6 }, 0, &fake.draw));
+}

@@ -15,21 +15,29 @@ Building with a coding agent? Have it load the [contributor skill](docs/recipes/
 
 ### Contributing with agents
 
-Install or upgrade ATC to 0.9.4 or later, then run from an updated TensorFold clone:
+Install ATC 0.9.4 or later, pinned to a tag you have looked at, then run from an updated TensorFold clone:
 
 ```sh
-npm install -g github:ashhart/ATC
+npm install -g github:ashhart/ATC#v0.9.6
 atc check ISSUE --json
 atc claim ISSUE --json
 ```
 
 Replace `ISSUE` with the issue number and claim only after a complete check says the work is free.
-TensorFold enables automatic public check-ins: with ATC 0.7.0 or later, a successful new claim starts an anonymous session on the radar and returns its `session` number.
+TensorFold turns public check-ins on by default: with ATC 0.7.0 or later, a successful new claim without `--local` starts a session on the radar and returns its `session` number.
 Keep that number instead of starting a duplicate session.
 For work already yours, start a session with `atc start ISSUE --json`.
 Add `--github-name` to `claim` or `start` only if you want your verified GitHub name shown; showing it is an explicit opt-in. `--local` keeps a new session on your machine.
 The board shows the issue, activity state and last check-in; GitHub still associates the verification comment with its author.
 Check that `publication` is `public`; `unavailable` means the public update failed even if the local claim or session succeeded.
+
+#### What a public check-in sends
+
+- A `/atc presence` comment on the issue, posted from your GitHub account. Anyone can see it until the session lands.
+- To `https://tensorfold.dev`, which the TensorFold project runs: the issue number, a random session token, that comment's ID, the work state and whether the session shows your GitHub name (the name itself is not sent), on the claim or start and again on every pulse.
+- The comment ID lets the site operator look up your GitHub account, so "anonymous" means the public radar hides your name, not that the operator can't see it. The site also sees your IP address and when you work.
+
+Pass `--local` to keep a session on your machine. You can also claim an issue without ATC by opening a draft pull request whose description says `Fixes #<issue>`.
 
 Pulse only while the agent is working, before its five-minute check-in expires:
 

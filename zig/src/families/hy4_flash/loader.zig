@@ -81,3 +81,32 @@ const Validation = struct {
         _ = try self.checkpoint.expect(name, dtype, shape);
     }
 };
+
+const CudaOwnership = struct {
+    checkpoint: *core.Checkpoint,
+
+    pub fn expect(self: *CudaOwnership, name: []const u8, format: weights.DType, shape: []const usize) !void {
+        _ = format;
+        _ = shape;
+        _ = try self.checkpoint.stored(name); // Exact-name ownership when present; no new admission requirement.
+    }
+};
+
+/// Finish the CUDA target's checkpoint after its layers have been read.
+pub fn finishCuda(ck: *core.Checkpoint, model: config.Model) !void {
+    var ownership: CudaOwnership = .{ .checkpoint = ck };
+    // Only the names matter here; four bits keeps the shared enumerator's logical dimensions valid.
+    try weights.checkCudaAuxiliary(&ownership, model, 4);
+    try refuseLeftovers(ck, error.UnusedHy4Tensors);
+}
+
+/// `ck` names `get` never took, refused with up to five named.
+pub fn refuseLeftovers(ck: *const core.Checkpoint, comptime err: anyerror) !void {
+    var n: usize = 0;
+    for (ck.files.items) |*f| for (f.names.keys()) |k| {
+        if (ck.used.contains(k)) continue;
+        if (n < 5 and !@import("builtin").is_test) std.log.err("unused checkpoint tensor {s}", .{k});
+        n += 1;
+    };
+    if (n != 0) return err;
+}

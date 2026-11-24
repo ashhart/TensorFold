@@ -93,10 +93,12 @@ pub const StreamRounds = struct {
     chooser: source_mod.Chooser = .{}, // its lone rounds' source chooser
     alone: bool = false, // its last round was its own, not a shared window's
     plain_next: bool = false, // lone stream's next round was asked zero drafts (skip inline pass)
+    taps_paused: bool = false,
     head: head_mod.Stream = .{}, // its MTP head rounds, priced by main's rule
 };
 
 const dflash_prior = [_]f64{ 0.85, 0.80, 0.80, 0.80, 0.80, 0.75, 0.70 };
+const sampled_rule: source_mod.Rule = .{ .first_dflash = 4 };
 
 /// Prompts past this length draft with the MTP head (the head won at 64K).
 pub const default_max_ctx = 32768;
@@ -207,6 +209,7 @@ pub const Rounds = struct {
             return null;
         };
         x.held_n = 0;
+        x.taps_paused = false;
         x.dflash = r.policy.ok(r.sl.slots[slot].prompt_len);
         x.sampled = sampled;
         x.used = null;
@@ -252,18 +255,22 @@ pub const Rounds = struct {
         r.streams[slot] = null;
     }
 
+    fn ruleFor(r: *const Rounds, sr: *const StreamRounds) source_mod.Rule {
+        return if (sr.sampled) sampled_rule else r.rule;
+    }
+
     /// Whether the next round for `wins` is predicted to use DFlash2, so inline encoding only runs when needed.
     pub fn expectInlineDflash(r: *const Rounds, wins: []const slots_mod.Win) bool {
         if (wins.len == 0) return false;
         if (wins.len == 1) {
             const sr = r.get(wins[0].slot) orelse return false;
-            return !sr.plain_next and sr.dflash and sr.chooser.peek(r.rule, true) == .dflash;
+            return !sr.plain_next and sr.dflash and !sr.taps_paused and sr.chooser.peek(r.ruleFor(sr), true) == .dflash;
         }
         if (r.shared_plain) return false;
         var sampled = false;
         for (wins) |w| {
             const sr = r.get(w.slot) orelse return false;
-            if (!sr.dflash) return false;
+            if (!sr.dflash or sr.taps_paused) return false;
             if (sr.sampled) sampled = true;
         }
         return r.shared.expect(source_mod.shared_rule, wins.len, sampled) == .dflash;
@@ -277,7 +284,7 @@ pub const Rounds = struct {
         if (nodes == 0) return;
         const m = r.model;
         try m.swap(sr.ctx);
-        var tree = m.proposeOptions(anchor, .{ .nodes = max_held, .children = 1 }) catch |err| {
+        var tree = m.proposeBlock(anchor, m.blockFor(max_held), .{ .nodes = nodes, .children = 1 }) catch |err| {
             m.swap(sr.ctx) catch {
                 m.backend.failed = true; // the model holds this stream's context: recovery resets both
             };
@@ -304,23 +311,38 @@ pub const Rounds = struct {
     /// `sr`'s source for `req`: a shared round's `window` source, else DFlash2 or its chooser (caps first).
     pub fn choose(r: *Rounds, sr: *StreamRounds, req: be.DraftRequest, t: u64, window: ?source_mod.Source) !source_mod.Source {
         const ms: f64 = if (sr.last > 0 and t > sr.last) @as(f64, @floatFromInt(t - sr.last)) / 24e3 else 0;
-        if (window == null and sr.alone) if (r.head) |h| if (req.rows != null and req.follow.len > 0) try h.observe(&sr.head, @intCast(req.follow.len - 1), ms);
+        if (r.head) |h| if (req.rows != null and req.follow.len > 0) {
+            const kept_n: u32 = @intCast(req.follow.len - 1);
+            if (window == null and sr.alone) try h.observe(&sr.head, kept_n, ms) else try h.observeShared(&sr.head, kept_n);
+        };
         if (sr.used) |u| if (window == null and sr.alone and req.rows != null and ms > 0) sr.chooser.observe(u, @floatFromInt(req.follow.len), ms);
         sr.last = t;
         sr.alone = window == null;
-        const s: source_mod.Source = if (req.rows == null or !sr.dflash) .mtp else if (window) |w| w else sr.chooser.next(r.rule, true);
+        if (req.rows == null or !sr.dflash) {
+            sr.used = .mtp;
+            return .mtp;
+        }
+        if (sr.taps_paused) {
+            const want = if (window) |w| w else sr.chooser.peek(r.ruleFor(sr), true);
+            if (want == .dflash) {
+                sr.used = .mtp;
+                return .mtp;
+            }
+        }
+        const s: source_mod.Source = if (window) |w| w else sr.chooser.next(r.ruleFor(sr), true);
         sr.used = s;
         return s;
     }
 
     /// The rounds of `jobs[members]` in one fixed-block batched pass: each chain slices its requested depth.
     pub fn roundBatch(r: *Rounds, jobs: []const Job, members: []const usize, out: []Round) !void {
+        const block = r.model.blockFor(max_held);
         var entries: [8]model_mod.Model.Proposal = undefined;
         for (members, entries[0..members.len]) |i, *en| {
             const j = jobs[i];
             j.sr.ctx.committed_end = j.position - 1;
             j.sr.held_n = 0;
-            en.* = .{ .context = j.sr.ctx, .pending = j.anchor, .options = .{ .nodes = max_held, .children = 1 } };
+            en.* = .{ .context = j.sr.ctx, .pending = j.anchor, .options = .{ .nodes = @max(1, @min(j.depth, max_held)), .children = 1 }, .block = block };
         }
         var trees: [8]selector.Tree = undefined;
         try r.model.proposeBatch(entries[0..members.len], trees[0..members.len]);
@@ -350,6 +372,24 @@ pub const Round = struct {
     held_n: u32 = 0,
 };
 
+fn followAnchor(sl: *slots_mod.Slots, req: be.DraftRequest, one: *u32) ![]const u32 {
+    if (req.rows != null) return req.follow;
+    const f = req.first orelse return error.NoFirstToken;
+    one.* = switch (f) {
+        .handle => |h| try sl.ringGet(@intCast(h)),
+        .value => |v| v,
+    };
+    return one[0..1];
+}
+
+fn syncTapPause(r_: *Rounds, sr: *StreamRounds, slot: u32, req: be.DraftRequest, window: ?source_mod.Source, sampled: bool, active: usize) !void {
+    const paused = if (window == .mtp) r_.shared.settledMtp(source_mod.shared_rule, active, sampled) else if (window == null) sr.chooser.settledMtp(r_.ruleFor(sr)) else false;
+    if (paused == sr.taps_paused) return;
+    sr.taps_paused = paused;
+    r_.taps.setActive(slot, !paused);
+    if (!paused) try sr.ctx.reset(r_.model.graph.config, req.position - 1);
+}
+
 /// The backend's draft hook with the drafter loaded: each request's kept rows committed, a chain round, MTP fallback.
 pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) anyerror!void {
     const sl = b.sl;
@@ -367,6 +407,10 @@ pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) a
     var job_n: usize = 0;
     const window = sharedSource(b, r_, requests, t_enter);
     var all_plain = window != null;
+    var any_sampled = false;
+    for (requests) |req| if (req.stream.sampling != null) {
+        any_sampled = true;
+    };
     for (requests, 0..) |req, k| {
         if (req.early or req.lanes != null or req.ranks) return error.TreeDraftsUnsupported;
         if (req.rows) |path| {
@@ -379,20 +423,24 @@ pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) a
             x.plain_next = req.depth == 0;
         };
         if (req.depth > 0) all_plain = false;
+        const was_paused = if (sr) |x| x.taps_paused else false;
+        const want_dflash = if (sr) |x| req.rows != null and x.dflash and (if (window) |w| w == .dflash else x.chooser.peek(r_.ruleFor(x), true) == .dflash) else false;
         const drafted = if (sr) |x| try r_.choose(x, req, t_enter, window) == .dflash else false;
         if (drafted and req.depth > 0) {
-            const anchor = if (req.rows == null) blk: {
-                const f = req.first orelse return error.NoFirstToken;
-                ones[k] = switch (f) {
-                    .handle => |h| try sl.ringGet(@intCast(h)),
-                    .value => |v| v,
-                };
-                break :blk ones[k];
-            } else req.follow[req.follow.len - 1];
-            jobs[job_n] = .{ .sr = sr.?, .position = req.position, .anchor = anchor, .depth = req.depth };
+            const follow = try followAnchor(sl, req, &ones[k]);
+            jobs[job_n] = .{ .sr = sr.?, .position = req.position, .anchor = follow[follow.len - 1], .depth = req.depth };
             job_of[k] = job_n;
             job_n += 1;
-        } else if (sr) |x| x.ctx.committed_end = req.position - 1;
+        } else if (sr) |x| {
+            x.ctx.committed_end = req.position - 1;
+            if (req.rows != null and x.dflash) {
+                if (was_paused and want_dflash) {
+                    x.taps_paused = false;
+                    r_.taps.setActive(slots[k], true);
+                    try x.ctx.reset(r_.model.graph.config, req.position - 1);
+                } else try syncTapPause(r_, x, slots[k], req, window, any_sampled, requests.len);
+            }
+        }
     }
     if (window != null) r_.shared_plain = all_plain;
     // the drafting streams' rounds: those of one block size in one pass; a stream drafting nothing costs nothing
@@ -419,6 +467,12 @@ pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) a
         } else try r_.roundBatch(jobs[0..job_n], members[0..n], rounds[0..job_n]);
     }
     if (p.count > 0) t_passes = now();
+    var mtp_of: [st.max_rows]?usize = @splat(null);
+    var head_streams: [st.max_rows]*head_mod.Stream = undefined;
+    var head_asks: [st.max_rows]u32 = undefined;
+    var head_firsts: [st.max_rows]bool = undefined;
+    var head_of: [st.max_rows]usize = undefined;
+    var head_n: usize = 0;
     for (requests, 0..) |req, k| {
         const round = if (job_of[k]) |i| rounds[i] else Round{};
         const drafted = if (r_.get(slots[k])) |x| x.used == .dflash else false;
@@ -431,21 +485,34 @@ pub fn draft(b: *host.Backend, r_: *Rounds, requests: []const be.DraftRequest) a
             req.stream.draft_chances_cut = null;
         }
         if (!drafted) { // no DFlash2 for this stream: its MTP head takes this round's shape
-            const follow: []const u32 = if (req.rows == null) blk: {
-                const f = req.first orelse return error.NoFirstToken;
-                ones[k] = switch (f) {
-                    .handle => |h| try sl.ringGet(@intCast(h)),
-                    .value => |v| v,
-                };
-                break :blk ones[k .. k + 1];
-            } else req.follow;
+            const follow = try followAnchor(sl, req, &ones[k]);
             const d = if (window == null) try r_.headDepth(r_.get(slots[k]), req) else @min(req.depth, mtp_drafts);
+            if (window != null and r_.head != null) if (r_.get(slots[k])) |x| {
+                head_streams[head_n] = &x.head;
+                head_asks[head_n] = req.depth;
+                head_firsts[head_n] = req.rows == null;
+                head_of[head_n] = mtp_n;
+                head_n += 1;
+            };
             mtp[mtp_n] = .{ .slot = slots[k], .prompt = req.rows == null, .follow = follow, .depth = d };
+            mtp_of[k] = mtp_n;
             mtp_n += 1;
         }
-        // GLM_WINDOWS: the round's source, the tokens its stream's last round gained, the drafts it now holds or asks
-        if (sl.log) std.log.info("glm round: slot {d} source {s} gained {d} drafts {d}", .{ slots[k], if (drafted) "dflash" else "mtp", req.follow.len, if (drafted) round.held_n else mtp[mtp_n - 1].depth });
     }
+    if (window != null and head_n > 0) if (r_.head) |h| {
+        var depths: [st.max_rows]u32 = undefined;
+        try h.sharedDepths(head_streams[0..head_n], head_asks[0..head_n], head_firsts[0..head_n], any_sampled, requests.len, depths[0..head_n]);
+        for (head_of[0..head_n], depths[0..head_n]) |m_i, d| mtp[m_i].depth = d;
+    };
+    // GLM_WINDOWS: the round's source, the tokens its stream's last round gained, the drafts it now holds or asks
+    if (sl.log) for (requests, 0..) |req, k| {
+        const round = if (job_of[k]) |i| rounds[i] else Round{};
+        if (mtp_of[k]) |m_i| {
+            std.log.info("glm round: slot {d} source mtp gained {d} drafts {d}", .{ slots[k], req.follow.len, mtp[m_i].depth });
+        } else {
+            std.log.info("glm round: slot {d} source dflash gained {d} drafts {d}", .{ slots[k], req.follow.len, round.held_n });
+        }
+    };
     if (mtp_n == 0) return;
     try sl.checkDrafts(mtp[0..mtp_n]);
     try sl.draftAll(mtp[0..mtp_n]);
@@ -520,64 +587,6 @@ pub fn chancesFor(r_: *Rounds, slot: u32, out: []f64) bool {
     }
     for (out[n..]) |*c| c.* = 0;
     return true;
-}
-
-test "chain flatten takes the best root and best children, chances are the per-step own" {
-    const a = std.testing.allocator;
-    const tokens = [_]u32{ 3, 8, 8, 8, 8, 8, 8, 8, 8 };
-    const parents = [_]i32{ -1, 0, 0, 0, 1, 1, 2, 2, 2 };
-    const scores = [_]f64{ -0.5, -0.7, -1.4, -3.0, -0.9, -1.1, -1.5, -1.6, -2.5 };
-    const tree: selector.Tree = .{ .gpa = a, .tokens = @constCast(&tokens), .parents = @constCast(&parents), .scores = @constCast(&scores) };
-    var chain: [7]u32 = undefined;
-    var chances: [7]f64 = undefined;
-    const n = flatten(&tree, &chain, &chances);
-    try std.testing.expectEqual(@as(u32, 3), n);
-    try std.testing.expectEqual(@as(u32, 3), chain[0]); // root, then its best child, then that child's
-    try std.testing.expectEqual(@as(u32, 8), chain[1]);
-    try std.testing.expectEqual(@as(u32, 8), chain[2]);
-    try std.testing.expectApproxEqAbs(@exp(-0.5), chances[0], 1e-9);
-    try std.testing.expectApproxEqAbs(@exp(-0.2), chances[1], 1e-9);
-    try std.testing.expectApproxEqAbs(@exp(-0.2), chances[2], 1e-9); // node 4's own step, from -0.7 to -0.9
-}
-
-test "chain flatten stops where the tree has no child at the chain's depth" {
-    const a = std.testing.allocator;
-    const tokens = [_]u32{ 5, 6 };
-    const parents = [_]i32{ -1, 0 };
-    const scores = [_]f64{ -0.3, -0.4 };
-    const tree: selector.Tree = .{ .gpa = a, .tokens = @constCast(&tokens), .parents = @constCast(&parents), .scores = @constCast(&scores) };
-    var chain: [7]u32 = undefined;
-    var chances: [7]f64 = undefined;
-    try std.testing.expectEqual(@as(u32, 2), flatten(&tree, &chain, &chances));
-}
-
-test "the cut keeps the first draft always, later ones stop where the product falls under" {
-    var chances = [_]f64{ 0.9, 0.9, 0.9, 0.9 };
-    cutChances(&chances, 0.7); // the products 0.9, 0.81, 0.729, 0.6561: only the fourth's own chance zeroes
-    try std.testing.expectEqual(@as(f64, 0.9), chances[0]);
-    try std.testing.expectEqual(@as(f64, 0.9), chances[1]);
-    try std.testing.expectEqual(@as(f64, 0.9), chances[2]);
-    try std.testing.expectEqual(@as(f64, 0), chances[3]);
-}
-
-test "the held chain is the priced prefix: it stops at the first chance the cut zeroed" {
-    var chances = [_]f64{ 0.9, 0.9, 0.9, 0.9, 0.9 };
-    cutChances(&chances, 0.7);
-    try std.testing.expectEqual(@as(u32, 3), pricedPrefix(&chances));
-    try std.testing.expectEqual(@as(u32, 0), pricedPrefix(&.{}));
-    try std.testing.expectEqual(@as(u32, 2), pricedPrefix(&.{ 0.5, 0.4 }));
-}
-
-test "a tiny first chance still keeps one draft, the rest stop" {
-    var chances = [_]f64{ 0.1, 0.9, 0.9 };
-    cutChances(&chances, 0.7);
-    try std.testing.expectEqual(@as(f64, 0.1), chances[0]);
-    try std.testing.expectEqual(@as(f64, 0), chances[1]);
-    try std.testing.expectEqual(@as(f64, 0), chances[2]);
-}
-
-test "the confidence cut reads TF_GLM_DRAFT_CONFIDENCE, its default without it" {
-    try std.testing.expectApproxEqAbs(@as(f64, default_confidence), try confidence(), 1e-9);
 }
 
 comptime {

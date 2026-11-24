@@ -120,7 +120,8 @@ fn say(ok: bool, comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt ++ "\n", args);
 }
 
-pub const head_opts: pr.Opts = .{ .chunk = 64, .head_rows = 128, .taps_rows = 128 };
+/// seg_min 2: every cold chunk (64 rows here) runs its first Engram span in two runs, 19 rows then 45
+pub const head_opts: pr.Opts = .{ .chunk = 64, .head_rows = 128, .taps_rows = 128, .seg_min = 2 };
 
 test "dsv41 metal prompt: a prompt then 8 decode steps equal the same tokens decoded one at a time; the cone's rows" {
     const a = testing.allocator;
@@ -165,26 +166,33 @@ test "dsv41 metal prompt: a prompt then 8 decode steps equal the same tokens dec
     try testing.expectEqual(@as(usize, 3), skipped);
 }
 
-test "dsv41 metal prompt: chunk sizes 1, 7, 64 and whole give the same logits, taps, slot and tail" {
+test "dsv41 metal prompt: chunk sizes 1, 7, 64 and whole, and a cold chunk in two runs, give the same logits, taps, slot and tail" {
     const a = testing.allocator;
     const f = try ff.Fwd.initWith(a, testing.io, fixture.promptConfig(), limit, 63);
     defer f.deinit();
     const c = &f.r.c;
     const hist = try ff.ids(a, c, n_prompt, 64);
     defer a.free(hist);
-    var base = try Run.init(a, f, head_opts, 0);
+    var base_o = head_opts;
+    base_o.seg = 0;
+    var base = try Run.init(a, f, base_o, 0);
     defer base.deinit();
     try base.p.run(env(f), &base.slot, &base.tail, hist);
     var bad: usize = 0;
-    for ([_]u32{ 1, 7, n_prompt }) |chunk| {
+    // chunk, seg percent, seg_min: 900-row chunks run their first Engram span on 270, 9 or 450 rows, then the rest
+    const cases = [_][3]u32{ .{ 1, 0, 512 }, .{ 7, 0, 512 }, .{ n_prompt, 0, 512 }, .{ n_prompt, 30, 512 }, .{ n_prompt, 1, 2 }, .{ n_prompt, 50, 2 }, .{ 64, 30, 2 } };
+    for (cases) |cs| {
         var o = head_opts;
-        o.chunk = chunk;
+        o.chunk = cs[0];
+        o.seg = cs[1];
+        o.seg_min = cs[2];
         var run = try Run.init(a, f, o, 0);
         defer run.deinit();
         try run.p.run(env(f), &run.slot, &run.tail, hist);
         const d = runDiff(c, &run, &base);
         const td = tailDiff(&run.tail, &base.tail);
-        say(d[0] + d[1] + d[2] + td == 0, "(b) chunk {d} vs 64: {d} logits, {d} taps, {d} state bytes, {d} tail bytes differ", .{ chunk, d[0], d[1], d[2], td });
+        const m = if (cs[1] > 0 and @min(cs[0], n_prompt) >= cs[2]) @min(cs[0], n_prompt) * cs[1] / 100 else 0;
+        say(d[0] + d[1] + d[2] + td == 0, "(b) chunk {d}, first run {d} rows, vs chunk 64 in one run: {d} logits, {d} taps, {d} state bytes, {d} tail bytes differ", .{ cs[0], m, d[0], d[1], d[2], td });
         bad += d[0] + d[1] + d[2] + td;
     }
     try testing.expectEqual(@as(usize, 0), bad);

@@ -51,6 +51,9 @@ pub fn excluded(args: cli.Args) ?[]const u8 {
         .{ "--vision", args.vision },
         .{ "--tp", args.tp > 1 },
         .{ "--speed-up", args.speed_up != null },
+        .{ "--kv-cache", !std.mem.eql(u8, args.kv_cache, "bf16") },
+        .{ "--prompt-precision", !std.mem.eql(u8, args.prompt_precision, "bf16") },
+        .{ "--rope-yarn", args.rope_yarn != null },
     };
     for (checks) |c| if (c[1]) return c[0];
     return null;
@@ -129,6 +132,7 @@ pub const State = struct {
     hashed: Hashed = .pending,
     thread: ?std.Thread = null,
     stop: parts.Stop = .init(false),
+    started: std.atomic.Value(bool) = .init(false),
 
     /// `binary` and `text` were opened and stamped before the load (null: unknown); the caller keeps and closes them.
     pub fn init(gpa: Allocator, io: Io, srv: *const Server, args: cli.Args, binary: ?parts.Binary, text: ?*const parts.Text) !*State {
@@ -145,12 +149,24 @@ pub const State = struct {
         return s;
     }
 
-    /// Hashes the binary and the text files on a thread of its own: call once the server is ready.
-    pub fn start(s: *State) void {
+    /// Hashes the binary and the text files on a thread of its own, and starts the engine's: call once ready.
+    pub fn start(s: *State, srv: *Server) void {
+        s.started.store(true, .release);
+        if (s.excluded == null) s.startEngine(srv); // an excluded server never reads the weights
         s.thread = std.Thread.spawn(.{}, work, .{s}) catch {
             s.publish(.{ .failed = .hash_failed });
             return;
         };
+    }
+
+    fn startEngine(s: *State, srv: *Server) void {
+        const m = srv.idle_manager orelse {
+            if (srv.info.witness) |w| w.start();
+            return;
+        };
+        m.mutex.lockUncancelable(s.io);
+        defer m.mutex.unlock(s.io);
+        if (!m.parked) if (srv.info.witness) |w| w.start();
     }
 
     /// Stops a hash in progress at its next block, so a stop right after ready does not wait for it.
@@ -161,8 +177,9 @@ pub const State = struct {
     }
 
     /// A new engine is published; the caller holds the lock its readers take (the idle manager's).
-    pub fn bump(s: *State) void {
+    pub fn bump(s: *State, info: api.Info) void {
         _ = s.epoch.fetchAdd(1, .acq_rel);
+        if (s.excluded == null and s.started.load(.acquire)) if (info.witness) |w| w.start(); // a reloaded engine hashes again
     }
 
     fn work(s: *State) void {

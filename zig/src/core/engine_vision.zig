@@ -23,6 +23,9 @@ pub const Size = struct { width: u32, height: u32 };
 /// One tower input of an image, and the tokens the placeholder expands to around its rows.
 pub const Piece = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, before: []const u32 = &.{}, after: []const u32 = &.{} };
 
+/// How a request's images share ``image_tokens`` (--vision-image-share): its own count, or the image limit (#2510).
+pub const ImageShare = enum { request, fixed };
+
 /// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
 pub const Vision = struct {
     ctx: *anyopaque,
@@ -38,6 +41,8 @@ pub const Vision = struct {
     /// Image tokens one request may hold in all, and images.
     image_tokens: u32,
     max_images: u32,
+    /// How the images share ``image_tokens``: the request's count, or the fixed share over ``max_images``.
+    image_share: ImageShare = .request,
     /// Video input, when the engine's family reads it.
     video: ?VideoOffer = null,
     /// The engine's words for a prepare error the server cannot word (a decoder library it lacks); null: the server's.
@@ -85,5 +90,5 @@ pub const VideoOffer = struct {
     max_frames: u32,
 };
 
-/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
-pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
+/// --vision's limits (``Open.vision``); image_tokens_set: the flag given; image_share: --vision-image-share's value.
+pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256, image_share: ImageShare = .request };

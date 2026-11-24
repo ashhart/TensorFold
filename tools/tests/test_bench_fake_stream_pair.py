@@ -46,8 +46,10 @@ class PairingScopeTests(unittest.TestCase):
         script = [b"data: [DONE]\n\n"]
         played, _ = self.post({"stream": True}, pairs=pairs, script=lambda _: script)
         self.assertEqual(played, [script])
-        _, replied = self.post({"stream": True, "n": 2}, pairs=pairs)
-        self.assertEqual(replied[0][0], 400)
+        _, replied = self.post({"stream": True, "n": 17}, pairs=pairs)  # past the served 1..16
+        error = {"message": fake.refusal({"n": 17}), "type": "invalid_request_error"}
+        self.assertEqual(replied, [(400, {"error": error})])
+        self.assertEqual(fake.refusal({"n": 17}), "n must be an integer between 1 and 16")
         pairs.claim.assert_not_called()
 
     def test_running_requires_explicit_pairing(self):

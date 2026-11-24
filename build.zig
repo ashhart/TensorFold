@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/tokenizer_host.zig").steps(b);
     @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
+    @import("zig/build/lane_status_host.zig").steps(b);
     @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
@@ -119,6 +120,8 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
+    @import("zig/build/h3_image_prompt.zig").tests(b, target, test_step);
+    @import("zig/build/h3_image_decoder.zig").compileHost(b, target);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
     @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
     @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
@@ -126,6 +129,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
     @import("zig/build/lfm3_host.zig").steps(b, test_step);
+    @import("zig/build/qwen3_asr_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
@@ -197,6 +201,7 @@ pub fn build(b: *std.Build) void {
         gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
         @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/glm_disk_host.zig").steps(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, test_step);
         @import("zig/build/prefill_widths_metal.zig").compileHost(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
         @import("zig/build/prefill_widths_metal.zig").rest(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
@@ -214,6 +219,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/glm_pdl_scan.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    @import("zig/build/pull_tests.zig").compile(b, target, draft_ids);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
     @import("zig/build/no_backend_host.zig").steps(b, test_step);
     if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
@@ -267,6 +273,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
     @import("zig/build/cache_index_timing.zig").step(b);
+    @import("zig/build/host_draw_timing.zig").step(b);
     // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
     const template_limits = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
     b.step("test-template-limits-host", "Chat template nesting, render steps, stack and memory limits without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = template_limits, .filters = &.{"security:"} })).step);

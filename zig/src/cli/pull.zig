@@ -7,13 +7,15 @@ const ranged = @import("pull_parts.zig");
 const single = @import("pull_file.zig");
 const Entry = single.Entry;
 const blobName = single.blobName;
-const fileStat = single.fileStat;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
 const revisionOk = hub.revisionOk;
+const route = @import("pull_route.zig");
 
 pub const GiB: u64 = 1 << 30;
-
+const revision_json_bytes = 1 << 20;
+const tree_json_bytes = 16 << 20;
+const config_json_bytes = 1 << 20;
 /// Where files switch to shared pieces, and how big a piece is (tests use small ones).
 pub const Sizes = struct { threshold: u64 = ranged.threshold, piece: u64 = ranged.piece };
 
@@ -34,6 +36,8 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         return 2;
     }
     const auth = try Auth.init(a, io, env, err_out) orelse return 1;
+    const endpoint = auth.endpoint;
+    if (!try routes(a, io, err_out, env)) return 2;
     const root = try hub.cacheDir(a, env, override);
     const w = std.Io.Dir.cwd();
     try w.createDirPath(io, root);
@@ -52,8 +56,14 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             try err_out.print("{s}@{s}: not a revision Hugging Face names (a branch, tag or 40-hex commit)\n", .{ repo, revision });
             return 1;
         },
+        error.HubTooLarge => {
+            try err_out.print("{s}@{s}: revision metadata exceeds its decompressed byte cap\n", .{ repo, revision });
+            return 1;
+        },
         else => {
-            try err_out.print("{s}@{s}: the hub is unreachable ({t}); check the network or HF_ENDPOINT\n", .{ repo, revision, e });
+            try err_out.print("{s}@{s}: the hub at {s} is unreachable: ", .{ repo, revision, endpoint });
+            try route.explain(io, err_out, e);
+            try err_out.writeAll("; check the network, HF_ENDPOINT or the proxy settings\n");
             return 1;
         },
     };
@@ -61,8 +71,14 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const entries = listTree(a, &client, auth, repo, sha) catch |e| switch (e) {
         error.HubStatus, error.NoConfig => return 1,
         error.HubDenied => return auth.refuse(err_out, repo),
+        error.HubTooLarge => {
+            try err_out.print("{s}@{s}: file tree exceeds its decompressed byte cap\n", .{ repo, revision });
+            return 1;
+        },
         else => {
-            try err_out.print("{s}@{s}: the hub's file tree is unreachable ({t})\n", .{ repo, revision, e });
+            try err_out.print("{s}@{s}: the hub's file tree is unreachable: ", .{ repo, revision });
+            try route.explain(io, err_out, e);
+            try err_out.writeAll("\n");
             return 1;
         },
     };
@@ -109,8 +125,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         };
         const blob_path = try std.fs.path.join(a, &.{ blobs_dir, blob_name });
         if (e.sha256 != null or e.git_sha1 != null) blob_exists: {
-            const size = fileStat(io, blob_path) catch break :blob_exists;
-            if (size != e.size) break :blob_exists;
+            if (!(single.cachedMatches(io, blob_path, e) catch false)) {
+                std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
+                break :blob_exists;
+            }
             try out.print("  {s}: cached\n", .{e.path});
             try linkIntoSnapshot(a, io, snapshot_dir, e.path, blob_name);
             continue;
@@ -122,7 +140,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         }
         const got = downloadRetrying(a, io, &client, auth, out, url, blobs_dir, e) catch |err| {
             if (err == error.HubDenied) return auth.refuse(err_out, repo);
-            try err_out.print("  {s}: the download failed ({t})\n", .{ e.path, err });
+            try failed(io, err_out, e.path, err);
             return 1;
         };
         try linkIntoSnapshot(a, io, snapshot_dir, e.path, got);
@@ -148,7 +166,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
                 ranged.discard(a, io, b.file, piece); // the hub sent whole files: one stream each
                 const got = downloadRetrying(a, io, client, auth, out, b.file.url, blobs_dir, b.entry) catch |e| {
                     if (e == error.HubDenied) return e;
-                    try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, e });
+                    try failed(io, err_out, b.entry.path, e);
                     return false;
                 };
                 try linkIntoSnapshot(a, io, snapshot_dir, b.entry.path, got);
@@ -157,7 +175,9 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
         },
         error.HubDenied => return err,
         else => {
-            try err_out.print("  the download failed ({t}); pull again to fetch only the missing pieces\n", .{err});
+            try err_out.writeAll("  the download failed: ");
+            try route.explain(io, err_out, err);
+            try err_out.writeAll("; pull again to fetch only the missing pieces\n");
             return false;
         },
     };
@@ -166,7 +186,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
             ranged.discard(a, io, b.file, piece);
             ranged.fetch(a, io, &.{b.file}, piece, auth, out) catch |err| {
                 if (err == error.HubDenied) return err;
-                try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, err });
+                try failed(io, err_out, b.entry.path, err);
                 return false;
             };
             if (!try matches(a, io, b)) {
@@ -186,11 +206,41 @@ fn matches(a: Allocator, io: std.Io, b: Big) !bool {
     return std.mem.eql(u8, &(try ranged.digest(a, io, b.file.path, b.file.size)), &b.entry.sha256.?);
 }
 
+/// Reads the proxy and timeout settings; false (after saying why, naming only the variable) when one is unusable.
+pub fn routes(a: Allocator, io: std.Io, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map) !bool {
+    route.reset(io);
+    route.configure(a, env) catch |e| {
+        try err_out.writeAll("tensorfold pull: ");
+        try route.refusal(err_out, e);
+        try err_out.writeAll("\n");
+        return false;
+    };
+    if (route.settings.skipped.len > 0) try err_out.print("tensorfold pull: {s} names a socks or https:// proxy, which pull cannot use; connecting directly\n", .{route.settings.skipped});
+    return true;
+}
+
+/// One file's failure: a stall names its timeout, its resumes and the proxy in use; others what the connect met.
+pub fn failed(io: std.Io, err_out: *std.Io.Writer, path: []const u8, err: anyerror) !void {
+    if (err == error.Stalled) {
+        try err_out.print("  {s}: no bytes arrived for {d} s ({s}), and {d} range resumes stalled too; ", .{ path, route.settings.stall_s, route.stall_name, single.max_resumes });
+        try route.proxyInUse(err_out);
+        try err_out.writeAll("; pull again to resume\n");
+        return;
+    }
+    try err_out.print("  {s}: the download failed: ", .{path});
+    try route.explain(io, err_out, err);
+    try err_out.writeAll("\n");
+}
+
+pub fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+    return if (env) |m| m.get(key) else null;
+}
+
 /// The commit the hub serves for ``repo@revision``.
 pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, auth: Auth, repo: []const u8, revision: []const u8) ![]const u8 {
     if (!revisionOk(revision)) return error.BadRevision;
     const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/revision/{s}", .{ auth.endpoint, repo, revision });
-    const body = try getJson(a, client, auth, url);
+    const body = try getJson(a, client, auth, url, revision_json_bytes);
     try out.print("[tensorfold] downloading {s}@{s} from Hugging Face\n", .{ repo, revision });
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.BadHubJson;
     defer parsed.deinit();
@@ -205,7 +255,7 @@ pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writ
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.
 pub fn listTree(a: Allocator, client: *std.http.Client, auth: Auth, repo: []const u8, sha: []const u8) ![]Entry {
     const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/tree/{s}?recursive=true", .{ auth.endpoint, repo, sha });
-    const body = try getJson(a, client, auth, url);
+    const body = try getJson(a, client, auth, url, tree_json_bytes);
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.BadHubJson;
     defer parsed.deinit();
     if (parsed.value != .array) return error.BadHubJson;
@@ -261,11 +311,11 @@ fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {
 
 /// One small file fetched whole into memory.
 fn fetchOne(a: Allocator, client: *std.http.Client, auth: Auth, repo: []const u8, sha: []const u8, path: []const u8) ![]u8 {
-    return getJson(a, client, auth, try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, path }));
+    return getJson(a, client, auth, try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, path }), config_json_bytes);
 }
 
-/// A hub answer's whole body, decompressed as a fetch would; error.HubDenied when the hub refused the request.
-fn getJson(a: Allocator, client: *std.http.Client, auth: Auth, url: []const u8) ![]u8 {
+/// One bounded hub answer, with its decompressed bytes capped independently of the transfer encoding.
+fn getJson(a: Allocator, client: *std.http.Client, auth: Auth, url: []const u8, limit: usize) ![]u8 {
     const uri = std.Uri.parse(url) catch return error.HubUnreachable;
     var req: std.http.Client.Request = undefined;
     var redirect_buf: [8 << 10]u8 = undefined;
@@ -275,9 +325,20 @@ fn getJson(a: Allocator, client: *std.http.Client, auth: Auth, url: []const u8) 
     const window: []u8 = if (response.head.content_encoding == .identity) &.{} else try a.alloc(u8, std.compress.flate.max_window_len);
     var transfer: [64]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
-    var body: std.Io.Writer.Allocating = .init(a);
-    _ = response.readerDecompressing(&transfer, &decompress, window).streamRemaining(&body.writer) catch return error.HubUnreachable;
-    return body.toOwnedSlice();
+    const reader = response.readerDecompressing(&transfer, &decompress, window);
+    return readCapped(a, reader, limit);
+}
+
+fn readCapped(a: Allocator, reader: anytype, limit: usize) ![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(a);
+    var chunk: [16 << 10]u8 = undefined;
+    while (true) {
+        const n = reader.readSliceShort(&chunk) catch return error.HubUnreachable;
+        if (n == 0) return body.toOwnedSlice(a);
+        if (n > limit -| body.items.len) return error.HubTooLarge;
+        try body.appendSlice(a, chunk[0..n]);
+    }
 }
 
 test "an LFS oid names its sha256 with or without the sha256: prefix" {
@@ -293,4 +354,20 @@ test "a revision is one URL path segment, and only a 40-hex sha names a snapshot
     for ([_][]const u8{ "", "..", "../main", "a/b", "main?x=1", "a%2Fb", "x..y" }) |r| try std.testing.expect(!revisionOk(r));
     try std.testing.expect(hub.hexSha("0123456789abcdefABCDEF0123456789abcdef01"));
     for ([_][]const u8{ "", "main", "0123456789abcdef0123456789abcdef0123456", "0123456789abcdef0123456789abcdef012345678", "../456789abcdef0123456789abcdef0123456789" }) |s| try std.testing.expect(!hub.hexSha(s));
+}
+
+test "security: identity bodies fail only above each Hub metadata cap" {
+    for ([_]usize{ 1 << 20, 16 << 20 }) |limit| {
+        const body = try std.testing.allocator.alloc(u8, limit + 1);
+        defer std.testing.allocator.free(body);
+        @memset(body, 'A');
+        for ([_]usize{ limit - 1, limit }) |length| {
+            var reader: std.Io.Reader = .fixed(body[0..length]);
+            const got = try readCapped(std.testing.allocator, &reader, limit);
+            defer std.testing.allocator.free(got);
+            try std.testing.expectEqualSlices(u8, body[0..length], got);
+        }
+        var reader: std.Io.Reader = .fixed(body);
+        try std.testing.expectError(error.HubTooLarge, readCapped(std.testing.allocator, &reader, limit));
+    }
 }

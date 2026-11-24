@@ -93,10 +93,12 @@ pub const Plan = struct {
     policy: tool_stream.Policy,
     named: []const u8,
     prompts: []const []const u8 = &.{}, // a raw completion's list of prompts, each its own choice (prompt_list.zig)
+    choices: u32 = 1, // ``n``: engine requests on the one prompt (choices.zig)
 };
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
+    if (raw == .object) try fields.singleChoice(cx, raw); // one reply: /v1/imprint's
     return (try plan(srv, cx, true, raw, null, true)).input;
 }
 
@@ -107,6 +109,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
+    const n = try fields.choiceCount(cx, body);
     if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined, .format = format, .execution_witness = try @import("witness_reply.zig").asked(srv, cx, body) };
     if (is_chat) {
@@ -117,6 +120,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     };
     input.messages = try @import("deferred_tools.zig").resolve(cx, input.messages, body.get("tools"), srv.text.deferred_native);
     const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
+    if (n > 1 and prompts.len > 0) return cx.refuse("n above 1 cannot be served with a list of prompts");
     if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");
@@ -134,6 +138,9 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     if (body.field("parallel_tool_calls")) |p| if (p == .bool and !p.bool) try sampling.put(cx.a, "tool_call_single", .{ .bool = true });
+    // a choice's rows or required call would be its own: these alone do not split over n choices
+    if (n > 1 and (logprobs != null or sampling.contains("tool_call_required"))) return cx.refuse("n above 1 cannot be served with logprobs or a required tool call");
+    if (n > 1 and cortheon.engages(srv, cx.a, raw, is_chat, &input)) return cx.refuse("n above 1 is not served by --cortheon's turn loop: send \"cortheon\": false");
     const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
     if (thinking.effort) |e| try sampling.put(cx.a, "reasoning_effort", .{ .string = e });
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
@@ -143,6 +150,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
+    input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -157,6 +165,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         .policy = policy,
         .named = replyModel(srv, body),
         .prompts = prompts,
+        .choices = n,
     };
 }
 
@@ -190,7 +199,9 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
+    p.input.cache_salt = @import("cache_salt.zig").ofRequest(srv, p.input.cache_salt, gone.conn.key_digest);
     if (p.prompts.len > 0) return prompt_list.run(srv, a, observed, gone, p, p.prompts, raw);
+    if (p.choices > 1) return @import("choices.zig").run(srv, a, observed, gone, is_chat, p, raw);
     if (srv.config.journal != null) p.input.trace = &trace;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
@@ -217,6 +228,7 @@ pub const Run = struct {
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
     call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
+    warm: bool = true, // the next turn prefills from this reply (one of n choices: choice 0's alone)
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -329,7 +341,7 @@ pub const Run = struct {
 
     /// The next turn's prompt prefilled in the background, from the reply as its client got it (warm.zig).
     fn warmNext(r: *Run, reply: *const chat.Reply, calls: ?[]Value) void {
-        if (!r.is_chat) return;
+        if (!r.is_chat or !r.warm) return;
         const message = json.newObject(r.a) catch return;
         message.put(r.a, "role", .{ .string = "assistant" }) catch return;
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;

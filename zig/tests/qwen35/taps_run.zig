@@ -61,8 +61,12 @@ pub fn runCase(gpa: std.mem.Allocator, e: *Engine, ids: []const u32, n: usize) !
     defer e.o.graphs = was;
     var buf: [5]u32 = undefined;
     const taps = layersOf(e.model().spec.n_layers, &buf);
+    // a drafter's taps, when one runs on this engine, come back after the case
+    const m = e.model();
+    const before = m.taps;
+    const kept = before.layers[0..before.n];
     try e.setTaps(taps);
-    defer e.setTaps(&.{}) catch {};
+    defer e.setTaps(kept) catch {};
     var caches = try e.newCaches(ids.len + 8);
     defer caches.deinit(gpa);
     const prompt = ids[0 .. ids.len - n];
@@ -107,8 +111,10 @@ fn secondRing(gpa: std.mem.Allocator, e: *Engine, taps: []const u32, ids: []cons
     const was = e.o.graphs;
     e.o.graphs = graphs;
     defer e.o.graphs = was;
+    // a drafter's taps, when one runs on this engine, come back after the case
+    const before = e.model().taps;
     try e.setTaps(taps);
-    defer e.setTaps(&.{}) catch {};
+    defer e.setTaps(before.layers[0..before.n]) catch {};
     // both streams live at once, so the second's ring is never the first's memory again
     var first = try e.newCaches(ids.len + 8);
     defer first.deinit(gpa);

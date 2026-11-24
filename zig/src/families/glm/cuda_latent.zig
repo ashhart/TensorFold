@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's MLA on the 512-wide latent cache (DSA layers): the Python family's latent on BF16, row by row.
+//! GLM's MLA on the latent cache (DSA layers), BF16 row by row: 512 wide, or 576 with full GLM-5.3's roped key columns.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -18,6 +18,30 @@ pub fn headBlock(rows: usize) usize {
     return if (rows >= 64) heads_tile_wide else heads_tile;
 }
 
+/// The latent's width, and the roped key columns a full GLM-5.3 row carries past it (cuda.mla's).
+pub const latent_width = 512;
+pub const rope_width = cuda.mla.rope_width;
+pub const roped_row = latent_width + rope_width;
+
+/// headBlock for rows `row` wide: roped rows keep 16 heads, as wide_smem<32, 64>() is past a block's shared memory.
+pub fn headBlockFor(rows: usize, row: usize) usize {
+    return if (row == roped_row) heads_tile else headBlock(rows);
+}
+
+/// The roped key columns of a q and key row: none at 512 (GLM-5.3-Flash), 64 at 576 (full GLM-5.3).
+fn ropeOf(row: usize) !usize {
+    return switch (row) {
+        latent_width => 0,
+        roped_row => rope_width,
+        else => error.LatentShape,
+    };
+}
+
+/// The roped image a roped row's call takes.
+fn roped(set: glue.Set) !*const cuda.mla.Mla {
+    return set.mla orelse error.NoRopedKernels;
+}
+
 /// latent.chunks_for: 512-key chunks to cover `length` keys.
 pub fn chunksFor(length: usize) usize {
     return (length + chunk - 1) / chunk;
@@ -27,10 +51,23 @@ fn cdiv(a: usize, b: usize) u32 {
     return @intCast((a + b - 1) / b);
 }
 
-/// latent.absorb_q (BF16 kv_b): out [rows][heads][lw] bf16 = q [rows][heads][d] . wk [heads][d][lw], fp32 sums.
-pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, out: u64, rows: usize, heads: usize, d: usize, lw: usize) !void {
+/// latent.absorb_q (BF16 kv_b): out [rows][heads][lw + rd] = q [rows][heads][d + rd] . wk, fp32; rd roped columns.
+pub fn absorbQ(set: glue.Set, stream: cuda.Stream, q: u64, wk: u64, out: u64, rows: usize, heads: usize, d: usize, rd: usize, lw: usize) !void {
+    if (rd != 0) {
+        if (rd != rope_width or d != cuda.mla.glm_nope) return error.LatentShape;
+        return (try roped(set)).absorbQ(stream, q, d + rd, wk, out, lw + rd, rows, heads, d, lw);
+    }
     if (d != 256 or lw != 512) return error.LatentShape;
     try rowBlocks(set.glue.absorb_q, stream, q, wk, out, rows, heads, lw / 32);
+}
+
+/// Where rope turns a row's 64 columns: from x + r x_row + h x_head into out + r o_row + h o_head (bf16 elements).
+pub const RopeRows = cuda.mla.RopeRows;
+
+/// The GPT-J pairs of `heads` heads a row at device i32 pos + r, fp32 frequencies `inv` [32] (no YaRN factor).
+pub fn rope(set: glue.Set, stream: cuda.Stream, v: RopeRows, rows: usize, heads: usize, pos: u64, inv: u64) !void {
+    if (inv == 0) return error.NoRopeFreqs;
+    try (try roped(set)).rope(stream, v, rows, heads, pos, inv, 1);
 }
 
 /// The absorb and expand launches: rows in one block in decode windows, prompt_rb a block in prompt chunks.
@@ -74,7 +111,7 @@ pub fn latentWrite(set: glue.Set, stream: cuda.Stream, lat: u64, lat_stride: usi
     try cuda_pdl.launch(set.glue.lat_write, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 } }, stream, &a);
 }
 
-/// The chunk partials of one attention call: po fp32 [nch][rows][heads][lw], pm and pl fp32 [nch][rows][heads].
+/// The chunk partials of one attention call: po fp32 [nch][rows][heads][512], pm and pl fp32 [nch][rows][heads].
 pub const Partials = struct { po: u64, pm: u64, pl: u64 };
 
 /// latent.attention: causal qa over the cache in `nch` 512-key chunks into out bf16; `dummy`: the merge's count i32.
@@ -87,10 +124,16 @@ pub fn attentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, 
     try merge(set, stream, p, out, dummy, rows, heads, lw, nch, false);
 }
 
-/// latent._dense_chunks (sparse false: keys through pos + r) and _sparse_chunks (row r's `counts` tokens of `tokens`).
+/// latent._dense_chunks (keys through pos + r) and _sparse_chunks (row r's `counts` of `tokens`); `lw` 512 or 576.
 fn chunks(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, pos: u64, tokens: u64, counts: u64, p: Partials, rows: usize, heads: usize, lw: usize, nch: usize, w: usize, scale: f32, hb: usize, sparse: bool) !void {
-    if (lw != 512) return error.LatentShape;
+    const rope_cols = try ropeOf(lw);
     if (scales != 0 and t.pt != 0) return error.Fp8OnPages;
+    if (rope_cols != 0) {
+        if (scales != 0) return error.LatentShape; // the E4M3 cache holds the latent alone
+        if (hb != heads_tile) return error.HeadBlock;
+        const on: cuda.mla.On = .{ .pt = t.pt, .ps = t.ps, .tokens = tokens, .counts = counts, .w = w, .sparse = sparse };
+        return (try roped(set)).chunksOn(stream, qa, cache, pos, on, .{ .po = p.po, .pm = p.pm, .pl = p.pl }, rows, heads, nch, scale);
+    }
     const f = switch (hb) {
         heads_tile => if (scales == 0) set.glue.chunks_16 else set.glue.chunks_16_fp8,
         heads_tile_wide => if (scales == 0) set.glue.chunks_32 else set.glue.chunks_32_fp8,
@@ -116,12 +159,13 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, 
 
 pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
     const nch = chunksFor(w);
-    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, headBlock(rows), true);
+    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, headBlockFor(rows, lw), true);
     try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
 }
 
+/// The partials and out hold the latent alone (the roped columns score, the values are the latent's).
 fn merge(set: glue.Set, stream: cuda.Stream, p: Partials, out: u64, counts: u64, rows: usize, heads: usize, lw: usize, nch: usize, sparse: bool) !void {
-    if (lw != 512) return error.LatentShape;
+    _ = try ropeOf(lw);
     var a: cuda.Args = .{};
     inline for (.{ p.po, p.pm, p.pl, out, counts, @as(i64, @intCast(rows)), @as(i64, @intCast(heads)), @as(c_int, @intCast(nch)), @as(c_int, @intFromBool(sparse)) }) |v| a.add(v);
     try cuda_pdl.launch(set.glue.merge, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads) }, .block = .{ .x = 128 } }, stream, &a);

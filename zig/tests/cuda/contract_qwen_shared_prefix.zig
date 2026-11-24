@@ -169,6 +169,7 @@ fn rows(k: Kernel, f: cuda.Function, s: cuda.Stream, x: Staged) !void {
     const none: u64 = 0;
     var args: cuda.Args = .{};
     inline for (.{ geo, x.q, x.segs, x.rowseg, x.rowanc, layer, none, scale, @as(c_int, @intCast(x.m)), x.pm, x.pl, x.po }) |v| args.add(v);
+    if (k.format == .bf16) args.add(false);
     const groups = (x.m + k.tile_rows - 1) / k.tile_rows;
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(groups), .y = max_chunks, .z = kv_heads }, .block = .{ .x = k.threads }, .shared = k.shared }, s, &args);
 }

@@ -54,6 +54,9 @@ pub const Device = struct {
     pub fn generation(_: Device) u32 {
         return 14;
     }
+    pub fn name(_: Device) [*:0]const u8 {
+        return ""; // no chip the cutover table lists
+    }
 };
 pub const CompileOptions = struct {
     pub fn mlx() @This() {
@@ -86,6 +89,9 @@ pub const Pipeline = struct {
 pub const Bound = struct { b: Buffer, off: usize };
 var pipe: Pipeline = .{};
 var bound: [32]Bound = undefined;
+var consts: [2]u32 = .{ 0, 0 }; // the last two-word setBytes
+/// fz_penalize_rows' last dispatch: logits, rows, tokens and amounts as bound, its constants and its grid width.
+pub var penalized: ?struct { bound: [4]Bound, c: [2]u32, n: usize } = null;
 pub const ComputeEncoder = struct {
     id: usize = 0,
     pub fn setPipeline(_: ComputeEncoder, p: Pipeline) void {
@@ -95,7 +101,9 @@ pub const ComputeEncoder = struct {
         bound[at] = .{ .b = b, .off = off };
     }
     pub fn setValue(_: ComputeEncoder, _: anytype, _: usize) void {}
-    pub fn setBytes(_: ComputeEncoder, _: []const u8, _: usize) void {}
+    pub fn setBytes(_: ComputeEncoder, bytes: []const u8, _: usize) void {
+        if (bytes.len == 8) @memcpy(std.mem.asBytes(&consts), bytes);
+    }
     fn value(text: []const u8, name: []const u8) usize {
         const at = (std.mem.indexOf(u8, text, name) orelse unreachable) + name.len;
         const stop = at + (std.mem.indexOfScalar(u8, text[at..], ';') orelse unreachable);
@@ -108,6 +116,10 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(_: ComputeEncoder, grid: Size, _: Size) void {
+        if (std.mem.eql(u8, pipe.name, "fz_penalize_rows")) {
+            penalized = .{ .bound = bound[0..4].*, .c = consts, .n = grid.width };
+            return;
+        }
         if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
             rotary_calls += 1;
             return;

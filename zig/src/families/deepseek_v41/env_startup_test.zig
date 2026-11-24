@@ -123,14 +123,29 @@ test "DeepSeek strict env: default-on graphs and lookup, nucleus and layer value
     const graphs = @import("graphs.zig");
     const lookup = @import("draft/lookup.zig");
     const pipe = @import("sampling_pipe.zig");
-    for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| _ = env.unsetenv(name);
-    defer for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| {
+    for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_COPY_DRAFTER", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| _ = env.unsetenv(name);
+    defer for ([_][:0]const u8{ "TF_DSV41_GRAPHS", "TF_DSV41_LOOKUP", "TF_DSV41_LOOKUP_PLAN", "TF_DSV41_COPY_DRAFTER", "TF_DSV41_NUCLEUS", "TF_DSV41_LAYERS" }) |name| {
         _ = env.unsetenv(name);
     };
     try t.expect((try graphs.Settings.fromEnvOr(true)).on);
     try t.expect(!(try graphs.Settings.fromEnvOr(false)).on);
     try t.expect((try lookup.Settings.fromEnv()).lookup);
     try t.expect(!(try lookup.Settings.fromEnv()).plan);
+    try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter);
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", "1", 1);
+    _ = env.setenv("TF_DSV41_LOOKUP_PLAN", "0", 1);
+    try t.expect((try lookup.Settings.fromEnv()).copy_drafter and (try lookup.Settings.fromEnv()).plan);
+    _ = env.unsetenv("TF_DSV41_LOOKUP_PLAN");
+    for ([_][:0]const u8{ "0", "false", "off", "no", "", " \t" }) |raw| {
+        _ = env.setenv("TF_DSV41_LOOKUP", raw, 1);
+        try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    }
+    _ = env.unsetenv("TF_DSV41_LOOKUP");
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", " ", 1);
+    try t.expect(!(try lookup.Settings.fromEnv()).copy_drafter and !(try lookup.Settings.fromEnv()).plan);
+    _ = env.setenv("TF_DSV41_COPY_DRAFTER", "true", 1);
+    try t.expectError(error.InvalidEnvironment, lookup.Settings.fromEnv());
+    _ = env.unsetenv("TF_DSV41_COPY_DRAFTER");
     try t.expectEqual(@as(u32, 512), try pipe.nucleusEnv());
     try t.expect(try model.layersEnv(t.allocator) == null);
     _ = env.setenv("TF_DSV41_LAYERS", "2-4", 1);

@@ -197,12 +197,38 @@ template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, false, false>
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 16, 32, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// TF_QMMF_HALF_BN: FP4, FP8 and FP8G half tiles, their n8 tiles 0-3 or 4-7 and those columns' scales.
+#define HALF_N(MODE, F32, CLUSTER) \
+    template __global__ void qmmf_kernel<MODE, 16, 32, 1, 4, 4, F32, CLUSTER, false>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+#define HALF_N_ALL(MODE) \
+    HALF_N(MODE, false, false) HALF_N(MODE, false, true) HALF_N(MODE, true, false) HALF_N(MODE, true, true)
+HALF_N_ALL(FP4)
+HALF_N_ALL(FP8)
+HALF_N_ALL(FP8G)
+#undef HALF_N_ALL
+#undef HALF_N
 
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// The fused form at the decode row tiles: one block a 64-column tile adds its K slices in the cluster's slice order.
+#define FUSE_DECODE(MODE, BM, F32) \
+    template __global__ void qmmf_kernel<MODE, BM, 64, 1, 4, 4, F32, false, true>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+FUSE_DECODE(MXFP8, 16, false)
+FUSE_DECODE(MXFP8, 16, true)
+FUSE_DECODE(MXFP8, 32, false)
+FUSE_DECODE(MXFP8, 32, true)
+FUSE_DECODE(BF16, 16, false)
+FUSE_DECODE(BF16, 16, true)
+FUSE_DECODE(BF16, 32, false)
+FUSE_DECODE(BF16, 32, true)
+#undef FUSE_DECODE
 // Prompt tiles retain the same m16n8k16 chains and fused slice boundaries as the 64x64 instances.
 #define BF16_PROMPT(F32, FUSE) \
     template __global__ void qmmf_kernel<BF16, 128, 128, 2, 4, 3, F32, false, FUSE>( \
@@ -244,6 +270,68 @@ __global__ void __launch_bounds__(256, 2) qmmf_prompt_k32_kernel(
 BF16_K32(false)
 BF16_K32(true)
 #undef BF16_K32
+
+// A grouped launch's projection: weights, output, scale, shape, K slices, first block (qmmf_group.zig Seg).
+struct GroupSeg {
+    const unsigned char* w;
+    const uint8_t* bs;
+    void* out;
+    float scale;
+    int N, SK, npad, first, tiles;
+};
+struct GroupSegs {
+    GroupSeg s[4];
+    int count, pad;
+};
+
+// Same-input projections in one launch: a block is one tile and slice of one projection, summed as its own launch.
+template <int MODE, int BN, bool CLUSTER>
+__device__ __forceinline__ void qmmf_group_body(const __nv_bfloat16* __restrict__ x, const GroupSegs& segs, int M,
+                                                int K) {
+    constexpr int BM = 16, WM = 1, WN = 4, STAGES = 4;
+    constexpr bool F32 = false, FUSE = false;
+    qmm_frag::grid_launch();  // a dependent launch, as qmmf_kernel
+    int si = 0;
+    for (int i = 1; i < segs.count; ++i) si = static_cast<int>(blockIdx.x) >= segs.s[i].first ? i : si;
+    const GroupSeg& seg = segs.s[si];
+    const unsigned char* __restrict__ w = seg.w;
+    const uint8_t* __restrict__ bs = seg.bs;
+    void* __restrict__ out = seg.out;
+    float* __restrict__ part = nullptr;
+    const float scale = seg.scale;
+    const int N = seg.N, SK = seg.SK, ldx = K, group = 1;
+    [[maybe_unused]] const int npad = seg.npad;
+    const int local = static_cast<int>(blockIdx.x) - seg.first, slice = local % SK, tile = local / SK;
+    if (tile >= seg.tiles) {  // a block past the projection's tiles: only its cluster's two barriers
+        if constexpr (CLUSTER) {
+#if __CUDA_ARCH__ >= 900
+            auto cluster = cooperative_groups::this_cluster();
+            cluster.sync();
+            cluster.sync();
+#endif
+        }
+        return;
+    }
+#define TF_QMMF_WFIRST
+#define TF_QMMF_GROUP
+#include "qmmf_body.cuh"
+#undef TF_QMMF_GROUP
+#undef TF_QMMF_WFIRST
+}
+
+#define TF_QMMF_GROUP_ENTRY(NAME, MODE, BN, CLUSTER) \
+extern "C" __global__ void __launch_bounds__(128) NAME(const __nv_bfloat16* x, const GroupSegs segs, int M, int K) { \
+    qmmf_group_body<MODE, BN, CLUSTER>(x, segs, M, K); \
+}
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_fp4, FP4, 64, false)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_fp4_c, FP4, 64, true)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_fp8, FP8, 64, false)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_fp8_c, FP8, 64, true)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_bf16, BF16, 64, false)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_bf16_c, BF16, 64, true)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_bf16_half, BF16, 32, false)
+TF_QMMF_GROUP_ENTRY(tf_qmmf_group_bf16_half_c, BF16, 32, true)
+#undef TF_QMMF_GROUP_ENTRY
 
 template __global__ void reduce_kernel<true>(const float* __restrict__, void* __restrict__, long long, int, float);
 template __global__ void reduce_kernel<false>(const float* __restrict__, void* __restrict__, long long, int, float);

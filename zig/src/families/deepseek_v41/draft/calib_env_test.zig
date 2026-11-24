@@ -126,6 +126,18 @@ test "the depth's knobs read as Python's" {
     try std.testing.expectError(error.DepthJoint, calib_env.depthSettings(&Env.get));
 }
 
+test "a block past 5 raises the cost depth's default cap to it; a set depth or the static mode keep theirs" {
+    Env.pairs = &.{};
+    try std.testing.expectEqual(@as(usize, 5), (try calib_env.depthSettingsFor(&Env.get, 5)).cap);
+    try std.testing.expectEqual(@as(usize, 7), (try calib_env.depthSettingsFor(&Env.get, 7)).cap);
+    try std.testing.expectEqual(@as(usize, 5), (try calib_env.depthSettingsFor(&Env.get, 3)).cap);
+    Env.pairs = &.{.{ "TF_DSV41_DRAFT_DEPTH", "4" }};
+    try std.testing.expectEqual(@as(usize, 4), (try calib_env.depthSettingsFor(&Env.get, 7)).cap);
+    Env.pairs = &.{.{ "TF_DSV41_DEPTH", "static" }};
+    try std.testing.expectEqual(@as(usize, 3), (try calib_env.depthSettingsFor(&Env.get, 7)).cap);
+    Env.pairs = &.{};
+}
+
 test "TF_DSV41_CALIB=measure / zig: the engine measures; a stored Zig table is read back by zig only" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

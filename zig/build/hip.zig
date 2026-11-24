@@ -190,9 +190,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);
     b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
+    b.step("test-qwen35-hip-faults-host", "Qwen HIP page-reference rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{"Qwen HIP page faults:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
+    b.step("test-nemotron-hip-faults-host", "Nemotron HIP adoption rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP page faults:"} })).step);
     const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
@@ -499,6 +501,8 @@ const groups = [_]Source{
     .{ .path = "qwen_vision.hip", .strict = true },
     .{ .path = "draft/draft.hip" },
     .{ .path = "exl3/exl3.hip" },
+    .{ .path = "decode/plan_rows.hip" },
+    .{ .path = "inkling2/attention.hip", .strict = true },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
@@ -509,7 +513,7 @@ const headers = [_][]const u8{
     "tiles/gemm.hpp",             "tiles/gemm_kp.hpp",     "tiles/matrix_gemm.hpp",         "tiles/matrix_item.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",
     "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp",         "flashnext/sparse.hpp",  "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
     "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",       "columns_controls.hpp", "ops/vision.hpp",
-    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp",
+    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp", "inkling2/tile.hpp",
 };
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };

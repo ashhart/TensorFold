@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.3.2
+V=1.3.4
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -112,6 +112,7 @@ Omit `--parallel` to use `auto`, which asks for up to eight streams as memory an
 Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
 Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
 For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
+On Metal, a GLM-5.3-Flash shared round holds 16 rows, one per active stream. Drafts fill only the rows left over: 8 spare rows at 8 streams, none at 16, so drafting speeds up fewer streams as the stream count rises. Replies are the same tokens either way. See #4311 for the measurements.
 Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
 
 Leave the server running and check it from another terminal:
@@ -210,7 +211,7 @@ Qwen4 has synthetic gates only.
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.3.2
+V=1.3.4
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -469,11 +470,19 @@ After a memory refusal, reduce the context or reply limit, or choose a smaller q
 `--learn` writes a shared prompt state to disk only while the disk keeps `--learn-min-free-gib` free, 4 GiB by default.
 Below that, learning pauses with a log line and serving goes on; a refused write is tried again after 1 to 60 seconds, sooner when space comes back.
 Each learned file carries a checksum over its header and contents, so a damaged, truncated or older file is refused and learned again.
-`--prompt-cache-disk DIR` writes every kept prompt state behind to that directory, while the engine idles,
-and a SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
+`--prompt-cache-disk DIR` writes kept prompt states to that directory; most families write while idle.
+A SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
 the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
 Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
 The startup line names the disk directory and the device budget when the engine reports one.
+GLM on Metal stages every resident keep, including each planned mark, before its borrowed MLA rows can be reused.
+It does so whatever `--spill-gib` is set to: with `--spill-gib`, those keeps are staged when kept, not at eviction.
+That moves the gather and its GPU wait into the request path.
+A busy staging permit waits and retries; an image larger than the permit finishes through the chunk writer there.
+The log names `StagingBusy` when a keep waits, or `StagingFull` when it streams bounded pieces.
+Other admission or copy failures are named in the log; that keep remains in RAM only, without an automatic retry.
+The synchronous writer finishes at keep; otherwise an owned staged image publishes in the background.
+More marks can write more bytes per turn and consume the daily budget sooner; inspect the disk log's byte counts.
 Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
 `--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 

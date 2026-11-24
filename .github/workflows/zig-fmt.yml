@@ -18,9 +18,10 @@ permissions:
 # 19 Nov: a landing train's PR (lead/train-*) skips these jobs. Our local CI runs the same checks on the train's
 # tip, and the hosted queue (58 runs behind ~13 jobs) held main's and contributors' checks for hours. A train
 # whose local run is red starts this workflow on its branch by hand (workflow_dispatch) for GitHub's verdict.
+# Forks never skip these jobs.
 jobs:
   fmt:
-    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
+    if: ${{ !(startsWith(github.head_ref, 'lead/train-') && github.event.pull_request.head.repo.full_name == github.repository) }}  # a landing train's tip: see the note above jobs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

@@ -3,7 +3,7 @@ const std = @import("std");
 const paged = @import("paged.zig");
 pub const original = @embedFile("../prefill/attention_nax.metal");
 const helpers = @embedFile("prompt_masked.h");
-const picker = @embedFile("prompt_pick.metal");
+const picker = @embedFile("../core/prompt_pick.metal") ++ @embedFile("prompt_pick.metal");
 pub const tags = paged.prefill_tags;
 
 fn edit(comptime text: []const u8, comptime from: []const u8, comptime to: []const u8, comptime count: usize) []const u8 {

@@ -43,6 +43,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
         try clearContext(b, slot);
+        try b.runner.admit(slot, @intCast(ids.len)); // a fresh pass: the slot takes its prompt's rows at once
     }
     s.cached = resumed;
     var at: usize = resumed;
@@ -214,6 +215,7 @@ pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
 
 /// A pass that failed or went back to the queue frees its slot, pages and promise (a standing slot 0's rows stay).
 fn drop(b: *Metal, slot: u32) void {
+    b.give_back[slot] = b.runner.kv_step != null;
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0);
     b.owners[slot] = null;
 }
@@ -228,6 +230,11 @@ pub fn slotResumeEnv() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
+/// Whether a lone stream's DFlash2 block adapts to its landed depth (TF_Q27_DFLASH_ADAPTIVE_BLOCK; default off).
+pub fn adaptiveBlockEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_Q27_DFLASH_ADAPTIVE_BLOCK", false);
+}
+
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).
 fn slotResume(b: *const Metal) bool {
     return b.slot_resume and b.vision == null;
@@ -235,7 +242,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and resume_rules.plain(s.cache_salt);
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
@@ -405,7 +412,8 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
     if (context_missing) {
-        const x = try Context.init(b.gpa, b.draft.?.model, drafting);
+        const x = try Context.initGrow(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
+        x.settle = .{ .ctx = b.runner, .slot = slot, .run = q.decode_round.Runner.settleOpaque };
         b.contexts[slot] = x;
         try x.buffers(&added, b.gpa);
     }
@@ -414,8 +422,12 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
 
 /// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
 fn contextBytes(c: q.dflash.config.Config, drafting: bool) usize {
-    const ring = @as(usize, c.window) * c.tapWidth() * 2;
-    return ring + if (drafting) @as(usize, c.layers) * 2 * (@as(usize, c.window) + 16) * c.kvWidth() * 2 else 0;
+    const ring = @as(usize, c.span()) * c.ringWidth() * 2;
+    var caches: usize = 0;
+    if (drafting) for (0..c.layers) |i| {
+        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    };
+    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
@@ -432,6 +444,11 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropRound();
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
+    if (slot == 0 and b.draft_block.enabled) {
+        std.log.info("q27_dflash_block rounds_8={d} rounds_16={d}", .{ b.draft_block.narrow_rounds, b.draft_block.wide_rounds });
+        b.draft_block.drop();
+        if (b.draft) |d| d.generation.draft.tree_block = @import("qwen27_draft_block.zig").wide;
+    }
     if (slot == 0) leave(b, s);
     b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
     b.owners[slot] = null;
@@ -440,10 +457,29 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     var live: usize = 0;
     for (b.owners[0..b.runner.slots]) |owner| live += @intFromBool(owner != null);
     if (live <= 1) b.runner.trimBefore();
+    b.give_back[slot] = b.runner.kv_step != null;
+    giveBack(b);
+}
+
+/// Free, unread slots give back grown K/V and rings without waiting; slot 0 keeps what a next turn resumes from.
+pub fn giveBack(b: *Metal) void {
+    for (0..b.runner.slots) |k| {
+        if (!b.give_back[k]) continue;
+        const slot: u32 = @intCast(k);
+        if (b.owners[k] != null) {
+            b.give_back[k] = false;
+            continue;
+        }
+        if ((slot == 0 and b.standing.tokens.len > 0) or b.runner.busy(slot)) continue;
+        b.give_back[k] = false;
+        b.runner.releaseGrown(slot) catch |err| std.log.warn("qwen27: slot {d} keeps its K/V ({s})", .{ slot, @errorName(err) });
+        clearContext(b, slot) catch {};
+    }
 }
 
 /// A promote unbind left for later, once no round is pending: a stream still in slot 0 or none to move ends it.
 pub fn promoteDue(b: *Metal) void {
+    giveBack(b);
     if (!b.promote_due or b.round != null) return;
     b.promote_due = false;
     promote(b);
@@ -535,12 +571,14 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else
             try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
+        if (result.rounds > 0) b.draft_block.observe(@intFromPtr(s), result.tree_landed);
         if (result.extended > 0) {
             try copies.lookup.observe(result.extended, result.extension_landed);
             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);

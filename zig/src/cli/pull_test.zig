@@ -85,9 +85,9 @@ pub const FakeHub = struct {
         return std.fmt.bytesToHex(git.finalResult(), .lower);
     }
 
-    const config_body = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 262144}";
+    pub const config_body = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 262144}";
     var weights_body_storage: [5000]u8 = @splat(0xA5);
-    const weights_body: []const u8 = &weights_body_storage;
+    pub const weights_body: []const u8 = &weights_body_storage;
 
     fn serve(fake: *FakeHub) void {
         var conns: [64]std.Thread = undefined;

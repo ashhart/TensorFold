@@ -26,10 +26,12 @@ pub const Fixture = struct {
         f.e.gpa = t.allocator;
         f.e.d = d;
         f.e.stream = .{ .d = d, .handle = null };
+        f.e.io = t.io;
         f.e.c = w.config;
         f.e.share = w.share;
         f.e.capacity = f.seq.st.capacity;
         f.e.mtp = mtp;
+        f.e.prompt_profs = @splat(null);
         f.e.snaps = .empty;
         f.e.snap_pages = null;
         f.e.snap_setup = null;

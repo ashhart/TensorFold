@@ -16,7 +16,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3-Embedding | [Native Metal](qwen3-embedding-metal.md), [HIP](qwen3-embedding-hip.md) |
 | Qwen3.5-2B | [Native Metal preview and CUDA, tied affine 4-bit](qwen3.5-2b-native.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [native HIP](flash-next-hip.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
 | Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md), [native CUDA](glm-5.3-flash-cuda.md) |
@@ -35,6 +35,8 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
 | Unlimited-OCR-2 | [Native Metal, the bf16 release: page images to structured text, 131k context](unlimited-ocr-metal.md) |
 | Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
+| Ripple-65B-Preview | [Native CUDA, the publisher's NVFP4 release](ripple-65b-cuda.md), [native Metal, the publisher's NVFP4 and bf16 releases](ripple-65b-metal.md) |
+| Ling-3.0-tiny | [Native CPU on aarch64 Linux, the Q4_K_M GGUF, exact greedy decode from token IDs](ling-3.0-tiny-cpu.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
@@ -74,6 +76,12 @@ The sampler keys each draw by seed, absolute position and token ID. A draft is a
 matches that draw from the target. Each verify row must use the serial row's arithmetic, including
 attention boundaries, routing ties and recurrence updates. Rollback must restore all state after the
 accepted path, including draft-head state.
+
+Family device tests can reuse `core/lanes/invariance.zig`: construct its `Runner` callback with fixed caller-owned
+token and RNG-position buffers and call `check`. The dynamic fake-target example is in `invariance_fake.zig`.
+The gate compares cohorts 2, 4 and 8 with solo output through timed joins and leaves, drafts off and on,
+greedy and keyed sampling, fresh and restored prefixes. It requires observed draft acceptance, restoration,
+overlap and lifecycle events, and prints the smallest failing replay rather than accepting a serialized pass.
 
 Prompt reuse is equally strict. The MLX planner computes chunks from rendered tokens and caches only
 compatible boundaries. Its resume points are assistant-message starts and the second message start

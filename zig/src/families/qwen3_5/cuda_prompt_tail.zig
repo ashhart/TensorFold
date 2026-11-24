@@ -5,6 +5,15 @@ const tail = core.prompt_tail;
 
 pub const rows = tail.rows;
 
+/// A partial final-layer tap need: compute from its first needed row, unless another reader blocks the tail.
+pub fn tapTailStart(candidate: ?usize, tapped: bool, taps_active: bool, tap_from: ?usize) ?usize {
+    const tail_first = candidate orelse return null;
+    if (!tapped or !taps_active) return tail_first;
+    const from = tap_from orelse return null;
+    if (from == 0) return null;
+    return @min(tail_first, from);
+}
+
 /// Every reader of the last layer's other rows on this family, and what its last layer must be.
 pub const Facts = struct {
     hidden: bool = false,
@@ -38,8 +47,9 @@ pub fn unread(e: anytype, images: bool) bool {
 }
 
 /// The tail's first row for engine `e`'s prompt chunk of `total` rows in `nseg` parts, or null.
-pub fn first(e: anytype, total: usize, nseg: usize, hidden: bool) ?usize {
+pub fn first(e: anytype, total: usize, nseg: usize, hidden: bool, taps_active: bool, tap_from: ?usize) ?usize {
     const last = e.layers.len - 1;
+    const tapped = lastTapped(e);
     const f: Facts = .{
         .hidden = hidden,
         .hooks = e.learning != null or e.mlp != null or e.pockets.any(),
@@ -47,9 +57,17 @@ pub fn first(e: anytype, total: usize, nseg: usize, hidden: bool) ?usize {
         .images = e.features != 0,
         .odd_group = (e.g.q_heads / e.g.kv_heads) % 2 != 0,
         .last_attention = e.layers[last].mixer == .attention,
-        .last_tapped = lastTapped(e),
+        .last_tapped = taps_active and tapped and (tap_from == null or tap_from.? == 0),
     };
-    return tail.start(f.of(total, nseg));
+    return tapTailStart(tail.start(f.of(total, nseg)), tapped, taps_active, tap_from);
+}
+
+test "partial tap capture computes the prefix tail while preserving every needed row" {
+    try std.testing.expectEqual(@as(?usize, 2047), tapTailStart(3968, true, true, 2047));
+    try std.testing.expectEqual(@as(?usize, null), tapTailStart(3968, true, true, 0));
+    try std.testing.expectEqual(@as(?usize, 3968), tapTailStart(3968, true, false, null));
+    try std.testing.expectEqual(@as(?usize, 3968), tapTailStart(3968, false, true, null));
+    try std.testing.expectEqual(@as(?usize, null), tapTailStart(null, false, false, null));
 }
 
 test "qwen3_5 prompt tail: a chunk is unread only when no reader is armed" {

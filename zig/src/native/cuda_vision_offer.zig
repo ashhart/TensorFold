@@ -19,11 +19,11 @@ pub fn offer(v: anytype, open: ?api.VisionOpen) ?api.Vision {
     if (comptime T == qwen35.native.vision.Vision) {
         // the template writes Qwen's vision_start and vision_end around the image token itself
         const image = x.shared.image_token;
-        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+        return .{ .ctx = x, .prepare = prepare, .image_token = image, .markers = &x.markers, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     }
     // a template that writes each image's begin and end itself: the server expands the image token alone
     const wrap: ?[2]u32 = if (@hasDecl(T, "template_wraps")) null else .{ x.marks.open, x.marks.close };
-    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = T.explain };
+    var out: api.Vision = .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = wrap, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .image_share = if (open) |o| o.image_share else .request, .explain = T.explain };
     if (comptime @hasDecl(T, "part_type")) out.part_type = T.part_type; // the template's name for an image part
     if (comptime T == nemotron.native.vision.Vision) {
         // video: the checkpoint's temporal projection, and a reserved token for the template's `<video>`
@@ -115,7 +115,7 @@ fn omniVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u3
 
 /// The device bytes a family's tower takes beside its text weights on this rank, 0 without --vision.
 pub fn weightBytes(comptime F: type, a: Allocator, io: std.Io, o: api.Open) !u64 {
-    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null and o.rank == 0) return F.visionBytes(a, io, o.dir);
+    if (comptime @hasDecl(F, "visionBytes")) if (o.vision != null) return F.visionBytes(a, io, o.dir, o.rank, o.tp); // its holder's rank
     return 0;
 }
 

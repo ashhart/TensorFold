@@ -11,7 +11,7 @@ pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidR
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
 comptime {
-    std.debug.assert(eos_ids.qwen35_hip.max.? == max_eos);
+    std.debug.assert(eos_ids.qwen35.max.? == max_eos);
 }
 
 /// The most decoder layers a config may declare.
@@ -98,10 +98,10 @@ pub fn products(s: Sizes) Error!void {
     for (widths) |w| if (w > limit) return error.InvalidConfig;
 }
 
-/// The HIP loader's end ids by core's qwen35_hip policy: root, text tower and generation_config.json, below `vocab`.
+/// The HIP loader's end ids by core's qwen35 policy: the root's, the tower's only when it gave none, then generation's.
 pub fn eos(out: *[max_eos]u32, root: std.json.ObjectMap, tower: std.json.ObjectMap, generation: ?std.json.ObjectMap, vocab: usize) Error![]const u32 {
     const gen: std.json.Value = if (generation) |g| .{ .object = g } else .null;
-    return eos_ids.collect(out, eos_ids.qwen35_hip, .{ .object = root }, .{ .object = tower }, gen, vocab) catch |e| return switch (e) {
+    return eos_ids.collect(out, eos_ids.qwen35, .{ .object = root }, .{ .object = tower }, gen, vocab) catch |e| return switch (e) {
         error.BadEosValue => error.BadEos,
         else => |x| x,
     };

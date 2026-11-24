@@ -137,12 +137,8 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
     var u: Usage = .{};
     for ([_][]const u8{ "16", "16384", "65536", "262144" }) |value| {
         const n = try std.fmt.parseInt(u32, value, 10);
-        for ([_][]const []const u8{
-            &.{ "m", "--vision", "--vision-image-tokens", value },
-            &.{ "m", "--vision", try std.fmt.allocPrint(a, "--vision-image-tokens={s}", .{value}) },
-        }) |argv| {
-            const args = try parse(a, argv, &u);
-            const vision = (try request(a, "d", "t", args)).vision.?;
+        for ([_][]const []const u8{ &.{ "m", "--vision", "--vision-image-tokens", value }, &.{ "m", "--vision", try std.fmt.allocPrint(a, "--vision-image-tokens={s}", .{value}) } }) |argv| {
+            const vision = (try request(a, "d", "t", try parse(a, argv, &u))).vision.?; // both spellings reach the engine
             try std.testing.expectEqual(n, vision.image_tokens);
             try std.testing.expect(vision.image_tokens_set);
         }
@@ -150,6 +146,10 @@ test "vision image budget: explicit large budgets reach the engine, with bounded
     const normal = (try request(a, "d", "t", try parse(a, &.{ "m", "--vision" }, &u))).vision.?;
     try std.testing.expectEqual(@as(u32, 4096), normal.image_tokens);
     try std.testing.expect(!normal.image_tokens_set);
+    // --vision-image-share: the request's split by default, the fixed share on opt-in, and it needs --vision
+    try std.testing.expectEqual(api.ImageShare.request, normal.image_share);
+    try std.testing.expectEqual(api.ImageShare.fixed, (try request(a, "d", "t", try parse(a, &.{ "m", "--vision", "--vision-image-share=fixed" }, &u))).vision.?.image_share);
+    for ([_][]const []const u8{ &.{ "m", "--vision", "--vision-image-share", "half" }, &.{ "m", "--vision-image-share", "fixed" } }) |argv| try std.testing.expectError(error.Usage, parse(a, argv, &u));
     for ([_][]const u8{ "15", "262145", "-1", "4294967296", "many" }) |bad|
         try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision", "--vision-image-tokens", bad }, &u));
 }

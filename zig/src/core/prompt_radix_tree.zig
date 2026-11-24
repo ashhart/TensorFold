@@ -15,7 +15,7 @@ pub const Identity = @import("cache_images.zig").Identity;
 pub const Tail = tail_mod.Tail;
 
 /// What rows depend on beyond their key and images: a tree never shares a page between two of these.
-pub const Ns = struct { namespace: u64 = 0, frame: u32 = 0 };
+pub const Ns = struct { namespace: u64 = 0, frame: u32 = 0, salt: ?u64 = null };
 
 /// What a walk matches: the words from the prompt's start, the images over them in prompt order, and their Ns.
 pub const Key = struct {

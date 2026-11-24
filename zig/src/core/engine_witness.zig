@@ -13,8 +13,14 @@ pub const Facts = union(enum) { pending, unknown: Reason, known: Known };
 pub const Source = struct {
     ctx: *anyopaque,
     read: *const fn (ctx: *anyopaque) Facts,
+    /// Starts the engine's hashing: the server calls it once it is ready, and again for each engine a reload publishes.
+    begin: ?*const fn (ctx: *anyopaque) void = null,
 
     pub fn facts(s: Source) Facts {
         return s.read(s.ctx);
+    }
+
+    pub fn start(s: Source) void {
+        if (s.begin) |f| f(s.ctx);
     }
 };

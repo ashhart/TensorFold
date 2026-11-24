@@ -24,7 +24,7 @@ pub fn tests(b: *std.Build) void {
         .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "lanes", .module = lanes }, .{ .name = "kernel_sources", .module = sources } },
     });
     b.step("test-qwen35-metal-steps-host", "Qwen2B Metal's stepped prompt pass on host-backed caches, no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = steps, .filters = &.{"Qwen2B Metal steps:"} })).step);
-    const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "a stream's cache bytes" };
+    const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "bounded keyed draws", "the blocked selection", "a non-finite word inside", "a stream's cache bytes" };
     b.step("test-qwen35-metal-host", "Qwen2B geometry, keyed draws and state sizing on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = pure })).step);
     const topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/sampling_row_topk.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const select = &.{ "bounded BF16 keys", "the blocked selection", "a non-finite word inside" };

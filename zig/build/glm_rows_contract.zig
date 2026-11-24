@@ -14,5 +14,13 @@ pub fn host(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     run.has_side_effects = true;
     const step = b.step("test-glm-window-contract-host", "Register and validate actual GLM replacement operators without a GPU");
     step.dependOn(&run.step);
+    const ownership_metal = b.createModule(.{ .root_source_file = b.path("zig/glm_kernel_ownership_metal.zig"), .target = b.graph.host });
+    const loader = b.createModule(.{ .root_source_file = b.path("zig/glm_rows_contract_family.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = ownership_metal }, .{ .name = "kernel_sources", .module = sources } } });
+    const ownership_root = b.createModule(.{ .root_source_file = b.path("zig/glm_kernel_ownership_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = ownership_metal }, .{ .name = "glm_kernels", .module = loader } } });
+    const ownership_run = b.addRunArtifact(b.addTest(.{ .root_module = ownership_root, .filters = &.{"GLM kernel ownership:"} }));
+    ownership_run.has_side_effects = true;
+    const ownership_step = b.step("test-glm-kernel-ownership-host", "Actual GLM loader pipelines are all released once on both capability paths");
+    ownership_step.dependOn(&ownership_run.step);
+    step.dependOn(ownership_step);
     return step;
 }

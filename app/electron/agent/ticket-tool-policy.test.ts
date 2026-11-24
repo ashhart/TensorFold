@@ -64,6 +64,36 @@ assert.equal(blockedNetwork.ok, false)
 assert.match(blockedNetwork.output, /ticket capability policy/)
 assert.equal(remoteExecCalled, false, 'SSH execution cannot bypass the ticket network lane')
 
+for (const command of [
+  'custom-runtime --upload',
+  'echo ok\n/usr/bin/curl https://example.com',
+  '$( /usr/bin/curl https://example.com)',
+  '/usr/bin/timeout 5 /usr/bin/curl https://example.com',
+]) {
+  const blocked = await executeTool('run_command', { command }, {
+    cwd: '/remote/project',
+    ...builder,
+    backend: {
+      kind: 'ssh', rootCwd: '/remote/project',
+      exec: async () => { remoteExecCalled = true; return { code: 0, stdout: 'unexpected', stderr: '' } },
+    } as any,
+  })
+  assert.equal(blocked.ok, false, command)
+  assert.match(blocked.output, /ticket capability policy/)
+}
+assert.equal(remoteExecCalled, false, 'opaque and nested network commands never reach SSH')
+
+const literal = await executeTool('run_command', { command: "printf '$( /usr/bin/curl https://example.com)'" }, {
+  cwd: '/remote/project',
+  ...builder,
+  backend: {
+    kind: 'ssh', rootCwd: '/remote/project',
+    exec: async () => { remoteExecCalled = true; return { code: 0, stdout: 'literal', stderr: '' } },
+  } as any,
+})
+assert.equal(literal.ok, true)
+assert.equal(remoteExecCalled, true, 'quoted substitution text remains a harmless literal argument')
+
 assert.equal(ticketToolCapability('mcp__server__delete'), 'mcp')
 assert.equal(ticketToolCapability('calendar_create'), 'connector')
 assert.equal(ticketToolCapability('launch_subagent'), null)

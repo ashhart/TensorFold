@@ -46,14 +46,17 @@ pub const Generation = struct {
     asked: ?*const std.atomic.Value(bool) = null, // POST /v1/requests/{id}/cancel's ask (cancel_ids.zig)
     cancel_sent: bool = false, // the ask went to the engine once; the loop then reads until the engine finishes
     seed: ?u64 = null,
+    report_seed: bool = false, // one of n > 1 choices: the tensorfold block names its seed
     sink: ?Sink,
     thinking: bool,
     chat: bool = true,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    grammar: @import("eos_phase.zig").Phase = .none, // the request's grammar at the next token to commit
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     required: bool = false, // tool_choice "required" or a named function: the reply must call a tool
+    call_end: bool = false, // Inkling 2's required call grammar: its end of message after a complete call ends the turn
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
@@ -61,6 +64,7 @@ pub const Generation = struct {
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     kimi: ?@import("kimi_reply.zig").Stream = null,
+    inkling2: ?@import("inkling2_reply.zig").Stream = null,
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},
@@ -79,7 +83,7 @@ pub const Generation = struct {
     deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
 
     fn eos(g: *const Generation, t: u32) bool {
-        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+        return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
     }
 
     /// Whether the route's own tool parser would find a call, or a refused envelope, in `text` taken as the answer.
@@ -106,7 +110,11 @@ pub const Generation = struct {
     fn stopHit(g: *Generation) Allocator.Error!bool {
         if (g.stops.strings.len == 0) return false;
         const t = g.collected.items;
-        const tail = t[t.len -| g.stops.tail()..];
+        // Inkling 2's byte tokens can spell one character in several: its window counts the stop's bytes
+        const inkling = @import("chat_inkling2.zig");
+        const window = if (inkling.enabled(g.srv)) inkling.stopWindow(g.stops.strings) else g.stops.tail();
+        const tail = t[t.len -| window..];
+        if (inkling.enabled(g.srv)) return inkling.stopIn(g.a, g.srv.text, t, window, g.stops.strings);
         const text = try g.srv.text.decode(g.a, tail);
         for (g.stops.strings) |s| if (std.mem.indexOf(u8, text, s) != null) return true;
         return false;
@@ -114,6 +122,7 @@ pub const Generation = struct {
 
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
+        const before = g.grammar; // the stream below judges each token's end at its own phase, as this loop does
         var landed: usize = 0;
         for (chunk) |t| {
             if (g.reason != null) break;
@@ -121,10 +130,14 @@ pub const Generation = struct {
             landed += 1;
             if (g.eos(t)) {
                 g.reason = "stop";
+            } else if (try @import("chat_inkling2.zig").endsBare(g, t)) {
+                g.reason = "stop";
+                g.srv.engine.cancel(g.id); // an Inkling 2 grammar's call or text message ended: the turn ends there
             } else if (try g.stopHit()) {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
             } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
+            g.grammar = g.grammar.next(t); // thinking on: the grammar takes the reply from the token after `</think>`
         }
         if (landed == 0) return;
         const arrived = nowNs(g.srv.io);
@@ -139,19 +152,14 @@ pub const Generation = struct {
             g.wrote_ns = nowNs(g.srv.io);
         }
         if (g.streaming_done) return;
-        var fresh: std.ArrayList(u32) = .empty;
-        for (chunk[0..landed]) |t| {
-            if (g.eos(t)) {
-                g.streaming_done = true;
-                break;
-            }
-            try fresh.append(g.a, t);
-        }
+        const fresh = @import("eos_phase.zig").streamed(before, g.ignore_eos, g.srv.eos, chunk[0..landed]);
+        if (fresh.ended) g.streaming_done = true;
         const live = g.liveRows();
-        if (live) |l| try l.add(g.srv, g.a, fresh.items);
-        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
+        if (live) |l| try l.add(g.srv, g.a, fresh.tokens);
+        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.tokens);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
+        if (@import("chat_inkling2.zig").enabled(g.srv)) return @import("chat_inkling2.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
@@ -308,9 +316,10 @@ pub const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
+        const inkling = @import("chat_inkling2.zig").enabled(g.srv);
+        const native: ?@import("native_reply.zig").Result = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else if (inkling) try @import("chat_inkling2.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
         const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
         const close_at: ?reply_text.Close = if (native == null and g.thinking)
@@ -325,7 +334,7 @@ pub const Generation = struct {
         var reasoning: ?[]const u8 = null;
         const read = g.thinking or g.recipient != null; // the reply's split text is its content
         if (native) |n| {
-            const r = reply_text.pyStrip(n.reasoning);
+            const r = if (inkling) n.reasoning else reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (read) {
             const split = if (g.recipient) |*r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
@@ -382,6 +391,17 @@ pub const Generation = struct {
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
         try @import("grammar_metrics.zig").put(a, runtime, m.stats.grammar);
         if (m.stats.gpu_seconds) |gpu| try runtime.put(a, "gpu_seconds", .{ .float = gpu }); // TF_Q27_PROFILE only
+        // Inkling 2's refused calls are dropped, never shown: say how many, as kept calls are counted
+        if (inkling) if (native) |n| if (n.rejected_calls > 0) {
+            log.line("warning: dropped {d} malformed, unoffered or unfinished Inkling 2 tool calls", .{n.rejected_calls});
+            try runtime.put(a, "rejected_tool_calls", try json.intValue(a, n.rejected_calls));
+        };
+        // a bare Inkling 2 reply's envelopes kept as content, reported and counted as the shared route reports them
+        if (inkling) if (native) |n| if (n.kept) |kept| {
+            log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{kept.rejected_envelopes});
+            g.srv.metrics.keptToolCalls(g.srv.io, kept.kept_unoffered, kept.kept_malformed);
+            try runtime.put(a, "kept_tool_calls", try @import("openai_calls.zig").keptBlock(a, kept));
+        };
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);
@@ -392,6 +412,7 @@ pub const Generation = struct {
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
+        if (g.report_seed) try runtime.put(a, "seed", if (g.seed) |v| try json.intValue(a, v) else .null);
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
@@ -430,6 +451,7 @@ pub const Generation = struct {
             .tool_calls_streamed = g.calls != null and g.calls.?.streamed,
             .native_tool_format = native != null,
             .native_calls = if (native) |n| n.calls else null,
+            .native_cut_calls = if (native) |n| n.cut_calls else false,
             .finish_reason = reason,
             .prompt_tokens = prompt_len,
             .cached_tokens = cached_tokens.within(m.cached, prompt_len),

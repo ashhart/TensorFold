@@ -201,7 +201,7 @@ fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M
 /// affine_mm's dense product at one batch: deep ones in column groups (mm_groups.zig, the same bits).
 fn denseOf(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32, s: affine_mm.Strides) void {
     if (q.k >= mm_groups.dense_from) return mm_groups.dense(e, p.mm.mm_groups, x, p.sums, q, y, M, s);
-    affine_mm.denseBatch(e, p.mm.mm_bf16, x, p.sums, q, y, M, 1, s);
+    affine_mm.denseBatchBm(e, p.mm.mm_bf16, x, p.sums, q, y, M, 1, s, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
@@ -221,7 +221,7 @@ fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine
 /// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
 fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
+    affine_mm.denseBm(e, p.mm.mm_f32, x, p.sums, q, y, M, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// Routed experts' gate, up and SwiGLU into `act` ([n, gate.n]); `groups`: 4/64 in column groups (the same bits).
@@ -397,7 +397,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
             e.setPipeline(if (tp) k.kda_scan_tp else k.kda_scan);
             bind(e, 0, .{ q, kk, v, g, beta, L.st[if (r0 == 0) cur else 1 - cur], L.st[1 - cur], sy });
             e.setValue(@as(i32, @intCast(m)), 8);
-            e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
+            if (x.k.m3_fast) e.dispatchGroups(size(c.kda_dim / 16, H, 1), size(128, 1, 1)) else e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
         }
         if (!fwd.on(x, "kda_post")) continue;
         e.setPipeline(if (tp) k.kda_post_tp else k.kda_post);
@@ -406,7 +406,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
         bind(e, 4, .{ p.y.at(@as(usize, r0) * W * 2), p.proj });
         fwd.shape(e, 6, .{ M, pitch }); // every block writes the next chunk's conv window, the same rows
         bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
-        e.dispatchGroups(size(m, H, 1), size(32, 1, 1));
+        if (x.k.m3_fast) e.dispatchGroups(size(m, H / 4, 1), size(128, 1, 1)) else e.dispatchGroups(size(m, H, 1), size(32, 1, 1));
     }
 }
 
@@ -431,7 +431,7 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
+    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// The index scores' tile rows: 128 (a row's queries read once for 64 blocks), 64 where that leaves the GPU half idle.
@@ -447,8 +447,8 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
     e.setPipeline(x.k.index_scores_nax);
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, p.sscore });
     e.setValue([5]u32{ p0, c.qrProj(), c.i_heads, s_stride, n }, 4);
-    const rows = scoreRows(most, n);
-    e.dispatchGroups(size((most + 63) / 64, (n + rows - 1) / rows, 1), size(2 * rows, 1, 1));
+    const rows = if (x.k.m3_fast) 32 else scoreRows(most, n);
+    e.dispatchGroups(size((most + 63) / 64, (n + rows - 1) / rows, 1), size(if (x.k.m3_fast) 128 else 2 * rows, 1, 1));
     e.setPipeline(x.k.index_select);
     bind(e, 0, .{ p.sscore, indices });
     e.setValue([5]u32{ p0, c.i_topk / c.kpool, c.keyWidth(), s_stride, c.keyWidth() }, 2);

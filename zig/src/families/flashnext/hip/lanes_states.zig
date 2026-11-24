@@ -29,12 +29,16 @@ pub fn settle(f: *Fx) void {
     if (f.lanes.get(k.s) != k.lane) return; // its stream gone without a release: nothing to save from
     const st = if (f.store) |*st| st else return;
     const prompt = k.s.prompt();
+    const key = if (k.s.key.len != 0) k.s.key else prompt;
+    const previous_salt = st.salt;
+    st.salt = k.s.cache_salt;
+    defer st.salt = previous_salt;
     for (k.marks[0..k.n]) |mk| {
         f.marked = mk;
-        _ = st.keep(prompt, @intCast(mk.at), k.lane, &.{}, &.{});
+        _ = st.keep(key, @intCast(mk.at), k.lane, &.{}, &.{});
     }
     f.marked = null; // a kept row at the chunk's end saves the live caches
-    if (k.live) |at| _ = st.keep(prompt, @intCast(at), k.lane, &.{}, &.{});
+    if (k.live) |at| _ = st.keep(key, @intCast(at), k.lane, &.{}, &.{});
     if (k.last) st.report(prompt.len, @intCast(k.from), st.counts.kept - k.kept0);
 }
 

@@ -4,6 +4,13 @@ const runtime = @import("cuda.zig").runtime;
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const isolation = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/qmmf_fused_split_host.zig"),
+        .target = host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "cuda", .module = cuda }},
+    }) }));
+    b.top_level_steps.get("test-flashnext-fused-split-host").?.step.dependOn(&isolation.step);
     const prompt_scratch = b.step("test-qmmf-prompt-scratch-host", "BF16 prompt scratch bounds in Debug and ReleaseFast without a GPU");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |optimize| {
         const tests = b.createModule(.{

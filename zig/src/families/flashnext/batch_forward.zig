@@ -8,8 +8,8 @@ const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
 pub const Seg = struct { s: *Session, row0: usize, rows: usize };
 
-/// `masks`: structured output, the rows' logits masked to their grammars' tokens before the argmax and the draws.
-pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*const @import("grammar.zig").Masks) !void {
+/// `masks` (grammars) and `pens` (presence and frequency penalties) edit the rows' logits before argmax and draws.
+pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*const @import("grammar.zig").Masks, pens: ?*const @import("penalties.zig").Rows) !void {
     const r = e.r;
     const m = e.m;
     const t = &m.t;
@@ -74,7 +74,12 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
                 r.rows = g.rows;
                 const ins = [_]Buf{ v.p, sl.cs[0], sl.so[0], l.conv, l.alog, l.dt, l.norm, t.eps, g.s.m.t.rows };
                 const outs = [_]Buf{ v.gout, sl.cs[1], sl.so[1] };
-                if (r.gdn_pipe) |pipe| fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                const wide = if (g.rows == 8 or g.rows == 16) r.batch_gdn_wide else null;
+                if (wide orelse r.gdn_pipe) |pipe| {
+                    fz.gdn_step.step(r, pipe, &ins, &outs, 0, 48);
+                } else {
+                    try r.callAs("q4_gdn@gdn", if (r.gdn_step and g.rows > 1) 8 else g.rows, &ins, &outs);
+                }
             }
         } else {
             try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, l.qn, l.kn, l.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
@@ -100,6 +105,10 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     try m.lane(t.mixed, fz.D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
     if (masks) |k| {
         k.encode(r.enc, t.logits, rows);
+        if (!r.serial) r.enc.barrier();
+    }
+    if (pens) |p| {
+        p.encode(r.enc, t.logits);
         if (!r.serial) r.enc.barrier();
     }
     r.enc.setPipeline(r.argmax_pipe);

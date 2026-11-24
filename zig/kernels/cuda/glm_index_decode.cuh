@@ -22,8 +22,8 @@ __device__ __forceinline__ uint32_t order_key(float s) {
 }
 
 // Row r's selection range [0, NP): its visible pools, at least K, at most np (tf_glm_select_rows' limit).
-__device__ __forceinline__ int row_limit(int64_t np, const int* pos, int64_t r, int K) {
-  const int64_t vis = ((int64_t)pos[0] + r + 1) / 4;
+__device__ __forceinline__ int row_limit(int64_t np, const int* pos, int64_t r, int K, int pool) {
+  const int64_t vis = ((int64_t)pos[0] + r + 1) / pool;
   return (int)min(np, max(vis, (int64_t)K));
 }
 
@@ -194,14 +194,14 @@ struct Merge {
 // tf_glm_dsel_scan, grid (cdiv(the last row's NP, SPAN), R): a span's pools above (gt) and at (eq) the row's floor.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
     tf_glm_dsel_scan(const float* S, int64_t np, const int* pos, int K, int target,
-                     uint32_t* __restrict__ bits, int64_t words) {
+                     uint32_t* __restrict__ bits, int64_t words, int pool) {
   glm_pdl::enter();
   using namespace glm_dsel;
   __shared__ int hist[256];
   __shared__ uint32_t sh_prefix;
   __shared__ int sh_need;
   const int64_t r = blockIdx.y;
-  const int NP = row_limit(np, pos, r, K);
+  const int NP = row_limit(np, pos, r, K, pool);
   const int64_t p0 = (int64_t)blockIdx.x * SPAN;
   if (NP <= CAP || p0 >= NP) return;  // rows of NP <= CAP mark nothing: the merge takes them whole
   const float* row = S + r * np;
@@ -259,12 +259,12 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
 // tf_glm_dsel_merge, a CTA a row: scores [R][np] into out [R][K] int64 ascending; PATH null or [R] int32, each path.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
     tf_glm_dsel_merge(const float* S, int64_t* __restrict__ OUT, int64_t np, const int* pos,
-                      int K, const uint32_t* bits, int64_t words, int* __restrict__ PATH) {
+                      int K, const uint32_t* bits, int64_t words, int* __restrict__ PATH, int pool) {
   glm_pdl::enter();
   using namespace glm_dsel;
   __shared__ Merge sm;
   const int64_t r = blockIdx.x;
-  const int NP = row_limit(np, pos, r, K);
+  const int NP = row_limit(np, pos, r, K, pool);
   const float* row = S + r * np;
   int64_t* out = OUT + r * K;
   const int t = threadIdx.x;

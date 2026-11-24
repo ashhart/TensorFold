@@ -70,7 +70,37 @@ test "limit pins: sampling numbers at their documented bounds" {
     }
 }
 
-test "limit pins: n is one and top_logprobs stays within twenty" {
+test "limit pins: n takes one through sixteen choices" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    for ([_][]const u8{ "{}", "{\"n\":null}", "{\"n\":1}" }) |text| try std.testing.expectEqual(@as(u32, 1), try fields.choiceCount(&cx, try body(a, text)));
+    try std.testing.expectEqual(@as(u32, 3), try fields.choiceCount(&cx, try body(a, "{\"n\":3}")));
+    try std.testing.expectEqual(@as(u32, 16), try fields.choiceCount(&cx, try body(a, "{\"n\":16}")));
+    for ([_][]const u8{ "{\"n\":0}", "{\"n\":17}", "{\"n\":-1}", "{\"n\":\"2\"}", "{\"n\":2.0}", "{\"n\":true}" }) |text| {
+        try std.testing.expectError(error.Refused, fields.choiceCount(&cx, try body(a, text)));
+        try std.testing.expectEqualStrings("n must be an integer between 1 and 16", cx.message);
+    }
+}
+
+test "limit pins: Responses and the one-reply routes keep n at one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    for ([_][]const u8{ "{\"input\":\"hi\"}", "{\"input\":\"hi\",\"n\":null}", "{\"input\":\"hi\",\"n\":1}" }) |text|
+        _ = try responses_translate.translate(&cx, try body(a, text), NoHistory{});
+    for ([_][]const u8{ "{\"n\":2}", "{\"n\":16}", "{\"n\":\"1\"}", "{\"n\":0}" }) |text| {
+        const req = try body(a, text);
+        try req.object.put(a, "input", .{ .string = "hi" });
+        try std.testing.expectError(error.Refused, responses_translate.translate(&cx, req, NoHistory{}));
+        try std.testing.expectEqualStrings("n must be 1; multiple choices are not supported", cx.message);
+        try std.testing.expectError(error.Refused, fields.singleChoice(&cx, req));
+    }
+}
+
+test "limit pins: top_logprobs stays within twenty" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -79,8 +109,6 @@ test "limit pins: n is one and top_logprobs stays within twenty" {
     try std.testing.expectEqual(@as(?u8, 0), try fields.probabilityOptions(&cx, try body(a, "{\"n\":1,\"logprobs\":true,\"top_logprobs\":0}"), true));
     try std.testing.expectEqual(@as(?u8, 20), try fields.probabilityOptions(&cx, try body(a, "{\"n\":1,\"logprobs\":true,\"top_logprobs\":20}"), true));
     const cases = [_]struct { []const u8, []const u8 }{
-        .{ "{\"n\":2}", "n must be 1; multiple choices are not supported" },
-        .{ "{\"n\":\"1\"}", "n must be 1; multiple choices are not supported" },
         .{ "{\"logprobs\":true,\"top_logprobs\":21}", "top_logprobs must be an integer between 0 and 20, or null" },
         .{ "{\"logprobs\":true,\"top_logprobs\":-1}", "top_logprobs must be an integer between 0 and 20, or null" },
         .{ "{\"top_logprobs\":2}", "top_logprobs requires logprobs: true" },
@@ -101,7 +129,6 @@ test "limit pins: completions logprobs stays within twenty" {
     try std.testing.expectEqual(@as(?u8, 0), try fields.legacyLogprobs(&cx, try body(a, "{\"logprobs\":0}"), true));
     try std.testing.expectEqual(@as(?u8, 20), try fields.legacyLogprobs(&cx, try body(a, "{\"logprobs\":20}"), true));
     const cases = [_]struct { []const u8, []const u8 }{
-        .{ "{\"n\":2}", "n must be 1; multiple choices are not supported" },
         .{ "{\"logprobs\":21}", "logprobs must be an integer between 0 and 20, or null" },
         .{ "{\"logprobs\":-1}", "logprobs must be an integer between 0 and 20, or null" },
         .{ "{\"logprobs\":true}", "logprobs must be an integer between 0 and 20, or null" },

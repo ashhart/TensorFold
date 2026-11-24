@@ -16,6 +16,8 @@ pub const Shape = struct {
     mt2: bool = false,
     join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
     unread: bool = false, // a prompt chunk nothing reads: its last layer stops at the state writes
+    /// In a MTP prompt cut, rows before this local index are not consumed by the drafter.
+    tap_from: ?usize = null,
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
     part: @import("cuda_stage_forward.zig").Part = .whole,
 
@@ -27,7 +29,7 @@ pub const Shape = struct {
     }
 
     pub fn key(s: Shape) u64 {
-        // captured shapes only: a window bucket's rows fit the low byte
+        // Captured shapes only: prompt tap_from is live; a window bucket's rows fit the low byte.
         return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32;
     }
 };

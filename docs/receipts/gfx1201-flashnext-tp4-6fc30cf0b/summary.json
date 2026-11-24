@@ -1,0 +1,143 @@
+{
+ "measured_at": "2026-11-20T12:02-12:13Z (world 4), 12:29-12:33Z (world 2 control)",
+ "world_4": {
+  "bench_openai_decode_tps": 122.9086120606177,
+  "concurrent_cells": [
+   {
+    "prompt": "code",
+    "streams": 1,
+    "aggregate_tps": 123.8,
+    "per_stream_tps": 123.8,
+    "alone_equal": 3,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "code",
+    "streams": 4,
+    "aggregate_tps": 242.0,
+    "per_stream_tps": 61.0,
+    "alone_equal": 12,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "chat",
+    "streams": 1,
+    "aggregate_tps": 103.5,
+    "per_stream_tps": 103.5,
+    "alone_equal": 3,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "chat",
+    "streams": 4,
+    "aggregate_tps": 205.2,
+    "per_stream_tps": 52.3,
+    "alone_equal": 12,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   }
+  ],
+  "cold_prefill": [
+   {
+    "tokens": 2048,
+    "median_s": 1.45,
+    "tok_s": 1412
+   },
+   {
+    "tokens": 8192,
+    "median_s": 6.03,
+    "tok_s": 1358
+   },
+   {
+    "tokens": 32768,
+    "median_s": 25.94,
+    "tok_s": 1263
+   }
+  ]
+ },
+ "world_2_control_same_binary": {
+  "bench_openai_decode_tps": 121.20957291591661,
+  "concurrent_cells": [
+   {
+    "prompt": "code",
+    "streams": 1,
+    "aggregate_tps": 121.5,
+    "per_stream_tps": 121.5,
+    "alone_equal": 3,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "code",
+    "streams": 4,
+    "aggregate_tps": 249.4,
+    "per_stream_tps": 63.2,
+    "alone_equal": 12,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "chat",
+    "streams": 1,
+    "aggregate_tps": 103.5,
+    "per_stream_tps": 103.5,
+    "alone_equal": 3,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   },
+   {
+    "prompt": "chat",
+    "streams": 4,
+    "aggregate_tps": 198.6,
+    "per_stream_tps": 50.9,
+    "alone_equal": 12,
+    "alone_unequal": 0,
+    "serial_equal": 1,
+    "serial_unequal": 0
+   }
+  ],
+  "cold_prefill": [
+   {
+    "tokens": 2048,
+    "median_s": 1.68,
+    "tok_s": 1219
+   },
+   {
+    "tokens": 8192,
+    "median_s": 7.03,
+    "tok_s": 1165
+   },
+   {
+    "tokens": 32768,
+    "median_s": 30.37,
+    "tok_s": 1079
+   }
+  ]
+ },
+ "earlier_tp2_receipt_v1.2.7-399_context": {
+  "bench_openai_decode_tps": 121.2,
+  "code_1_4": [
+   121.5,
+   213.2
+  ],
+  "chat_1_4": [
+   103.5,
+   171.0
+  ],
+  "cold_prefill_tok_s": [
+   1191,
+   1121,
+   1058
+  ]
+ }
+}

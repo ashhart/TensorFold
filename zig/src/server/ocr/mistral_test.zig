@@ -56,7 +56,7 @@ test "ocr mistral: pages bounds hold before any allocation and dedupe within the
     }
 }
 
-const facts: mistral.Facts = .{ .pdf = false, .fetch = null, .pages_left = 16 };
+const facts: mistral.Facts = .{ .geometry = .block, .pdf = false, .fetch = null, .pages_left = 16 };
 
 /// A request body around ``doc`` (a document object) and ``extra`` fields.
 fn body(a: Allocator, doc: []const u8, extra: []const u8) !json.Value {
@@ -130,7 +130,12 @@ test "ocr mistral: content-changing and malformed fields are refused with their 
             return error.TestUnexpectedResult;
         }
     }
+    // a reader without geometry marks no headers or footers
     var fault: types.Fault = undefined;
+    const none: mistral.Facts = .{ .geometry = .none, .pdf = false, .fetch = null, .pages_left = 16 };
+    try t.expectError(error.Faulted, mistral.decode(a, try body(a, doc, ", \"extract_footer\": true"), none, &fault));
+    try t.expectEqualStrings("this model does not mark page headers or footers", fault.message);
+    _ = try mistral.decode(a, try body(a, doc, ", \"extract_footer\": false"), none, &fault);
     try t.expectError(error.Faulted, mistral.decode(a, try value(a, "[1]"), facts, &fault));
     try t.expectError(error.Faulted, mistral.decode(a, try value(a, "{\"model\": null}"), facts, &fault));
     try t.expectEqualStrings("document is required", fault.message);

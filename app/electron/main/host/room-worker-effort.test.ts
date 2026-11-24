@@ -8,6 +8,7 @@ import { restrictTicketToolContext } from '../../agent/ticket-tool-policy'
 import { requireTicketDependenciesReady } from '../../../shared/ticket-dependencies'
 import { lexicalLocalWorkspaceKey } from './workspace-mutation-guard'
 import * as reasoning from '../../../shared/reasoning-effort'
+import * as botPolicy from '../../../shared/bot-policy'
 
 const code = ts.transpileModule(readFileSync(path.join(__dirname, 'ticket-worker-runtime.ts'), 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true },
@@ -50,6 +51,10 @@ for (const [global, configured, sourceEffort] of [['high', 'low', undefined], ['
       '../state': { store }, './audit': { requireSecurityRole() {}, auditEvent: async () => {} },
       './room-worktree': { ensureRoomWorktree: () => workspace },
       '../../../shared/ticket-dependencies': { requireTicketDependenciesReady },
+      '../../../shared/bot-policy': botPolicy,
+      '../../agent/bot-tool-scope': { scopeBotToolContext: (_bot: any, base: any) => base },
+      './ticket-bot': { captureTicketBot: () => undefined, assertTicketBotReady: () => {},
+        sameTicketBot: (previous: any, next: any) => (!previous || !next ? previous === next : true) },
       './workspace': { resolveWorkspaceCwd: async (cwd: string) => cwd, inspectGitRepository: async () => ({ branch: 'fixture' }) },
       './ticket-helpers': { summarizeTicketWorkerOutcome: () => ({ text: 'Synthetic result', evidence: [],
         codeChanged: false, testsPassed: false, signals: { commands: [], blockers: [], files: [], diffs: [] } }) },

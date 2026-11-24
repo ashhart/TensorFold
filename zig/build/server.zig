@@ -3,6 +3,7 @@ const std = @import("std");
 
 /// The web launcher uses fake PATH tools and no model, network or device.
 pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
+    @import("request_access_host.zig").steps(b, all);
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/web_cli.zig"),
         .target = b.graph.host,
@@ -102,6 +103,9 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
+    const pool_after_warmup = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "CUDA pool after warmup:", "profile line:", "stable profile:", "capability audit: environment" } }));
+    pool_after_warmup.has_side_effects = true;
+    b.step("test-cuda-pool-report-host", "CUDA sizing device report and counted profile without devices").dependOn(&pool_after_warmup.step);
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
     testImports(b, parser, b.graph.host, .debug);
@@ -158,6 +162,10 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const inkling = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Inkling 2 reply:", "Inkling 2 parse:" } }));
+    inkling.has_side_effects = true;
+    all.dependOn(&inkling.step);
+    b.step("test-server-inkling2-reply-host", "Inkling 2 native reply split, tools and default-model isolation without devices").dependOn(&inkling.step);
     const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
     quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
     b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);

@@ -2,8 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
-const st = @import("safetensors.zig");
-const file_cache = @import("checkpoint_file_cache.zig");
+const st = @import("core").safetensors;
+const file_cache = @import("core").checkpoint_file_cache;
 
 pub const DType = st.DType;
 
@@ -308,10 +308,13 @@ pub const Stage = struct {
     }
 };
 
+/// The most one pread asks for: macOS refuses a count above INT_MAX, so a longer span takes several calls.
+const max_pread = 1 << 30;
+
 fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, @min(dest.len - done, max_pread), @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
@@ -435,6 +438,26 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     try std.testing.expectError(error.ShardClosed, split.read("text.weight", 0, &part));
     try std.testing.expectEqualSlices(u32, (try full.get("text.weight")).host(u32), w.host(u32));
     try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
+}
+
+test "a span longer than one pread may ask for is read whole" {
+    const len: usize = (1 << 31) + 4096;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/sparse.bin", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(platform.c.mode_t, 0o600));
+    if (fd < 0) return error.SkipZigTest;
+    defer _ = platform.c.close(fd);
+    const tail = "the last bytes";
+    if (platform.c.pwrite(fd, tail.ptr, tail.len, @intCast(len - tail.len)) != tail.len) return error.SkipZigTest;
+    const dest = std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch return error.SkipZigTest;
+    defer std.posix.munmap(dest);
+    try readAll(fd, dest, 0);
+    try std.testing.expectEqualStrings(tail, dest[len - tail.len ..]);
+    try std.testing.expectEqual(@as(u8, 0), dest[max_pread]);
+    try std.testing.expectError(error.ShortRead, readAll(fd, dest[0..2], len - 1));
 }
 
 test {

@@ -63,6 +63,7 @@ pub const Auth = struct {
         var at = uri;
         var rest = buf;
         while (true) {
+            try @import("pull_route.zig").note(client.io, at);
             o.headers.authorization = auth.header(at);
             req.* = try client.request(method, at, o);
             errdefer req.deinit();

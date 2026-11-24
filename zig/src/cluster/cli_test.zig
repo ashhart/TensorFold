@@ -69,7 +69,7 @@ test "four fake hosts: init discovers the mesh, check plans GLM-5.3, serve bring
     try std.testing.expect(has(serve.out, "fake cluster up: 4 nodes agree on plan"));
     const launches = try tmp.dir.readFileAlloc(io, "launches.log", a, .limited(1 << 20));
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, launches, "tensorfold node --name"));
-    try std.testing.expect(has(launches, "ProxyCommand=ssh -i /keys/k -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p tf@192.0.2.10"));
+    try std.testing.expect(has(launches, "ProxyCommand=ssh -i /keys/k -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p 'tf@192.0.2.10'"));
     const node = try run(a, &.{ "node", "--name", "s3", "--cluster", file, "--probes", root });
     try std.testing.expectEqual(@as(u8, 1), node.code);
     try std.testing.expect(has(node.out, "s3 ") and has(node.err, "fake hosts (--probes) have no MCDMA links"));

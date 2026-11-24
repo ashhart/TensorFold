@@ -1,0 +1,150 @@
+[
+ {
+  "label": "flashnext-tp2-decode",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 121.2099182020188,
+  "decode_tps_all": [
+   120.79,
+   121.21,
+   121.33
+  ],
+  "ttft_s_median": 0.05374725300043792,
+  "prompt_ttft_tps_median": 260.478,
+  "prefill_tps_median": 260.478,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 8.25,
+  "round_gap_p50_ms_median": 20.802,
+  "round_gap_p95_ms_median": 24.386,
+  "tokens_per_chunk_median": 2.485,
+  "headers_s_median": 0.002,
+  "first_payload_s_median": 0.054,
+  "first_content_s_median": 0.054,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.054,
+  "last_output_s_median": 2.157,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f4a5dddbe1e3",
+    "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f4a5dddbe1e3",
+    "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "f4a5dddbe1e3",
+    "output_sha256": "d3b8d9488d6cfd45b1a07e7c03bd60c4e6da8ef72c9e39ee94dcebca7b79b16d",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "\n\nHere's the code:\n```python\ndef fibonacci(n):\n    \"\"\"\n    Compute the nth Fibonacci number using an iterative approach.\n    \"\"\"\n    if n <= 0:\n        return 0",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ },
+ {
+  "label": "flashnext-tp2-decode",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "off",
+  "thinking_off_requested": true,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 103.64492248773014,
+  "decode_tps_all": [
+   103.62,
+   103.64,
+   103.77
+  ],
+  "ttft_s_median": 0.08953773200028081,
+  "prompt_ttft_tps_median": 346.223,
+  "prefill_tps_median": 346.223,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 9.648,
+  "round_gap_p50_ms_median": 18.135,
+  "round_gap_p95_ms_median": 22.915,
+  "tokens_per_chunk_median": 2.0,
+  "headers_s_median": 0.002,
+  "first_payload_s_median": 0.002,
+  "first_content_s_median": 0.09,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.09,
+  "last_output_s_median": 2.55,
+  "evidence": [
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "97545dcbff41",
+    "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "97545dcbff41",
+    "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 31,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "97545dcbff41",
+    "output_sha256": "154a1ea560cf961fe9a2bf70d2fe881eb98fd5255a3e390b502a6107a2224908",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "### How Matrix Multiplication Uses a GPU (In Plain English)\n\nImagine you have a giant spreadsheet with thousands of rows and columns. In a standard computer (a ",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ }
+]

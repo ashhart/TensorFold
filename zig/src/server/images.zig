@@ -199,8 +199,15 @@ pub fn expandWith(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx:
     if (ps.len == 0) return null;
     if (n_images > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, n_images }));
     if (v.video) |o| if (n_videos > o.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{o.max_videos}));
-    const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
-    if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
+    // the tokens one image takes: --vision-image-share request splits by this request's count, fixed by the image limit
+    const budget: u32 = if (n_images == 0) 0 else switch (v.image_share) {
+        .request => v.image_tokens / @as(u32, @intCast(n_images)),
+        .fixed => v.image_tokens / v.max_images,
+    };
+    if (n_images > 0 and budget < 1) return switch (v.image_share) {
+        .request => cx.refuse("the image count exceeds the visual-token budget"),
+        .fixed => cx.refuse(try std.fmt.allocPrint(cx.a, "image 1: the visual-token budget (--vision-image-tokens {d}) leaves no share for {d} images (--vision-max-images)", .{ v.image_tokens, v.max_images })),
+    };
     const prepared = try cx.a.alloc(api.PreparedImage, n_images);
     const frames = try cx.a.alloc(?api.Size, n_images);
     const clips = try cx.a.alloc(api.PreparedVideo, n_videos);

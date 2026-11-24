@@ -16,6 +16,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
     const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
     const tools = b.step("test-grammar-tools", "tool_grammar's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
+    // Declared before the early returns, so every target lists it (tools/zig/build_options_test.py).
+    const real_tokenizer = b.option([]const u8, "grammar-real-tokenizer", "Real Qwen3.8 tokenizer.json for the CPU budget regression");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
         budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);
@@ -36,7 +38,21 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     options.addOptionPath("library", host.getEmittedBin());
     const check = b.createModule(.{ .root_source_file = b.path("zig/grammar_budget_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     check.addOptions("grammar_budget_library", options);
-    budget.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check })).step);
+    const mask_checks = b.addRunArtifact(b.addTest(.{ .root_module = check }));
+    budget.dependOn(&mask_checks.step);
+    // Optional real-checkpoint CPU regression; ordinary host checks need neither tokenizer files nor xgrammar.
+    if (real_tokenizer) |tokenizer| {
+        const real_options = b.addOptions();
+        real_options.addOptionPath("library", host.getEmittedBin());
+        real_options.addOption([]const u8, "tokenizer", tokenizer);
+        const real = @import("server.zig").plain(b, "zig/src/server/grammar_real_budget_host.zig", b.graph.host, .debug, lanes);
+        real.addOptions("grammar_real_budget", real_options);
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = real, .filters = &.{"real grammar budget:"} }));
+        run.has_side_effects = true;
+        const real_step = b.step("test-grammar-real-budget-host", "Real Qwen3.8 fixed/client budget policy, cache isolation, masks and server refusals, CPU only");
+        real_step.dependOn(&run.step);
+        real_step.dependOn(&mask_checks.step);
+    }
     const walk = @import("server.zig").plain(b, "zig/src/server/tool_grammar_xgrammar_test.zig", b.graph.host, .debug, lanes);
     walk.addOptions("grammar_library", options);
     tools.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = walk })).step);

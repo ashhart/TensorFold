@@ -54,7 +54,7 @@ test "execution witness HTTP: off answers 404 for every key and leaves replies a
     var on: fixture.Harness = .{};
     try on.start(&on_engine, &keys, &c, .{ .execution_witness = true });
     defer on.deinit();
-    on.state.?.start();
+    on.state.?.start(on.srv);
     _ = fixture.settled(on.state.?, on.srv);
     const before = try plain.ask(a, "POST", "/v1/completions", "admin-secret", "localhost", completion);
     const after = try on.ask(a, "POST", "/v1/completions", "admin-secret", "localhost", completion);
@@ -75,7 +75,7 @@ test "execution witness HTTP: read and admin keys read it; no key, an inference 
     var h: fixture.Harness = .{};
     try h.start(&engine, &keys, &c, .{ .execution_witness = true });
     defer h.deinit();
-    h.state.?.start();
+    h.state.?.start(h.srv);
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -105,7 +105,7 @@ test "execution witness HTTP: pending until hashed, then known; the same server 
     const pending = try fixture.payload(a, try h.ask(a, "GET", witness.path, "", "localhost", ""));
     try t.expectEqualStrings("unknown", pending.strField("state").?);
     try t.expectEqualStrings("pending", pending.strField("reason").?);
-    h.state.?.start();
+    h.state.?.start(h.srv);
     try t.expect(fixture.settled(h.state.?, h.srv).result == .known);
     const reply = try h.ask(a, "GET", witness.path, "", "localhost", "");
     try expectStatus(reply, 200);
@@ -138,12 +138,31 @@ test "execution witness HTTP: an engine without a hook is unsupported_path; an e
         var h: fixture.Harness = .{};
         try h.start(&engine, null, &c, case.args);
         defer h.deinit();
-        h.state.?.start();
+        h.state.?.start(h.srv);
         _ = fixture.settled(h.state.?, h.srv);
         const v = try fixture.payload(a, try h.ask(a, "GET", witness.path, "", "localhost", ""));
         try t.expectEqualStrings("unknown", v.strField("state").?);
         try t.expectEqualStrings(case.reason, v.strField("reason").?);
         if (case.feature) |f| try t.expectEqualStrings(f, v.strField("feature").?) else try t.expect(v.get("feature") == null);
         try t.expect(v.get("witness") == null and v.get("content") == null);
+    }
+}
+
+test "execution witness HTTP: the engine's hashing begins at ready and at each reload, never on an excluded server" {
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    for ([_]struct { args: @import("cli.zig").Args, begins: [2]u32 }{
+        .{ .args = .{ .execution_witness = true, .unix_socket = "test" }, .begins = .{ 1, 2 } },
+        .{ .args = .{ .execution_witness = true, .unix_socket = "test", .cortheon = true }, .begins = .{ 0, 0 } },
+    }) |case| {
+        var engine: fixture.Engine = .{};
+        var h: fixture.Harness = .{};
+        try h.start(&engine, null, &c, case.args);
+        defer h.deinit();
+        try t.expectEqual(@as(u32, 0), engine.begins.load(.acquire)); // nothing before ready
+        h.state.?.start(h.srv);
+        try t.expectEqual(case.begins[0], engine.begins.load(.acquire));
+        h.state.?.bump(h.srv.info); // a reload publishes a new engine
+        try t.expectEqual(case.begins[1], engine.begins.load(.acquire));
     }
 }

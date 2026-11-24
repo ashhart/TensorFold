@@ -87,10 +87,14 @@ pub const Backend = struct {
     first_before_draft: bool = false,
     /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
     defer_lone_draft: bool = false,
+    /// Commit a fully accepted lone chain; Inkling 2 Mini needs this transaction commit.
+    keep_full_lone: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Whether image requests may run a background warm prefill; wrappers preserve the target policy.
+    warm_images: bool = true,
     ptr: *anyopaque,
     vtable: *const VTable,
 

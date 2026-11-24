@@ -24,9 +24,11 @@ pub fn text(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
 
 /// The same library as a GPU without tensor units builds it (nax.h's simdgroup-matrix layout).
 fn preM5(a: std.mem.Allocator) ![]u8 {
-    const body = try tf.frags.precision.source(a, false, sources.core_affine_mm, sources.nax, false);
+    const core = try std.mem.replaceOwned(u8, a, sources.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", sources.core_affine_nonfinite);
+    defer a.free(core);
+    const body = try tf.frags.precision.source(a, false, core, sources.nax, false);
     defer a.free(body);
-    return std.mem.concat(a, u8, &.{ "#define TF_BITS 4\n#define TF_GROUP 64\n#define TF_OUT_T bfloat\n", body, sources.glm_mm_groups });
+    return std.mem.concat(a, u8, &.{ "#define TF_BITS 4\n#define TF_GROUP 64\n#define TF_OUT_T bfloat\n#define TF_AM_EXACT_NONFINITE 1\n", body, sources.glm_mm_groups });
 }
 
 /// Rows: sorted pairs (experts' means 2, 43 and 183: both tile heights of each launch); n: gate/up's width; k: hidden.

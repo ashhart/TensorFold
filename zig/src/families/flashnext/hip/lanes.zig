@@ -262,10 +262,13 @@ pub const Fx = struct {
         if (f.store) |*st| {
             var arena: std.heap.ArenaAllocator = .init(f.gpa);
             defer arena.deinit();
+            const previous_salt = st.salt;
+            st.salt = s.cache_salt;
+            defer st.salt = previous_salt;
             fill.kept0 = st.counts.kept;
             const plan = st.begin(
                 arena.allocator(),
-                prompt,
+                if (s.key.len != 0) s.key else prompt,
                 s.history_len,
                 s.shared_prefixes,
                 &.{},

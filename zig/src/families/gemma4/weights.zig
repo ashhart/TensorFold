@@ -26,9 +26,9 @@ pub const Linear = struct {
     /// The row path's weights (a chip without tensor units): the checkpoint's arrays as stored.
     raw: ?rowp.Weights = null,
 
-    /// The reg kernel's width, which reads the group sums its input's kernel wrote; others sum their input themselves.
+    /// The reg kernel's widths (4-, 5-, or 6-bit g64 on whole tiles), reading group sums from the input kernel.
     pub fn reg(x: Linear) bool {
-        return std.meta.eql(x.format, fast);
+        return x.format.group == cfg.group and x.n % 32 == 0 and (x.format.bits == 4 or x.format.bits == 5 or x.format.bits == 6);
     }
 
     /// `rows` of x [rows, k] through a general-unpack pipeline, which takes 16 rows an encode: y's rows y_stride apart.
@@ -146,7 +146,7 @@ pub const Weights = struct {
     }
 };
 
-/// MLX affine words, scales and biases [x.n, x.k] at x's width in the lane layout (reg order at 4/64).
+/// MLX affine words, scales and biases [x.n, x.k] at x's width in the lane layout (reg order at 4/5/6-bit g64).
 pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, words: []const u32, scales: []const u16, biases: []const u16, x: Linear) !Linear {
     if (!device.tensorUnits()) return packRows(gpa, device, owned, words, scales, biases, x);
     const l = layout(geo, x);
@@ -155,7 +155,7 @@ pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayL
     const sb = try device.buffer(l.metadataElements() * 2, shared);
     errdefer sb.deinit();
     try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sb.slice(u16, l.metadataElements()));
-    if (l.reg) try lane.regOrder(device, &.{.{ .w = .{ .buf = wb }, .n = x.n, .k = x.k }});
+    if (l.reg) try lane.regOrder(device, &.{.{ .w = .{ .buf = wb }, .n = x.n, .k = x.k, .bits = x.format.bits }});
     try owned.ensureUnusedCapacity(gpa, 2);
     owned.appendAssumeCapacity(wb);
     owned.appendAssumeCapacity(sb);

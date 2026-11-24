@@ -11,12 +11,23 @@ pub const simd_bits = @import("simd_qmm_bits.zig");
 /// The narrow kernel's rows per weight read; wide windows use 8, 4, 2 and 1.
 pub const batch = 2;
 
+/// The cutover table and its chip key (row_cutover.zig, host-tested without Metal).
+pub const cut = @import("row_cutover.zig");
+pub const Tier = cut.Tier;
+pub const Chip = cut.Chip;
+pub const chipOf = cut.chipOf;
+pub const never = cut.never;
+pub const Cutover = cut.Cutover;
+pub const cutovers = cut.cutovers;
+pub const wideFrom = cut.wideFrom;
+pub const keyLine = cut.keyLine;
+
 /// Output columns a simdgroup and simdgroups a threadgroup (the kernel's RPS and SG).
 pub const columns = 4;
 pub const groups = 2;
 
 /// The code widths the kernels unpack.
-pub const bit_widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
+pub const bit_widths = cut.bit_widths;
 
 /// A group's input sum for the bias: fp32 in order (tensor path's xsum), or bf16-rounded per add (Nemotron's experts).
 pub const Sum = enum { f32, bf16 };
@@ -76,7 +87,13 @@ pub const Pipelines = struct {
     wide_plain: [variants]mtl.Pipeline,
     wide_relu2: [variants]mtl.Pipeline,
     wide_strided: [variants]mtl.Pipeline,
-    wide: bool = false, // windows of 4+ rows take the 8-row kernels only on chips with tensor units (the M5 path)
+    wide: bool = false, // the 8-row kernels are built only on chips with tensor units (the M5 path)
+    wide_from: [bit_widths.len]usize = @splat(never), // the narrowest window that takes them, a code width each
+
+    /// Whether a window of `rows` of `w` takes the wide kernels.
+    pub fn takesWide(p: *const Pipelines, w: Weights, rows: usize) bool {
+        return p.wide and cut.takes(&p.wide_from, w.bits, rows);
+    }
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -86,6 +103,8 @@ pub const Pipelines = struct {
         defer lib.deinit();
         var p: Pipelines = undefined;
         p.wide = wide;
+        const chip = chipOf(device.generation(), std.mem.span(device.name()));
+        for (&p.wide_from, bit_widths) |*from, bits| from.* = if (wide) wideFrom(chip, bits) orelse never else never;
         inline for (bit_widths, 0..) |bits, b| inline for (.{ "f32", "bf16" }, 0..) |sum, m| {
             const i = b * 2 + m;
             p.plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_q{d}_{s}", .{ bits, sum }), false);
@@ -129,7 +148,7 @@ pub fn call(p: *const Pipelines, w: Weights, rows: usize, relu2: bool) !Call {
     try w.validate();
     if (rows == 0) return error.NoRows;
     const i = w.variant();
-    const pipeline = if (rows >= 4 and p.wide) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
+    const pipeline = if (p.takesWide(w, rows)) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
     return .{ .pipeline = pipeline, .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, .groups = w.n / (columns * groups) };
 }
 
@@ -138,7 +157,7 @@ pub fn callStrided(p: *const Pipelines, w: Weights, rows: usize, stride: usize) 
     try w.validate();
     if (rows == 0) return error.NoRows;
     if (stride < w.n or stride > std.math.maxInt(i32)) return error.UnsupportedRowStride;
-    return .{ .pipeline = if (rows >= 4 and p.wide) p.wide_strided[w.variant()] else p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
+    return .{ .pipeline = if (p.takesWide(w, rows)) p.wide_strided[w.variant()] else p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
 }
 
 /// y[slots, n] = x[slot / repeat] W[ids[slot]]^T; the grid's y is the slot.
@@ -204,39 +223,49 @@ test "a strided call writes rows at least a matrix wide" {
     try std.testing.expectEqual([6]i32{ 128, 64, 64, 2, 192, 1 }, c.dims);
 }
 
-// Fake pipelines carry a distinct id in both the real Metal struct and the recording stub's u32.
+const pipelines_have_ids = @import("builtin").os.tag == .macos and (@typeInfo(mtl.Pipeline) != .@"struct" or @hasField(mtl.Pipeline, "id"));
+
+// Real Metal uses a pointer id. Recording pipelines can use an integer id or be integers.
 fn testPipeline(id: usize) mtl.Pipeline {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") .{ .id = @ptrFromInt(id) } else @intCast(id);
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(id);
+    return .{ .id = if (comptime @typeInfo(@FieldType(mtl.Pipeline, "id")) == .pointer) @ptrFromInt(id) else @intCast(id) };
 }
 fn testPipelineId(p: mtl.Pipeline) usize {
-    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") @intFromPtr(p.id) else @intCast(p);
+    if (comptime @typeInfo(mtl.Pipeline) != .@"struct") return @intCast(p);
+    return if (comptime @typeInfo(@TypeOf(p.id)) == .pointer) @intFromPtr(p.id) else @intCast(p.id);
 }
 
-test "row dispatch selects wide contiguous and strided pipelines from four rows" {
-    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
+test "row dispatch takes the wide pipelines from the cutover at each width" {
+    if (comptime !pipelines_have_ids) return error.SkipZigTest; // inert stand-ins carry no id to compare
     var p: Pipelines = undefined;
     p.wide = true;
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
         for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }
-    for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
-        const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
-        const i = w.variant();
-        for (1..33) |rows| {
-            for ([_]bool{ false, true }) |relu2| {
-                const expected = if (rows >= 4) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
-                try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try call(&p, w, rows, relu2)).pipeline));
+    const max = [bit_widths.len]usize{ 32, never, never, never, never, never }; // an M5 Max's: each width its own
+    for ([_]?usize{ 4, 8, 16, 32, never, null }) |uniform| {
+        p.wide_from = if (uniform) |u| @splat(u) else max;
+        for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
+            const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
+            const i = w.variant();
+            const from = uniform orelse max[i / 2];
+            for (1..33) |rows| {
+                for ([_]bool{ false, true }) |relu2| {
+                    const expected = if (rows >= from) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
+                    try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try call(&p, w, rows, relu2)).pipeline));
+                }
+                const expected = if (rows >= from) p.wide_strided[i] else p.strided[i];
+                try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try callStrided(&p, w, rows, 128)).pipeline));
             }
-            const expected = if (rows >= 4) p.wide_strided[i] else p.strided[i];
-            try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try callStrided(&p, w, rows, 128)).pipeline));
-        }
-    };
+        };
+    }
 }
 
 test "row dispatch without tensor units keeps main's pipelines at every row count" {
-    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
+    if (comptime !pipelines_have_ids) return error.SkipZigTest; // inert stand-ins carry no id to compare
     var p: Pipelines = undefined;
     p.wide = false;
+    p.wide_from = @splat(1); // a stale cutover must not matter without the wide pipelines
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
         for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }

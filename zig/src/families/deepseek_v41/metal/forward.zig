@@ -22,7 +22,7 @@ const R = pipelines.max_rows;
 pub const Model = struct { top: *const weights.Top, layers: []const weights.Layer };
 
 /// Where Engram rows come from: the family's hashes over the token history, then a row source (null: index rows).
-pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source };
+pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source, stats: ?*const host.engram_rows.Stats = null };
 
 /// The Engram call of a launch's rows: hash columns of 256 values in, a key per stream and one value out.
 pub fn engramCall(c: *const Config, rows: u32) eng.Call {
@@ -109,6 +109,12 @@ pub const Piece = struct { ids: []const u32, lookback: []const u32 };
 
 /// `prepare` for several slots' rows, pieces one after another in row order.
 pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !void {
+    const l = try prepareIds(b, c, pieces, lk) orelse return;
+    for (0..c.engram_layers.len) |li| try fillRows(b, c, pieces, l, li);
+}
+
+/// The launch's ids, checked, pieces one after another in row order; the Engram lookup its rows need (null: none).
+pub fn prepareIds(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !?Lookup {
     var n: usize = 0;
     for (pieces) |pc| {
         if (pc.ids.len == 0) return error.BadRows;
@@ -122,17 +128,26 @@ pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: 
         @memcpy(all[at..][0..pc.ids.len], pc.ids);
         at += pc.ids.len;
     }
-    if (c.engram_layers.len == 0) return;
-    const l = lk orelse return error.EngramLookupMissing;
+    if (c.engram_layers.len == 0) return null;
+    return lk orelse error.EngramLookupMissing;
+}
+
+/// Engram layer index `li`'s rows of the pieces into rows[li] (a source's reads in flight are waited for).
+pub fn fillRows(b: *const Bufs, c: *const Config, pieces: []const Piece, l: Lookup, li: usize) !void {
     const K = c.hashCols() * c.engram_head_dim;
-    for (c.engram_layers.items(), 0..) |id, li| {
-        const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
-        var r0: usize = 0;
-        for (pieces) |pc| {
-            try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, id, 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
-            r0 += pc.ids.len;
-        }
+    var n: usize = 0;
+    for (pieces) |pc| n += pc.ids.len;
+    const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
+    var r0: usize = 0;
+    for (pieces) |pc| {
+        try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, c.engram_layers.items()[li], 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
+        r0 += pc.ids.len;
     }
+}
+
+/// Starts reading every Engram layer's rows of the pieces from the source (no source: nothing to start).
+pub fn prefetchRows(pieces: []const Piece, l: Lookup) void {
+    for (pieces) |pc| l.host.prefetch(l.a, l.source, pc.ids, pc.lookback, 0, 1);
 }
 
 /// The tokens' embedding rows into all four streams of streams[0], and the one-hot pre mix.
@@ -168,7 +183,12 @@ fn engram(x: *const Ctx, e: mtl.ComputeEncoder, b: *const Bufs, w: weights.Engra
     if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
     try eng.encodeAq(p, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
     e.barrier();
-    try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
+    // the projection on the MMA tile at the rows it takes (the same bits), else on the row kernel
+    const t = pipelines.fp8_tile;
+    const tc: t.Call = .{ .k = w.wkv.k, .n = w.wkv.n, .rows = x.rows, .out = .bf16 };
+    if (t.takes(tc, 1)) {
+        try t.encode(&x.p.tile, e, cv(t.Ref, b.emb), cv(t.Ref, w.wkv.w), cv(t.Ref, w.wkv.s), cv(t.Ref, b.ekv), tc, .{});
+    } else try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
     e.barrier();
     try eng.encodeGate(p, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
     e.barrier();
@@ -213,6 +233,18 @@ pub fn chunkEnd(lo: usize, n: usize) usize {
 
 /// The decode forward in about `buffers` command buffers, each committed once encoded; waits for the last.
 pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
+    return runWith(x, q, m, b, .{ .ctx = undefined });
+}
+
+/// A forward's side work: Engram rows written just before the buffer that reads them, work queued after the last.
+pub const Hooks = struct {
+    ctx: *anyopaque,
+    rows: ?*const fn (ctx: *anyopaque, li: usize) anyerror!void = null,
+    then: ?*const fn (ctx: *anyopaque) void = null,
+};
+
+/// `run` with `h`'s Engram rows and queued work.
+pub fn runWith(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
@@ -225,6 +257,10 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
         if (n == max_buffers) return error.TooManyBuffers;
+        if (h.rows) |f| for (x.c.engram_layers.items(), 0..) |id, li| if (id >= lo and id < hi) f(h.ctx, li) catch |err| {
+            if (n > 0) cbs[n - 1].wait();
+            return err;
+        };
         const cb = q.commandBuffer();
         const e = cb.compute(.concurrent);
         segs.declare(x, e);
@@ -240,6 +276,7 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
         if (hi == m.layers.len) break;
         lo = hi;
     }
+    if (h.then) |f| f(h.ctx);
     cbs[n - 1].wait();
     q.roundEnd();
     if (t0) |t| round_prof.end(t, x.rows, cbs[0], cbs[n - 1]);

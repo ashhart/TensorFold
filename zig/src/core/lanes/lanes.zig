@@ -11,6 +11,7 @@ pub const recall = @import("recall.zig");
 pub const recall_store = @import("recall_store.zig");
 pub const sampling = @import("sampling.zig");
 pub const sampling_row = @import("sampling_row.zig");
+pub const penalty_rows = @import("penalty_rows.zig"); // presence and frequency entries for GPU and host draws
 pub const fill = @import("fill.zig");
 pub const prefill_widths = @import("prefill_widths.zig");
 pub const solo_chunk = @import("solo_chunk.zig");
@@ -39,6 +40,7 @@ pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
 pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
 pub const shared_draft_check = @import("shared_draft_check.zig");
+pub const invariance = @import("invariance.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const draft_tree = @import("draft_tree.zig");
@@ -53,6 +55,12 @@ pub const Engine = engine.Engine;
 pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
+
+/// The named cut points the backend honors for this request.
+pub fn cutPoints(s: *const Stream) []const u32 {
+    return s.chunks;
+}
+
 pub const Sampling = sampling.Sampling;
 pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;
@@ -73,6 +81,7 @@ test {
     _ = @import("open_trace_test.zig");
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
+    _ = @import("gpu_launch_test.zig");
     _ = @import("drafted_test.zig");
     _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
@@ -96,6 +105,8 @@ test {
     _ = @import("copied_rate_test.zig");
     _ = @import("granted_reservation_test.zig");
     _ = @import("rollback_test.zig");
+    _ = @import("conformance_test.zig");
+    _ = @import("invariance_fake.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");
@@ -106,5 +117,9 @@ test {
     _ = @import("lone_copy_price_test.zig");
     _ = @import("lone_copy_sampled_test.zig");
     _ = @import("copy_price_test.zig");
+    _ = @import("copy_edges_test.zig");
+    _ = @import("copy_scope_test.zig");
     _ = @import("sampling_row.zig");
+    _ = @import("sampling_row_test.zig");
+    _ = @import("penalty_rows.zig");
 }

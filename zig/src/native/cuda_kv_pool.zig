@@ -195,6 +195,10 @@ pub fn attach(comptime F: type, a: Allocator, ctx: *anyopaque, paged: ?Plan, pla
     if (comptime !@hasDecl(F, "attach")) return true;
     const p = paged orelse return true;
     F.attach(ctx, p.lanes - 1, p.pages) catch |e| {
+        if (comptime @hasDecl(F, "kvHostRefusal")) if (F.explain(null, e)) |why| {
+            problem.* = why;
+            return false;
+        };
         problem.* = try std.fmt.allocPrint(a, "the CUDA engine could not make its {d} streams' pages ({s})", .{ p.lanes - 1, @errorName(e) });
         return false;
     };
@@ -520,7 +524,6 @@ test "CUDA cache default leaves seven full windows beside an unpaged engine" {
     explicit.prompt_cache_gib = 40;
     try std.testing.expectEqual(@as(u64, 40 * GiB), budgetOf(struct {}, l, 88 * GiB, explicit, 8192, false, false, 0, null).cache);
 }
-
 test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
     const GiB: u64 = 1 << 30;
     const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
@@ -532,7 +535,6 @@ test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 24 * GiB), p.copied);
 }
-
 test "CUDA cache default leaves no copies when unpaged windows use all room" {
     const GiB: u64 = 1 << 30;
     const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
@@ -544,7 +546,6 @@ test "CUDA cache default leaves no copies when unpaged windows use all room" {
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 0), p.copied);
 }
-
 const Promptless = struct {
     pub const keeps_no_prompts = true;
 };

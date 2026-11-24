@@ -8,7 +8,11 @@ const Allocator = std.mem.Allocator;
 
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 pub fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
-    return poolFor(@import("sys").windows, Sources, a, io, ctx, problem);
+    return poolCached(a, io, ctx, 0, problem);
+}
+/// The same pool, adding the checkpoint's cached bytes back to CUDA's free on unified Linux.
+pub fn poolCached(a: Allocator, io: std.Io, ctx: *const cuda.Context, cached: u64, problem: *[]const u8) !?budget.Pool {
+    return poolForCached(@import("sys").windows, Sources, a, io, ctx, cached, problem);
 }
 const Sources = struct {
     pub const procText = budget.procText;
@@ -16,6 +20,9 @@ const Sources = struct {
 };
 /// The served pool decision with only the OS and host probes supplied by a fixture.
 pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
+    return poolForCached(windows, Host, a, io, ctx, 0, problem);
+}
+pub fn poolForCached(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, cached: u64, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
     const counts_text = Host.env("TENSORFOLD_UNIFIED_HOST_COUNTS");
@@ -34,7 +41,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         return null;
     };
     const available = budget.counting(measured, zones);
-    const free = budget.boundFree(host_counts, available.available, card.free);
+    const free = budget.boundFree(host_counts, available.available, card.free, cached);
     const total = available.total;
     const reserve = budget.reserveBytes(Host.env("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ Host.env("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
@@ -61,7 +68,7 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
         return null;
     };
-    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole, o.drafts) catch |err| {
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole, o.drafts, o.rank, o.tp) catch |err| {
         problem.* = (if (@hasDecl(F, "explains_open")) F.explain(null, err) else null) orelse try std.fmt.allocPrint(a, "cannot size this rank's weights ({s})", .{@errorName(err)});
         return null;
     } else whole;
@@ -69,8 +76,8 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
 }
 
 /// `F.weightShare`, plain bytes or an error union (a family whose split settings can be refused).
-fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64, drafts: bool) anyerror!u64 {
-    return F.weightShare(a, io, dir, whole, drafts);
+fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64, drafts: bool, rank: u32, tp: u32) anyerror!u64 {
+    return F.weightShare(a, io, dir, whole, drafts, rank, tp);
 }
 
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
