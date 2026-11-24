@@ -228,6 +228,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .cache_salt_per_key = args.cache_salt_per_key,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .request_log_replies = if (env(s, "TENSORFOLD_REQUEST_LOG_REPLIES")) |v| std.mem.eql(u8, v, "1") else false,
         .journal = journal,
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
