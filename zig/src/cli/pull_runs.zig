@@ -165,7 +165,7 @@ const Open = struct {
 
 /// One run: fetched whole into `buf`, checked, then written; a stale link is resolved again.
 fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u8) !void {
-    if (s.auth.bearer != null and r.first != s.positions[r.file]) return error.RangeUnsupported;
+    if (s.auth.bearer != null and r.first < s.positions[r.file]) return error.RangeUnsupported;
     var last: anyerror = error.ReadFailed;
     var wait_ms: u64 = 250;
     for (0..attempts) |_| {
@@ -191,14 +191,8 @@ fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u
         if (s.auth.bearer == null) {
             try file.writePositionalAll(s.io, buf, r.first);
         } else {
-            const body = &s.bodies[r.file];
-            const held = body.buffered();
-            const safe = try body.feed(std.heap.page_allocator, buf);
-            if (safe.len > 0) {
-                try file.writePositionalAll(s.io, safe, r.first - @as(u64, @intCast(held)));
-                body.commit(safe.len);
-            }
-            s.positions[r.file] = r.end;
+            try bridge(s, file, r.file, r.first);
+            try advance(s, file, r.file, buf);
         }
         _ = s.bytes.fetchAdd(buf.len, .monotonic);
         return;
@@ -206,16 +200,68 @@ fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u
     return last;
 }
 
+/// Feeds the file's next `bytes` (at its stream position) through its scanner and writes the prefix proven safe.
+fn advance(s: *Shared, file: std.Io.File, index: u32, bytes: []const u8) !void {
+    const body = &s.bodies[index];
+    const held = body.buffered();
+    const safe = try body.feed(std.heap.page_allocator, bytes);
+    if (safe.len > 0) {
+        try file.writePositionalAll(s.io, safe, s.positions[index] - @as(u64, @intCast(held)));
+        body.commit(safe.len);
+    }
+    s.positions[index] += bytes.len;
+}
+
+/// Whether no raw or percent-encoded credential can contain `byte`: not the secret's own, `%` or a hex digit.
+fn breaks(secret: []const u8, byte: u8) bool {
+    return byte != '%' and !std.ascii.isHex(byte) and std.mem.indexOfScalar(u8, secret, byte) == null;
+}
+
+/// Carries the stream over on-disk bytes (checked clean, or holes) to `to`, from the last byte no match can contain.
+fn bridge(s: *Shared, file: std.Io.File, index: u32, to: u64) !void {
+    var buf: [64 << 10]u8 = undefined;
+    while (s.positions[index] < to and s.bodies[index].buffered() > 0) try preserved(s, file, index, &buf, to);
+    if (s.positions[index] >= to) return;
+    const bearer = s.auth.bearer.?;
+    const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+    var end = to;
+    while (end > s.positions[index]) {
+        const n: usize = @intCast(@min(buf.len, end - s.positions[index]));
+        const from = end - n;
+        if (try file.readPositionalAll(s.io, buf[0..n], from) != n) return error.ShortRange;
+        var k = n;
+        while (k > 0) {
+            k -= 1;
+            if (breaks(secret, buf[k])) {
+                s.positions[index] = from + k; // nothing held: skipped clean bytes start no match
+                end = 0;
+                break;
+            }
+        }
+        if (end != 0) end = from;
+    }
+    while (s.positions[index] < to) try preserved(s, file, index, &buf, to);
+}
+
+/// The next on-disk bytes before `to`, fed through the scanner and written back unchanged where safe.
+fn preserved(s: *Shared, file: std.Io.File, index: u32, buf: []u8, to: u64) !void {
+    const n: usize = @intCast(@min(buf.len, to - s.positions[index]));
+    if (try file.readPositionalAll(s.io, buf[0..n], s.positions[index]) != n) return error.ShortRange;
+    try advance(s, file, index, buf[0..n]);
+}
+
+/// Each file's held tail: settled over the bytes after its last run, or at its real end.
 fn finish(s: *Shared) !void {
     if (s.auth.bearer == null) return;
-    for (s.targets, s.positions, s.bodies) |target, position, *body| {
-        if (position != target.size) return error.ShortRange;
+    for (s.targets, s.bodies, 0..) |target, *body, i| {
+        if (body.buffered() == 0) continue;
+        const index: u32 = @intCast(i);
+        const file = try std.Io.Dir.cwd().openFile(s.io, target.path, .{ .mode = .read_write });
+        defer file.close(s.io);
+        var buf: [64 << 10]u8 = undefined;
+        while (s.positions[index] < target.size and body.buffered() > 0) try preserved(s, file, index, &buf, target.size);
         const tail = try body.finish(std.heap.page_allocator);
-        if (tail.len > 0) {
-            const file = try std.Io.Dir.cwd().openFile(s.io, target.path, .{ .mode = .read_write });
-            defer file.close(s.io);
-            try file.writePositionalAll(s.io, tail, target.size - @as(u64, @intCast(tail.len)));
-        }
+        if (tail.len > 0) try file.writePositionalAll(s.io, tail, target.size - @as(u64, @intCast(tail.len)));
     }
 }
 

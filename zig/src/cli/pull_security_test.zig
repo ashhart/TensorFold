@@ -270,3 +270,95 @@ test "security: artifact containment spans every byte split without refusing ben
         try std.testing.expectEqualSlices(u8, benign, written.items);
     }
 }
+
+const sparse_bearer = "Bearer fixture-sparse-token";
+
+/// An authenticated EXLR8 pull of `ranges` from a 256-byte release, over `existing` bytes already on disk if any.
+fn sparsePull(a: Allocator, io: std.Io, root: []const u8, weights: []const u8, ranges: []const [2]u64, existing: ?[]const u8, path: *[]const u8) !void {
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    fake.weights = weights;
+    path.* = try std.fs.path.join(a, &.{ root, "width.exlr8" });
+    if (existing) |bytes| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path.*, .data = bytes }) else std.Io.Dir.cwd().deleteFile(io, path.*) catch {};
+    const target = runs.Target{ .url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake.endpoint(a), FakeHub.weights_path }), .path = path.*, .size = weights.len };
+    const list = try a.alloc(runs.Run, ranges.len);
+    for (list, ranges) |*r, range| r.* = .{ .file = 0, .first = range[0], .end = range[1], .units = .{ 0, 0 } };
+    const Accept = struct {
+        fn all(_: *const anyopaque, _: runs.Run, _: []const u8) bool {
+            return true;
+        }
+    };
+    const context: u8 = 0;
+    const auth = @import("pull_auth.zig").Auth{ .bearer = sparse_bearer };
+    return runs.fetch(a, io, &.{target}, list, .{ .ctx = &context, .run = Accept.all }, auth, null);
+}
+
+/// A 256-byte release of binary bytes, with `text` placed at `at` when given.
+fn release(a: Allocator, text: []const u8, at: usize) ![]u8 {
+    const bytes = try a.alloc(u8, 256);
+    for (bytes, 0..) |*b, i| b.* = @intCast((i * 151 + 7) % 256);
+    @memcpy(bytes[at..][0..text.len], text);
+    return bytes;
+}
+
+test "security: an authenticated EXLR8 node pulls its sparse runs and trailing holes as main does" {
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = client_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const weights = try release(a, "", 0);
+    for ([_][]const [2]u64{ &.{ .{ 0, 16 }, .{ 64, 80 } }, &.{.{ 16, 32 }}, &.{ .{ 8, 40 }, .{ 200, 256 } } }) |ranges| {
+        var path: []const u8 = undefined;
+        try sparsePull(a, io, root, weights, ranges, null, &path);
+        const got = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+        try std.testing.expectEqual(weights.len, got.len);
+        var next: usize = 0;
+        for (ranges) |r| { // each run is the release's bytes, every hole is left untouched
+            for (got[next..@intCast(r[0])]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+            try std.testing.expectEqualSlices(u8, weights[@intCast(r[0])..@intCast(r[1])], got[@intCast(r[0])..@intCast(r[1])]);
+            next = @intCast(r[1]);
+        }
+        for (got[next..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+        // a second pull over the same file reuses it and leaves the same bytes
+        var again: []const u8 = undefined;
+        try sparsePull(a, io, root, weights, ranges, got, &again);
+        try std.testing.expectEqualSlices(u8, got, try std.Io.Dir.cwd().readFileAlloc(io, again, a, .limited(1 << 20)));
+    }
+}
+
+test "security: a key completed across a sparse run's edge with bytes on disk is refused before it is written" {
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = client_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const secret = sparse_bearer["Bearer ".len..];
+    var path: []const u8 = undefined;
+    // inside a run, at a gap and at the release's end
+    try std.testing.expectError(error.HubCredentialBody, sparsePull(a, io, root, try release(a, secret, 70), &.{ .{ 0, 16 }, .{ 64, 96 } }, null, &path));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+    // the key's head already on disk before a run, its rest brought by the run
+    var disk: [256]u8 = @splat(0);
+    @memcpy(disk[40..48], secret[0..8]);
+    const head = try release(a, secret[8..], 48);
+    try std.testing.expectError(error.HubCredentialBody, sparsePull(a, io, root, head, &.{.{ 48, 64 }}, &disk, &path));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+    // a run's last bytes begin the key and the bytes after it on disk end it
+    var after: [256]u8 = @splat(0);
+    @memcpy(after[16..][0 .. secret.len - 8], secret[8..]);
+    const tail = try release(a, secret[0..8], 8);
+    try std.testing.expectError(error.HubCredentialBody, sparsePull(a, io, root, tail, &.{.{ 0, 16 }}, &after, &path));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+}
