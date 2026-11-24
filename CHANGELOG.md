@@ -142,9 +142,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on Metal: `TF_FN_GX_GATEUP_MB2=1` (opt-in) decodes each expert's gate/up weights once for two rows; about 2% faster at 4 code streams on an M5 Ultra, tokens unchanged (refs #1486).
 
-- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
+- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
 
-- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers, the part plan); nothing calls it yet (#3563).
+- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers that refuse a row their format cannot hold exactly, the part plan); nothing calls it yet (#3563).
 
 - Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
