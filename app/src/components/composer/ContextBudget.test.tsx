@@ -7,6 +7,7 @@ const budget = composerBudget({ text: 'x'.repeat(1000), attachments: [{ id: 'ima
 const render = () => hooks.render(() => ContextBudget({ budget }))
 let result = render()
 assert.ok(text(result).includes('Partial'))
+assert.equal(find(result, node => node.type === 'button').props['aria-label'], undefined, 'visible estimate supplies the button name')
 assert.equal(find(result, node => node.type === 'section'), undefined)
 find(result, node => node.type === 'button').props.onClick()
 result = render()
