@@ -59,3 +59,34 @@ test "Inkling 2 reply: plain auto and JSON-schema token ids stay exact through b
         };
     }
 }
+
+test "Inkling 2 reply: non-Inkling required tools keep all token ids and the shared compiler" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = try std.mem.concat(a, u32, &.{ try h.encodeReply(a, call_x ++ "<|end_message|>" ++ call_x), &.{2} });
+    const want = try std.json.Stringify.valueAlloc(a, reply, .{});
+    const plain = try h.ask(a, "not_inkling2", &.{2}, "", false, 1);
+    for ([_]bool{ false, true }) |lane| for ([_]usize{ 0, 1, 2, 3, 256 }) |stride| {
+        const got = if (lane) try h.askLane(a, "not_inkling2", reply, required, stride > 0, @max(stride, 1)) else try h.ask(a, "not_inkling2", reply, required, stride > 0, @max(stride, 1));
+        try t.expectEqualStrings(want, got.token_ids);
+        try t.expectEqualStrings("lookuplookup", got.names);
+        try t.expectEqual(plain.eos_len, got.eos_len);
+        try t.expectEqual(@as(usize, 1), got.grammars);
+        try t.expectEqual(@as(usize, 0), got.tool_grammars);
+    };
+}
+
+test "Inkling 2 reply: complete-call stop requires a surviving required-tool grammar" {
+    const callEnd = @import("chat_inkling2.zig").callEnd;
+    const api = @import("engine_api");
+    var srv: struct { text: struct { native_inkling2: bool } } = .{ .text = .{ .native_inkling2 = true } };
+    const tool: api.Structure = .{ .kind = .structural_tag, .field = "tool_choice" };
+    try t.expect(callEnd(&srv, true, tool));
+    try t.expect(!callEnd(&srv, false, tool));
+    try t.expect(!callEnd(&srv, true, null));
+    try t.expect(!callEnd(&srv, true, .{ .kind = .json_schema, .field = "response_format" }));
+    try t.expect(!callEnd(&srv, true, .{ .kind = .structural_tag, .field = "guided_structural_tag" }));
+    srv.text.native_inkling2 = false;
+    try t.expect(!callEnd(&srv, true, tool));
+}

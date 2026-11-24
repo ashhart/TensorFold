@@ -111,7 +111,7 @@ test "Inkling 2 reply: a required call grammar takes the end of message, and onl
     const a = arena.allocator();
     const reply = try h.encodeReply(a, "<|end_message|>" ++ call_x ++ "<|end_message|>" ++ call_x);
     const got = try h.probeIds(a, "release", reply, required);
-    try t.expectEqual(try plainEnds(a) + 1, got.eos_len);
+    try t.expectEqual(try plainEnds(a), got.eos_len);
     try t.expectEqualStrings("lookup", got.names);
     try t.expectEqualStrings("{\"q\":\"x\"}", got.arguments);
     try t.expectEqualStrings("tool_calls", got.finish);
