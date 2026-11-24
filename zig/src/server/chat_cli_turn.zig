@@ -78,16 +78,37 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
     return json.stringify(a, .{ .object = o }, .{});
 }
 
+fn containsRequest(a: Allocator, request: []const u8, forms: []const []const u8) Allocator.Error!bool {
+    if (try credential.contains(a, request, forms)) return true;
+    return switch (try json.parse(a, request)) {
+        .ok => |value| try containsJsonValue(a, value, forms),
+        .err => false, // Non-JSON direct callers retain the exact serialized-byte check above.
+    };
+}
+
+fn containsJsonValue(a: Allocator, value: json.Value, forms: []const []const u8) Allocator.Error!bool {
+    switch (value) {
+        .string => |text| return credential.contains(a, text, forms),
+        .array => |items| for (items) |item| if (try containsJsonValue(a, item, forms)) return true,
+        .object => |object| for (object.keys(), object.values()) |key, item| {
+            if (try credential.contains(a, key, forms)) return true;
+            if (try containsJsonValue(a, item, forms)) return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
 /// The exact serialized request, or null when credential containment suppresses it; null must never be POSTed.
 pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []const u8, credentials: Credentials) !?[]u8 {
     const request = try body(a, s, history, user);
-    if (try credential.contains(a, request, credentials.forms)) return null;
+    if (try containsRequest(a, request, credentials.forms)) return null;
     return request;
 }
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
 pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
-    if ((try credential.contains(a, url, credentials.forms)) or (try credential.contains(a, request, credentials.forms)))
+    if ((try credential.contains(a, url, credentials.forms)) or (try containsRequest(a, request, credentials.forms)))
         return .{ .failed = .{ .reason = credential.withheld } };
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
@@ -306,25 +327,26 @@ test "chat CLI: final request containment catches JSON escape synthesis in model
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const cases = [_]struct { secret: []const u8, decoded: []const u8 }{
-        .{ .secret = "\\u00e9", .decoded = "\u{e9}" },
-        .{ .secret = "\\n", .decoded = "\n" },
-        .{ .secret = "\\\"", .decoded = "\"" },
-        .{ .secret = "\\\\", .decoded = "\\" },
+    const cases = [_]struct { secret: []const u8, decoded: []const u8, escaped: []const u8 }{
+        .{ .secret = "\\u00e9", .decoded = "\u{e9}", .escaped = "\\u00e9" },
+        .{ .secret = "\\n", .decoded = "\n", .escaped = "\\n" },
+        .{ .secret = "\\\"", .decoded = "\"", .escaped = "\\\"" },
+        .{ .secret = "\\\\", .decoded = "\\", .escaped = "\\\\" },
+        .{ .secret = "\u{e9}abc", .decoded = "\u{e9}abc", .escaped = "\\u00e9abc" },
     };
     for (cases) |case| {
         const secrets = [_][]const u8{case.secret};
         const credentials: Credentials = .{ .forms = &secrets };
         var retained: History = .{ .a = a };
         try retained.keep("question", case.decoded);
-        try std.testing.expect(std.mem.indexOf(u8, case.decoded, case.secret) == null);
+        if (!std.mem.eql(u8, case.secret, case.decoded)) try std.testing.expect(std.mem.indexOf(u8, case.decoded, case.secret) == null);
         const from_history = try body(a, .{ .model = "m" }, &retained, "next");
-        try std.testing.expect(std.mem.indexOf(u8, from_history, case.secret) != null);
+        try std.testing.expect(std.mem.indexOf(u8, from_history, case.escaped) != null);
         try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &retained, "next", credentials)) == null);
 
         var empty: History = .{ .a = a };
         const from_model = try body(a, .{ .model = case.decoded }, &empty, "next");
-        try std.testing.expect(std.mem.indexOf(u8, from_model, case.secret) != null);
+        try std.testing.expect(std.mem.indexOf(u8, from_model, case.escaped) != null);
         try std.testing.expect((try checkedBody(a, .{ .model = case.decoded }, &empty, "next", credentials)) == null);
     }
 }
@@ -351,11 +373,11 @@ test "chat CLI: final request containment preserves an ordinary serialized body 
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const forms = [_][]const u8{ "\\u00e9", "\\n", "\\\"", "\\\\" };
+    const forms = [_][]const u8{ "\\u00e9", "\\n", "\\\"", "\\\\", "abcdefghi" };
     var h: History = .{ .a = a };
     try h.keep("one", "1");
-    const expected = try body(a, .{ .model = "m" }, &h, "two");
-    const checked = (try checkedBody(a, .{ .model = "m" }, &h, "two", .{ .forms = &forms })) orelse return error.TestUnexpectedResult;
+    const expected = try body(a, .{ .model = "m" }, &h, "abc% safe");
+    const checked = (try checkedBody(a, .{ .model = "m" }, &h, "abc% safe", .{ .forms = &forms })) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(expected, checked);
 }
 

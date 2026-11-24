@@ -238,7 +238,6 @@ test "chat CLI: KR69 source prefixes stay out of terminal and history across SSE
         .{ .held = "abcd", .continuation = "X" },
         .{ .held = "abc%64", .continuation = "X" },
         .{ .held = "abc%2564", .continuation = "X" },
-        .{ .held = "abc%6", .continuation = "X" },
     };
     for (cases) |case| {
         var seen: Seen = .{ .a = a };
@@ -253,6 +252,23 @@ test "chat CLI: KR69 source prefixes stay out of terminal and history across SSE
         try std.testing.expectEqualStrings("X", r.content.items);
         try std.testing.expect(r.complete());
     }
+}
+
+test "chat CLI: an invalidated percent escape releases its complete safe text across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+    try r.feed(try contentDelta(a, "abc%6"));
+    try std.testing.expectEqualStrings("", seen.text.items);
+    try std.testing.expectEqualStrings("", r.content.items);
+    try r.feed(try contentDelta(a, "X"));
+    try r.feed(finishing_events);
+    try r.end();
+    try std.testing.expectEqualStrings("<c>abc%6X", seen.text.items);
+    try std.testing.expectEqualStrings("abc%6X", r.content.items);
+    try std.testing.expect(r.complete());
 }
 
 test "chat CLI: KR69 transformed prefixes stay out of terminal and history across SSE events" {

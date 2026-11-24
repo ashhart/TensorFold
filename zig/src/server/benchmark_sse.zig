@@ -445,7 +445,7 @@ test "chat CLI: KR69 streaming suppresses disambiguated raw and nested credentia
         .{ .input = "abcdX", .expected = "X" },
         .{ .input = "abc%64X", .expected = "X" },
         .{ .input = "abc%2564X", .expected = "X" },
-        .{ .input = "abc%6X", .expected = "X" },
+        .{ .input = "abc%6X", .expected = "abc%6X" },
         .{ .input = "pre abcdX post", .expected = "pre X post" },
     };
     for (cases) |case| {
@@ -469,7 +469,7 @@ test "chat CLI: KR69 whole raw, nested and mid-escape credential prefixes are su
     defer arena.deinit();
     const a = arena.allocator();
     const secrets = [_][]const u8{"abcde"};
-    for ([_][]const u8{ "abcd", "pre abcdX post", "abc%64", "abc%2564X", "abc%6X" }) |text| {
+    for ([_][]const u8{ "abcd", "pre abcdX post", "abc%64", "abc%2564X" }) |text| {
         try std.testing.expectEqualStrings(credential.withheld, try suppress(a, text, &secrets));
         try std.testing.expect((try redactContained(a, text, &secrets)) == null);
         try std.testing.expect((try cleanContained(a, text, &secrets, 2000)) == null);
@@ -498,6 +498,17 @@ test "chat CLI: KR71 raw and decoded prefixes fail closed at every terminal boun
         try std.testing.expectEqualStrings("", streamed.rest);
         const checked = try containedPiece(a, case.input, &secrets);
         try std.testing.expectEqualStrings(case.expected, checked.emit.?);
+        try std.testing.expectEqualStrings("", checked.rest);
+    }
+    for ([_][]const u8{ "abc% safe", "abc%6X" }) |input| {
+        try std.testing.expectEqualStrings(input, try suppress(a, input, &secrets));
+        try std.testing.expectEqualStrings(input, (try redactContained(a, input, &secrets)).?);
+        try std.testing.expectEqualStrings(input, (try cleanContained(a, input, &secrets, 2000)).?);
+        const streamed = try redactPiece(a, input, &secrets);
+        try std.testing.expectEqualStrings(input, streamed.text);
+        try std.testing.expectEqualStrings("", streamed.rest);
+        const checked = try containedPiece(a, input, &secrets);
+        try std.testing.expectEqualStrings(input, checked.emit.?);
         try std.testing.expectEqualStrings("", checked.rest);
     }
     try std.testing.expectEqualStrings("abcX", try suppress(a, "abcX", &secrets));
