@@ -14,6 +14,7 @@ pub const Mock = struct {
     gpa: std.mem.Allocator,
     arch: ArchSpec,
     snaps_alive: usize = 0,
+    composed: ?*std.ArrayList(u8) = null, // when set, each composed state's bytes are appended here
 
     pub const spec = ArchSpec{
         .family = .qwen3_5,
@@ -75,6 +76,12 @@ pub const Mock = struct {
 
     fn buildSnap(ctx: *anyopaque, composed: *const RawState, suffix_ids: []const u32) !SnapHandle {
         const self: *Mock = @ptrCast(@alignCast(ctx));
+        if (self.composed) |out| {
+            for (composed.kv_k) |k| try out.appendSlice(self.gpa, std.mem.sliceAsBytes(k));
+            for (composed.kv_v) |v| try out.appendSlice(self.gpa, std.mem.sliceAsBytes(v));
+            for (composed.rec_state) |r| try out.appendSlice(self.gpa, std.mem.sliceAsBytes(r));
+            for (composed.rec_conv) |c| try out.appendSlice(self.gpa, std.mem.sliceAsBytes(c));
+        }
         const s = try self.gpa.create(u32);
         s.* = composed.len + @as(u32, @intCast(suffix_ids.len));
         self.snaps_alive += 1;
