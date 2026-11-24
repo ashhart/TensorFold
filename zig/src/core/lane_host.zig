@@ -86,6 +86,7 @@ pub const LaneHost = struct {
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // OS memory pressure (lane_host_pressure.zig); null: off
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
+    weight_release: ?@import("lane_activity.zig").WeightRelease = null, // submission restores and true idle releases; null: off
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
@@ -217,6 +218,7 @@ pub const LaneHost = struct {
             h.gpa.destroy(job);
             return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
+        try @import("lane_activity.zig").restore(h, job);
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
         while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
@@ -558,8 +560,7 @@ pub const LaneHost = struct {
                     learn.step(h);
                     continue;
                 }
-                activity.end();
-                if (rows_host.idle(h)) continue;
+                if (@import("lane_activity.zig").idleRows(h, &activity)) continue;
                 if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
