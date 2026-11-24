@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: `GLM_POOL_TOKENS` sizes the shared latent pool apart from each stream's `--context` window, so one Mac's streams can share a 2M-token pool with zero output-token differences (#3906). Thanks to @gilby.
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_ROUND_PROF=1` times every decode round (host prepare, encode, wait and choose, each command buffer's GPU span and the gaps between them, and the drafter's ingest, propose and finish) and logs mean, p50 and p95 by slots, rows and drafted or plain every 4096 rounds and at close; it is off by default and changes no token (#2951, refs #2984). Thanks to @gilby.
 
 
