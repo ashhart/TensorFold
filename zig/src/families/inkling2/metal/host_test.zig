@@ -2,6 +2,7 @@
 
 test {
     _ = @import("attention_test.zig");
+    _ = @import("dense_tail_test.zig");
     _ = @import("glue_test.zig");
     _ = @import("experts_test.zig");
     _ = @import("loop_test.zig");
