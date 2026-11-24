@@ -510,7 +510,7 @@ test {
 }
 
 test "Metal CSA2 prompt accepts complete pairs of checkpoint heads" {
-    const shape = @import("metal/attn_shape.zig");
+    const shape = @import("attn_shape.zig");
     const release = try Config.parseMetadata(std.testing.allocator, @embedFile("fixtures/flash1017-config.json"));
     try shape.check(release.heads);
     try shape.check(tiny().heads);

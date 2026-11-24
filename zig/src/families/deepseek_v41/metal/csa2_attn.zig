@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
-const shape = @import("attn_shape.zig");
+const shape = @import("dsv41").attn_shape; // one module owns it: the host checks heads, this encoder launches
 
 pub const head_dim = 512;
 pub const window = 128;
