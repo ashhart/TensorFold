@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lanes: window-cost tables are measured in interleaved sweeps and saved tables are repaired at startup inside a fixed time budget; a table with no valid timing is refused. Tokens unchanged (#4755).
+
 - Drama 3 on CUDA: semantic guidance (`--cfg-gamma` and the other guidance flags) now works, as it does on Metal (#4153). Thanks @plotarmordev.
 
 - Tools: `tools/exact_restarts.py` checks the exact path end to end, comparing token ids across fresh restarts, `--parallel` levels, busy versus alone requests, and drafting on versus off (#4574).
