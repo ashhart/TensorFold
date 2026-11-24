@@ -94,7 +94,7 @@ test "a prose round's seventh level is priced on decoding's windows, not on the 
     var ms: [17]f64 = @splat(0);
     var levels: Levels = .{};
     try rule.measureWidths(Gpu{}, &levels, ms[1..], false);
-    try rule.smooth(Gpu{}, ms[1..]);
+    try rule.smoothSerial(Gpu{}, ms[1..]);
     var r = @import("cuda_drafts.zig").depthRule(core.draft_depth.Costs.measured(&ms, 0.7108, 16));
     for ([_][3]usize{ .{ 2, 3, 3 }, .{ 4, 11, 10 }, .{ 2, 2, 2 }, .{ 4, 4, 3 } }) |x| r.done(x[0], x[1], x[2]); // rounds 0-3
     var run: f64 = 1.0;

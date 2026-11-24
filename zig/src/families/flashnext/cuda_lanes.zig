@@ -571,6 +571,7 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snaps.restore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
+            _ = @import("cuda_lanes_vision_test.zig").Cases(@This());
         }
 
         test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {

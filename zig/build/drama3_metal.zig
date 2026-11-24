@@ -40,6 +40,8 @@ pub fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
         const cc = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal", b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=precise" });
         cc.addPrefixedDirectoryArg("-I", b.path(dir));
         cc.addFileInput(b.path(dir ++ "/d3_common.h"));
+        // codec.metal includes the shared u32 copy macros; a change there must rebuild its .air.
+        if (std.mem.eql(u8, name, "codec.metal")) cc.addFileInput(b.path("zig/kernels/metal/core/copy_u32.metal"));
         cc.addArg("-c");
         cc.addFileArg(b.path(b.fmt("{s}/{s}", .{ dir, name })));
         cc.addArg("-o");

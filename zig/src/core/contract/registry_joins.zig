@@ -97,6 +97,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("moss_image_records.zig").records ++
     @import("idol_dino_records.zig").records ++
     @import("idol_records.zig").records ++
+    @import("h3_image_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++
     @import("minimax_records.zig").records ++
     @import("ling_route_records.zig").records ++

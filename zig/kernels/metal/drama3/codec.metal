@@ -1,5 +1,6 @@
 // Drama 3's codec (Fish S2 modded DAC) in fp32: the GEMM and the glue between them, time-major [rows, channels].
 #include "d3_common.h"
+#include "../core/copy_u32.metal"
 
 struct GemmArgs {
   uint rows, o, cin, ldx, ldy;
@@ -330,7 +331,4 @@ inline float erfc_pos(float z) {
 }
 
 // Move n 4-byte words (carried rows of a staging buffer, through a scratch copy when they overlap).
-[[max_total_threads_per_threadgroup(256)]] kernel void c_copy(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]], constant uint& n [[buffer(2)]],
-                   uint i [[thread_position_in_grid]]) {
-  if (i < n) dst[i] = src[i];
-}
+[[max_total_threads_per_threadgroup(256)]] TF_COPY_U32_N(c_copy)

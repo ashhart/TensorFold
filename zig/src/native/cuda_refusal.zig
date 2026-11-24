@@ -42,9 +42,9 @@ pub fn backend(o: api.Open) ?[]const u8 {
     return null;
 }
 
-/// LFM2 reads a checkpoint's pictures through its own tower without --vision: the flag is refused, not ignored.
+/// LFM2 opens outside `family()`: its ranks are refused here, and --vision goes on to core's gate in its open.
 pub fn lfm2(o: api.Open) ?[]const u8 {
-    return if (o.vision != null) lfm2_vision else unranked(o);
+    return unranked(o);
 }
 
 pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp and --rank";
@@ -53,9 +53,6 @@ pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve witho
 pub fn unranked(o: api.Open) ?[]const u8 {
     return if (o.tp != 1 or (o.given.rank and o.rank != 0)) no_ranks else null;
 }
-
-const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
-    "serve it without --vision";
 
 /// A given --rank below the world, as main's CLI refused it, and a world in the family's `worlds` when it lists them.
 pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
@@ -225,12 +222,15 @@ test "flags with nothing to do on CUDA are refused, not ignored" {
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .prompt_cache_gib = 4 }) == null);
 }
 
-test "--vision is each family's to take: Super VL reads images, LFM2 refuses the flag, the rest refuse at their open" {
+test "--vision is each family's to take: LFM2 passes it on to core's gate at its open, its ranks are still refused" {
     for ([_][]const u8{ "nemotron_h", "nemotron_h_omni", "glm5_next", "lfm2_vl" }) |t| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .vision = .{} }) == null);
     }
-    try std.testing.expectEqualStrings(lfm2_vision, lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{} }) orelse "");
+    try std.testing.expect(lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{} }) == null);
     try std.testing.expect(lfm2(.{ .dir = "d", .model_type = "lfm2_vl" }) == null);
+    try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{}, .tp = 2 }).?);
+    const one: api.Open = .{ .dir = "d", .model_type = "lfm2_vl", .vision = .{}, .rank = 1, .given = .{ .rank = true } };
+    try std.testing.expectEqualStrings(no_ranks, lfm2(one).?);
 }
 
 test "--drafter opens only a family that takes one" {

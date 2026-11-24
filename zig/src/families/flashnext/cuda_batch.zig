@@ -325,7 +325,8 @@ pub fn Pass(comptime Tri: type) type {
             a.add(gv);
             a.add(ggb);
             a.add(state);
-            if (rows >= 64) {
+            const form = gdn.chainForm(rows, state_out, self.k.forms.gdn_chain_tpr);
+            if (form == .chain_tpr) {
                 // two threads a state row (fn_gdn_chain_tpr), fn_gdn_rows' bits; in place without a rollback copy
                 a.add(if (state_out != 0) state_out else state);
                 a.add(cint(rows));
@@ -335,7 +336,7 @@ pub fn Pass(comptime Tri: type) type {
             if (state_out != 0) a.add(state_out);
             a.add(cint(rows));
             a.add(ys);
-            try cuda.launch.launch(if (state_out != 0) g.chain_to else g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
+            try cuda.launch.launch(if (form == .chain_to) g.chain_to else g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
         }
 
         pub fn attnBlock(self: *Self, lw: *const Layer, ai: usize) !void {
