@@ -103,9 +103,14 @@ const Scratch = struct {
 const Slot = struct { cache: cuda.DeviceBuffer, sites: cuda.DeviceBuffer, backup: cuda.DeviceBuffer, hist: cuda.DeviceBuffer };
 pub const max_slots = 16;
 
-/// The bytes a slot's allocations ask for: the cache layout and four rewind sites a visit.
-pub fn slotAllocs(layout: *const loop.CacheLayout, n_visits: u32) [2]usize {
-    return .{ @intCast(layout.bytes), @as(usize, n_visits) * 4 * @sizeOf(ops.RewindSite) };
+/// A slot's allocation sizes: its cache layout, four rewind sites a visit, its window's backup and history.
+pub fn slotAllocs(layout: *const loop.CacheLayout, w: *const weights_.Weights) [4]usize {
+    const c = w.c.text;
+    const kv: usize = @as(usize, c.local.kv) * c.local.dim;
+    const visits: usize = w.p.n_visits;
+    const cache: usize = @intCast(layout.bytes);
+    const backup: usize = @intCast(layout.bytes - layout.at(0).conv_offset);
+    return .{ cache, visits * 4 * @sizeOf(ops.RewindSite), backup, visits * (2 * kv + 2 * c.hidden) * window_rows * 4 };
 }
 
 pub const Model = struct {
@@ -149,16 +154,17 @@ pub const Model = struct {
         }
     }
 
-    /// A slot's allocations: its cache and its rewind-site table (slotAllocs), its window's backup and history.
+    /// A slot's four allocations, sized by slotAllocs: its cache, rewind-site table, window backup and history.
     pub fn newSlot(m: *const Model) !Slot {
-        const sizes = slotAllocs(&m.layout, m.w.p.n_visits);
+        const sizes = slotAllocs(&m.layout, m.w);
         var cache = try cuda.DeviceBuffer.alloc(m.d, sizes[0]);
         errdefer cache.free();
         var sites = try cuda.DeviceBuffer.alloc(m.d, sizes[1]);
         errdefer sites.free();
-        var backup = try cuda.DeviceBuffer.alloc(m.d, m.layout.bytes - m.layout.at(0).conv_offset);
+        var backup = try cuda.DeviceBuffer.alloc(m.d, sizes[2]);
         errdefer backup.free();
-        return .{ .cache = cache, .sites = sites, .backup = backup, .hist = try cuda.DeviceBuffer.alloc(m.d, m.histBytes()) };
+        const hist = try cuda.DeviceBuffer.alloc(m.d, sizes[3]);
+        return .{ .cache = cache, .sites = sites, .backup = backup, .hist = hist };
     }
 
     fn alloc(m: *Model, bytes: usize) !u64 {
@@ -204,9 +210,7 @@ pub const Model = struct {
     }
 
     fn histBytes(m: *const Model) usize {
-        const c = m.w.c.text;
-        const kv: usize = @as(usize, c.local.kv) * c.local.dim;
-        return @as(usize, m.w.p.n_visits) * (2 * kv + 2 * c.hidden) * window_rows * 4;
+        return slotAllocs(&m.layout, m.w)[3];
     }
 
     pub fn histOf(m: *const Model, visit: u32, site: usize) u64 {

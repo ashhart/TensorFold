@@ -178,7 +178,7 @@ test "the complete prompt snapshot hooks match the store vtable" {
     try std.testing.expect(@intFromPtr(pc.save) != 0);
 }
 
-test "stream_bytes is what an extra stream's slot and lane buffers allocate, 806,408 bytes past the cache on Mini" {
+test "stream_bytes is what an extra stream's slot and lane buffers allocate on Mini" {
     const Record = struct { // a DeviceBuffer hook that hands out addresses and sums what is asked
         bytes: usize = 0,
         next: u64 = 1 << 32,
@@ -212,11 +212,16 @@ test "stream_bytes is what an extra stream's slot and lane buffers allocate, 806
     cuda.memory.setHook(.{ .ctx = &rec, .alloc = Record.alloc, .free = Record.free });
     defer cuda.memory.setHook(before);
     var slot = try m.newSlot();
-    defer for ([2]*cuda.DeviceBuffer{ &slot.cache, &slot.sites }) |x| x.free();
+    defer for ([4]*cuda.DeviceBuffer{ &slot.cache, &slot.sites, &slot.backup, &slot.hist }) |x| x.free();
     try b.slotBuffers(2); // the second stream's lane buffers; the first already holds its own
     defer for (&b.slot[1]) |*x| x.free();
     try std.testing.expectEqual(@as(u64, rec.bytes), backend.streamBytes(&m));
-    try std.testing.expectEqual(@as(u64, 48 * 4 * 32 + 200_058 * 4 + 32), backend.streamBytes(&m) - m.layout.bytes);
+    // past the cache: rewind sites, the window's backup (past conv 0) and history, the last-logits row and the rule
+    const kv: u64 = @as(u64, w.c.text.local.kv) * w.c.text.local.dim;
+    const backup: u64 = m.layout.bytes - m.layout.at(0).conv_offset;
+    const hist: u64 = 48 * (2 * kv + 2 * w.c.text.hidden) * engine.window_rows * 4;
+    const past = backend.streamBytes(&m) - m.layout.bytes;
+    try std.testing.expectEqual(48 * 4 * 32 + backup + hist + 200_058 * 4 + 32, past);
 }
 
 test "the forward refuses a token id at the vocabulary before any launch" {
