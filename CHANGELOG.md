@@ -10,11 +10,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
-- Inkling 2 on HIP: attention kernels under the kernel contract (#N).
+- Inkling 2 on HIP: attention kernels under the kernel contract (#4633).
 
 - Qwen3.6-35B-A3B on Metal: the text-only checkpoint serves on the routed expert path, `--vision` refuses it by name, and `tf-qwen27-run --stages DIR` writes each layer's stream for a float64 comparison (#3239). Thanks to @cshintov.
 
-- Metal Qwen3.8-27B with MTP drafts: `TF_Q27_MTP_GPU_PICK=1` runs each MTP absorb in one command buffer and picks draft tokens on the GPU, removing two blocking waits per absorb and the CPU pass over the vocabulary; off by default (#N).
+- Metal Qwen3.8-27B with MTP drafts: `TF_Q27_MTP_GPU_PICK=1` runs each MTP absorb in one command buffer and picks draft tokens on the GPU, removing two blocking waits per absorb and the CPU pass over the vocabulary; off by default (#4570).
 
 - Idol: octree and decode-trace allocation failures now unwind cleanly and free what they hold, with successful output unchanged (#4304).
 
@@ -28,11 +28,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: the app typecheck passes again after two engine types were restored (#4829).
 
-- GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
+- GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#4694).
 
-- Ling-3.0-tiny on ARM CPUs: an exact decoder for the published 4-bit GGUF, built and launched on aarch64 Linux (#N).
+- Ling-3.0-tiny on ARM CPUs: an exact decoder for the published 4-bit GGUF, built and launched on aarch64 Linux (#4266).
 
-- DFlash2 drafter on CUDA: `TF_DFLASH_QL_SPAN=1` reads only the vocabulary span the drafter uses from an NVFP4 or FP8 target lm_head, and `TF_DFLASH_GRAPH=1` captures the drafter's hold and absorb steps in CUDA graphs; target outputs and accepted tokens are unchanged; both off by default (#N).
+- DFlash2 drafter on CUDA: `TF_DFLASH_QL_SPAN=1` reads only the vocabulary span the drafter uses from an NVFP4 or FP8 target lm_head, and `TF_DFLASH_GRAPH=1` captures the drafter's hold and absorb steps in CUDA graphs; target outputs and accepted tokens are unchanged; both off by default (#4516).
 
 - Flint on Metal: a shared round's sampled rows draw in one launch instead of one serial launch a row, with the same tokens (#4780).
 
@@ -40,13 +40,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - MOSS-Image contract: the reference for `tf_me_conv` now follows fp32 `expf` overflow, so its sums check no longer fails on inputs near -89 (#4794).
 
-- HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#N).
+- HIP decode: multi-row rounds weigh each slot's rows from one read of their values (#4754).
 
-- H3 on Macs: long image renders give way to live speech on the GPU (#N).
+- HIP decode: multi-row rounds score each slot's rows from one read of their keys (#4673). Thanks @AbrahamCete.
 
-- GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#N).
+- H3 on Macs: long image renders give way to live speech on the GPU (#4650).
 
-- Qwen 3.5 on Metal: `TF_QWEN35_CHUNK` sets the prefill chunk size for measurement; the default stays 128 rows (#N).
+- GLM TP=2 decode on CUDA: `TF_GLM_WIDE_EXPERT_TILE=1` runs routed-expert down for decode windows wider than 16 rows with the 64-pair factored tile that matches gate-up, keeping each output's K order; off by default (#4565).
+
+- Qwen 3.5 on Metal: `TF_QWEN35_CHUNK` sets the prefill chunk size for measurement; the default stays 128 rows (#3762).
 
 - CUDA: Ripple-65B-Preview (ricursive) serves on the native engine from the publisher's NVFP4 release as published, with prompt chunks and decode, lane rounds as CUDA graphs, greedy and sampled draws, kept states and the prompt cache; the bf16 release is refused by name, and structured output and forced tool calls are refused until masked sampling lands (#2302, fixes #2300). Thanks to @jrb-ai.
 
@@ -54,25 +56,25 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen on Metal: with `TF_Q27_KV_GROW=<rows>` (a multiple of 16; 0 or unset is off) a serve's K/V slots start at that many rows, grow as their streams do and give the rows back when a stream ends, and drafter tap rings grow the same way; replies are byte-identical with it on or off (#1896). Thanks to @grantoverton.
 
-- LFM3 on Metal: warm turns, so a tool loop whose re-rendered history changes mid-conversation re-prefills only from the first changed token, with outputs identical to a fresh run (#N).
+- LFM3 on Metal: warm turns, so a tool loop whose re-rendered history changes mid-conversation re-prefills only from the first changed token, with outputs identical to a fresh run (#4585).
 
 - GLM, MiniMax and Nemotron on CUDA: each is placed by `--tp`, `--rank`, `--master` and `--master-port`, and `--master` with `--master-port` sets `NCCL_COMM_ID` when it is unset (a different one refuses); `TF_GLM_RANK`/`TF_GLM_WORLD`, `TF_MINIMAX_RANK`/`TF_MINIMAX_WORLD` and `TF_NEMOTRON_RANK`/`TF_NEMOTRON_WORLD` still work as aliases until 1.3.1, with a start-up warning, and a flag and an alias that differ refuse (#2919, part of #2560). Thanks to @laudney.
 
 - Gemma 4 on Metal: a new stream's prompt fills one chunk per call at the same chunk cuts as before, with other streams' decode rounds running between chunks, so a long prompt no longer freezes their replies; a cancel between chunks keeps the last finished chunk, and a drafting stream's drafter takes each chunk's tapped rows as it lands (#3025, fixes #3021).
 
-- Qwen3.5/3.8 on CUDA: `TF_QWEN35_ATTN_ALL_ROWS=1` sends multi-row BF16 decode windows to the existing rows attention kernel at every context length (it already matches the one-row kernel's score and reduction order), removing the dead second launch below 8K; off by default (#N).
+- Qwen3.5/3.8 on CUDA: `TF_QWEN35_ATTN_ALL_ROWS=1` sends multi-row BF16 decode windows to the existing rows attention kernel at every context length (it already matches the one-row kernel's score and reduction order), removing the dead second launch below 8K; off by default (#4496).
 
-- Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#N).
+- Tests: a GB10 check compares Qwen CUDA prompts run in one pass against 512-row capped cuts with a second stream live, byte for byte and over the next 64 greedy tokens (#4586).
 
-- Flash Next on Metal: `TF_FLASHNEXT_BATCH_GDN_WIDE=1` runs 8- and 16-row batch segments on the existing non-replay GDN kernel instead of the recorded pipe; off by default until the M3 and M5 checks (#N).
+- Flash Next on Metal: `TF_FLASHNEXT_BATCH_GDN_WIDE=1` runs 8- and 16-row batch segments on the existing non-replay GDN kernel instead of the recorded pipe; off by default until the M3 and M5 checks (#4489).
 
 - Host status: the lane host's status read copies a snapshot the engine thread publishes, so a monitoring client polling the status no longer holds the lock every decode round takes; a torn read retries and the round waits for no reader (#3200).
 
-- Qwen3.8-27B family on Metal: tied embedding heads are accepted, binding the output projection to the embedding weights; small tied Qwen shapes still wait for their own size qualification (#N).
+- Qwen3.8-27B family on Metal: tied embedding heads are accepted, binding the output projection to the embedding weights; small tied Qwen shapes still wait for their own size qualification (#4519).
 
 - Server: `tensorfold capabilities --json` now lists `TENSORFOLD_PARALLEL` and the other environment variables `serve` honours, so the desktop app's Engine variables page accepts them (#N, fixes #3684).
 
-- Tests: host tests record where capped prompt chunks cut while another stream is live, family by family (#N).
+- Tests: host tests record where capped prompt chunks cut while another stream is live, family by family (#4579).
 
 - Tests: the lone-driver third-prompt test no longer hangs when its poller is descheduled (#4783).
 
@@ -102,13 +104,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: the optimization ledger's cells catch up with PRs that landed since it was last updated (#4580). Thanks @jschmied.
 
-- Unlimited-OCR-2: a cancelled request now stops before image encoding, between images and between decoder prefill chunks instead of running the whole prefill; uncancelled replies are unchanged (#N).
+- Unlimited-OCR-2: a cancelled request now stops before image encoding, between images and between decoder prefill chunks instead of running the whole prefill; uncancelled replies are unchanged (#4528).
 
 - Lane host: under stepped prefill, a waiting stream no longer pins its kept prompt state, so another stream's cache can't be allocated past the budget; an evicted state is looked up again before the first call. Tokens unchanged (#4751).
 
-- Tests: a per-template tool-call conformance test renders tool definitions, round-trips calls and results, keeps multi-call order and rejects malformed calls for every chat template family we ship (#N).
+- Tests: a per-template tool-call conformance test renders tool definitions, round-trips calls and results, keeps multi-call order and rejects malformed calls for every chat template family we ship (#4555).
 
-- Server web fetches: hostname lookup now uses the shared bounded resolver, so a request's deadline holds even when the system lookup is slow, and long answer lists are read while they arrive (#N).
+- Server web fetches: hostname lookup now uses the shared bounded resolver, so a request's deadline holds even when the system lookup is slow, and long answer lists are read while they arrive (#4551).
 
 - Qwen 3.5 and 3.8: one EOS rule for every family reader, and qwen27 now reads `generation_config.json`, so its stop tokens match the served set on the ten configs that declare `<|im_end|>` (#4678). Thanks @devopsfortunato.
 
