@@ -203,8 +203,7 @@ pub const Adapter = struct {
         }
     }
 
-    /// Runs `ids` through `cache` (using full prefill chunks for speed), absorbing every row into
-    /// the optional MTP head using `follow_token` as the next token after the final row.
+    /// Prefills `ids` into `cache`; the optional MTP head absorbs each row, `follow_token` after the last.
     fn runForwardIntoCache(self: *Adapter, cache: *st.Cache, ids: []const u32, follow_token: u32) !void {
         const b = self.metal;
         try self.ensureIdsBuf(ids.len + 1);
