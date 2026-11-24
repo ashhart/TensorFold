@@ -1,8 +1,8 @@
-/// Scalar twins of the Metal engines' cache packers and dequantisers, matching each kernel's float operations.
-/// A packer returns `error.NotExact` rather than a row the format would hold with different values.
+//! Scalar twins of the Metal engines' cache packers and dequantisers, matching each kernel's float operations.
 const std = @import("std");
 const c = @import("codec.zig");
 
+/// A row the target format would hold with other values: the packer writes nothing exact for it.
 pub const Error = error{NotExact};
 
 fn rne(x: f32) f32 {
