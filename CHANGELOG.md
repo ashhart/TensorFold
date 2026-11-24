@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
+
 - Gemma 4 on CUDA (assistant and DFlash drafters) and one more MoE family's CUDA loader: loading now refuses a checkpoint with tensors the engine never binds, each scoped to its own directory or prefix (#4566).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GDN_CHAIN_TPR=1` runs short verify windows (under 64 rows) on the existing two-threads-a-row GDN chain kernel, which keeps the same bits with one shuffle level instead of five; off by default until the GB10 measurements (#4484).
