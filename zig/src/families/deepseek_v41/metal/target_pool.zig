@@ -45,8 +45,20 @@ pub fn place(t: *Target, slot: u32, n: usize) !void {
     const want = @min(t.opt.limit, @as(u64, n) +| (mn orelse t.opt.limit) +| pipelines.max_rows);
     const plan = p.take(slot, want) catch |e| return if (e == error.LaneMemory) error.LaneMemory else error.PastLimit;
     const c = t.env.c;
-    t.pbufs.?.apply(c, plan);
-    for (plan.moves) |m| t.slots[m.seat].kv.bind(c, @as(u64, m.to) * pool_.block, t.slots[m.seat].kv.limit);
+    if (plan.moves.len > 0) {
+        const t0 = mtl.clock.seconds();
+        t.pbufs.?.applyMoves(c, plan.moves);
+        for (plan.moves) |m| t.slots[m.seat].kv.bind(c, @as(u64, m.to) * pool_.block, t.slots[m.seat].kv.limit);
+        const move_ms = (mtl.clock.seconds() - t0) * 1e3;
+        t.pbufs.?.applyZero(c, plan.zero);
+        const total_ms = (mtl.clock.seconds() - t0) * 1e3;
+        var blocks: u64 = 0;
+        for (plan.moves) |m| blocks += m.blocks;
+        const mib = @as(f64, @floatFromInt(blocks * pool_bufs.bytesPerBlock(c))) / (1 << 20);
+        if (!@import("builtin").is_test) std.log.info("dsv41 pool: compacted {d} run(s) ({d} blocks, {d:.1} MiB) in {d:.2} ms ({d:.2} ms with zero)", .{ plan.moves.len, blocks, mib, move_ms, total_ms });
+    } else {
+        t.pbufs.?.apply(c, plan);
+    }
     s.kv.bind(c, @as(u64, plan.run.start) * pool_.block, @intCast(@min(t.opt.limit, pool_.tokensOf(plan.run.blocks))));
     s.high = 0; // the run reads as zeros past what this request writes
 }
