@@ -25,4 +25,5 @@ test {
     _ = loop;
     _ = loop_model;
     _ = loop_math_cuda;
+    _ = @import("shared_kernels_test.zig");
 }
