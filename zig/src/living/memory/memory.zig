@@ -112,7 +112,6 @@ test "memory bank: end-to-end teach, route, compose, safetensors save/reload (ze
         .rec_rows = 16,
         .rec_cols = 16,
         .conv_elems = 12,
-        .svd_rank = 6,
     };
 
     var mock = Mock{ .gpa = gpa, .arch = arch };
@@ -279,8 +278,6 @@ test "memory bank(v6): delta journal replay, temporal belief revision + undo res
             .rec_rows = 16,
             .rec_cols = 16,
             .conv_elems = 12,
-            .svd_rank = 4,
-            .svd_rank_short = 4,
         };
         var mock = Mock{ .gpa = gpa, .arch = arch };
         const backend = Backend{ .ctx = &mock, .arch = arch, .extractHidden = Mock.extractHidden, .compileState = Mock.compileState, .buildSnap = Mock.buildSnap, .dropSnap = Mock.dropSnap };
@@ -368,8 +365,6 @@ test "memory bank(v6): delta journal replay, temporal belief revision + undo res
             .rec_rows = 0,
             .rec_cols = 0,
             .conv_elems = 0,
-            .svd_rank = 0,
-            .svd_rank_short = 0,
         };
         var mock_l = Mock{ .gpa = gpa, .arch = arch_llama };
         const backend_l = Backend{ .ctx = &mock_l, .arch = arch_llama, .extractHidden = Mock.extractHidden, .compileState = Mock.compileState, .buildSnap = Mock.buildSnap, .dropSnap = Mock.dropSnap };
