@@ -29,7 +29,7 @@ pub const explains_open = true;
 /// A request's verify reserve: its pages hold that many rows past its prompt and reply.
 pub const window_rows: u32 = be.max_window;
 
-/// The longest window: Kolibri 1.1 to its 2,184 attended keys (no sparse selection yet), else max_position_embeddings.
+/// The longest window: Kolibri 1.1 to its 2,048 selected keys (no sparse selection yet), else max_position_embeddings.
 pub fn contextCeiling(a: std.mem.Allocator, io: std.Io, dir: []const u8, _: ?f64) !i64 {
     const path = try std.fs.path.join(a, &.{ dir, "config.json" });
     defer a.free(path);
@@ -48,8 +48,8 @@ fn ceilingOf(a: std.mem.Allocator, text: []const u8) !i64 {
     return if (v == .integer and v.integer > 0) v.integer else 0;
 }
 
-test "the window: Kolibri 1.1 up to its 2,184 attended keys, Kolibri-1 its max_position_embeddings" {
-    try std.testing.expectEqual(@as(i64, 2184), try ceilingOf(std.testing.allocator, cfg.kolibri11.pinned));
+test "the window: Kolibri 1.1 up to its 2,048 selected keys, Kolibri-1 its max_position_embeddings" {
+    try std.testing.expectEqual(@as(i64, 2048), try ceilingOf(std.testing.allocator, cfg.kolibri11.pinned));
     try std.testing.expectEqual(@as(i64, 0), try ceilingOf(std.testing.allocator, cfg.pinned));
 }
 
