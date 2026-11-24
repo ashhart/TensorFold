@@ -195,6 +195,23 @@ def _validate_decode_args(levels, gen_tokens: int, pool_len: int) -> list[int]:
     return vals
 
 
+def _decode_overlap(rows: list[dict]) -> tuple[bool | None, int]:
+    """Return (overlapped, max_concurrent) across accepted streams' [first, last] decode intervals."""
+    spans = sorted((r["first"], r["last"]) for r in rows if r.get("first") is not None and r.get("last") is not None)
+    if len(spans) < 2:
+        return None, len(spans)
+    overlapped = any(b[0] < a[1] for a, b in zip(spans, spans[1:]))
+    events = [(lo, 1) for lo, _ in spans] + [(hi, -1) for _, hi in spans]
+    # Process end (-1) before start (+1) at equal timestamps so abutting intervals do not count as concurrent.
+    events.sort(key=lambda e: (e[0], e[1]))
+    cur = peak = 0
+    for _, delta in events:
+        cur += delta
+        if cur > peak:
+            peak = cur
+    return overlapped, peak
+
+
 def run_prose_decode(
     base_url: str,
     prose_dir: str,
@@ -247,25 +264,38 @@ def run_prose_decode(
                 all_accepted = all(r["accepted"] for r in rows)
                 all_cold = all(r["cache_state"] == "cold" for r in rows)
                 all_timed = all_accepted and all(r["decode_tps"] is not None for r in rows)
+                overlapped, max_concurrent = _decode_overlap(rows) if all_accepted else (None, 0)
+                serialized = (n > 1) and (overlapped is False)
                 timing_row = None
                 if all_accepted and all_cold:
                     tot_prompt = sum(r["prompt_tokens"] for r in rows)
                     tot_gen = sum(r["tokens"] for r in rows)
-                    start_t, last_tok_t = min(r["sent"] for r in rows), max(r["last"] for r in rows)
+                    start_t = min(r["sent"] for r in rows)
+                    first_tok_t = min(r["first"] for r in rows)
+                    last_tok_t = max(r["last"] for r in rows)
+                    shared_span = last_tok_t - first_tok_t
+                    agg_dec_tps = (sum(r["tokens"] - 1 for r in rows) / shared_span) if (all_timed and shared_span > 0) else None
+                    per_med_tps = statistics.median(r["decode_tps"] for r in rows) if all_timed else None
                     timing_row = {
                         "prompt_tokens": tot_prompt, "cached_tokens": 0, "completion_tokens": tot_gen,
-                        "decode_tps": sum(r["decode_tps"] for r in rows) if all_timed else None,
+                        "decode_tps": agg_dec_tps, "per_stream_median_tps": per_med_tps,
+                        "shared_decode_s": shared_span if shared_span > 0 else None,
+                        "overlapped": overlapped, "max_concurrent_decoding": max_concurrent,
+                        "serialized": serialized,
                         "e2e_tps": (tot_gen / (last_tok_t - start_t)) if last_tok_t > start_t else None,
                         "median_ttft_s": statistics.median(r["ttft_s"] for r in rows),
                     }
                 mode_key, mode_s = ("draft", "DFly2") if draft_on else ("plain", "Plain")
                 arms[mode_key] = {"rows": rows, "all_accepted": all_accepted,
-                                  "cold_verified": all_accepted and all_cold, "timing": timing_row}
+                                  "cold_verified": all_accepted and all_cold,
+                                  "concurrent_verified": (n == 1) or (overlapped is True),
+                                  "overlapped": overlapped, "serialized": serialized, "timing": timing_row}
                 if timing_row is not None:
                     dec_s = f"{timing_row['decode_tps']:6.2f}" if timing_row["decode_tps"] is not None else "  n/a "
                     e2e_s = f"{timing_row['e2e_tps']:6.2f}" if timing_row["e2e_tps"] is not None else "  n/a "
+                    queue_note = " [SERIALIZED/QUEUED]" if serialized else ""
                     print(f"    [{n}s {mode_s:5s}] prompt={timing_row['prompt_tokens']:,} (cached=0, cold) | "
-                          f"decode={dec_s} tok/s | e2e={e2e_s} tok/s | median_TTFT={timing_row['median_ttft_s']:.2f}s", flush=True)
+                          f"decode={dec_s} tok/s | e2e={e2e_s} tok/s | median_TTFT={timing_row['median_ttft_s']:.2f}s{queue_note}", flush=True)
                 else:
                     reasons = sorted({r["error"] or f"cache_{r['cache_state']}" for r in rows if not r["accepted"] or r["cache_state"] != "cold"})
                     print(f"    [{n}s {mode_s:5s}] REJECTED (no timing row): {', '.join(reasons)}", flush=True)
@@ -276,6 +306,7 @@ def run_prose_decode(
             tok_eq = [pair_token_equal(d, p) for d, p in zip(d_rows, p_rows)]
             out_eq = [pair_output_equal(d, p) for d, p in zip(d_rows, p_rows)]
             pair_qualified = (arms["draft"]["cold_verified"] and arms["plain"]["cold_verified"]
+                              and arms["draft"]["concurrent_verified"] and arms["plain"]["concurrent_verified"]
                               and prompts_identical and seeds_identical
                               and all(v is True for v in tok_eq) and all(v is True for v in out_eq))
             if not pair_qualified:
