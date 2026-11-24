@@ -326,7 +326,7 @@ pub const Fixture = struct {
         return true;
     }
 
-    fn launch(self: *Fixture) !void {
+    pub fn launch(self: *Fixture) !void {
         const sh = self.shape;
         switch (self.entry.kind) {
             .gu => try int4.gateUp(self.kx, self.rig.s, self.xd, sh.k, self.ex, self.plan, slots, 512, self.out, sh.rows, self.skip, self.entry.tile),
