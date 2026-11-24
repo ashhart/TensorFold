@@ -110,6 +110,99 @@ The head's greedy requests, one by one (rep 0 is the warm-up, which also runs wi
 | 121,022 | 2 | 2.24 | 29.52 |
 | 121,022 | 3 | 2.22 | 30.13 |
 
+## First request on a fresh server (review of 2026-11-24)
+
+The review asked for the first request of a fresh server, with no earlier request, at 34 and 7,588 prompt tokens
+(28,946 and 121,022 added), against fixed trees of 15, 7 and 3 nodes. This section supersedes the remarks above about
+the first request of a band (rep 0 of the warm-up runs); the sections above are unchanged.
+
+**Policy.** A band whose calibration nothing has filed yet (`lone_kept` empty) keeps the 15-node tree through the
+request, with no width trial, when the prompt is under 2,048 tokens (the drafter's window plus one,
+`cold_context` in `xpu_dflash2.zig`); its 15-node rounds are the calibration the request files when it ends. From 2,048
+prompt tokens on, a cold band probes widths as before. A band that has a calibration is priced from it as before. So a
+fresh server's first short request draws exactly the fixed 15-node tree, and a deep first request still adapts.
+
+**Builds.** Head: `599d8a56e` (this branch, with main `ef0ecb9a6` merged), SHA-256
+`97a02ea19447c3d178af6bf8d7dc260360e310e7e09c009cd83d32973eee33c8`. Main: `ef0ecb9a6`, SHA-256
+`d78347faa767d6b4072a14f7d39d752a5e3035b1f4fc4f1a8b38009cbc0155f4`, run with `XPU_TREE` 15, 7 and 3. Same build flags,
+Zig, card (the host's card 0, PCIe 5.0 x16), checkpoints and server flags as above; no local patch. The host's other
+card ran an unrelated server during the run. Measured on 2026-11-24, 12:57 to 13:52 local time.
+
+**Protocol.** 48 cells: 4 prompts x 4 arms (head, main 15, main 7, main 3) x 3 fresh servers. A cell is one fresh
+`tensorfold-native serve` (`--parallel 1 --context 132096 --prompt-cache-gib 0`), one request (greedy, 256 new tokens,
+thinking off, the request of `scripts/bench_tree.py`), then the server is stopped and the page cache dropped. The request
+is the server's first: no warm-up, no calibration request. The prompts are cells 0, 8192, 32768 and 131072 of
+`bench_tree.py` (`prompt_sha256` `cf916455e20cf240`, `829dddadac0f329f`, `0bd40816987651da`, `60986a50b4990e56`; the
+7,588- and 121,022-token ones are also those of the `xpu-qwen27-attn-exp` receipt). Within a prompt the arm order is
+head, 15, 7, 3 for server 1, reversed for server 2, forward again for server 3; the prompts run in the order of the
+tables below. Speed is decode tok/s as `bench_tree.py` defines it ((tokens - 1) over the time from the first token to
+the end); nodes a round is `drafted / rounds`; TTFT is the time to the first content chunk.
+
+#### 34 prompt tokens
+
+| arm | servers | tok/s, servers 1..N | median | mean | nodes a round | TTFT s (median) | hashes |
+|---|---:|---|---:|---:|---:|---:|---:|
+| adaptive (head) | 3 | 128.98, 126.98, 126.71 | 126.98 | 127.56 | 15.00 | 0.09 | 1 |
+| fixed 15 | 3 | 127.59, 128.82, 126.73 | 127.59 | 127.71 | 15.00 | 0.09 | 1 |
+| fixed 7 | 3 | 120.21, 120.20, 119.87 | 120.20 | 120.09 | 7.00 | 0.09 | 1 |
+| fixed 3 | 3 | 85.11, 85.16, 84.77 | 85.11 | 85.01 | 3.00 | 0.09 | 1 |
+
+Token hashes across every cell of this prompt: 1 distinct (EQUAL).
+Adaptive / best fixed tree (fixed 15, 127.59): 0.995 on the medians (BELOW); the slowest adaptive server is 0.993 of it.
+Adaptive / fixed 15 (head against main's default): 0.995.
+
+#### 7,588 prompt tokens
+
+| arm | servers | tok/s, servers 1..N | median | mean | nodes a round | TTFT s (median) | hashes |
+|---|---:|---|---:|---:|---:|---:|---:|
+| adaptive (head) | 3 | 65.61, 65.87, 65.53 | 65.61 | 65.67 | 7.75 | 4.01 | 1 |
+| fixed 15 | 3 | 59.14, 59.14, 59.22 | 59.14 | 59.17 | 15.00 | 4.01 | 1 |
+| fixed 7 | 3 | 67.28, 67.29, 67.32 | 67.29 | 67.30 | 7.00 | 4.01 | 1 |
+| fixed 3 | 3 | 57.98, 58.02, 58.01 | 58.01 | 58.01 | 3.00 | 4.01 | 1 |
+
+Token hashes across every cell of this prompt: 1 distinct (EQUAL).
+Adaptive / best fixed tree (fixed 7, 67.29): 0.975 on the medians (BELOW); the slowest adaptive server is 0.974 of it.
+Adaptive / fixed 15 (head against main's default): 1.109.
+
+#### 28,946 prompt tokens
+
+| arm | servers | tok/s, servers 1..N | median | mean | nodes a round | TTFT s (median) | hashes |
+|---|---:|---|---:|---:|---:|---:|---:|
+| adaptive (head) | 3 | 47.86, 47.81, 47.82 | 47.82 | 47.83 | 5.12 | 16.95 | 1 |
+| fixed 15 | 3 | 35.39, 35.37, 35.36 | 35.37 | 35.37 | 15.00 | 16.98 | 1 |
+| fixed 7 | 3 | 45.74, 45.73, 45.72 | 45.73 | 45.73 | 7.00 | 16.96 | 1 |
+| fixed 3 | 3 | 50.37, 50.33, 50.33 | 50.33 | 50.34 | 3.00 | 16.96 | 1 |
+
+Token hashes across every cell of this prompt: 1 distinct (EQUAL).
+Adaptive / best fixed tree (fixed 3, 50.33): 0.950 on the medians (BELOW); the slowest adaptive server is 0.950 of it.
+Adaptive / fixed 15 (head against main's default): 1.352.
+
+#### 121,022 prompt tokens
+
+| arm | servers | tok/s, servers 1..N | median | mean | nodes a round | TTFT s (median) | hashes |
+|---|---:|---|---:|---:|---:|---:|---:|
+| adaptive (head) | 3 | 23.60, 23.56, 23.55 | 23.56 | 23.57 | 3.53 | 101.26 | 1 |
+| fixed 15 | 3 | 13.12, 13.12, 13.13 | 13.12 | 13.13 | 15.00 | 101.27 | 1 |
+| fixed 7 | 3 | 20.92, 20.92, 20.92 | 20.92 | 20.92 | 7.00 | 101.29 | 1 |
+| fixed 3 | 3 | 26.87, 26.89, 26.89 | 26.89 | 26.88 | 3.00 | 101.29 | 1 |
+
+Token hashes across every cell of this prompt: 1 distinct (EQUAL).
+Adaptive / best fixed tree (fixed 3, 26.89): 0.876 on the medians (BELOW); the slowest adaptive server is 0.876 of it.
+Adaptive / fixed 15 (head against main's default): 1.795.
+
+**Reading.**
+- Every reply has one `token_sha256` per prompt across all 12 cells of the prompt: exactness holds at every width.
+- 34 tokens: the head draws 15.00 nodes a round in all three servers, as fixed 15 does; the two are the same
+  computation, and their 0.995 is the spread of a first request (the head's servers span 126.71 to 128.98 tok/s, fixed 15
+  alone 126.73 to 128.82).
+- 7,588 tokens: the head is 1.109 times fixed 15 and 0.975 times the best fixed tree (7 nodes). Its first request probes
+  widths (7.55 to 7.92 nodes a round) that the fixed 7 does not pay for.
+- 28,946 and 121,022 tokens: the head is 1.352 and 1.795 times fixed 15, and 0.950 and 0.876 times the best fixed tree
+  (3 nodes). The first request pays for its width trials (5.12 and 3.53 nodes a round against 3); the warmed head of the
+  Speed section beats the best fixed tree at these depths.
+- So the first-request criterion "at or above the best fixed tree" is met at 34 tokens up to the spread, and is not met
+  from 7,588 tokens on; a cold band's probing is the price of learning its widths.
+
 ## Tests
 
 Host tests on the head's code: `zig build test-shared-lane-regressions-host` passes 449 with 1 skip, and
@@ -127,4 +220,5 @@ prints the tables.
 
 `runs/`: every request of the table's passes (`<pass>-<variant>.jsonl`, the seeded ones `-sampled.jsonl`; a variant
 ending in `b` is a repeat pass of the same variant, `fix` is the head), nothing else. `analyse.out`: the tables.
-`scripts/`: the drivers.
+`scripts/`: the drivers. `runs/cold/`: the first-request series (`raw/`: one JSON line per cell, `summary.md`: its
+tables, `driver.log`); `scripts/cold/`: its driver (`series.sh`, with `--dry-run`), client, prompts and summary.
