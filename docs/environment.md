@@ -101,6 +101,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal: exactly `0` or `1`; default 1, where the 4-bit expert kernels (decode, grouped and prompt gathers) read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values from fewer weight bytes, and the routed experts' stored scales and biases are not kept in memory; `0` keeps and reads the stored arrays; ignored with `--ssd-experts` |
 | `TF_FLASHNEXT_GROUPED_ROWS` | Flash Next on Metal without tensor units: `0`, or the rows (`1` through `32`) from which a decode window runs its 4-bit experts grouped by expert, with the same output bits; default 5; ignored with `--ssd-experts` and in speed-up mode |
 | `TF_FN_GX_GATEUP_MB2` | Flash Next on Metal, grouped experts only: exactly `0` or `1`; `1` has gate/up decode an expert's 4-bit weights once for two rows, with each row's arithmetic and order unchanged; default 0 |
+| `TF_FN_GX_SHARED` | Flash Next on Metal without tensor units: exactly `0` or `1`; `1` uses the existing grouped kernels for eligible shared-round 4-bit/group-32 experts with the per-row kernels' output bits; default 0 keeps per-pair launches; the existing row threshold applies |
 | `TF_QWEN27_SHARED_PREFIX` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `0` keeps cached keys on the tail attention kernel; unset or blank is `1` |
 | `TF_QWEN27_SLOT_RESUME` | Qwen3.8-27B on Metal: exactly `0` or `1`; `0` stops slot 0 resuming a later prompt; unset or blank keeps it on |
 | `TF_QWEN27_METAL_KV_PAGES` | Qwen3.8-27B on Metal: exactly `0` or `1`; `1` puts keys and values in core-pool pages (refused on Macs with tensor units); unset or blank is `0` |
@@ -176,13 +177,14 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 39 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 40 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
 | --- | --- |
 | `TF_FLASHNEXT_PROMPT_BF16` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_WINDOW_GRAPH` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | Exactly `0` or `1`; default off. For one stream, `1` keeps CUDA graphs for both sequence-state/draft-spare pointer orientations, avoiding recapture after whole-window accepts |
 | `TF_FLASHNEXT_LANE_PARTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_KEEP_INPASS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_FIRST_EARLY` | Exactly `0` or `1`; default on |
@@ -241,6 +243,8 @@ These settings retain their existing boolean policies rather than gaining new al
   and `TF_SLIDE_FIT_REDUCE` its exact `tree` reduction selection. These developer switches keep their existing semantics.
 - GLM: `GLM_EHPROJ_NAX` retains its first-character `0` disabling rule, `TF_GLM_DFLASH2_PROF` enables by presence,
   even empty or `0`, and `TF_KV_POISON` (also read by Nemotron) is on only for exact `1`.
+- Qwen shared-prefix snapshots: `TF_QWEN_KV_SNAPSHOT_GPU` opts in only for exact `1`. With `TF_QWEN_KV_SHARE=n`,
+  at most `n` states occupy device memory; a failed device allocation retains the pinned-host fallback. Unset keeps host snapshots.
 - The existing tool-grammar, rows-sync, log-time, memory-pressure and XPU-MTP boolean policies are unchanged.
 - Flash Next keeps its lenient readers where they are: `TF_FLASHNEXT_TP` and `TF_FLASHNEXT_LOGITS` take a path,
   `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence,

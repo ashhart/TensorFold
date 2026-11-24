@@ -156,11 +156,12 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
-        // --vision on a checkpoint without a tower serves text, as before; an unreadable tower still refuses at open
-        const seen: @FieldType(Options, "vision") = if (o.vision == null) null else if (vision.Vision.config(gpa, io, dir)) |_| o.vision else |err| switch (err) {
-            error.NoQwenVision => null,
+        // --vision on a checkpoint without a tower refuses by name (core's gate); an unreadable tower refuses too
+        const tower = if (o.vision == null) false else if (vision.Vision.config(gpa, io, dir)) |_| true else |err| switch (err) {
+            error.NoQwenVision => false,
             else => return err,
         };
+        const seen: @FieldType(Options, "vision") = if (try @import("engine_api").visionGate(o.vision != null, tower)) o.vision else null;
         e.o = o;
         e.o.prompt_rows = @max(o.prompt_rows, o.cut_rows); // a test's cut is one piece: the prompts arena holds it
         e.o.vision = seen;

@@ -41,7 +41,7 @@ pub fn cancelled(comptime Lanes: type, backend: anytype) !void {
 }
 
 /// Lanes' parts a stepped pass touches, with a forward that records each cut's rows and nothing on a device.
-const Fake = struct {
+pub const Fake = struct {
     const reuse = @import("cuda_reuse.zig");
     const Cache = struct {
         untaught: bool = false,
@@ -53,11 +53,20 @@ const Fake = struct {
         }
     };
     const Plan = struct { from: usize, marks: []u32 };
-    const Prefix = struct {
-        pub fn open(_: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32, _: ?u64) !?struct { cache: *Cache, plan: Plan } {
-            return null;
+    pub const Prefix = struct {
+        cache: ?*Cache = null,
+        from: usize = 0,
+        marks: []const u32 = &.{},
+        kept: [8]usize = undefined,
+        n: usize = 0,
+        pub fn open(p: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32, _: ?u64) !?struct { cache: *Cache, plan: Plan } {
+            if (p.cache == null) return null;
+            return .{ .cache = p.cache.?, .plan = .{ .from = p.from, .marks = try t.allocator.dupe(u32, p.marks) } };
         }
-        pub fn keep(_: *Prefix, _: *Cache, _: []const u32, _: ?u64, _: usize) error{QwenLaneTable}!void {}
+        pub fn keep(p: *Prefix, _: *Cache, _: []const u32, _: ?u64, at: usize) error{QwenLaneTable}!void {
+            p.kept[p.n] = at;
+            p.n += 1;
+        }
     };
     const Pages = struct {
         pub fn log(_: *Pages, _: usize, _: usize) void {}
@@ -70,7 +79,7 @@ const Fake = struct {
     };
     const Int8 = struct { on: bool = false };
     const Keep = @import("cuda_engine.zig").Keep;
-    const Engine = struct {
+    pub const Engine = struct {
         const MtpPrompt = @import("cuda_mtp_prompt.zig").State;
         const PromptTapMode = @import("cuda_mtp_prompt.zig").Mode;
         const Call = struct { rows: usize, mode: PromptTapMode, tap_from: ?usize };
@@ -139,7 +148,7 @@ const Fake = struct {
     pub fn restoreKept(f: *Fake, _: *Cache, _: *anyopaque, _: []const reuse.Seen) !void {
         if (!f.restore_ok) return error.FakeRestore;
     }
-    fn deinit(f: *Fake) void {
+    pub fn deinit(f: *Fake) void {
         var it = f.seen.valueIterator();
         while (it.next()) |v| f.gpa.free(v.*);
         f.seen.deinit(f.gpa);
@@ -575,4 +584,8 @@ test "MTP suffix filtering is disabled for chunked, resumed, and reuse-marked pr
     try t.expectEqual(@as(usize, 4096), resumed_engine.calls.items[0].rows);
     try t.expectEqual(Fake.Engine.PromptTapMode.mtp, resumed_engine.calls.items[0].mode);
     try t.expectEqual(@as(?usize, null), resumed_engine.calls.items[0].tap_from);
+}
+
+test {
+    _ = @import("cuda_prefill_page_grid_test.zig");
 }
