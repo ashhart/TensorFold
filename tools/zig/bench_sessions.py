@@ -145,15 +145,15 @@ class Client:
         run["tensorfold"] = {k: v for k, v in runtime.items() if k != "token_ids"} if isinstance(runtime, dict) else {}
         run["speculative"] = spec if isinstance(spec, dict) else None
         run["content"] = "".join(text)
-        # max_tokens may end a reply after complete calls or cut its last one: only a cut call (not a JSON object) goes
-        run["calls"] = [c for c in (calls[k] for k in sorted(calls)) if run["finish"] != "length" or whole(c)]
+        done = (runtime.get("complete_tool_calls") or []) if isinstance(runtime, dict) else []
+        run["calls"] = [calls[k] for k in sorted(calls) if run["finish"] != "length" or whole(calls[k], done, k)]
         return run
 
 
-def whole(call: dict) -> bool:
-    """Whether a merged call's arguments are a complete JSON object, as a call the cap did not cut is."""
+def whole(call: dict, complete: list, at: int) -> bool:
+    """Whether the server closed this call's envelope and its arguments form a JSON object."""
     try:
-        return isinstance(json.loads((call.get("function") or {}).get("arguments") or ""), dict)
+        return at in complete and isinstance(json.loads((call.get("function") or {}).get("arguments") or ""), dict)
     except ValueError:
         return False
 

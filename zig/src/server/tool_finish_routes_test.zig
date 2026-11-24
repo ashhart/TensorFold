@@ -172,3 +172,23 @@ test "tool finish: an EOS landing exactly at max_tokens is a natural end: tool_c
         try t.expect(has(out, "\"finish_reason\": \"tool_calls\"") or has(out, "\"finish_reason\":\"tool_calls\""));
     }
 }
+
+test "tool finish: capped replies identify complete calls, not merely valid JSON arguments" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const open = "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"q\": \"a\"}}";
+    const cases = [_]struct { reply: []const u8, complete: []const u8 }{
+        .{ .reply = call, .complete = "[0]" },
+        .{ .reply = open, .complete = "[]" },
+        .{ .reply = call ++ "\n" ++ open, .complete = "[0]" },
+    };
+    for (cases) |case| for ([_][]const u8{ "false", "true" }) |stream| {
+        var e: Called = .{ .reply = case.reply };
+        const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"messages\":[{{\"role\":\"user\",\"content\":\"x\"}}],\"max_tokens\":{d},{s},\"stream\":{s}}}", .{ case.reply.len, tools, stream });
+        const out = try post(a, &e, "/v1/chat/completions", body);
+        const tight = try std.fmt.allocPrint(a, "\"complete_tool_calls\":{s}", .{case.complete});
+        const spaced = try std.fmt.allocPrint(a, "\"complete_tool_calls\": {s}", .{case.complete});
+        try t.expect(has(out, tight) or has(out, spaced));
+    };
+}

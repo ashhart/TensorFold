@@ -1348,6 +1348,9 @@ When a reply keeps tool-call envelopes as text instead of returning them as call
 `kept_tool_calls`: `unoffered` and `malformed` counts, and `unoffered_names`, the names the model wrote for the
 kept unoffered calls, in order, without duplicates, at most 8 names of 64 bytes each. The whole reply and the
 streamed finish event carry the same object; a reply that kept none has no `kept_tool_calls` field.
+When `max_tokens` ends a reply with tool calls, the block also carries `complete_tool_calls`: the zero-based indices
+of calls whose envelopes closed. Any other returned call was cut, even if its arguments already form complete JSON.
+The whole reply and streamed finish event carry the same array; a reply the token limit did not end omits the field.
 A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
