@@ -37,19 +37,84 @@ inline float ink2_mx_weight(uchar value, uchar scale) {
   return float(bfloat(w));
 }
 
+inline float2 ink2_bf2(uint pair) {
+  return float2(as_type<float>(pair << 16u), as_type<float>(pair & 0xffff0000u));
+}
+
+// A byte of two E2M1 codes as two FP16 values scaled by 2^-14, low nibble first; the byte must stand alone.
+inline float2 ink2_e2m1_pair(uint code) {
+  return float2(as_type<half2>(((code * 0x00200200u) & 0x0e000e00u) | ((code * 0x01001000u) & 0x80008000u)));
+}
+
+// ink2_e4m3(code) * 2^14 from the FP16 bits of the same layout; 0x7f and 0xff stay NaN.
+inline float ink2_e4m3_scale(uint code) {
+  const float v = float(as_type<half>(ushort(((code & 0x7fu) << 7u) | ((code & 0x80u) << 8u)))) * 4194304.0f;
+  return (code & 0x7fu) == 0x7fu ? as_type<float>(((code & 0x80u) << 24u) | 0x7fc00000u) : v;
+}
+
+// ink2_nv_weight twice: (e2m1 * 2^-14) * (e4m3 * 2^14) is the same exact product, then phi and one BF16 round.
+inline float ink2_nv_byte(float sum, uint code, float scale, float phi, float2 x) {
+  const float2 m = ink2_e2m1_pair(code);
+  sum += float(bfloat((m.x * scale) * phi)) * x.x;
+  return sum + float(bfloat((m.y * scale) * phi)) * x.y;
+}
+
+// Columns in order, 16 to a scale block; k is a multiple of 16 and w, x are 16-byte aligned.
 inline float ink2_dot_nv(device const uchar* w, device const uchar* scales,
                          device const bfloat* x, float phi, uint k) {
   float sum = 0.0f;
-  for (uint c = 0; c < k; ++c)
-    sum += ink2_nv_weight(w[c / 2u], c, scales[c / 16u], phi) * float(x[c]);
+  for (uint b = 0; b < k / 16u; ++b) {
+    const uint2 codes = *(device const uint2*)(w + 8u * b);
+    const float scale = ink2_e4m3_scale(scales[b]);
+    const uint4 xa = *(device const uint4*)(x + 16u * b), xb = *(device const uint4*)(x + 16u * b + 8u);
+    sum = ink2_nv_byte(sum, codes.x & 255u, scale, phi, ink2_bf2(xa.x));
+    sum = ink2_nv_byte(sum, (codes.x >> 8u) & 255u, scale, phi, ink2_bf2(xa.y));
+    sum = ink2_nv_byte(sum, (codes.x >> 16u) & 255u, scale, phi, ink2_bf2(xa.z));
+    sum = ink2_nv_byte(sum, codes.x >> 24u, scale, phi, ink2_bf2(xa.w));
+    sum = ink2_nv_byte(sum, codes.y & 255u, scale, phi, ink2_bf2(xb.x));
+    sum = ink2_nv_byte(sum, (codes.y >> 8u) & 255u, scale, phi, ink2_bf2(xb.y));
+    sum = ink2_nv_byte(sum, (codes.y >> 16u) & 255u, scale, phi, ink2_bf2(xb.z));
+    sum = ink2_nv_byte(sum, codes.y >> 24u, scale, phi, ink2_bf2(xb.w));
+  }
   return sum;
 }
 
-inline float ink2_dot_mx(device const uchar* w, device const uchar* scales,
-                         device const bfloat* x, uint k) {
+// Four E4M3 bytes, columns 4i to 4i + 3, added in order; the FP16 route gives e4m3 / 256, 2^(scale - 119) restores it.
+inline float ink2_mx_word(float sum, uint word, float factor, float2 x01, float2 x23) {
+  const uint even = word & 0x00ff00ffu, odd = (word >> 8u) & 0x00ff00ffu;
+  const float2 w02 = float2(as_type<half2>(((even << 7u) & 0x3f803f80u) | ((even << 8u) & 0x80008000u)));
+  const float2 w13 = float2(as_type<half2>(((odd << 7u) & 0x3f803f80u) | ((odd << 8u) & 0x80008000u)));
+  sum += (w02.x * factor) * x01.x;
+  sum += (w13.x * factor) * x01.y;
+  sum += (w02.y * factor) * x23.x;
+  return sum + (w13.y * factor) * x23.y;
+}
+
+// A block of 32 columns: scales 24 to 230 with no NaN code take the word route, the rest decode as ink2_mx_weight.
+inline float ink2_mx_block(float sum, device const uchar* w, uint scale, device const bfloat* x) {
+  const uint4 q0 = *(device const uint4*)w, q1 = *(device const uint4*)(w + 16);
+  uint nan = 0u;
+  for (uint i = 0; i < 4u; ++i) nan |= ((q0[i] & 0x7f7f7f7fu) + 0x01010101u) | ((q1[i] & 0x7f7f7f7fu) + 0x01010101u);
+  if (scale - 24u > 206u || (nan & 0x80808080u) != 0u) {
+    for (uint j = 0; j < 32u; ++j) sum += ink2_mx_weight(w[j], uchar(scale)) * float(x[j]);
+    return sum;
+  }
+  const float factor = as_type<float>((scale + 8u) << 23u);
+  const uint4 xa = *(device const uint4*)x, xb = *(device const uint4*)(x + 8), xc = *(device const uint4*)(x + 16);
+  const uint4 xd = *(device const uint4*)(x + 24);
+  sum = ink2_mx_word(sum, q0.x, factor, ink2_bf2(xa.x), ink2_bf2(xa.y));
+  sum = ink2_mx_word(sum, q0.y, factor, ink2_bf2(xa.z), ink2_bf2(xa.w));
+  sum = ink2_mx_word(sum, q0.z, factor, ink2_bf2(xb.x), ink2_bf2(xb.y));
+  sum = ink2_mx_word(sum, q0.w, factor, ink2_bf2(xb.z), ink2_bf2(xb.w));
+  sum = ink2_mx_word(sum, q1.x, factor, ink2_bf2(xc.x), ink2_bf2(xc.y));
+  sum = ink2_mx_word(sum, q1.y, factor, ink2_bf2(xc.z), ink2_bf2(xc.w));
+  sum = ink2_mx_word(sum, q1.z, factor, ink2_bf2(xd.x), ink2_bf2(xd.y));
+  return ink2_mx_word(sum, q1.w, factor, ink2_bf2(xd.z), ink2_bf2(xd.w));
+}
+
+inline float ink2_dot_mx(device const uchar* w, device const uchar* scales, device const bfloat* x, uint k) {
   float sum = 0.0f;
-  for (uint c = 0; c < k; ++c)
-    sum += ink2_mx_weight(w[c], scales[c / 32u]) * float(x[c]);
+  for (uint b = 0; b < k / 32u; ++b) sum = ink2_mx_block(sum, w + 32u * b, scales[b], x + 32u * b);
   return sum;
 }
 
