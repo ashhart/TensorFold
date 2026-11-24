@@ -208,6 +208,7 @@ pub fn saveFull(self: *Bank) !u64 {
     const meta = [_]store.MetaKV{
         .{ .key = "format", .value = store.format_tag },
         .{ .key = "family", .value = arch.family.name() },
+        .{ .key = "arch", .value = try arch.signature(a) },
         .{ .key = "hidden", .value = try std.fmt.allocPrint(a, "{d}", .{arch.hidden}) },
         .{ .key = "num_attn", .value = try std.fmt.allocPrint(a, "{d}", .{arch.num_attn}) },
         .{ .key = "num_rec", .value = try std.fmt.allocPrint(a, "{d}", .{arch.num_rec}) },
