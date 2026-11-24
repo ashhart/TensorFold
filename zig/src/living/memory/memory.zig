@@ -28,6 +28,7 @@ test {
     _ = @import("durable_test.zig");
     _ = @import("exact_test.zig");
     _ = @import("validate_test.zig");
+    _ = @import("lesson_test.zig");
 }
 
 test "memory bank: end-to-end teach, route, compose, safetensors save/reload (zero plaintext), and forget" {

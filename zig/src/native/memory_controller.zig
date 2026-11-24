@@ -62,7 +62,12 @@ pub const Holder = struct {
             .routeAndCompose = routeAndComposeFn,
             .dropSnap = dropSnapFn,
             .exec = execFn,
+            .version = versionFn,
         };
+    }
+
+    fn versionFn(ctx: *anyopaque) u64 {
+        return of(ctx).bank.version;
     }
 
     fn of(ctx: *anyopaque) *Holder {
@@ -107,6 +112,7 @@ pub const Holder = struct {
                     .is_small_fact = x.is_small_fact,
                     .is_standing = x.is_standing,
                     .is_digest = x.is_digest,
+                    .staged = x.staged,
                 }) catch |e| {
                     return .{ .err = @errorName(e) };
                 };
@@ -192,6 +198,10 @@ pub const Holder = struct {
                     return .{ .err = @errorName(e) };
                 };
                 return .{ .units = 0, .affected = removed, .bytes = 0 };
+            },
+            .publish_parent => |pid| {
+                const n = b.publishParent(pid) catch |e| return .{ .err = @errorName(e) };
+                return .{ .units = b.activeUnitCount(), .affected = n, .bytes = b.last_bytes, .version = b.version };
             },
             .stats => {
                 return .{

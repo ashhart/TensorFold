@@ -213,6 +213,7 @@ pub const TeachChunkInput = struct {
     is_small_fact: bool = false,
     is_standing: bool = false, // always-on standing policy/behavioral rule (bypasses episodic gate)
     is_digest: bool = false, // consolidated cross-section entity/spec digest for a multi-chunk parent
+    staged: bool = false, // held out of routing until its lesson is published (Bank.publishParent)
 };
 
 pub const ConsolidateReport = struct {
